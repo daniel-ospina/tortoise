@@ -947,7 +947,7 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
         test GREEN).
         """
         sdk = TortoiseSDK.__new__(TortoiseSDK)
-        calls = {"query": 0, "resolve": 0}
+        calls = {"_query": 0, "resolve": 0}
         # Hold the OBJECTS, not their addresses: the mutation this assertion
         # exists to kill is `self._proj = None`, which drops the last strong
         # reference, so an id-only list could see the address reused and pass
@@ -956,8 +956,8 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
 
         class _G:
             def query(self, *a, **k):
-                calls["query"] += 1
-                return behaviour(calls["query"])
+                calls["_query"] += 1
+                return behaviour(calls["_query"])
 
             def execute_command(self, *a, **k):
                 # #7685: the graph-replaced abort is only retried when the
@@ -983,7 +983,7 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
         lambda n: (_ for _ in ()).throw(replaced) if n == 1 else "ok")
     assert sdk._graph_write_with_retry(
         lambda: sdk._get_proj().g.query("X"), what="t") == "ok"
-    assert calls["query"] == 2, f"expected 1 retry, got {calls['query']} attempt(s)"
+    assert calls["_query"] == 2, f"expected 1 retry, got {calls['_query']} attempt(s)"
     assert len({id(h) for h in handles}) == 1, (
         "the retry must reuse the same (stateless) handle — no re-resolution")
     assert sdk._graph_write_retry_count == 1, (
@@ -996,7 +996,7 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
     sdk, calls, _ = _sdk_with(lambda n: (_ for _ in ()).throw(replaced))
     with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
         sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
-    assert calls["query"] == 4, "1 attempt + 3 retries before exhaustion"
+    assert calls["_query"] == 4, "1 attempt + 3 retries before exhaustion"
     assert sdk._graph_write_retry_count == 3
 
     # 3. a NON-retryable error is re-raised unchanged and is not retried at all
@@ -1004,7 +1004,7 @@ def test_graph_write_retry_reissues_on_the_same_stateless_handle():
         redis_exc.ResponseError("WRONGTYPE Operation against a key")))
     with pytest.raises(redis_exc.ResponseError, match="WRONGTYPE"):
         sdk._graph_write_with_retry(lambda: sdk._get_proj().g.query("X"), what="t")
-    assert calls["query"] == 1, "a deterministic error must never be retried"
+    assert calls["_query"] == 1, "a deterministic error must never be retried"
     assert sdk._graph_write_retry_count == 0
 
 
@@ -1023,7 +1023,7 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
 
     sdk = TortoiseSDK.__new__(TortoiseSDK)
     seen: list[str] = []
-    state = {"query": 0, "resolve": 0}
+    state = {"_query": 0, "resolve": 0}
     # Hold the OBJECTS, not their addresses — see the sibling test above for
     # why an id-only list is unsound when the mutation frees the reference.
     handles: list[object] = []
@@ -1031,8 +1031,8 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
     class _G:
         def query(self, cypher, *a, **k):
             seen.append(cypher)
-            state["query"] += 1
-            if state["query"] == 1:
+            state["_query"] += 1
+            if state["_query"] == 1:
                 raise replaced
             return type("R", (), {"result_set": [[7]]})()
 
@@ -1060,7 +1060,7 @@ def test_the_FIRST_write_of_create_point_goes_through_the_retry():
     sdk._graph_write_retry_count = 0
 
     assert sdk._advance_ep_version() == 7
-    assert state["query"] == 2, "the FIRST write was retried once"
+    assert state["_query"] == 2, "the FIRST write was retried once"
     assert state["resolve"] == 1, (
         "one resolve; the retry reuses the same (stateless) handle — no "
         "cache-drop. If the FIRST write is not wrapped, the abort escapes and "

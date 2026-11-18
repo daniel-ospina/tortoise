@@ -699,7 +699,7 @@ def test_the_census_pin_can_report_drift(tmp_path):
 
 
 def test_a_lambda_body_is_part_of_its_enclosing_function():
-    """`lambda: sdk.query("MATCH …")` is a statement site, not an invisible one.
+    """`lambda: sdk._query("MATCH …")` is a statement site, not an invisible one.
 
     The review found 52 of these (23 in `hosted_api.py`, 29 in `sdk.py`), dropped
     because the walker stopped at `ast.Lambda` and the residual line printed them
@@ -709,12 +709,12 @@ def test_a_lambda_body_is_part_of_its_enclosing_function():
 
     source = (
         "def f(sdk):\n"
-        "    return asyncio.to_thread(lambda: sdk.query(\"MATCH (n:Point) RETURN n.id\"))\n"
+        "    return asyncio.to_thread(lambda: sdk._query(\"MATCH (n:Point) RETURN n.id\"))\n"
     )
     tree = ast.parse(source)
     func = tree.body[0]
     calls = [n for n in census._own_nodes(func) if isinstance(n, ast.Call)]
-    assert any(census._is_door(c) == "query" for c in calls), (
+    assert any(census._is_door(c) == "_query" for c in calls), (
         "a door call inside a lambda must be visible to the census"
     )
 

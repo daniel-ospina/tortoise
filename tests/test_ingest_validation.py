@@ -283,7 +283,7 @@ class TestPhase1Phase2Parity:
 
     def test_relation_mitigation_refusal_names_the_sanctioned_route(self, sdk):
         """#5244 — refusing `mitigation` on a relation connection must tell the
-        caller what to do instead (the operator route / sdk.mitigate_operator),
+        caller what to do instead (the operator route / sdk._mitigate_operator),
         and must mutate nothing (Phase-1, zero-mutation contract)."""
         from tortoise.exceptions import BundleValidationError
         bundle = _points_pair() | {"connections": [
@@ -292,7 +292,7 @@ class TestPhase1Phase2Parity:
         with pytest.raises(BundleValidationError) as exc:
             sdk._ingest(bundle)
         msg = exc.value.violations[0]["message"]
-        assert "mitigate_operator" in msg, msg
+        assert "_mitigate_operator" in msg, msg
         assert "operator" in msg and "mitigation" in msg, msg
         assert _point_count(sdk) == 0, "zero-mutation on the rejection"
         assert _edge_count(sdk, "mitigated_by") == 0

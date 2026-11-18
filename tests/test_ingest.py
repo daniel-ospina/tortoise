@@ -282,7 +282,7 @@ def test_main_end_to_end():
     log = _tmp("events.jsonl")
     out = _tmp("graph.html")
 
-    with patch("sys.argv", ["ingest", str(t),
+    with patch("sys.argv", ["_ingest", str(t),
                             "--point-model", "mock:cheap",
                             "--relation-model", "mock:reason",
                             "--db", db, "--log", log, "--out", out]):
@@ -304,7 +304,7 @@ def test_main_skip():
     log = _tmp("events.jsonl")
     out = _tmp("graph.html")
 
-    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out]
+    args = ["_ingest", str(t), "--db", db, "--log", log, "--out", out]
     with patch("sys.argv", args):
         _run_main(None)
 
@@ -322,7 +322,7 @@ def test_main_force():
     log = _tmp("events.jsonl")
     out = _tmp("graph.html")
 
-    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out]
+    args = ["_ingest", str(t), "--db", db, "--log", log, "--out", out]
     with patch("sys.argv", args):
         _run_main(None)
 
@@ -340,7 +340,7 @@ def test_main_resolution():
     log = _tmp("events.jsonl")
     out = _tmp("graph.html")
 
-    with patch("sys.argv", ["ingest", str(t),
+    with patch("sys.argv", ["_ingest", str(t),
                             "--db", db, "--log", log, "--out", out,
                             "--resolution"]):
         _run_main(None)
@@ -360,7 +360,7 @@ def test_main_max_utterances():
     log = _tmp("events.jsonl")
     out = _tmp("graph.html")
 
-    with patch("sys.argv", ["ingest", str(t),
+    with patch("sys.argv", ["_ingest", str(t),
                             "--db", db, "--log", log, "--out", out,
                             "--max-utterances", "1"]):
         output = _run_main(None, capture=True)
@@ -378,7 +378,7 @@ def test_main_bad_model():
     out = _tmp("graph.html")
 
     try:
-        with patch("sys.argv", ["ingest", str(t),
+        with patch("sys.argv", ["_ingest", str(t),
                                 "--point-model", "bad_spec",
                                 "--db", db, "--log", log, "--out", out]):
             _run_main(None)
@@ -477,7 +477,7 @@ Content here.
         dl_mod.resolve_domain_from_path = _patched_resolve
 
         try:
-            with patch("sys.argv", ["ingest", str(t),
+            with patch("sys.argv", ["_ingest", str(t),
                                     "--point-model", "mock:cheap",
                                     "--relation-model", "mock:reason",
                                     "--db", db, "--log", log_path, "--out", out]):
@@ -520,7 +520,7 @@ def test_main_document_metadata_emitted():
     log_path = _tmp("events.jsonl")
     out = _tmp("graph.html")
 
-    with patch("sys.argv", ["ingest", str(t),
+    with patch("sys.argv", ["_ingest", str(t),
                             "--point-model", "mock:cheap",
                             "--relation-model", "mock:reason",
                             "--db", db, "--log", log_path, "--out", out]):
@@ -544,7 +544,7 @@ def test_main_transcript_no_document():
     log_path = _tmp("events.jsonl")
     out = _tmp("graph.html")
 
-    with patch("sys.argv", ["ingest", str(t),
+    with patch("sys.argv", ["_ingest", str(t),
                             "--point-model", "mock:cheap",
                             "--relation-model", "mock:reason",
                             "--db", db, "--log", log_path, "--out", out]):
@@ -652,7 +652,7 @@ def _ingest_doc_fixture(tmp_path, extra_args=()):
     db = str(tmp_path / "g.db")
     log = tmp_path / "events.jsonl"
     out = str(tmp_path / "graph.html")
-    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+    argv = ["_ingest", str(t), "--point-model", "mock:cheap",
             "--relation-model", "mock:reason",
             "--db", db, "--log", str(log), "--out", out, *extra_args]
     with patch("sys.argv", argv), \
@@ -821,7 +821,7 @@ def test_4938_entity_stage_failure_does_not_sink_the_document(tmp_path):
     db = str(tmp_path / "g.db")
     log = tmp_path / "events.jsonl"
     out = str(tmp_path / "graph.html")
-    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+    argv = ["_ingest", str(t), "--point-model", "mock:cheap",
             "--relation-model", "mock:reason",
             "--db", db, "--log", str(log), "--out", out]
     with patch("sys.argv", argv), \
@@ -851,7 +851,7 @@ def test_4938_partial_entity_failure_leaves_no_orphan_subjects(tmp_path):
     db = str(tmp_path / "g.db")
     log = tmp_path / "events.jsonl"
     out = str(tmp_path / "graph.html")
-    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+    argv = ["_ingest", str(t), "--point-model", "mock:cheap",
             "--relation-model", "mock:reason",
             "--db", db, "--log", str(log), "--out", out]
     with patch("sys.argv", argv), \
@@ -904,7 +904,7 @@ def test_4938_graph_write_failure_does_not_orphan_minted_subjects(tmp_path):
             raise RuntimeError("simulated graph-write failure on 2nd Subject")
         return real_add_subject(self, name, subject_kind)
 
-    argv = ["ingest", str(t), "--point-model", "mock:cheap",
+    argv = ["_ingest", str(t), "--point-model", "mock:cheap",
             "--relation-model", "mock:reason",
             "--db", db, "--log", str(log), "--out", out]
     with patch("sys.argv", argv), \
@@ -947,7 +947,7 @@ def test_4938_upgrade_path_files_subjects(tmp_path):
             params={"id": t.name, "sp": str(t)})
     finally:
         seed.close()
-    argv = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+    argv = ["_ingest", str(t), "--db", db, "--log", log, "--out", out,
             "--upgrade", "--point-model", "mock:cheap",
             "--relation-model", "mock:reason"]
     with patch("sys.argv", argv), \
@@ -1013,7 +1013,7 @@ def test_capture_metadata_creates_document_no_points():
         "Alice: we should raise prices because margins matter.\n",
         encoding="utf-8")
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
-    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+    args = ["_ingest", str(t), "--db", db, "--log", log, "--out", out,
             "--capture-metadata", "--point-model", "mock:cheap",
             "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
@@ -1087,13 +1087,13 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
         encoding="utf-8")
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
     # 1. capture-metadata first (should NOT block full later)
-    with patch("sys.argv", ["ingest", str(t), "--db", db, "--log", log1,
+    with patch("sys.argv", ["_ingest", str(t), "--db", db, "--log", log1,
                             "--out", out, "--capture-metadata",
                             "--point-model", "mock:cheap",
                             "--relation-model", "mock:reason"]):
         _run_main(None)
     # 2. full ingest on same file → MUST extract (not skipped)
-    with patch("sys.argv", ["ingest", str(t), "--db", db, "--log", log2,
+    with patch("sys.argv", ["_ingest", str(t), "--db", db, "--log", log2,
                             "--out", out, "--point-model", "mock:cheap",
                             "--relation-model", "mock:reason"]):
         _run_main(None)
@@ -1125,7 +1125,7 @@ def test_capture_defaults_needs_extraction():
         "---\ntitle: CapDefault\ntopics: x\nsummary: y\n---\n\n## User\nhello\n",
         encoding="utf-8")
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
-    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+    args = ["_ingest", str(t), "--db", db, "--log", log, "--out", out,
             "--capture-metadata", "--point-model", "mock:cheap",
             "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
@@ -1163,7 +1163,7 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
         "needs_extraction: true\n---\n\n## User\nImportant decision\n",
         encoding="utf-8")
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
-    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out,
+    args = ["_ingest", str(t), "--db", db, "--log", log, "--out", out,
             "--capture-metadata", "--point-model", "mock:cheap",
             "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
@@ -1212,7 +1212,7 @@ def test_upgrade_on_already_extracted_is_noop():
     finally:
         proj.close()
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
-    args = ["ingest", str(t), "--db", db, "--log", log, "--out", out, "--upgrade",
+    args = ["_ingest", str(t), "--db", db, "--log", log, "--out", out, "--upgrade",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     # The stored flag alone cannot discriminate this path (#5140 review round 10):
     # a real upgrade also ENDS with `needs_extraction=false` via the completion
@@ -1277,7 +1277,7 @@ def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
         proj.close()
     # No positional transcript — the crash path (P0 regression)
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
-    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
+    args = ["_ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
@@ -1317,7 +1317,7 @@ def test_upgrade_all_fail_closed_outside_base(monkeypatch, tmp_path):
     finally:
         proj.close()
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
-    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
+    args = ["_ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
@@ -1356,7 +1356,7 @@ def test_upgrade_all_unset_base_skips_everything(monkeypatch, tmp_path):
     finally:
         proj.close()
     out = _tmp("graph.html")  # explicit, like the other call sites (#3717)
-    args = ["ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
+    args = ["_ingest", "--db", db, "--log", log, "--out", out, "--upgrade-all",
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
@@ -1497,7 +1497,7 @@ def test_sc4_deprecation_markers_present():
     import re
 
     # every still-live legacy surface carries its marker + a LIVE replacement
-    for method_name in ("ingest_corpus", "_index_sessions"):
+    for method_name in ("_ingest_corpus", "_index_sessions"):
         doc = inspect.getdoc(getattr(TortoiseSDK, method_name)) or ""
         assert "DEPRECATED" in doc, f"{method_name} missing DEPRECATED marker"
         assert "index_sources_from_directory" in doc, \

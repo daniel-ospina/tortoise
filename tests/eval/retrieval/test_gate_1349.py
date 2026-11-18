@@ -218,8 +218,8 @@ def build_burn(
               "arctic-xs": "arctic-xs", "arctic-xs-query": "arctic-xs",
               "arctic-s": "arctic-s", "arctic-s-query": "arctic-s"}
     prompts = {"minilm": None, "bge-small": None, "arctic-xs": None,
-               "arctic-xs-query": "query", "arctic-s": None,
-               "arctic-s-query": "query"}
+               "arctic-xs-query": "_query", "arctic-s": None,
+               "arctic-s-query": "_query"}
     deltas = deltas or {n: {"turn_recall@10": 0.0, "ndcg@10": 0.0} for n in names}
     abs_deltas = abs_deltas or {}
     revisions = revisions or {}

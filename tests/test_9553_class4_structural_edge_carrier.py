@@ -99,7 +99,7 @@ def test_the_structural_edge_is_journaled_and_survives_the_rebuild(env):
     # (a) the carrier exists.
     created = [e for e in _journal(events) if e.get("type") == "DirectEdgeCreated"]
     assert created, (
-        "`sdk.create_edge` emitted NO DirectEdgeCreated record, so the edge is "
+        "`sdk._create_edge` emitted NO DirectEdgeCreated record, so the edge is "
         "live-only: the replay engine's pass-2b fold has nothing to re-create "
         "(#9553 R5 class 4 — 'no producer'). The graph and the record disagree "
         "and a rebuild silently loses the edge.")
@@ -353,7 +353,7 @@ def test_bound_a_url_only_source_stub_emits_no_record_and_reports_it(env):
 
 
 def test_the_mint_carries_the_node_property_lane(env):
-    """FIXED (was `#9827`'s bound 1): `sdk.create_object(..., ownedBy=…)` calls
+    """FIXED (was `#9827`'s bound 1): `sdk._create_object(..., ownedBy=…)` calls
     `proj.create_owned_by` DIRECTLY — it never passes the SDK's `create_edge`
     door, which is why a door-level emission left the COMMONEST `ownedBy`
     producer live-only.
@@ -381,7 +381,7 @@ def test_the_mint_carries_the_node_property_lane(env):
     proj.rebuild_all(str(events), confirm_destructive=True)
     rebuilt = _edge_count(proj, "ownedBy", widget["id"], team["id"])
     assert rebuilt == 1, (
-        "`sdk.create_object(name, 'product', ownedBy=team)` lost its edge on a "
+        "`sdk._create_object(name, 'product', ownedBy=team)` lost its edge on a "
         "journal rebuild — the commonest `ownedBy` producer is live-only again")
 
 

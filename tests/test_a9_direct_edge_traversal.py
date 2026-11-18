@@ -20,7 +20,7 @@ Covers:
   pre-existing-path activation (a legacy-created direct edge is selected
   and computed by dream post-A9).
 - E2E-14: live-point IMPL 3-cycle + NAND-inclusive variant through
-  ``sdk.dream(dirty_only=True)`` — termination within EP_MAX_ITERATIONS,
+  ``sdk._dream(dirty_only=True)`` — termination within EP_MAX_ITERATIONS,
   honest convergence (iterations > 0, affected_claims non-empty), dirty
   roots cleared only because factors ran, numeric confidence movement.
 

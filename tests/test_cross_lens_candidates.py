@@ -347,7 +347,7 @@ def test_mcp_tool_registered_readonly():
     pointer = RETIRED_USE_INSTEAD["tortoise_find_cross_lens_candidates"]
     assert pointer.startswith("tortoise_review_link_candidates("), pointer
     assert 'kind="cross_lens"' in pointer, pointer
-    assert td.sdk_method == "get_cross_lens_candidates"
+    assert td.sdk_method == "_get_cross_lens_candidates"
     assert td.annotations.readOnlyHint is True
     assert td.annotations.destructiveHint is False
     assert td.http_policy is True
@@ -363,7 +363,7 @@ def test_mcp_handler_delegates(sdk, monkeypatch):
         return {"candidates": [], "count": 0, "cap": 200,
                 "truncated": False, "routing": kw.get("routing")}
 
-    monkeypatch.setattr(sdk, "get_cross_lens_candidates", fake_sdk_method)
+    monkeypatch.setattr(sdk, "_get_cross_lens_candidates", fake_sdk_method)
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates(
         threshold=0.5, max_candidates=50, routing="relevance", top_k=7)
@@ -388,7 +388,7 @@ def test_mcp_tool_integration(sdk, monkeypatch):
 
 def test_mcp_tool_error_surfaces(sdk, monkeypatch):
     from tortoise import mcp_server
-    monkeypatch.setattr(sdk, "get_cross_lens_candidates",
+    monkeypatch.setattr(sdk, "_get_cross_lens_candidates",
                         lambda **kw: (_ for _ in ()).throw(ValueError("boom")))
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates()

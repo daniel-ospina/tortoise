@@ -125,7 +125,7 @@ def test_create_point_appends_the_record_before_the_cache_write(env, monkeypatch
             order.append("cache")
         return real_query(cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", spy_query)
+    monkeypatch.setattr(type(proj.g), "_query", spy_query)
 
     point = sdk._create_point("statement", "a journal-first claim")
     assert point.get("id"), f"create_point returned no id: {point!r}"
@@ -364,7 +364,7 @@ def test_a_failed_cache_write_leaves_the_record_replayable(env, monkeypatch):
             raise RuntimeError("simulated write failure (test)")
         return real_query(cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", spy_query)
+    monkeypatch.setattr(type(proj.g), "_query", spy_query)
 
     # The failed CREATE surfaces as the engine error (`_graph_write_with_retry`
     # re-raises a non-abort error unchanged) — the point here is that the

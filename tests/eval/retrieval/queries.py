@@ -170,7 +170,7 @@ def _new_queries_for(
             counters[tier] += 1
             out.append({
                 "id": f"nrq{counters[tier]:03d}-{tier[:1]}",
-                "query": " ".join(toks),
+                "_query": " ".join(toks),
                 "tier": tier,
                 "source": "oracle_new",
                 "oracle_target": k,
@@ -197,15 +197,15 @@ def build_oracle_query_set(
     queries: list[dict] = []
     skipped: list[str] = []
     for q in mix["queries"]:
-        target = oracle.token_topic_assignment(q["query"])
+        target = oracle.token_topic_assignment(q["_query"])
         if target is None:
             skipped.append(q["id"])
             continue
-        q_tokens = _tokens(q["query"])
+        q_tokens = _tokens(q["_query"])
         near_vocab = {t for n in oracle.near(target) for t in oracle.vocab(n)}
         queries.append({
             "id": q["id"],
-            "query": q["query"],
+            "_query": q["_query"],
             "tier": _assign_query_mix_tier(oracle, target, q_tokens),
             "source": "query_mix",
             "oracle_target": target,
@@ -283,64 +283,64 @@ def load_oracle_queries() -> dict:
 
 AUTHORED_QUERIES: list[dict] = [
     # Pricing / product (product/ strategy docs + pricing.json)
-    {"id": "aq001", "query": "pricing tiers enterprise plans", "domain": "pricing", "rationale": "product/pricing.json + strategy docs"},
-    {"id": "aq002", "query": "unit economics per message cost", "domain": "pricing", "rationale": "pricing research, cost-per-token economics"},
-    {"id": "aq003", "query": "free tier limits graph nodes", "domain": "pricing", "rationale": "tier limits / max_graph_nodes"},
-    {"id": "aq004", "query": "launch roadmap milestones phase", "domain": "product", "rationale": "product/archive/2026-08-10-launch-roadmap.md"},
-    {"id": "aq005", "query": "beta feedback funnel onboarding", "domain": "product", "rationale": "beta feedback docs (#1199)"},
-    {"id": "aq006", "query": "competitor comparison positioning", "domain": "product", "rationale": "product/competition/"},
-    {"id": "aq007", "query": "three layer memory model", "domain": "product", "rationale": "product/2026-07-31-three-layer-memory-model.md"},
-    {"id": "aq008", "query": "agent coordination layer plan", "domain": "product", "rationale": "product/2026-07-10-agent-coordination-layer-plan.md"},
+    {"id": "aq001", "_query": "pricing tiers enterprise plans", "domain": "pricing", "rationale": "product/pricing.json + strategy docs"},
+    {"id": "aq002", "_query": "unit economics per message cost", "domain": "pricing", "rationale": "pricing research, cost-per-token economics"},
+    {"id": "aq003", "_query": "free tier limits graph nodes", "domain": "pricing", "rationale": "tier limits / max_graph_nodes"},
+    {"id": "aq004", "_query": "launch roadmap milestones phase", "domain": "product", "rationale": "product/archive/2026-08-10-launch-roadmap.md"},
+    {"id": "aq005", "_query": "beta feedback funnel onboarding", "domain": "product", "rationale": "beta feedback docs (#1199)"},
+    {"id": "aq006", "_query": "competitor comparison positioning", "domain": "product", "rationale": "product/competition/"},
+    {"id": "aq007", "_query": "three layer memory model", "domain": "product", "rationale": "product/2026-07-31-three-layer-memory-model.md"},
+    {"id": "aq008", "_query": "agent coordination layer plan", "domain": "product", "rationale": "product/2026-07-10-agent-coordination-layer-plan.md"},
     # Hybrid search engine (tortoise/search_engine.py)
-    {"id": "aq009", "query": "hybrid rrf fusion ranking", "domain": "search", "rationale": "search_engine.rrf_fusion"},
-    {"id": "aq010", "query": "circuit breaker latency protection", "domain": "search", "rationale": "search_engine _CircuitBreaker (#249)"},
-    {"id": "aq011", "query": "degraded fallback tfidf", "domain": "search", "rationale": "search_engine.fallback_tfidf"},
-    {"id": "aq012", "query": "query classification kind filter", "domain": "search", "rationale": "search_engine.classify_query"},
-    {"id": "aq013", "query": "vector index hnsw embedding", "domain": "search", "rationale": "run_vector_query HNSW path (#7777)"},
-    {"id": "aq014", "query": "retracted points excluded results", "domain": "search", "rationale": "#689 status filter"},
-    {"id": "aq015", "query": "structural kind query pointKind", "domain": "search", "rationale": "run_structural_query"},
-    {"id": "aq016", "query": "full text search index", "domain": "search", "rationale": "run_fts_query / db.idx.fulltext"},
-    {"id": "aq017", "query": "relationship traversal predicate filter", "domain": "search", "rationale": "filter_by_traversal_predicate (#7846)"},
-    {"id": "aq018", "query": "ep annotation confidence breakdown", "domain": "search", "rationale": "annotate_ep_batch"},
+    {"id": "aq009", "_query": "hybrid rrf fusion ranking", "domain": "search", "rationale": "search_engine.rrf_fusion"},
+    {"id": "aq010", "_query": "circuit breaker latency protection", "domain": "search", "rationale": "search_engine _CircuitBreaker (#249)"},
+    {"id": "aq011", "_query": "degraded fallback tfidf", "domain": "search", "rationale": "search_engine.fallback_tfidf"},
+    {"id": "aq012", "_query": "query classification kind filter", "domain": "search", "rationale": "search_engine.classify_query"},
+    {"id": "aq013", "_query": "vector index hnsw embedding", "domain": "search", "rationale": "run_vector_query HNSW path (#7777)"},
+    {"id": "aq014", "_query": "retracted points excluded results", "domain": "search", "rationale": "#689 status filter"},
+    {"id": "aq015", "_query": "structural kind query pointKind", "domain": "search", "rationale": "run_structural_query"},
+    {"id": "aq016", "_query": "full text search index", "domain": "search", "rationale": "run_fts_query / db.idx.fulltext"},
+    {"id": "aq017", "_query": "relationship traversal predicate filter", "domain": "search", "rationale": "filter_by_traversal_predicate (#7846)"},
+    {"id": "aq018", "_query": "ep annotation confidence breakdown", "domain": "search", "rationale": "annotate_ep_batch"},
     # EP / epistemic engine (tortoise/ep.py)
-    {"id": "aq019", "query": "belief propagation posterior update", "domain": "ep", "rationale": "EP belief propagation"},
-    {"id": "aq020", "query": "contested claims variance threshold", "domain": "ep", "rationale": "posterior variance contestation"},
-    {"id": "aq021", "query": "nand contradiction evidence", "domain": "ep", "rationale": "NAND operators = contradiction evidence"},
-    {"id": "aq022", "query": "ep convergence non convergence retention", "domain": "ep", "rationale": "epic 903-C5 retention"},
-    {"id": "aq023", "query": "posterior stability uncalibrated prior", "domain": "ep", "rationale": "posterior_alpha/beta stability"},
-    {"id": "aq024", "query": "epistemic annotation confidence", "domain": "ep", "rationale": "EpBreakdown confidence_mean"},
+    {"id": "aq019", "_query": "belief propagation posterior update", "domain": "ep", "rationale": "EP belief propagation"},
+    {"id": "aq020", "_query": "contested claims variance threshold", "domain": "ep", "rationale": "posterior variance contestation"},
+    {"id": "aq021", "_query": "nand contradiction evidence", "domain": "ep", "rationale": "NAND operators = contradiction evidence"},
+    {"id": "aq022", "_query": "ep convergence non convergence retention", "domain": "ep", "rationale": "epic 903-C5 retention"},
+    {"id": "aq023", "_query": "posterior stability uncalibrated prior", "domain": "ep", "rationale": "posterior_alpha/beta stability"},
+    {"id": "aq024", "_query": "epistemic annotation confidence", "domain": "ep", "rationale": "EpBreakdown confidence_mean"},
     # Ops / infrastructure (docs/ops + infra)
-    {"id": "aq025", "query": "backup restore runbook", "domain": "ops", "rationale": "docs/ops/registry-backup-dr.md"},
-    {"id": "aq026", "query": "event log rebuild recovery", "domain": "ops", "rationale": "JSONL event-log rebuild (#548)"},
-    {"id": "aq027", "query": "docker deploy environment variables", "domain": "ops", "rationale": "docker compose / env config"},
-    {"id": "aq028", "query": "migration legacy store", "domain": "ops", "rationale": "tortoise/migrate_kinds.py"},
-    {"id": "aq029", "query": "namespace isolation graph", "domain": "ops", "rationale": "SDK namespace prefixing"},
-    {"id": "aq030", "query": "data safety encryption at rest", "domain": "ops", "rationale": "docs/data-safety.md"},
-    {"id": "aq031", "query": "client server package split", "domain": "ops", "rationale": "docs/client-server-split.md (#526)"},
-    {"id": "aq032", "query": "quickstart self hosted", "domain": "ops", "rationale": "docs/quickstart-selfhosted.md"},
+    {"id": "aq025", "_query": "backup restore runbook", "domain": "ops", "rationale": "docs/ops/registry-backup-dr.md"},
+    {"id": "aq026", "_query": "event log rebuild recovery", "domain": "ops", "rationale": "JSONL event-log rebuild (#548)"},
+    {"id": "aq027", "_query": "docker deploy environment variables", "domain": "ops", "rationale": "docker compose / env config"},
+    {"id": "aq028", "_query": "migration legacy store", "domain": "ops", "rationale": "tortoise/migrate_kinds.py"},
+    {"id": "aq029", "_query": "namespace isolation graph", "domain": "ops", "rationale": "SDK namespace prefixing"},
+    {"id": "aq030", "_query": "data safety encryption at rest", "domain": "ops", "rationale": "docs/data-safety.md"},
+    {"id": "aq031", "_query": "client server package split", "domain": "ops", "rationale": "docs/client-server-split.md (#526)"},
+    {"id": "aq032", "_query": "quickstart self hosted", "domain": "ops", "rationale": "docs/quickstart-selfhosted.md"},
     # Ontology / registry (docs/ONTOLOGY.md + registry schema)
-    {"id": "aq033", "query": "point kind taxonomy", "domain": "ontology", "rationale": "KIND_WEIGHTS / pointKind"},
-    {"id": "aq034", "query": "operator impl edges structure", "domain": "ontology", "rationale": "IMPL edges + operators"},
-    {"id": "aq035", "query": "registry graph schema entity", "domain": "ontology", "rationale": "docs/registry-graph-schema.md"},
-    {"id": "aq036", "query": "pack installs backfill", "domain": "ontology", "rationale": "backfill_pack_installs.py"},
-    {"id": "aq037", "query": "source url canonical identity", "domain": "ontology", "rationale": "#448/#149 source url key"},
+    {"id": "aq033", "_query": "point kind taxonomy", "domain": "ontology", "rationale": "KIND_WEIGHTS / pointKind"},
+    {"id": "aq034", "_query": "operator impl edges structure", "domain": "ontology", "rationale": "IMPL edges + operators"},
+    {"id": "aq035", "_query": "registry graph schema entity", "domain": "ontology", "rationale": "docs/registry-graph-schema.md"},
+    {"id": "aq036", "_query": "pack installs backfill", "domain": "ontology", "rationale": "backfill_pack_installs.py"},
+    {"id": "aq037", "_query": "source url canonical identity", "domain": "ontology", "rationale": "#448/#149 source url key"},
     # Benchmarks (benchmarks/ + #316)
-    {"id": "aq038", "query": "latency p95 target arms", "domain": "benchmark", "rationale": "bench_core pre-registered targets"},
-    {"id": "aq039", "query": "warmup steady state protocol", "domain": "benchmark", "rationale": "WarmupProtocol CV target"},
-    {"id": "aq040", "query": "right censored capped samples", "domain": "benchmark", "rationale": "failure taxonomy capped/capped-tail"},
-    {"id": "aq041", "query": "e2e verdict band achieved", "domain": "benchmark", "rationale": "E2E_TARGET_MS 300ms band"},
-    {"id": "aq042", "query": "elevated timeout uncensored", "domain": "benchmark", "rationale": "ELEVATED_TIMEOUT_MS (#317)"},
+    {"id": "aq038", "_query": "latency p95 target arms", "domain": "benchmark", "rationale": "bench_core pre-registered targets"},
+    {"id": "aq039", "_query": "warmup steady state protocol", "domain": "benchmark", "rationale": "WarmupProtocol CV target"},
+    {"id": "aq040", "_query": "right censored capped samples", "domain": "benchmark", "rationale": "failure taxonomy capped/capped-tail"},
+    {"id": "aq041", "_query": "e2e verdict band achieved", "domain": "benchmark", "rationale": "E2E_TARGET_MS 300ms band"},
+    {"id": "aq042", "_query": "elevated timeout uncensored", "domain": "benchmark", "rationale": "ELEVATED_TIMEOUT_MS (#317)"},
     # Memory / sessions (tortoise/session_*)
-    {"id": "aq043", "query": "session memory reconciliation", "domain": "memory", "rationale": "session_continuity + reconciliation"},
-    {"id": "aq044", "query": "semantic search sessions", "domain": "memory", "rationale": "test_session_semantic_search"},
-    {"id": "aq045", "query": "event store append schema", "domain": "memory", "rationale": "event_store GraphEvent schema"},
+    {"id": "aq043", "_query": "session memory reconciliation", "domain": "memory", "rationale": "session_continuity + reconciliation"},
+    {"id": "aq044", "_query": "semantic search sessions", "domain": "memory", "rationale": "test_session_semantic_search"},
+    {"id": "aq045", "_query": "event store append schema", "domain": "memory", "rationale": "event_store GraphEvent schema"},
     # Auth / teams / hosted
-    {"id": "aq046", "query": "api key team membership", "domain": "auth", "rationale": "membership_create / api_key"},
-    {"id": "aq047", "query": "signup rate limit buckets", "domain": "auth", "rationale": "tortoise/abuse.py signup limiters"},
-    {"id": "aq048", "query": "hosted quickstart deployment", "domain": "auth", "rationale": "docs/quickstart-cloud.md"},
+    {"id": "aq046", "_query": "api key team membership", "domain": "auth", "rationale": "membership_create / api_key"},
+    {"id": "aq047", "_query": "signup rate limit buckets", "domain": "auth", "rationale": "tortoise/abuse.py signup limiters"},
+    {"id": "aq048", "_query": "hosted quickstart deployment", "domain": "auth", "rationale": "docs/quickstart-cloud.md"},
     # Strategy / research / governance
-    {"id": "aq049", "query": "gtm pricing decision rationale", "domain": "strategy", "rationale": "graph-scripts pricing decisions"},
-    {"id": "aq050", "query": "org attribution research", "domain": "strategy", "rationale": "product/2026-07-08-org-attribution-research.md"},
+    {"id": "aq049", "_query": "gtm pricing decision rationale", "domain": "strategy", "rationale": "graph-scripts pricing decisions"},
+    {"id": "aq050", "_query": "org attribution research", "domain": "strategy", "rationale": "product/2026-07-08-org-attribution-research.md"},
 ]
 
 

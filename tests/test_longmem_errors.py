@@ -104,18 +104,18 @@ def test_eval_failure_class_semantics():
     # #1776: a transient/unknown at ingest grades retries_exhausted (a
     # single FalkorDB/network blip during ingest is recoverable, like the
     # identical reader/judge transients) — never a run-wide veto.
-    assert eval_failure_class(_HttpErr(429), site="ingest") == \
+    assert eval_failure_class(_HttpErr(429), site="_ingest") == \
         "ingest:retries_exhausted"
     import requests
     assert eval_failure_class(requests.ConnectionError("down"),
-                              site="ingest") == "ingest:retries_exhausted"
+                              site="_ingest") == "ingest:retries_exhausted"
     assert eval_failure_class(RuntimeError("extractor boom"),
-                              site="ingest") == "ingest:retries_exhausted"
+                              site="_ingest") == "ingest:retries_exhausted"
     # structurally-fatal / parse at ingest stay bare ``ingest`` (unchanged
     # hard veto — the extractor-internal failure is permanent by
     # construction): no loosening beyond the transient class.
-    assert eval_failure_class(_HttpErr(401), site="ingest") == "ingest"
-    assert eval_failure_class(KeyError("x"), site="ingest") == "ingest"
+    assert eval_failure_class(_HttpErr(401), site="_ingest") == "_ingest"
+    assert eval_failure_class(KeyError("x"), site="_ingest") == "_ingest"
     # reader/judge transient (incl. P2-unknown = transient-safe) → exhausted
     assert eval_failure_class(_HttpErr(429), site="reader") == \
         "reader:retries_exhausted"
@@ -138,18 +138,18 @@ def test_ingest_retries_exhausted_recoverable_allowlist():
     failure still hard-vetoes)."""
     from tools.longmem_eval.report import RECOVERABLE_EVAL_FAILURE_CLASSES
     assert "ingest:retries_exhausted" in RECOVERABLE_EVAL_FAILURE_CLASSES
-    assert "ingest" not in RECOVERABLE_EVAL_FAILURE_CLASSES
+    assert "_ingest" not in RECOVERABLE_EVAL_FAILURE_CLASSES
     # the exact-string match also fails a tampered suffix closed.
     assert "evil:retries_exhausted" not in RECOVERABLE_EVAL_FAILURE_CLASSES
 
 
 def test_ingest_error_text_class():
-    assert class_for_ingest_error_text("extractor timeout") == "ingest"
+    assert class_for_ingest_error_text("extractor timeout") == "_ingest"
 
 
 def test_census_classes():
-    entries = ["reader:retries_exhausted", "judge:fatal", "ingest",
+    entries = ["reader:retries_exhausted", "judge:fatal", "_ingest",
                "reader:retries_exhausted", "", None]
     assert census_classes(entries) == {
-        "ingest": 1, "judge:fatal": 1, "reader:retries_exhausted": 2}
+        "_ingest": 1, "judge:fatal": 1, "reader:retries_exhausted": 2}
     assert census_classes([]) == {}

@@ -104,7 +104,7 @@ def test_promoted_point_pair_refuses_the_attribute(sdk, key, value):
     # The message must name the MECHANISM (the promotion) and the remedy, not
     # only the verdict: the caller never asked for the operator route.
     assert "#8499" in msg and "operator-mediated" in msg, msg
-    assert "create_direct_edge" in msg, msg
+    assert "_create_direct_edge" in msg, msg
 
     # Phase 1 must also be ZERO-mutation, and Phase 2 must agree.
     with pytest.raises(BundleValidationError) as exc:

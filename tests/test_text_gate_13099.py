@@ -86,7 +86,7 @@ def test_short_keyword_class_reuses_the_committed_queries_verbatim():
     got = classes["short_keyword"]
     assert len(got) == len(committed) == 100
     for c, q in zip(got, committed, strict=True):
-        assert c["text"] == q["query"]
+        assert c["text"] == q["_query"]
         assert c["target"] == q["oracle_target"]
         assert c["qid"] == q["id"]
 

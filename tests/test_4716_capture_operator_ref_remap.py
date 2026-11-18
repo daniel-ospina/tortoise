@@ -269,7 +269,7 @@ def test_capture_commit_resolves_mitigates_reason_for_a_folded_endpoint(
 def test_capture_commit_single_prefixes_an_unresolvable_mitigates_reason(
         sdk, monkeypatch):
     """#4716 review cycle 4 coverage: the unresolvable-`src` fallback must add
-    NO prefix of its own — `sdk.mitigate_operator` already writes
+    NO prefix of its own — `sdk._mitigate_operator` already writes
     ``content=f"[MITIGATION] {reason}"`` and ``why.py`` strips exactly one, so
     the old ``f"[MITIGATION] {src}"`` fallback stored a DOUBLE prefix. The
     `src` here resolves to neither a payload point nor a folded noop

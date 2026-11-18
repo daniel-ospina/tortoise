@@ -438,7 +438,7 @@ def test_projection_wrapper_refuses_on_every_query_entry_point():
     QUERY entry point must be overridden, not forwarded, or the wrapper is an
     escape hatch on its own.
     """
-    for verb in ("query", "ro_query", "_query", "profile", "explain"):
+    for verb in ("_query", "ro_query", "_query", "profile", "explain"):
         g, handle = _guarded()
         with pytest.raises(UnsupportedCypherOperatorError):
             getattr(g, verb)(LEGACY_SHAPE_CHECK)
@@ -447,7 +447,7 @@ def test_projection_wrapper_refuses_on_every_query_entry_point():
 
 # ── #7162: the `proj.g` wrapper's OWN `WITH *` barrier (`_bar`) ──────────────
 
-@pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile", "explain"])
+@pytest.mark.parametrize("verb", ["_query", "ro_query", "_query", "profile", "explain"])
 def test_projection_wrapper_bars_the_6976_offender_on_every_query_entry_point(verb):
     """Falsifier: ``_GuardedGraph._bar`` is not dead code on the ``proj.g`` path.
 
@@ -736,7 +736,7 @@ def test_guarded_class_publishes_its_unguarded_base_and_still_blocks():
             return lambda *a, **k: ("UNGURADED", name, a)
 
     handle = guarded_cls(_StubClient(), "g")
-    for verb in ("query", "ro_query"):
+    for verb in ("_query", "ro_query"):
         try:
             getattr(handle, verb)("MATCH (n) CALL apoc.foo() RETURN n")
         except Exception:

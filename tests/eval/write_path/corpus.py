@@ -36,7 +36,7 @@ BASELINE_PATH = BASELINES_DIR / "main.json"
 # ``inconclusive`` — the committed config is the contract for the frozen
 # corpus run.
 BASELINE_CONFIG: dict = {
-    "lanes": ["verbatim", "facts", "dream"],
+    "lanes": ["verbatim", "facts", "_dream"],
     "mode": "BPRE",          # cost-bounded default; `--full` is opt-in
     "harness": "all",        # seams graded
     "seed": 42,               # deterministic within-run ordering only

@@ -896,7 +896,7 @@ def test_no_redirect_stems_registry_exact():
         "test_embedded_lifecycle",
         "test_embedded_lifecycle_fast_close",
         "test_flip_gate",
-        "test_guard",
+        "_test_guard",
         "test_hard_reject",
         # #4047: both #3845 fork-guard files carry a module-level
         # `pytestmark = pytest.mark.embedded_only` (their subject is the

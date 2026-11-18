@@ -48,8 +48,8 @@ fact) so the differential isolates the arm: everything after the fetch —
 annotation, per-session dedup, boost, packaging, assembly — is the real path.
 * **the product seam** (tests 4-6) — HERMETIC: no graph, no model call, no
 network. FOUR substitutions on the graph/reader seam, plus two that hold for
-the whole section, listed so none is invisible. Per test: ``sdk.tortoise_fts_query``
-(the retrieval fetch) and ``sdk.annotate_ask_hits`` (the batch annotation —
+the whole section, listed so none is invisible. Per test: ``sdk._tortoise_fts_query``
+(the retrieval fetch) and ``sdk._annotate_ask_hits`` (the batch annotation —
 stubbed to a PASS-THROUGH, so the pool arrives WITHOUT the graph-derived
 ``session_date``/``speaker`` keys the real call adds) are stubbed;
 ``sdk._get_proj()`` — the SDK's projection accessor, which would otherwise

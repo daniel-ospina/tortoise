@@ -6976,7 +6976,7 @@ def tortoise_delete(id: str, dry_run: bool = False,
     sdk = _get_org_sdk()
     # Read the declared binding HERE, on every path (#3904): the confirmation
     # protocol means the default path returns before the write, so a read that
-    # lived only in the delete branch would leave `sdk_method="delete"` declared
+    # lived only in the delete branch would leave `sdk_method="_delete"` declared
     # but never consumed on the call an agent actually makes first.
     delete = sdk._delete
     if confirmation is None or dry_run:

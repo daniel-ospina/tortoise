@@ -374,7 +374,7 @@ def test_the_residency_meter_is_the_gauge_and_never_the_addend(monkeypatch):
         calls.append(org_id)
         return {"measured": True, "unmeasured_reason": None,
                 "stored_bytes": 12_345_678, "rows": 42,
-                "measured_at": "2026-11-17T00:00:00+00:00", "source": "audit"}
+                "measured_at": "2026-11-17T00:00:00+00:00", "source": "_audit__svc"}
 
     monkeypatch.setattr(metering, "get_postgres_residency", fake_reader, raising=True)
     reading = allowance_gate._postgres_stored_bytes("org_wired")
@@ -453,7 +453,7 @@ def test_the_residency_meter_is_the_gauge_and_never_the_addend(monkeypatch):
         metering, "get_postgres_residency",
         lambda org_id: {"measured": True, "unmeasured_reason": None,
                         "stored_bytes": 5, "rows": 1,
-                        "measured_at": None, "source": "audit"}, raising=True)
+                        "measured_at": None, "source": "_audit__svc"}, raising=True)
     try:
         allowance_gate._postgres_stored_bytes("org_no_timestamp")
     except allowance_gate.MeterUnavailable:
@@ -572,7 +572,7 @@ def test_the_reader_names_why_it_has_no_figure(monkeypatch):
         def query(self, _table, **_kwargs):
             return [{"stored_bytes": 4096, "rows": 3,
                      "measured_at": "2026-11-17T00:00:00+00:00",
-                     "source": "audit"}]
+                     "source": "_audit__svc"}]
 
     monkeypatch.setattr(
         "tortoise.supabase_control.get_control_plane", lambda: _HasRow(),
@@ -706,7 +706,7 @@ def test_a_stale_snapshot_is_refused_rather_than_enforced(monkeypatch):
     def old_reader(org_id: str) -> dict:
         return {"measured": True, "unmeasured_reason": None,
                 "stored_bytes": 1_000, "rows": 1,
-                "measured_at": "2000-01-01T00:00:00+00:00", "source": "audit"}
+                "measured_at": "2000-01-01T00:00:00+00:00", "source": "_audit__svc"}
 
     monkeypatch.setattr(metering, "get_postgres_residency", old_reader, raising=True)
     assert allowance_gate._stale(

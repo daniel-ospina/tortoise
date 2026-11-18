@@ -117,7 +117,7 @@ def test_oracle_false_friend_property():
     qs = load_oracle_queries()["queries"]
     found = 0
     for q in qs:
-        tokens = {t for t in q["query"].split()}
+        tokens = {t for t in q["_query"].split()}
         labels = oracle_grades_for_query(o, q["oracle_target"], live)
         for pid, grade in labels.items():
             if grade == 0 and tokens & set(content_by_id[pid].split()):
@@ -246,7 +246,7 @@ def test_near_topic_distractors_are_real():
 
     # 2. Every hard query token-matches a grade-1 point.
     for q in hard:
-        qtoks = set(q["query"].split())
+        qtoks = set(q["_query"].split())
         near = [pid for nt in o.near(q["oracle_target"]) for pid in live[nt]]
         assert any(
             qtoks & set(content[pid].split()) for pid in near
@@ -257,7 +257,7 @@ def test_near_topic_distractors_are_real():
         if q["tier"] != "hard" or q["source"] != "oracle_new":
             continue
         t = q["oracle_target"]
-        qtoks = set(q["query"].split())
+        qtoks = set(q["_query"].split())
         g1_max = max(
             len(qtoks & set(content[pid].split()))
             for nt in o.near(t) for pid in live[nt]
@@ -313,9 +313,9 @@ def test_tfidf_retrieves_near_topic_distractors_for_hard_queries(tmp_path):
             if q["tier"] != "hard":
                 continue
             labels = oracle_grades_for_query(o, q["oracle_target"], live)
-            qv = o.query_vector_for(q["query"], 42)
+            qv = o.query_vector_for(q["_query"], 42)
             ranked = retrieve_per_strategy(
-                g, q["query"], q.get("kind"), qv, tfidf_points, True, 50,
+                g, q["_query"], q.get("kind"), qv, tfidf_points, True, 50,
             )
             ids = [pid for pid, _s in ranked["tfidf"]]
             assert any(labels.get(pid, 0) == 1 for pid in ids), (
@@ -360,9 +360,9 @@ def _run_strategies_on_mix(corpus_size: int, db_path: str) -> dict:
         p5: dict[str, list[float]] = {}
         ndcg: dict[str, list[float]] = {}
         for q in qs:
-            qv = o.query_vector_for(q["query"], 42)
+            qv = o.query_vector_for(q["_query"], 42)
             ranked = retrieve_per_strategy(
-                g, q["query"], q.get("kind"), qv, tfidf_points, True, 50,
+                g, q["_query"], q.get("kind"), qv, tfidf_points, True, 50,
             )
             labels = oracle_grades_for_query(o, q["oracle_target"], live)
             for strat in ("vector", "tfidf"):
@@ -447,9 +447,9 @@ def test_hard_tier_punishes_token_match_more_than_easy(tmp_path):
         for q in qs:
             if q["tier"] not in ("easy", "hard"):
                 continue
-            qv = o.query_vector_for(q["query"], 42)
+            qv = o.query_vector_for(q["_query"], 42)
             ranked = retrieve_per_strategy(
-                g, q["query"], q.get("kind"), qv, tfidf_points, True, 50,
+                g, q["_query"], q.get("kind"), qv, tfidf_points, True, 50,
             )
             labels = oracle_grades_for_query(o, q["oracle_target"], live)
             ids = [pid for pid, _s in ranked["vector"]]

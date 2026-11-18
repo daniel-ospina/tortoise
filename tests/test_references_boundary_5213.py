@@ -81,7 +81,7 @@ def _anchor_exists(proj, key: str, value: str) -> bool:
 
 def test_create_edge_mints_an_unanchored_derivation_link():
     """Input: Source(contentHash='h1') → Event, and → a document-bearing :Source,
-    both linked through the PUBLIC ``sdk.create_edge('references', ...)``.
+    both linked through the PUBLIC ``sdk._create_edge('references', ...)``.
 
     FAILS IF ``create_edge`` starts stamping ``r.sourceVersion`` (that is option 1
     of #5213 — a deliberate decision reopening: update §9.6 and this pin in the
@@ -242,7 +242,7 @@ def test_storage_architecture_still_records_the_boundary():
         "§9.6 no longer states the anchor is a pipeline guarantee rather than a "
         "graph invariant — the boundary #5213 tracks is unrecorded"
     )
-    assert "create_edge" in section and "backfill_references.py" in section, (
+    assert "_create_edge" in section and "backfill_references.py" in section, (
         "§9.6 no longer names BOTH bypassing writers (#5213)"
     )
     assert "#5213" in section, (

@@ -1519,7 +1519,7 @@ def test_a_non_point_record_naming_the_id_is_not_journal_presence(tmp_path, capl
         # the OTHER kinds' own records, in the producers' shape
         log.append({"type": "ObjectRegistered", "id": typo, "name": "collides"})
         log.append({"type": "EntityMutated", "id": typo,
-                    "label": "Object", "op": "update"})
+                    "label": "Object", "op": "_update"})
         before = monitoring.silent_revision_loss_counts()
         caplog.clear()
         with caplog.at_level("WARNING"):
@@ -2332,7 +2332,7 @@ def test_a_delete_in_the_recreated_path_is_answered_not_escalated(
                 with open(journal, "w", encoding="utf-8") as fh:
                     fh.write(json.dumps({"type": "EntityMutated",
                                          "id": pid, "label": "Point",
-                                         "op": "delete"}) + "\n")
+                                         "op": "_delete"}) + "\n")
                 return None
             return real_stat_key(log)
 
@@ -2556,7 +2556,7 @@ def test_a_journal_truncated_and_regrown_in_place_drops_the_stale_map(
             log.append({"type": "PointAdded", "point": {"id": f"seed-{i:04d}"}})
         # …and this id's LAST record in the first journal is a hard delete
         log.append({"type": "EntityMutated", "id": point_id,
-                    "label": "Point", "op": "delete"})
+                    "label": "Point", "op": "_delete"})
 
         # ── build the map: one absent read folds every record above ──
         assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
@@ -2723,7 +2723,7 @@ def test_a_seam_that_cannot_be_read_drops_the_map_instead_of_trusting_it(
                 fh.write(json.dumps({"type": "PointAdded",
                                      "point": {"id": f"seed-{i:04d}"}}) + "\n")
             fh.write(json.dumps({"type": "EntityMutated", "id": point_id,
-                                 "label": "Point", "op": "delete"}) + "\n")
+                                 "label": "Point", "op": "_delete"}) + "\n")
         # the journal path is a SYMLINK: `mention_lines` follows it, `tail_bytes`
         # (O_NOFOLLOW) cannot open it at all
         os.symlink(target, journal)
@@ -5421,7 +5421,7 @@ def test_a_fifo_at_the_journal_path_cannot_park_the_absent_write(tmp_path):
             os.mkfifo(journal)
             pid = str(uuid.uuid4())
             before = monitoring.silent_revision_loss_counts()
-            reply = sdk.update_point(pid, confidence=0.9)
+            reply = sdk._update_point(pid, confidence=0.9)
             after = monitoring.silent_revision_loss_counts()
             print(json.dumps({
                 "reply": reply,

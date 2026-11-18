@@ -590,7 +590,7 @@ def test_the_differential_pins_the_eval_retrieval_budget(seeded_sdk,
         captured.append(kw.get("_elevated_timeout_ms"))
         return []
 
-    monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", _capture)
+    monkeypatch.setattr(TortoiseSDK, "_tortoise_fts_query", _capture)
     retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
                           pool_size=60)
     assert captured, "the read reached no tortoise_fts_query call at all"

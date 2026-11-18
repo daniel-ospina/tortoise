@@ -340,7 +340,7 @@ class TestKeyRenameSupabase:
         rows = fake.query("api_keys", select=["id"],
                           filters=[("lookup_hash", "eq", lookup_hash(key))])
         key_id = rows[0]["id"]
-        client.delete(f"/v1/team/keys/{key_id}",
+        client._delete(f"/v1/team/keys/{key_id}",
                       headers={"Authorization": f"Bearer {key}"})
         r = client.patch(
             f"/v1/team/keys/{key_id}",
@@ -443,7 +443,7 @@ class TestDashboardLoginGate:
         from tortoise.auth import lookup_hash
         rows = fake.query("api_keys", select=["id"], filters=[("lookup_hash", "eq", lookup_hash(key))])
         kid = rows[0]["id"]
-        r = client.delete(f"/v1/team/keys/{kid}", headers={"Authorization": f"Bearer {key}"})
+        r = client._delete(f"/v1/team/keys/{kid}", headers={"Authorization": f"Bearer {key}"})
         assert r.status_code == 403, r.text
         body = r.json().get("detail", {})
         assert (body.get("error_code") == "dashboard_login_disabled") if isinstance(body, dict) else True
@@ -644,7 +644,7 @@ class TestKeyManagementTeamPins:
         dashboard's revokeKey sends the pin."""
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
         kid = self._key_id(fake, teamB)
-        r = client.delete(f"/v1/team/keys/{kid}",
+        r = client._delete(f"/v1/team/keys/{kid}",
                           headers={"Authorization": "Bearer eyJ.sess"})
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == "Not your API key"
@@ -654,7 +654,7 @@ class TestKeyManagementTeamPins:
         key (the session lane honors the pin membership-checked)."""
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
         kid = self._key_id(fake, teamB)
-        r = client.delete(f"/v1/team/keys/{kid}?org_id={teamB}",
+        r = client._delete(f"/v1/team/keys/{kid}?org_id={teamB}",
                           headers={"Authorization": "Bearer eyJ.sess"})
         assert r.status_code == 200, r.text
         assert r.json()["revoked"] is True
@@ -668,7 +668,7 @@ class TestKeyManagementTeamPins:
         revoke, even when the user owns both teams."""
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
         kid = self._key_id(fake, teamB)
-        r = client.delete(f"/v1/team/keys/{kid}?org_id={teamA}",
+        r = client._delete(f"/v1/team/keys/{kid}?org_id={teamA}",
                           headers={"Authorization": "Bearer eyJ.sess"})
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == "Not your API key"
@@ -680,7 +680,7 @@ class TestKeyManagementTeamPins:
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
         _, teamC = _provision_anon(client, fake)  # third team, NOT claimed
         kid = self._key_id(fake, teamC)
-        r = client.delete(f"/v1/team/keys/{kid}?org_id={teamC}",
+        r = client._delete(f"/v1/team/keys/{kid}?org_id={teamC}",
                           headers={"Authorization": "Bearer eyJ.sess"})
         assert r.status_code == 403, r.text
         assert "No membership in team" in str(r.json())
@@ -842,7 +842,7 @@ class TestKeyManagementOwnerAdminGate:
             client, fake, monkeypatch)
         kid = self._first_key_id(fake, org_id)  # the owner's signup key
         _patch_session_user(monkeypatch, member_id)
-        r = client.delete(f"/v1/team/keys/{kid}?org_id={org_id}",
+        r = client._delete(f"/v1/team/keys/{kid}?org_id={org_id}",
                           headers={"Authorization": "Bearer eyJ.sess"})
         assert r.status_code == 403, r.text
         assert r.json()["detail"] == "Requires owner or admin role in team"
@@ -901,7 +901,7 @@ class TestKeyManagementOwnerAdminGate:
         assert t.status_code == 200, t.text
         assert t.json()["enabled"] is False
         # revoke the minted key (frees the slot)
-        d = client.delete(f"/v1/team/keys/{kid}?org_id={org_id}", headers=h)
+        d = client._delete(f"/v1/team/keys/{kid}?org_id={org_id}", headers=h)
         assert d.status_code == 200, d.text
         assert d.json()["revoked"] is True
         # the REVOKED key no longer authenticates (401) — regression guard
@@ -931,7 +931,7 @@ class TestKeyManagementOwnerAdminGate:
         m = client.post(f"/v1/team/keys?org_id={org_id}",
                         headers={"Authorization": "Bearer eyJ.sess"}, json={})
         assert m.status_code == 200, m.text
-        d = client.delete(f"/v1/team/keys/{m.json()['id']}?org_id={org_id}",
+        d = client._delete(f"/v1/team/keys/{m.json()['id']}?org_id={org_id}",
                           headers={"Authorization": "Bearer eyJ.sess"})
         assert d.status_code == 200, d.text
 
@@ -951,7 +951,7 @@ class TestKeyManagementOwnerAdminGate:
         m = client.post(f"/v1/team/keys?org_id={org_id}", headers=h, json={})
         assert m.status_code == 200, m.text
         kid = m.json()["id"]
-        assert client.delete(f"/v1/team/keys/{kid}?org_id={org_id}",
+        assert client._delete(f"/v1/team/keys/{kid}?org_id={org_id}",
                              headers=h).status_code == 200
 
     def test_member_session_scoped_mint_403(self, client, fake, monkeypatch):

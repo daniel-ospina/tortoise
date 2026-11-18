@@ -1211,7 +1211,7 @@ def test_capture_promotes_a_multi_labelled_endpoint_operator_once(
             "CREATE (c)-[:INPUT {idx:0}]->(o)")
         # The promotion happens before the ingest EP pass; stub the pass so
         # the test measures the SWEEP, not EP cost.
-        monkeypatch.setattr(sdk, "dream", lambda **kw: {})
+        monkeypatch.setattr(sdk, "_dream", lambda **kw: {})
         # #1088 signature: ``promotion_ids`` is the minted-claim set this call
         # may promote. The operator below is reached through the CLAIM join
         # (it was not created by this capture), so ``operator_ids`` stays
@@ -1646,7 +1646,7 @@ def test_capture_session_source_materialized_when_event_write_fails(sdk, monkeyp
     def boom(*args, **kwargs):
         raise RuntimeError("falkordb down")
 
-    monkeypatch.setattr(sdk, "create_event", boom)
+    monkeypatch.setattr(sdk, "_create_event", boom)
     res = sdk._capture_session(CONV)
     sid = res["session_id"]
     proj = sdk._get_proj()
@@ -1686,7 +1686,7 @@ def test_capture_session_event_write_failure_logs_warning(sdk, caplog, monkeypat
     def boom(*args, **kwargs):
         raise RuntimeError("falkordb down")
 
-    monkeypatch.setattr(sdk, "create_event", boom)
+    monkeypatch.setattr(sdk, "_create_event", boom)
     with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
         res = sdk._capture_session(CONV)
     assert res["turns"] == 3, "turn/session writes must still succeed"
@@ -2643,7 +2643,7 @@ def test_extract_session_v2_counts_point_write_skips(sdk, monkeypatch):
             raise RuntimeError("point write failed")
         return _real_create_point(*args, **kwargs)
 
-    monkeypatch.setattr(sdk, "create_point", _boom_point)
+    monkeypatch.setattr(sdk, "_create_point", _boom_point)
     extracted, meta = sdk._extract_session_v2(
         CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
     assert extracted, "the successful point is reported"
@@ -2955,7 +2955,7 @@ def test_extract_session_v2_terminal_old_is_silent_noop(sdk, monkeypatch):
     """#2164 (Task 4): re-ingesting a pt_ supersession record whose OLD
     point is ALREADY terminal is an idempotent silent no-op — no raise, no
     NEW meta warning naming the ref (the helper's terminal probe pre-empts
-    supersede_point's raise — sdk.supersede_point rejects terminal olds),
+    supersede_point's raise — sdk._supersede_point rejects terminal olds),
     and no duplicate CORRECTS edge."""
     import tortoise.extractor_v2 as ev2
 
@@ -4368,7 +4368,7 @@ def test_extract_session_llm_wiring_failure_is_structured(sdk, monkeypatch):
                 raise RuntimeError("falkordb transient write failure")
         return _real_query(query, **params)
 
-    monkeypatch.setattr(_raw, "query", _boom_on_second)
+    monkeypatch.setattr(_raw, "_query", _boom_on_second)
     extracted, meta = sdk._extract_session_llm(
         CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
     assert meta["mode"] == "error"
@@ -4763,7 +4763,7 @@ def test_capture_session_event_write_failure_keeps_structured_success(sdk, monke
     dangling eventId, Source eventId null, no references edge)."""
     def boom(*args, **kwargs):
         raise RuntimeError("falkordb down")
-    monkeypatch.setattr(sdk, "create_event", boom)
+    monkeypatch.setattr(sdk, "_create_event", boom)
     res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert res["extraction_mode"] in ("llm:mock", "llm")
@@ -4784,7 +4784,7 @@ def test_capture_session_event_write_failure_keeps_structured_success(sdk, monke
 def test_capture_session_event_write_no_id_warns(sdk, monkeypatch):
     """P1 (D4): create_event succeeding but returning a dict WITHOUT
     id/eventId silently skips stamping — must surface as an additive warning."""
-    monkeypatch.setattr(sdk, "create_event",
+    monkeypatch.setattr(sdk, "_create_event",
                         lambda *a, **kw: {"name": "no-id-event"})
     res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
@@ -4808,7 +4808,7 @@ def test_capture_session_stamping_failure_warns_and_leaves_points(sdk, monkeypat
             raise RuntimeError("stamping query failed")
         return _real_query(query, **params)
 
-    monkeypatch.setattr(_raw, "query", _boom_stamp)
+    monkeypatch.setattr(_raw, "_query", _boom_stamp)
     res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     # #8501: the EVENT MINT and the provenance STAMP are separate halves now, so
@@ -4838,7 +4838,7 @@ def test_capture_session_two_warnings_sources_no_clobber(sdk, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
                         lambda: _EmptyOutputExtractor())
-    monkeypatch.setattr(sdk, "create_event",
+    monkeypatch.setattr(sdk, "_create_event",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("event down")))
     res = sdk._capture_session(
         [{"role": "user", "content": "the weather today is fine"}])
@@ -7420,7 +7420,7 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
             raise RuntimeError("simulated verification read failure")
         return real_query(query, params=params, timeout=timeout)
 
-    monkeypatch.setattr(raw, "query", failing_query)
+    monkeypatch.setattr(raw, "_query", failing_query)
     res = sdk._capture_session(conv)
     assert res["points"], "the capture itself commits"
     assert res["surfaced"] == [], (
@@ -8079,7 +8079,7 @@ def test_capture_true_retry_heals_unstamped_first_attempt(
     # (simulated) — the claim stays live but UNSTAMPED.
     def _fail_mint(*a, **kw):
         raise RuntimeError("simulated mint failure")
-    monkeypatch.setattr(sdk, "create_event", _fail_mint)
+    monkeypatch.setattr(sdk, "_create_event", _fail_mint)
     res1 = sdk._capture_session(conv, session_id=sid)
     assert res1["ok"] is False, res1
     assert res1["extracted"] >= 1, "attempt-1 claim must land"
@@ -8095,7 +8095,7 @@ def test_capture_true_retry_heals_unstamped_first_attempt(
 
     # Attempt 2 (TRUE retry): claim folds onto the existing node
     # (content_hash_hit) + mint succeeds + the heal stamps it.
-    monkeypatch.setattr(sdk, "create_event", real_create_event)
+    monkeypatch.setattr(sdk, "_create_event", real_create_event)
     res2 = sdk._capture_session(conv, session_id=sid)
     assert res2["ok"] is True, res2
     assert res2["extraction_mode"] != "replayed", res2

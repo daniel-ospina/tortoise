@@ -85,7 +85,7 @@ def _fts_query_fn():
     """
     tree = ast.parse(_SDK.read_text(encoding="utf-8"))
     return next(n for n in ast.walk(tree)
-                if isinstance(n, ast.FunctionDef) and n.name == "tortoise_fts_query")
+                if isinstance(n, ast.FunctionDef) and n.name == "_tortoise_fts_query")
 
 
 def _mentions_store(node) -> bool:
@@ -121,7 +121,7 @@ def _mentions_store(node) -> bool:
                 return True
             # `self.query(...)` / `graph.query(...)` — a store round trip however
             # the handle was obtained.
-            if child.attr == "query":
+            if child.attr == "_query":
                 return True
     return False
 
@@ -363,7 +363,7 @@ def _post_retrieval_returns():
     """
     tree = ast.parse(_SDK.read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "tortoise_fts_query")
+              if isinstance(n, ast.FunctionDef) and n.name == "_tortoise_fts_query")
 
     def mark_name(stmt):
         if isinstance(stmt, ast.Expr):
@@ -1037,7 +1037,7 @@ def _marks_inside_fts_query() -> set[str]:
     """
     tree = ast.parse(_SDK.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "tortoise_fts_query":
+        if isinstance(node, ast.FunctionDef) and node.name == "_tortoise_fts_query":
             marks: set[str] = set()
             for inner in ast.walk(node):
                 if (isinstance(inner, ast.Call)

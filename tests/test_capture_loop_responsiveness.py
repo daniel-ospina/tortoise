@@ -1848,7 +1848,7 @@ def test_default_bound_and_org_wide_keys_share_one_bucket():
     `org_{org_id}` — the SAME graph. A legacy bound-default key resolving to it
     must therefore REFUSE a concurrent capture of the same session_id instead of
     running beside it. (The registry/selfhost lane mints its default node as
-    `org_{name}` via `sdk.org_create` — a DIFFERENT graph from an org-wide
+    `org_{name}` via `sdk._org_create` — a DIFFERENT graph from an org-wide
     key's `org_{org_id}`; that lane is the negative case in the next test.)
     """
     from fastapi import HTTPException
@@ -1881,7 +1881,7 @@ def test_genuinely_distinct_graphs_keep_distinct_buckets():
     """#3365 NEGATIVE case: the key must still separate DIFFERENT graphs.
 
     The fix is not "fold every bound key onto the default". In the
-    registry/selfhost lane (`sdk.org_create`) the default node's namespace is
+    registry/selfhost lane (`sdk._org_create`) the default node's namespace is
     `org_{name}` while an org-wide key opens `org_{org_id}` — TWO different
     physical graphs (`_data_sdk` documents the #2023 divergence) — so folding
     by the binding's `kind` (the `backup_sweep.enumerate_org_graphs` rule for
@@ -2297,7 +2297,7 @@ def test_capture_under_a_legacy_default_bound_key_is_refused(client,
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app, get_current_org
 
-    # The default node as `sdk.org_create` mints it and as supabase
+    # The default node as `sdk._org_create` mints it and as supabase
     # `set_graph_recording` upserts it: a real gid whose namespace IS the org
     # graph name. Raw registry write so the seed is mode-independent.
     ha_mod._make_sdk(namespace="registry")._get_registry().query(
@@ -2465,7 +2465,7 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
         writer_threads.append(threading.current_thread().name)
         return orig_writer(*args, **kwargs)
 
-    monkeypatch.setattr(graph_cls, "query", _timed_query)
+    monkeypatch.setattr(graph_cls, "_query", _timed_query)
     monkeypatch.setattr(sdk_mod, "_write_capture_turns", _wrapped_writer)
 
     async def _run():
@@ -2475,7 +2475,7 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
                                        "session_id": sid})
 
     resp = asyncio.run(_run())
-    monkeypatch.setattr(graph_cls, "query", orig_query)
+    monkeypatch.setattr(graph_cls, "_query", orig_query)
     monkeypatch.setattr(sdk_mod, "_write_capture_turns", orig_writer)
     # #5049: the capture route is not exempt from the transport wait bound, so a
     # 504 here is a non-answer — INCONCLUSIVE, never the bare FAIL every caller

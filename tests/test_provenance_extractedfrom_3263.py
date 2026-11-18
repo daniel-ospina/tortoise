@@ -222,7 +222,7 @@ def _prop_refs(proj, pid: str):
     """The Point's own ``extractedFrom`` node property (the reported surface).
 
     ⛔ A SCALAR after a fold holds refs (#7704 review P1): the survivor's own
-    creating source. ``sdk.query`` / ``paginated_query`` match this property by
+    creating source. ``sdk._query`` / ``paginated_query`` match this property by
     EQUALITY (``n.`extractedFrom` = $extractedFrom``), and an ARRAY is not
     equality-matchable — `test_a_fold_keeps_the_read_door_answering` is the pin
     that the read door still answers. The folded SET is ``_all_prop_refs``.
@@ -320,7 +320,7 @@ def test_dedup_hit_accumulates_the_second_source(prov):
 def test_a_fold_keeps_the_read_door_answering(prov):
     """#7704 review P1: the fold must not make its own survivor unfindable.
 
-    ``sdk.query`` / ``paginated_query`` (SDK **and** MCP) filter with
+    ``sdk._query`` / ``paginated_query`` (SDK **and** MCP) filter with
     ``n.`extractedFrom` = $extractedFrom`` — an EQUALITY match — and an ARRAY
     is not equality-matchable. Writing the accumulated LIST into that property
     therefore dropped the survivor out of a PUBLIC read door for every source
@@ -1130,7 +1130,7 @@ def test_a_fold_does_not_invent_refs_from_a_container_prop(prov, monkeypatch):
             point["extractedFrom"] = poisoned
         return point
 
-    monkeypatch.setattr(sdk, "get_point", _get_point)
+    monkeypatch.setattr(sdk, "_get_point", _get_point)
     sdk._create_point("statement", content, extractedFrom=second, dedup=True)
 
     invented = _sources_of(proj, pid) - {held, second}

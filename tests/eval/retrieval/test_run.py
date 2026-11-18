@@ -156,8 +156,8 @@ def test_query_prompt_threads_to_inject_model():
     with patch.object(run_module, "inject_model",
                       return_value=_fake_state("arctic-s")) as m:
         run_module._inject_probe_model(
-            _args("unused.db", model="arctic-s", query_prompt="query"))
-    m.assert_called_once_with("arctic-s", query_prompt="query")
+            _args("unused.db", model="arctic-s", query_prompt="_query"))
+    m.assert_called_once_with("arctic-s", query_prompt="_query")
 
 
 def test_no_model_skips_injection():
@@ -305,7 +305,7 @@ def test_query_prompt_without_model_is_argparse_error(capsys):
     """Fix 2 (T3 P2): --query-prompt without --model is a silent no-op today
     (_inject_probe_model returns early) — it must be a clean argparse error."""
     with pytest.raises(SystemExit) as exc:
-        run_module.main(["--db", "unused.db", "--query-prompt", "query",
+        run_module.main(["--db", "unused.db", "--query-prompt", "_query",
                          "--quiet"])
     assert exc.value.code == 2
     assert "--query-prompt requires --model" in capsys.readouterr().err
@@ -370,11 +370,11 @@ def test_benchmark_query_prompt_threads_to_inject_model_and_provenance(tmp_path)
                return_value=_fake_state("arctic-s")):
         report = run_benchmark(_bench_args(
             str(tmp_path / "bench-qp.db"),
-            model="arctic-s", query_prompt="query"))
+            model="arctic-s", query_prompt="_query"))
 
-    assert calls == [("arctic-s", "query")], \
+    assert calls == [("arctic-s", "_query")], \
         "--query-prompt must thread to inject_model"
-    assert report["provenance"]["query_prompt"] == "query"
+    assert report["provenance"]["query_prompt"] == "_query"
 
 
 def test_benchmark_query_prompt_without_model_is_argparse_error(capsys):
@@ -383,7 +383,7 @@ def test_benchmark_query_prompt_without_model_is_argparse_error(capsys):
     from benchmarks.run_report import main as bench_main
 
     with pytest.raises(SystemExit) as exc:
-        bench_main(["--db", "unused.db", "--query-prompt", "query",
+        bench_main(["--db", "unused.db", "--query-prompt", "_query",
                     "--quiet"])
     assert exc.value.code == 2
     assert "--query-prompt requires --model" in capsys.readouterr().err
@@ -678,7 +678,7 @@ def test_query_vecs_never_borrow_the_model_in_the_synthetic_space():
     """The regression itself: a synthetic corpus must NOT get model-encoded
     queries, however loadable the ambient model is."""
     oracle = run_module.build_topic_oracle(42)
-    queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
+    queries = [{"id": "q001", "_query": "pricing tiers enterprise"}]
     stub = _StubModel()
 
     with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
@@ -693,7 +693,7 @@ def test_query_vecs_never_borrow_the_model_in_the_synthetic_space():
 
 def test_query_vecs_use_the_model_in_the_model_space():
     oracle = run_module.build_topic_oracle(42)
-    queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
+    queries = [{"id": "q001", "_query": "pricing tiers enterprise"}]
     stub = _StubModel()
 
     with patch.object(run_module, "_loaded_embedding_model", return_value=stub):
@@ -741,7 +741,7 @@ def test_query_vecs_requires_an_explicit_space():
     Nothing at the call site said so, and the tool's output did not either.
     """
     oracle = run_module.build_topic_oracle(42)
-    queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
+    queries = [{"id": "q001", "_query": "pricing tiers enterprise"}]
     stub = _StubModel()
 
     with (patch.object(run_module, "_loaded_embedding_model", return_value=stub),
@@ -759,8 +759,8 @@ def test_query_vecs_propagate_a_model_encode_failure():
     oracle vectors here rebuilds the two-space arm while provenance still says
     'model' (and a half-encoded arm is worse than no verdict)."""
     oracle = run_module.build_topic_oracle(42)
-    queries = [{"id": "q001", "query": "pricing tiers enterprise"},
-               {"id": "q002", "query": "pricing tiers team"}]
+    queries = [{"id": "q001", "_query": "pricing tiers enterprise"},
+               {"id": "q002", "_query": "pricing tiers team"}]
 
     class _FailingModel:
         def encode(self, texts):
@@ -779,7 +779,7 @@ def test_query_vecs_encode_nothing_in_the_synthetic_space():
     the oracle, and no encode is attempted at all (the old "degrade the whole
     arm on the first failure" branch was unreachable and is gone)."""
     oracle = run_module.build_topic_oracle(42)
-    queries = [{"id": "q001", "query": "pricing tiers enterprise"}]
+    queries = [{"id": "q001", "_query": "pricing tiers enterprise"}]
 
     class _ExplodingModel:
         calls = 0
@@ -808,7 +808,7 @@ class _PromptAwareStub(_StubModel):
     F4, so a stub that ignored it would make the assertion vacuous.
     """
 
-    def __init__(self, default_prompt_name: str | None = "query"):
+    def __init__(self, default_prompt_name: str | None = "_query"):
         super().__init__()
         self.default_prompt_name = default_prompt_name
         self.default_prompt = None
@@ -844,7 +844,7 @@ def test_reembed_corpus_encodes_documents_without_the_query_prompt():
     writer encodes documents — with no prompt — even though the injected
     candidate carries the vendor's query instruction as its constructor
     default (which EVERY encode() would otherwise inherit)."""
-    stub = _PromptAwareStub(default_prompt_name="query")
+    stub = _PromptAwareStub(default_prompt_name="_query")
     points = [{"id": "p001", "content": "alpha beta gamma"},
               {"id": "p002", "content": "delta epsilon"}]
 
@@ -855,7 +855,7 @@ def test_reembed_corpus_encodes_documents_without_the_query_prompt():
         "the corpus is document text: inheriting the constructor's query prompt "
         f"would store a vector shape the product never writes (applied={stub.applied})"
     )
-    assert stub.default_prompt_name == "query", \
+    assert stub.default_prompt_name == "_query", \
         "the query side must keep the instruction it was injected for"
 
 

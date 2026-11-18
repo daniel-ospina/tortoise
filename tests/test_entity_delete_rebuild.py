@@ -63,7 +63,7 @@ def _journal(events) -> list[dict]:
 
 def _deletes(journal: list[dict], oid: str) -> list[dict]:
     return [e for e in journal
-            if e.get("type") == _REC and e.get("op") == "delete"
+            if e.get("type") == _REC and e.get("op") == "_delete"
             and e.get("id") == oid]
 
 
@@ -380,7 +380,7 @@ def test_in_memory_fold_respects_delete():
 
     events = [
         {"type": "PointAdded", "point": {"id": "p1", "content": "x"}},
-        {"type": "EntityMutated", "id": "p1", "op": "delete",
+        {"type": "EntityMutated", "id": "p1", "op": "_delete",
          "label": "Point"},
     ]
     assert "p1" not in fold(events)
@@ -498,7 +498,7 @@ class TestIdentityIsKindPlusId:
             fh.write(json.dumps({
                 "event_id": ulid(), "ts": datetime.now(UTC).isoformat(),
                 "type": "EntityMutated", "initiated_by": "raw-producer",
-                "projection_version": 2, "id": pid, "op": "delete",
+                "projection_version": 2, "id": pid, "op": "_delete",
                 "label": "Source",
             }) + "\n")
 
@@ -516,7 +516,7 @@ class TestIdentityIsKindPlusId:
 
         events = [
             {"type": "PointAdded", "point": {"id": "p1", "content": "x"}},
-            {"type": "EntityMutated", "id": "p1", "op": "delete",
+            {"type": "EntityMutated", "id": "p1", "op": "_delete",
              "label": "Subject"},
         ]
         assert "p1" in fold(events), (
@@ -540,7 +540,7 @@ class TestIdentityIsKindPlusId:
                 "initiated_by": "raw-producer",
                 "projection_version": 2,
                 "id": pid,
-                "op": "delete",
+                "op": "_delete",
                 "label": "Point) DETACH DELETE (n",
             }) + "\n")
 
@@ -580,7 +580,7 @@ def test_foreign_kind_delete_does_not_advance_point_annotator_boundary(env):
         fh.write(json.dumps({
             "event_id": ulid(), "ts": datetime.now(UTC).isoformat(),
             "type": "EntityMutated", "initiated_by": "raw-producer",
-            "projection_version": 2, "id": op, "op": "delete",
+            "projection_version": 2, "id": op, "op": "_delete",
             "label": "Subject",
         }) + "\n")
         fh.write(json.dumps({

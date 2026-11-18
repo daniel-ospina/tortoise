@@ -152,7 +152,7 @@ def test_a_flag_dead_point_is_refused_and_the_row_is_untouched(env, stored):
     assert "refused to promote" in message, "part 1: what was refused"
     assert "outdated=true" in message and "terminal" in message, (
         "part 2: why")
-    assert "create_point" in message, "part 3: a performable repair"
+    assert "_create_point" in message, "part 3: a performable repair"
 
 
 def test_the_refused_promote_journals_nothing(env):
@@ -189,7 +189,7 @@ def test_the_two_point_doors_agree_on_the_flag_dead_row(env):
     pid = sdk._create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status=None, outdated=True)
 
-    for door in ("update_point", "update_knowledge"):
+    for door in ("_update_point", "update_knowledge"):
         with pytest.raises(ValueError) as exc:
             getattr(sdk, door)(pid, status="live")
         assert "terminal" in str(exc.value), door

@@ -133,7 +133,7 @@ class TestCreatePointRefuses:
         with pytest.raises(ValueError) as exc:
             sdk._create_point("\u2003statement\u2003", "x", status="live")
         message = str(exc.value)
-        assert "create_point" in message
+        assert "_create_point" in message
         assert "pointKind" in message
         assert "U+2003" in message
         assert "#9287" in message

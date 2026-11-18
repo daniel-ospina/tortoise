@@ -16,7 +16,7 @@ every PR that touched it:
   * the **wrong belief mechanism** — a linear-system `grounding` solve presented as
     what `confidence` holds. `projection.compute_grounding()` writes `Point.grounding`,
     a different field entirely; `confidence` is written by the expectation-propagation
-    engine (`tortoise/ep.py`, `tortoise/dream.py`) and read back by `sdk.get_confidence()`,
+    engine (`tortoise/ep.py`, `tortoise/dream.py`) and read back by `sdk._get_confidence()`,
   * two issue references (`#7881`, `#7882`) that do not exist.
 
 Nothing failed. The public docs simply described a system that was never shipped.
@@ -342,7 +342,7 @@ def _extraction_write_calls() -> list[ast.Call]:
 
     Parsed rather than grepped: the extraction path's sourcing claim is about the
     DOOR it writes through, and a regex over the file would also match the
-    advisory `sdk.create_point` mentioned in a neighbouring docstring.
+    advisory `sdk._create_point` mentioned in a neighbouring docstring.
     """
     tree = ast.parse(_read(SDK))
     out: list[ast.Call] = []
@@ -352,7 +352,7 @@ def _extraction_write_calls() -> list[ast.Call]:
                 if (
                     isinstance(sub, ast.Call)
                     and isinstance(sub.func, ast.Attribute)
-                    and sub.func.attr == "create_point"
+                    and sub.func.attr == "_create_point"
                 ):
                     out.append(sub)
     return out
@@ -363,7 +363,7 @@ def test_the_extraction_write_path_sources_every_extracted_point() -> None:
 
     `Point.source_ref` (`tortoise/commit_schema.py`, pinned below) governs the
     COMMIT payload. The extraction path does not go through it — it writes with
-    `sdk.create_point`, whose contract is advisory (`no_source`, #8171) — so the
+    `sdk._create_point`, whose contract is advisory (`no_source`, #8171) — so the
     commit-schema pin cannot carry the FAQ's sentence on its own. What makes the
     sentence true is the write itself: `_extract_session_v2` passes
     `extractedFrom=f"session:{session_id}"`, and `create_point` wires that edge.
@@ -485,7 +485,7 @@ def test_commit_schema_requires_a_source_on_every_extracted_claim() -> None:
     `Field(min_length=1)` with no default, so an extracted Point cannot validate
     without one, and `""` is refused too.
 
-    It is deliberately NOT claimed for *every* claim. `sdk.create_point` accepts a
+    It is deliberately NOT claimed for *every* claim. `sdk._create_point` accepts a
     fresh claim with no source and no provenance and returns
     `advisories: [{code: 'no_source'}]` — advisory only, nothing is refused, and
     `audit`'s `missing_sourceKind` check exists precisely because unsourced claims
@@ -587,7 +587,7 @@ def test_faq_ties_only_extracted_claims_to_their_source() -> None:
     assert not offenders, (
         "faq.html universalised the source requirement again: "
         f"{offenders}. Scope it to extracted claims (the commit contract requires "
-        "source_ref, but sdk.create_point does not — it returns a no_source "
+        "source_ref, but sdk._create_point does not — it returns a no_source "
         "advisory, #8171)."
     )
 
@@ -2605,7 +2605,7 @@ def test_faq_source_answer_states_the_capture_shaping() -> None:
 
     Extraction's own honesty claim is separate and stays pinned: extraction is
     additive, and every EXTRACTED claim carries its source. The scoping to
-    "extracted" is deliberate — `sdk.create_point` takes an unsourced claim and
+    "extracted" is deliberate — `sdk._create_point` takes an unsourced claim and
     only advises (`PROVENANCE ADVISORY`, #8171).
     """
     # `"verbatim evidence"` never shipped on `origin/main`, but it DID exist in this

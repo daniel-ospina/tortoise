@@ -87,7 +87,7 @@ GH_JOBS = {
     "welcome-e2e-monitor.yml": ["welcome-e2e"],
     "tenant-provision-monitor.yml": ["monitor"],
     "e2e-live-reconcile.yml": ["reconcile"],
-    "prod-csp-monitor.yml": ["audit"],
+    "prod-csp-monitor.yml": ["_audit__svc"],
     "supabase-deploy.yml": ["deploy"],
     # `tools/inbound_relay_sweep.py` reaches `gh` for EVERY read and EVERY
     # mutation (label, comment, close, relay) — the job has no other channel to

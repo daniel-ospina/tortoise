@@ -754,7 +754,7 @@ def test_a_RECREATED_point_does_not_inherit_the_dead_incarnations_retraction(
                "new_content": "deploy failed"}
     log.append(revised)
     proj.apply(revised)
-    for event in ({"type": "EntityMutated", "op": "delete", "id": "p1",
+    for event in ({"type": "EntityMutated", "op": "_delete", "id": "p1",
                    "label": "Point"},
                   _pt("p1", "deploy failed", search_keys=["release"])):
         log.append(event)
@@ -1140,7 +1140,7 @@ def test_promotion_events_are_folded_like_the_writer(proj, tmp_path):
     product's core draft→live path.
     (1) Fails if the promotion is not applied to the journal side: with plain
     `fold` this fixture reports `promotedAt`/`reviewed`/`status`.
-    (2) Reachable: the two-event shape `sdk.promote_point` emits.
+    (2) Reachable: the two-event shape `sdk._promote_point` emits.
     """
     log_path = str(tmp_path / "promo.jsonl")
     _seed(proj, log_path, [

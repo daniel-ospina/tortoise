@@ -181,7 +181,7 @@ class TestCreateOperator:
             sdk._create_operator("MITIGATES", a["id"], [b["id"]])
         msg = str(exc.value)
         assert "MITIGATES is not an operator kind" in msg
-        assert "mitigate_operator" in msg
+        assert "_mitigate_operator" in msg
         # No operator node was written (the raise precedes any mutation).
         assert sdk._get_proj().g.query(
             "MATCH (o:Point) WHERE o.is_operator = true RETURN count(o)"
@@ -207,7 +207,7 @@ class TestCreateOperator:
                                   "to": "b"}, violations, None)
         msg = " ".join(v["message"] for v in violations)
         assert "MITIGATES is not an operator kind" in msg, msg
-        assert "mitigate_operator" in msg, msg
+        assert "_mitigate_operator" in msg, msg
 
     def test_invalid_direction_raises(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)

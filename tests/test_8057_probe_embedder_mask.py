@@ -184,7 +184,7 @@ def _module_level_create_point_lines(path: Path) -> list[int]:
     import ast
 
     text = path.read_text()
-    if "create_point" not in text:
+    if "_create_point" not in text:
         return []
     tree = ast.parse(text)
     spans = [
@@ -197,7 +197,7 @@ def _module_level_create_point_lines(path: Path) -> list[int]:
         for n in ast.walk(tree)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "create_point"
+        and n.func.attr == "_create_point"
         and not any(lo <= n.lineno <= hi for lo, hi in spans)
     ]
 

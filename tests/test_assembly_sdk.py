@@ -913,7 +913,7 @@ def test_exactly_one_reader_call_and_no_legacy_rerun(sdk, monkeypatch):
         return "42", 5
 
     monkeypatch.setattr(sdk_mod, "_ask_reader_complete", _flaky)
-    monkeypatch.setattr(sdk, "tortoise_fts_query",
+    monkeypatch.setattr(sdk, "_tortoise_fts_query",
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("legacy retrieval must NOT run")))
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")

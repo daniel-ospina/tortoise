@@ -114,7 +114,7 @@ class _V6Graph:
 # ── the queries themselves ───────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("query", [_DUMP_NODE_PAGE_QUERY, _DUMP_EDGE_PAGE_QUERY],
+@pytest.mark.parametrize("_query", [_DUMP_NODE_PAGE_QUERY, _DUMP_EDGE_PAGE_QUERY],
                          ids=["nodes", "edges"])
 def test_the_page_predicate_never_uses_a_negative_comparison(query):
     """Shape pin: the cursor is OFFSET, never NEGATED.

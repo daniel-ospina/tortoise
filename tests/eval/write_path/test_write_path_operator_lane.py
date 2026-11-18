@@ -562,7 +562,7 @@ def test_fold_lane_commit_leg_keeps_every_operator_after_a_rekey(
     # resolved from the same ref the remap repointed, so a map-unaware
     # resolver silently degraded its content to "[MITIGATION] [MITIGATION]
     # <graph-id>". Assert the content resolves to a real endpoint, with
-    # exactly the one prefix `sdk.mitigate_operator` adds (`why.py` strips one).
+    # exactly the one prefix `sdk._mitigate_operator` adds (`why.py` strips one).
     for (content,) in proj.g.query(
             "MATCH (o:Point {is_operator:true})-[:mitigated_by]->(m:Point) "
             "RETURN m.content").result_set:
@@ -707,7 +707,7 @@ def test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats(
     triple must be stamped exactly like every other created node.
 
     #4936 wrote this against the then-true behaviour that
-    ``sdk.create_operator`` mints unconditionally, so two payload operator
+    ``sdk._create_operator`` mints unconditionally, so two payload operator
     records resolving onto one triple each created their own node, and the
     capture's provenance set had to be the CREATION LIST rather than the
     MITIGATES lookup dict — otherwise the earlier node's id was dropped and

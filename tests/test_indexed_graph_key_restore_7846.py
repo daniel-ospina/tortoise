@@ -599,7 +599,7 @@ def _safe_restore_seams(raw, graph, *, witness, index_at_create):
 
     return {
         "dump": lambda: raw.execute_command("DUMP", graph),
-        "delete": lambda: raw.execute_command("DEL", graph),
+        "_delete": lambda: raw.execute_command("DEL", graph),
         "restore": lambda payload: raw.execute_command(
             "RESTORE", graph, 0, payload, "REPLACE"
         ),
@@ -641,7 +641,7 @@ def test_the_safe_path_restores_an_indexed_graph_without_the_index_in_the_payloa
         safe = restore_graph_key_safe(
             graph=graph,
             dump=seams["dump"],
-            delete=seams["delete"],
+            delete=seams["_delete"],
             restore=seams["restore"],
             ping=seams["ping"],
             list_indexes=seams["list_indexes"],

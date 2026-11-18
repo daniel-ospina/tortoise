@@ -106,8 +106,8 @@ class TestDe2e7:
         # The retired doors still DRIVE their original SDK methods, which is what
         # makes each container above the same answer rather than a new capability.
         retired_by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
-        assert retired_by_name["tortoise_promote_point"].sdk_method == "promote_point"
-        assert retired_by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
+        assert retired_by_name["tortoise_promote_point"].sdk_method == "_promote_point"
+        assert retired_by_name["tortoise_belief_timeline"].sdk_method == "_belief_timeline"
 
     def test_mcp_handler_error_contract(self, monkeypatch):
         """J-6: handlers return {error: message} on failure — the REAL SDK
@@ -128,7 +128,7 @@ class TestDe2e7:
         # Raising SDK method → {error: message} (sanitized, no crash).
         def boom(*a, **k):
             raise RuntimeError("synthetic sdk failure")
-        monkeypatch.setattr(sdk, "belief_timeline", boom)
+        monkeypatch.setattr(sdk, "_belief_timeline", boom)
         res4 = mcp.tortoise_belief_timeline("port 16379")
         assert isinstance(res4, dict) and "error" in res4, res4
         assert "synthetic" in res4["error"]

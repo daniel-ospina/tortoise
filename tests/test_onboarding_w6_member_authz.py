@@ -127,7 +127,7 @@ class TestSettingsViewDeleteSessionLane:
         assert det.json()["id"] == sid
         assert len(det.json()["turn_points"]) == cap["turns"]
         # delete (session lane) → transcript gone + receipt cleaned
-        d = client.delete(f"/v1/sessions/{sid}{q}", headers={"Authorization": _SESS})
+        d = client._delete(f"/v1/sessions/{sid}{q}", headers={"Authorization": _SESS})
         assert d.status_code == 200, d.text
         assert d.json()["deleted"] is True
         assert client.get(f"/v1/sessions/{sid}{q}",
@@ -148,7 +148,7 @@ class TestSettingsViewDeleteSessionLane:
         g = client.get(f"/v1/sessions/whatever-1{q}", headers={"Authorization": _SESS})
         assert g.status_code == 403, g.text
         assert "membership" in g.json()["detail"]
-        d = client.delete(f"/v1/sessions/whatever-1{q}",
+        d = client._delete(f"/v1/sessions/whatever-1{q}",
                           headers={"Authorization": _SESS})
         assert d.status_code == 403, d.text
         assert "membership" in d.json()["detail"]
@@ -167,14 +167,14 @@ class TestSettingsViewDeleteSessionLane:
         g = client.get(f"/v1/sessions/whatever-2{q}", headers={"Authorization": _SESS})
         assert g.status_code == 403, g.text
         assert "No membership in team" in g.json()["detail"]
-        d = client.delete(f"/v1/sessions/whatever-2{q}",
+        d = client._delete(f"/v1/sessions/whatever-2{q}",
                           headers={"Authorization": _SESS})
         assert d.status_code == 403, d.text
 
     def test_unauthenticated_is_401(self, env):
         client, _fake = env
         assert client.get("/v1/sessions/whatever-3?org_id=t").status_code == 401
-        assert client.delete("/v1/sessions/whatever-3?org_id=t").status_code == 401
+        assert client._delete("/v1/sessions/whatever-3?org_id=t").status_code == 401
 
 
 class TestSettingsViewDeleteKeyLane:
@@ -189,7 +189,7 @@ class TestSettingsViewDeleteKeyLane:
         det = client.get(f"/v1/sessions/{sid}?org_id={org_id}",
                          headers={"Authorization": f"Bearer {key}"})
         assert det.status_code == 200, det.text
-        d = client.delete(f"/v1/sessions/{sid}?org_id={org_id}",
+        d = client._delete(f"/v1/sessions/{sid}?org_id={org_id}",
                           headers={"Authorization": f"Bearer {key}"})
         assert d.status_code == 200, d.text
         assert client.get(f"/v1/sessions/{sid}?org_id={org_id}",
@@ -208,7 +208,7 @@ class TestSettingsViewDeleteKeyLane:
         hb = {"Authorization": f"Bearer {key_b}"}
         assert client.get(f"/v1/sessions/{sid}?org_id={team_b}",
                           headers=hb).status_code == 404
-        assert client.delete(f"/v1/sessions/{sid}?org_id={team_b}",
+        assert client._delete(f"/v1/sessions/{sid}?org_id={team_b}",
                              headers=hb).status_code == 404
         # and the owner's session is untouched by the foreign attempt
         det = client.get(f"/v1/sessions/{sid}?org_id={team_a}",

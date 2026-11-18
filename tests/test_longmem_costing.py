@@ -183,7 +183,7 @@ def test_cache_hit_priced_at_reduced_rate_when_verified():
     rate = lookup_rate("openrouter", "deepseek/deepseek-v4-flash")
     cache_read = rate["cache_read_per_1m"]
     usd, _, breakdown = price_usage_envelope(_env({
-        ("ingest", "openrouter", "deepseek/deepseek-v4-flash"): {
+        ("_ingest", "openrouter", "deepseek/deepseek-v4-flash"): {
             "prompt_tokens": 1000, "completion_tokens": 0,
             "prompt_cache_hit_tokens": 800,  # 800 cached of 1000
             "calls": 1, "usage_present": True},
@@ -213,7 +213,7 @@ def test_cache_tokens_without_verified_rate_flagged_not_silent():
 def test_reasoning_not_double_counted():
     """reasoning_tokens ride completion_tokens — only completion is billed."""
     usd, _, _ = price_usage_envelope(_env({
-        ("ingest", "deepseek-direct", "deepseek-v4-flash"): {
+        ("_ingest", "deepseek-direct", "deepseek-v4-flash"): {
             "prompt_tokens": 10_000, "completion_tokens": 2000,
             "reasoning_tokens": 1500,  # included in completion_tokens
             "calls": 1, "usage_present": True},

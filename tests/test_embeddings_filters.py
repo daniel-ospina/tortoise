@@ -103,7 +103,7 @@ class TestSearchPoints:
     def test_empty_points_returns_empty(self):
         """Empty points list → [] (lines 128-129)."""
         from tortoise.embeddings import search_points
-        result = search_points("query", [])
+        result = search_points("_query", [])
         assert result == []
 
     def test_tfidf_fallback_ranking(self):

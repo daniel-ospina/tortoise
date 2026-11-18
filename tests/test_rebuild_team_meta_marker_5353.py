@@ -1,7 +1,7 @@
 """#5353 — `rebuild_all` must not wipe the `:TeamMeta` first-org marker.
 
 `:TeamMeta` is written with a bare `CREATE (:TeamMeta {name, created})` and NO
-identity property — by `sdk.org_create`, `__main__._cmd_key_create` and three
+identity property — by `sdk._org_create`, `__main__._cmd_key_create` and three
 `hosted_api` provisioning lanes — so it rides no journal record and no replay
 pass recreates it. Before this change `rg -n "TeamMeta" tortoise/projection/`
 was ZERO hits: the unconditional wipe in `rebuild_all` destroyed the class

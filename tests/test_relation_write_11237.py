@@ -533,7 +533,7 @@ def test_a_manifest_only_structural_predicate_names_the_writer_it_would_reach():
         assert edges == [], (predicate, edges)
         assert len(drops) == 1, (predicate, drops)
         reason = drops[0].reason
-        assert "create_edge" in reason, (predicate, reason)
+        assert "_create_edge" in reason, (predicate, reason)
         assert "binds only the operator path" not in reason, (predicate, reason)
         # The drop still carries the pair and the stated verb.
         assert (drops[0].src, drops[0].dst) == (

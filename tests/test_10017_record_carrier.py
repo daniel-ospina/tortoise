@@ -535,7 +535,7 @@ def _record_side(records) -> dict[str, dict]:
         if record.get("type") == rp.TURNS_RECORD_TYPE:
             for row in _record_rows(record["turns"]):
                 rows[row["id"]] = row
-        elif record.get("type") == "EntityMutated" and record.get("op") == "delete":
+        elif record.get("type") == "EntityMutated" and record.get("op") == "_delete":
             rows.pop(record.get("id"), None)
     return rows
 
@@ -587,7 +587,7 @@ def test_a_shorter_recapture_removes_the_turn_on_both_routes(
     journal = _record_carried(list(recaptured))
     stale = f"{SESSION}_t1"
     deletes = [r for r in journal
-               if r.get("type") == "EntityMutated" and r.get("op") == "delete"]
+               if r.get("type") == "EntityMutated" and r.get("op") == "_delete"]
     assert any(r.get("id") == stale for r in deletes), (
         "the shorter re-capture journalled no hard delete for the surplus turn")
     # The record half: that record's own statements remove the row.

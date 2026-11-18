@@ -791,7 +791,7 @@ def test_a_failed_pre_read_cannot_downgrade_a_transition_to_a_create(
             raise RuntimeError("injected pre-read failure")
         return orig_query(self, query, *a, **kw)
 
-    monkeypatch.setattr(type(g), "query", _boom)
+    monkeypatch.setattr(type(g), "_query", _boom)
     sdk.register_source(_URL, "document", title="v1", contentHash="h-1")
 
     assert len(_of_type(events, "SourceCreated")) == 1, (
@@ -821,7 +821,7 @@ def test_a_journal_less_sdk_does_not_pre_read_the_source(tmp_path, monkeypatch):
             seen.append(query)
             return orig_query(self, query, *a, **kw)
 
-        monkeypatch.setattr(type(g), "query", _rec)
+        monkeypatch.setattr(type(g), "_query", _rec)
         sdk.register_source(_URL, "document", title="v0", contentHash="h-0")
         offenders = [q for q in seen if _PRE_READ_SQL in q]
         assert not offenders, (

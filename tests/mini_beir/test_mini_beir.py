@@ -306,14 +306,14 @@ def test_model_and_query_prompt_wiring(tmp_path, monkeypatch, fake_embeddings):
     data_dir = _write_dataset_dir(tmp_path)
     out = tmp_path / "out"
     res = mb.run_main(["--data-dir", str(data_dir),
-                       "--model", "arctic-s", "--query-prompt", "query",
+                       "--model", "arctic-s", "--query-prompt", "_query",
                        "--output-dir", str(out)])
-    assert calls == [("arctic-s", "query")]
+    assert calls == [("arctic-s", "_query")]
     assert res["probe"]["name"] == "arctic-s"
-    assert res["probe"]["query_prompt"] == "query"
+    assert res["probe"]["query_prompt"] == "_query"
     assert res["probe"]["resolved_revision"] == "abc123"
     # per-model result file name encodes model + prompt
-    p = mb.result_path(out, "arctic-s", "query")
+    p = mb.result_path(out, "arctic-s", "_query")
     assert p.is_file()
     assert "arctic-s" in p.name
 

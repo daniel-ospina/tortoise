@@ -121,13 +121,13 @@ def _embedder_off(force_sparse_tfidf):
 
     Every assertion here is LEXICAL + recency: none depends on a vector, and the
     only vectors that matter are the ones a test SEEDS by hand (``vecf32`` in the
-    scan-branch pin). Unpinned, each ``sdk.create_point`` pays one real
+    scan-branch pin). Unpinned, each ``sdk._create_point`` pays one real
     transformer forward whenever the lane has the model — and this file writes
     **558** of them (the acceptance sweep's 10+50+119+130+200 look-alikes, plus
     the BM25 arm's 21 and the small fixtures). Measured on the D14
     (``embedded_only``) leg, run 40559368109 job 122408095621: the acceptance
     sweep hit pytest's ``--timeout=300`` with its stack inside
-    ``sdk.create_point`` -> ``embeddings.encode_for_row`` ->
+    ``sdk._create_point`` -> ``embeddings.encode_for_row`` ->
     ``sentence_transformers.encode`` -> BERT forward, which reddened the leg and
     through it the required ``python-ci-gate``.
 

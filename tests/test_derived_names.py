@@ -3938,7 +3938,7 @@ def test_both_censuses_SKIP_an_exempt_file_and_flag_a_peer(tmp_path, registry):
         "    proj = _FP.from_uri(\"bolt://localhost\")\n"
         "    from falkordb import FalkorDB\n"
         "    client = FalkorDB(host=\"h\")\n"
-        "    client.query(\"MATCH (n) DETACH DELETE n\")\n"
+        "    client._query(\"MATCH (n) DETACH DELETE n\")\n"
         "\n"
         "def helper_not_enclosing():\n"
         "    return 1\n"

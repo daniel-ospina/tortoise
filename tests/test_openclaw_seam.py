@@ -673,9 +673,9 @@ sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
 
 def add(stmt):
-    ev = sdk.create_point("evidence", stmt + " [supporting record]")
-    claim = sdk.create_point("statement", stmt)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", stmt + " [supporting record]")
+    claim = sdk._create_point("statement", stmt)
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     for pid in (claim["id"], ev["id"]):
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=0.9231, "

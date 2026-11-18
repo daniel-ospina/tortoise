@@ -190,7 +190,7 @@ def test_external_id_is_a_declared_point_prop():
 
 
 def test_derive_repo_from_corpus_reads_the_staged_layout(tmp_path: Path):
-    base = tmp_path / "ingest"
+    base = tmp_path / "_ingest"
     staged = base / "org-1" / "repo-2"
     staged.mkdir(parents=True)
     assert derive_repo_from_corpus(staged, str(base)) == "org-1/repo-2"
@@ -220,7 +220,7 @@ def corpus(tmp_path: Path, monkeypatch, force_sparse_tfidf, request):
 
     slug = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40]
     monkeypatch.setenv("TORTOISE_INDEX_NO_NETWORK", "1")
-    base = tmp_path / "ingest"
+    base = tmp_path / "_ingest"
     root = base / "org-1" / "repo-2"
     (root / "docs").mkdir(parents=True)
     (root / "docs" / "gate.md").write_text(DOC_WITH_CLAIMS, encoding="utf-8")

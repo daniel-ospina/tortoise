@@ -3441,7 +3441,7 @@ def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
                      "operator_points=26 (anchored 0)",
                      "other=15 (anchored 0)",
                      "total=326", "STRUCTURALLY INCAPABLE",
-                     "create_operator", "never writes extractedFrom",
+                     "_create_operator", "never writes extractedFrom",
                      "BY CONSTRUCTION", measure.TURN_WRITE_CITE,
                      # the denominator is stated as the WRITER class, and the
                      # residual is inside it
@@ -14821,7 +14821,7 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
     definition was present (measured) — the wrong diagnosis, since a definition produces
     nothing.
     """
-    names = {"create_edge", "create_about_edge", "create_operator"}
+    names = {"_create_edge", "create_about_edge", "_create_operator"}
     toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     out: list[tuple[int, str]] = []
     for i, (a_line, b_line) in enumerate(itertools.pairwise(toks)):
@@ -15088,7 +15088,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #   1. A dot-ANCHORED pattern (the record's own command shape) missed the unqualified
     #      `return create_operator(payload)` — a real call with no receiver.
     #   2. A dot-EXCLUDING lookbehind then missed the RECEIVER-qualified form
-    #      (`sdk.create_edge(payload)`), i.e. it pinned the COMPLEMENT of the claim while
+    #      (`sdk._create_edge(payload)`), i.e. it pinned the COMPLEMENT of the claim while
     #      its message asserted the claim.
     #   3. Any `re` arm also reads a COMMENT or a STRING that names the verb as a call, so
     #      a prose mention claimed the record's conclusion was FALSE when nothing was called.
@@ -15102,7 +15102,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # The helper's own two degenerate cases, so the detector cannot go inert silently: a call at the
     # FIRST token of the source (which a `zip(toks, toks[1:], toks[2:])` form missed — measured),
     # and a DEFINITION, which is not a call site.
-    assert _call_sites("create_operator(payload)\n") == [(1, "create_operator")], (
+    assert _call_sites("create_operator(payload)\n") == [(1, "_create_operator")], (
         "`_call_sites` must see a call at the FIRST token of the source — a triple-zip over "
         "`(toks, toks[1:], toks[2:])` cannot, and answered `[]` there")
     assert _call_sites("def create_operator(payload):\n    pass\n") == [], (
@@ -15112,9 +15112,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # the docstring's own two false readings (a receiver-qualified call missed by a dot-EXCLUDING
     # lookbehind, a comment read as a call) were UNBOUND — reintroducing either left the suite green
     # (measured), because the live tree has neither shape.
-    assert _call_sites("sdk.create_edge(payload)\n") == [(1, "create_edge")], (
+    assert _call_sites("sdk._create_edge(payload)\n") == [(1, "_create_edge")], (
         "a RECEIVER-qualified call is a call site")
-    assert _call_sites("return create_operator(x)\n") == [(1, "create_operator")], (
+    assert _call_sites("return create_operator(x)\n") == [(1, "_create_operator")], (
         "an UNQUALIFIED call is a call site")
     assert _call_sites("# call create_operator(payload)\n") == [], (
         "a COMMENT naming the verb is not a call site")
@@ -15256,7 +15256,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # The A1 proof command must match BOTH shapes its sentence covers, and must stay on ONE line WITH
     # its pathspec. Two measured ways to pin the COMPLEMENT instead: a dot-ANCHORED `'\.(verb)\('`
     # exits 1 on an unqualified `return create_operator(payload)`, and a `[^[:alnum:]_.]` class
-    # EXCLUDES the dot so it exits 1 on `sdk.create_edge(payload)` — the exact false reading the
+    # EXCLUDES the dot so it exits 1 on `sdk._create_edge(payload)` — the exact false reading the
     # tokenized arm below was written for. Wrapped, the command loses its pathspec and greps the whole
     # tree (measured: 133 hits, exit 0, where the record states no output). The pattern is READ OUT of
     # the record and proved on both samples, so a future tidy cannot re-install the complement.
@@ -15267,7 +15267,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "lines it drops `tortoise/extractor_v2.py` and greps the whole tree")
     _a1 = _a1_cmd.group(1)
     # ⚠️ Structural BEFORE behavioural: the class that decides both halves is the dotted one. A `[^…_.]`
-    # class excludes the `.` that precedes a receiver, so it is blind to `sdk.create_edge(payload)`;
+    # class excludes the `.` that precedes a receiver, so it is blind to `sdk._create_edge(payload)`;
     # dropping the `(^|…)` alternation and anchoring on `\.` is blind to the bare call instead.
     assert "[^[:alnum:]_]" in _a1 and "[^[:alnum:]_.]" not in _a1, (
         f"the A1 proof command's class reads {_a1!r} — a dot-EXCLUDING class is blind to a "
@@ -15398,7 +15398,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         f"it reads {_quote[0][:70]!r}; re-derive them with `git grep -n 'create_operator' -- "
         "tortoise/extractor_v2.py`")
     assert _live_run.group(1).split() == [
-        f":{i}" for i, line in enumerate(ext, 1) if "create_operator" in line], (
+        f":{i}" for i, line in enumerate(ext, 1) if "_create_operator" in line], (
         "the record's create_operator reproduction must quote the LIVE line numbers, in the "
         f"tree's order ({_live_run.group(1).split()}) — re-derive them with "
         "`git grep -n 'create_operator' -- tortoise/extractor_v2.py`")
@@ -15433,7 +15433,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # (an earlier revision of this comment typed that count; it has grown since — a typed count is
     # this bundle's recurring defect, so the tail is named, not counted) — including arms that need
     # no history at all.
-    live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
+    live_mentions = [i for i, line in enumerate(ext, 1) if "_create_operator" in line]
     assert live_mentions == [10449, 10467, 10474, 10854], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote; re-derive "

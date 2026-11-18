@@ -7,7 +7,7 @@ Validates the §6.3 contracts against the current client API:
 - writeClaim(content, kind, authored_by, confidence) → generic single-claim writer
 
 Note: the `context` kwarg was REMOVED from the API in #49 — pointKind is
-the filtering dimension (see sdk.create_point's explicit TypeError).
+the filtering dimension (see sdk._create_point's explicit TypeError).
 Runs with FalkorDBLite (embedded) — no Docker needed.
 """
 
@@ -1131,7 +1131,7 @@ class TestGracefulDegradation:
         self._clear_db_env()
         os.environ["TORTOISE_DB_URI"] = "docker://localhost:1"
         os.environ["TORTOISE_DB_PATH"] = "/tmp/ignored.db"
-        with patch.object(TortoiseSDK, "summarize_structure", return_value={"nodes": 0}):
+        with patch.object(TortoiseSDK, "_summarize_structure", return_value={"nodes": 0}):
             result = tortoise_client.status()
         assert result["available"] is True
         assert result["db_uri"] == "docker://localhost:1"

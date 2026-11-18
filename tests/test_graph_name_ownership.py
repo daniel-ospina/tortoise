@@ -299,7 +299,7 @@ def test_the_routed_delete_helper_consults_the_live_canonical_set(monkeypatch):
 
     class _Db:
         def list_graphs(self):
-            calls.append(("list_graphs",))
+            calls.append(("_list_graphs",))
             return []
 
     proj = SimpleNamespace(graph_name="test_review_p2_canonical_ab12cd34", db=_Db())
@@ -314,7 +314,7 @@ def test_the_routed_delete_helper_consults_the_live_canonical_set(monkeypatch):
     # the guard's presence read is what answers (the graph is absent → False).
     # Without this the refusal below could pass for the wrong reason.
     assert _live_utils.drop_test_graph(proj) is False
-    assert calls and all(c == ("list_graphs",) for c in calls), (
+    assert calls and all(c == ("_list_graphs",) for c in calls), (
         "the gate refused a name the canonical set authorises — the "
         "precondition of this test is broken, so it would pass vacuously")
     calls.clear()

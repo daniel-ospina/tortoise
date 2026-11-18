@@ -456,10 +456,10 @@ def test_a_transport_without_a_workspace_refuses_instead_of_attaching(monkeypatc
 
 def test_the_dispatch_strips_the_argument_before_any_tool_sees_it():
     """The handler must never receive a keyword its signature does not declare."""
-    arguments = {"query": "x", "graph": "g_fund_b"}
+    arguments = {"_query": "x", "graph": "g_fund_b"}
     assert mcp_server._take_graph_argument("tortoise_query", arguments) == "g_fund_b"
-    assert arguments == {"query": "x"}
-    assert mcp_server._take_graph_argument("tortoise_query", {"query": "x"}) is None
+    assert arguments == {"_query": "x"}
+    assert mcp_server._take_graph_argument("tortoise_query", {"_query": "x"}) is None
     assert mcp_server._take_graph_argument("tortoise_query", None) is None
 
 
@@ -552,7 +552,7 @@ def test_resolution_does_not_run_on_the_event_loop_thread(monkeypatch):
 
 
 def test_a_call_without_the_argument_is_untouched():
-    assert mcp_server._take_graph_argument("tortoise_query", {"query": "x"}) is None
+    assert mcp_server._take_graph_argument("tortoise_query", {"_query": "x"}) is None
     assert mcp_server._take_graph_argument("tortoise_query", None) is None
     assert mcp_auth.use_graph_target(None) is None
     assert mcp_auth._current_graph_id.get() is None
@@ -727,7 +727,7 @@ def test_the_wiring_scopes_the_dispatch_and_never_forwards_the_key(monkeypatch):
 
     async def _call():
         return await mcp_server._wrapped_call_tool(
-            "tortoise_query", {"query": "x", "graph": "g_fund_a"})
+            "tortoise_query", {"_query": "x", "graph": "g_fund_a"})
 
     try:
         assert asyncio.run(_call()) == "DISPATCHED"
@@ -1330,7 +1330,7 @@ def test_a_transport_refused_graph_call_is_not_a_graph_error(monkeypatch):
     monkeypatch.setattr(mcp_server, "_scoped_dispatch", _spy_scoped)
 
     result = _wrapped_call(monkeypatch, "tortoise_query",
-                           {"query": "x", "graph": "g_fund_a"})
+                           {"_query": "x", "graph": "g_fund_a"})
 
     assert getattr(result, "meta", None) and \
         result.meta.get(mcp_server._WAIT_BOUND_META_KEY) is True, (
@@ -1444,7 +1444,7 @@ async def test_the_resolution_runs_in_the_dispatch_task(monkeypatch):
     try:
         caller_task = asyncio.current_task()
         await mcp_server._wrapped_call_tool(
-            "tortoise_query", {"query": "x", "graph": "g_fund_a"})
+            "tortoise_query", {"_query": "x", "graph": "g_fund_a"})
     finally:
         mcp_auth._current_org_id.reset(org)
 
@@ -1480,7 +1480,7 @@ def test_the_wrapper_hands_the_ref_to_the_seam_instead_of_resolving_it(
     monkeypatch.setattr(mcp_server, "_await_under_mcp_wait_bound", _fake_seam)
 
     assert _wrapped_call(monkeypatch, "tortoise_query",
-                         {"query": "x", "graph": "g_fund_a"}) == "DISPATCHED"
+                         {"_query": "x", "graph": "g_fund_a"}) == "DISPATCHED"
     assert seen["graph_ref"] == "g_fund_a", (
         "the wrapper did not hand the `graph` argument to the dispatch seam as "
         "`graph_ref` — the seam cannot resolve it inside the task")
@@ -1523,7 +1523,7 @@ async def test_the_graph_scope_cannot_outlive_the_dispatch(monkeypatch):
     org = mcp_auth._current_org_id.set(ORG_A)
     try:
         await mcp_server._wrapped_call_tool(
-            "tortoise_query", {"query": "x", "graph": "g_fund_a"})
+            "tortoise_query", {"_query": "x", "graph": "g_fund_a"})
         assert seen.get("record_tenant") == (ORG_A, "g_fund_a"), (
             "the dispatch did not install the record tenant of the graph it "
             f"scopes: {seen.get('record_tenant')}")
@@ -1577,7 +1577,7 @@ def test_a_slow_graph_lookup_refuses_as_a_graph_error_every_time(monkeypatch):
     for attempt in range(3):
         with pytest.raises(ToolError) as excinfo:
             _wrapped_call(monkeypatch, "tortoise_query",
-                          {"query": "x", "graph": "g_fund_a"})
+                          {"_query": "x", "graph": "g_fund_a"})
         message = str(excinfo.value)
         assert "graph lookup" in message and "Retry after" in message, (
             f"attempt {attempt}: the lookup's own refusal lost to the generic "
@@ -1628,7 +1628,7 @@ def test_a_refusal_that_lands_MID_SEAM_does_not_emit_a_second_breach(monkeypatch
 
     monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
 
-    result = _wrapped_call(monkeypatch, "tortoise_query", {"query": "x"})
+    result = _wrapped_call(monkeypatch, "tortoise_query", {"_query": "x"})
 
     assert getattr(result, "meta", None) and \
         result.meta.get(mcp_server._WAIT_BOUND_META_KEY) is True

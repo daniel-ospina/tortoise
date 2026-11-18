@@ -155,7 +155,7 @@ def _point_invalidated(pid: str) -> dict:
 def _point_deleted(pid: str) -> dict:
     return {"event_id": f"e-del-{pid}", "ts": "2026-09-18T00:00:03+00:00",
             "type": "EntityMutated", "initiated_by": "raw-producer",
-            "projection_version": 2, "op": "delete", "id": pid,
+            "projection_version": 2, "op": "_delete", "id": pid,
             "label": "Point"}
 
 
@@ -531,7 +531,7 @@ def test_failed_restore_still_retires_the_sidecar(sup, tmp_path):
             raise RuntimeError("injected engine rejection")
         return real_query(cypher, params=params, timeout=timeout)
 
-    with mock.patch.object(inner, "query", _inject):
+    with mock.patch.object(inner, "_query", _inject):
         proj.rebuild_all(str(events), confirm_destructive=True)
     # The premise must be SELF-VERIFIED: if the restore clause string ever
     # changes, the injection would silently stop firing and this test would

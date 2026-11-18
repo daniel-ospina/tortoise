@@ -185,7 +185,7 @@ def test_create_point_is_one_graph_write_per_point(tmp_path, monkeypatch,
             writes.append(text[:120])
         return original(self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(_GuardedGraph, "query", spy)
+    monkeypatch.setattr(_GuardedGraph, "_query", spy)
     try:
         sdk._create_point(kind="evidence", content=FACTS[0], credibility="medium",
                          source_harness="battery-parity",
@@ -238,7 +238,7 @@ def test_create_point_sourced_with_inherited_at_is_one_graph_write(
             writes.append(text[:120])
         return original(self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(_GuardedGraph, "query", spy)
+    monkeypatch.setattr(_GuardedGraph, "_query", spy)
     try:
         point = sdk._create_point(
             kind="evidence", content=FACTS[0], credibility="medium",
@@ -437,7 +437,7 @@ def test_create_point_retries_an_aborted_create_once_and_writes_one_point(
                     "running, aborting")
         return original(self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(_GuardedGraph, "query", _abort_the_create_once)
+    monkeypatch.setattr(_GuardedGraph, "_query", _abort_the_create_once)
     try:
         point = sdk._create_point(
             kind="evidence", content=FACTS[0], credibility="medium",

@@ -25,7 +25,7 @@ Class-B test doctrine:
       the ACL key pattern, ``hosted_api._org_graph_name`` for the hosted
       default) and the deriver's own source line where the shape is written by a
       function no test can call without a DB (``sdk._graph_create``,
-      ``hosted_api._provision_graph``, ``sdk.org_create``).
+      ``hosted_api._provision_graph``, ``sdk._org_create``).
 
 Hermetic: reads committed files only — the two docs, ``sdk.py``,
 ``hosted_api.py``, ``backup_sweep.py``, ``mcp_server.py`` and the #3543 tenancy
@@ -189,7 +189,7 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         code side: `hosted_api._org_graph_name` is the shared seam the
         export/open paths use, and its no-stored-name fallback is asserted to
         be `org_{org_id}`; the registry-lane `org_{name}` half is anchored to
-        `sdk.org_create`'s derivation, which no exported function returns —
+        `sdk._org_create`'s derivation, which no exported function returns —
         without that anchor the assertion would be the doc against itself. The
         ATTRIBUTION is pinned too, not just the presence of both shapes, and it is
         pinned on the right AXIS: the shape follows the MINTING FUNCTION, not the
@@ -200,7 +200,7 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         legacy test. The `org_{org_id}` deriver list must name the registry
         `kind='default'` node by its MINTER, not as a bare deriver: that node
         KIND is written with both shapes (`agent_signup`'s registry branch with
-        `org_{org_id}`, `sdk.org_create` with `org_{name}`), so an unqualified
+        `org_{org_id}`, `sdk._org_create` with `org_{name}`), so an unqualified
         listing sends a reader resolving a registry default node to a graph
         that may not exist.
     """
@@ -233,8 +233,8 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         "the DEFAULT-graph clause must attribute `org_{org_id}` to the derivers "
         "listed before the `org_{name}` marker — `hosted_api._org_graph_name`'s "
         "fallback is that shape")
-    assert "sdk.org_create" in registry_half, (
-        "the clause's `org_{name}` half must name `sdk.org_create` as its ONLY "
+    assert "sdk._org_create" in registry_half, (
+        "the clause's `org_{name}` half must name `sdk._org_create` as its ONLY "
         "deriver — no other path stores that shape")
     # WHICH axis the split runs on, pinned explicitly: `org_{org_id}` is minted
     # by `register_user` / `agent_signup` BEFORE any lane branch (they compute the
@@ -284,22 +284,22 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
     # sit on that side — naming it on the `org_{name}` side attributes a mint of
     # the wrong shape to it (`agent_signup` is guarded the same way above; this
     # one is a phrase because `create_org` also legitimately appears in the
-    # registry half as `sdk.org_create`'s lane name).
+    # registry half as `sdk._org_create`'s lane name).
     assert "Supabase-lane `create_org`" in _flat(supabase_half), (
         "the Supabase-lane `create_org` must be named among the `org_{org_id}` "
         "derivers (`hosted_api` mints `org_{org_id}` there); moving it across "
         "the `org_{name}` marker inverts the attribution")
     # `stored` is load-bearing and must survive: `hosted_api`'s duplicate-name
     # replay (create_org) re-derives `f"org_{name}".replace(' ', '_')` outside
-    # `sdk.org_create`, so an unqualified "only on sdk.org_create" is false. What
-    # is unique to `sdk.org_create` is the STORED `Team.graph_name`.
+    # `sdk._org_create`, so an unqualified "only on sdk._org_create" is false. What
+    # is unique to `sdk._org_create` is the STORED `Team.graph_name`.
     assert re.search(r"stored only by\s+`?sdk\.org_create", _flat(clause), re.I), (
-        "the clause must say `org_{name}` is STORED only by `sdk.org_create`, "
+        "the clause must say `org_{name}` is STORED only by `sdk._org_create`, "
         "not derived only there: the create_org duplicate-name replay derives "
         "the same shape, so an unqualified 'only' is a false claim")
     # The registry `kind='default'` node is NOT a deriver on its own: the same
     # node KIND is written with BOTH shapes — `agent_signup`'s registry branch
-    # with `org_{org_id}` (`hosted_api.py`, `namespace=graph_name`), `sdk.org_create`
+    # with `org_{org_id}` (`hosted_api.py`, `namespace=graph_name`), `sdk._org_create`
     # with `org_{name}` — so listing it beside the functions hands a reader
     # resolving a registry default node two contradictory rules and no way to
     # choose, which is the silent-empty-read class this cell exists to prevent.
@@ -321,7 +321,7 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         "the clause must mention the registry `kind='default'` node exactly "
         "ONCE — inside the minter parenthetical, which is the only attribution "
         "that is true. A second mention lists the node as one more "
-        "`org_{org_id}` deriver, and `sdk.org_create` writes that same node "
+        "`org_{org_id}` deriver, and `sdk._org_create` writes that same node "
         "KIND with `org_{name}`, so the node kind is not the discriminator")
     assert "so the path, never the node kind, decides" in flat_clause, (
         "the clause must say the NODE KIND is not the discriminator — without "
@@ -329,13 +329,13 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         "this clause and `org_{name}` from the bullet below, and nothing says "
         "which applies")
     # The `org_{name}` half's code side: the registry lane's stored org
-    # `graph_name` — `sdk.org_create` derives it from the org name (spaces →
+    # `graph_name` — `sdk._org_create` derives it from the org name (spaces →
     # `_`) and the registry `kind='default'` node takes it as its namespace. The
     # cell attributes the shape to that method, so the pin must read that method
     # or it is only the doc agreeing with itself.
     sdk_src = (REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8")
     assert "graph_name = f\"org_{name}\".replace(' ', '_')" in sdk_src, (
-        "`sdk.org_create` must keep deriving the registry-lane default "
+        "`sdk._org_create` must keep deriving the registry-lane default "
         "namespace as org_{name} (spaces → `_`) — the §Graph cell states that "
         "shape for that lane, so a change here re-stales the cell")
     # The node-kind claim's CODE side — two SITES, one node KIND, two shapes. The
@@ -344,7 +344,7 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
     # claim is the doc agreeing with itself.
     assert ('self._graph_create(tid, "default", kind="default", namespace=graph_name)'
             in sdk_src), (
-        "`sdk.org_create` must keep writing the registry `kind='default'` node "
+        "`sdk._org_create` must keep writing the registry `kind='default'` node "
         "from ITS `graph_name` (`org_{name}`) — the cell's claim that the node "
         "KIND takes both shapes rests on this site")
     hosted_src = (REPO / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
@@ -544,7 +544,7 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
         two independent prose statements. Its ATTRIBUTION and its AXIS are
         pinned as the cell's are: the pre-#9052 row ("Which lane mints the graph
         decides the shape") satisfied every presence assertion — it carried
-        `org_{org_id}` before its `org_{name}` marker and named `sdk.org_create`
+        `org_{org_id}` before its `org_{name}` marker and named `sdk._org_create`
         after it — so presence alone left the correction revertible VERBATIM
         with this test green.
     """
@@ -564,18 +564,18 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
     assert "`org_{org_id}`" in row_org_id_half, (
         "the row must attribute `org_{org_id}` to the derivers listed before its "
         "`org_{name}` marker")
-    assert "sdk.org_create" in row_name_half, (
-        "the row's `org_{name}` half must name `sdk.org_create` as that shape's "
+    assert "sdk._org_create" in row_name_half, (
+        "the row's `org_{name}` half must name `sdk._org_create` as that shape's "
         "only source")
     # …and `stored` is as load-bearing in the ROW as it is in the cell, for the
     # same reason: `hosted_api`'s create_org duplicate-name replay re-derives
-    # `f"org_{name}".replace(' ', '_')` outside `sdk.org_create`, so an
-    # unqualified "only on sdk.org_create" is false. The word was pinned on the
+    # `f"org_{name}".replace(' ', '_')` outside `sdk._org_create`, so an
+    # unqualified "only on sdk._org_create" is false. The word was pinned on the
     # cell clause only (measured: the row rewritten to "`org_{name}` is derived
-    # only by `sdk.org_create`" — the exact false claim this PR corrects — kept
+    # only by `sdk._org_create`" — the exact false claim this PR corrects — kept
     # the whole row test green). The row is a single line, so no flattening.
     assert re.search(r"stored only by\s+`?sdk\.org_create", row, re.I), (
-        "the row must say `org_{name}` is STORED only by `sdk.org_create`, not "
+        "the row must say `org_{name}` is STORED only by `sdk._org_create`, not "
         "derived only there: the create_org duplicate-name replay derives the "
         "same shape, so an unqualified 'only' is a false claim")
     # (`the lane does` is asserted as a negative on the CELL only. The row never
@@ -609,7 +609,7 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
     # inert — the identifier both docs use is "the registry `kind='default'`
     # node", which does not contain the literal "the registry default node", so
     # a bare-deriver regression (`... `agent_signup`, the registry `kind='default'`
-    # node; `org_{name}` only from `sdk.org_create` ...`) passed it green while
+    # node; `org_{name}` only from `sdk._org_create` ...`) passed it green while
     # dropping the parenthetical. So require the minter form, then bound the
     # number of node mentions: one, the minter one. (A literal ban on a
     # particular bare spelling is what failed before — a reworded bare listing
@@ -621,12 +621,12 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
         "MINTER that writes it — `agent_signup`'s registry branch stores "
         "`org_{org_id}` there — not list it as one more `org_{org_id}` deriver: "
         "that node KIND is written with BOTH shapes (`agent_signup` with "
-        "`org_{org_id}`, `sdk.org_create` with `org_{name}`), so the artifact "
+        "`org_{org_id}`, `sdk._org_create` with `org_{name}`), so the artifact "
         "alone does not decide the shape")
     assert row.count("the registry `kind='default'` node") == 1, (
         "and it must be the row's ONLY mention of the registry "
         "`kind='default'` node — a second, bare mention lists it as one more "
-        "`org_{org_id}` deriver, and `sdk.org_create` writes that same node "
+        "`org_{org_id}` deriver, and `sdk._org_create` writes that same node "
         "KIND with `org_{name}`, so the node kind is not the discriminator")
     cited = re.findall(r"supabase/migrations/[\w.\-]+\.sql", row)
     assert cited, (

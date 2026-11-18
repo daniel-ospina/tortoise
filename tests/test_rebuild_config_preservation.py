@@ -196,7 +196,7 @@ def _inject_query_failure(sdk, predicate):
             raise RuntimeError("injected engine rejection")
         return real_query(cypher, params=params, timeout=timeout)
 
-    return mock.patch.object(inner, "query", _inject), injected
+    return mock.patch.object(inner, "_query", _inject), injected
 
 
 _PACK_INSTALL_LABEL = None
@@ -829,7 +829,7 @@ def test_rebuild_all_wipe_statement_is_byte_identical_and_classified_bulk(
         seen.append(cypher)
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(pr._GuardedGraph, "query", spy)
+    monkeypatch.setattr(pr._GuardedGraph, "_query", spy)
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     deletes = [c for c in seen if "DETACH DELETE" in c]

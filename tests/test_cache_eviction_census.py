@@ -95,7 +95,7 @@ class _FakeGraph:
 
     def query(self, statement: str, params=None):
         """GRAPH.QUERY — refuses, because a census must never issue it."""
-        self.queries.append(("query", statement))
+        self.queries.append(("_query", statement))
         raise AssertionError(
             f"the census issued GRAPH.QUERY ({statement!r}) — GRAPH.QUERY CREATES the "
             f"graph when the name does not exist, so every read must go through "

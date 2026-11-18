@@ -30,7 +30,7 @@ can never pass — the named under-fire class of the first graded measurement
 the graded cell the epistemic state the product write path builds: the
 canonical #2199 ``system-default`` starting belief (Beta(3,1)) on every live
 belief point that has no persisted prior, then the REAL EP pass
-(``sdk.dream(mode="full")``) so operator structure propagates.  It is
+(``sdk._dream(mode="full")``) so operator structure propagates.  It is
 applied to the GRADED cells only (a null-reflex lane injects nothing, so
 there is nothing for a posterior to decide) and it never overwrites a
 persisted prior.
@@ -409,7 +409,7 @@ def ep_warm_start(sdk, *, log: list[str] | None = None) -> dict:
        ``baseline``), read at its PRIOR mean by the gate — it is not a
        fabricated measurement, and it never overwrites a real one (the
        Cypher excludes ``baseline_set`` rows and persisted posteriors).
-    2. **the real EP pass** — ``sdk.dream(mode="full")``, so any operator
+    2. **the real EP pass** — ``sdk._dream(mode="full")``, so any operator
        structure the lane DID mint propagates.  On an operator-less echo
        cell this is a scan (``scanned_count``), not a no-op-by-accident:
        the pass still runs and is reported.

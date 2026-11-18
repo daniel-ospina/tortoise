@@ -217,7 +217,7 @@ def test_server_error_degrades_200_never_503(client, monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("simulated assembly failure")
 
-    monkeypatch.setattr(ha_mod.TortoiseSDK, "volunteer_context", _boom)
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "_volunteer_context", _boom)
     r = client.post("/v1/context", json={"window": _window(
         "What did Alice decide?")})
     assert r.status_code == 200, r.text  # fail-open, NEVER 503
@@ -239,7 +239,7 @@ def test_enforced_slo_breach_degrades_timeout(client, monkeypatch):
         time.sleep(0.4)  # > 300 ms SLO
         return orig(self, window, *a, **k)
 
-    monkeypatch.setattr(ha_mod.TortoiseSDK, "volunteer_context", _slow)
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "_volunteer_context", _slow)
     r = client.post("/v1/context", json={"window": _window(
         "What did Alice decide?")})
     assert r.status_code == 200
@@ -259,7 +259,7 @@ def test_hard_ceiling_never_hangs_caller(client, monkeypatch):
     def _hung(self, window, *a, **k):
         time.sleep(10)
 
-    monkeypatch.setattr(ha_mod.TortoiseSDK, "volunteer_context", _hung)
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "_volunteer_context", _hung)
     r = client.post("/v1/context", json={"window": _window(
         "What did Alice decide?")})
     assert r.status_code == 200  # never 503, never a hung caller

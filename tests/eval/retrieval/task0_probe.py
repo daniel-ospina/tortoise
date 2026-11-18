@@ -142,7 +142,7 @@ def _probe(sdk, args) -> dict:
     pop_counts = {"fts": 0, "vector": 0, "structural": 0}
     for q in queries:
         ranked = retrieve_per_strategy(
-            ctx["graph"], q["query"], q.get("kind"), ctx["vecs"].get(q["id"]),
+            ctx["graph"], q["_query"], q.get("kind"), ctx["vecs"].get(q["id"]),
             ctx["tfidf_points"], ctx["is_embedded"], depth,
         )
         labels = oracle_grades_for_query(

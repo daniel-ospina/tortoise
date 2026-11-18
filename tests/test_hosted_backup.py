@@ -1337,7 +1337,7 @@ def test_restore_live_delete_failure_leaves_recovery_copy(monkeypatch):
                 raise RuntimeError("delete boom")
             return real_delete(self)
 
-        monkeypatch.setattr(Graph, "delete", _boom_delete)
+        monkeypatch.setattr(Graph, "_delete", _boom_delete)
         with pytest.raises(RuntimeError, match="Restore swap failed"):
             restore_backup(
                 proj.db, registry, store, dump_key,
@@ -1474,16 +1474,16 @@ def test_restore_live_check_fail_closed_when_list_graphs_fails(monkeypatch):
         def _boom_list_graphs(self):
             raise ConnectionError("connection died")
 
-        monkeypatch.setattr(Graph, "query", _boom_live_query)
-        monkeypatch.setattr(type(proj.db), "list_graphs", _boom_list_graphs)
+        monkeypatch.setattr(Graph, "_query", _boom_live_query)
+        monkeypatch.setattr(type(proj.db), "_list_graphs", _boom_list_graphs)
         with pytest.raises(RestoreVerificationError, match="fail closed"):
             restore_backup(
                 proj.db, registry, store, dump_key,
                 org_id="team_x", graph_name="tortoise",
             )
         # restore the real methods, then assert: live untouched, no staging residue
-        monkeypatch.setattr(Graph, "query", real_query)
-        monkeypatch.setattr(type(proj.db), "list_graphs", real_list)
+        monkeypatch.setattr(Graph, "_query", real_query)
+        monkeypatch.setattr(type(proj.db), "_list_graphs", real_list)
         assert "tortoise" in set(proj.db.list_graphs())
         assert not any("_restore_" in g or "_pre_restore_" in g for g in proj.db.list_graphs())
         assert proj.g.query("MATCH (n) WHERE NOT n:Meta RETURN count(n)").result_set[0][0] == 6

@@ -903,7 +903,7 @@ def _post_point_request(credential):
     _set_dependency(credential)
     try:
         with verdict_client(app) as tc:
-            return tc.post(_resolved_path("create_point"),
+            return tc.post(_resolved_path("_create_point"),
                            json={"content": "first memory",
                                  "kind": "statement"})
     finally:

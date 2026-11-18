@@ -180,7 +180,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
     so this is the runtime seam that makes the Connected screen reachable — it
     turns the capture-tense gating from source-pinned into runtime-proven.
     """
-    cap = {"objects": [], "points": [], "state": [], "org_create": [],
+    cap = {"objects": [], "points": [], "state": [], "_org_create": [],
            "checkpoint": [], "mint": [], "capabilities": 0,
            # #3514: every demand POST, with the body and the idempotency header
            # it carried — the two facts the record's contract is made of.
@@ -321,7 +321,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
             # step — this stub stays as a loud tripwire (cap['org_create']
             # must stay EMPTY on the journey) rather than a silent 409.
             if path.endswith("/v1/onboarding/team") and method == "POST":
-                cap["org_create"].append(json.loads(route.request.post_data or "{}"))
+                cap["_org_create"].append(json.loads(route.request.post_data or "{}"))
                 route.fulfill(status=409, content_type="application/json",
                               body=json.dumps({"detail": "Sub-team already created"}))
                 return
@@ -638,7 +638,7 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
         f"done step must NOT patch onboarding_complete: {cap['state']}"
     # #2323: an org-holding journey NEVER mints a second org through the
     # wizard org-create step.
-    assert cap["org_create"] == [], f"#2323 violated: org_create fired: {cap['org_create']}"
+    assert cap["_org_create"] == [], f"#2323 violated: org_create fired: {cap['_org_create']}"
     # #2167: the whole wizard journey issues ZERO POST /v1/session/key (the
     # mount mint is deleted; connect-step durable sourcing is #2211-owned and
     # rides POST /v1/team/keys)
@@ -1826,7 +1826,7 @@ def test_first_timer_wizard_build_fork_records_no_catalog_presented(page: Page) 
     # the PATCH surface is the other way a catalog mark could return.
     assert [b for b in cap["state"] if b.get("catalog_presented")] == [], \
         f"#3913: no PATCH may record catalog_presented: {cap['state']}"
-    assert cap["org_create"] == [], f"#2323 violated: org_create fired: {cap['org_create']}"
+    assert cap["_org_create"] == [], f"#2323 violated: org_create fired: {cap['_org_create']}"
 
 
 def test_build_fork_connected_on_the_two_observed_acts(page: Page) -> None:

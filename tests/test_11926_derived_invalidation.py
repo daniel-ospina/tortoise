@@ -313,7 +313,7 @@ def test_the_LEGACY_outdated_WORD_retires_an_input_like_the_recall_lane(sdk, ret
 
     ⚠️ THE INVARIANT IS STALENESS, NOT READER UNANIMITY, and this docstring said the
     opposite until a review falsified it against the source: the OBJECT family is
-    SPLIT about this word — the four retrieval legs and `sdk.recall_state` still
+    SPLIT about this word — the four retrieval legs and `sdk._recall_state` still
     SERVE an `outdated` Object (`search_engine._status_vocab_for` passes
     `OBJECT_TERMINAL_STATUSES` with `include_outdated_flag=False`; `commit_ops.py`
     says it outright: *"'outdated' IS visible — it is not in the object vocabulary,
@@ -739,7 +739,7 @@ def test_the_PRECEDENCE_holds_in_the_POST_EXCEPTION_arm(sdk, monkeypatch):
         real_retract(point_id, **kwargs)
         raise ValueError("already terminal")
 
-    monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    monkeypatch.setattr(sdk, "_retract_point", retired_by_a_PEER)
     result = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
                                           reason="target-revised", detail="…",
                                           goal_id=g2["id"]))
@@ -795,14 +795,14 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
             # state this arm re-reads.
             real_retract(point_id, **kwargs)
             raise ValueError("already terminal")
-        monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+        monkeypatch.setattr(sdk, "_retract_point", retired_by_a_PEER)
     else:
         sdk.update_knowledge(t["id"], threshold=8.0)  # live, and stale
 
         def vanish_during_retract(point_id, **_kwargs):
             sdk._delete_entity__svc(point_id)
             raise ValueError("no such point")
-        monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
+        monkeypatch.setattr(sdk, "_retract_point", vanish_during_retract)
 
     result = invalidate(sdk, Invalidation(judgement_id=claim_id,
                                           reason="target-revised", detail="…",
@@ -827,7 +827,7 @@ def test_the_PRECEDENCE_holds_when_the_claim_VANISHES(sdk, monkeypatch):
         sdk._delete_entity__svc(point_id)
         raise ValueError("no such point")
 
-    monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
+    monkeypatch.setattr(sdk, "_retract_point", vanish_during_retract)
     result = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
                                           reason="target-revised",
                                           detail="threshold moved",
@@ -1551,7 +1551,7 @@ def test_the_VANISH_BETWEEN_READ_AND_RETIREMENT_reconciles_the_CLAIMS_goal(sdk, 
         sdk._delete_entity__svc(point_id)  # gone between the read and the write
         raise ValueError("no such point")
 
-    monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
+    monkeypatch.setattr(sdk, "_retract_point", vanish_during_retract)
     result = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
                                           reason="target-revised",
                                           detail="threshold moved"))
@@ -1725,7 +1725,7 @@ def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
         real_retract(point_id, **kwargs)
         raise ValueError("already terminal")
 
-    monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    monkeypatch.setattr(sdk, "_retract_point", retired_by_a_PEER)
     # ⛔ NO `goal_id` HERE, ON PURPOSE (#12315 review cycle 12): passing it makes
     # the claim-sourced read short-circuit, so the fallback this arm exists to
     # provide was evaluated by NO test — reverting it to `invalidation.goal_id`
@@ -1772,7 +1772,7 @@ def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
         sdk._delete_entity__svc(point_id)          # the peer's cleanup, then its refusal
         raise ValueError(f"no such point {point_id}")
 
-    monkeypatch.setattr(sdk, "retract_point", purged_by_a_PEER)
+    monkeypatch.setattr(sdk, "_retract_point", purged_by_a_PEER)
     report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
                                           goal_id=g["id"],
                                           reason="target-revised", detail="…"))
@@ -1842,7 +1842,7 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
         raise ValueError("already terminal")
 
     monkeypatch.setattr(di, "latest_judgement", boom)
-    monkeypatch.setattr(sdk, "retract_point", retired_by_a_PEER)
+    monkeypatch.setattr(sdk, "_retract_point", retired_by_a_PEER)
     report = invalidate_stale(sdk, goal_id=g["id"])
     counts = report["counts"]
     assert counts["stale"] == 1, counts
@@ -2450,7 +2450,7 @@ def test_the_module_docs_state_the_REPAIR_BOUNDARY_not_an_absolute():
 # `invalidate_stale` enumerates LIVE claims, so a goal whose LAST claim is gone
 # is never a finding again: the door is never called, the cached word stands, and
 # nothing repairs it. The two routes that reach that state without the door are
-# a hard delete (`sdk.delete_entity`) and a retirement written out of band (a
+# a hard delete (`sdk._delete_entity__svc`) and a retirement written out of band (a
 # direct status/lifecycle write). Both are measured below, and the repair sweep
 # is the mechanism that closes them — a sweep over GOALS, not over claims.
 

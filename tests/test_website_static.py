@@ -1094,7 +1094,7 @@ def test_tortoise_decide_skill_ships_the_workflow():
         assert marker in src, f"skill missing the {marker!r} step"
     # Tool-based (MCP): the skill must reference the graph-write tools, not
     # require a local FalkorDB.
-    assert "create_point" in src or "tortoise_create_point" in src, \
+    assert "_create_point" in src or "tortoise_create_point" in src, \
         "the skill must be tool-based (MCP write tools)"
 
 

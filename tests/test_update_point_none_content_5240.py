@@ -239,7 +239,7 @@ def test_a_non_str_content_is_refused_by_name(sup):
 
     with pytest.raises(TypeError) as exc:
         sdk._update_point(pid, content=123)
-    assert "content" in str(exc.value) and "update_point" in str(exc.value)
+    assert "content" in str(exc.value) and "_update_point" in str(exc.value)
     # Refused BEFORE the write: the point is untouched.
     assert _point(sdk, pid) == (_ORIGINAL, True)
     assert _hash(sdk, pid) == _sha(_ORIGINAL)

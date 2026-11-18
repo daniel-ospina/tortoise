@@ -227,7 +227,7 @@ class TestInviteCreate:
         assert r1.status_code == 200, r1.text
         iid = r1.json()["invite_id"]
         # owner rescinds → the seat frees → a new invite fits
-        r = client.delete(f"/v1/invites/{iid}?org_id=team-pro2")
+        r = client._delete(f"/v1/invites/{iid}?org_id=team-pro2")
         assert r.status_code == 200, r.text
         r2 = client.post("/v1/invites",
                          json={"org_id": "team-pro2", "email": "carol@example.com"})
@@ -892,7 +892,7 @@ class TestMembersRbac:
         assert r.status_code == 200, r.text
         iid = r.json()["invite_id"]
         assert len(self._ghost_rows(client)) == 1
-        r = client.delete(f"/v1/invites/{iid}?org_id=team-t")
+        r = client._delete(f"/v1/invites/{iid}?org_id=team-t")
         assert r.status_code == 200, r.text
         assert self._ghost_rows(client) == [], "ghost invite row survives rescind"
 
@@ -900,19 +900,19 @@ class TestMembersRbac:
         """Owner protection: the owner cannot be removed."""
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.delete(f"/v1/organizations/team-t/members/{_U1}")
+        r = client._delete(f"/v1/organizations/team-t/members/{_U1}")
         assert r.status_code == 409
         assert "Owner cannot be removed" in r.json()["detail"]
 
     def test_remove_member_404(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
-        r = client.delete(f"/v1/organizations/team-t/members/{_U_GHOST}")
+        r = client._delete(f"/v1/organizations/team-t/members/{_U_GHOST}")
         assert r.status_code == 404
 
     def test_remove_member_sets_status_removed(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.delete(f"/v1/organizations/team-t/members/{_U2}")
+        r = client._delete(f"/v1/organizations/team-t/members/{_U2}")
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "removed"
         assert _U2 not in _active_roles(reg, "team-t")
@@ -922,7 +922,7 @@ class TestMembersRbac:
         _seed_membership(reg, "team-t", _U2, "member")
         _seed_membership(reg, "team-t", _U3, "member")
         _as_user(_U3, "member3@example.com")
-        r = client.delete(f"/v1/organizations/team-t/members/{_U2}")
+        r = client._delete(f"/v1/organizations/team-t/members/{_U2}")
         assert r.status_code == 403
 
     def test_change_role_owner_409(self, client, reg):
@@ -1039,7 +1039,7 @@ class TestPendingInvites:
         invite AND deletes the fake invite-{iid} membership row (#1880)."""
         inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
-        r = client.delete(f"/v1/invites/pending/{inv['invite_id']}")
+        r = client._delete(f"/v1/invites/pending/{inv['invite_id']}")
         assert r.status_code == 200, r.text
         assert r.json()["revoked"] is True
         # ghost cleaned (#1880) — members list is owner/admin-only
@@ -1053,7 +1053,7 @@ class TestPendingInvites:
         (the by-id accept reads status/accepted_at now)."""
         inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
-        r = client.delete(f"/v1/invites/pending/{inv['invite_id']}")
+        r = client._delete(f"/v1/invites/pending/{inv['invite_id']}")
         assert r.status_code == 200, r.text
         r2 = client.post(f"/v1/invites/pending/{inv['invite_id']}/accept")
         assert r2.status_code == 409
@@ -1078,9 +1078,9 @@ class TestPendingInvites:
     def test_decline_idempotent(self, client, reg):
         inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
-        r1 = client.delete(f"/v1/invites/pending/{inv['invite_id']}")
+        r1 = client._delete(f"/v1/invites/pending/{inv['invite_id']}")
         assert r1.status_code == 200
-        r2 = client.delete(f"/v1/invites/pending/{inv['invite_id']}")
+        r2 = client._delete(f"/v1/invites/pending/{inv['invite_id']}")
         assert r2.status_code == 200
         assert r2.json().get("already") is True
 

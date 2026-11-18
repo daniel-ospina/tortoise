@@ -392,7 +392,7 @@ class TestVerdictMapping:
         layer = VerdictLayer(sdk)
         layer.mark_queued("rv-race")
         monkeypatch.setattr(
-            sdk, "promote_point",
+            sdk, "_promote_point",
             lambda pid: {"id": pid, "promoted": False, "blocked": True,
                          "reason": "batch_quarantined"})
         with pytest.raises(ValueError, match="could not be promoted"):
@@ -496,7 +496,7 @@ def test_keep_rolls_the_review_write_back_when_the_promote_RAISES(sdk, monkeypat
         stamped.update(_props(sdk, point_id))
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
 
     with pytest.raises(ValueError, match="No point"):
         VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
@@ -535,7 +535,7 @@ def test_the_rollback_restores_the_prior_stamps_rather_than_clearing_them(
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
 
     with pytest.raises(ValueError, match="No point"):
         VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
@@ -702,7 +702,7 @@ def test_an_unreadable_classification_read_leaves_the_review_write_alone(
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
     _proxied_projection(sdk, monkeypatch, fail_on=LIFECYCLE_FANOUT_QUERY)
 
     with pytest.raises(ValueError, match="No point"):
@@ -729,7 +729,7 @@ def test_a_failed_rollback_logs_and_does_not_mask_the_promote_error(
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
     _proxied_projection(sdk, monkeypatch, fail_on="$prior")
 
     with caplog.at_level(logging.WARNING, logger="tortoise.review_verdicts"), \
@@ -820,7 +820,7 @@ def test_a_fanout_row_of_unexpected_width_does_not_replace_the_promote_error(
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
     proxy = _proxied_projection(sdk, monkeypatch, row_width=width)
 
     with pytest.raises(ValueError, match="No point"):

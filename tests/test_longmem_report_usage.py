@@ -204,7 +204,7 @@ def test_block_overhead_covers_breaker_and_failed_spend():
     lme_usage.reset_collector()
     c = lme_usage.get_collector()
     lme_usage.set_question_key("q-breaker")
-    c.record(stage="ingest", provider="openrouter",
+    c.record(stage="_ingest", provider="openrouter",
              model_id="deepseek/deepseek-v4-flash",
              usage={"prompt_tokens": 2000, "completion_tokens": 500},
              usage_present=True)

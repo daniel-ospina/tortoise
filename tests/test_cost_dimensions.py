@@ -1043,7 +1043,7 @@ def test_query_by_name_answers_and_typos_are_not_answers():
 def test_query_verb_exit_codes_distinguish_the_three_answers():
     """measured -> 0; declared out of scope -> 3; unknown -> 2."""
     def run(name: str) -> int:
-        return audit.main(["query", name])
+        return audit.main(["_query", name])
 
     assert run("egress") == 0
     assert run("fixed_shared_saas") == 0
@@ -1095,7 +1095,7 @@ def test_the_cli_entrypoint_works_in_a_fresh_interpreter():
     already covered in-process above.
     """
     proc = subprocess.run(
-        [sys.executable, str(AUDIT_VERB), "query", "egress"],
+        [sys.executable, str(AUDIT_VERB), "_query", "egress"],
         cwd=_ROOT, capture_output=True, text=True,
         env={**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"})
     assert proc.returncode == 0, proc.stdout + proc.stderr

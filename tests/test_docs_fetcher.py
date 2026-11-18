@@ -85,7 +85,7 @@ def test_walk_stages_docs_under_team_dir(tmp_path, monkeypatch):
     """docs/ blobs are fetched and staged under
     {TORTOISE_INGEST_BASE_DIR}/{org_id}/{repo}/docs/... with the original
     relative layout preserved."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     entries, blobs = _mk_files("docs/README.md", "docs/guides/setup.md")
     t = MockGitHubDocsTransport(
@@ -116,7 +116,7 @@ def test_walk_stages_docs_under_team_dir(tmp_path, monkeypatch):
 def test_two_team_staging_isolation(tmp_path, monkeypatch):
     """Team A blobs are never picked up by team B — staging is partitioned
     under {base}/{org_id}/ (T2-P2b)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     entries, blobs = _mk_files("docs/README.md")
     t = MockGitHubDocsTransport(
@@ -147,7 +147,7 @@ def test_two_team_staging_isolation(tmp_path, monkeypatch):
 def test_skip_binary_and_oversized(tmp_path, monkeypatch):
     """Binary/non-UTF8 blobs and oversized blobs are skipped with an honest
     skipped count — never staged (text-type guard + max-blob-size constant)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     md = gh_docs_entry("docs/ok.md")
     binary = gh_docs_entry("docs/logo.png",
@@ -176,7 +176,7 @@ def test_staging_cleanup_partial_failure(tmp_path, monkeypatch):
     """A mid-walk fetch failure cleans up THIS run's staged files and leaves
     the manifest untouched — no half-fetched content for the next corpus
     pass (atomic-or-reconciled staging)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     a = gh_docs_entry("docs/a.md")
     b = gh_docs_entry("docs/b.md")
@@ -205,7 +205,7 @@ def test_staging_cleanup_after_prior_success_keeps_old_files(
     files untouched — the new (never-fetched) content never lands, the
     failing run's staged temp files are discarded, and the manifest never
     advances past a failed run."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     a1 = gh_docs_entry("docs/a.md")
     t1 = MockGitHubDocsTransport(
@@ -260,7 +260,7 @@ def test_tree_truncated_surfaced(tmp_path, monkeypatch):
     short-circuit the walk — a truncated tree is a PARTIAL view, so the
     tree-by-sha shortcut is disabled (Fix 5) and the flag is surfaced in
     stats."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     entries, blobs = _mk_files("docs/README.md")
     t = MockGitHubDocsTransport(
@@ -286,7 +286,7 @@ def test_truncated_tree_preserves_hidden_files(tmp_path, monkeypatch):
     from the truncated listing is NOT reconcile-deleted (it may sit beyond
     the 100k-entry truncation point) — it is carried forward in the manifest
     (Fix 5 × 2b interaction)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     a1 = gh_docs_entry("docs/a.md")
     t1 = MockGitHubDocsTransport(
@@ -324,7 +324,7 @@ def test_truncated_tree_preserves_hidden_files(tmp_path, monkeypatch):
 def test_unchanged_tree_short_circuits_zero_fetch(tmp_path, monkeypatch):
     """An unchanged tree (same tree sha) short-circuits the whole walk — 0
     blobs fetched, 0 files staged (incremental tree-by-sha)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     entries, blobs = _mk_files("docs/README.md")
     t = MockGitHubDocsTransport(
@@ -342,7 +342,7 @@ def test_unchanged_tree_short_circuits_zero_fetch(tmp_path, monkeypatch):
 def test_incremental_blob_dedup_fetches_only_changed(tmp_path, monkeypatch):
     """Within a changed tree, only blobs whose sha differs from the manifest
     are fetched (per-path blob-sha dedup)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     a1 = gh_docs_entry("docs/a.md")
     b1 = gh_docs_entry("docs/b.md")
@@ -373,7 +373,7 @@ def test_incremental_blob_dedup_fetches_only_changed(tmp_path, monkeypatch):
 def test_reconcile_removes_deleted_docs(tmp_path, monkeypatch):
     """A staged file that disappears from the tree is removed on the next
     walk (reconciled staging — no stale files for the next corpus pass)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     a = gh_docs_entry("docs/a.md")
     b = gh_docs_entry("docs/b.md")
@@ -400,7 +400,7 @@ def test_reconcile_removes_deleted_docs(tmp_path, monkeypatch):
 
 def test_branch_fallback_to_master(tmp_path, monkeypatch):
     """A 404 on the requested branch falls back to master (honest flag)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     entries, blobs = _mk_files("docs/README.md")
     t = MockGitHubDocsTransport(
@@ -438,7 +438,7 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
     unchanged re-ingest produces 0 NEW nodes. The ingest corpus root is the
     TEAM partition (as the hosted job does) so rel-paths embed
     {owner}/{repo} and doc ids are repo-unique."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     entries, blobs = _mk_files("docs/README.md", "docs/guides/setup.md")
     t = MockGitHubDocsTransport(

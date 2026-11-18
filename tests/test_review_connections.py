@@ -418,7 +418,7 @@ def test_add_scoped_pool_keeps_the_source_exclusion(
     p3 = sdk._create_point("statement", "kubernetes runbook elsewhere",
                           extractedFrom="doc://other.md")
     monkeypatch.setattr(
-        sdk, "tortoise_fts_query",
+        sdk, "_tortoise_fts_query",
         lambda *a, **k: [{"id": p["id"], "scores": {"rrf": 1.0}}
                          for p in (p1, p2, p3)])
     result = sdk._review_connections(
@@ -486,7 +486,7 @@ def test_add_scope_topic_narrows_pool(sdk_factory, tmp_path, monkeypatch):
     """scope=<topic text> restricts the candidate pool via retrieval.
 
     The prompt is tested at its seam: ``_review_pool`` builds the scoped pool
-    from ``sdk.tortoise_fts_query`` (sdk.py), so stubbing THAT makes the
+    from ``sdk._tortoise_fts_query`` (sdk.py), so stubbing THAT makes the
     assertion independent of the embedder state (sparse vs dense) instead of
     opting out of one of them — and still fails if ``scope=`` is ignored
     (whole-graph pool -> the croissant pair becomes a suggestion).
@@ -504,7 +504,7 @@ def test_add_scope_topic_narrows_pool(sdk_factory, tmp_path, monkeypatch):
     # shape (tortoise_fts_query returns scores.rrf via SearchScores). A
     # positive score is required — _review_pool drops results whose score <= 0.
     monkeypatch.setattr(
-        sdk, "tortoise_fts_query",
+        sdk, "_tortoise_fts_query",
         lambda *a, **k: [{"id": k1["id"], "scores": {"rrf": 1.0}},
                          {"id": k2["id"], "scores": {"rrf": 1.0}}])
     # Unscoped, similarity says EVERYTHING is related — but scoped to the
@@ -788,7 +788,7 @@ def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path, monkeypatch
     return its nearest neighbours. The empty pool here comes from retrieval
     itself returning nothing, which is what this test pins.
 
-    Stubbed at the retrieval seam (``sdk.tortoise_fts_query``) rather than
+    Stubbed at the retrieval seam (``sdk._tortoise_fts_query``) rather than
     pinned to the sparse embedder state, so the guard is covered regardless of
     which retrieval legs are active — and still fails if the scope filter is
     removed (the whole-graph flag list would return the stale entry).
@@ -798,7 +798,7 @@ def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path, monkeypatch
     victim = sdk._create_point("statement", "doomed claim")
     sdk._create_operator("IMPL", src["id"], [victim["id"]])
     sdk._retract_point(victim["id"])
-    monkeypatch.setattr(sdk, "tortoise_fts_query", lambda *a, **k: [])
+    monkeypatch.setattr(sdk, "_tortoise_fts_query", lambda *a, **k: [])
 
     result = sdk._review_connections(mode="prune", scope="zzz-no-such-topic-xyz")
     assert result["prune"] == []
@@ -940,7 +940,7 @@ def test_registry_entry_readonly_and_sdk_method(sdk_factory, tmp_path):
     """
     from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
     td = next(t for t in RETIRED_TOOL_REGISTRY if t.name == "tortoise_review_connections")
-    assert td.sdk_method == "review_connections"
+    assert td.sdk_method == "_review_connections"
     assert td.annotations.readOnlyHint is True
     assert td.annotations.destructiveHint is False
     assert td.http_policy is True

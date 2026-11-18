@@ -593,7 +593,7 @@ def test_a_derived_claim_that_is_not_a_judgement_is_not_an_assessment(sdk):
     # is the same defect from the other side. ⚠️ The shape is SDK-REACHABLE, not
     # writer-produced: `record_judgement` always passes
     # `claim_class="derived"` (`goal_judgement.py`), so no in-repo writer mints a
-    # non-derived claim carrying `judgementState` — `sdk.create_point(...,
+    # non-derived claim carrying `judgementState` — `sdk._create_point(...,
     # judgementState=...)` does, and the read must not be fooled by it. The
     # conjunct matters because the SIBLING reader discriminates on
     # `judgementState` ALONE (`goal_judgement.latest_judgement`), so dropping
@@ -776,11 +776,11 @@ def test_the_batch_read_count_is_fixed_for_a_goal_batch(sdk, monkeypatch):
             calls.append(cypher)
             return real_query(cypher, params=params, timeout=timeout)
 
-        monkeypatch.setattr(_GuardedGraph, "query", _counting_query)
+        monkeypatch.setattr(_GuardedGraph, "_query", _counting_query)
         try:
             blocks = assemble_why_blocks(proj, batch)
         finally:
-            monkeypatch.setattr(_GuardedGraph, "query", real_query)
+            monkeypatch.setattr(_GuardedGraph, "_query", real_query)
         assert set(blocks) == set(batch)
         return len(calls)
 
@@ -871,11 +871,11 @@ def test_a_point_side_read_failure_does_not_suppress_the_object_dimension(
             raise RuntimeError(f"injected Point-side {template_attr} failure")
         return real_query(cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", _query)
+    monkeypatch.setattr(_GuardedGraph, "_query", _query)
     try:
         blocks = assemble_why_blocks(proj, batch)
     finally:
-        monkeypatch.setattr(_GuardedGraph, "query", real_query)
+        monkeypatch.setattr(_GuardedGraph, "_query", real_query)
 
     assert not blocks[point_id].get(key), (
         "the injection did not take effect on the Point side: "
@@ -918,11 +918,11 @@ def test_the_support_dimensions_direct_leg_still_runs_when_the_operator_leg_rais
             raise RuntimeError("injected operator-leg failure")
         return real_query(cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", _query)
+    monkeypatch.setattr(_GuardedGraph, "_query", _query)
     try:
         blocks = assemble_why_blocks(proj, [claim["id"]])
     finally:
-        monkeypatch.setattr(_GuardedGraph, "query", real_query)
+        monkeypatch.setattr(_GuardedGraph, "_query", real_query)
 
     assert [e["content_snippet"] for e in blocks[claim["id"]]["support_chain"]] == [
         "the hit rate is 98%"], (
@@ -963,11 +963,11 @@ def test_a_non_first_labels_existence_probe_failure_keeps_the_other_blocks(
             raise RuntimeError("injected Object-side existence-probe failure")
         return real_query(cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", _query)
+    monkeypatch.setattr(_GuardedGraph, "_query", _query)
     try:
         blocks = assemble_why_blocks(proj, [claim["id"], goal["id"]])
     finally:
-        monkeypatch.setattr(_GuardedGraph, "query", real_query)
+        monkeypatch.setattr(_GuardedGraph, "_query", real_query)
 
     assert claim["id"] in blocks, (
         "a non-first label's existence-probe failure emptied the WHOLE batch: "
@@ -998,11 +998,11 @@ def test_no_resolvable_label_still_yields_no_blocks(sdk, monkeypatch):
             raise RuntimeError("injected existence-probe failure")
         return real_query(cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", _query)
+    monkeypatch.setattr(_GuardedGraph, "_query", _query)
     try:
         blocks = assemble_why_blocks(proj, [claim["id"]])
     finally:
-        monkeypatch.setattr(_GuardedGraph, "query", real_query)
+        monkeypatch.setattr(_GuardedGraph, "_query", real_query)
 
     assert blocks == {}, f"expected no blocks, got {sorted(blocks)}"
 

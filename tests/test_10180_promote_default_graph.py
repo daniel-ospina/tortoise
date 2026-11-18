@@ -539,7 +539,7 @@ def test_the_move_is_a_single_rpc_call(sb, monkeypatch):
             writes.append(f"{kwargs.get('method')} {table}")
         return original(table, **kwargs)
 
-    monkeypatch.setattr(fake, "query", _recording_query)
+    monkeypatch.setattr(fake, "_query", _recording_query)
     before = len(fake.rpc_calls)
     r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
     assert r.status_code == 200, r.text
@@ -706,7 +706,7 @@ def _hosted(monkeypatch) -> None:
 @pytest.mark.parametrize("namespace", [
     f"org_{TEAM}",             # untouched default (the overwhelmingly common case)
     f"team_{TEAM}",            # legacy pre-#3543 shape — flipping would re-home data
-    "org_some_other_name",     # registry `sdk.org_create org_{name}` shape (#2023)
+    "org_some_other_name",     # registry `sdk._org_create org_{name}` shape (#2023)
     f"org_{TEAM}",             # explicit repeat: the historical value
     None, "",                  # absent namespace → historical open, never a guess
 ])
@@ -1945,10 +1945,10 @@ def test_soft_delete_cannot_tombstone_a_graph_that_became_the_default(
             return [{"kind": "custom", "status": "active"}]
         return real(table, **kwargs)
 
-    monkeypatch.setattr(fake, "query", _stale_pre_read)
+    monkeypatch.setattr(fake, "_query", _stale_pre_read)
     assert soft_delete_graph(fake, TEAM, NEW_ID) is False, (
         "the tombstone must be refused once the row is the default")
-    monkeypatch.setattr(fake, "query", real)
+    monkeypatch.setattr(fake, "_query", real)
     assert [g["status"] for g in fake.tables["graphs"]
             if g["id"] == NEW_ID] == ["active"]
     assert len(_defaults(fake)) == 1
@@ -2403,7 +2403,7 @@ def test_the_default_graph_pair_is_read_at_one_instant(monkeypatch):
                      representation=True)
         return rows
 
-    monkeypatch.setattr(fake, "query", _query)
+    monkeypatch.setattr(fake, "_query", _query)
     token = ha._resolved_default_namespace.set(None)
     try:
         moved, tenant = ha._org_default_graph(TEAM)
@@ -2487,7 +2487,7 @@ def test_the_default_graph_pair_comes_from_the_request_own_credential(monkeypatc
         reads.append(table)
         return orig_query(table, **kw)
 
-    monkeypatch.setattr(fake, "query", _query)
+    monkeypatch.setattr(fake, "_query", _query)
     token = ha._resolved_default_namespace.set(None)
     try:
         ha._publish_default_namespace(_credential(default_graph_id=NEW_ID))
@@ -2605,7 +2605,7 @@ def test_the_credential_pair_describes_one_graph(monkeypatch):
                      representation=True)
         return rows
 
-    monkeypatch.setattr(fake, "query", _query)
+    monkeypatch.setattr(fake, "_query", _query)
     cred = resolve_api_key(fake, key)
     assert fired, "the fake never served an organizations/graphs read — nothing was raced"
     assert (cred["graph_namespace"], cred["default_graph_id"]) in (
@@ -3772,7 +3772,7 @@ def test_the_org_create_lane_resolves_the_prior_default_off_the_loop(sb, monkeyp
             namespace_reads.append((wanted.get("id"), _on_loop()))
         return real_query(table, select=select, filters=filters, **kwargs)
 
-    monkeypatch.setattr(fake, "query", _query)
+    monkeypatch.setattr(fake, "_query", _query)
 
     # Which graph the prior-org open actually used — BOTH sampled facts must be
     # THREADED into the gated door, not merely resolved somewhere.

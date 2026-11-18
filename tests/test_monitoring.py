@@ -433,7 +433,7 @@ class TestProbeDb:
         (#1565 flake history).
         """
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 3.0)
-        calls = {"query": 0}
+        calls = {"_query": 0}
         entered = {}
 
         class SlowSetupSlowQuery:
@@ -442,7 +442,7 @@ class TestProbeDb:
                 proj = MagicMock()
 
                 def _q(*args, **kwargs):
-                    calls["query"] += 1
+                    calls["_query"] += 1
                     entered["t"] = time.monotonic()
                     time.sleep(5.0)  # would blow the remaining budget
                     return MagicMock(result_set=[[1]])
@@ -452,7 +452,7 @@ class TestProbeDb:
 
         result = monitoring.probe_db(SlowSetupSlowQuery())
         returned = time.monotonic()
-        assert calls["query"] == 1  # setup succeeded → phase 2 was reached
+        assert calls["_query"] == 1  # setup succeeded → phase 2 was reached
         assert result["ok"] is False
         assert "timeout" in result["error"]
         # Shared budget → the query may spend only the ~0.8s left; a per-phase
@@ -2367,11 +2367,11 @@ class TestProbeQueueIsolation:
             monotonic=lambda: clock.t, sleep=lambda _s: None))
 
         release_slot = threading.Event()
-        ran = {"query": 0}
+        ran = {"_query": 0}
         proj = MagicMock()
 
         def _q(*args, **kwargs):
-            ran["query"] += 1
+            ran["_query"] += 1
             return MagicMock(result_set=[[1]])
 
         proj.g.query.side_effect = _q
@@ -2406,7 +2406,7 @@ class TestProbeQueueIsolation:
             # #3683: and the probe never OBSERVED anything, so the report is
             # the documented `unknown`, never a false `degraded`.
             assert observed is False, observed
-            assert ran["query"] == 0, (
+            assert ran["_query"] == 0, (
                 "the queued query RAN — the blocker did not hold the slot")
         finally:
             # Release the blocker, then flush the abandoned query submission so

@@ -212,7 +212,7 @@ def test_the_row_write_swallow_is_not_silent_either(armed_sdk, monkeypatch):
                 "write handle (`proj.g`) ... statement=CREATE (e:GraphEvent ...")
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
 
     point = sdk._create_point("statement", "the append itself is refused")
 
@@ -263,7 +263,7 @@ def test_a_duplicate_append_is_not_reported_as_a_loss(armed_sdk, monkeypatch):
                 "tortoise_ge_uid violated")
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
 
     assert event_store.append_event(
         proj, event_store.next_seq(proj), "PointAdded", {"id": "p1"},
@@ -410,7 +410,7 @@ def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
                 raise RuntimeError("Connection closed by server")
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
 
     sdk._create_point("statement", "append and read-back both fail")
 

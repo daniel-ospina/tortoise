@@ -289,7 +289,7 @@ async def test_the_wait_bound_refusal_is_repaired_for_a_wrap_tool(quiet,
         return refusal
 
     monkeypatch.setattr(ms, "_await_under_mcp_wait_bound", _refuse)
-    result = await ms.mcp.call_tool("tortoise_search", {"query": "q"})
+    result = await ms.mcp.call_tool("tortoise_search", {"_query": "q"})
     assert result.is_error is True
     assert result.structured_content is None
     assert _TRANSPORT_WAIT_BOUND_MESSAGE in _wire_payload(result)["text"]
@@ -322,7 +322,7 @@ async def test_the_real_search_tool_is_repaired_when_its_sdk_raises(quiet,
 
     with mock.patch.object(ms, "_get_org_sdk", _RaisingSDK):
         result = await ms.mcp.call_tool("tortoise_search",
-                                        {"query": "positioning", "limit": 10})
+                                        {"_query": "positioning", "limit": 10})
     assert result.is_error is True
     assert result.structured_content is None
     assert "VectorF32" in _wire_payload(result)["text"]
@@ -547,7 +547,7 @@ async def test_a_repaired_failure_is_not_recorded_as_ok(monkeypatch, stdio):
             raise RuntimeError("boom")
 
     with mock.patch.object(ms, "_get_org_sdk", _RaisingSDK):
-        result = await ms.mcp.call_tool("tortoise_search", {"query": "q"})
+        result = await ms.mcp.call_tool("tortoise_search", {"_query": "q"})
     assert result.is_error is True
     assert events and events[0]["status"] == "exec_error"
     assert events[0]["error_kind"] == "safe_error"
@@ -653,9 +653,9 @@ async def test_the_named_read_path_siblings(quiet, stdio):
         def recall_state(self, *a, **kw):
             raise RuntimeError("boom-recall")
 
-    calls = {"tortoise_search": {"query": "q"},
+    calls = {"tortoise_search": {"_query": "q"},
              "tortoise_expand_relationships": {"point_id": "p1"},
-             "tortoise_recall": {"query": "q"}}
+             "tortoise_recall": {"_query": "q"}}
     with mock.patch.object(ms, "_get_org_sdk", _RaisingSDK):
         for name, args in calls.items():
             schema = await _registered_schema(name)
@@ -703,11 +703,11 @@ async def test_real_mcp_round_trip_delivers_the_sdk_message(quiet, stdio):
             advertised = next(t for t in await client.list_tools()
                               if t.name == "tortoise_search")
             result = await client.call_tool(
-                "tortoise_search", {"query": "positioning", "limit": 10},
+                "tortoise_search", {"_query": "positioning", "limit": 10},
                 raise_on_error=False)
             with pytest.raises(ToolError) as raised:
                 await client.call_tool(
-                    "tortoise_search", {"query": "positioning", "limit": 10})
+                    "tortoise_search", {"_query": "positioning", "limit": 10})
 
     assert result.is_error is True
     assert result.structured_content is None
@@ -739,7 +739,7 @@ async def test_the_auth_gate_is_classified_through_a_wrap_envelope(monkeypatch):
     monkeypatch.setattr(ms, "_is_dev_mode", lambda: False)
     token = ms._transport_mode.set("stdio")
     try:
-        result = await ms.mcp.call_tool("tortoise_search", {"query": "q"})
+        result = await ms.mcp.call_tool("tortoise_search", {"_query": "q"})
     finally:
         ms._transport_mode.reset(token)
 
@@ -776,7 +776,7 @@ async def test_a_non_gate_auth_refusal_is_not_labelled_the_stdio_gate(monkeypatc
         events.append({"status": status, "error_kind": kind}))
     token = ms._transport_mode.set(None)
     try:
-        result = await ms.mcp.call_tool("tortoise_search", {"query": "q"})
+        result = await ms.mcp.call_tool("tortoise_search", {"_query": "q"})
     finally:
         ms._transport_mode.reset(token)
 

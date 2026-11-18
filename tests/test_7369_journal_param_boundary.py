@@ -284,7 +284,7 @@ def test_legitimate_nested_arrays_survive():
 # they fail, because the strict driver then sees the raw value and raises
 # exactly as FalkorDB does.
 
-@pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile",
+@pytest.mark.parametrize("verb", ["_query", "ro_query", "_query", "profile",
                                   "explain"])
 def test_the_boundary_degrades_before_the_driver_sees_it(verb):
     """MUTATION-SENSITIVE: unwire the gate from any verb and this fails.

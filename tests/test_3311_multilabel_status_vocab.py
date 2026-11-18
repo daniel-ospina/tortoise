@@ -497,7 +497,7 @@ def test_a_WORD_problem_is_refused_as_a_WORD_while_a_declared_synonym_lands(env,
         # does not name the successor route, and `_render` quotes the value into
         # every refusal, so matching on the word alone would stay green if this
         # arm were deleted (#13143 review finding 3's lesson).
-        assert "supersededBy" in text and "supersede_point" in text, (
+        assert "supersededBy" in text and "_supersede_point" in text, (
             f"the `outdated` refusal must name the successor route: {text!r}")
         assert _status(sdk, pid) == "draft"
         assert _mutations(events, pid) == before, (

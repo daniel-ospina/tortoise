@@ -43,7 +43,7 @@ def _read(key, *, at="2026-11-16T10:01:00+00:00", label="Point", tenant="t1"):
 
 def _query(kind, *, seed=None, at="2026-11-16T10:02:00+00:00", label="Point",
            returned=3, tenant="t1"):
-    return {"event": "query", "kind": kind, "label": label, "seed": seed,
+    return {"event": "_query", "kind": kind, "label": label, "seed": seed,
             "returned": returned, "at": at, "tenant": tenant}
 
 
@@ -66,7 +66,7 @@ def test_the_mix_counts_CALLS_including_empty_ones(tmp_path):
 def test_an_unlabelled_query_is_COUNTED_not_folded_into_a_bucket(tmp_path):
     """A pre-#13084 line (or an undated one) must not read as, say, `lookup`."""
     p = _write(tmp_path / "l.jsonl",
-               {"event": "query", "label": "Point", "returned": 1,
+               {"event": "_query", "label": "Point", "returned": 1,
                 "at": "2026-11-16T10:00:00+00:00", "tenant": "t1"},
                _query("text"))
     mix = read_ledger.query_mix(read_ledger.fold(p))

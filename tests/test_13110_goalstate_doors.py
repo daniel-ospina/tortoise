@@ -8,7 +8,7 @@ it. Measured on the tree before this change (2026-11-17):
 | `POST /v1/objects` | **200, then the node reads back `goalState: None`** — pydantic's default `extra='ignore'` dropped the field, and an INVALID word was dropped just as silently (`"green"` also answered 200) |
 | MCP `tortoise_create_object(goalState=…)` | **`unexpected keyword argument`** — the served schema is derived from the HANDLER's signature, which declared `props` but not the field, so an agent reading `tools/list` could not learn it exists |
 | MCP `tortoise_create_object(props={"goalState": …})` | already worked (the free-form bag reaches the SDK) — reported as measured, NOT claimed as this change's work |
-| SDK `sdk.create_object(..., goalState=…)` | already worked |
+| SDK `sdk._create_object(..., goalState=…)` | already worked |
 
 ⛔ **THE MCP DOOR NAMED IN THAT TABLE IS NOW RETIRED FROM THE SURFACE** (#13052,
 #4282 Phase 2 — `tortoise_create_object` was merged into `tortoise_create_entity`,

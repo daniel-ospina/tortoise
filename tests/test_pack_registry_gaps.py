@@ -629,7 +629,7 @@ class TestRelationWriteVerdict:
         writer, not just `create_edge`'s set.
 
         `aboutPoint` is written by `create_about_edge` and `extractedFrom` by
-        `sdk.ingest`; both are declarable with zero validation errors, so
+        `sdk._ingest`; both are declarable with zero validation errors, so
         reporting them `predicate-not-in-allowlist` asserted a runtime the
         code contradicts. Before this fix the resolver read only
         `_VALID_EDGE_PREDICATES` (neither predicate is in it) and this fails.
@@ -2299,7 +2299,7 @@ class TestCoreHierarchy:
         `:Point`/`:Subject`/`:Object`/`:Event` (`docs/ONTOLOGY.md`), so the
         duplication is the model, not residue).
 
-        Consequence, recorded rather than discovered: `sdk.query(kind=
+        Consequence, recorded rather than discovered: `sdk._query(kind=
         "portfolio:allocationTarget")` builds `n.pointKind IN [...]`, so after
         the Leg A append it matches `pointKind='target'` POINTS where it used to
         return nothing. Accepted — the declaration says an allocation target IS a
@@ -2335,7 +2335,7 @@ class TestCoreHierarchy:
         `MATCH (n:<label>)` for its own `entity_type`
         (`read_ledger.label_for_entity_type`), so an object read widens inside the
         `:Object` label only; it does NOT return `:Point` rows. A
-        `sdk.query(kind="Object")` (a `MATCH (n:Point)` read) matches **`:Point`
+        `sdk._query(kind="Object")` (a `MATCH (n:Point)` read) matches **`:Point`
         rows** whose `pointKind` is one of those four. The two read paths widen
         inside their own label space.
         ⛔ And inside the object read the widening is FORM-SCOPED: the two forms of
@@ -2464,7 +2464,7 @@ class TestCoreHierarchy:
 
         def _capture(graph_, query, struct_kind, query_vec, strategies, **kw):
             captured.append(
-                {"query": query, "struct_kind": struct_kind,
+                {"_query": query, "struct_kind": struct_kind,
                  "strategies": strategies})
             return {}
 
@@ -2491,12 +2491,12 @@ class TestCoreHierarchy:
         # …and the kind-only form carries NO text query, so the post-retrieval
         # `if kind and query is not None and result_ids:` expansion filter cannot
         # run — the structural `=` is the only kind predicate on that read.
-        assert kind_only["query"] is None, kind_only
+        assert kind_only["_query"] is None, kind_only
         assert kind_only["strategies"] == {
             "fts": False, "vector": False, "structural": True}, kind_only
         # …while the text-query form carries one, which is what reaches the
         # expansion filter — the widening the docstring attributes to it ALONE.
-        assert text_query["query"] == "widget", text_query
+        assert text_query["_query"] == "widget", text_query
 
         # ── and the EXPANSION reaching the post-retrieval filter ───────────
         # The capture above proves the gate is REACHABLE only on a text query; it

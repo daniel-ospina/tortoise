@@ -256,10 +256,10 @@ _APPLY_FIRST_DOORS = {
     # function that no longer exists, which reds as a stale entry AND leaves the renamed
     # body reaching the write handle with no lane (measured before this: reds 1 and 2).
     "_assess_source",        # SET reliability, then the assessment record
-    "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
-    "mitigate_operator",     # CREATE the mitigation, then its records
-    "promote_point",         # CAS SET status='live', then PointPromoted
-    "set_point_baseline",    # SET the baseline, then its record
+    "_compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
+    "_mitigate_operator",     # CREATE the mitigation, then its records
+    "_promote_point",         # CAS SET status='live', then PointPromoted
+    "_set_point_baseline",    # SET the baseline, then its record
 }
 
 #: Apply-first INTERNAL helpers — the same ordering as the doors above, reached
@@ -352,7 +352,7 @@ _NO_JOURNAL = {
     # row here would be a STALE census entry — which
     # `test_the_inventories_hold_no_stale_entry` reds on. A door that no longer
     # exists has no lane to name.
-    "ingest",
+    "_ingest",
     # ⛔ #12948 renamed the public `set_source_tier` to `_set_source_tier` (the container
     # `manage_source_trust` is the door now), so the entry moves with the rename for the
     # same measured reason as `_assess_source` above.
@@ -490,7 +490,7 @@ _UNRESOLVED = {
     # authoritative; `test_the_unresolved_hand_check_cites_symbols_not_line_numbers`
     # and `test_the_calibration_readers_assemble_no_write_clause` keep this note
     # honest instead of trusting it.
-    "calibrate_summary",
+    "_calibrate_summary",
     "_uncalibrated_ep_participants",
     "_cross_lens_pool",
     "_entity_name_holders",
@@ -634,12 +634,12 @@ _UNRESOLVED = {
     "_state_related_objects",
     "_state_related_points",
     "_unsweepable_dirty_roots",
-    "list_batch",
-    "paginated_query",
-    "query",
+    "_list_batch",
+    "_paginated_query",
+    "_query",
     "_search_sessions",
     "_suggest_entry_points",
-    "tortoise_fts_query",
+    "_tortoise_fts_query",
     # ⛔ NO SECOND ROW FOR `calibrate_summary` / `_uncalibrated_ep_participants`.
     # They are declared ONCE, above (the #9063 entry). Both PRs that landed on
     # 2026-10-20 declared them at different offsets, so the merge kept both
@@ -1450,7 +1450,7 @@ def _assembled_write_evidence(assembled: str) -> str | None:
 
 #: The two rows the #9063 note covers, each with the read shape the note states.
 _CALIBRATION_READERS: tuple[tuple[str, str], ...] = (
-    ("calibrate_summary", "OPTIONAL MATCH"),
+    ("_calibrate_summary", "OPTIONAL MATCH"),
     ("_uncalibrated_ep_participants", "RETURN n.id"),
 )
 
@@ -1974,7 +1974,7 @@ _BUILTIN_NAMES = frozenset(dir(builtins))
 #: The accumulation verbs a callee can use to hand text back through a parameter
 #: instead of returning it (see `_mutated_parameters`). `append`/`extend`/`insert`
 #: on a list, `update` on a dict, plus `+=`/`<param>[k] = …` handled separately.
-_ACCUMULATOR_METHODS = frozenset({"append", "extend", "insert", "update"})
+_ACCUMULATOR_METHODS = frozenset({"append", "extend", "insert", "_update"})
 
 #: Builtins whose RESULT cannot carry statement text, so a parameter handed to
 #: one genuinely IS a scalar. `str` is deliberately NOT here: it returns its
@@ -2896,10 +2896,10 @@ def test_the_fragment_walk_retains_the_nodes_it_keys_on():
                    if isinstance(node, ast.FunctionDef)
                    and node.name == "reading")
     bindings = _local_bindings(reading)
-    assert "query" in bindings, "the synthetic reader binds no statement"
+    assert "_query" in bindings, "the synthetic reader binds no statement"
     followed: dict = {}
     visited: dict = {}
-    _fragments_of(bindings["query"][0], bindings, _params_of(reading),
+    _fragments_of(bindings["_query"][0], bindings, _params_of(reading),
                   tree, Path("synthetic_sdk.py"), followed, set(),
                   visited=visited)
     assert followed, (
@@ -3526,7 +3526,7 @@ _ACCUMULATOR_SHAPES: dict[str, tuple[str, str, str]] = {
         'def _fill(out):\n    out.insert(0, " SET n.poked = 1")\n',
         "        _fill(parts)\n",
         '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
-    "update": (
+    "_update": (
         'def _fill(out):\n    out.update({"k": " SET n.poked = 1"})\n',
         "        _fill(parts)\n",
         '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts.values())\n'),
@@ -3696,7 +3696,7 @@ def test_the_census_writer_set_states_its_own_polarity():
     # an `assert not (names & proven)` here: that assertion held by construction
     # and therefore for every input. What is checkable is that the definition is
     # CONFINED to one module and LOAD-BEARING on the real tree — both above/below.
-    assert "invalidate_point" in names, (
+    assert "_invalidate_point" in names, (
         "a name the census genuinely proves writes is missing from the set — "
         "the subtraction above cannot be the whole surface")
 
@@ -3742,7 +3742,7 @@ def test_a_proven_read_is_subtracted_only_for_its_own_module():
     surface = {"TortoiseSDK.invalidate_point": {}}
     foreign = {("tortoise/event_store.py", "TortoiseStore.invalidate_point")}
     still_a_writer = _census_writer_names(surface=surface, register=foreign)
-    assert "invalidate_point" in still_a_writer, (
+    assert "_invalidate_point" in still_a_writer, (
         "a proven read registered for ANOTHER module removed an `sdk.py` writer "
         "of the same bare name — one module's proof un-guarded another "
         f"module's write (writers={sorted(still_a_writer)})")
@@ -3794,7 +3794,7 @@ def test_the_calibration_reader_list_is_bound_to_the_rows_it_guards():
     50` idiom the symbol pin already uses.
     """
     names = {name for name, _ in _CALIBRATION_READERS}
-    assert names == {"calibrate_summary", "_uncalibrated_ep_participants"}, (
+    assert names == {"_calibrate_summary", "_uncalibrated_ep_participants"}, (
         "`_CALIBRATION_READERS` no longer names exactly the two #9063 rows, "
         f"so a row is un-guarded without a red (got {sorted(names)})")
     assert names <= set(_UNRESOLVED), (
@@ -3825,8 +3825,8 @@ class Door:
                 if isinstance(node, ast.FunctionDef))
     offenders = _calibration_read_offenders(
         {"reading": func}, (("reading", "RETURN n.id"),),
-        writers=frozenset({"invalidate_point"}))
-    assert any("invalidate_point" in offender for offender in offenders), (
+        writers=frozenset({"_invalidate_point"}))
+    assert any("_invalidate_point" in offender for offender in offenders), (
         "a write through ANOTHER SDK method produced no offender, so the "
         f"note's second claim can rot false with nothing red (offenders={offenders})")
 
@@ -3837,7 +3837,7 @@ class Door:
                       if isinstance(node, ast.FunctionDef))
     assert not _calibration_read_offenders(
         {"reading": clean_func}, (("reading", "RETURN n.id"),),
-        writers=frozenset({"invalidate_point"})), (
+        writers=frozenset({"_invalidate_point"})), (
         "a call to a function the census does not prove writes was reported as "
         "a write — this arm must follow the census, not sound like a keyword"
         )
@@ -3849,7 +3849,7 @@ class Door:
                        if isinstance(node, ast.FunctionDef))
     assert not _calibration_read_offenders(
         {"reading": handle_func}, (("reading", "RETURN n.id"),),
-        writers=frozenset({"query"})), (
+        writers=frozenset({"_query"})), (
         "the handle reach `proj.g.query(...)` was reported as a write through "
         "another SDK method")
 
@@ -3901,13 +3901,13 @@ def test_the_module_bindings_cache_retains_its_module():
 _APPLY_FIRST_DECLARED_DOORS = {
     # The apply-first, by decision doors: the record's OUTCOME depends on the
     # write, and the decision is recorded where the door lives.
-    "delete_point",          # #9207: cache-first, the destroy is the commit point
-    "update_point",          # #8830: the promote arm's guarded SET, then its record
+    "_delete_point",          # #9207: cache-first, the destroy is the commit point
+    "_update_point",          # #8830: the promote arm's guarded SET, then its record
     # The mechanical apply-first doors (#9206): their record is built from the
     # node they just wrote, so the append cannot precede the write without
     # changing the door's commit contract (#9124 part 2).
-    "create_operator",
-    "create_direct_edge",
+    "_create_operator",
+    "_create_direct_edge",
     "_update_entity",
     "_delete_entity",
     "_write_capture_turns",
@@ -3985,7 +3985,7 @@ def test_the_derived_recompute_lane_has_its_own_kind():
     journal-first label.
     """
     kind = _kind({"scopes": [(1, "_derived_recompute_write_scope")],
-                 "writes": [(2, "query", "SET n.x = 1")],
+                 "writes": [(2, "_query", "SET n.x = 1")],
                   "appends": [], "end_lineno": 3,
                   "scope_spans": [(1, 3)]})
     assert kind == "derived-recompute"
@@ -4009,7 +4009,7 @@ _APPLY_FIRST_PROVED_ELSEWHERE = {
     # `tests/test_7951_update_point_outbox.py::
     # test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
     # `::test_a_refused_promote_journals_no_revision`.
-    "update_point": "tests/test_7951_update_point_outbox.py",
+    "_update_point": "tests/test_7951_update_point_outbox.py",
 }
 
 
@@ -4217,8 +4217,8 @@ def test_every_live_declared_door_is_journal_first():
     assert not offenders, (
         "a live-lane declaration covers a write that precedes its record:\n  "
         + "\n  ".join(offenders))
-    assert {"invalidate_point", "retract_point",
-            "supersede_point"} <= {_bare_name(n) for n in checked}, (
+    assert {"_invalidate_point", "_retract_point",
+            "_supersede_point"} <= {_bare_name(n) for n in checked}, (
         "the journal-first doors #9124 part 1 declared are not all being "
         f"checked ({sorted(checked)}) — the ordering pin would be vacuous for "
         "them. `delete_point` is deliberately NOT in this set: #9207 reversed "
@@ -4242,9 +4242,9 @@ def test_every_live_declared_door_is_journal_first():
 #: purpose: listing it would claim a coverage that no longer exists.
 _DECLARED_DOOR_NESTED_INVENTORIED = {
     # #9124 part 1 (journal-first doors)
-    "invalidate_point": {"_mark_dirty"},
-    "retract_point": {"_mark_dirty"},
-    "supersede_point": {"_mark_dirty"},
+    "_invalidate_point": {"_mark_dirty"},
+    "_retract_point": {"_mark_dirty"},
+    "_supersede_point": {"_mark_dirty"},
     # #9206 (apply-first doors, + the capture writer whose turn store is the
     # nested apply-first claim). MEASURED, not assumed: every one of these
     # reaches `_mark_dirty`, which is inventoried `_NO_JOURNAL` — so the lane
@@ -4252,10 +4252,10 @@ _DECLARED_DOOR_NESTED_INVENTORIED = {
     # per-function census. Pinning the edge is what forces a reviewed line for
     # it; the write itself is a re-derivable flatten, which is why it is
     # inventoried rather than journaled.
-    "update_point": {"_mark_dirty"},
-    "delete_point": {"_mark_dirty"},
-    "create_operator": {"_mark_dirty"},
-    "create_direct_edge": {"_mark_dirty"},
+    "_update_point": {"_mark_dirty"},
+    "_delete_point": {"_mark_dirty"},
+    "_create_operator": {"_mark_dirty"},
+    "_create_direct_edge": {"_mark_dirty"},
     # Declared doors that reach NO inventoried helper — listed explicitly so a
     # future nested no-journal call reds HERE rather than being absorbed by an
     # unpinned door (a door absent from this dict is not measured at all).
@@ -4760,7 +4760,7 @@ def test_a_duplicate_writer_definition_reds_the_gates(monkeypatch):
     producer is removed; this test would not.)
     """
     fake = {"Store.door": {
-        "lineno": 10, "writes": [(11, "query", "CREATE (n:Point)", 0)],
+        "lineno": 10, "writes": [(11, "_query", "CREATE (n:Point)", 0)],
         "reads": 0, "appends": [], "scopes": [], "aliases": set(),
         "params": set(), "duplicate_writer_defs": True,
         "def_linenos": [10, 30],
@@ -4953,14 +4953,14 @@ _PROVEN_READS: set[tuple[str, str]] = {
 #: extent.
 _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     # one `g.query`, resolving to `MATCH (n:Point) {where} … RETURN …`
-    ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"): ("query",),
+    ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"): ("_query",),
     # one `g.query`, resolving to `MATCH (n:{label}) WHERE … RETURN n.id [LIMIT n]`
-    ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"): ("query",),
+    ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"): ("_query",),
     # one `g.query`, resolving to `MATCH (n:{label} {id:$id}) RETURN count(n) …`
-    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity._rows"): ("query",),
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity._rows"): ("_query",),
     # ONE, not two: the nested `_rows` probe takes its own key above; this
     # function's only unresolved statement is the sibling probe's f-string label.
-    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity"): ("query",),
+    ("tortoise/sdk.py", "TortoiseSDK._supersede_entity"): ("_query",),
     # ONE, not three: `_assert_supersession_names_a_successor` issues three
     # `proj.g.query` calls and only the first is unresolved (the label loop's
     # f-string). The other two are literal statements the resolver flattens into
@@ -4972,13 +4972,13 @@ _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     # enumerator emits 4, the same arity defect e0d8b165b7 fixed for the
     # `_hydrate_evidence` row below. Comment only: the assertion compares the
     # VERB tuple, so no gate was ever defeated by it.)
-    ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"): ("query",),
+    ("tortoise/sdk.py", "TortoiseSDK._assert_supersession_names_a_successor"): ("_query",),
     # ONE, and it is `_hydrate_evidence`'s only handle reach: the baseline-load
     # read whose f-string interpolates `live._terminal_excluded('n.status')`
     # (#13034). Measured with the module's own enumerator on this head:
     # `writes == [(38824, 'query', '<unresolved>', 0)]` (the fourth element is the
     # control-flow depth), `_is_unresolved_only` True.
-    ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"): ("query",),
+    ("tortoise/sdk.py", "TortoiseSDK._hydrate_evidence"): ("_query",),
 }
 
 
@@ -5266,7 +5266,7 @@ def test_a_proven_read_entry_must_be_unproven_and_undeclared(monkeypatch):
     first = sorted(grown)[0]
     # A SECOND statement appeared in a function blessed as read-only: the verdict
     # no longer covers it, and the pin must say so.
-    grown[first] = grown[first] + ("query",)
+    grown[first] = grown[first] + ("_query",)
     monkeypatch.setattr("test_9124_declared_live_doors._PROVEN_READ_STATEMENTS", grown)
     with pytest.raises(AssertionError, match="read-only verdict no longer covers"):
         test_every_proven_read_names_a_real_census_entry()

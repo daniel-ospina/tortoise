@@ -363,7 +363,7 @@ def test_id_reuse_drops_pre_recreation_invalidate_fold(sup):
     drop the pre-recreate fold entirely (no ghost CORRECTS B→A, no older
     stamps) and fold the post-recreate one verbatim.
 
-    Uses the RAW hard-delete lane rather than ``sdk.delete_point``. The original
+    Uses the RAW hard-delete lane rather than ``sdk._delete_point``. The original
     reason — "delete_point emits PointRetracted, which tombstones the fresh
     incarnation pre-sweep and breaks the id-reuse premise" — NO LONGER HOLDS:
     since #3300, ``delete_point`` journals a JSONL ``EntityMutated op="delete"``

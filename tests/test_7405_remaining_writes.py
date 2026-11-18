@@ -1114,7 +1114,7 @@ def test_a_non_landed_detach_delete_converges_to_absence_on_replay(tmp_path):
         records = proxy.records_at_abort or []
         assert not [r for r in records
                     if r.get("type") == "EntityMutated"
-                    and r.get("op") == "delete" and r.get("id") == pid], (
+                    and r.get("op") == "_delete" and r.get("id") == pid], (
             "the op=delete record was appended BEFORE the DELETE was issued — "
             "the #9207 divergence (a record the cache can outlive): "
             f"{records!r}")
@@ -1166,7 +1166,7 @@ def test_the_delete_exemption_rests_on_the_committed_record(tmp_path):
         kept = [line for line in path.read_text().splitlines()
                 if line.strip() and not (
                     json.loads(line).get("type") == "EntityMutated"
-                    and json.loads(line).get("op") == "delete")]
+                    and json.loads(line).get("op") == "_delete")]
         assert kept, "fixture precondition: the creation record must survive"
         path.write_text("\n".join(kept) + "\n")
 
@@ -1230,7 +1230,7 @@ def test_a_delete_whose_record_cannot_be_committed_is_refused_loudly(
         assert err.record_committed is False, (
             "the append did not confirm, so this is the UNCONFIRMED arm — the "
             "committed arm would tell the caller the destruction is durable")
-        assert err.operation == "delete_point"
+        assert err.operation == "_delete_point"
         assert proxy.matching >= 1, (
             "the DESTROY is issued before the append under #9207's ordering, so "
             "the statement must have run — a skip would mean the record still "
@@ -1322,7 +1322,7 @@ def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
             "fixture precondition: the creation record must be in the journal "
             "the replay will use")
         assert not any(r.get("type") == "EntityMutated"
-                       and r.get("op") == "delete" and r.get("id") == pid
+                       and r.get("op") == "_delete" and r.get("id") == pid
                        for r in records), (
             "the skipped delete must have recorded NOTHING — that absent "
             "carrier is the residual: the replay cannot know the destruction "
@@ -1459,7 +1459,7 @@ def test_a_journal_less_delete_is_undone_by_the_creators_journal_today(tmp_path)
             "the landed delete must remove the Point from the live graph")
 
         assert not any(r.get("type") == "EntityMutated"
-                       and r.get("op") == "delete" and r.get("id") == pid
+                       and r.get("op") == "_delete" and r.get("id") == pid
                        for r in _journal_records(log_dir)), (
             "the journal-less door recorded NOTHING — that absent carrier is "
             "the residual, and it is why the replay below can undo the delete")

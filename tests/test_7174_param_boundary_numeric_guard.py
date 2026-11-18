@@ -78,7 +78,7 @@ class _FakeHandle:
         return "SENTINEL-REACHED-HANDLE"
 
     def query(self, q, params=None, timeout=None):
-        sentinel = self._record("query", q, params, timeout)
+        sentinel = self._record("_query", q, params, timeout)
         # #2897: the tag-sync fold issues this one indexed RETURN and reads
         # ``.result_set`` off it; answer with an empty result (no tags) so the
         # fold is a no-op and every other assertion keeps the sentinel.
@@ -205,7 +205,7 @@ def test_raw_select_graph_handle_refuses_the_same_param():
     assert wire.commands == [], "the out-of-domain number reached the wire"
 
 
-@pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile", "explain"])
+@pytest.mark.parametrize("verb", ["_query", "ro_query", "_query", "profile", "explain"])
 def test_every_query_entry_point_on_the_seam_refuses(verb):
     """Falsifier: no query VERB may be an unguarded way around the domain check."""
     handle, wire = _guarded_vendor_handle()
@@ -214,7 +214,7 @@ def test_every_query_entry_point_on_the_seam_refuses(verb):
     assert wire.commands == [], f"{verb} forwarded the out-of-domain number"
 
 
-@pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile", "explain"])
+@pytest.mark.parametrize("verb", ["_query", "ro_query", "_query", "profile", "explain"])
 def test_every_query_entry_point_on_the_projection_wrapper_refuses(verb):
     """Falsifier: the ``proj.g`` wrapper stays complete on its own.
 
@@ -349,7 +349,7 @@ def test_the_inlined_cypher_param_header_is_refused():
     assert handle.calls == [], "the inlined header was forwarded to a 4.x clamp"
 
 
-@pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile", "explain"])
+@pytest.mark.parametrize("verb", ["_query", "ro_query", "_query", "profile", "explain"])
 def test_every_query_entry_point_on_the_seam_refuses_a_literal(verb):
     """Falsifier: no query VERB on the guarded vendor handle skips the text scan."""
     handle, wire = _guarded_vendor_handle()
@@ -358,7 +358,7 @@ def test_every_query_entry_point_on_the_seam_refuses_a_literal(verb):
     assert wire.commands == [], f"{verb} forwarded the out-of-domain literal"
 
 
-@pytest.mark.parametrize("verb", ["query", "ro_query", "_query", "profile", "explain"])
+@pytest.mark.parametrize("verb", ["_query", "ro_query", "_query", "profile", "explain"])
 def test_every_query_entry_point_on_the_projection_wrapper_refuses_a_literal(verb):
     """Falsifier: the ``proj.g`` wrapper refuses on its OWN, literal included.
 
@@ -417,7 +417,7 @@ def test_the_literal_scan_reads_CODE_and_not_data(statement):
     """
     g, handle = _guarded()
     assert g.query(statement) == "SENTINEL-REACHED-HANDLE"
-    assert handle.calls == [("query", (statement, None, None), {})]
+    assert handle.calls == [("_query", (statement, None, None), {})]
 
 
 @pytest.mark.parametrize("statement", [
@@ -440,7 +440,7 @@ def test_ordinary_literals_reach_the_handle_unchanged(statement):
     """
     g, handle = _guarded()
     assert g.query(statement) == "SENTINEL-REACHED-HANDLE"
-    assert handle.calls == [("query", (statement, None, None), {})]
+    assert handle.calls == [("_query", (statement, None, None), {})]
 
 
 def test_the_literal_frontier_is_the_stores_limit_not_a_digit_count():
@@ -530,7 +530,7 @@ def test_ordinary_leading_dot_literals_reach_the_handle_unchanged(statement):
     """
     g, handle = _guarded()
     assert g.query(statement) == "SENTINEL-REACHED-HANDLE"
-    assert handle.calls == [("query", (statement, None, None), {})]
+    assert handle.calls == [("_query", (statement, None, None), {})]
 
 
 def test_a_long_leading_zero_integer_is_judged_by_domain_not_length():
@@ -674,7 +674,7 @@ def test_representable_params_reach_the_handle_unchanged():
         "int_ok": INT64_MAX,
     }
     assert g.query(CYPHER, params) == "SENTINEL-REACHED-HANDLE"
-    assert handle.calls == [("query", (CYPHER, params, None), {})]
+    assert handle.calls == [("_query", (CYPHER, params, None), {})]
 
 
 def test_the_frontier_is_the_stores_limit_not_a_digit_count():
@@ -720,7 +720,7 @@ def test_no_params_is_not_a_refusal():
     """Anti-overfix guard: a param-less query is untouched."""
     g, handle = _guarded()
     assert g.query("MATCH (n) RETURN n") == "SENTINEL-REACHED-HANDLE"
-    assert handle.calls == [("query", ("MATCH (n) RETURN n", None, None), {})]
+    assert handle.calls == [("_query", ("MATCH (n) RETURN n", None, None), {})]
 
 
 def test_unsupported_operator_still_refused_first():

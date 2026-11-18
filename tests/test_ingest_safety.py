@@ -46,7 +46,7 @@ from tortoise.analyze import _bfs_select_operators
 # ── Track B sentinels (§7 capability-probe sentinels) ────────────────
 _INGEST_CAN_SUPPRESS_PROMOTION = (
     "promote_source" in inspect.signature(TortoiseSDK._create_operator).parameters)
-_CAN_PROMOTE_POINT = hasattr(TortoiseSDK, "promote_point")
+_CAN_PROMOTE_POINT = hasattr(TortoiseSDK, "_promote_point")
 _TRACK_B_FULL = _INGEST_CAN_SUPPRESS_PROMOTION and _CAN_PROMOTE_POINT
 _SENTINEL_A9 = getattr(__import__("tortoise.analyze", fromlist=["x"]),
                        "DIRECT_EDGE_TRAVERSAL", False)

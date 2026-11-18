@@ -696,7 +696,7 @@ class TestAggregationOnlyGuard:
             assert verb not in src, verb
         for name in dir(ri):
             assert not name.lower().startswith(
-                ("prune", "purge", "delete", "expire", "sweep")), name
+                ("prune", "purge", "_delete", "expire", "sweep")), name
 
     def test_the_guard_is_stated_on_the_payload(self):
         assert ri.AGGREGATION_ONLY is True

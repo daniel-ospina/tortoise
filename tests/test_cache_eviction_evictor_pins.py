@@ -1185,7 +1185,7 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
     deletes: list[str] = []
     redis_stub = types.ModuleType("redis")
     # ⛔ VARIADIC, not `name`: `redis.delete` takes `*names`, and a one-argument stub let
-    # `client.delete(graph_name, "test_evict_a_live_peer")` through GREEN — destroying a
+    # `client._delete(graph_name, "test_evict_a_live_peer")` through GREEN — destroying a
     # peer's LIVE owned graph is exactly the #11373 harm, so the stub must see every name.
     redis_stub.Redis = lambda *a, **k: types.SimpleNamespace(
         delete=lambda *names, **k2: deletes.extend(names))

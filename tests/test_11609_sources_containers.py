@@ -386,7 +386,7 @@ class TestCheckConnection:
         s._record_tenant = None
         monkeypatch.setattr(TortoiseSDK, "_get_proj",
                             lambda self: type("P", (), {"g": type("G", (), {
-                                "query": staticmethod(lambda *a, **k: type(
+                                "_query": staticmethod(lambda *a, **k: type(
                                     "R", (), {"result_set": [[0]]})())})()})())
         monkeypatch.setattr(TortoiseSDK, "get_organisation_account",
                             lambda self: {"id": "acct-1"})
@@ -467,7 +467,7 @@ class TestCheckConnectionKeyIsolation:
         s._record_tenant = (self.OWN_ORG, "graph-own")
         monkeypatch.setattr(TortoiseSDK, "_get_proj",
                             lambda self: type("P", (), {"g": type("G", (), {
-                                "query": staticmethod(lambda *a, **k: type(
+                                "_query": staticmethod(lambda *a, **k: type(
                                     "R", (), {"result_set": [[0]]})())})()})())
         monkeypatch.setattr(TortoiseSDK, "get_organisation_account",
                             lambda self: {"id": "acct-1"})

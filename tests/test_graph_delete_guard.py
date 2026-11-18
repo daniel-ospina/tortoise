@@ -46,11 +46,11 @@ class _FakeGraph:
         self._name, self._calls = name, calls
 
     def query(self, q, *a, **k):
-        self._calls.append(("query", self._name, q))
+        self._calls.append(("_query", self._name, q))
         return types.SimpleNamespace(result_set=[])
 
     def delete(self):
-        self._calls.append(("delete", self._name))
+        self._calls.append(("_delete", self._name))
 
 
 class _FakeDb:
@@ -118,8 +118,8 @@ def test_absent_graph_transmits_no_command():
 def test_present_graph_detaches_then_deletes():
     db = _FakeDb(graphs=["test_here"])
     assert safe_graph_delete(db, "test_here", detach=True, drop=True) is True
-    assert db.calls == [("query", "test_here", "MATCH (n) DETACH DELETE n"),
-                        ("delete", "test_here")]
+    assert db.calls == [("_query", "test_here", "MATCH (n) DETACH DELETE n"),
+                        ("_delete", "test_here")]
 
 
 def test_present_graph_delete_rides_the_command_vector():
@@ -127,8 +127,8 @@ def test_present_graph_delete_rides_the_command_vector():
     never ``query("GRAPH.DELETE")`` (a Cypher parse error)."""
     db = _FakeDb(graphs=["test_here"])
     safe_graph_delete(db, "test_here", detach=False, drop=True)
-    assert db.calls == [("delete", "test_here")]
-    assert not [c for c in db.calls if c[0] == "query"], \
+    assert db.calls == [("_delete", "test_here")]
+    assert not [c for c in db.calls if c[0] == "_query"], \
         "GRAPH.DELETE must never ride GRAPH.QUERY"
 
 
@@ -219,7 +219,7 @@ def test_lock_WAITS_for_a_contended_lock_and_then_acquires():
         "a lock that frees up within wait_s must be acquired, not refused"
     assert len([c for c in conn.commands if c[0] == "SET"]) == 4, \
         f"the loser must POLL, not refuse on the first refusal: {conn.commands}"
-    assert db.calls == [("delete", "test_here")]
+    assert db.calls == [("_delete", "test_here")]
 
 
 def test_lock_released_when_the_drop_raises():
@@ -308,7 +308,7 @@ def test_presence_read_happens_INSIDE_the_held_lock():
             return self._inner.query(*a, **k)
 
         def delete(self):
-            order.append("delete")
+            order.append("_delete")
             return self._inner.delete()
 
     class _Db(_LockingDb):
@@ -330,10 +330,10 @@ def test_presence_read_happens_INSIDE_the_held_lock():
     # hides behind the detach's marker. Mutants this catches:
     # read-before-acquire, read-after-release, detach-after-release,
     # delete-after-release, drop-both-after-release.
-    for marker in ("acquire", "read", "detach", "delete", "release"):
+    for marker in ("acquire", "read", "detach", "_delete", "release"):
         assert marker in order, f"{marker} never happened: {order}"
     assert (order.index("acquire") < order.index("read")
-            < order.index("detach") < order.index("delete")
+            < order.index("detach") < order.index("_delete")
             < order.index("release")), (
         f"the read AND both drop commands must run INSIDE the held lock — "
         f"got {order}")
@@ -421,8 +421,8 @@ def test_drop_one_graph_present_detaches_and_deletes():
     db = _FakeDb(graphs=["test_here"])
     proj = types.SimpleNamespace(db=db)
     assert _drop_one_graph(proj, "test_here", drop=True) is True
-    assert db.calls == [("query", "test_here", "MATCH (n) DETACH DELETE n"),
-                        ("delete", "test_here")]
+    assert db.calls == [("_query", "test_here", "MATCH (n) DETACH DELETE n"),
+                        ("_delete", "test_here")]
 
 
 def test_drop_one_graph_REFUSAL_is_not_a_success():

@@ -435,15 +435,15 @@ class TestF4CaptureGuards:
             self.calls: list[tuple[str, dict]] = []
 
         def _compute_confidence(self, **kw):
-            self.calls.append(("compute_confidence", kw))
+            self.calls.append(("_compute_confidence", kw))
             return self._targeted
 
         def _dream(self, **kw):
-            self.calls.append(("dream", kw))
+            self.calls.append(("_dream", kw))
             return self._stabilized
 
         def _get_confidence(self, _pid, **kw):
-            self.calls.append(("get_confidence", kw))
+            self.calls.append(("_get_confidence", kw))
             return {"mean": 0.5}
 
     _CLEAN_TARGETED: ClassVar[dict[str, object]] = {
@@ -458,7 +458,7 @@ class TestF4CaptureGuards:
         # of the fail-closed calibration gate explicitly, or the capture is only
         # hermetic by accident (fresh_sdk's setdefault).
         assert [name for name, _ in duck.calls] == [
-            "compute_confidence", "dream", "get_confidence", "get_confidence"]
+            "_compute_confidence", "_dream", "_get_confidence", "_get_confidence"]
         assert all(kw.get("require_calibration") is False for _, kw in duck.calls)
         assert duck.calls[1][1].get("warm_start") is False  # Epic 903-C4 (#1242)
 

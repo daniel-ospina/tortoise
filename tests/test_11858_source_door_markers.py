@@ -284,9 +284,9 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
 
 
 @pytest.mark.parametrize("door", [
-    "create_point", "create_entity", "create_document", "create_object",
-    "create_subject", "create_event", "update_point", "update_entity",
-    "update", "update_knowledge",
+    "_create_point", "create_entity", "_create_document", "_create_object",
+    "_create_subject", "_create_event", "_update_point", "update_entity",
+    "_update", "update_knowledge",
 ])
 def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
     """The census: the leak population is this one door, and starts that way.
@@ -315,7 +315,7 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
     sdk, journal = _journal(tmp_path)
     try:
         target = "p-census"
-        if door in ("update", "update_knowledge"):
+        if door in ("_update", "update_knowledge"):
             # Only these two need an existing node; `update_point` and
             # `update_entity` refuse at intake BEFORE any id lookup (measured),
             # so creating a target for them would be dead setup that reads as if
@@ -331,27 +331,27 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
             # marker (`unknown type 'e-census'` / `multiple values for 'title'`)
             # and stayed GREEN under the mutant that removes the key from the
             # constant — a false PASS in the file written to stop exactly that.
-            if door == "create_point":
+            if door == "_create_point":
                 sdk._create_point("statement", "a claim",
                                  source_id="s", span="1-2", quote="q",
                                  embedding_width="f16")
             elif door == "create_entity":
                 sdk.create_entity("object", "e-census", embedding_width="f16")
-            elif door == "create_object":
+            elif door == "_create_object":
                 sdk._create_object("o-census", None, embedding_width="f16")
-            elif door == "create_subject":
+            elif door == "_create_subject":
                 sdk._create_subject("s-census", None, embedding_width="f16")
-            elif door == "create_event":
+            elif door == "_create_event":
                 sdk._create_event("e-census", "thing", embedding_width="f16")
-            elif door == "update_point":
+            elif door == "_update_point":
                 sdk._update_point("p-census", embedding_width="f16")
             elif door == "update_entity":
                 sdk.update_knowledge("e-census", embedding_width="f16")
-            elif door == "update":
+            elif door == "_update":
                 sdk._update(target, embedding_width="f16")
             elif door == "update_knowledge":
                 sdk.update_knowledge(target, embedding_width="f16")
-            elif door == "create_document":
+            elif door == "_create_document":
                 sdk._create_document("a census title", "document",
                                     embedding_width="f16")
             else:

@@ -748,7 +748,7 @@ def test_a_recreation_that_omits_tags_still_drops_the_dead_incarnations(env):
     _write_journal(events, [
         {"type": "PointAdded",
          "point": {"id": "p1", "content": "v1", "tags": ["ghost"]}},
-        {"type": "EntityMutated", "op": "delete", "id": "p1",
+        {"type": "EntityMutated", "op": "_delete", "id": "p1",
          "label": "Point"},
         {"type": "PointAdded", "point": {"id": "p1", "content": "v2"}},
     ])

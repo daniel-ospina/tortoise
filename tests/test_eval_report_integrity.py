@@ -146,12 +146,12 @@ def test_report_integrity_surfaces_extractor_warnings():
     run was byte-indistinguishable from a clean one, so an extraction-quality
     regression that surfaced only as a warning was invisible to the harness."""
     o1 = _outcome("q1")
-    o1["ingest"] = {"warnings": {
+    o1["_ingest"] = {"warnings": {
         "count": 3, "distinct": 2,
         "sample": ["R8: no prior matches — skipped (fail-open)",
                    "Tier-A: ambiguous (2 priors) — never guess"]}}
     o2 = _outcome("q2")
-    o2["ingest"] = {"warnings": {"count": 0, "distinct": 0, "sample": []}}
+    o2["_ingest"] = {"warnings": {"count": 0, "distinct": 0, "sample": []}}
     integ = _report([o1, o2])["integrity"]
     ew = integ["extractor_warnings"]
     assert ew["count"] == 3, "per-question warning counts must be summed"
@@ -179,11 +179,11 @@ def test_report_integrity_extractor_warnings_malformed_fails_closed():
     ``_outcome_shape_ok`` posture). Non-numeric ``count`` reads 0; a
     non-list ``sample`` contributes nothing; ``valid`` is unaffected."""
     bad_count = _outcome("q1")
-    bad_count["ingest"] = {"warnings": {"count": "abc", "sample": 5}}
+    bad_count["_ingest"] = {"warnings": {"count": "abc", "sample": 5}}
     bad_bool = _outcome("q2")
-    bad_bool["ingest"] = {"warnings": {"count": True, "sample": {"a": 1}}}
+    bad_bool["_ingest"] = {"warnings": {"count": True, "sample": {"a": 1}}}
     ok = _outcome("q3")
-    ok["ingest"] = {"warnings": {"count": 7, "sample": "ab"}}
+    ok["_ingest"] = {"warnings": {"count": 7, "sample": "ab"}}
     integ = _report([bad_count, bad_bool, ok])["integrity"]
     ew = integ["extractor_warnings"]
     assert ew["count"] == 7  # only q3's numeric count survives
@@ -197,10 +197,10 @@ def test_report_integrity_extractor_warnings_dedupes_by_qid():
     concurrent-checkpoint overlap) must not double-count — the rest of the
     integrity block dedupes by qid, and this readout must too."""
     a = _outcome("q1")
-    a["ingest"] = {"warnings": {"count": 5, "distinct": 1,
+    a["_ingest"] = {"warnings": {"count": 5, "distinct": 1,
                                 "sample": ["w1"]}}
     b = _outcome("q1")
-    b["ingest"] = {"warnings": {"count": 5, "distinct": 1,
+    b["_ingest"] = {"warnings": {"count": 5, "distinct": 1,
                                 "sample": ["w1"]}}
     integ = _report([a, b])["integrity"]
     ew = integ["extractor_warnings"]
@@ -218,7 +218,7 @@ def test_report_integrity_extractor_warning_sample_capped():
     outcomes = []
     for i in range(n):
         o = _outcome(f"q{i}")
-        o["ingest"] = {"warnings": {"count": 1, "distinct": 1,
+        o["_ingest"] = {"warnings": {"count": 1, "distinct": 1,
                                     "sample": [f"w{i}"]}}
         outcomes.append(o)
     ew = _report(outcomes)["integrity"]["extractor_warnings"]
@@ -230,7 +230,7 @@ def test_print_summary_surfaces_extractor_warnings(capsys):
     """#2873 (review P2): the operator-facing console summary must not be
     byte-identical between a warning-emitting run and a clean one."""
     o = _outcome("q1")
-    o["ingest"] = {"warnings": {
+    o["_ingest"] = {"warnings": {
         "count": 3, "distinct": 2,
         "sample": ["R8: skipped (fail-open)", "Tier-A: ambiguous"]}}
     _print_summary(_report([o]))
@@ -420,7 +420,7 @@ def test_report_integrity_permanent_eval_failure_vetoes():
     assert integ["n_hard_invalid"] == 1
 
     ingest_fail = _report(outcomes, failures=[{
-        "question_id": "q2", "error_class": "ingest",
+        "question_id": "q2", "error_class": "_ingest",
         "error": "write-path boom", "failed_at_utc": "2026-08-20T00:00:00Z",
     }], threshold=0.5)["integrity"]
     assert ingest_fail["valid"] is False
@@ -449,7 +449,7 @@ def test_report_integrity_ingest_transient_recoverable_rates():
     assert above["valid"] is False        # recoverable still rate-limited
 
     bare = _report(outcomes, failures=[{
-        "question_id": "q2", "error_class": "ingest",
+        "question_id": "q2", "error_class": "_ingest",
         "error": "extractor-internal boom",
         "failed_at_utc": "2026-08-20T00:00:00Z",
     }], threshold=1.0)["integrity"]
@@ -1145,7 +1145,7 @@ def test_report_integrity_malformed_dict_outcome_dropped():
             lambda o: o.__setitem__("question_type", ["a", "b"]),
             lambda o: o["session_recall@k"].__setitem__("5", "oops"),
             lambda o: o.__setitem__("evidence_recall@k", "oops"),
-            lambda o: o.__setitem__("ingest", {"evidence_turns": "many"}),
+            lambda o: o.__setitem__("_ingest", {"evidence_turns": "many"}),
             lambda o: o.__setitem__("evidence_retrieved@k", {"5": "oops"}),
             # None/missing shapes (VGATE-pinned): o[...]-dereferenced keys
             lambda o: o.__setitem__("session_recall@k", None),
@@ -1157,7 +1157,7 @@ def test_report_integrity_malformed_dict_outcome_dropped():
             lambda o: o["session_recall@k"].__setitem__("5", None),
             # round-7 families: None leg_mix value, None ingest evidence
             lambda o: o.__setitem__("leg_mix", {"tfidf": None}),
-            lambda o: o.__setitem__("ingest", {"evidence_turns": None,
+            lambda o: o.__setitem__("_ingest", {"evidence_turns": None,
                                                "evidence_points": 5}),
             lambda o: o.__setitem__("rerank_pass",
                                     {"applied": True,

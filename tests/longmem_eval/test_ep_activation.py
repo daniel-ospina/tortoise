@@ -812,7 +812,7 @@ def test_no_op_reason_is_read_from_the_health_surface():
 
 def test_no_op_reason_unknown_when_the_sdk_has_no_health_surface():
     sdk, _ = _make(["c1"])
-    assert not hasattr(sdk, "dream_health_check")
+    assert not hasattr(sdk, "_dream_health_check")
     manifest = epa.activate_beliefs(sdk)
     assert manifest["no_op_reason"] is None
 

@@ -31,7 +31,7 @@ output is in the PR body):
 * **Let the ledger break the read path** — re-raise an append error →
   ``test_a_failed_append_never_raises_into_the_read_path`` RED.
 * **Stop recording reads from the funnel** — drop the call in
-  ``sdk.tortoise_fts_query`` → ``test_the_funnel_records_each_returned_key`` RED.
+  ``sdk._tortoise_fts_query`` → ``test_the_funnel_records_each_returned_key`` RED.
 
 They run on the embedded carve-out (``TORTOISE_TEST_CARVE_OUT=1``) or a
 ``TORTOISE_DB_URI`` (``tests/conftest.py`` session gate).

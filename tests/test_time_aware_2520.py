@@ -36,7 +36,7 @@ from tortoise.time_aware import (
 # detect_temporal_intent
 # ══════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize("query", [
+@pytest.mark.parametrize("_query", [
     "where do I live now?",
     "Where does the user live currently?",
     "What type of coffee does Ava currently prefer?",
@@ -53,7 +53,7 @@ def test_prefer_latest_intent_phrasings(query):
     assert detect_temporal_intent(query).kind == PREFER_LATEST
 
 
-@pytest.mark.parametrize("query", [
+@pytest.mark.parametrize("_query", [
     "where did I live in 2024?",
     "What was my address back in March?",
     "What did I say I used to prefer?",

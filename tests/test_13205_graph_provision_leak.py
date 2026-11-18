@@ -1433,7 +1433,7 @@ class TestReaperExecute:
                             lambda *a, **k: type(
                                 "S", (), {"_get_proj": lambda self: _Proj()})())
         report = _real_report(type("P", (), {
-            "db": type("D", (), {"list_graphs": lambda self: [
+            "db": type("D", (), {"_list_graphs": lambda self: [
                 "org_o1", "org_customer", "orphan"]})()})())
         outcome = reaper.reap(report, proj=_Proj())
         assert deleted == ["org_o1"], deleted
@@ -1489,7 +1489,7 @@ class TestReaperExecute:
         class _Proj:
             db = type("D", (), {
                 "select_graph": lambda self, n: type(
-                    "G", (), {"delete": lambda s: deleted.append(n)})()})()
+                    "G", (), {"_delete": lambda s: deleted.append(n)})()})()
 
         report = {"graphs": [
             {"graph": "org_a_g_1", "bucket": reaper.BUCKET_REAPABLE,
@@ -1512,7 +1512,7 @@ class TestReaperExecute:
         class _Proj:
             db = type("D", (), {
                 "select_graph": lambda self, n: type(
-                    "G", (), {"delete": lambda s: deleted.append(n)})()})()
+                    "G", (), {"_delete": lambda s: deleted.append(n)})()})()
 
         report = {"graphs": [
             {"graph": "org_a_g_1", "bucket": reaper.BUCKET_REAPABLE,
@@ -1531,7 +1531,7 @@ class TestReaperExecute:
 
         monkeypatch.setattr(reaper, "build_report", lambda **kw: _real_report(
             type("P", (), {"db": type("D", (), {
-                "list_graphs": lambda self: [
+                "_list_graphs": lambda self: [
                     "org_o1", "org_customer", "orphan"]})()})()))
         rc = reaper.main(["--json"])
         out = capsys.readouterr().out
@@ -1559,7 +1559,7 @@ class TestReaperExecute:
 
         monkeypatch.setattr(reaper, "build_report", lambda **kw: _real_report(
             type("P", (), {"db": type("D", (), {
-                "list_graphs": lambda self: [
+                "_list_graphs": lambda self: [
                     "org_o1", "org_customer", "orphan"]})()})()))
         monkeypatch.setattr(reaper, "_read_handle", lambda: _Proj())
         monkeypatch.setattr("tortoise.hosted_api._make_sdk",

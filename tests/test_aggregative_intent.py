@@ -74,7 +74,7 @@ CLASSIFICATION_TABLE = [
 
 
 @pytest.mark.parametrize(
-    ("query", "is_aggregative", "quantifier", "scope"),
+    ("_query", "is_aggregative", "quantifier", "scope"),
     CLASSIFICATION_TABLE,
     ids=[f"r{i}" for i in range(len(CLASSIFICATION_TABLE))],
 )

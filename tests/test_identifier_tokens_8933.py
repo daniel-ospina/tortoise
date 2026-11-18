@@ -436,7 +436,7 @@ class TestRawRetrieval:
         phrases = [t for t in terms if t.startswith('"')]
         assert len(phrases) <= MAX_ALIASES_PER_POINT, len(phrases)
 
-    @pytest.mark.parametrize("query", [
+    @pytest.mark.parametrize("_query", [
         "time is 27:12", "price was $40", "how much did I spend at $40?",
         "date 2024-01-15", "on 2024-01-15 the deploy failed",
     ])

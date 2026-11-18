@@ -769,7 +769,7 @@ def test_pipeline_cli_builds_a_journal_less_projection():
         node for node in ast.walk(module)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "ingest"
+        and node.func.attr == "_ingest"
     ]
     assert any(
         c.args and ast.unparse(c.args[0]) == "proj"
@@ -849,7 +849,7 @@ def test_verify_health_check_remains_a_self_deleting_scratch_write():
         "_cmd_verify no longer WRITES its scratch `test-verify` Point — the "
         "health check can print success over a no-op (#3600)"
     )
-    assert any(isinstance(c.func, ast.Attribute) and c.func.attr == "query"
+    assert any(isinstance(c.func, ast.Attribute) and c.func.attr == "_query"
                and "test-verify" in _text(c) and "DELETE" in _text(c)
                for c in calls), (
         "_cmd_verify no longer DELETES its own scratch `test-verify` Point — "

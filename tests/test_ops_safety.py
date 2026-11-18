@@ -385,7 +385,7 @@ def test_torn_removal_record_is_not_replayed_into_a_resurrection():
     db_path = os.path.join(tmp, "torn_removal.db")
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     # A SIGKILL mid-append: truncated inside the record, after its type field.
     torn = full[:full.index('"op"')]
@@ -471,7 +471,7 @@ def test_complete_log_with_a_removal_still_replays_identically():
         _point_added("gone-1"),
         _point_added("kept-1"),
         json.dumps({"type": "EntityMutated", "label": "Point",
-                    "id": "gone-1", "op": "delete", "seq": 3}),
+                    "id": "gone-1", "op": "_delete", "seq": 3}),
     )
     proj = FalkorProjection(db_path)
     try:
@@ -506,7 +506,7 @@ def test_rebuild_all_refuses_a_torn_tail_in_any_journal_file(torn_file):
     os.makedirs(log_dir, exist_ok=True)
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     torn = full[:full.index('"op"')]
     if torn_file == "a.jsonl":
@@ -584,7 +584,7 @@ def test_rebuild_all_refuses_a_torn_removal_tail_before_the_wipe():
     os.makedirs(log_dir, exist_ok=True)
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "sentinel",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(os.path.join(log_dir, "events.jsonl"),
                    _point_added("sentinel"), full[:full.index('"op"')],
@@ -612,7 +612,7 @@ def test_rebuild_refuses_a_torn_removal_tail_before_the_wipe():
     journal = os.path.join(log_dir, "events.jsonl")
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(journal, _point_added("gone-1"), full[:full.index('"op"')],
                    torn_last=True)
@@ -669,7 +669,7 @@ def test_inmemory_rebuild_refuses_a_torn_removal_tail():
     journal = os.path.join(tmp, "events.jsonl")
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(journal, _point_added("gone-1"), full[:full.index('"op"')],
                    torn_last=True)
@@ -835,7 +835,7 @@ def test_backup_restore_refuses_a_torn_removal_tail():
     os.makedirs(work, exist_ok=True)
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(os.path.join(backup_dir, "events.jsonl"),
                    _point_added("gone-1"), full[:full.index('"op"')],
@@ -894,7 +894,7 @@ def test_backup_restore_refuses_before_touching_the_destination():
     # fallback is the path that would run.
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(os.path.join(backup_dir, "events.jsonl"),
                    _point_added("gone-1"), full[:full.index('"op"')],
@@ -947,7 +947,7 @@ def test_backup_restore_default_copies_a_torn_tail_backup():
     os.makedirs(work, exist_ok=True)
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(os.path.join(backup_dir, "events.jsonl"),
                    _point_added("gone-1"), full[:full.index('"op"')],
@@ -985,7 +985,7 @@ def test_reconcile_cli_refuses_a_torn_removal_tail(capsys):
     log_path = os.path.join(tmp, "events.jsonl")
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(log_path, _point_added("gone-1"),
                    full[:full.index('"op"')], torn_last=True)
@@ -1025,7 +1025,7 @@ def test_rebuild_cli_reports_the_refusal_as_a_message(capsys, monkeypatch):
     os.makedirs(log_dir, exist_ok=True)
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "sentinel",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(os.path.join(log_dir, "events.jsonl"),
                    _point_added("sentinel"), full[:full.index('"op"')],
@@ -1063,7 +1063,7 @@ def test_rebuild_cli_inmemory_fallback_refuses_a_torn_tail(capsys, monkeypatch):
     os.makedirs(log_dir, exist_ok=True)
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "sentinel",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     _write_journal(os.path.join(log_dir, "events.jsonl"),
                    _point_added("sentinel"), full[:full.index('"op"')],
@@ -1096,7 +1096,7 @@ def test_recover_from_log_pending_snapshot_route_refuses_a_torn_tail():
     os.makedirs(log_dir, exist_ok=True)
     full = json.dumps({
         "type": "EntityMutated", "label": "Point", "id": "gone-1",
-        "op": "delete", "seq": 2,
+        "op": "_delete", "seq": 2,
     })
     # A complete PointAdded + a torn hard delete: replaying without the delete
     # would revive gone-1.
@@ -1352,7 +1352,7 @@ def test_the_unresponsive_leg_leaves_the_store_untouched(monkeypatch):
         raise RuntimeError("backend unresponsive (injected)")
 
     try:
-        monkeypatch.setattr(proj, "query", _dead)
+        monkeypatch.setattr(proj, "_query", _dead)
         r = recover_from_log(tmp, proj)
         assert r["recovered"] is False, r
         assert "unresponsive" in r["reason"], r["reason"]
@@ -1442,7 +1442,7 @@ def test_an_unmeasurable_post_replay_count_is_not_reported_as_empty(monkeypatch)
                 raise RuntimeError("injected: backend died before the count")
         return real_query(q, *a, **k)
 
-    monkeypatch.setattr(proj, "query", _query)
+    monkeypatch.setattr(proj, "_query", _query)
     try:
         r = recover_from_log(tmp, proj)
         assert counts["n"] >= 2, (
@@ -1491,7 +1491,7 @@ def test_a_clean_replay_whose_count_fails_is_not_reported_as_empty(monkeypatch):
                 raise RuntimeError("injected: backend died before the count")
         return real_query(q, *a, **k)
 
-    monkeypatch.setattr(proj, "query", _query)
+    monkeypatch.setattr(proj, "_query", _query)
     try:
         r = recover_from_log(tmp, proj)
         assert counts["n"] >= 2, (
@@ -1562,7 +1562,7 @@ def test_the_pending_route_reports_an_unmeasurable_count_as_unknown(monkeypatch)
                 raise RuntimeError("injected: backend died before the count")
         return real_query(q, *a, **k)
 
-    monkeypatch.setattr(proj, "query", _query)
+    monkeypatch.setattr(proj, "_query", _query)
     try:
         r = recover_from_log(tmp, proj)
         assert counts["n"] >= 2, (

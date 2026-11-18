@@ -99,7 +99,7 @@ def _order_spies(sdk, monkeypatch, cache_pattern: str) -> list[str]:
             order.append("cache")
         return real_query(cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", spy_query)
+    monkeypatch.setattr(type(proj.g), "_query", spy_query)
     return order
 
 
@@ -165,7 +165,7 @@ def test_a_failed_append_does_not_write_the_cache_on_update(env, monkeypatch):
     assert ei.value.record_committed is False, (
         "the append FAILED, so the record is not committed and the cache must "
         "not hold it")
-    assert ei.value.operation == "update_point", (
+    assert ei.value.operation == "_update_point", (
         "the error must name the door that raised it — a create_point message "
         f"on an update is a lie the caller cannot see past: {ei.value}")
     live = dict(sdk._get_point(pid))
@@ -200,7 +200,7 @@ def test_a_failed_cache_write_leaves_the_revision_replayable(env, monkeypatch):
             raise RuntimeError("simulated write failure (test)")
         return real_query(cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", spy_query)
+    monkeypatch.setattr(type(proj.g), "_query", spy_query)
 
     with pytest.raises(RuntimeError, match="simulated write failure"):
         sdk._update_point(pid, content="revised content")

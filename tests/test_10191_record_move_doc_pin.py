@@ -96,7 +96,7 @@ _NON_DERIVABLE_CLAIM = "at neither endpoint"
 
 def _structural_repoint(src="p1", tgt="Acme Corp", edge_type="aboutObject",
                         **extra):
-    """The 2b descriptor `sdk.supersede_point` journals (no successor field)."""
+    """The 2b descriptor `sdk._supersede_point` journals (no successor field)."""
     return {"type": "DirectEdgeRepoint", "ts": "T",
             "id": f"{src}->p2:{edge_type}:{tgt}",
             "src": src, "tgt": tgt, "target_label": "Object",

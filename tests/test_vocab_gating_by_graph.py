@@ -1437,11 +1437,11 @@ class TestMCPEntityDoors5475:
 
     @pytest.mark.parametrize("tool,prop,kind,sdk_method", [
         ("tortoise_create_object", "objectKind", "marketing:campaign",
-         "create_object"),
+         "_create_object"),
         ("tortoise_create_subject", "subjectKind", "marketing:persona",
-         "create_subject"),
+         "_create_subject"),
         ("tortoise_create_event", "eventKind", "agent-ops:ruleRevised",
-         "create_event"),
+         "_create_event"),
     ])
     def test_mcp_entity_tool_refuses_and_does_not_widen(self, mcp_sdk, tool,
                                                         prop, kind,
@@ -2245,7 +2245,7 @@ class TestIngestCorpusEventKind5475:
         ``compile_vocab``'s docstring carries the authoritative "what is still
         open" map — it is what a later lane reads to decide whether a write
         path needs work, and the PR body leans on it for the same reason. The
-        paragraph this test pins listed ``sdk.ingest_corpus(eventKind=...)``'s
+        paragraph this test pins listed ``sdk._ingest_corpus(eventKind=...)``'s
         raw ``SET e += $props`` among the writers that "never meet a door at
         all"; this PR gated that argument BEFORE the raw write, so the map had
         to drop the clause and say what is really left on that method.
@@ -2289,7 +2289,7 @@ class TestIngestCorpusEventKind5475:
         # The sink must stay named, and named by its MEASUREMENT rather than by
         # the shape: `link_source_to_entity` has no `_journal_backed` check, so
         # it is open on both shapes and a "journal-less" framing understates it.
-        assert "link_source_to_entity" in ungated and "sourceKind" in ungated, (
+        assert "_link_source_to_entity" in ungated and "sourceKind" in ungated, (
             "the projection's OWN sinks still widen the approval set on a "
             "direct call (`FalkorProjection.apply` when `_journal_backed` is "
             "false, `link_source_to_entity`'s `sourceKind` on BOTH shapes) — "

@@ -308,7 +308,7 @@ def test_structural_leg_orders_documents_by_their_canonical_key(sdk):
 #: `tortoise/projection/__init__.py::_HANDLE_MUTATING_VERBS`, which lists all six
 #: so "what is a query verb" cannot drift between readers). `explain` PLANS and
 #: never executes, so it is deliberately absent — it cannot return rows.
-_QUERY_VERBS = frozenset({"query", "ro_query", "_query", "profile",
+_QUERY_VERBS = frozenset({"_query", "ro_query", "_query", "profile",
                           "execute_command"})
 
 #: Markers that make a read non-ranking BY ITS OWN SHAPE, so a missing ORDER BY

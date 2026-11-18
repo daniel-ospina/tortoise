@@ -532,7 +532,7 @@ async def test_recall_bad_mode_is_recorded_as_a_failure(events, hosted):
     The refusal is a tool-body branch: the SDK is never reached, so there is no
     exception for the ladder to catch and nothing `_safe` produced.
     """
-    result = await ms.mcp.call_tool("tortoise_recall", {"query": "q",
+    result = await ms.mcp.call_tool("tortoise_recall", {"_query": "q",
                                                         "mode": "bogus"})
 
     payload = result.structured_content
@@ -846,7 +846,7 @@ async def test_the_refusal_wire_shape_is_the_plain_dict_it_replaced(
     later refactor that "cleans up" the payload is caught here rather than by a
     customer parsing the wire.
     """
-    result = await ms.mcp.call_tool("tortoise_recall", {"query": "q",
+    result = await ms.mcp.call_tool("tortoise_recall", {"_query": "q",
                                                         "mode": "bogus"})
 
     payload = dict(result.structured_content)      # what a client deserializes

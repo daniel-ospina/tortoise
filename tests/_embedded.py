@@ -500,7 +500,7 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_longmem_runner",
     "test_flip_gate",
     "test_graph_integrity_gate",
-    "test_guard",
+    "_test_guard",
     "test_hard_reject",
     # #4047: the two #3845 fork-guard files carry a module-level
     # ``pytestmark = pytest.mark.embedded_only`` — their SUBJECT is the embedded

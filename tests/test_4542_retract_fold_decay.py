@@ -191,7 +191,7 @@ def test_4542_fold_retract_before_a_recreate_leaves_the_fresh_incarnation_alone(
          "point": {"id": "p1", "content": "old", "status": "live",
                    "confidence": 0.9, "posterior_alpha": 9.0}},
         {"type": "PointRetracted", "id": "p1"},
-        {"type": "EntityMutated", "op": "delete", "id": "p1", "label": "Point"},
+        {"type": "EntityMutated", "op": "_delete", "id": "p1", "label": "Point"},
         {"type": "PointAdded",
          "point": {"id": "p1", "content": "new", "status": "live"}},
     ])

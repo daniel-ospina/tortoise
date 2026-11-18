@@ -103,7 +103,7 @@ _LIVENESS_FORBIDDEN_NAMES = {
 #: collects ``ast.Name``, so a forbidden callee reached through a receiver would
 #: otherwise be invisible to the pin (the readiness sibling guards ``_get_proj``
 #: this way too).
-_LIVENESS_FORBIDDEN_ATTRS = {"query", "submit", "run_in_executor", "to_thread",
+_LIVENESS_FORBIDDEN_ATTRS = {"_query", "submit", "run_in_executor", "to_thread",
                              "wrap_future", "snapshot", "_get_proj"}
 
 
@@ -442,7 +442,7 @@ def test_ready_handler_does_not_touch_db_code_on_the_loop():
         for n in _walk_own_body(node)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Attribute)
-        and n.func.attr in {"_get_proj", "query"}
+        and n.func.attr in {"_get_proj", "_query"}
     ]
     assert not offenders, (
         f"selfhost health_ready touches DB/projection code directly at line(s) "

@@ -306,7 +306,7 @@ def _write_fault(monkeypatch):
             raise redis_exc.TimeoutError("simulated stall")
         return _ORIGINAL_QUERY(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(proj_mod._GuardedGraph, "query", _flaky)
+    monkeypatch.setattr(proj_mod._GuardedGraph, "_query", _flaky)
 
 
 def _noop_sleep_runner_time() -> types.ModuleType:
@@ -342,7 +342,7 @@ def _run(tmp_path, monkeypatch, *, retry_failed=False, fail_writes=False,
     if fail_writes:
         _write_fault(monkeypatch)
     else:
-        monkeypatch.setattr(proj_mod._GuardedGraph, "query", _ORIGINAL_QUERY)
+        monkeypatch.setattr(proj_mod._GuardedGraph, "_query", _ORIGINAL_QUERY)
     reader = MockReader()
     if reader_boom:
         def _rb(**kw):
@@ -719,7 +719,7 @@ def test_failure_entry_repr_truncation():
 
     big = requests.exceptions.Timeout("x" * 5000)
     entry = runner._failure_entry("q1", "single-session-user", big,
-                                  stage="ingest", attempts=0)
+                                  stage="_ingest", attempts=0)
     assert entry["retryable"] is True
     assert len(entry["error"]) <= runner.ERROR_REPR_CAP + len("…<truncated>")
     assert entry["error"].endswith("…<truncated>")

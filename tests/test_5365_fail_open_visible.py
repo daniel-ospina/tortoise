@@ -1,6 +1,6 @@
 """#5365 — a fail-open supersession skip must be VISIBLE, not just warned.
 
-`commit_ops.apply_supersessions` and `sdk.promote_point` both deliberately
+`commit_ops.apply_supersessions` and `sdk._promote_point` both deliberately
 swallow a failed supersession rather than abort their caller (a bad record must
 not abort a whole ingest; a promotion must not be lost to a wire that cannot be
 made). #4021 made that acute: a retroactive supersession that previously

@@ -2559,7 +2559,7 @@ def _install_fts(monkeypatch, mapping, *, leg=None):
              excluded_statuses=None, leg_trace=None, keep_numeric=False,
              expansion_terms=None):
         rows = [tuple(r) for r in mapping.get(query, [])]
-        calls.append({"query": query, "entity_type": entity_type,
+        calls.append({"_query": query, "entity_type": entity_type,
                       "limit": limit})
         if leg_trace is not None:
             leg_trace.append(dict(

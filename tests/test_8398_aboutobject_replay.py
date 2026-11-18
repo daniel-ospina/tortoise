@@ -1635,7 +1635,7 @@ def test_a_CHAINS_latest_carry_wins_ACROSS_a_rebuild(wired) -> None:
     The single-hop case is pinned by the two tests above; a chain is a
     different question, and the answer is not "the first descriptor to run".
     Live is last-writer-wins ON A CHAIN: every transfer reads `properties(r)` of
-    the edge its predecessor holds AT THAT MOMENT (`sdk.supersede_point`), so
+    the edge its predecessor holds AT THAT MOMENT (`sdk._supersede_point`), so
     X→Y carries X's value, and Y→Z carries whatever Y's edge holds by then.
 
     Measured here: X holds `0.42`, the intermediate successor Y holds its own

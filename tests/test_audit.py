@@ -419,7 +419,7 @@ def test_cli_json_mode_and_exit_code(sdk, capsys, tmp_path):
     sdk.close()
 
     from tortoise.__main__ import main
-    rc = main(["audit", "--db", db, "--json"])
+    rc = main(["_audit__svc", "--db", db, "--json"])
     out = capsys.readouterr().out
     report = json.loads(out)
     assert rc == 1
@@ -434,7 +434,7 @@ def test_cli_human_mode_and_clean_exit(sdk, capsys, tmp_path):
     sdk.close()
 
     from tortoise.__main__ import main
-    rc = main(["audit", "--db", db])
+    rc = main(["_audit__svc", "--db", db])
     out = capsys.readouterr().out
     assert rc == 0
     assert "Tortoise Audit" in out
@@ -448,7 +448,7 @@ def test_cli_human_mode_reports_issues(sdk, capsys, tmp_path):
     sdk.close()
 
     from tortoise.__main__ import main
-    rc = main(["audit", "--db", db])
+    rc = main(["_audit__svc", "--db", db])
     out = capsys.readouterr().out
     assert rc == 1
     assert "[superseded_no_edge]" in out
@@ -498,11 +498,11 @@ def test_cli_error_paths_clean_one_line(case, capsys, monkeypatch, tmp_path):
         _clear_db_env(monkeypatch)
         monkeypatch.setenv("FALKORDB_HOST", "localhost")
         monkeypatch.setenv("FALKORDB_PORT", "not-an-int")
-        argv = ["audit"]
+        argv = ["_audit__svc"]
         expect = "Invalid FALKORDB_PORT"
     elif case == "relative_path":
         _clear_db_env(monkeypatch)
-        argv = ["audit", "--db", "relative/path.db"]
+        argv = ["_audit__svc", "--db", "relative/path.db"]
         expect = "Relative DB path"
     elif case == "unreachable_uri":
         _clear_db_env(monkeypatch)
@@ -512,7 +512,7 @@ def test_cli_error_paths_clean_one_line(case, capsys, monkeypatch, tmp_path):
         monkeypatch.setenv(
             "TORTOISE_DB_URI",
             f"docker://:{secret}@127.0.0.1:1/tortoise")
-        argv = ["audit"]
+        argv = ["_audit__svc"]
         expect = "audit failed"
     else:  # embedded_busy
         _clear_db_env(monkeypatch)
@@ -525,7 +525,7 @@ def test_cli_error_paths_clean_one_line(case, capsys, monkeypatch, tmp_path):
             json.dumps({"pidfile": str(tmp_path / "busy.pid")}),
             encoding="utf-8")
         (tmp_path / "busy.pid").write_text(str(os.getpid()), encoding="utf-8")
-        argv = ["audit", "--db", db_path]
+        argv = ["_audit__svc", "--db", db_path]
         expect = "Embedded store busy"
 
     rc = main(argv)

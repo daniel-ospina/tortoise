@@ -961,7 +961,7 @@ def test_the_declared_vocabulary_has_one_home():
     """#2766's defect is a vocabulary derived in several places and drifting.
 
     `pack_registry.declared_relation_predicates` is the ONE home; the write path
-    (`sdk.create_operator`) and S5's gate both read it. THIS test is the OFFLINE
+    (`sdk._create_operator`) and S5's gate both read it. THIS test is the OFFLINE
     half — it pins S5's gate to the same call, and pins the helper's answer to
     the sets the write path used to derive for itself. The write path's own
     half is BEHAVIOURAL and lives where `create_operator` can actually be

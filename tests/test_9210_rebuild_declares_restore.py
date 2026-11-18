@@ -304,7 +304,7 @@ def _record_authorizations(monkeypatch):
         seen.append((cypher, _CACHE_WRITE_AUTHORIZED.get()))
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
     return seen
 
 
@@ -331,7 +331,7 @@ def _record_writes_with_params(monkeypatch):
         seen.append((cypher, _CACHE_WRITE_AUTHORIZED.get(), params))
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
     return seen
 
 

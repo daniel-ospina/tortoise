@@ -671,7 +671,7 @@ class TestPointDeleteTwoStore:
         sdk._delete_point(pid)
 
         recs = [r for r in _mutations(events) if r.get("id") == pid]
-        assert [(r["op"], r["label"]) for r in recs] == [("delete", "Point")]
+        assert [(r["op"], r["label"]) for r in recs] == [("_delete", "Point")]
         assert "state" not in recs[0], \
             "#3299's recorded shape carries nothing for a delete"
 
@@ -750,9 +750,9 @@ class TestOpVocabulary:
                     & _ENTITY_MUTATION_PENDING_OPS)
 
     def test_state_ops_plus_delete_is_the_implemented_set(self):
-        assert _ENTITY_MUTATION_STATE_OPS | {"delete"} == \
+        assert _ENTITY_MUTATION_STATE_OPS | {"_delete"} == \
             _ENTITY_MUTATION_IMPLEMENTED_OPS
-        assert "delete" not in _ENTITY_MUTATION_STATE_OPS
+        assert "_delete" not in _ENTITY_MUTATION_STATE_OPS
 
     @pytest.mark.parametrize("op", sorted(_ENTITY_MUTATION_PENDING_OPS))
     def test_pending_ops_are_the_documented_ones(self, op):
@@ -886,7 +886,7 @@ class TestNonFoldedSet:
         Warning here would turn valid journals into false positives — and the
         pass-1b warning already covers the rebuild_all case."""
         sdk, events = env
-        self._raw(events, type=_REC, op="delete", label="Object",
+        self._raw(events, type=_REC, op="_delete", label="Object",
                   id="obj-never-existed")
         with caplog.at_level("WARNING"):
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)

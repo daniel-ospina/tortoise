@@ -694,15 +694,15 @@ def test_a_topical_query_pays_no_pool_width_state_read(ku_graph, monkeypatch):
 
 _RE_OWNING_LANES = (
     # (label, method name, args, kwargs)
-    ("recall_state", "recall_state", (_PLAIN_QUERY,), {}),
-    ("issue_insight", "issue_insight", ("billing ledger", "the database"), {}),
+    ("_recall_state", "_recall_state", (_PLAIN_QUERY,), {}),
+    ("_issue_insight", "_issue_insight", ("billing ledger", "the database"), {}),
     # #4282 / #11609 Phase 2: the standalone ``suggest_entry_points`` SDK door
     # retired into ``search_knowledge(mode="entry_points")``, which delegates to
     # the same ``_suggest_entry_points`` lane — so the lane, and this pin, keep
     # their subject through the one surviving door.
     ("search_knowledge(entry_points)", "search_knowledge", ("billing ledger",),
      {"mode": "entry_points"}),
-    ("recall_gaps", "recall_gaps", (_PLAIN_QUERY,), {}),
+    ("_recall_gaps", "_recall_gaps", (_PLAIN_QUERY,), {}),
     # #8487 review round 6, P2: the review pool is a MEMBERSHIP filter and the
     # subgraph seed is an expansion START SET — neither consumes the order.
     ("_review_pool", "_review_pool", ("billing ledger now",), {}),
@@ -727,7 +727,7 @@ def test_internal_pool_reads_opt_out_of_the_selection(sdk, monkeypatch):
         seen.append((args[0] if args else "", kwargs))
         return []
 
-    monkeypatch.setattr(sdk, "tortoise_fts_query", _record)
+    monkeypatch.setattr(sdk, "_tortoise_fts_query", _record)
     failures = []
     for label, method, args, kwargs in _RE_OWNING_LANES:
         seen.clear()
@@ -751,7 +751,7 @@ def test_the_measurement_lanes_declare_their_valid_time_choice():
     Reachable: an AST pass over the six declared lanes below, which asserts the
     DECLARED
     choice per lane rather than a general rule — each file's reason is recorded
-    at its own call site or in its own docstring. Only `sdk.tortoise_fts_query`
+    at its own call site or in its own docstring. Only `sdk._tortoise_fts_query`
     call sites are inspected, so unrelated calls cannot satisfy it.
     """
     import ast
@@ -779,7 +779,7 @@ def test_the_measurement_lanes_declare_their_valid_time_choice():
                 continue
             fn = node.func
             name = getattr(fn, "attr", getattr(fn, "id", ""))
-            if name != "tortoise_fts_query":
+            if name != "_tortoise_fts_query":
                 continue
             kw = {k.arg: k.value for k in node.keywords if k.arg}
             value = kw.get("_valid_time_rerank")
@@ -794,7 +794,7 @@ def test_the_measurement_lanes_declare_their_valid_time_choice():
     problems = []
     for rel, want in expected.items():
         declared = _declared(root / rel)
-        assert declared, f"{rel}: no sdk.tortoise_fts_query call site found"
+        assert declared, f"{rel}: no sdk._tortoise_fts_query call site found"
         for got in declared:
             if got != want:
                 problems.append(f"{rel}: _valid_time_rerank={got!r}, want {want!r}")

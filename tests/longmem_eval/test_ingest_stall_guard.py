@@ -172,9 +172,9 @@ def test_hung_read_grades_ingest_retries_exhausted(monkeypatch, hung_server):
                                 skip_health_check=True)
         proj.g.query("RETURN 1")
     exc = ei.value
-    assert eval_failure_class(exc, site="ingest") == "ingest:retries_exhausted"
+    assert eval_failure_class(exc, site="_ingest") == "ingest:retries_exhausted"
     entry = runner._failure_entry("q1", "multi-session", exc,
-                                  stage="ingest", attempts=0)
+                                  stage="_ingest", attempts=0)
     assert entry["retryable"] is True
     assert entry["error_class"] == "ingest:retries_exhausted"
     # …and that entry is exactly what the resume path re-attempts.
@@ -187,9 +187,9 @@ def test_ingest_stall_timeout_is_retryable_and_resume_eligible():
     assert isinstance(exc, TimeoutError)
     assert exc.errno == errno.ETIMEDOUT  # transport evidence for the predicate
     assert retryable_transient(exc) is True
-    assert eval_failure_class(exc, site="ingest") == "ingest:retries_exhausted"
+    assert eval_failure_class(exc, site="_ingest") == "ingest:retries_exhausted"
     entry = runner._failure_entry("q7", "temporal", exc,
-                                  stage="ingest", attempts=0)
+                                  stage="_ingest", attempts=0)
     assert entry["retryable"] is True
     assert runner._retry_failed_gate_ok(entry) is True
 
@@ -439,7 +439,7 @@ def test_ingest_haystack_v2_aborts_stalled_question(monkeypatch):
         ingest_haystack_v2(_BoomSDK(), question, model=None, heartbeat=hb)
     assert ei.value.stalled_for >= 100.0
     assert retryable_transient(ei.value) is True
-    assert eval_failure_class(ei.value, site="ingest") == \
+    assert eval_failure_class(ei.value, site="_ingest") == \
         "ingest:retries_exhausted"
     # The guard fired on the boundary that FOLLOWED the slow stage (the
     # stage label is the one that overran) — the graph was never touched.

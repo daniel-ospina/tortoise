@@ -232,7 +232,7 @@ class _FakeGraph:
         return b"x" * 64
 
     def delete(self):
-        self.calls.append("delete")
+        self.calls.append("_delete")
 
     def restore(self, _payload):
         self.calls.append("restore")
@@ -248,7 +248,7 @@ class _FakeGraph:
 
     # --- conveniences -----------------------------------------------------------
     def destructive_calls(self) -> list:
-        return [call for call in self.calls if call in ("dump", "delete", "restore")]
+        return [call for call in self.calls if call in ("dump", "_delete", "restore")]
 
     def safe(self, **overrides):
         kwargs = dict(
@@ -333,7 +333,7 @@ def test_the_guard_does_not_fire_on_an_unindexed_graph() -> None:
 
     observation = engine.raw()
 
-    assert engine.destructive_calls() == ["dump", "delete", "restore"], (
+    assert engine.destructive_calls() == ["dump", "_delete", "restore"], (
         f"the unindexed restore did not run: {engine.calls}"
     )
     assert observation.status in (SERVED, UNMEASURED)
@@ -415,7 +415,7 @@ def test_a_range_index_in_the_PARSED_shape_is_not_a_reason_to_refuse() -> None:
 
     observation = engine.raw(index_guard=lambda: [rangeful])
 
-    assert engine.destructive_calls() == ["dump", "delete", "restore"], (
+    assert engine.destructive_calls() == ["dump", "_delete", "restore"], (
         f"a RANGE-only graph was refused through the parsed seam: {engine.calls}"
     )
     assert observation.status in (SERVED, UNMEASURED)
@@ -456,7 +456,7 @@ def test_a_range_or_fulltext_index_is_not_a_reason_to_refuse() -> None:
 
     observation = engine.raw()
 
-    assert engine.destructive_calls() == ["dump", "delete", "restore"]
+    assert engine.destructive_calls() == ["dump", "_delete", "restore"]
     assert observation.status in (SERVED, UNMEASURED)
 
 
@@ -530,7 +530,7 @@ def test_an_unindexed_graph_is_restored_without_any_index_work() -> None:
 
     result = engine.safe()
 
-    assert engine.destructive_calls() == ["dump", "delete", "restore"]
+    assert engine.destructive_calls() == ["dump", "_delete", "restore"]
     assert result.indexes.definitions == ()
     assert result.indexes.dropped is False
     assert result.indexes.recreated is False
@@ -583,7 +583,7 @@ def test_a_drop_that_does_not_take_refuses_before_the_dump() -> None:
     assert "dump" not in engine.calls, (
         f"the DUMP ran although the index survived the drop: {engine.calls}"
     )
-    assert "delete" not in engine.calls
+    assert "_delete" not in engine.calls
     assert "embedding" in str(raised.value)
 
 
@@ -664,7 +664,7 @@ def test_a_dump_failure_re_creates_the_index_because_the_KEY_was_never_deleted()
         engine.safe()
 
     assert "DUMP failed" in str(raised.value)
-    assert "delete" not in engine.calls, "the DEL ran after the DUMP failed"
+    assert "_delete" not in engine.calls, "the DEL ran after the DUMP failed"
     creates = [call for call in engine.calls if call.startswith("create:")]
     assert creates == ["create:embedding"], (
         f"the dropped index was not put back although the graph key was never deleted: "

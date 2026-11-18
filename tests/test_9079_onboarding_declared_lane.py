@@ -884,10 +884,10 @@ def test_the_verb_scan_is_not_vacuous():
     scanned = _scanned_write_verbs()
     required = {
         # the wrapper's own verbs (including the private hop #9124 enumerates)
-        "query", "ro_query", "_query", "profile", "explain",
+        "_query", "ro_query", "_query", "profile", "explain",
         "execute_command",
         # forwarded through `__getattr__` to the vendor Graph
-        "delete", "copy", "call_procedure",
+        "_delete", "copy", "call_procedure",
     }
     missing = sorted(required - scanned)
     assert not missing, (
@@ -898,13 +898,13 @@ def test_the_verb_scan_is_not_vacuous():
     # vendor surface, so asserting only against `scanned` would let a wrapper
     # override disappear unnoticed (the vendor would supply the name).
     wrapper_verbs = {n for n in dir(_GuardedGraph) if not n.startswith("__")}
-    assert {"query", "ro_query", "_query", "profile", "explain",
+    assert {"_query", "ro_query", "_query", "profile", "explain",
             "execute_command"} <= wrapper_verbs, (
         "`_GuardedGraph` no longer overrides one of the verbs the guard "
         "depends on — it would fall through to the vendor handle and lose the "
         "projection's own refusals"
     )
-    assert not ({"query", "delete"} & _READ_ONLY_HANDLE_VERBS), (
+    assert not ({"_query", "_delete"} & _READ_ONLY_HANDLE_VERBS), (
         "the read-only allowlist contains a write verb — that would silence "
         "the scan on the exact calls it exists to catch"
     )

@@ -174,7 +174,7 @@ def _revised(sdk: TortoiseSDK, pid: str, **fields) -> dict:
 
 
 def _deleted(sdk: TortoiseSDK, pid: str) -> dict:
-    return _mutated(sdk, type_="EntityMutated", op="delete", id=pid,
+    return _mutated(sdk, type_="EntityMutated", op="_delete", id=pid,
                     label="Point")
 
 

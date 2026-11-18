@@ -66,7 +66,7 @@ def bare_sdk(monkeypatch):
     """An SDK with only the legs the ARM uses — no graph, no persistence."""
     recorder = _Recorder()
     sdk = TortoiseSDK.__new__(TortoiseSDK)
-    monkeypatch.setattr(TortoiseSDK, "create_point", recorder, raising=True)
+    monkeypatch.setattr(TortoiseSDK, "_create_point", recorder, raising=True)
     monkeypatch.setattr(TortoiseSDK, "_nudge_candidates",
                         lambda _self, _text, exclude_ids=None: [], raising=True)
     return sdk, recorder

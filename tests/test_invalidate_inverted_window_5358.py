@@ -119,7 +119,7 @@ def test_future_dated_predecessor_refused_without_mutation(sdk):
     repl = _make_point(sdk, content="replacement")
     before = _props(sdk, old["id"])
 
-    with pytest.raises(ValueError, match="retract_point"):
+    with pytest.raises(ValueError, match="_retract_point"):
         sdk._invalidate_point(old["id"], repl["id"])
 
     # (a) nothing was mutated — byte-identical props (validFrom, no validTo,
@@ -296,7 +296,7 @@ def test_retract_point_is_the_window_agnostic_route_after_refusal(sdk):
     old = _make_point(sdk, content="future claim", validFrom=future.isoformat())
     repl = _make_point(sdk, content="replacement")
 
-    with pytest.raises(ValueError, match="retract_point"):
+    with pytest.raises(ValueError, match="_retract_point"):
         sdk._invalidate_point(old["id"], repl["id"])
 
     sdk._retract_point(old["id"])
@@ -337,7 +337,7 @@ def test_duplicate_id_group_refuses_when_ANY_node_is_future_dated(sdk):
     )
     repl = _make_point(sdk, content="replacement")
 
-    with pytest.raises(ValueError, match="retract_point"):
+    with pytest.raises(ValueError, match="_retract_point"):
         sdk._invalidate_point("dup5358", repl["id"])
 
     rows = proj.g.query(
@@ -398,8 +398,8 @@ def test_all_rows_semantics_are_order_independent(sdk, monkeypatch):
     _guard([(past,)])
     # ANY future start refuses, whatever the order
     for rows in ([(future,)], [(past,), (future,)], [(future,), (past,)]):
-        with pytest.raises(ValueError, match="retract_point"):
+        with pytest.raises(ValueError, match="_retract_point"):
             _guard(rows)
     # a leading UNDATED node must not short-circuit the scan
-    with pytest.raises(ValueError, match="retract_point"):
+    with pytest.raises(ValueError, match="_retract_point"):
         _guard([(None,), (future,)])

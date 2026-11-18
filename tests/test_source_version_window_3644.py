@@ -581,7 +581,7 @@ def test_the_mcp_boundary_keeps_only_the_transition_keys():
 
     `_reject_server_managed_props` is the choke point for every MCP entity
     tool, and `tortoise_create_point`/`tortoise_update_point` splat caller
-    `props` straight into `sdk.create_point`/`sdk.update_point`, for which
+    `props` straight into `sdk._create_point`/`sdk._update_point`, for which
     `validFrom`/`validTo` are first-class caller props (§4.7 keeps the Point
     column caller-writable; `sdk._refuse_inverted_point_window`'s docstring
     states it). FAILS BEFORE: all five keys were in the shared set, so a

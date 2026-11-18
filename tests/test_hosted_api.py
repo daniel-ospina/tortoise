@@ -1720,7 +1720,7 @@ class TestPointsCreate:
         drains and evicts that same queue on the LOOP thread. The assertion
         only passes when the response is delivered inside that window, and the
         window is lost deterministically once boot maintenance shares the GIL
-        with the worker's blocking ``sdk.dream()`` — which is now the normal
+        with the worker's blocking ``sdk._dream()`` — which is now the normal
         case, because the #2953 boot sweeps no longer run before the bind.
         Spy on the enqueue instead: the call site is what this test is about,
         it is recorded synchronously inside the request, and it pins the
@@ -1936,12 +1936,12 @@ class TestPointsCreateConfidenceAndAuthor:
 
     `CreatePointRequest` declared neither field, so pydantic's default
     ``extra='ignore'`` discarded them and the route never forwarded them to
-    ``sdk.create_point`` — the write reported ``ok`` while BOTH fields were
+    ``sdk._create_point`` — the write reported ``ok`` while BOTH fields were
     lost. The wire names are not invented here: the hosted client
     (agent-infra ``scripts/tortoise-memory.mjs``) sends exactly these on
     ``write-points`` / ``write-claim``, and the in-repo Python client
     (``tortoise_client.write_claim``) already persists them through
-    ``sdk.create_point``. Each test below pins one half of the contract: the
+    ``sdk._create_point``. Each test below pins one half of the contract: the
     value is STORED, or the request is ANSWERED with a 4xx — never a success
     that silently discards it.
     """
@@ -2219,7 +2219,7 @@ class TestTeamInfo:
         assert r.json() == {"session": None}
 
     def test_create_object_idempotent(self, client):
-        """#1643 (Task 2): POST /v1/objects wraps sdk.create_object —
+        """#1643 (Task 2): POST /v1/objects wraps sdk._create_object —
         deterministic id by name, idempotent across calls (node outcome)."""
         r1 = client.post("/v1/objects", json={"name": "proj-x", "objectKind": "project"})
         assert r1.status_code == 200, r1.text
@@ -2230,7 +2230,7 @@ class TestTeamInfo:
         assert r2.json()["id"] == o1["id"], "create_object must be idempotent by name"
 
     def test_create_subject_wraps_sdk_idempotent(self, client):
-        """#1660: POST /v1/subjects wraps sdk.create_subject —
+        """#1660: POST /v1/subjects wraps sdk._create_subject —
         deterministic id by name, idempotent across calls."""
         r1 = client.post("/v1/subjects", json={"name": "daniel", "subjectKind": "person"})
         assert r1.status_code == 200, r1.text
@@ -2758,7 +2758,7 @@ class TestRevokedKeysDoNotConsumeCap2481:
         # control: at the cap with 2 ACTIVE keys → 402
         assert client.post("/v1/team/keys").status_code == 402
         # revoke one key → its tombstone must NOT consume the cap slot
-        r = client.delete(f"/v1/team/keys/{a.json()['id']}")
+        r = client._delete(f"/v1/team/keys/{a.json()['id']}")
         assert r.status_code == 200 and r.json()["revoked"] is True
         m = client.post("/v1/team/keys", json={"name": "replacement"})
         assert m.status_code == 200, m.text
@@ -2771,7 +2771,7 @@ class TestRevokedKeysDoNotConsumeCap2481:
         for i in range(4):
             r = client.post("/v1/team/keys", json={"name": f"cycle-{i}"})
             assert r.status_code == 200, r.text
-            d = client.delete(f"/v1/team/keys/{r.json()['id']}")
+            d = client._delete(f"/v1/team/keys/{r.json()['id']}")
             assert d.status_code == 200, d.text
         # every key this team ever minted is now a revoked tombstone → two
         # fresh mints land; a third 402s ONLY because 2 are ACTIVE.
@@ -2784,13 +2784,13 @@ class TestRevokedKeysDoNotConsumeCap2481:
         assert client.post("/v1/team/keys",
                            json={"scopes": ["graphs:read"]}).status_code == 409
         # revoke one active key → BOTH the 402 and 409 surfaces free up
-        assert client.delete(
+        assert client._delete(
             f"/v1/team/keys/{k1.json()['id']}").status_code == 200
         # scoped-mint 409 surface first (tombstones still present)
         s = client.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
         assert s.status_code == 200, s.text
         # legacy-mint 402 surface too
-        assert client.delete(
+        assert client._delete(
             f"/v1/team/keys/{s.json()['id']}").status_code == 200
         assert client.post("/v1/team/keys").status_code == 200
 
@@ -3723,7 +3723,7 @@ class TestSessionCapture:
                 raise RuntimeError("stamping query failed")
             return _real_query(query, **params)
 
-        monkeypatch.setattr(_raw, "query", _boom_stamp)
+        monkeypatch.setattr(_raw, "_query", _boom_stamp)
         monkeypatch.setattr("tortoise.sdk.TortoiseSDK._get_proj",
                             lambda self: proj)
         # #1727 (Task 11): the _get_proj patch also redirects the consent
@@ -4261,7 +4261,7 @@ class TestSessionCaptureWriteVerb:
                 self, cypher, params=params, timeout=timeout)
 
         for cls in _graph_classes:
-            monkeypatch.setattr(cls, "query", _selective_boom)
+            monkeypatch.setattr(cls, "_query", _selective_boom)
         r = client.post("/v1/sessions", json={
             "conversation": self.CONVERSATION,
             "session_id": "w5-enrich-fail-session",
@@ -6101,7 +6101,7 @@ class TestIssueInsightAPI:
         def _boom(*args, **kwargs):
             raise RuntimeError("graph down")
 
-        monkeypatch.setattr(ha_mod.TortoiseSDK, "issue_insight", _boom)
+        monkeypatch.setattr(ha_mod.TortoiseSDK, "_issue_insight", _boom)
         r = client.get("/v1/issue-insight", params={"title": "x", "repo": "owner/a"})
         assert r.status_code == 500
         assert r.json()["detail"] == "Insight unavailable"
@@ -6112,7 +6112,7 @@ class TestKeysRevoke:
 
     def test_revoke_key_sets_revoked_at(self, client):
         created = client.post("/v1/team/keys").json()
-        r = client.delete(f"/v1/team/keys/{created['id']}")
+        r = client._delete(f"/v1/team/keys/{created['id']}")
         assert r.status_code == 200, r.text
         assert r.json()["revoked"] is True
         # Listed key now shows revoked
@@ -6121,7 +6121,7 @@ class TestKeysRevoke:
         assert target and target[0]["revoked_at"] is not None
 
     def test_revoke_nonexistent_key_returns_404(self, client):
-        r = client.delete("/v1/team/keys/nonexistent-key")
+        r = client._delete("/v1/team/keys/nonexistent-key")
         assert r.status_code == 404
 
     def test_revoke_requires_auth(self, unauth_client):
@@ -6130,8 +6130,8 @@ class TestKeysRevoke:
 
     def test_revoking_twice_is_idempotent(self, client):
         created = client.post("/v1/team/keys").json()
-        r1 = client.delete(f"/v1/team/keys/{created['id']}")
-        r2 = client.delete(f"/v1/team/keys/{created['id']}")
+        r1 = client._delete(f"/v1/team/keys/{created['id']}")
+        r2 = client._delete(f"/v1/team/keys/{created['id']}")
         assert r1.status_code == 200
         assert r2.json()["already"] is True
         # Still exactly one revoked entry after double revoke
@@ -7135,7 +7135,7 @@ class TestEventReplay:
 
     def test_events_delete_not_allowed(self, client):
         """DELETE /v1/events → 405 Method Not Allowed."""
-        r = client.delete("/v1/events")
+        r = client._delete("/v1/events")
         assert r.status_code == 405, f"expected 405, got {r.status_code}"
 
     # ── Limit param ───────────────────────────────────────────────────
@@ -11522,7 +11522,7 @@ class TestEmbeddedRegistryPathDivergence:
         def _query_boom(table, **kw):
             raise RuntimeError("PostgREST transient outage")
 
-        monkeypatch.setattr(fake, "query", _query_boom)
+        monkeypatch.setattr(fake, "_query", _query_boom)
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
         assert ha_mod._iter_registered_orgs() == []

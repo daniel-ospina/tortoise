@@ -426,7 +426,7 @@ class TestDeleteDuringCapture:
             """The real project exposes the graph as BOTH .g.query (hosted
             impl) and .query (onboarding state helpers) — mirror both, and
             delegate every other attribute to the real project."""
-            g = type("G", (), {"query": staticmethod(fake_query)})()
+            g = type("G", (), {"_query": staticmethod(fake_query)})()
             query = staticmethod(fake_query)
 
             def __getattr__(self, name):

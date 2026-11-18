@@ -2525,7 +2525,7 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
                     isinstance(func, ast.Attribute)
                     and isinstance(func.value, ast.Name)
                     and func.value.id == "app"
-                    and func.attr in {"get", "post", "put", "patch", "delete"}
+                    and func.attr in {"get", "post", "put", "patch", "_delete"}
                 ):
                     continue
                 if isinstance(decorator.args[0], ast.Constant):
@@ -2556,7 +2556,7 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 # function passed as a VALUE (`_safe(_preview_supersede, …)`, which is how the
 # supersede dry run is reached and which a call-target-only graph misses), a
 # carrier constant, or an imported name with `from x import y as _y` resolved
-# back to `y` (how `sdk.topic_summarize` reaches its reader at all). The reader
+# back to `y` (how `sdk._topic_summarize` reaches its reader at all). The reader
 # must be in that set.
 #
 # ⚠️ **Declared residuals — each MEASURED here, not assumed:**

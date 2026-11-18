@@ -100,7 +100,7 @@ def test_diff_deleted_base_migration_rejected():
     base = _git_sha(d)
     (d / MIG / "0001_a.sql").unlink()
     _git(d, "add", "-A")
-    _git(d, "commit", "-q", "-m", "delete")
+    _git(d, "commit", "-q", "-m", "_delete")
     r = _run_script("diff", d, base)
     assert r.returncode == 1, r.stdout
     assert "0001_a.sql" in r.stdout

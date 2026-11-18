@@ -336,7 +336,7 @@ def test_fts_trace_index_missing(tmp_path, monkeypatch):
         # proj.g is a read-only _GuardedGraph — patch the underlying handle
         def _raise_index(*a, **kw):
             raise RuntimeError("index does not exist: Point")
-        monkeypatch.setattr(proj.g._g, "query", _raise_index)
+        monkeypatch.setattr(proj.g._g, "_query", _raise_index)
         trace: list[dict] = []
         hits = run_fts_query(proj.g, "hello", leg_trace=trace)
         assert hits == []
@@ -542,7 +542,7 @@ class TestR2OrUnionAndSearchKeys:
         assert "other" not in ids
 
     def test_write_path_flattens_search_keys(self, proj):
-        """R2 D3: sdk.create_point stores search_keys as a FLAT string (E3's
+        """R2 D3: sdk._create_point stores search_keys as a FLAT string (E3's
         list payload is flattened on the write path — owner-flagged cross-lane
         deviation, plan D3) and the flat value is FTS-findable."""
         from tortoise.sdk import TortoiseSDK

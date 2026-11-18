@@ -5,12 +5,12 @@ pack set**. At this branch's base that property is enforced at the doors
 declared in `_DOORS` below and no others — stated as doors rather than as a
 cardinality, because a count is the part that goes stale:
 
-* the SDK point door (`sdk.create_point`) and the SDK entity funnel
+* the SDK point door (`sdk._create_point`) and the SDK entity funnel
   (`sdk._create_entity`, which `create_object`/`create_subject`/`create_event`/
   `create_document`/`create_source`/`create_entity` all relay through);
-* the two UPDATE doors (`sdk.update_point`, `sdk._update_entity`, #9070);
-* the second writers of an already-mined property — `sdk.link_source_to_entity`
-  (its `sourceKind` keyword) and `sdk.ingest_corpus` (its `eventKind` keyword);
+* the two UPDATE doors (`sdk._update_point`, `sdk._update_entity`, #9070);
+* the second writers of an already-mined property — `sdk._link_source_to_entity`
+  (its `sourceKind` keyword) and `sdk._ingest_corpus` (its `eventKind` keyword);
 * the record-building doors that journal-then-fold — `sdk._apply_and_journal`
   and `sdk._doc_write`;
 * the raw-`:Event` record half (`sdk._journal_event_raw_write`, #9122) — the
@@ -139,7 +139,7 @@ read the set before, perform ONE write, read it after.
      s.sourceKind=$sk`). This method has **no `_journal_backed` check at all**
      (measured: a journal-backed SDK widens too), so **it is open on BOTH
      shapes**, and the ONLY refusal on that leg is in the
-     `sdk.link_source_to_entity` WRAPPER. A fix that mirrors `apply`'s gate
+     `sdk._link_source_to_entity` WRAPPER. A fix that mirrors `apply`'s gate
      (`if not _journal_backed: refuse`) would therefore leave the
      journal-backed half open — which is why the pin below carries a
      journal-backed case as well as the journal-less ones.
@@ -1123,7 +1123,7 @@ def test_a_pipeline_row_does_not_grant_its_namespace(
 # projection writes a mined kind property in a second place —
 # `link_source_to_entity` stores the caller's `source_kind` in `sourceKind`
 # (`projection/edges.py`) — and the gate for that leg lives in the
-# `sdk.link_source_to_entity` WRAPPER, not in the projection. `apply` gates
+# `sdk._link_source_to_entity` WRAPPER, not in the projection. `apply` gates
 # only when `_journal_backed`; the link has NO `_journal_backed` check at all,
 # so it is open on both shapes. Hence THREE cases: the journal-less pair plus a
 # journal-backed link, so a fix that mirrors `apply`'s gate cannot leave the
@@ -1180,7 +1180,7 @@ def journal_backed_dev_only_sdk(tmp_path: Path) -> Iterator[TortoiseSDK]:
     "a direct call: `apply` refuses only when `_journal_backed` (open on a "
     "journal-less projection), while `link_source_to_entity` has no "
     "`_journal_backed` check at all (open on BOTH shapes) — its only refusal "
-    "is the `sdk.link_source_to_entity` wrapper"))
+    "is the `sdk._link_source_to_entity` wrapper"))
 def test_a_journal_less_fold_does_not_widen_the_approval_set(
         request, writer, namespaced: str, fixture_name: str) -> None:
     """(1) Failing value is the approval set gaining `namespaced`; (2) the

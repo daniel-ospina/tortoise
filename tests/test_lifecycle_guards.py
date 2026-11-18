@@ -425,8 +425,8 @@ def test_duplicate_id_with_an_operator_sibling_is_refused(sdk):
 # `update_point` never consulted the shared `_assert_lifecycle_guard`, so a
 # TERMINAL claim's validity window could be rewritten through it:
 #
-#     sdk.retract_point(p)                       # p is now TERMINAL
-#     sdk.update_point(p, validTo="2026-06-10")  # ...accepted, window written
+#     sdk._retract_point(p)                       # p is now TERMINAL
+#     sdk._update_point(p, validTo="2026-06-10")  # ...accepted, window written
 #
 # The guard is scoped to `_TEMPORAL_RESTAMP_PROPS` (window bounds + their
 # precision markers + `expiredAt` + `when`) because an ADDRESSED content/

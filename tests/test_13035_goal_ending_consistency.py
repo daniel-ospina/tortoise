@@ -224,7 +224,7 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
         sdk._create_point("goal", "GOAL - duplicate [create-door]",
                          id=goal["id"], status="archived")
     msg = str(exc.value)
-    assert "REFUSED" in msg and "create_point" in msg, msg
+    assert "REFUSED" in msg and "_create_point" in msg, msg
     assert "goalState='abandoned'" in msg       # repair 1: add the ending
     assert "status='live'" in msg               # repair 2: drop the ending
     # nothing landed: the stored pair is untouched
@@ -308,7 +308,7 @@ def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
     with pytest.raises(ValueError) as exc:
         sdk._create_point("goal", "GOAL - duplicate [no status]", id=goal["id"])
     msg = str(exc.value)
-    assert "REFUSED" in msg and "create_point" in msg, msg
+    assert "REFUSED" in msg and "_create_point" in msg, msg
     assert "status='live'" in msg                # the pair it refused, named
     assert "drop the ending from `goalState`" in msg   # repair 2: drop it
 
@@ -1490,7 +1490,7 @@ def test_a_RE_MENTION_create_on_DUPLICATE_disagreeing_ids_refuses(sdk):
         _refuse_ending_dropped_by_a_re_mention(
             sdk._get_proj(), twin,
             {"goalState": "abandoned"}, label="Object",
-            surface="create_object")
+            surface="_create_object")
     msg = str(exc.value)
     assert "more than one node" in msg, msg
     assert "resolve the duplicate ids first" in msg, msg

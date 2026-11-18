@@ -258,7 +258,7 @@ class TestIssueInsightE2E:
         def _boom(*args, **kwargs):
             raise RuntimeError("graph down")
 
-        monkeypatch.setattr(sdk, "issue_insight", _boom)
+        monkeypatch.setattr(sdk, "_issue_insight", _boom)
 
         result = ms.tortoise_issue_insight(title="x", repo="owner/a")
 

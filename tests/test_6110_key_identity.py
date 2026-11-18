@@ -1775,7 +1775,7 @@ class TestContentIdentityReadIsBatched:
             calls.append(q)
             return real(self, q, **kwargs)
 
-        with mock.patch.object(type(proj.g), "query", spy):
+        with mock.patch.object(type(proj.g), "_query", spy):
             sdk._validate_bundle(bundle)
         return len(calls), sum(1 for q in calls if "content_hash" in q)
 
@@ -1831,7 +1831,7 @@ class TestTheBatchedReadPlansAsASeek:
             calls.append((q, kwargs.get("params") or {}))
             return real(self, q, **kwargs)
 
-        with mock.patch.object(type(proj.g), "query", spy):
+        with mock.patch.object(type(proj.g), "_query", spy):
             sdk._validate_bundle(bundle)
         return [(q, p) for q, p in calls if "content_hash" in q]
 
@@ -2132,7 +2132,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
            Pre-fix this errors (the array-kind row is keyed before the twin is
            ever reached).
         2. the defect surfaced through the PUBLIC door, not only in the read:
-           the review's repro was ``sdk.ingest(...)`` raising a bare
+           the review's repro was ``sdk._ingest(...)`` raising a bare
            ``TypeError``. So the legal bundle is committed here, and the
            collided one raises the STRUCTURED verdict.
         """

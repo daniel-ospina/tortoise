@@ -116,13 +116,13 @@ def test_same_lane_sums_and_cache_detail_keys_preserved():
     c = _fresh()
     usage.set_question_key("q1")
     for _ in range(3):
-        c.record(stage="ingest", provider="openrouter",
+        c.record(stage="_ingest", provider="openrouter",
                  model_id="deepseek/deepseek-v4-flash",
                  usage={"prompt_tokens": 7, "completion_tokens": 3,
                         "prompt_cache_hit_tokens": 2},
                  usage_present=True)
     env = c.drain_question("q1")
-    bucket = env["by_stage"]["ingest"]["openrouter"][
+    bucket = env["by_stage"]["_ingest"]["openrouter"][
         "deepseek/deepseek-v4-flash"]
     assert bucket == {"prompt_tokens": 21, "completion_tokens": 9,
                       "calls": 3, "usage_present": True,
@@ -179,7 +179,7 @@ def test_threaded_fires_single_drain_no_lost_rows():
     ctx = contextvars.copy_context()  # mirrors _call_once's daemon behavior
 
     def _fire():
-        c.record(stage="ingest", provider="openrouter", model_id="m",
+        c.record(stage="_ingest", provider="openrouter", model_id="m",
                  usage={"prompt_tokens": 1, "completion_tokens": 1},
                  usage_present=True)
 
@@ -209,14 +209,14 @@ def test_keyless_rows_go_to_overhead_and_clear_question_key():
     env = c.drain_question("q1")
     assert env["total"]["calls"] == 1
     usage.clear_question_key()
-    c.record(stage="ingest", provider="openrouter", model_id="m",
+    c.record(stage="_ingest", provider="openrouter", model_id="m",
              usage={"prompt_tokens": 4, "completion_tokens": 1},
              usage_present=True)
     oh = c.drain_overhead()
     assert oh is not None
     # preflight + the post-clear keyless row
     assert oh["by_stage"]["preflight"]["openrouter"]["m"]["calls"] == 1
-    assert oh["by_stage"]["ingest"]["openrouter"]["m"]["calls"] == 1
+    assert oh["by_stage"]["_ingest"]["openrouter"]["m"]["calls"] == 1
     assert oh["total"]["calls"] == 2
 
 
@@ -246,12 +246,12 @@ def test_attach_wires_sink_and_records_under_registered_provider():
     c = _fresh()
     adapter = _StubAdapter("deepseek-v4-flash", provider="openrouter")
     adapter.usage_sink = None  # explicitly NO pre-set sink (A6)
-    n = c.attach(adapter, stage="ingest", provider=None)
+    n = c.attach(adapter, stage="_ingest", provider=None)
     assert n == 1
     usage.set_question_key("q1")
     adapter.complete(system="s", user="u")
     env = c.drain_question("q1")
-    assert env["by_stage"]["ingest"]["openrouter"]["deepseek-v4-flash"][
+    assert env["by_stage"]["_ingest"]["openrouter"]["deepseek-v4-flash"][
         "calls"] == 1
 
 
@@ -285,15 +285,15 @@ def test_attach_walks_routing_and_rotating_members():
     p2 = _StubAdapter("deepseek-v4-flash", provider="deepseek-direct")
     routed = RoutingLike(p1)
     rot = RotatingLike([p1, p2])
-    assert c.attach(routed, stage="ingest", provider=None) == 1
-    assert c.attach(rot, stage="ingest", provider=None) == 2
+    assert c.attach(routed, stage="_ingest", provider=None) == 1
+    assert c.attach(rot, stage="_ingest", provider=None) == 2
     assert p1.usage_sink is not None and p2.usage_sink is not None
     usage.set_question_key("q1")
     p1.complete(system="s", user="u")
     p2.complete(system="s", user="u")
     env = c.drain_question("q1")
     assert env["total"]["calls"] == 2
-    assert env["by_stage"]["ingest"]["deepseek-direct"][
+    assert env["by_stage"]["_ingest"]["deepseek-direct"][
         "deepseek-v4-flash"]["calls"] == 1
 
 
@@ -326,13 +326,13 @@ def test_attach_descends_through_complete_bearing_wrappers():
     p1 = _StubAdapter("deepseek/deepseek-v4-flash", provider="openrouter")
     f1 = _StubAdapter("deepseek-v4-flash", provider="deepseek-direct")
     routed = RoutingLike(p1, f1)
-    assert c.attach(routed, stage="ingest", provider=None) == 2
+    assert c.attach(routed, stage="_ingest", provider=None) == 2
     # members bound; the wrapper itself must NOT be the sole bind
     assert p1.usage_sink is not None and f1.usage_sink is not None
     usage.set_question_key("q1")
     routed.complete(system="s", user="u")  # delegates to p1's transport
     env = c.drain_question("q1")
-    assert env["by_stage"]["ingest"]["openrouter"][
+    assert env["by_stage"]["_ingest"]["openrouter"][
         "deepseek/deepseek-v4-flash"]["calls"] == 1
     assert env["total"]["calls"] == 1
 
@@ -541,7 +541,7 @@ def test_merge_and_fold_preserve_detail_keys():
     store; merges and folds now sum over the UNION of scalar keys."""
     c = _fresh()
     usage.set_question_key("qFail")
-    c.record(stage="ingest", provider="deepseek-direct",
+    c.record(stage="_ingest", provider="deepseek-direct",
              model_id="deepseek-v4-flash",
              usage={"prompt_tokens": 10, "completion_tokens": 4,
                     "reasoning_tokens": 3,
@@ -549,23 +549,23 @@ def test_merge_and_fold_preserve_detail_keys():
              usage_present=True)
     env = c.drain_to_overhead("qFail")
     assert env is not None
-    lane = env["by_stage"]["ingest"]["deepseek-direct"]
+    lane = env["by_stage"]["_ingest"]["deepseek-direct"]
     lane = lane["deepseek-v4-flash"]
     assert lane["reasoning_tokens"] == 3
     assert lane["prompt_tokens_details_cached_tokens"] == 6
     oh = c.drain_overhead()
-    lane = oh["by_stage"]["ingest"]["deepseek-direct"]
+    lane = oh["by_stage"]["_ingest"]["deepseek-direct"]
     lane = lane["deepseek-v4-flash"]
     assert lane["reasoning_tokens"] == 3
     assert lane["prompt_tokens_details_cached_tokens"] == 6
     # fold path preserves the detail keys too
     c2 = UsageCollector()
     assert c2.fold_replica(
-        "qFail", {"ingest": {"deepseek-direct": {"deepseek-v4-flash": {
+        "qFail", {"_ingest": {"deepseek-direct": {"deepseek-v4-flash": {
             "prompt_tokens": 10, "completion_tokens": 4, "calls": 1,
             "reasoning_tokens": 3, "usage_present": True}}}}) is True
     oh2 = c2.drain_overhead()
-    lane2 = oh2["by_stage"]["ingest"]["deepseek-direct"]
+    lane2 = oh2["by_stage"]["_ingest"]["deepseek-direct"]
     assert lane2["deepseek-v4-flash"]["reasoning_tokens"] == 3
 
 

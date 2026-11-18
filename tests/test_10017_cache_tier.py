@@ -259,7 +259,7 @@ def test_provenance_cannot_rewrite_the_tier(monkeypatch) -> None:
                         lambda _type, **record: seen.update(record))
     try:
         sdk._journal_entity_mutation(
-            "Point", "s1_t0", "delete", cache_tier=RECORD_ONLY_TIER,
+            "Point", "s1_t0", "_delete", cache_tier=RECORD_ONLY_TIER,
             provenance={"cache_tier": "graph", "session_id": "s1"})
     finally:
         sdk.close()

@@ -415,7 +415,7 @@ def test_push_path_recomputes_no_beliefs(sdk_factory, monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("the push path called the EP engine")
 
-    monkeypatch.setattr(ep_mod.TortoiseEP, "compute_confidence", _boom)
+    monkeypatch.setattr(ep_mod.TortoiseEP, "_compute_confidence", _boom)
     sdk = _seed(sdk_factory, n=2)
     proj = sdk._get_proj()
     wd.create_subscription(proj, url="https://hooks.example.com/cb")
@@ -1180,10 +1180,10 @@ def test_rest_registration_lifecycle(client):
     empty = client.get(f"/v1/context/subscriptions/{sub_id}/deliveries")
     assert empty.status_code == 200 and empty.json()["deliveries"] == []
 
-    deleted = client.delete(f"/v1/context/subscriptions/{sub_id}")
+    deleted = client._delete(f"/v1/context/subscriptions/{sub_id}")
     assert deleted.status_code == 200 and deleted.json()["deleted"] is True
     assert client.get("/v1/context/subscriptions").json()["subscriptions"] == []
-    assert client.delete(f"/v1/context/subscriptions/{sub_id}").status_code == 404
+    assert client._delete(f"/v1/context/subscriptions/{sub_id}").status_code == 404
     assert client.get(
         "/v1/context/subscriptions/sub_missing/deliveries").status_code == 404
 

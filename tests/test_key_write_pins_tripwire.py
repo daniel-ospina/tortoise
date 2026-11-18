@@ -100,7 +100,7 @@ KEY_WRITE_HANDLERS: dict[str, tuple[str, ...]] = {
 # is deliberately excluded — same boundary as the client tripwire's scan of
 # backtick `/v1/team/keys` URLs).
 KEY_WRITE_ROUTE_PREFIXES = ("/v1/team/keys", "/v1/team/dashboard-login")
-KEY_WRITE_METHODS = ("post", "patch", "delete")
+KEY_WRITE_METHODS = ("post", "patch", "_delete")
 
 
 @pytest.fixture(autouse=True)
@@ -375,7 +375,7 @@ class TestKeyWritePinsTripwireBehavior:
         # and ignoring were indistinguishable on this lane.)
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
         kid = self._key_id(fake, teamA)  # key lives in A (memberships[0])
-        r = client.delete(
+        r = client._delete(
             f"/v1/team/keys/{kid}?org_id={teamB}", headers={"Authorization": "Bearer eyJ.sess"}
         )
         assert r.status_code == 403, r.text

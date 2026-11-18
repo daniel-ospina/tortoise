@@ -119,7 +119,7 @@ class Pool:
                           point_kind=p.get("point_kind", ""))
                 for p in q.get("points", [])
             ]
-            queries.append(PoolQuery(id=q["id"], query=q["query"], points=points))
+            queries.append(PoolQuery(id=q["id"], query=q["_query"], points=points))
         return cls(
             queries=queries,
             corpus_fingerprint=data.get("corpus_fingerprint", {}),
@@ -132,7 +132,7 @@ class Pool:
             "corpus_fingerprint": self.corpus_fingerprint,
             "strategies": self.strategies,
             "queries": [
-                {"id": q.id, "query": q.query,
+                {"id": q.id, "_query": q.query,
                  "points": [p.to_dict() for p in q.points]}
                 for q in self.queries
             ],
@@ -275,7 +275,7 @@ def agreement_report(labels_a: dict[str, dict[str, int]],
         ka = _kappa_labels(a)
         kb = _kappa_labels(b)
         per_query[qid] = {
-            "query": query_meta.get(qid, ""),
+            "_query": query_meta.get(qid, ""),
             "kappa": kappa_tool.kappa(ka, kb),
             "n_points": len(set(a) & set(b)),
         }

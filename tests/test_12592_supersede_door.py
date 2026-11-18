@@ -233,7 +233,7 @@ def test_a_point_refusal_prescribes_retract_not_reserved_archived(sdk):
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status="superseded")
     msg = str(exc.value)
-    assert "retract_point" in msg, msg
+    assert "_retract_point" in msg, msg
     assert "RESERVED on Points" not in msg, (
         f"the Point refusal still claims `archived` is RESERVED on Points — a row "
         f"§5 deleted in v3.37 and the synonym map contradicts: {msg!r}")
@@ -627,7 +627,7 @@ def test_a_hybrid_row_nameless_as_object_is_prescribed_the_point_remedy(sdk):
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(node, status="superseded")
     message = str(exc.value)
-    assert "retract_point" in message and "names no verb" in message, (
+    assert "_retract_point" in message and "names no verb" in message, (
         "a hybrid nameless as an Object was prescribed a Point-illegal "
         f"'archived': {message}")
     assert "status='archived'" not in message, message

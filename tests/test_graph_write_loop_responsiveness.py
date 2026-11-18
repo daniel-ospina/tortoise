@@ -27,7 +27,7 @@ Mechanism under test (post-review, #3718): the SHORT graph calls (`~35ms`
 class — `create_point`, `create_object`, `create_subject`, `poll_events`) go
 through `asyncio.to_thread`, the file's house style — the same pattern
 `/v1/search` uses for the same class of short sync graph work. The LONG call
-(`sdk.dream`, seconds) and the `_dream_worker` drain go through the dedicated
+(`sdk._dream`, seconds) and the `_dream_worker` drain go through the dedicated
 `_DREAM_EXECUTOR` via `_run_dream_on_pool`: the module's own #3060 criterion
 reserves a dedicated pool for long/stallable work, because the shared default
 executor is `min(32, cpu+4)` with an unbounded wait. WHICH
@@ -68,7 +68,7 @@ their behavioural and AST-inventory guards live in
 `tests/test_read_routes_loop_responsiveness.py` — while ~30 other `async def`
 routes in this file still run sync FalkorDB I/O inline (the named residual in
 that file's `_KNOWN_INLINE_ROUTE_RESIDUAL`); and the capture path's
-`_apply_capture_ingest_ep` still runs a `sdk.dream(mode="local")` pass on the
+`_apply_capture_ingest_ep` still runs a `sdk._dream(mode="local")` pass on the
 loop (tracked by #3086) — which is also why the production `_dream_lock`
 serializes only the two POOLED pass sites. So a tick count here certifies the
 OFF-LOADED CALL, not the whole request.
@@ -113,28 +113,28 @@ MIN_TICKS_IN_STALL = 10
 # `_DREAM_QUEUES` root so the branch executes at all. `url` (not `path`) is the
 # httpx request kwarg.
 _ENDPOINTS = [
-    ("points", "create_point",
+    ("points", "_create_point",
      {"method": "POST", "url": "/v1/points",
       "json": {"content": "the release needs a normalization pass",
                # #1643: drives the create_about_edge sub-call in the same
                # worker hand-off, so the branch executes at all.
                "about_object": "3718-about-object"}}),
-    ("objects", "create_object",
+    ("objects", "_create_object",
      {"method": "POST", "url": "/v1/objects",
       "json": {"name": "3718-object"}}),
-    ("subjects", "create_subject",
+    ("subjects", "_create_subject",
      {"method": "POST", "url": "/v1/subjects",
       "json": {"name": "3718-subject"}}),
     ("events", "poll_events",
      {"method": "GET", "url": "/v1/events"}),
-    ("dream", "dream",
+    ("_dream", "_dream",
      {"method": "POST", "url": "/v1/dream"}),
     # The other two /v1/dream branches (I1 precedence: an explicit mode wins
     # over full). A refactor that put only one branch back on the loop would
     # otherwise pass.
-    ("dream-mode", "dream",
+    ("dream-mode", "_dream",
      {"method": "POST", "url": "/v1/dream", "params": {"mode": "local"}}),
-    ("dream-full", "dream",
+    ("dream-full", "_dream",
      {"method": "POST", "url": "/v1/dream", "params": {"full": "true"}}),
 ]
 
@@ -441,7 +441,7 @@ def test_graph_write_does_not_freeze_the_event_loop(
         f"FalkorDB socket I/O freezes every concurrent request for the round "
         f"trip (the /v1/search precedent off-loads it; #3718)")
 
-    if label.startswith("dream"):
+    if label.startswith("_dream"):
         # The long pass must not ride the SHARED default executor — the #3060
         # starvation path the first review cycle caught in this change. (#10618
         # moved the auth path's per-request hooks off that pool, which removes
@@ -450,7 +450,7 @@ def test_graph_write_does_not_freeze_the_event_loop(
         # handlers, with /health still green.)
         assert not str(state.get("thread")).startswith(
             _SHARED_POOL_THREAD_PREFIX), (
-            f"[{label}] sdk.dream ran on {state.get('thread')!r} — the shared "
+            f"[{label}] sdk._dream ran on {state.get('thread')!r} — the shared "
             f"default executor, whose unbounded queue a burst of dream passes "
             f"would fill, stalling unrelated tenants before their handlers "
             f"with /health still green (#3060 / #3718)")
@@ -503,7 +503,7 @@ _PREAMBLE_ENDPOINTS = [
     ("subjects", {"method": "POST", "url": "/v1/subjects",
                   "json": {"name": "3773-subject"}}),
     ("events", {"method": "GET", "url": "/v1/events"}),
-    ("dream", {"method": "POST", "url": "/v1/dream"}),
+    ("_dream", {"method": "POST", "url": "/v1/dream"}),
 ]
 
 #: The handlers whose preamble ALSO runs the per-org quota count.
@@ -588,13 +588,13 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
 
     ``create_point`` calls ``_enqueue_dream``, which schedules
     ``_dream_worker`` — an ``async def`` that called ``sdk._mark_dirty`` and
-    ``sdk.dream`` directly in its body. So ONE user write could enqueue a
+    ``sdk._dream`` directly in its body. So ONE user write could enqueue a
     further on-loop graph pass after the handler had already returned: the
     write's own response would come back promptly and the loop would freeze
     later, with no request in flight to explain it.
 
     This drives the real path (a POST /v1/points, unpatched) and blocks the
-    WORKER's ``sdk.dream``; the handler itself never calls ``dream``, so the
+    WORKER's ``sdk._dream``; the handler itself never calls ``dream``, so the
     blocking call observed here is unambiguously the worker's. The debounce is
     shortened only so the test does not spend it waiting.
 
@@ -610,7 +610,7 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
     state: dict = {}
     _record_loop_thread_of(monkeypatch, "_mark_dirty", state,
                            "mark_dirty_on_loop")
-    _install_blocking_graph_call(monkeypatch, "dream", state, delegate=False)
+    _install_blocking_graph_call(monkeypatch, "_dream", state, delegate=False)
     # #3773: the drain's SDK build was the third on-loop graph call — record
     # whether ANY `_make_sdk` (the handler's `_data_sdk` open AND the worker's)
     # ran on the loop.
@@ -668,7 +668,7 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
         ha_mod._DREAM_TASKS.pop(ha_mod._dream_key(TEST_ORG_ID, None), None)
     assert point.status_code == 200, point.text
     assert entered is not None, (
-        "the dream worker never reached sdk.dream — the write did not enqueue "
+        "the dream worker never reached sdk._dream — the write did not enqueue "
         "a drain (or the worker failed before the call), so this run proves "
         "nothing")
     assert state.get("mark_dirty_on_loop") is False, (
@@ -683,13 +683,13 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
         f"its keepalive anchor probe is synchronous FalkorDB work, so the SDK "
         f"build freezes every concurrent request (#3773)")
     assert state.get("ran_on_loop") is False, (
-        "_dream_worker's sdk.dream ran ON the event loop — one user write can "
+        "_dream_worker's sdk._dream ran ON the event loop — one user write can "
         "enqueue a multi-second synchronous graph pass that freezes every "
         "concurrent request AFTER the write's own response was returned "
         "(#3718)")
     assert not str(state.get("thread")).startswith(
         _SHARED_POOL_THREAD_PREFIX), (
-        f"the worker's sdk.dream ran on {state.get('thread')!r} — the shared "
+        f"the worker's sdk._dream ran on {state.get('thread')!r} — the shared "
         f"default executor, which a burst of dream passes would fill and so "
         f"stall unrelated tenants before their handlers "
         f"(#3060 / #3718)")
@@ -713,7 +713,7 @@ def test_dream_default_branch_marks_queued_roots_off_loop(client, monkeypatch):
     the branch only executes when the queue is non-empty and no other case
     pre-seeds it. This one does.
 
-    The pass itself (``sdk.dream``) is stubbed: this test pins the MARK's
+    The pass itself (``sdk._dream``) is stubbed: this test pins the MARK's
     thread affinity, not a pass — a real pass against the temp DB is slow and
     is covered by the parametrized ``dream`` cases above.
     """
@@ -741,7 +741,7 @@ def test_dream_default_branch_marks_queued_roots_off_loop(client, monkeypatch):
     def _stub_dream(self, *args, **kwargs):
         return {"ok": True, "stubbed": True}
 
-    monkeypatch.setattr(TortoiseSDK, "dream", _stub_dream)
+    monkeypatch.setattr(TortoiseSDK, "_dream", _stub_dream)
 
     key = ha_mod._dream_key(TEST_ORG_ID, None)
     ha_mod._DREAM_QUEUES.pop(key, None)

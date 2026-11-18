@@ -154,7 +154,7 @@ ALLOWED_SOURCE_NODE_PROPS = frozenset({
     "sourcePath", "_searchText", "provenance_spans",
     # the session-capture writer (sdk._materialize_session_source)
     "sessionId", "capturedAt", "summary", "topics", "eventId",
-    # the reliability cache (sdk.get_source_reliability) — an in-tree producer
+    # the reliability cache (sdk._get_source_reliability) — an in-tree producer
     "reliability", "reliabilityComponents", "reliability_derived_at",
 })
 

@@ -219,7 +219,7 @@ def test_unlink_success(client, monkeypatch, fake):
     def _delete(url, headers=None, timeout=None):
         calls["url"] = url
         return _FakeResp(204)
-    monkeypatch.setattr(httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "_delete", _delete)
     # 3 methods: 2 oauth + confirmed email
     fake.auth_users = [{"id": "u-1", "email": "u@example.com",
                         "email_confirmed_at": "2026-08-01T00:00:00Z",
@@ -239,7 +239,7 @@ def test_unlink_422_single_identity_surfaced(client, monkeypatch, fake):
     import httpx
     def _delete(url, headers=None, timeout=None):
         return _FakeResp(422, "single_identity_not_deletable")
-    monkeypatch.setattr(httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "_delete", _delete)
     fake.auth_users = [{"id": "u-1", "email": "u@example.com",
                         "email_confirmed_at": "2026-08-01T00:00:00Z",
                         "encrypted_password": None}]
@@ -258,7 +258,7 @@ def test_unlink_404_already(client, monkeypatch, fake):
     import httpx
     def _delete(url, headers=None, timeout=None):
         return _FakeResp(404)
-    monkeypatch.setattr(httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "_delete", _delete)
     fake.auth_users = [{"id": "u-1", "email": "u@example.com",
                         "email_confirmed_at": "2026-08-01T00:00:00Z",
                         "encrypted_password": None}]
@@ -275,7 +275,7 @@ def test_unlink_httpx_failure_compensates(client, monkeypatch, fake):
     import httpx
     def _delete(url, headers=None, timeout=None):
         raise httpx.ConnectError("boom")
-    monkeypatch.setattr(httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "_delete", _delete)
     fake.auth_users = [{"id": "u-1", "email": "u@example.com",
                         "email_confirmed_at": "2026-08-01T00:00:00Z",
                         "encrypted_password": None}]
@@ -341,7 +341,7 @@ def test_unlink_two_tab_threaded(client, monkeypatch, fake):
         fake.auth_identities[:] = [i for i in fake.auth_identities
                                    if i.get("id") != iid]
         return _FakeResp(204)
-    monkeypatch.setattr(httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "_delete", _delete)
 
     def do_unlink(iid):
         results[iid] = client.post("/v1/user/identity/unlink",
@@ -388,7 +388,7 @@ def test_audit_rows_written(client, monkeypatch, fake):
     # unlink → identity_unlink (with remaining count)
     audit.clear()
     _seed_methods(fake, n=3)
-    monkeypatch.setattr(httpx, "delete", lambda *a, **k: _FakeResp(204))
+    monkeypatch.setattr(httpx, "_delete", lambda *a, **k: _FakeResp(204))
     r = client.post("/v1/user/identity/unlink", json={"identity_id": "00000000-0000-0000-0000-000000000000"})
     assert r.status_code == 200
     assert any(op == "identity_unlink" for op, _ in audit)
@@ -410,7 +410,7 @@ def test_unlink_bff_forwards_user_token_not_service_key(client, monkeypatch, fak
     def _delete(url, headers=None, timeout=None):
         captured.update(headers or {})
         return _FakeResp(204)
-    monkeypatch.setattr(httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "_delete", _delete)
     _seed_methods(fake, n=3)
     client.post("/v1/user/identity/unlink", json={"identity_id": "00000000-0000-0000-0000-000000000000"},
                 headers={"Authorization": "Bearer user-token-abc"})
@@ -485,7 +485,7 @@ def test_unlink_reauth_422_mapped(client, monkeypatch, fake):
     import httpx
     def _delete(url, headers=None, timeout=None):
         return _FakeResp(422, "reauthentication_not_valid")
-    monkeypatch.setattr(httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "_delete", _delete)
     _seed_methods(fake, n=3)
     r = client.post("/v1/user/identity/unlink", json={"identity_id": "00000000-0000-0000-0000-000000000000"})
     assert r.status_code == 403
@@ -533,7 +533,7 @@ def test_unlink_token_never_in_logs(client, monkeypatch, fake, caplog):
         if calls["n"] == 1:
             return _FakeResp(204)          # success
         return _FakeResp(422, "single_identity_not_deletable")  # failure
-    monkeypatch.setattr(httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "_delete", _delete)
     with caplog.at_level(logging.DEBUG, logger="tortoise.api"):
         r1 = client.post("/v1/user/identity/unlink", json={"identity_id": "00000000-0000-0000-0000-000000000000"},
                          headers={"Authorization": "Bearer tok-super-secret-xyz"})

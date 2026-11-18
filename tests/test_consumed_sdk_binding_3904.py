@@ -451,7 +451,7 @@ _EXPECTED_PUBLIC_READS: dict[str, frozenset[str]] = {
     # #4282 Phase 2: re-pointed from the retired MCP name `tortoise_operator_action` to
     # the container that now owns the entry, `tortoise_adjust_relationship`. Same
     # handler, same two reads.
-    "tortoise_adjust_relationship": frozenset({"mitigate_operator", "annotate_operator"}),
+    "tortoise_adjust_relationship": frozenset({"_mitigate_operator", "_annotate_operator"}),
 }
 
 
@@ -658,8 +658,8 @@ def test_drive_swallows_handler_exceptions_and_reports_the_census():
 
 # ── mutation proof ───────────────────────────────────────────────────────────
 
-_MUTATION_TARGET = "tortoise_query"          # declares sdk_method="query"; handler reads .query
-_MUTATION_WRONG_LIVE_METHOD = "create_point"  # a DIFFERENT live method (not inert)
+_MUTATION_TARGET = "tortoise_query"          # declares sdk_method="_query"; handler reads .query
+_MUTATION_WRONG_LIVE_METHOD = "_create_point"  # a DIFFERENT live method (not inert)
 _MUTATION_INERT_METHOD = "inert_stub_3904"    # added to TortoiseSDK by the mutation
 
 

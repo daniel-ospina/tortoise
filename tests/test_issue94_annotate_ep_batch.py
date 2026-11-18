@@ -4,7 +4,7 @@
 Post-#2206 contract: EpBreakdown.confidence_mean is the belief mean α/(α+β)
 of the PERSISTED posterior when EP has run (posterior_alpha/beta), else the
 persisted prior mean (ep_alpha/beta, e.g. a baseline) — identical to
-sdk.get_confidence for the same point.
+sdk._get_confidence for the same point.
 #11702 SUPERSEDES the third arm: unmeasured points (no persisted α/β and no
 `n.confidence` mirror) now read has_ep=False + **confidence_mean=None** +
 `ep_state="absent"` — the neutral Beta(1,1) mean 0.5 this file used to pin
@@ -191,7 +191,7 @@ class TestAnnotateEpBatchIssue94:
         """A persisted baseline prior (set_point_baseline → ep_alpha/ep_beta)
         is NOT EP measurement (#3276): pre-EP it reads has_ep=False /
         measured=False / baseline=True, while confidence_mean stays the prior
-        mean — the same number sdk.get_confidence returns pre-EP."""
+        mean — the same number sdk._get_confidence returns pre-EP."""
         claim = sdk._create_point("statement", "A baseline-backed claim")
         claim_id = claim["id"]
 
@@ -208,7 +208,7 @@ class TestAnnotateEpBatchIssue94:
         assert ep.measured is False and ep.baseline is True, ep
         assert ep.confidence_mean == pytest.approx(18.0 / 20.0, abs=1e-4)
         # The EP read (TortoiseEP.compute_confidence — the read under
-        # sdk.get_confidence) agrees with the search annotation.
+        # sdk._get_confidence) agrees with the search annotation.
         conf = sdk._get_ep().compute_confidence(claim_id)
         assert conf["mean"] == pytest.approx(18.0 / 20.0, abs=1e-9)
         # Zero operator edges → no structural evidence, but belief is 0.9:

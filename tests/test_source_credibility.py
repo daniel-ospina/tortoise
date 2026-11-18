@@ -636,7 +636,7 @@ class TestBaselineProvenance:
         """#6151 review round 6 P1 — the MCP prop boundary refuses the quartet.
 
         `tortoise_create_point` does `merged = dict(props or {})` and splats it
-        into `sdk.create_point(**merged)`. The SDK reject is the fail-closed
+        into `sdk._create_point(**merged)`. The SDK reject is the fail-closed
         backstop; `_SERVER_MANAGED_PROPS` is the boundary check IN FRONT of it,
         matching the `embedding_*`/`rawState` pattern. `credibility` stays out
         of the set — it is a documented `create_point`/`mitigate_operator`

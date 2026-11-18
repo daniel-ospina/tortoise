@@ -282,7 +282,7 @@ def _wire_stripe_webhook(monkeypatch, order: list[str], *,
     monkeypatch.setattr(ha, "_webhook_apply_event", _apply)
 
     async def _audit(*a, **k):
-        order.append("audit")
+        order.append("_audit__svc")
         if audit_raises:
             raise _Boom("audit DSN malformed")
 
@@ -353,8 +353,8 @@ def test_stripe_webhook_audit_failure_cannot_strand_the_notification(
     resp = asyncio.run(ha.webhooks_stripe(_stripe_request({})))
 
     assert resp.status_code == 200
-    assert order.index("notify") < order.index("audit")
-    assert order.index("audit") < order.index("analytics")
+    assert order.index("notify") < order.index("_audit__svc")
+    assert order.index("_audit__svc") < order.index("analytics")
 
 
 def test_stripe_webhook_tier_read_failure_leaves_the_event_unclaimed(

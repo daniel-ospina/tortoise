@@ -192,7 +192,7 @@ class TestRelationTemplates:
 
         `CORE_PREDICATES` admitting `MITIGATES` let a pack declare the retired
         spelling as a chain edge without declaring a relation, so validation
-        accepted a chain edge the engine cannot build (`sdk.create_operator`
+        accepted a chain edge the engine cannot build (`sdk._create_operator`
         refuses the spelling; a mitigation is a `mitigated_by` Point, §3.9).
         This asserts the validator rejects it (#2766 / #5322)."""
         errors = _ontology_errors(

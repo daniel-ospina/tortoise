@@ -1155,7 +1155,7 @@ def test_wire_identity_is_stripped_like_the_reader_names_it():
     as a decision about padding. The key normalisation neither merges nor
     rejects
     what the write door accepted. On a REAL product hit the strip is a
-    no-op, because ``sdk.tortoise_fts_query`` sanitises the wire value at
+    no-op, because ``sdk._tortoise_fts_query`` sanitises the wire value at
     the producer. What this test therefore pins is exactly the hand-built
     half: the pool and the reader agree on whether a hit HAS an identity, and
     on which.

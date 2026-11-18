@@ -80,7 +80,7 @@ _UNPATCHED_AT_IMPORT = tuple(
         ("journal", tlog.EventLog, "append"),
         ("record", record_writer, "write_live_record"),
         ("fold", FalkorProjection, "apply"),
-        ("cache", _GuardedGraph, "query"),
+        ("cache", _GuardedGraph, "_query"),
     )
 )
 
@@ -671,7 +671,7 @@ def _instrument(mp, entries: list[Door]) -> dict:
     mp.setattr(tlog.EventLog, "append", append)
     mp.setattr(record_writer, "write_live_record", write_live_record)
     mp.setattr(FalkorProjection, "apply", apply)
-    mp.setattr(_GuardedGraph, "query", query)
+    mp.setattr(_GuardedGraph, "_query", query)
     return open_fold
 
 
@@ -1812,7 +1812,7 @@ def test_D12_a_gate_with_no_usage_reading_fails_closed(org, monkeypatch):
     # The meter is made UNREADABLE (the count itself fails), which is the
     # shape D12 names — not a missing limit key, which `test_quota.py` pins.
     with monkeypatch.context() as m:
-        m.setattr(sdk._get_proj().g._g, "query", no_reading)
+        m.setattr(sdk._get_proj().g._g, "_query", no_reading)
         with pytest.raises(QuotaCheckError) as exc:
             enforce_org_limit(limits, "points", sdk=sdk)
         assert "quota count failed" in str(exc.value), exc.value

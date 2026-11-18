@@ -1,6 +1,6 @@
 """A13 audit surface (epic #902, issue #1051) — list_batch / list_batches.
 
-Plan §4.2 audit row + W4 A13: `sdk.list_batch(batch_id)` returns the
+Plan §4.2 audit row + W4 A13: `sdk._list_batch(batch_id)` returns the
 bundle's STAMPED artifacts — every Point carrying the batch_id (created OR
 ADOPTED via dedup — E2E-10 row 14) incl. operator/mitigation Points, and
 every operator-less direct edge carrying it. Entities/sources are OUT of
@@ -312,8 +312,8 @@ def test_audit_tool_registry_surface():
     by_name = {t.name: t for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)}
     assert "list_knowledge" in RETIRED_USE_INSTEAD["tortoise_list_batch"], (
         "the retired batch mirror must name the list_knowledge container")
-    for name, method in (("tortoise_list_batch", "list_batch"),
-                         ("tortoise_list_batches", "list_batches")):
+    for name, method in (("tortoise_list_batch", "_list_batch"),
+                         ("tortoise_list_batches", "_list_batches")):
         entry = by_name.get(name)
         assert entry is not None, f"{name} missing from the served registry"
         assert entry.sdk_method == method

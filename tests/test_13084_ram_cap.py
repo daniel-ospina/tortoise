@@ -221,9 +221,9 @@ _GATE_DOORS: frozenset[tuple[str, str, str | None]] = frozenset({
     ("tortoise/hosted_api.py", "_check_org_limit", None),
     ("tortoise/hosted_api.py", "_check_org_limit_off_loop", None),
     # the REST write doors
-    ("tortoise/hosted_api.py", "create_object", "points"),
-    ("tortoise/hosted_api.py", "create_subject", "points"),
-    ("tortoise/hosted_api.py", "create_point", "points"),
+    ("tortoise/hosted_api.py", "_create_object", "points"),
+    ("tortoise/hosted_api.py", "_create_subject", "points"),
+    ("tortoise/hosted_api.py", "_create_point", "points"),
     ("tortoise/hosted_api.py", "create_api_key", "api_keys"),
     ("tortoise/hosted_api.py", "rotate_api_key", "api_keys"),
     ("tortoise/hosted_api.py", "_capture_session_impl", "sessions"),
@@ -866,7 +866,7 @@ def test_the_cap_deletes_nothing():
     from tortoise import allowance_gate, graph_storage, metering
 
     tree = ast.parse(inspect.getsource(allowance_gate))
-    forbidden = {"delete", "evict", "drop_graph", "_delete_nodes",
+    forbidden = {"_delete", "evict", "drop_graph", "_delete_nodes",
                  "execute_command"}
     called = {
         node.func.attr if isinstance(node.func, ast.Attribute)

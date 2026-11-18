@@ -323,7 +323,7 @@ def test_each_declared_type_materializes_or_declares_a_no_effect(record_type):
 
 def test_entity_mutated_dispatches_on_op_and_refuses_undeclared_ops():
     base = {"type": "EntityMutated", "ts": "T", "id": "p1", "label": "Point"}
-    delete = rp.mutations_for({**base, "op": "delete"}, org_id="o", graph_id="g")
+    delete = rp.mutations_for({**base, "op": "_delete"}, org_id="o", graph_id="g")
     # The hard delete is the identity parent's removal (cascades the node and
     # its incident relations, matching the fold's `DETACH DELETE`) then the
     # node row itself.
@@ -2290,7 +2290,7 @@ def test_entity_mutated_state_ops_match_the_entity_id_column_not_node_key():
 
         delete = rp.mutations_for(
             {"type": "EntityMutated", "ts": "T", "id": ident, "label": label,
-             "op": "delete"},
+             "op": "_delete"},
             org_id="o", graph_id="g",
         )
         # The record's hard delete is `DETACH DELETE`'s two halves: the
@@ -2359,7 +2359,7 @@ def test_direct_edge_repoint_delete_only_deletes_rather_than_upserts():
 
 def _structural_repoint(src="p1", tgt="Acme Corp", edge_type="aboutObject",
                        **extra):
-    """The 2b descriptor `sdk.supersede_point` journals (sdk.py:16657)."""
+    """The 2b descriptor `sdk._supersede_point` journals (sdk.py:16657)."""
     return {"type": "DirectEdgeRepoint", "ts": "T",
             "id": f"{src}->p2:{edge_type}:{tgt}",
             "src": src, "tgt": tgt, "target_label": "Object",
@@ -2531,7 +2531,7 @@ def test_the_structural_carry_reads_the_folds_own_vocabulary():
 def test_a_structural_repoint_carries_the_descriptors_attributes():
     """#10303 review P1 — the RECORD route carries what the descriptor carries.
 
-    `sdk.supersede_point` journals the retired edge's attributes FLAT on the 2b
+    `sdk._supersede_point` journals the retired edge's attributes FLAT on the 2b
     descriptor (`#10139`) and the graph's pass-2b replay re-applies them
     (`ON CREATE SET nr += $attrs`). This route wrote the moved row with NO
     attributes at all, so ONE journal rebuilt to two different stores — the
@@ -2792,7 +2792,7 @@ def test_a_hard_delete_cascades_the_identity_and_incident_relations():
     """
     statements = rp.mutations_for(
         {"type": "EntityMutated", "ts": "T", "id": "p2", "label": "Point",
-         "op": "delete"},
+         "op": "_delete"},
         org_id="o", graph_id="g",
     )
     assert len(statements) == 2, statements
@@ -2818,7 +2818,7 @@ def test_a_hard_delete_cascades_the_identity_and_incident_relations():
     # `id`, while `node_key` is the name the relation FKs into).
     obj = rp.mutations_for(
         {"type": "EntityMutated", "ts": "T", "id": "o1", "label": "Object",
-         "op": "delete"},
+         "op": "_delete"},
         org_id="o", graph_id="g",
     )
     assert obj[0].sql.startswith("DELETE FROM public.node_identity")
@@ -2952,7 +2952,7 @@ def test_the_edge_endpoint_key_and_the_delete_cascade_agree():
     )[0]
     delete = rp.mutations_for(
         {"type": "EntityMutated", "ts": "T", "id": "o1", "label": "Object",
-         "op": "delete"},
+         "op": "_delete"},
         org_id="o", graph_id="g",
     )
     assert "SELECT node_key FROM public.object" in link.sql, link.sql

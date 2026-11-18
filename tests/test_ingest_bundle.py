@@ -526,7 +526,7 @@ class TestPromotionPolicy:
             sdk._ingest(bundle)
         msg = str(exc.value)
         assert "status:'live' is not allowed under promotion_policy 'gated'" in msg
-        assert "promotion_policy='auto'" in msg and "update_point" in msg
+        assert "promotion_policy='auto'" in msg and "_update_point" in msg
 
     def test_auto_allows_explicit_live_item(self, sdk):
         # Same item is sanctioned under auto (the row-9 route).

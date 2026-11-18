@@ -20,7 +20,7 @@ participant. Dedup keeps its OWN two-disjunct form,
 ``(n.is_operator IS NULL OR n.is_operator = false) AND (n.op_type IS NULL OR
 n.is_operator = false)`` (#2892/#2949): the bare ``... AND n.op_type IS NULL``
 conjunct belongs to the COUNTING predicates (`summarize_structure` /
-`list_pointkinds` / `ep`'s contested-claim scan / `sdk.query`), and putting it
+`list_pointkinds` / `ep`'s contested-claim scan / `sdk._query`), and putting it
 in dedup mints a
 duplicate on an idempotent re-write -- do not restore parity there.
 
@@ -394,7 +394,7 @@ def test_audit_raises_when_a_boolean_index_cannot_be_dropped(db, monkeypatch):
             return real("RETURN 1")
         return real(q, *a, **kw)
 
-    monkeypatch.setattr(g, "query", _no_op_drop)
+    monkeypatch.setattr(g, "_query", _no_op_drop)
     with pytest.raises(RuntimeError, match="survived"):
         hosted_backup._audit_copied_boolean_indexes(
             g, graph_name=name, stage="survive",

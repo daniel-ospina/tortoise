@@ -6,7 +6,7 @@ The issue measured three failures at the graph's own scale (3,353 points,
 1. **The 200-operator cap is REPORTED in the result, not just stderr.**
    ``analyze._bfs_select_operators`` truncates the selected operator set with a
    ``logging.warning`` and returned a bare 2-tuple, so
-   ``sdk.compute_confidence`` returned ``{iterations, converged, confidences}``
+   ``sdk._compute_confidence`` returned ``{iterations, converged, confidences}``
    either way — a caller could not tell a full-graph ranking from one computed
    over a truncated topology, and a published ranking (margins of 0.0067)
    came from a capped pass with nothing in the result saying so. The result

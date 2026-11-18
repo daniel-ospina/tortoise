@@ -93,7 +93,7 @@ KNOWN_STALE_TOOL_NAMES = {
         # `--sync` would revert. `research-domain` and `tortoise-onboarding` ARE authored
         # here and were re-pointed in the same change.
         "tortoise_create_point",    # → tortoise_create_entity(type="point", ...)
-        "tortoise_fts_query",      # an SDK method name, never a tool
+        "_tortoise_fts_query",      # an SDK method name, never a tool
         # #4282 → tortoise_graph_overview(section="structure") — see the note above.
         "tortoise_summarize_structure",
         "tortoise_list_pointkinds",  # retired #3883 → tortoise_graph_overview

@@ -151,7 +151,7 @@ def test_stub_projection_positive_control_seam():
 
     oracle = build_topic_oracle(42)
     live_ids_by_topic = {k: [f"p-{k}-{i}" for i in range(10)] for k in oracle.core}
-    stub = _StubOracleProjection(oracle, live_ids_by_topic, "query")
+    stub = _StubOracleProjection(oracle, live_ids_by_topic, "_query")
     _STUB_CURRENT.oracle_target = 0
     try:
         rows = stub.g.query("x", params={"ids": [f"p-0-1", f"p-0-2"]}).result_set  # noqa: F541

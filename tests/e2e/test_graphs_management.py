@@ -526,7 +526,7 @@ def test_default_graph_has_no_actions_and_custom_delete_armed(page: Page) -> Non
     # Re-arm, type the word, confirm → DELETE drops the row from the refetch.
     custom_row.get_by_role("button", name="Delete graph prod").click()
     expect(modal).to_be_visible()
-    modal.get_by_label("Type delete to confirm").fill("delete")
+    modal.get_by_label("Type delete to confirm").fill("_delete")
     expect(confirm_btn).to_be_enabled()
     confirm_btn.click()
     expect(custom_row).not_to_be_visible(timeout=15_000)  # list re-fetch drops it

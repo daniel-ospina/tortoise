@@ -11,7 +11,7 @@ the same statement:
     MATCH (s:L {k:$sv}) MATCH (t:M {k:$tv}) MERGE (s)-[:<predicate>]->(t)
 
 `#9124`'s guard classifies that `MERGE` a write (`_statement_writes`), so with
-the guard armed every `sdk.create_edge*` call site on `origin/main` would be
+the guard armed every `sdk._create_edge*` call site on `origin/main` would be
 refused — including the self-host onboarding seed, whose REST callers answer
 500. That is a product regression wearing a guard, so this declaration lands in
 the **before-the-guard batch** with `#9123`/`#9121`/`#9122`.
@@ -96,7 +96,7 @@ from tortoise.projection.edges import (
 #: The lane's declared verbs — the two edge mints plus `create_edge`'s three
 #: typed wrappers.
 DECLARED_VERBS = (
-    "create_edge", "create_about_edge",
+    "_create_edge", "create_about_edge",
     "create_owned_by", "create_managed_by", "create_authored_by",
 )
 
@@ -302,7 +302,7 @@ def test_a_peer_projection_opening_mid_walk_is_not_attributed_to_this_lane(
     assert_no_foreign_undeclared(probe)
 
 
-@pytest.mark.parametrize("mint", ["create_edge", "create_about_edge"])
+@pytest.mark.parametrize("mint", ["_create_edge", "create_about_edge"])
 def test_a_read_on_this_path_is_not_declared(sdk_with_journal, monkeypatch, mint):
     """The scope wraps the MUTATING statement, not the verb — for EACH declared
     mint, not just the generic one.
@@ -319,7 +319,7 @@ def test_a_read_on_this_path_is_not_declared(sdk_with_journal, monkeypatch, mint
     endpoints = _endpoints(sdk_with_journal)
 
     probe = _instrument(monkeypatch, refuse=False, owner=proj)
-    if mint == "create_edge":
+    if mint == "_create_edge":
         proj.create_edge(endpoints["source"], endpoints["target"], "ownedBy")
     else:
         assert proj.create_about_edge(
@@ -427,7 +427,7 @@ _STATED_OTHER_WRITERS = {
         "`test_the_about_name_path_is_still_refused_until_its_lane_lands`; "
         "`#9124` must census them before arming",
     "_link_source": _PROVENANCE_REASON,
-    "link_source_to_entity": _PROVENANCE_REASON,
+    "_link_source_to_entity": _PROVENANCE_REASON,
     "link_source_to_event": _PROVENANCE_REASON,
     "link_source_to_legacy_event": _PROVENANCE_REASON,
     "_sync_tags":
@@ -440,7 +440,7 @@ _WRITE_KEYWORDS = ("MERGE", "CREATE", "SET ", "DELETE", "REMOVE ")
 #: The handle's statement verbs. `execute_command` is included because
 #: `_GuardedGraph` overrides it and a `GRAPH.QUERY` through it writes;
 #: `profile`/`explain` execute the statement.
-_STATEMENT_VERBS = {"query", "_query", "execute_command", "profile", "explain"}
+_STATEMENT_VERBS = {"_query", "_query", "execute_command", "profile", "explain"}
 
 
 def _receiver(node: ast.Call) -> str | None:
@@ -632,7 +632,7 @@ def test_the_verb_scan_is_not_vacuous():
     only CALLS it.
     """
     methods, writers, module_writers = _write_scan()
-    for required in ("create_edge", "create_owned_by", "create_managed_by",
+    for required in ("_create_edge", "create_owned_by", "create_managed_by",
                      "create_authored_by", "_link_source", "create_about_edge",
                      "_create_edges", "_sync_tags"):
         assert required in writers, (
@@ -1006,7 +1006,7 @@ def test_the_lane_and_its_argument_are_recorded():
     # `create_about_edge`, each issuing its own `MERGE`.
     ledger_at = init_block.find(f"`{STRUCTURAL_EDGE_WRITE_LANE}`")
     ledger_row = init_block[ledger_at:ledger_at + 900]
-    for mint in ("create_edge", "create_about_edge"):
+    for mint in ("_create_edge", "create_about_edge"):
         assert mint in ledger_row, (
             f"the declaration ledger's row for this lane does not name "
             f"{mint!r} — the lane mints TWO relationships and a ledger that "

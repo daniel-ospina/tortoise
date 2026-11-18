@@ -377,7 +377,7 @@ class TestApplyLimitsAndReconcile:
             queries.append(q)
             return orig_query(q, **kwargs)
 
-        monkeypatch.setattr(sdk._get_registry(), "query", counting_query)
+        monkeypatch.setattr(sdk._get_registry(), "_query", counting_query)
         apply_limits(sdk, team["id"], "pro")
         assert len(queries) == 1  # single atomic Cypher SET
         t = sdk._org_get(team["id"])

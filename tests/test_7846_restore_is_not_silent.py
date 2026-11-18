@@ -76,7 +76,7 @@ def _call(*, graph="i7846"):
     return {
         "graph": graph,
         "dump": lambda: b"x" * 32,
-        "delete": lambda: None,
+        "_delete": lambda: None,
     }
 
 

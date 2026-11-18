@@ -124,11 +124,11 @@ class _StubQuerySDK:
         self.tag_points = [{"id": f"t{i}"} for i in range(3)]
 
     def _query(self, kind=None, **kwargs):
-        self.calls.append(("query", kind, kwargs))
+        self.calls.append(("_query", kind, kwargs))
         return self.points
 
     def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
-        self.calls.append(("paginated_query", kind, skip, limit, kwargs))
+        self.calls.append(("_paginated_query", kind, skip, limit, kwargs))
         total = len(self.points)
         return {"results": self.points[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
@@ -136,7 +136,7 @@ class _StubQuerySDK:
     def _query_points_by_tag(self, tag, *, _record_reads=True):
         # #7983: the real accessor takes the read-ledger opt-out, so the double
         # must too — a paginated caller passes `_record_reads=False`.
-        self.calls.append(("query_points_by_tag", tag, _record_reads))
+        self.calls.append(("_query_points_by_tag", tag, _record_reads))
         return self.tag_points
 
     def _tortoise_fts_query(self, query=None, **kwargs):
@@ -165,11 +165,11 @@ class TestQueryConsolidation:
         assert result == query_sdk.points
         # #10602: the un-paginated path is BOUNDED, so it reaches the one SDK
         # accessor that applies a LIMIT (`paginated_query`) and takes only its
-        # page — `sdk.query` has no LIMIT in its Cypher at all, so the whole
+        # page — `sdk._query` has no LIMIT in its Cypher at all, so the whole
         # label came back and blew the 10 s transport wait bound. The RETURN
         # contract is unchanged: still a plain list, all rows while under the cap.
         name, kind, skip, limit, kwargs = query_sdk.calls[-1]
-        assert (name, kind, skip) == ("paginated_query", "statement", 0)
+        assert (name, kind, skip) == ("_paginated_query", "statement", 0)
         assert limit == 100, "the plain path's own computed default cap"
         assert kwargs.get("include_retracted") is False
 
@@ -177,14 +177,14 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(kind="statement", offset=5, limit=10)
         name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
-        assert (name, kind, skip, limit) == ("paginated_query", "statement", 5, 10)
+        assert (name, kind, skip, limit) == ("_paginated_query", "statement", 5, 10)
         assert result == {"results": [], "total": 5, "hasMore": False}
 
     def test_page_1_maps_to_offset_0(self, query_sdk):
         from tortoise.mcp_server import tortoise_query
         tortoise_query(kind="statement", page=1, limit=10)
         name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
-        assert (name, kind, skip, limit) == ("paginated_query", "statement", 0, 10)
+        assert (name, kind, skip, limit) == ("_paginated_query", "statement", 0, 10)
 
     def test_page_is_1_based_and_overrides_offset(self, query_sdk):
         """Both page and offset set -> page wins (review P1-2: the previous
@@ -192,24 +192,24 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         tortoise_query(kind="statement", page=2, offset=5, limit=10)
         name, kind, skip, limit, kwargs = query_sdk.calls[-1]
-        assert (name, skip, limit) == ("paginated_query", 10, 10)
+        assert (name, skip, limit) == ("_paginated_query", 10, 10)
         # zero offset must not bypass the page override either
         tortoise_query(kind="statement", page=3, offset=0, limit=10)
         name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
-        assert (name, skip, limit) == ("paginated_query", 20, 10)
+        assert (name, skip, limit) == ("_paginated_query", 20, 10)
 
     def test_tag_filter_uses_tag_path(self, query_sdk):
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(tag="pricing")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1][:2] == ("query_points_by_tag", "pricing")
+        assert query_sdk.calls[-1][:2] == ("_query_points_by_tag", "pricing")
 
     def test_tag_takes_precedence_over_text(self, query_sdk):
         """Documented precedence: tag mode wins when both are provided."""
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(tag="pricing", text="semantic query")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1][0] == "query_points_by_tag"
+        assert query_sdk.calls[-1][0] == "_query_points_by_tag"
         # #7983: the accessor never records — it runs BEFORE the retracted
         # filter, so recording there would count Points the caller never gets.
         assert query_sdk.calls[-1][2] is False
@@ -350,7 +350,7 @@ class TestDeprecatedAliases:
         result = tortoise_paginated_query(kind="statement", skip=2, limit=5,
                                           filters={"status": "active"})
         name, kind, skip, limit, kwargs = query_sdk.calls[-1]
-        assert (name, kind, skip, limit) == ("paginated_query", "statement", 2, 5)
+        assert (name, kind, skip, limit) == ("_paginated_query", "statement", 2, 5)
         assert kwargs.get("status") == "active"
         assert result["hasMore"] is False
 
@@ -359,14 +359,14 @@ class TestDeprecatedAliases:
         from tortoise.mcp_server import tortoise_paginated_query
         result = tortoise_paginated_query()
         name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
-        assert (name, skip, limit) == ("paginated_query", 0, 20)
+        assert (name, skip, limit) == ("_paginated_query", 0, 20)
         assert "results" in result and "total" in result and "hasMore" in result
 
     def test_query_points_by_tag_alias_delegates(self, query_sdk):
         from tortoise.mcp_server import tortoise_query_points_by_tag
         result = tortoise_query_points_by_tag("pricing")
         assert result == query_sdk.tag_points
-        assert query_sdk.calls[-1][:2] == ("query_points_by_tag", "pricing")
+        assert query_sdk.calls[-1][:2] == ("_query_points_by_tag", "pricing")
 
 
 class TestToolFunctions:

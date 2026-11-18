@@ -623,7 +623,7 @@ def test_the_rest_door_shares_both_seams_with_the_measured_door(monkeypatch):
     """Door 2's convergence is STRUCTURAL, and the residual is stated.
 
     ``POST /v1/objects`` does not write anything itself: its handler is
-    ``sdk.create_object`` on the SDK ``_data_sdk_offloaded`` opened, and
+    ``sdk._create_object`` on the SDK ``_data_sdk_offloaded`` opened, and
     `_data_sdk` opens it through ``_make_sdk(graph_name=<the resolved
     namespace>)`` and binds the record with ``_bind_record_tenant`` — the exact
     pair the SDK leg above measures end to end (and the pair the evidence
@@ -645,7 +645,7 @@ def test_the_rest_door_shares_both_seams_with_the_measured_door(monkeypatch):
     from tortoise import hosted_api
 
     handler = inspect.getsource(hosted_api.create_object)
-    assert "sdk.create_object" in handler
+    assert "sdk._create_object" in handler
     assert "_data_sdk_offloaded" in handler
     # `_data_sdk` is the one opener both REST branches use, and it is the object
     # the SDK leg measures.

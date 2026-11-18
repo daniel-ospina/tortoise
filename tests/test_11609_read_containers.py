@@ -67,17 +67,17 @@ def _bare_sdk(monkeypatch, doors, reached):
 # ── row 6 — graph_overview, section= ──────────────────────────────────
 GRAPH_OVERVIEW_DOORS = {
     "taxonomy": "_taxonomy",
-    "structure": "summarize_structure",
-    "structure_check": "check_structure",
+    "structure": "_summarize_structure",
+    "structure_check": "_check_structure",
     "pointkinds": "_list_pointkinds",
     "tags": "_list_tags",
     "sources": "_list_sources",
     "namespaces": "_list_namespaces",
     "status": "_status",
-    "stale": "stale_points",
+    "stale": "_stale_points",
     "validate_domain": "_validate_domain",
-    "audit": "audit",
-    "dream_health": "dream_health_check",
+    "_audit__svc": "_audit__svc",
+    "dream_health": "_dream_health_check",
     "topics": "_list_topics",
 }
 
@@ -209,17 +209,17 @@ class TestOverviewSectionSets:
         sdk_fold = set(TortoiseSDK.GRAPH_OVERVIEW_SECTIONS) - set(
             TortoiseSDK.GRAPH_OVERVIEW_NEEDS_ARGUMENT)
         transport_fold = set(ms._OVERVIEW_DEFAULT_SUMMARY_KEYS)
-        assert sdk_fold - transport_fold == {"audit", "dream_health"}
+        assert sdk_fold - transport_fold == {"_audit__svc", "dream_health"}
         assert transport_fold - sdk_fold == set(ms._OVERVIEW_TRANSPORT_ONLY_SECTIONS)
 
 
 # ── row 3 — search_knowledge, mode= ───────────────────────────────────
 SEARCH_KNOWLEDGE_DOORS = {
-    "hybrid": "tortoise_fts_query",
-    "tag": "query_points_by_tag",
+    "hybrid": "_tortoise_fts_query",
+    "tag": "_query_points_by_tag",
     "sessions": "_search_sessions",
     "entry_points": "_suggest_entry_points",
-    "issue_insight": "issue_insight",
+    "_issue_insight": "_issue_insight",
 }
 
 
@@ -239,11 +239,11 @@ class TestSearchKnowledge:
         # It is ALSO asked not to record the population (#7983) — this stub has to
         # accept that kwarg, which is the same reach the pg arm performs.
         monkeypatch.setattr(
-            TortoiseSDK, "query_points_by_tag",
+            TortoiseSDK, "_query_points_by_tag",
             lambda self, tag, _record_reads=True: reached.append(
-                ("query_points_by_tag", (), {}))
+                ("_query_points_by_tag", (), {}))
             or [{"id": "point-1"}])
-        kwargs = {"query": "q", "tag": "t", "title": "a title"}
+        kwargs = {"_query": "q", "tag": "t", "title": "a title"}
         sdk.search_knowledge(mode=mode, **kwargs)
         assert [r[0] for r in reached] == [door]
 
@@ -269,7 +269,7 @@ class TestSearchKnowledge:
         reached: list = []
         sdk = _bare_sdk(monkeypatch, set(SEARCH_KNOWLEDGE_DOORS.values()), reached)
         sdk.search_knowledge(query="q")
-        assert reached[0][0] == "tortoise_fts_query"
+        assert reached[0][0] == "_tortoise_fts_query"
 
     def test_an_unknown_mode_refuses_and_names_the_valid_set(self, monkeypatch):
         sdk = _bare_sdk(monkeypatch, set(SEARCH_KNOWLEDGE_DOORS.values()), [])
@@ -281,8 +281,8 @@ class TestSearchKnowledge:
             assert mode in message
 
     @pytest.mark.parametrize("mode,missing", [
-        ("tag", "tag"), ("sessions", "query"), ("entry_points", "query"),
-        ("issue_insight", "title"),
+        ("tag", "tag"), ("sessions", "_query"), ("entry_points", "_query"),
+        ("_issue_insight", "title"),
     ])
     def test_a_mode_without_its_argument_refuses_by_name(self, mode, missing, monkeypatch):
         reached: list = []
@@ -319,7 +319,7 @@ class TestSearchKnowledgeTagArm:
             calls.append((tag, _record_reads))
             return list(rows)
 
-        monkeypatch.setattr(TortoiseSDK, "query_points_by_tag", fake)
+        monkeypatch.setattr(TortoiseSDK, "_query_points_by_tag", fake)
         recorded: list = []
         # `kind=` (#13084) is keyword-only on the helper; the stub records the
         # rows exactly as before and ignores the call-kind it now also receives.
@@ -380,9 +380,9 @@ class TestSearchKnowledgeTagArm:
 
 # ── row 4 — list_knowledge, kind= ─────────────────────────────────────
 LIST_KNOWLEDGE_DOORS = {
-    "claim": "paginated_query",
+    "claim": "_paginated_query",
     "source": "_list_sources",
-    "source_reliability": "get_source_reliability",
+    "source_reliability": "_get_source_reliability",
     "namespace": "_list_namespaces",
     "topic": "_list_topics",
     "diary": "_diary_read",
@@ -403,18 +403,18 @@ class TestListKnowledge:
         assert [r[0] for r in reached] == [door]
 
     @pytest.mark.parametrize("kwargs,door", [
-        ({"id": "batch-1"}, "list_batch"),
-        ({}, "list_batches"),
+        ({"id": "batch-1"}, "_list_batch"),
+        ({}, "_list_batches"),
     ])
     def test_batch_dispatches_on_the_id(self, kwargs, door, monkeypatch):
         reached: list = []
-        sdk = _bare_sdk(monkeypatch, {"list_batch", "list_batches"}, reached)
+        sdk = _bare_sdk(monkeypatch, {"_list_batch", "_list_batches"}, reached)
         sdk.list_knowledge("batch", **kwargs)
         assert [r[0] for r in reached] == [door]
 
     def test_claim_forwards_paging_to_the_exact_read(self, monkeypatch):
         reached: list = []
-        sdk = _bare_sdk(monkeypatch, {"paginated_query"}, reached)
+        sdk = _bare_sdk(monkeypatch, {"_paginated_query"}, reached)
         sdk.list_knowledge("claim", point_kind="statement", offset=20, limit=10)
         _label, args, kwargs = reached[0]
         assert kwargs["kind"] == "statement"
@@ -446,18 +446,18 @@ class TestListKnowledge:
 # ── row 5 — check_confidence, dispatch by argument ────────────────────
 class TestCheckConfidence:
     @pytest.mark.parametrize("kwargs,door", [
-        ({"claim_id": "point-1"}, "get_confidence"),
-        ({"topic": "pricing"}, "belief_timeline"),
-        ({"session": True}, "session_context"),
-        ({"calibrate": True}, "calibrate_summary"),
-        ({}, "calibrate_summary"),
+        ({"claim_id": "point-1"}, "_get_confidence"),
+        ({"topic": "pricing"}, "_belief_timeline"),
+        ({"session": True}, "_session_context"),
+        ({"calibrate": True}, "_calibrate_summary"),
+        ({}, "_calibrate_summary"),
     ])
     def test_selector_reaches_its_door(self, kwargs, door, monkeypatch):
         reached: list = []
         sdk = _bare_sdk(
             monkeypatch,
-            {"get_confidence", "belief_timeline", "session_context",
-             "calibrate_summary", "_provenance", "compute_confidence"},
+            {"_get_confidence", "_belief_timeline", "_session_context",
+             "_calibrate_summary", "_provenance", "_compute_confidence"},
             reached)
         sdk.check_confidence(**kwargs)
         assert [r[0] for r in reached] == [door]
@@ -467,23 +467,23 @@ class TestCheckConfidence:
         reached: list = []
         sdk = _bare_sdk(
             monkeypatch,
-            {"get_confidence", "belief_timeline", "session_context",
-             "calibrate_summary", "compute_confidence"},
+            {"_get_confidence", "_belief_timeline", "_session_context",
+             "_calibrate_summary", "_compute_confidence"},
             reached)
         sdk.check_confidence(claim_id="point-1")
         sdk.check_confidence(topic="t")
         sdk.check_confidence(session=True)
         sdk.check_confidence()
-        assert "compute_confidence" not in [r[0] for r in reached]
+        assert "_compute_confidence" not in [r[0] for r in reached]
 
     def test_provenance_rides_the_claim_arm_only_when_asked(self, monkeypatch):
         reached: list = []
         sdk = _bare_sdk(monkeypatch,
-                        {"get_confidence", "_provenance"}, reached)
+                        {"_get_confidence", "_provenance"}, reached)
         sdk.check_confidence(claim_id="point-1")
-        assert [r[0] for r in reached] == ["get_confidence"]
+        assert [r[0] for r in reached] == ["_get_confidence"]
         out = sdk.check_confidence(claim_id="point-1", include_provenance=True)
-        assert [r[0] for r in reached] == ["get_confidence", "get_confidence",
+        assert [r[0] for r in reached] == ["_get_confidence", "_get_confidence",
                                            "_provenance"]
         assert set(out) == {"confidence", "provenance"}
 
@@ -495,7 +495,7 @@ class TestExploreConnections:
                         [])
         with pytest.raises(ValueError) as exc:
             sdk.explore_connections()
-        assert "node_id" in str(exc.value) and "query" in str(exc.value)
+        assert "node_id" in str(exc.value) and "_query" in str(exc.value)
 
     def test_include_content_takes_the_expand_door(self, monkeypatch):
         reached: list = []
@@ -534,9 +534,9 @@ class TestExploreConnections:
 
 # ── row 10 — review_link_candidates, dispatch by argument ─────────────
 REVIEW_LINK_DOORS = {
-    "connections": "review_connections",
+    "connections": "_review_connections",
     "dedup": "_list_dedup_candidates",
-    "cross_lens": "get_cross_lens_candidates",
+    "cross_lens": "_get_cross_lens_candidates",
 }
 
 
@@ -592,7 +592,7 @@ WRAP_ENVELOPE_DOORS = (
     # `list_batches` is the one member whose SDK method did NOT retire (it is the
     # still-public exact read that `list_knowledge(kind='batch')` delegates to), so
     # this door reaches the method itself rather than the container.
-    ("tortoise_list_batches", "list_batches"),
+    ("tortoise_list_batches", "_list_batches"),
     ("tortoise_list_namespaces", "graph_overview"),
     ("tortoise_diary_read", "list_knowledge"),
     ("tortoise_expand_relationships", "explore_connections"),
@@ -711,7 +711,7 @@ class TestSuggestEntryPointsFallback:
         reached = []
         sdk = _bare_sdk(monkeypatch, {"search_knowledge"}, reached)
         # the hybrid arm's own door, returning NOTHING — the fallback's trigger
-        monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", lambda *a, **k: [])
+        monkeypatch.setattr(TortoiseSDK, "_tortoise_fts_query", lambda *a, **k: [])
         monkeypatch.setattr(ms, "_get_org_sdk", lambda *a, **k: sdk)
         # `_safe`'s fail-closed auth gate needs a transport mode; stdio is the
         # dev-mode lane these routing tests run on.
@@ -820,7 +820,7 @@ class TestProvenanceDoorDoesNotPayTheCalibrationGate:
                     "get_confidence: 1 uncalibrated evidence points")
             return {"mean": 0.5, "variance": 0.1}
 
-        monkeypatch.setattr(TortoiseSDK, "get_confidence", get_confidence)
+        monkeypatch.setattr(TortoiseSDK, "_get_confidence", get_confidence)
         monkeypatch.setattr(TortoiseSDK, "_provenance",
                             lambda self, pid: chain)
         return TortoiseSDK.__new__(TortoiseSDK)

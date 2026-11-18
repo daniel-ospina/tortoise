@@ -773,7 +773,7 @@ def test_every_handle_call_is_the_pinned_verb_set():
             continue
         verbs.setdefault(node.func.attr, set()).add(owner.get(id(node), "<module>"))
 
-    assert verbs == {"query": {"_run"}}, (
+    assert verbs == {"_query": {"_run"}}, (
         "the handle is no longer reached only through `_run` with `query`: "
         f"{ {v: sorted(f) for v, f in verbs.items()} }. Every statement this "
         "module issues must be classified and (when mutating) declared — route "
@@ -835,7 +835,7 @@ def test_raw_handle_queries_are_the_pinned_read_only_set():
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if not isinstance(node.func, ast.Attribute) or node.func.attr != "query":
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "_query":
             continue
         if _root_name(node.func) != "graph":
             continue

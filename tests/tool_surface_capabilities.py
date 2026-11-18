@@ -45,7 +45,7 @@ from tortoise.tool_registry import MAINTENANCE_TIER, WRITE_RISK_TIERS
 # The SDK method itself still exists — the SDK surface is trimmed by its own batch — so a
 # future MCP row that re-declares `backfill_v25` must re-add it here.
 HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
-    "dream": "CPU-heavy whole-graph EP (#329)",
+    "_dream": "CPU-heavy whole-graph EP (#329)",
 }
 
 # Operations that DO write on an internal self-heal / cache-refresh path but
@@ -58,8 +58,8 @@ HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
 # below therefore require `risk == "maintenance"`: the declared set moves with
 # the code, so the posture cannot silently re-stale.
 READ_THROUGH_WRITE_METHODS: dict[str, str] = {
-    "compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
-    "get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
+    "_compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
+    "_get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
     # #11609 Phase 2 — the READ/QUERY containers. Each of these reaches a refresh that
     # is ALREADY declared above or below; the container does not add a new writer, it
     # aggregates reads that one of its arms performs. Named individually because the
@@ -254,7 +254,7 @@ class DeclaredBindingDivergence(NamedTuple):
 #
 # KNOWN BOUND, inherited from `handler_operations`: it records an attribute
 # REFERENCE to an SDK method, not a call.  A handler that merely names its declared
-# method in dead code (`if False: return _get_org_sdk().query`) would satisfy the
+# method in dead code (`if False: return _get_org_sdk()._query`) would satisfy the
 # arm.  Both real defects are genuine calls to *other* methods with no mention of
 # the declared one, so both are caught; tightening the reach semantics is a
 # `handler_operations` change that would move every other check that consumes it,
@@ -279,13 +279,13 @@ DECLARED_BINDING_DIVERGENCES: dict[str, DeclaredBindingDivergence] = {
 # Operations a handler reaches that are reads with no registry binding (they
 # need no binding).  Enumerated so the binding-resolution guard is scoped.
 UNBOUND_READ_OPERATIONS: frozenset[str] = frozenset({
-    "recall_gaps", "recall_subgraph",
+    "_recall_gaps", "_recall_subgraph",
 })
 
 # Filesystem-api users on internal/derived paths — NOT caller-supplied walks,
 # so they are not "reaches a filesystem path" for the HTTP-exclusion guard.
 INTERNAL_PATH_READERS: frozenset[str] = frozenset({
-    "_probe_embedded_busy", "session_index_health",
+    "_probe_embedded_busy", "_session_index_health",
 })
 
 # The wrap sites that pass `abuse_weight` (R1 point-create metering).  Every
@@ -298,8 +298,8 @@ INTERNAL_PATH_READERS: frozenset[str] = frozenset({
 # assert a weight on a method that no longer has a wrap site, which is exactly the
 # `test_point_creating_wrap_sites_have_weights` red this re-key closes.
 WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
-    "create_point", "create_operator", "mitigate_operator", "write_question",
-    "record_decision", "diary_write", "ingest",
+    "_create_point", "_create_operator", "_mitigate_operator", "write_question",
+    "record_decision", "_diary_write", "_ingest",
     # #11609 lane C retires the PUBLIC `checkpoint` method; its still-served door
     # wraps the SDK's private seam, and the weight is unchanged (the `filed`
     # count), so the weight class follows the name the wrap site actually calls.
@@ -346,9 +346,9 @@ SDK_SEAM_ALIASES: dict[str, str] = {
 # against a declared map.  Staleness fails loudly (both directions + name
 # liveness).
 DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
-    "create_point": "tortoise_create_point",
-    "create_operator": "tortoise_create_operator",
-    "mitigate_operator": "tortoise_mitigate_operator",
+    "_create_point": "tortoise_create_point",
+    "_create_operator": "tortoise_create_operator",
+    "_mitigate_operator": "tortoise_mitigate_operator",
     # #4282 Phase 2: the four container names replace the five retired ones
     # (`file_decision`->`write_question`, `file_human_approval`->`record_decision`,
     # `supersede`->`supersede_knowledge`, `update_entity`/`update_point`->`update_knowledge`).
@@ -359,13 +359,13 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "record_decision": "tortoise_record_decision",
     "supersede_knowledge": "tortoise_supersede_knowledge",
     "update_knowledge": "tortoise_update_knowledge",
-    "invalidate_point": "tortoise_invalidate",
-    "retract_point": "tortoise_retract_point",
+    "_invalidate_point": "tortoise_invalidate",
+    "_retract_point": "tortoise_retract_point",
     "_checkpoint": "tortoise_checkpoint",  # retired method, seam-wrapping door (#11609)
-    "diary_write": "tortoise_diary_write",
+    "_diary_write": "tortoise_diary_write",
     "create_entity": "tortoise_create_entity",
     # ⛔ `update` LEFT this map in #11609 lane B (#12915 review F1): no MCP handler
-    # quota-gates `sdk.update` any more. `tortoise_update` — the door the
+    # quota-gates `sdk._update` any more. `tortoise_update` — the door the
     # `tortoise_update_knowledge` container's `props` arm delegates to — routes
     # through `sdk.update_knowledge` (the same `_update_entity_any` relay
     # `tortoise_update_point` and `tortoise_update_entity` call), because `update`
@@ -373,11 +373,11 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # refuses every non-promote transition by a fixed sentence. Keeping the key
     # would red the inverse arm ("declared write methods with no wrap site") on a
     # method nothing writes through.
-    "annotate_operator": "tortoise_operator_action",
-    "create_subject": "tortoise_create_subject",
-    "create_object": "tortoise_create_object",
-    "create_event": "tortoise_create_event",
-    "create_document": "tortoise_create_document",
+    "_annotate_operator": "tortoise_operator_action",
+    "_create_subject": "tortoise_create_subject",
+    "_create_object": "tortoise_create_object",
+    "_create_event": "tortoise_create_event",
+    "_create_document": "tortoise_create_document",
     # #11609 lane C: `create_source` / `assess_source` are RETIRED (`register_source` /
     # `manage_source_trust` absorb them) and their doors wrap the private seams. The
     # key is the wrap site's name; the label is the retired-but-served door, which the
@@ -395,8 +395,8 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # The entity write is still mapped, under the method its door actually wraps:
     # `update_knowledge` above.
 
-    "create_edge": "tortoise_create_edge",
-    "ingest": "tortoise_ingest",
+    "_create_edge": "tortoise_create_edge",
+    "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
     # #11609 lane C's containers: each wraps its own SDK operation, so each is a
     # declared write surface of its own (the forward arm would otherwise report them
@@ -441,7 +441,7 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     # connection down: #1924 made the per-source switch intent, not a disconnect.
     # #4282 Phase 2: the two containers that ship with `sdk_method=""` because they
     # DELEGATE to the handler they absorbed (`adjust_relationship` ->
-    # `tortoise_operator_action` -> sdk.mitigate_operator/annotate_operator;
+    # `tortoise_operator_action` -> sdk._mitigate_operator/annotate_operator;
     # `refresh_confidence` -> dream/promote_point/set_point_baseline). Both are
     # writer-classified (`risk="destructive"`), so they belong in this declared set —
     # without them `empty_writers == set(NON_SDK_WRITER_TOOLS)` reds and a
@@ -458,7 +458,7 @@ NON_SDK_WRITER_TOOLS: frozenset[str] = frozenset({
     # (`archive/mcp-tools/b1-removed-no-destination/tortoise_pack_install.py`), so it no
     # longer resolves. The helper and its REST door (`POST /v1/packs/manifests`) are
     # untouched; a future MCP door must re-add the tool here AND bind the op above.
-    # #3904: handler-served writer (dispatches to sdk.mitigate_operator / sdk.annotate_operator)
+    # #3904: handler-served writer (dispatches to sdk._mitigate_operator / sdk._annotate_operator)
     "tortoise_operator_action",
 })
 NON_SDK_READ_TOOLS: frozenset[str] = frozenset({
@@ -976,7 +976,7 @@ def _handler_operations_cached(tool_name: str, source: str | None) -> HandlerOpe
             if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
                 callee_name = sub.func.id
                 if callee_name in sdk_methods and callee_name not in funcs:
-                    # `from tortoise.sdk import create_point; create_point(...)`
+                    # `from tortoise.sdk import _create_point; create_point(...)`
                     ops.add(callee_name)
                 callee = func_alias.get(callee_name, callee_name)
                 if callee in funcs and callee not in seen:

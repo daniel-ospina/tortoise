@@ -83,9 +83,9 @@ REPOINTED = {
 #: `_dispatched_sections`. `raising=True` on the patches is deliberate: a renamed door must
 #: fail this file loudly, not be created on the spot by a permissive spy.
 OVERVIEW_DOORS = (
-    "taxonomy", "summarize_structure", "check_structure", "list_pointkinds",
-    "list_tags", "list_sources", "list_namespaces", "list_graphs", "list_topics",
-    "health", "status", "stale", "validate_domain", "audit", "dream_health",
+    "taxonomy", "_summarize_structure", "_check_structure", "list_pointkinds",
+    "list_tags", "list_sources", "list_namespaces", "_list_graphs", "list_topics",
+    "health", "status", "stale", "validate_domain", "_audit__svc", "dream_health",
 )
 
 
@@ -320,8 +320,8 @@ class TestSectionRouting:
         # ONLY the doors this file asserts. `issue_insight` is not in this batch at all,
         # and patching a name with `raising=False` silently CREATES it if it ever goes
         # away — a spy that cannot fail is not coverage.
-        for label in ("validate_domain", "audit", "dream_health",
-                      "check_structure", "summarize_structure"):
+        for label in ("validate_domain", "_audit__svc", "dream_health",
+                      "_check_structure", "_summarize_structure"):
             monkeypatch.setattr(ms, f"tortoise_{label}", record(label))
         return calls
 
@@ -336,8 +336,8 @@ class TestSectionRouting:
         assert spy == [], "a refusal must not reach the door with a missing argument"
 
     def test_audit_forwards_point_kinds(self, spy):
-        ms.tortoise_graph_overview(section="audit", point_kinds=["statement"])
-        assert spy == [("audit", (), {"point_kinds": ["statement"]})]
+        ms.tortoise_graph_overview(section="_audit__svc", point_kinds=["statement"])
+        assert spy == [("_audit__svc", (), {"point_kinds": ["statement"]})]
 
     def test_dream_health_reaches_its_door(self, spy):
         ms.tortoise_graph_overview(section="dream_health")
@@ -346,7 +346,7 @@ class TestSectionRouting:
     def test_structure_and_structure_check_keep_their_doors(self, spy):
         ms.tortoise_graph_overview(section="structure")
         ms.tortoise_graph_overview(section="structure_check")
-        assert [c[0] for c in spy] == ["summarize_structure", "check_structure"]
+        assert [c[0] for c in spy] == ["_summarize_structure", "_check_structure"]
 
     def test_unknown_section_lists_every_section(self, monkeypatch):
         # The message is BUILT from `_OVERVIEW_SECTIONS`, so asserting "every listed name
@@ -379,7 +379,7 @@ class TestDefaultSummaryIsUnchanged:
         assert len(ms._OVERVIEW_SUMMARY_SKIP) == 4, (
             "the skip set is FOUR sections; a fifth means one was added without this "
             "pin moving, and the default envelope is not 11 keys any more")
-        for section in ("topics", "validate_domain", "audit", "dream_health"):
+        for section in ("topics", "validate_domain", "_audit__svc", "dream_health"):
             assert section not in seen, f"{section} entered the default summary"
 
     def test_the_summary_still_carries_exactly_the_eleven_pre_existing_keys(self, monkeypatch):

@@ -852,9 +852,9 @@ _TERMINAL_CONTRACT_DOCSTRINGS = {
     # The canonical module's own docstring — the first place a reader meets
     # the predicate.
     "live module docstring": (_REPO_ROOT / "tortoise" / "live.py", None),
-    "TortoiseSDK.query": (_REPO_ROOT / "tortoise" / "sdk.py", "query"),
+    "TortoiseSDK.query": (_REPO_ROOT / "tortoise" / "sdk.py", "_query"),
     "TortoiseSDK.paginated_query": (
-        _REPO_ROOT / "tortoise" / "sdk.py", "paginated_query"),
+        _REPO_ROOT / "tortoise" / "sdk.py", "_paginated_query"),
     "TortoiseSDK._raise_update_point_status_error": (
         _REPO_ROOT / "tortoise" / "sdk.py",
         "_raise_update_point_status_error"),
@@ -902,7 +902,7 @@ def test_review_connections_contract_names_every_stale_status() -> None:
     """
     doc = re.sub(r"\s+", " ", _function_docstring(
         (_REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8"),
-        "review_connections"))
+        "_review_connections"))
     assert "* stale" in doc and "* contested" in doc, (
         "review_connections no longer documents the mode=prune "
         "stale/contested bullets, so this pin cannot bind the stale "

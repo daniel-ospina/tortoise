@@ -1,9 +1,9 @@
 """#12372 — `tortoise_query(entity_type=...)` was ACCEPTED and DROPPED.
 
 The tool's signature takes ``entity_type: str = "point"``, but only the ``text=``
-arm forwards it (into ``sdk.tortoise_fts_query``, which honours it). The
+arm forwards it (into ``sdk._tortoise_fts_query``, which honours it). The
 paginated arm and the plain structural arm call
-``sdk.paginated_query(kind, skip, limit, **_filters)`` — **no ``entity_type``**
+``sdk._paginated_query(kind, skip, limit, **_filters)`` — **no ``entity_type``**
 — and ``paginated_query``/``query`` are Point readers by construction (no
 ``entity_type`` parameter at all). The tag arm ignores it too, by its own
 docstring.
@@ -61,21 +61,21 @@ class _StubSDK:
         self.n_tag_points = n_tag_points
 
     def _query(self, kind=None, **kwargs):
-        self.calls.append(("query", kind, kwargs))
+        self.calls.append(("_query", kind, kwargs))
         return self.points
 
     def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
-        self.calls.append(("paginated_query", kind, skip, limit, kwargs))
+        self.calls.append(("_paginated_query", kind, skip, limit, kwargs))
         total = len(self.points)
         return {"results": self.points[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
     def _query_points_by_tag(self, tag, *, _record_reads=True):
-        self.calls.append(("query_points_by_tag", tag, _record_reads))
+        self.calls.append(("_query_points_by_tag", tag, _record_reads))
         return [{"id": f"tag{i}"} for i in range(self.n_tag_points)]
 
     def _tortoise_fts_query(self, query=None, kind=None, **kwargs):
-        self.calls.append(("tortoise_fts_query", query, kind, kwargs))
+        self.calls.append(("_tortoise_fts_query", query, kind, kwargs))
         return [{"id": "op0", "is_operator": True}]
 
 
@@ -295,7 +295,7 @@ def test_the_text_arm_still_honours_entity_type(stub_factory) -> None:
     assert isinstance(out, list) and out == [{"id": "op0", "is_operator": True}], (
         f"the text arm must keep forwarding entity_type: {out!r}"
     )
-    assert stub.calls[-1][0] == "tortoise_fts_query"
+    assert stub.calls[-1][0] == "_tortoise_fts_query"
     assert stub.calls[-1][3].get("entity_type") == "operator", (
         "entity_type must reach the fts leg unchanged"
     )
@@ -597,7 +597,7 @@ def test_a_blank_text_with_a_kind_still_serves(stub_factory) -> None:
     out = tortoise_query(text="  ", kind="AgentSession", entity_type="event", limit=1)
 
     assert isinstance(out, list), f"a working combination was refused: {out!r}"
-    assert stub.calls[-1][0] == "tortoise_fts_query"
+    assert stub.calls[-1][0] == "_tortoise_fts_query"
     assert stub.calls[-1][3].get("entity_type") == "event"
 
 
@@ -659,7 +659,7 @@ def test_a_blank_text_still_serves_operator_because_its_leg_has_a_condition(
     out = tortoise_query(text="  ", entity_type="operator", limit=3)
 
     assert isinstance(out, list), f"a working combination was refused: {out!r}"
-    assert stub.calls[-1][0] == "tortoise_fts_query"
+    assert stub.calls[-1][0] == "_tortoise_fts_query"
     assert stub.calls[-1][3].get("entity_type") == "operator"
 
 
@@ -979,7 +979,7 @@ def test_the_event_remedy_names_the_population_to_reconcile_against() -> None:
     `event` names no count key at all — it names a read that can be reconciled
     against the graph's own Event count, which is a different and equally
     load-bearing claim (`tortoise_get_entity(None, type='events')` →
-    `sdk.get_events` → `MATCH (e:Event) LIMIT $lim`, default 20, a bare list,
+    `sdk._get_events` → `MATCH (e:Event) LIMIT $lim`, default 20, a bare list,
     no status filter, so `counts.Event` is the matching population). Round 10
     measured the gap: deleting that clause left the suite fully GREEN, i.e. the
     one entry whose size source is prose could lose it silently — the same

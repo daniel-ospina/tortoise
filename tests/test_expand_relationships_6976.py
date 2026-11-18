@@ -4,7 +4,7 @@
 (§3, and §8 rule 8 mandates it over ``traverse``). It delegates to
 ``search_engine.get_relationships``, whose selection had two blind spots:
 
-1. **Operator-less direct edges were invisible.** ``sdk.create_direct_edge`` is
+1. **Operator-less direct edges were invisible.** ``sdk._create_direct_edge`` is
 the shape ONTOLOGY v3.5 §8 calls canonical for a plain IMPL/NAND connection
 ("plain IMPL/NAND connections are direct edges … NO operator node"), and it is
 what ``tortoise_list_batch`` reports as a ``direct_edge``. The reader required

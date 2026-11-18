@@ -803,11 +803,11 @@ def test_a_refused_supersede_leaves_no_second_live_claim(sdk, monkeypatch):
     def refuse(*a, **kw):
         raise ValueError("refused by the lifecycle guard")
 
-    monkeypatch.setattr(sdk, "supersede_point", refuse)
+    monkeypatch.setattr(sdk, "_supersede_point", refuse)
     with pytest.raises(ValueError):
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
-    monkeypatch.setattr(sdk, "supersede_point", real)
+    monkeypatch.setattr(sdk, "_supersede_point", real)
 
     live = [r for r in _judgement_points(sdk, goal["id"])
             if r[1] not in {"superseded", "retracted"}]
@@ -866,11 +866,11 @@ def test_a_supersede_that_fails_after_mutating_keeps_the_migrated_mirror(
         real(old_id, new_id, **kw)  # the supersession LANDED (mirror migrated)
         raise RuntimeError("driver died after the journal append")
 
-    monkeypatch.setattr(sdk, "supersede_point", dies_after_the_mutation)
+    monkeypatch.setattr(sdk, "_supersede_point", dies_after_the_mutation)
     with pytest.raises(RuntimeError) as excinfo:
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
-    monkeypatch.setattr(sdk, "supersede_point", real)
+    monkeypatch.setattr(sdk, "_supersede_point", real)
 
     live = [r for r in _judgement_points(sdk, goal["id"])
             if r[1] not in {"superseded", "retracted"}]
@@ -921,11 +921,11 @@ def test_a_supersede_that_dies_mid_transfer_keeps_the_successor(sdk, monkeypatch
         # … and 2a-INPUT + the status write never happen.
         raise RuntimeError("driver died between the 2a and 2a-INPUT legs")
 
-    monkeypatch.setattr(sdk, "supersede_point", dies_mid_transfer)
+    monkeypatch.setattr(sdk, "_supersede_point", dies_mid_transfer)
     with pytest.raises(RuntimeError):
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
-    monkeypatch.setattr(sdk, "supersede_point", real)
+    monkeypatch.setattr(sdk, "_supersede_point", real)
 
     assert sdk.get_entity(met["point_id"])["status"] == "live", (
         "this pin is about the window where the predecessor is STILL live"
@@ -1001,11 +1001,11 @@ def test_a_status_only_supersession_landing_keeps_the_successor(sdk, monkeypatch
             params={"id": old_id})
         raise RuntimeError("driver died after the status write")
 
-    monkeypatch.setattr(sdk, "supersede_point", stamps_then_dies)
+    monkeypatch.setattr(sdk, "_supersede_point", stamps_then_dies)
     with pytest.raises(RuntimeError):
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
-    monkeypatch.setattr(sdk, "supersede_point", real)
+    monkeypatch.setattr(sdk, "_supersede_point", real)
 
     assert sdk.get_entity(met["point_id"])["status"] == "superseded"
     live = [r[0] for r in _judgement_points(sdk, goal["id"])
@@ -1187,8 +1187,8 @@ def test_a_failed_compensation_does_not_mask_the_supersede_refusal(
     def cleanup_cannot_confirm(*a, **kw):
         raise RuntimeError("journal append for the delete did not confirm")
 
-    monkeypatch.setattr(sdk, "supersede_point", refuse)
-    monkeypatch.setattr(sdk, "delete_point", cleanup_cannot_confirm)
+    monkeypatch.setattr(sdk, "_supersede_point", refuse)
+    monkeypatch.setattr(sdk, "_delete_point", cleanup_cannot_confirm)
     with pytest.raises(ValueError) as excinfo:
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)

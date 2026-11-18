@@ -1478,7 +1478,7 @@ def test_the_refusal_repair_is_true_on_the_door_that_raises_it(sdk):
         sdk._update_point(target["id"], validTo="2026-02-30")
     message = str(refused.value)
 
-    assert "update_point" in message and "OMITTING validTo" in message, (
+    assert "_update_point" in message and "OMITTING validTo" in message, (
         "the repair must say that omitting the field is NOT an open end on "
         f"update_point — that is the door that just refused: {message}"
     )
@@ -2293,8 +2293,8 @@ def test_supersede_refusal_message_survives_scrub(sdk):
     assert "inverted window" in msg
     assert _scrub_error(msg) == msg, f"scrub rewrote the message: {_scrub_error(msg)}"
     # the remedy is named, and it exists
-    assert "retract_point" in msg
-    assert hasattr(sdk, "retract_point")
+    assert "_retract_point" in msg
+    assert hasattr(sdk, "_retract_point")
 
 
 # ---------------------------------------------------------------------------
@@ -2387,7 +2387,7 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
     ``update_point`` returns ``{}`` for an id that does not exist, and that path
     writes NOTHING. Shaping still ran from the caller's props, so attaching
     ``valid_to_shaped`` turned the empty result into a truthy dict:
-    a caller's existence check (``if not sdk.update_point(id, ...)``) silently
+    a caller's existence check (``if not sdk._update_point(id, ...)``) silently
     passed, and the receipt reported a shaping that never reached the record.
 
     #10119 — THE REPLY IS NOT THE WHOLE CONTRACT. This test used to pin the

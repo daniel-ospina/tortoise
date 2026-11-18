@@ -95,7 +95,7 @@ DEPTH_BUCKET_VALUES = frozenset({"early", "middle", "late"})
 
 # Comparison lanes + mode snapshot for the committed baseline config (the
 # resolved-config snapshot the --compare gate checks — plan §4.3.3).
-LANE_VALUES = frozenset({"verbatim", "facts", "dream"})
+LANE_VALUES = frozenset({"verbatim", "facts", "_dream"})
 MODE_VALUES = frozenset({"BPRE", "full"})
 
 # Extractor posture (REVIEW-FIX, PR #2183 review findings 1+4): the product

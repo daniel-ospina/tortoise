@@ -335,7 +335,7 @@ def test_outcomes_to_report_golden_shape():
     assert lat["retrieval"]["mean_ms"] == 11.0
     assert lat["reader"]["mean_ms"] == 22.0
     assert lat["judge"]["mean_ms"] == 33.0
-    assert lat["ingest"]["mean_ms"] == 12.5  # M7 D5: isolated write-path cost
+    assert lat["_ingest"]["mean_ms"] == 12.5  # M7 D5: isolated write-path cost
     assert lat["total_per_question"]["mean_ms"] == 66.0
 
     # M7 D1: integrity block — one completed, zero invalid → valid.
@@ -6997,8 +6997,8 @@ def test_outcome_instrumentation_fields(tmp_path):
                     "ingest_latency_ms"):
             assert key in o, f"outcome {o['question_id']} missing {key}"
         # pool_size == turns + chunks written for THIS question (authoritative)
-        assert o["pool_size"] == o["ingest"]["turns"] + o["ingest"]["chunks"]
-        assert o["evidence_written"] == o["ingest"]["evidence_turns"]
+        assert o["pool_size"] == o["_ingest"]["turns"] + o["_ingest"]["chunks"]
+        assert o["evidence_written"] == o["_ingest"]["evidence_turns"]
         assert o["ingest_latency_ms"] > 0
         assert o["valid"] is True
         assert o["error_classes"] == {}  # M4 #1524: census dict (deterministic → empty)
@@ -7011,7 +7011,7 @@ def test_outcome_instrumentation_fields(tmp_path):
     assert report["pool_size"]["mean"] > 0
     assert report["evidence"]["evidence_bearing_n"] == 4
     assert report["evidence"]["evidence_absent_n"] == 1  # mini_abs
-    assert report["latency_ms"]["ingest"]["mean_ms"] > 0
+    assert report["latency_ms"]["_ingest"]["mean_ms"] > 0
 
 
 def test_integrity_block_and_error_census(tmp_path):
@@ -7790,7 +7790,7 @@ def test_trace_timeout_on_overrun(tmp_path, monkeypatch):
                 time.sleep(0.8)
             return real_query(*args, **kwargs)
 
-        monkeypatch.setattr(proj.g._g, "query", _slow_vector_query)
+        monkeypatch.setattr(proj.g._g, "_query", _slow_vector_query)
         t0 = time.monotonic()
         trace: list[dict] = []
         sdk._tortoise_fts_query(q["question"], limit=5, leg_trace=trace)

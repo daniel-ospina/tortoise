@@ -113,7 +113,7 @@ class _CapturingGraph:
 
     @property
     def sent(self) -> list[str]:
-        return [p["query"] for _c, p in self.calls if "query" in p]
+        return [p["_query"] for _c, p in self.calls if "_query" in p]
 
 
 class TestTheEmittedQueryCarriesTheComposite:
@@ -137,7 +137,7 @@ class TestTheEmittedQueryCarriesTheComposite:
         run_fts_query(g, "web_search", entity_type="point", limit=3)
         cypher, params = g.calls[0]
         assert "db.idx.fulltext.queryNodes('Point', $query)" in cypher, cypher
-        assert params["query"].count("web_search") == 1, params
+        assert params["_query"].count("web_search") == 1, params
 
     @pytest.mark.parametrize("query,composite", [
         ("web_search", "web_search"),
@@ -167,8 +167,8 @@ class TestBothSurfacesPassTheRawQuery:
     """The fix must reach the capture prior AND the MCP/SDK search door.
 
     Both ride ``run_fts_query``: the MCP tool ``tortoise_search`` is registered
-    with ``sdk_method="tortoise_fts_query"`` (``tool_registry.py``) and the
-    capture prior is ``extractor_v2._fts_rows`` -> ``sdk.tortoise_fts_query``.
+    with ``sdk_method="_tortoise_fts_query"`` (``tool_registry.py``) and the
+    capture prior is ``extractor_v2._fts_rows`` -> ``sdk._tortoise_fts_query``.
     What this pins is the HALF that can silently regress: neither door may
     pre-tokenise the text, because a door that hands a split term list down
     cannot be repaired by any later builder.
@@ -181,15 +181,15 @@ class TestBothSurfacesPassTheRawQuery:
 
         class _FakeSDK:
             def tortoise_fts_query(self, query, **kw):
-                seen.append({"query": query, **kw})
+                seen.append({"_query": query, **kw})
                 return []
 
         _fts_rows(_FakeSDK(), "object", "web_search", limit=3)
         assert seen, "the capture prior never reached the FTS seam"
-        assert seen[0]["query"] == "web_search", (
+        assert seen[0]["_query"] == "web_search", (
             "the capture prior re-tokenised BEFORE the seam: "
-            f"{seen[0]['query']!r}")
-        assert "web_search" in _or_terms(build_or_query(seen[0]["query"])), (
+            f"{seen[0]['_query']!r}")
+        assert "web_search" in _or_terms(build_or_query(seen[0]["_query"])), (
             "the term the prior hands down is lost by the builder")
 
     def test_builder_keeps_the_door_agnostic(self):

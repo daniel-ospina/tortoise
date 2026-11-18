@@ -534,7 +534,7 @@ class TestMcpHandlers:
 
     def test_tortoise_operator_action_unknown(self):
         from tortoise.mcp_server import tortoise_operator_action
-        r = tortoise_operator_action("dream", id="x")
+        r = tortoise_operator_action("_dream", id="x")
         assert "error" in r and "unknown action" in r["error"]
 
     def test_tortoise_supersede_transfer_edges_param(self):

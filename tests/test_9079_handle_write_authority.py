@@ -170,7 +170,7 @@ def _dispatch_probe(self):
     the test asserts the detector can see it — a detector that returned an empty
     set for this source is the P2 the test exists for.
     """
-    return _dispatch_decided(self._g, "query", "CREATE (n:Probe {id:'p'})")
+    return _dispatch_decided(self._g, "_query", "CREATE (n:Probe {id:'p'})")
 
 
 #: #9209 — the third bucket: MUTATING verbs on the handle whose refusal is NOT
@@ -193,7 +193,7 @@ _NON_STATEMENT_GUARDED_HANDLE_VERBS = {
     # `GRAPH.DELETE` carries no Cypher at all: the guard is #9209's non-Cypher
     # decision, shared with the command channel so the two spellings cannot
     # drift.
-    "delete": ("_refuse_unauthorized_graph_wipe",),
+    "_delete": ("_refuse_unauthorized_graph_wipe",),
     # `CALL <procedure>(…)` IS Cypher text, so this verb is protected by the L2
     # bulk-wipe classifier applied to the statement the vendor will build — AND
     # it consults §17.1's statement door on that same reconstructed statement

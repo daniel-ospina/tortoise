@@ -99,7 +99,7 @@ class TestProtocolHash:
         # a decide-loop tool-surface change must update this tuple and trip
         # parity (that is the point of the protocol hash).
         assert TOOL_SURFACE_IDS == (
-            "create_point", "create_operator", "file_nand",
+            "_create_point", "_create_operator", "file_nand",
             "register_conflict", "mitigate", "supersede")
         # single-source lock (#2284 review P2): the parity-pinned tuple must
         # stay EXACTLY the schema-v1.1 tool_event verb registry — two

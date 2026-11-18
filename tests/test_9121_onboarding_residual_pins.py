@@ -127,7 +127,7 @@ def _mint_sites_from_its_owner() -> set[tuple[str, str]]:
 #: (the self-service arm and the Supabase-mode arm), and a slice of that pair
 #: disappearing without the note being re-read is exactly the drift here.
 _ESCAPE3_CALL_SITES = {
-    ("tortoise/sdk.py", "org_create"): 1,
+    ("tortoise/sdk.py", "_org_create"): 1,
     ("tortoise/hosted_api.py", "provision_tenant"): 1,
     ("tortoise/hosted_api.py", "register_user"): 2,
     ("tortoise/hosted_api.py", "_eager_provision_org_graph"): 1,
@@ -312,14 +312,14 @@ def _not_through_the_declared_funnel(
                 "is not provably a `guarded_write_handle(...)` binding"
             )
             continue
-        if leaf == "query" and receiver in handles:
+        if leaf == "_query" and receiver in handles:
             offenders.append(
                 f"line {lineno}: {callee}({', '.join(passed)}) — issued on this "
                 f"function's escape-(3) handle(s) {sorted(handles)}: the #9157 "
                 "escape is back"
             )
             continue
-        if leaf == "query" and (receiver in {"g", "proj"}
+        if leaf == "_query" and (receiver in {"g", "proj"}
                                 or callee.endswith(".g.query")):
             offenders.append(
                 f"line {lineno}: {callee}({', '.join(passed)}) — `proj.g` is bound "
@@ -621,7 +621,7 @@ def test_every_eager_init_site_issues_its_statement_through_the_declared_funnel(
             assert enclosing is not None
             handles = _escape_handle_names(enclosing)
             # #9157: an empty binding set is now the CLEAN shape for a site
-            # whose only graph access is the guarded handle — `sdk.org_create`
+            # whose only graph access is the guarded handle — `sdk._org_create`
             # opened `select_graph(...)` solely to issue this statement, and the
             # fix removed it. Three other sites keep the binding as their READ
             # handle (the `_seen`/idempotency probe), so both shapes are legal;
@@ -948,7 +948,7 @@ def test_the_declaration_detector_can_fail():
             for node in ast.walk(tree)
             for child in ast.iter_child_nodes(node)
         }
-        assert _declaring_functions(tree, parents) == {"org_create"}, (
+        assert _declaring_functions(tree, parents) == {"_org_create"}, (
             f"the declaration detector no longer recognises a `with` over "
             f"{primitive}() — a site closed through that opener would leave "
             "every residual pin in this file green while the note went stale"

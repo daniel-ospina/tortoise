@@ -36,7 +36,7 @@ Both are pinned below, and the second is pinned at the SDK door that the hosted
 commit path funnels through.
 
 WHY THE DOOR ROWS EXIST (review R1/R2 on the `eb7071ae` head). The rows above
-drove `sdk.create_point` / `sdk.update_point` directly, so THREE doors the fix
+drove `sdk._create_point` / `sdk._update_point` directly, so THREE doors the fix
 is about — `hosted_api._execute_commit_writes`, the `_extract_session_v2`
 capture seam, and `update_entity` — stayed guarded only by `inspect.getsource`
 substrings in `test_referentiality_11021.py`, which a `if False:` or an

@@ -2,7 +2,7 @@
 
 THE DEFECT THIS PINS
 --------------------
-``sdk.create_point("statement", None)`` — and every non-``str`` beside it —
+``sdk._create_point("statement", None)`` — and every non-``str`` beside it —
 raised a bare ``AttributeError: 'NoneType' object has no attribute 'encode'``
 from ``_content_hash``, one frame inside a private helper. ``content`` is a
 REQUIRED ``str`` in the signature, yet nothing validated it, so the caller saw
@@ -95,7 +95,7 @@ def test_a_non_str_content_is_refused_by_name(sup):
         with pytest.raises(TypeError) as exc:
             sdk._create_point("statement", bad)
         msg = str(exc.value)
-        assert "create_point" in msg, f"must name the surface: {msg}"
+        assert "_create_point" in msg, f"must name the surface: {msg}"
         assert "content" in msg, f"must name the argument: {msg}"
         assert "encode" not in msg, f"no helper-level message may leak: {msg}"
 
@@ -174,6 +174,6 @@ def test_mcp_tortoise_create_point_returns_a_naming_validation_error(
         m._transport_mode.set(None)
 
     message = r["error"]
-    assert "create_point" in message, message
+    assert "_create_point" in message, message
     assert "content" in message, message
     assert "encode" not in message, f"no helper-level message may leak: {message}"

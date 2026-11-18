@@ -2484,7 +2484,7 @@ class TestAccountDeletionCycle3:
             return real_query(table, *args, **kwargs)
 
         monkeypatch.setattr(fake, "rpc", _rpc)
-        monkeypatch.setattr(fake, "query", _query)
+        monkeypatch.setattr(fake, "_query", _query)
         as_user()
 
         r = tc.delete("/v1/user/account")
@@ -3270,7 +3270,7 @@ class TestUuidComparisonTolerance:
                     for c, op, v in filters])
             return real_query(table, *args, **kwargs)
 
-        monkeypatch.setattr(fake, "query", _pg_uuid_equality)
+        monkeypatch.setattr(fake, "_query", _pg_uuid_equality)
         assert sc.sole_owned_org_ids(fake, OWNER.upper()) == [ORG_ID]
 
 

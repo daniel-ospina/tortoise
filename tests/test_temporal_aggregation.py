@@ -91,7 +91,7 @@ def test_census_class_units_are_time_units():
 
 # ── (b) classification table ──────────────────────────────────────────────
 
-@pytest.mark.parametrize(("query", "kind", "unit"), [
+@pytest.mark.parametrize(("_query", "kind", "unit"), [
     # explicit frequency / count surface (the literal issue class)
     ("How many times did we discuss the API migration?", "count", None),
     ("How often do I go to the gym?", "count", None),

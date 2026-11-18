@@ -302,7 +302,7 @@ def _run_commit(sdk, raw: dict, state):
 
 
 def test_commit_path_carries_the_span_to_the_node(sdk):
-    """Review P3: the two `sdk.create_point` calls in
+    """Review P3: the two `sdk._create_point` calls in
     `_execute_commit_writes` forward the span, and nothing exercised that.
     A regression that dropped or mis-mapped the fields there would have kept
     the suite green, so drive the real commit path end to end.

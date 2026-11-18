@@ -1072,7 +1072,7 @@ class TestSessionSourceIndexIdentity:
             assert [u for u, _ in rows] == ["session:s1"], rows
 
             # 3) delete path — the canonical identity is what it removes
-            rd = client.delete("/v1/sessions/s1")
+            rd = client._delete("/v1/sessions/s1")
             assert rd.status_code == 200, rd.text
             assert _session_source_rows() == []
         finally:
@@ -1777,7 +1777,7 @@ class TestFailedWriteRetry4704:
                 raise RuntimeError("simulated transient graph error")
             return real(self, *args, **kwargs)
 
-        monkeypatch.setattr(TortoiseSDK, "create_point", _boom_once)
+        monkeypatch.setattr(TortoiseSDK, "_create_point", _boom_once)
         return calls
 
     def test_failed_write_retry_applies_the_counters_once(self, client,
@@ -3358,9 +3358,9 @@ class TestCommitOrgIngestBound:
             self, client, monkeypatch):
         """A `MITIGATES` bridge-attack mints THREE nodes, not two.
 
-        `sdk.mitigate_operator` CREATEs the mitigation `:Point` and then emits
+        `sdk._mitigate_operator` CREATEs the mitigation `:Point` and then emits
         BOTH `PointAdded` and `OperatorAdded` for it — two durability records,
-        where an `IMPL`/`NAND` entry (`sdk.create_operator`) leaves one. The
+        where an `IMPL`/`NAND` entry (`sdk._create_operator`) leaves one. The
         mitigation Point is in no other lane (it is not a `points[]` entry), so
         an under-charged operator lane is a straight fail-open.
 
@@ -5561,7 +5561,7 @@ def test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record(client
       stays green: the record is never stored, so nothing is cleared).
     * `point_props["mentions"] = _mention_props or None` (unconditional) →
       this row REDs **when the create door's own `mentions is None` guard is
-      also removed**. Alone it does not: `sdk.create_point` refuses to forward
+      also removed**. Alone it does not: `sdk._create_point` refuses to forward
       a `None` mention into the dedup fold, so the record survives by the
       second guard. That layering is deliberate (two independent doors cannot
       delete a record the caller did not restate) and it is why the SDK guard

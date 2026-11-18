@@ -507,7 +507,7 @@ def test_non_uuid_connector_id_is_a_422_not_a_500(client) -> None:
     green with it — the same class as the source_type/sync_status validators.
     """
     tc, _ = client
-    for method in ("get", "patch", "delete"):
+    for method in ("get", "patch", "_delete"):
         kw = {"json": {"config": {"x": 1}}} if method == "patch" else {}
         r = getattr(tc, method)("/v1/connectors/not-a-uuid", **kw)
         assert r.status_code == 422, (method, r.status_code, r.text)

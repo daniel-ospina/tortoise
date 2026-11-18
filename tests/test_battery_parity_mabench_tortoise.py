@@ -96,7 +96,7 @@ class RecordingMemory:
         self._short_ingest = short_ingest
 
     def ingest(self, texts: list[str]) -> int:
-        self.events.append(("ingest", len(texts)))
+        self.events.append(("_ingest", len(texts)))
         if self._fail_ingest:
             raise RuntimeError("store down")
         self.ingested = list(texts)
@@ -147,7 +147,7 @@ class TestLaneSemantics:
         caller = ScriptedCaller(["Answer: Leeds", "Answer: Mahmoud Abbas",
                                  "Answer: Asia"])
         cell, run = _run(ITEMS, memory, caller)
-        assert memory.events[0] == ("ingest", len(POOL_UNITS)), \
+        assert memory.events[0] == ("_ingest", len(POOL_UNITS)), \
             "the pool is ingested ONCE, BEFORE the first question"
         assert [e[0] for e in memory.events[1:]] == ["recall"] * 3
         assert cell.detail["ingested"] == len(POOL_UNITS)
@@ -246,7 +246,7 @@ class TestFailClosed:
         with pytest.raises(ExecutorUnavailable, match="ingest failed"):
             _run(ITEMS, memory, caller)
         assert caller.prompts == [], "no question may run after a failed ingest"
-        assert [e[0] for e in memory.events] == ["ingest"]
+        assert [e[0] for e in memory.events] == ["_ingest"]
 
     def test_partial_ingest_is_refused(self):
         memory = RecordingMemory(short_ingest=True)
@@ -260,7 +260,7 @@ class TestFailClosed:
             _run(ITEMS, memory, caller)
         # The pool WAS ingested; the run still refuses rather than scoring a
         # subset of the questions it happened to answer.
-        assert [e[0] for e in memory.events] == ["ingest", "recall"]
+        assert [e[0] for e in memory.events] == ["_ingest", "recall"]
 
     def test_all_empty_retrieval_is_refused_not_labelled_tortoise(self):
         """An all-empty retrieval is a no-context baseline; reporting it under

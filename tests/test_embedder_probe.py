@@ -280,13 +280,13 @@ def test_warm_process_stale_singleton_hard_fails():
 def test_query_prompt_threaded_to_model():
     _fake, prev = _seed_st()
     try:
-        state = probe.inject_model("arctic-xs", query_prompt="query")
-        assert state["query_prompt"] == "query"
+        state = probe.inject_model("arctic-xs", query_prompt="_query")
+        assert state["query_prompt"] == "_query"
         model = EmbeddingModel.get()
         # Threaded as default_prompt_name (the sentence-transformers>=3 name —
         # prompt_name was renamed in v3.0; threading the old name raises
         # TypeError on the pinned range).
-        assert model.kwargs.get("default_prompt_name") == "query"
+        assert model.kwargs.get("default_prompt_name") == "_query"
     finally:
         _restore_st(prev)
 
@@ -481,7 +481,7 @@ def test_query_prompt_seam_threads_default_prompt_name_to_real_model():
     try:
         # (a) the factory seam directly: construction + encode with the prompt
         factory = probe._CandidateFactory(
-            RealST, "sentence-transformers/all-MiniLM-L6-v2", None, "query")
+            RealST, "sentence-transformers/all-MiniLM-L6-v2", None, "_query")
         model = factory("ignored", local_files_only=True)
         assert model.get_embedding_dimension() == 384
         vecs = np.asarray(model.encode(
@@ -491,8 +491,8 @@ def test_query_prompt_seam_threads_default_prompt_name_to_real_model():
         del model  # drop the direct handle before the injection below
 
         # (b) the full injection path (real module patched, singleton swapped)
-        state = probe.inject_model("minilm", query_prompt="query")
-        assert state["query_prompt"] == "query"
+        state = probe.inject_model("minilm", query_prompt="_query")
+        assert state["query_prompt"] == "_query"
         assert state["dim"] == 384
         vecs2, degraded = _encode(["tortoise is a live epistemic graph engine"])
         assert degraded is False

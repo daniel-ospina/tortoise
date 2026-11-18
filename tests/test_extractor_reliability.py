@@ -207,7 +207,7 @@ def test_key_limit_403_census_fires_the_extraction_killer_gate():
     # value is this PARTIAL shape — an embed list present, no empty_embed_list.
     assert _outcome_extraction_health({
         "question_id": "wp01", "error_classes": census,
-        "ingest": {"points": 202}, "points_total": 1000,
+        "_ingest": {"points": 202}, "points_total": 1000,
     }) == "degraded"
 
 

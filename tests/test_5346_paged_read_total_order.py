@@ -1,6 +1,6 @@
 """#5346 — a PAGED read must order by a TOTAL key, or the pages are not adjacent.
 
-``sdk.paginated_query`` (and therefore the MCP tools ``tortoise_query`` with
+``sdk._paginated_query`` (and therefore the MCP tools ``tortoise_query`` with
 ``offset=``/``page=`` and ``tortoise_paginated_query``) enumerated Points with
 ``ORDER BY n.createdAt DESC SKIP $skip LIMIT $limit``. ``createdAt`` is **not
 unique** — one capture stamps a whole session of turns with a single timestamp
@@ -201,7 +201,7 @@ def test_search_sessions_legacy_fallback_pages_without_loss(sdk, monkeypatch):
         "name:$q + ' ' + toString(i), startedAt:$ts})",
         params={"n": n, "q": "zzprobe5346", "ts": "2026-01-01T00:00:00Z"},
     )
-    monkeypatch.setattr(sdk, "tortoise_fts_query", lambda *a, **k: [])
+    monkeypatch.setattr(sdk, "_tortoise_fts_query", lambda *a, **k: [])
 
     seen: list[str] = []
     offset = 0

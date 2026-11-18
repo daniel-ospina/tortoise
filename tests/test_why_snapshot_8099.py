@@ -247,7 +247,7 @@ def test_push_path_assembles_nothing_and_computes_no_beliefs(monkeypatch):
     # of that binding, so nothing after this line could reach it — a guard no
     # mutant can red is not a guard (agent-infra#3442 rule 2).
     monkeypatch.setattr("tortoise.why.assemble_why_blocks", _boom_assembly)
-    monkeypatch.setattr(ep_mod.TortoiseEP, "compute_confidence", _boom_ep)
+    monkeypatch.setattr(ep_mod.TortoiseEP, "_compute_confidence", _boom_ep)
     transport = FakeTransport()
     summary = wd.dispatch_pending(proj, transport=transport)
     assert summary["delivered"] >= 1
@@ -961,21 +961,21 @@ def test_the_dream_endpoint_refreshes_the_snapshot_cache(client, monkeypatch):
     def _stub_dream(self, *a, **k):
         payload = {"ok": True, "affected_claims": ["pt_0000000a"],
                    "mode": k.get("mode") or ("full" if k.get("full") else "dirty")}
-        calls.append(("dream", payload))
+        calls.append(("_dream", payload))
         return payload
 
     def _observe_precompute(sdk, dream_result):
         calls.append(("precompute", dream_result))
         return None
 
-    monkeypatch.setattr(TortoiseSDK, "dream", _stub_dream)
+    monkeypatch.setattr(TortoiseSDK, "_dream", _stub_dream)
     monkeypatch.setattr(ha_mod, "_precompute_why_blocks", _observe_precompute)
 
     for params in ({}, {"mode": "stale-first"}, {"full": "true"}):
         calls.clear()
         response = client.post("/v1/dream", params=params)
         assert response.status_code == 200, response.text
-        assert [c[0] for c in calls] == ["dream", "precompute"], (
+        assert [c[0] for c in calls] == ["_dream", "precompute"], (
             f"{params}: the dream pass did not refresh the why-block cache — "
             f"observed {[c[0] for c in calls]}")
         assert calls[1][1] is calls[0][1], (

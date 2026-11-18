@@ -1354,7 +1354,7 @@ def test_kill9_warm_db_aof_carries_post_save_writes(monkeypatch):
 
 def test_jsonl_recovery_after_total_graph_loss(monkeypatch):
     """#915 indicator 2 — JSONL event-log rebuild is the recovery path for
-    LOG-BACKED writes. Pinned write path: sdk.create_point with event_log_path
+    LOG-BACKED writes. Pinned write path: sdk._create_point with event_log_path
     in the db's directory. Green pre-fix BY DESIGN (verification test)."""
     canonical = _canonical_path()
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)

@@ -84,7 +84,7 @@ def test_handler_makes_no_direct_query_call():
     offenders = [
         n.lineno
         for n in _walk_own_body(node)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "query"
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "_query"
     ]
     assert not offenders, (
         f"health_ready calls .query(...) directly at line(s) {offenders} — "
@@ -335,7 +335,7 @@ def _on_loop_nested_names(node: ast.AST) -> set[str]:
 #: That site is pinned BEHAVIOURALLY instead
 #: (`tests/test_oauth_clients_count_2853.py::test_the_read_runs_off_the_event_loop`),
 #: not by this guard — do not read membership as coverage of it.
-_CP_METHOD_NAMES = frozenset({"query", "rpc", "rpc_value", "query_with_total"})
+_CP_METHOD_NAMES = frozenset({"_query", "rpc", "rpc_value", "query_with_total"})
 
 #: The receiver convention this detector recognises, and NOTHING else. ``cp`` is
 #: the module's own binding for ``get_control_plane()`` at nearly every
@@ -466,7 +466,7 @@ def _supabase_control_blocking_names() -> set[str]:
                     continue
                 calls |= {_callee_name(c.func) for c in ast.walk(stmt)
                           if isinstance(c, ast.Call)}
-            if (calls & blocking) or (calls & {"query", "rpc", "rpc_value"}):
+            if (calls & blocking) or (calls & {"_query", "rpc", "rpc_value"}):
                 blocking.add(name)
                 changed = True
     return blocking
@@ -891,7 +891,7 @@ def test_detector_flags_direct_control_plane_method_io():
         (call.lineno, name)
         for name, call in _control_plane_method_calls(node)
     ]
-    assert hits == [(2, "query"), (5, "rpc_value")], (
+    assert hits == [(2, "_query"), (5, "rpc_value")], (
         "the method-form detector must flag an un-offloaded ``cp.query`` and "
         "``get_control_plane().rpc_value``, and must NOT flag the offloaded "
         f"call or a non-control-plane receiver (``db.query``); got {hits}"
@@ -1957,7 +1957,7 @@ def test_selfhost_ready_does_not_probe_on_the_loop():
         for n in _walk_own_body(node)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Attribute)
-        and n.func.attr in {"_get_proj", "query"}
+        and n.func.attr in {"_get_proj", "_query"}
     ]
     assert not offenders, (
         f"selfhost health_ready calls DB-touching code directly at line(s) {offenders} — "

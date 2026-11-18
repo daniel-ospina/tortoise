@@ -314,7 +314,7 @@ def test_the_two_named_tools_declare_a_shape_fastmcp_accepts():
     passing.
     """
     for name, sdk_method, expected in (
-            ("tortoise_belief_timeline", "belief_timeline", "list"),
+            ("tortoise_belief_timeline", "_belief_timeline", "list"),
             # #11609: the SDK method retired into `review_link_candidates`, which
             # returns `Any` — so this door owes its OWN envelope (`-> dict`) rather
             # than the SDK method's list type. The premise is re-derived, not dropped.
@@ -419,7 +419,7 @@ async def test_a_non_empty_list_result_keeps_its_rows(stubbed):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,args,raising", [
-    ("tortoise_belief_timeline", {"topic": "Helios"}, "belief_timeline"),
+    ("tortoise_belief_timeline", {"topic": "Helios"}, "_belief_timeline"),
     ("tortoise_list_dedup_candidates", {}, "review_link_candidates"),
 ])
 async def test_a_safe_failure_is_not_demoted_into_the_success_payload(
@@ -489,7 +489,7 @@ def test_the_passthrough_recogniser_sees_both_idiomatic_shapes():
         return {"mode": "state", "rows": ms._safe(  # pragma: no cover
             ms._get_org_sdk()._belief_timeline, topic)}
 
-    assert _passthrough_of(one_statement) == "belief_timeline"
-    assert _passthrough_of(bound_then_return) == "belief_timeline"
+    assert _passthrough_of(one_statement) == "_belief_timeline"
+    assert _passthrough_of(bound_then_return) == "_belief_timeline"
     assert _passthrough_of(enveloped) is None
     assert _passthrough_of(reshaped) is None

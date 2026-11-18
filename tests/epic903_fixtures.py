@@ -316,7 +316,7 @@ class F3NonConvergent:
     while A wobbles ≈0.82-0.84, so ``ep.run``'s relative change never drops
     below ``EP_TOL`` within ``EP_MAX_ITER``. Calibrated 2026-08-14 (#1250):
     fails across every seed tested and across all three execution paths
-    (``sdk.dream``, ``sdk.dream(full=True)``, ``sdk.compute_confidence``).
+    (``sdk._dream``, ``sdk._dream(full=True)``, ``sdk._compute_confidence``).
     The eval-spec B7 odd-NAND triangle is NOT suitable (it converges trivially
     today — plan Substep 7 note).
     """
@@ -341,7 +341,7 @@ def f3_nonconvergent() -> F3NonConvergent:
     """F3 — fails-to-converge fixture builder.
 
     The builder creates the graph only (no EP run) — consumers run
-    ``sdk.dream(dirty_only=True)`` and must receive ``converged=False`` (the
+    ``sdk._dream(dirty_only=True)`` and must receive ``converged=False`` (the
     calibration test pins this). Pins ``FIXED_SEED`` so downstream EP
     trajectories are reproducible.
     """

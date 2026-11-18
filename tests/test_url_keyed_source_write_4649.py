@@ -442,7 +442,7 @@ class TestUrlKeyedSourceIsWritable:
         assert not _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=url)
 
         recs = [r for r in _mutations(events)
-                if r.get("id") == url and r.get("op") == "delete"]
+                if r.get("id") == url and r.get("op") == "_delete"]
         assert recs and recs[0]["label"] == "Source", (
             f"the delete must journal an {_REC} op=delete label='Source' "
             f"record; got {recs!r}")
@@ -485,7 +485,7 @@ class TestDeletePreviewAgreesWithTheWriter:
         (``tortoise_delete(dry_run=True)`` → ``_preview_delete``), not just the
         leaf preview. It resolves the label itself, so it needs the same
         ``by_url`` the writer got — otherwise it reports ``found=False`` for a
-        node ``sdk.delete`` deletes (a dry run that lies on an irreversible
+        node ``sdk._delete`` deletes (a dry run that lies on an irreversible
         op), while the (already OR-set-aware) leaf preview disagrees.
 
         (1) Failing values are ``found is False`` / ``nodes_removed == 0`` and
@@ -502,7 +502,7 @@ class TestDeletePreviewAgreesWithTheWriter:
 
         assert preview["found"] is True, (
             "tortoise_delete(dry_run=True) reported the url-keyed Source as "
-            "absent while sdk.delete(url) deletes it — the dispatcher resolves "
+            "absent while sdk._delete(url) deletes it — the dispatcher resolves "
             "without by_url (#4649)")
         assert preview["nodes_removed"] == 1, preview
         assert preview["nodes_removed"] == _preview_delete_entity(
@@ -716,7 +716,7 @@ class TestNoRegressionOnExistingShapes:
 
         assert sdk._delete(url) is True
         recs = [r for r in _mutations(events)
-                if r.get("id") == url and r.get("op") == "delete"]
+                if r.get("id") == url and r.get("op") == "_delete"]
         assert len(recs) == 1, recs
 
     def test_an_absent_id_is_still_a_silent_no_op(self, env):
@@ -759,7 +759,7 @@ class TestIdentityTablesCannotDrift:
     def test_the_read_router_covers_every_write_identity_key(self, env):
         """Every key in the write OR-set must have an ENABLED read branch, or
         the silent no-op this issue fixes is rebuilt for the new key: the
-        writers (and both folds) would match it while `sdk.update`/`delete`
+        writers (and both folds) would match it while `sdk._update`/`delete`
         resolution could not route to the node.
 
         (1) The failing state is a declared write-identity key that

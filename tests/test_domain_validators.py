@@ -360,7 +360,7 @@ def _seed_chain_violations(sdk: TortoiseSDK) -> dict:
 
 
 def _legacy_check_structure(graph) -> list[dict]:
-    """VERBATIM copy of the pre-#405 sdk.check_structure (reference for the
+    """VERBATIM copy of the pre-#405 sdk._check_structure (reference for the
     wrapper-equivalence test — the migration must not change behavior on
     live-only fixtures)."""
     violations: list[dict] = []
@@ -592,7 +592,7 @@ class TestGraphValidators:
             graph_sdk.graph_overview("validate_domain", domain="no-such-domain-405")
 
     def test_wrapper_equivalence_with_legacy(self, graph_sdk):
-        """sdk.check_structure (registry delegation) == legacy implementation
+        """sdk._check_structure (registry delegation) == legacy implementation
         on a live-points fixture (output contract + messages preserved)."""
         _seed_chain_violations(graph_sdk)
         proj = graph_sdk._get_proj()

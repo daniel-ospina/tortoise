@@ -157,7 +157,7 @@ class TestSupersedeEPCascade:
         def _boom(*_a, **_kw):
             raise ConnectionError("graph unreachable — EP re-propagation failed")
 
-        monkeypatch.setattr(sdk, "dream", _boom)
+        monkeypatch.setattr(sdk, "_dream", _boom)
         with pytest.raises(ConnectionError):
             sdk._dream(dirty_only=True, max_hops=2,
                       require_calibration=False)

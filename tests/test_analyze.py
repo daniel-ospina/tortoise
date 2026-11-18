@@ -100,7 +100,7 @@ def test_with_projection(shared_proj):
         result = analyze("where is the disagreement?", proj=proj)
         assert result["pattern"] == "disagreement"
         assert len(result["raw"]) > 0, "disagreement query returned no rows"
-        assert result["query"] is not None
+        assert result["_query"] is not None
     finally:
         pass  # shared session projection — fixture owns close
 
@@ -317,7 +317,7 @@ def test_analyze_error_redacted(monkeypatch, shared_proj):
             result = analyze("where is the disagreement?", proj=proj)
             assert "Traceback" not in result["answer"]
             assert "proj" not in result["answer"]
-            assert result["query"] is None
+            assert result["_query"] is None
         finally:
             _a.TEMPLATES["disagreement"]["cypher"] = orig
     finally:

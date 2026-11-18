@@ -912,7 +912,7 @@ class TestConcurrentCaptureDuringDelete:
                 )
             return real_query(self, q, params=params, **kw)
 
-        monkeypatch.setattr(_GuardedGraph, "query", racing_query)
+        monkeypatch.setattr(_GuardedGraph, "_query", racing_query)
         _delete(tc, SID)
 
         assert injected["done"], "the race never fired — test is vacuous"
@@ -922,7 +922,7 @@ class TestConcurrentCaptureDuringDelete:
         # … so its removal MUST be in the journal, or a replay resurrects it.
         recs = _journal(sdk)
         assert any(
-            e.get("type") == "EntityMutated" and e.get("op") == "delete"
+            e.get("type") == "EntityMutated" and e.get("op") == "_delete"
             and e.get("label") == "Point" and e.get("id") == concurrent
             for e in recs), (
             "a Point removed by the session delete was not journaled because "
@@ -951,13 +951,13 @@ class TestDeleteIsJournaled:
             "EntityMutated record can express it (#7951)")
         point_deletes = [
             e for e in recs
-            if e.get("type") == "EntityMutated" and e.get("op") == "delete"
+            if e.get("type") == "EntityMutated" and e.get("op") == "_delete"
             and e.get("label") == "Point"]
         assert point_deletes, (
             "every removed CONTAINS Point must be journaled as an "
             "EntityMutated op=delete (#7951)")
         assert any(
-            e.get("type") == "EntityMutated" and e.get("op") == "delete"
+            e.get("type") == "EntityMutated" and e.get("op") == "_delete"
             and e.get("label") == "Event"
             for e in recs), "the removed sessionCaptured Event must be journaled"
 
@@ -1009,7 +1009,7 @@ class TestOrphanedWriteSweepIsJournaled:
             return real_query(query, params=merged)
 
         class _FakeProj:
-            g = type("G", (), {"query": staticmethod(fake_query)})()
+            g = type("G", (), {"_query": staticmethod(fake_query)})()
             query = staticmethod(fake_query)
 
             def __getattr__(self, name):  # delegate everything else
@@ -1037,7 +1037,7 @@ class TestOrphanedWriteSweepIsJournaled:
         recs = _journal(sdk)
         swept = [
             e for e in recs
-            if e.get("type") == "EntityMutated" and e.get("op") == "delete"
+            if e.get("type") == "EntityMutated" and e.get("op") == "_delete"
             and e.get("label") == "Point"
             and isinstance(e.get("id"), str) and e["id"].startswith(f"{sid}_t")]
         assert swept, (
@@ -1100,7 +1100,7 @@ class TestOrphanedWriteSweepIsJournaled:
             return real_query(query, params=merged)
 
         class _FakeProj:
-            g = type("G", (), {"query": staticmethod(fake_query)})()
+            g = type("G", (), {"_query": staticmethod(fake_query)})()
             query = staticmethod(fake_query)
 
             def __getattr__(self, name):  # delegate everything else
@@ -1174,7 +1174,7 @@ class TestOrphanedWriteSweepIsJournaled:
             return real_query(query, params=merged)
 
         class _FakeProj:
-            g = type("G", (), {"query": staticmethod(fake_query)})()
+            g = type("G", (), {"_query": staticmethod(fake_query)})()
             query = staticmethod(fake_query)
 
             def __getattr__(self, name):  # delegate everything else

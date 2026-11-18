@@ -160,7 +160,7 @@ def test_runner_pool_emission_and_judge_labels(tmp_path):
     assert pool["schema_version"] == 1
     assert len(pool["queries"]) == 50  # authored queries only
     for q in pool["queries"]:
-        assert q["query"]
+        assert q["_query"]
         # Top-50/strategy/query, deduped → ≤ 5*50 points per query.
         assert 1 <= len(q["points"]) <= 5 * 50
         assert all("id" in p and "content" in p for p in q["points"])

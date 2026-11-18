@@ -957,7 +957,7 @@ def test_new_org_window_failure_still_applies_the_metadata_tier(
 
     When the window write fails AND the subscription price does not resolve
     (``tier is None``), the metadata fallback is the only path that lifts a new
-    PAID org off free limits in the registry/selfhost lane (``sdk.org_create``
+    PAID org off free limits in the registry/selfhost lane (``sdk._org_create``
     hardcodes free; #2789). Re-raising early skips it. The fix runs the
     fallback first and re-raises LAST, so the tier lands AND the event is
     retried.

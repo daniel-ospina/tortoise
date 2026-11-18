@@ -100,10 +100,10 @@ from tortoise.tool_registry import (
 #: (`create_entity`'s `type="point"`/`type="diary"`). Every assertion here is
 #: parametrized over this table, so a door added here is covered without a second edit.
 RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
-    "tortoise_get_session": ("get_session", 'type="session"'),
+    "tortoise_get_session": ("_get_session", 'type="session"'),
     "tortoise_find_cross_lens_candidates": (
-        "get_cross_lens_candidates", 'kind="cross_lens"'),
-    "tortoise_list_batch": ("list_batch", 'kind="batch"'),
+        "_get_cross_lens_candidates", 'kind="cross_lens"'),
+    "tortoise_list_batch": ("_list_batch", 'kind="batch"'),
     "tortoise_create_subject": ("create_entity", 'type="subject"'),
     "tortoise_create_object": ("create_entity", 'type="object"'),
     "tortoise_create_event": ("create_entity", 'type="event"'),
@@ -410,7 +410,7 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
     """Measured by substitution: the container's door is replaced by a recorder."""
 
     @pytest.mark.parametrize("kind,door", [
-        ("batch", "list_batch"),
+        ("batch", "_list_batch"),
     ])
     def test_list_knowledge_batch_reaches_list_batch(self, kind, door, monkeypatch):
         reached: list = []
@@ -437,10 +437,10 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             return _fn
 
         monkeypatch.setattr(
-            TortoiseSDK, "get_cross_lens_candidates",
-            record("get_cross_lens_candidates"), raising=True)
+            TortoiseSDK, "_get_cross_lens_candidates",
+            record("_get_cross_lens_candidates"), raising=True)
         sdk.review_link_candidates("cross_lens", limit=3)
-        assert [r[0] for r in reached] == ["get_cross_lens_candidates"], reached
+        assert [r[0] for r in reached] == ["_get_cross_lens_candidates"], reached
 
     def test_get_entity_session_reaches_get_session(self, monkeypatch):
         """The MCP door dispatches `type=` through `tortoise_get`, so measure THERE."""
@@ -451,7 +451,7 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             reached.append((args, kwargs))
             return {"session": args[0] if args else None}
 
-        monkeypatch.setattr(TortoiseSDK, "get_session", _fn, raising=True)
+        monkeypatch.setattr(TortoiseSDK, "_get_session", _fn, raising=True)
         monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
         # `_safe`'s auth gate refuses when the transport mode is unset (fail-closed,
         # #236) — this case measures DISPATCH, not auth, so name the mode.
@@ -702,7 +702,7 @@ class TestProtectedDoorsStayLive:
     #     `recompute=True` / `recall=True` — the row below.
     @pytest.mark.parametrize("name,arm,selector", [
         ("tortoise_compute_confidence", "recompute", ("factors", "evidence", "anchors")),
-        ("tortoise_recall", "recall", ("query", "mode")),
+        ("tortoise_recall", "recall", ("_query", "mode")),
     ])
     def test_the_door_retired_only_because_the_container_grew_the_arm(
             self, name, arm, selector):

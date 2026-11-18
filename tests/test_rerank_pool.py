@@ -1332,7 +1332,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     #     page literally moving);
     #   * `ast.Call` nodes with `func.attr == "tortoise_fts_query"` missed the
     #     sites that hand the BOUND METHOD to a helper — `mcp_server.py`'s
-    #     `_safe(_get_org_sdk().tortoise_fts_query, …)` — so
+    #     `_safe(_get_org_sdk()._tortoise_fts_query, …)` — so
     #     `tortoise_suggest_entry_points` (default `limit=5`, no leg trace) was
     #     re-picking WHICH ENTITIES RESOLVE with nothing to disclose it;
     #   * and one external file has TWO sites, so `"kwarg" in src` passed with
@@ -1386,17 +1386,17 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         out: list[tuple[str, bool]] = []
         for node in _ast.walk(tree):
             if not (isinstance(node, _ast.Attribute)
-                    and node.attr == "tortoise_fts_query"):
+                    and node.attr == "_tortoise_fts_query"):
                 continue
             # the CALL the mention feeds: either it IS the callee, or it is an
-            # argument (``_safe(sdk.tortoise_fts_query, …)``)
+            # argument (``_safe(sdk._tortoise_fts_query, …)``)
             call = None
             for c in _ast.walk(tree):
                 if not isinstance(c, _ast.Call):
                     continue
                 # the mention may be the callee, a positional argument
-                # (``_safe(sdk.tortoise_fts_query, …)``) or a KEYWORD VALUE
-                # (``_search_fn=sdk.tortoise_fts_query``)
+                # (``_safe(sdk._tortoise_fts_query, …)``) or a KEYWORD VALUE
+                # (``_search_fn=sdk._tortoise_fts_query``)
                 if (c.func is node or node in c.args
                         or any(node is k.value for k in c.keywords)):
                     call = c
@@ -1412,7 +1412,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                 and k.value.value is False
                 for k in call.keywords)
             if call is not None and not opted_out:
-                # a read BOUND as a seam (``_search_fn=sdk.tortoise_fts_query``):
+                # a read BOUND as a seam (``_search_fn=sdk._tortoise_fts_query``):
                 # the flag rides in the adjacent ``_search_kwargs`` dict, so the
                 # call itself carries no keyword for it — and the DICT is
                 # evaluated, not grepped, for the reason above
@@ -1543,7 +1543,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does`:
         # this list can only say the file is ALLOWED to run the lever, so the
         # flags it actually passes are pinned against `_fts_rows`'s own.
-        "tools/window_quality_m2.py": frozenset({"query"}),
+        "tools/window_quality_m2.py": frozenset({"_query"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
@@ -1585,7 +1585,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     tree = _ast.parse((root / "tortoise" / "sdk.py").read_text())
     seams = [n for n in _ast.walk(tree)
              if isinstance(n, _ast.keyword) and n.arg == "_search_fn"
-             and getattr(n.value, "attr", None) == "tortoise_fts_query"]
+             and getattr(n.value, "attr", None) == "_tortoise_fts_query"]
     kw_seams = [n for n in _ast.walk(tree)
                 if isinstance(n, _ast.keyword) and n.arg == "_search_kwargs"]
     assert len(kw_seams) >= len(seams), (

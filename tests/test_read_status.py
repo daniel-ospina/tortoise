@@ -462,7 +462,7 @@ class TestReadPathStates:
         try:
             # simulate a leg whose return path writes no term
             monkeypatch.setattr(
-                sdk, "tortoise_fts_query", lambda *a, **k: [])
+                sdk, "_tortoise_fts_query", lambda *a, **k: [])
             out: dict = {}
             rows = sdk._recall_state("alpha", read_status_out=out, limit=5)
             assert rows == []
@@ -727,7 +727,7 @@ class TestAStoreThatWillNotOpenKeepsTheDocumentedArms:
     The recorded promise is the one under test, per flag state:
 
     * read-status (or residency) ON → ``status: degraded`` plus an INCOMPLETE
-      empty, exactly what ``sdk.tortoise_fts_query``'s own ``_get_proj()`` arm
+      empty, exactly what ``sdk._tortoise_fts_query``'s own ``_get_proj()`` arm
       emits for the same store;
     * both OFF → the route's own 500 ``"Search failed"``, byte for byte as
       before.

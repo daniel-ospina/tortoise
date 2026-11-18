@@ -3,7 +3,7 @@
 The tool's signature takes ``filters`` and the docstring documents it for the
 structural path. The (pre-fix) ``text=`` arm forwarded only
 ``kind``/``entity_type``/``limit``/``min_confidence``/``order_by`` — **no
-property filter** — into ``sdk.tortoise_fts_query``, and ``_filters`` was not even
+property filter** — into ``sdk._tortoise_fts_query``, and ``_filters`` was not even
 computed until *after* that arm had returned. It now forwards a sixth argument,
 ``include_terminal``, promoted from ``include_retracted`` (a flag, never a
 property filter — see the boundary section below). So a caller who passes
@@ -16,7 +16,7 @@ the caller asked for, and "nothing matched my filter" is indistinguishable from
 "my filter never ran".
 
 Why REFUSE rather than honour (option 1 of the issue's two): the fts leg has no
-property-filter parameter to honour it with. ``sdk.tortoise_fts_query`` takes
+property-filter parameter to honour it with. ``sdk._tortoise_fts_query`` takes
 ``exclude_status`` / ``claim_class`` / ``exclude_turn_echo_session`` /
 ``relationship_filter`` / ``structural_kind`` / ``traversal_path`` — named
 knobs, not a property-filter dict (``tortoise/sdk.py:40637-40710``). Making it
@@ -81,7 +81,7 @@ class _StubSDK:
                            exclude_status=None, claim_class=None,
                            exclude_turn_echo_session=None,
                            include_terminal=False):
-        self.calls.append(("tortoise_fts_query", query, kind, {
+        self.calls.append(("_tortoise_fts_query", query, kind, {
             "entity_type": entity_type,
             "structural_kind": structural_kind,
             "structural_hops": structural_hops,
@@ -100,17 +100,17 @@ class _StubSDK:
         return self.rows
 
     def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
-        self.calls.append(("paginated_query", kind, skip, limit, kwargs))
+        self.calls.append(("_paginated_query", kind, skip, limit, kwargs))
         total = len(self.rows)
         return {"results": self.rows[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
     def _query(self, kind=None, **kwargs):
-        self.calls.append(("query", kind, kwargs))
+        self.calls.append(("_query", kind, kwargs))
         return self.rows
 
     def _query_points_by_tag(self, tag, *, _record_reads=True):
-        self.calls.append(("query_points_by_tag", tag, _record_reads))
+        self.calls.append(("_query_points_by_tag", tag, _record_reads))
         return self.rows
 
 
@@ -203,7 +203,7 @@ def test_the_refusal_happens_before_the_read(stub) -> None:
 
     tortoise_query(text="anything", filters={"domain": "legal"})
 
-    assert [c for c in stub.calls if c[0] == "tortoise_fts_query"] == [], (
+    assert [c for c in stub.calls if c[0] == "_tortoise_fts_query"] == [], (
         f"the fts leg was read before refusing: {stub.calls}"
     )
 
@@ -277,7 +277,7 @@ def test_the_structural_arm_still_applies_the_same_filters(stub) -> None:
     result = tortoise_query(kind="statement", filters={"domain": "legal"})
 
     assert not _is_refusal(result), f"the structural arm was blocked: {result}"
-    forwarded = [c for c in stub.calls if c[0] == "paginated_query"]
+    forwarded = [c for c in stub.calls if c[0] == "_paginated_query"]
     assert forwarded, f"the structural arm never read: {stub.calls}"
     assert forwarded[0][4].get("domain") == "legal", (
         f"the filter did not reach the accessor: {forwarded[0][4]}"
@@ -309,7 +309,7 @@ def test_include_retracted_is_promoted_and_APPLIED_on_the_text_arm(stub) -> None
         "include_retracted is promoted to the parameter, not a property filter — "
         "refusing it here is a false block"
     )
-    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    fts = [c for c in stub.calls if c[0] == "_tortoise_fts_query"]
     assert fts, f"the text arm did not read: {stub.calls}"
     assert fts[0][3].get("include_terminal") is True, (
         "the text arm did not forward include_retracted as the fts leg's "
@@ -328,7 +328,7 @@ def test_include_retracted_stays_false_by_default(stub) -> None:
 
     tortoise_query(text="anything")
 
-    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    fts = [c for c in stub.calls if c[0] == "_tortoise_fts_query"]
     assert fts, f"the text arm did not read: {stub.calls}"
     assert fts[0][3].get("include_terminal") is False, (
         f"a default text= read started surfacing terminal rows: {fts[0][3]}"
@@ -366,7 +366,7 @@ def test_the_tag_arm_refuses_a_filters_dict_it_cannot_apply(stub, kwargs) -> Non
         f"{sorted(kwargs)} was accepted and the filter was DROPPED — the "
         f"unfiltered tag population was served: {len(result) if isinstance(result, list) else result}"
     )
-    assert [c for c in stub.calls if c[0] == "query_points_by_tag"] == [], (
+    assert [c for c in stub.calls if c[0] == "_query_points_by_tag"] == [], (
         f"the tag read happened before refusing: {stub.calls}"
     )
 
@@ -407,7 +407,7 @@ def test_a_tag_read_with_a_non_filter_still_serves(stub, filters) -> None:
     result = tortoise_query(tag="pricing", filters=filters)
 
     assert not _is_refusal(result), f"refused a legitimate tag read: {result}"
-    assert [c[0] for c in stub.calls] == ["query_points_by_tag"], stub.calls
+    assert [c[0] for c in stub.calls] == ["_query_points_by_tag"], stub.calls
 
 
 def test_a_tag_read_without_filters_still_serves(stub) -> None:
@@ -421,7 +421,7 @@ def test_a_tag_read_without_filters_still_serves(stub) -> None:
     result = tortoise_query(tag="pricing")
 
     assert not _is_refusal(result), f"refused a legitimate tag read: {result}"
-    assert [c[0] for c in stub.calls] == ["query_points_by_tag"], stub.calls
+    assert [c[0] for c in stub.calls] == ["_query_points_by_tag"], stub.calls
 
 
 #: The stale sentence that ACTUALLY SHIPPED in the tool's served docstring, and

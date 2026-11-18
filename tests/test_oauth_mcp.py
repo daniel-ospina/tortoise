@@ -3347,7 +3347,7 @@ class TestCimdClientIdentity:
                 raise RuntimeError("control plane 500")
             return original(table, **kwargs)
 
-        monkeypatch.setattr(cp, "query", _fail_post)
+        monkeypatch.setattr(cp, "_query", _fail_post)
         verifier, challenge = _pkce()  # noqa: RUF059
         r = tc.get("/oauth/authorize", params={
             "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,

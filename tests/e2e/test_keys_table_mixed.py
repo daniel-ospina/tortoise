@@ -582,7 +582,7 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
                               body=json.dumps({"detail": "stray mint — #4355 rotate is one call"}))
                 return
             if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
-                order.append("delete")
+                order.append("_delete")
                 route.fulfill(status=402, content_type="application/json",
                               body=json.dumps({"detail": "stray delete — #4355 rotate revokes server-side"}))
                 return
@@ -725,7 +725,7 @@ def test_rotate_plaintext_less_mint_latches_no_reveal(page: Page) -> None:
                               body=json.dumps({"detail": "stray mint — #4355 rotate is one call"}))
                 return
             if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
-                order.append("delete")
+                order.append("_delete")
                 route.fulfill(status=402, content_type="application/json",
                               body=json.dumps({"detail": "stray delete — #4355 rotate revokes server-side"}))
                 return

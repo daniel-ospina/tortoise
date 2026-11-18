@@ -221,7 +221,7 @@ def _seed_read_surface():
 _READ_CASES = [
     ("points-list", "list_points",
      lambda: {"method": "GET", "url": "/v1/points"}),
-    ("point-get", "get_point",
+    ("point-get", "_get_point",
      lambda: {"method": "GET", "url": f"/v1/points/{_SEEDED_POINT}"}),
     ("dream-health", "dream_health",
      lambda: {"method": "GET", "url": "/v1/dream/health"}),
@@ -250,9 +250,9 @@ _READ_CASES = [
      lambda: {"method": "GET", "url": "/v1/search?q=seed"}),
     ("topic-summary", "topic_summary",
      lambda: {"method": "GET", "url": "/v1/topics/release/summary"}),
-    ("session-context", "session_context",
+    ("session-context", "_session_context",
      lambda: {"method": "GET", "url": "/v1/context"}),
-    ("issue-insight", "issue_insight",
+    ("issue-insight", "_issue_insight",
      lambda: {"method": "GET", "url": "/v1/issue-insight?title=seed"}),
 ]
 
@@ -761,8 +761,8 @@ def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
     the request) and each of the three ``#1591`` rows returns 200 with its soft
     body. The other FOUR RED on the status code ALONE: ``_BrokenSDK`` defines
     only ``_get_proj`` / ``_get_registry`` / ``close``, so the pre-change inline
-    path reaches ``sdk.tortoise_fts_query`` / ``sdk.session_context`` /
-    ``sdk.issue_insight`` / ``sdk.topic_summarize``, raises ``AttributeError`` and
+    path reaches ``sdk._tortoise_fts_query`` / ``sdk._session_context`` /
+    ``sdk._issue_insight`` / ``sdk._topic_summarize``, raises ``AttributeError`` and
     lands in each route's generic 500 arm. So for those four the pre-change
     observation is a 500, not
     a soft 200 — the status CODE is the whole difference. ``search`` still owns
@@ -1425,7 +1425,7 @@ def test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode(
 # `_make_sdk` one level down), which is the same helper-mediated boundary the
 # paragraph above names, and which the behavioural probe extension in
 # `tests/test_dataplane_lane_loop_responsiveness.py` (#4660) is the guard for.
-_GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_check",
+_GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "_dream_health_check",
                            # #3718: the org switcher's listing seam. Sync by
                            # design (it returns the rows), and its FalkorDB I/O
                            # is reached through the cached ``_registry_anchor()``
@@ -1579,7 +1579,7 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     # ``test_read_route_construction_is_offloaded`` — the count is
     # ``len(_CONSTRUCTION_CASES)``, derived, not restated here — each one RED on
     # the inline shape (`sdk_built_on_loop` True, thread MainThread).
-    "list_points", "get_point", "org_info", "list_sessions",
+    "list_points", "_get_point", "org_info", "list_sessions",
     "get_session_detail", "dream_health",
     # #3718 (second construction batch): four more DATA-plane read routes whose
     # SDK was built on the loop — NOT the last ones, and this block's examples
@@ -1604,7 +1604,7 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     # trip moved here) and is the ANTI-REGRESSION pin for ``search`` /
     # ``topic_summary`` (their round trip was already off the loop, so they
     # PASS pre-change — do not read that row as a failed conversion).
-    "search", "topic_summary", "session_context", "issue_insight",
+    "search", "topic_summary", "_session_context", "_issue_insight",
 })
 
 #: Async bodies whose GRAPH I/O is off-loaded but whose SDK CONSTRUCTION is
@@ -1674,9 +1674,9 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     # live in ``_OFFLOADED_ASYNC_BODIES`` where a regression reds instead of
     # passing as declared debt.
     "accept_invite_by_id", "agent_token_revoke", "create_graph", "create_org",
-    "create_org_graph", "list_graphs", "list_invites",
+    "create_org_graph", "_list_graphs", "list_invites",
     "list_packs", "list_trash", "rescind_invite",
-    "upload_pack_manifest", "volunteer_context",
+    "upload_pack_manifest", "_volunteer_context",
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
@@ -1827,7 +1827,7 @@ def _inline_seam_hits(node: ast.AsyncFunctionDef) -> tuple[list[int], list[int]]
                 hits.append(current.lineno)
             elif isinstance(current.func, ast.Attribute):
                 base = current.func.value
-                if (name == "query" and isinstance(base, ast.Attribute)
+                if (name == "_query" and isinstance(base, ast.Attribute)
                         and base.attr == "g") or (isinstance(base, ast.Name) and base.id in bound):
                     hits.append(current.lineno)
         for child in ast.iter_child_nodes(current):
@@ -2022,11 +2022,11 @@ def test_sdk_construction_seam_is_scanned_and_reported_separately():
         "violation, and a real finding gets dismissed as noise (#4660)")
 
     # A construction seam must not be treated as a graph HANDLE binding either:
-    # `sdk = _make_sdk(...)` does not make `sdk.query(...)` a graph-seam hit.
+    # `sdk = _make_sdk(...)` does not make `sdk._query(...)` a graph-seam hit.
     handle = ast.parse(
         "async def _probe():\n"
         "    sdk = _make_sdk(namespace='registry')\n"
-        "    return sdk.query('MATCH (n) RETURN n')\n"
+        "    return sdk._query('MATCH (n) RETURN n')\n"
     ).body[0]
     assert _inline_seam_hits(handle) == ([], [2]), (
         "the construction seam leaked into the graph-handle binding rule "
@@ -3241,7 +3241,7 @@ async def _warm_up_paying_the_cold_phases(ac, label: str, handler: str,
       ``graph`` lane's own ``graph_offload_timeout_s()``
       (``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``,
       30 s by default), which is ``bound``;
-    * **``/v1/search``'s one-time embedder load** (#4055). ``sdk.tortoise_fts_query``
+    * **``/v1/search``'s one-time embedder load** (#4055). ``sdk._tortoise_fts_query``
       calls ``EmbeddingModel.get()`` synchronously ON THE READ WORKER, so the
       ``attach_projection`` bundling that assigns the cold open to the
       construction lane says NOTHING about it, and its ``huggingface_hub``
@@ -3601,7 +3601,7 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
       `CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S`, 30 s by default. It is what the
       warm-up pays once, with the pool free and outside the measurement;
     * a request-owned ONE-TIME EMBEDDER LOAD inside `/v1/search`'s callable —
-      `sdk.tortoise_fts_query` calls `EmbeddingModel.get()` synchronously in the
+      `sdk._tortoise_fts_query` calls `EmbeddingModel.get()` synchronously in the
       worker (`hosted_api._read_offload`'s #4055 note; budgeted
       `EmbeddingModel._LOAD_TIMEOUT_S`, 90 s and 270 s in the test lane,
       #6960).
@@ -4012,7 +4012,7 @@ def test_the_record_read_refusal_is_not_shadowed_by_the_session_one():
 class TestTheReadLaneExemptsARequestOwnedColdSetup:
     """``/v1/search``'s read-lane callable CONTAINS the embedder cold load.
 
-    ``sdk.tortoise_fts_query`` calls ``EmbeddingModel.get()`` synchronously in
+    ``sdk._tortoise_fts_query`` calls ``EmbeddingModel.get()`` synchronously in
     the worker, and a cold bge-small load is measured at ~57 s (budgeted
     ``_LOAD_TIMEOUT_S`` = 90 s). Judging that by the lane's 8 s answers 503
     ``graph_unavailable`` for a HEALTHY graph while the embedder is merely

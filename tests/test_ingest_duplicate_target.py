@@ -672,7 +672,7 @@ def test_absorb_reports_the_writes_it_makes(make_sdk):
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_create_operator_dedups_repeated_target(make_sdk):
-    """``sdk.create_operator(op, a, [b, b])`` — the primitive cannot
+    """``sdk._create_operator(op, a, [b, b])`` — the primitive cannot
     double-write, so no door (MCP, extraction, `decide`, battery) can."""
     sdk = make_sdk("primitive")
     a = sdk._create_point(kind="statement", content="one")

@@ -34,7 +34,7 @@ whole rule, not one shape: absent / half pair / zero-total pair / mirror-only /
 unreadable-operand / out-of-band-mirror / measured.
 
 Deliberately OUT of this file's scope: `battery/arms/a4_tortoise.py` (an eval
-arm, not a product surface) and `sdk.get_confidence` /
+arm, not a product surface) and `sdk._get_confidence` /
 `TortoiseEP.compute_confidence`, which remain the EP prior read under
 `require_calibration=False` and still answer 0.5 for an absent claim — the
 one stated exception, recorded in the #11702 decision comment
@@ -1486,7 +1486,7 @@ def test_the_object_aggregate_reports_absent_without_a_mean_over_nothing(sdk):
                  "n.posterior_beta = 1.0", params={"id": measured_point})
     absent_point = sdk._create_point("statement", "ZQOBJ a belief-less claim")["id"]
 
-    # Created with raw Cypher on purpose: `sdk.create_object` DEDUPES by kind
+    # Created with raw Cypher on purpose: `sdk._create_object` DEDUPES by kind
     # and returned ONE node for two different names (measured: same id twice,
     # degree 2), which would make both assertions read the same aggregate.
     measured_obj = f"zqobj-measured-{uuid.uuid4().hex[:8]}"

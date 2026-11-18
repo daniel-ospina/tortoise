@@ -755,7 +755,7 @@ DECLARED_LEG_BUDGETS: dict[str, tuple[str, str, tuple[str, str] | None]] = {
         # `if ended_scope:` inside `tortoise_fts_query`, the arm that RETURNS
         # before the retrieval machinery runs. Pinned to the statement, so the
         # same name at any joined site is an offender rather than a pass.
-        ("tortoise_fts_query", "_ended_bound")),
+        ("_tortoise_fts_query", "_ended_bound")),
 }
 
 

@@ -331,7 +331,7 @@ def test_the_injection_seam_is_a_real_write_not_a_no_op(tmp_path):
     """**NON-VACUITY, second direction.** An injected ENTITY failure removes
     `ObjectRegistered`.
 
-    The pin's injection is a raise on `sdk.create_point`. This arm injects on a
+    The pin's injection is a raise on `sdk._create_point`. This arm injects on a
     DIFFERENT symbol and observes the DIFFERENT record disappear, so a future
     refactor that turns the injection into a no-op (a bound method replaced on
     the instance but no longer called, say) reds here instead of quietly

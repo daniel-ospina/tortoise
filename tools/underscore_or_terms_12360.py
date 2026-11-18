@@ -29,7 +29,7 @@ SURFACES (all three go through `run_fts_query`; two are product doors)
                    run can be compared to it.
 ``mcp_search``     ``sdk.tortoise_fts_query`` — the door the MCP tool
                    ``tortoise_search`` is registered to
-                   (``tool_registry.py``: ``sdk_method="tortoise_fts_query"``)
+                   (``tool_registry.py``: ``sdk_method="_tortoise_fts_query"``)
                    and the one REST ``GET /v1/search`` uses. The FUSED read.
 ``capture_prior``  ``extractor_v2._fts_rows`` — the capture-time
                    link-before-create prior (``entity_type="object"``,
@@ -436,7 +436,7 @@ def run(args: argparse.Namespace) -> int:
                 out = _query_ids(surface, ctx, q, PRIOR_WINDOW)
                 wide = _query_ids(surface, ctx, q, 15)
                 fid = f"u12360-fx-{i}"
-                fx.append({"stored": stored_name, "query": q,
+                fx.append({"stored": stored_name, "_query": q,
                            "rank": out.index(fid) + 1 if fid in out else None,
                            "rank_wide": wide.index(fid) + 1 if fid in wide else None,
                            # ⛔ The switch decides this, or the artifact lies:
@@ -585,7 +585,7 @@ def measure_declared_user_search(ctx: dict) -> dict:
     except Exception as exc:
         return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    queries = [q["query"] if isinstance(q, dict) else str(q) for q in decl]
+    queries = [q["_query"] if isinstance(q, dict) else str(q) for q in decl]
     out: dict = {
         "available": True,
         "source": "tests/eval/retrieval/queries.py::AUTHORED_QUERIES (#1144)",

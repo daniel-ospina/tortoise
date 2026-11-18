@@ -317,7 +317,7 @@ class TestTheRiskAxis:
         constructions against its `field(init=False)` shape).
         """
         base = dict(name="tortoise_probe_bare", id="surface.probe.bare",
-                    description="probe", http_policy=True, sdk_method="query")
+                    description="probe", http_policy=True, sdk_method="_query")
         with pytest.raises(TypeError):
             ToolDefinition(**base)  # no `risk` at all — must not default to read
         with pytest.raises(TypeError):
@@ -538,7 +538,7 @@ class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
 
     @staticmethod
     def mitigation_writers() -> list[ToolDefinition]:
-        """Every served entry whose handler reaches `sdk.mitigate_operator`.
+        """Every served entry whose handler reaches `sdk._mitigate_operator`.
 
         Read from the CODE, not from a list: `sdk_method` covers the direct
         binding, and a handler-served entry (`tortoise_operator_action`) is found
@@ -550,7 +550,7 @@ class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
 
         found: list[ToolDefinition] = []
         for entry in served():
-            if entry.sdk_method == "mitigate_operator":
+            if entry.sdk_method == "_mitigate_operator":
                 found.append(entry)
                 continue
             handler = getattr(mcp_server, entry.name, None)
@@ -560,7 +560,7 @@ class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
                 source = inspect.getsource(handler)
             except (OSError, TypeError):  # pragma: no cover — dynamic handlers
                 continue
-            if "mitigate_operator" in source:
+            if "_mitigate_operator" in source:
                 found.append(entry)
         return found
 
@@ -792,13 +792,13 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
 
         # Pretend the accessor `tortoise_query` reaches were an out-of-boundary
         # mutator: it is NOT declared, so the arm must fire for it. #10602 moved
-        # that tool off `sdk.query` (no LIMIT in its Cypher) onto
+        # that tool off `sdk._query` (no LIMIT in its Cypher) onto
         # `paginated_query`, which is the accessor its handler actually reaches now
         # — probing `query` tests a binding that no longer exists and passes
         # vacuously. This is the third copy of the probe (two live in
         # test_tool_registry.py); the key must move in ALL of them.
         monkeypatch.setitem(
-            tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "_paginated_query",
             "probe: pretend a mutation lives outside sdk.py")
         violations = tsc.write_classification_violations(tsc.served_registry())
         assert any("out-of-boundary mutation" in v and "tortoise_query" in v

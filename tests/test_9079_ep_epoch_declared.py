@@ -119,7 +119,7 @@ def _record_authorizations(monkeypatch):
         seen.append((cypher, _CACHE_WRITE_AUTHORIZED.get()))
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
     return seen
 
 
@@ -194,7 +194,7 @@ def test_the_declaration_survives_a_retry(sdk_with_journal, monkeypatch):
                 "another write is in progress, retry the query")
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
 
     assert sdk._advance_ep_version() == 1
     assert attempts == [EPOCH_LANE, EPOCH_LANE], (
@@ -262,7 +262,7 @@ def test_a_create_path_is_not_refused_for_its_epoch_write(sdk_with_journal,
                 f"cache. statement={cypher[:120]}")
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
 
     point = sdk._create_point("fact", "a create with the epoch guard armed")
     assert refused == [], (

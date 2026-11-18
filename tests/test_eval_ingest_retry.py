@@ -495,7 +495,7 @@ def _install_write_fault(monkeypatch, *, fail_which: str = "write"):
                 raise redis_exc.TimeoutError("simulated write stall")
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(proj_mod._GuardedGraph, "query", _flaky)
+    monkeypatch.setattr(proj_mod._GuardedGraph, "_query", _flaky)
     return state
 
 
@@ -649,7 +649,7 @@ def test_parse_error_never_retried(tmp_path, monkeypatch):
                            **props)
 
     sdk = _fresh_sdk(tmp_path)
-    monkeypatch.setattr(TortoiseSDK, "create_point", _parse_fail)
+    monkeypatch.setattr(TortoiseSDK, "_create_point", _parse_fail)
     try:
         with pytest.raises(ValueError, match="parse: bad point payload"):
             ingest_haystack_v2(sdk, _v2_question(), object())
@@ -690,7 +690,7 @@ def test_misconf_write_refusal_is_retried(tmp_path, monkeypatch):
                     "No space left on device")
             return real(self, cypher, params=params, timeout=timeout)
 
-        monkeypatch.setattr(proj_mod._GuardedGraph, "query", _misconf)
+        monkeypatch.setattr(proj_mod._GuardedGraph, "_query", _misconf)
         stats = ingest_haystack_v2(sdk, _v2_question(), object())
         assert state["fired"] is True
         assert stats["points"] == 2
@@ -718,7 +718,7 @@ def test_consolidation_write_timeout_absorbed_no_r2(tmp_path, monkeypatch):
                 raise redis_exc.TimeoutError("stall at consolidation")
             return real(self, cypher, params=params, timeout=timeout)
 
-        monkeypatch.setattr(proj_mod._GuardedGraph, "query", _flaky)
+        monkeypatch.setattr(proj_mod._GuardedGraph, "_query", _flaky)
         # a payload whose extractor result carries a NOOP fold
         def _with_noop(model, conversation, **kw):
             out = _fake_extract_factory(_payload())(model, conversation, **kw)
@@ -916,7 +916,7 @@ def _run_with_r2_fault(instances, tmp_path, monkeypatch, *, persistent=False,
     monkeypatch.setattr(runner, "_make_question_sdk", _patched_make)
     import tortoise.projection as proj_mod
 
-    monkeypatch.setattr(proj_mod._GuardedGraph, "query", flaky)
+    monkeypatch.setattr(proj_mod._GuardedGraph, "_query", flaky)
     monkeypatch.setattr(runner.random, "uniform", lambda a, b: 0.0)
     monkeypatch.setattr(runner, "time", _noop_sleep_runner_time())
 

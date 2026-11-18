@@ -849,7 +849,7 @@ def test_update_writes_a_valid_snapshot(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(dlb, "relative_link_findings", lambda root, files: [])
     files = _write(tmp_path, "files.txt", "docs/x.md\ndocs/y.md\n")
     out = tmp_path / "baseline.json"
-    rc = dlb.main(["update", "--files-from", str(files), "--baseline", str(out)])
+    rc = dlb.main(["_update", "--files-from", str(files), "--baseline", str(out)])
     assert rc == 0
     written = json.loads(out.read_text(encoding="utf-8"))
     assert written["schema_version"] == dlb.BASELINE_SCHEMA
@@ -899,7 +899,7 @@ def test_update_deduplicates_the_lychee_half(tmp_path: Path, monkeypatch):
     )
     files = _write(tmp_path, "files.txt", "docs/x.md\n")
     out = tmp_path / "baseline.json"
-    assert dlb.main(["update", "--files-from", str(files), "--baseline", str(out)]) == 0
+    assert dlb.main(["_update", "--files-from", str(files), "--baseline", str(out)]) == 0
     written = json.loads(out.read_text(encoding="utf-8"))
     assert written["lychee"] == ["docs/x.md|https://example.invalid/a"]
     assert written["snapshot"]["counts"]["lychee"] == 1
@@ -1064,7 +1064,7 @@ def test_update_refuses_a_snapshot_that_did_not_lint_the_whole_population(
     )
     files = _write(tmp_path, "files.txt", "docs/x.md\ndocs/y.md\n")
     out = tmp_path / "baseline.json"
-    rc = dlb.main(["update", "--files-from", str(files), "--baseline", str(out)])
+    rc = dlb.main(["_update", "--files-from", str(files), "--baseline", str(out)])
     assert rc == 2
     assert not out.exists()
 

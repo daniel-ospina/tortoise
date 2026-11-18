@@ -2335,7 +2335,7 @@ def test_the_guard_reds_on_a_tampered_default_behind_an_approved_tool():
     tampers = {
         # `limit` is the 4th positional default of `tortoise_search`.
         "default": {"__defaults__": (*fn.__defaults__[:3], 999, *fn.__defaults__[4:])},
-        "annotation": {"__annotations__": {**fn.__annotations__, "query": "int"}},
+        "annotation": {"__annotations__": {**fn.__annotations__, "_query": "int"}},
     }
     for label, override in tampers.items():
         shadow = _shadow_of(fn, **override)
@@ -4697,7 +4697,7 @@ def test_check_anchor_sees_an_sdk_endpoint_row_not_just_tool_rows(tmp_path, monk
     sm = _load_manifest_tool()
     doc = _manifest()
     doc["response_fields"] = [
-        {"response": "volunteer_context", "field": "x", "emitted_when": "always"}
+        {"response": "_volunteer_context", "field": "x", "emitted_when": "always"}
     ]
     monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "sdk-anchored.yml"))
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))

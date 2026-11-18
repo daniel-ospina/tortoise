@@ -1090,7 +1090,7 @@ class TestTheBeliefSeam:
         """
         eid = _event(sdk, name="BeliefDeleteOp")
         self._api(sdk).emit_belief(
-            "EntityMutated", id=eid, label="Event", op="delete",
+            "EntityMutated", id=eid, label="Event", op="_delete",
             state={"status": "superseded"})
         # The fold's delete arm ran (the node is gone) and no refusal was raised
         # on the way — the record was left to the arm that owns it.

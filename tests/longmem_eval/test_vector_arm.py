@@ -303,7 +303,7 @@ def test_vector_arm_never_calls_tortoise_fts_query(tmp_path, monkeypatch, fake_e
     def _boom(*a, **k):
         raise AssertionError("tortoise_fts_query must not be called by the vector arm")
 
-    monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", _boom)
+    monkeypatch.setattr(TortoiseSDK, "_tortoise_fts_query", _boom)
     sdk = _fresh_sdk(tmp_path)
     try:
         q = _mini()[0]
@@ -454,7 +454,7 @@ def test_encode_cache_key_includes_model_id(tmp_path):
     p = tmp_path / "c.json"
     c_a = encode_cache.EncodeCache(p, model_id="model-a", prompt_name=None)
     c_b = encode_cache.EncodeCache(p, model_id="model-b", prompt_name=None)
-    c_aq = encode_cache.EncodeCache(p, model_id="model-a", prompt_name="query")
+    c_aq = encode_cache.EncodeCache(p, model_id="model-a", prompt_name="_query")
     text = "the same text"
     assert c_a.key_for(text) != c_b.key_for(text)      # model_id in the key
     assert c_a.key_for(text) != c_aq.key_for(text)     # prompt_name in the key
@@ -1144,7 +1144,7 @@ def test_checkpoint_cross_surface_and_model_isolation(tmp_path, capsys):
 
 
 def test_checkpoint_key_shape():
-    assert runner.checkpoint_key("hnsw", "vector", "arctic-s", "query") == \
+    assert runner.checkpoint_key("hnsw", "vector", "arctic-s", "_query") == \
         "hnsw__vector__arctic-s__query"
     assert runner.checkpoint_key("embedded", "hybrid", None, None) == \
         "embedded__hybrid__default__default"
@@ -2108,20 +2108,20 @@ def test_question_graph_namespace_isolation():
     must be distinct per (question, model-run)."""
     ns = runner.question_graph_namespace
     # distinct per model
-    assert ns("arctic-s", "query", "mini_ie_user_001") != \
-        ns("minilm", "query", "mini_ie_user_001")
+    assert ns("arctic-s", "_query", "mini_ie_user_001") != \
+        ns("minilm", "_query", "mini_ie_user_001")
     # distinct per question
-    assert ns("arctic-s", "query", "mini_ie_user_001") != \
-        ns("arctic-s", "query", "mini_msr_002")
+    assert ns("arctic-s", "_query", "mini_ie_user_001") != \
+        ns("arctic-s", "_query", "mini_msr_002")
     # distinct per prompt
-    assert ns("arctic-s", "query", "mini_ie_user_001") != \
+    assert ns("arctic-s", "_query", "mini_ie_user_001") != \
         ns("arctic-s", None, "mini_ie_user_001")
     # deterministic
-    assert ns("arctic-s", "query", "mini_ie_user_001") == \
-        ns("arctic-s", "query", "mini_ie_user_001")
+    assert ns("arctic-s", "_query", "mini_ie_user_001") == \
+        ns("arctic-s", "_query", "mini_ie_user_001")
     # valid as an SDK namespace (alnum/underscore/hyphen, ≤64 chars)
     import re as _re
-    for v in (ns("arctic-s", "query", "mini_ie_user_001"),
+    for v in (ns("arctic-s", "_query", "mini_ie_user_001"),
               ns("minilm", None, "mini_abs_005_abs")):
         assert _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", v), v
 
@@ -2144,17 +2144,17 @@ def test_db_mode_sdk_gets_per_question_namespace(monkeypatch, tmp_path):
 
     _sdk1, cleanup1 = runner._make_question_sdk(
         db_uri="docker://localhost:6379/bench",
-        namespace=runner.question_graph_namespace("arctic-s", "query", "q1"),
+        namespace=runner.question_graph_namespace("arctic-s", "_query", "q1"),
         work_dir=None)
     _sdk2, cleanup2 = runner._make_question_sdk(
         db_uri="docker://localhost:6379/bench",
-        namespace=runner.question_graph_namespace("minilm", "query", "q1"),
+        namespace=runner.question_graph_namespace("minilm", "_query", "q1"),
         work_dir=None)
     cleanup1()
     cleanup2()
     assert seen == [
-        runner.question_graph_namespace("arctic-s", "query", "q1"),
-        runner.question_graph_namespace("minilm", "query", "q1"),
+        runner.question_graph_namespace("arctic-s", "_query", "q1"),
+        runner.question_graph_namespace("minilm", "_query", "q1"),
     ]
     assert seen[0] != seen[1]
 

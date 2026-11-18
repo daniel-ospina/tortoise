@@ -1535,7 +1535,7 @@ def test_doc_citations_do_not_drop_a_shared_sdk_method(tmp_path, monkeypatch) ->
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
 
-    declared = sorted(r["name"] for r in bt._registry_rows() if r["sdk_method"] == "get_point")
+    declared = sorted(r["name"] for r in bt._registry_rows() if r["sdk_method"] == "_get_point")
     assert len(declared) >= 2, f"expected >=2 registry tools declaring `get_point`, got {declared}"
 
     synthetic = tmp_path / "beta.md"
@@ -1795,7 +1795,7 @@ def test_approved_menu_closure_comes_from_the_doc_not_a_copy(tmp_path, monkeypat
         "below would be vacuous"
     )
     menu = bt._approved_menu()
-    assert "query_points_by_tag" in menu["list_knowledge"]["members"], (
+    assert "_query_points_by_tag" in menu["list_knowledge"]["members"], (
         "the doc says `query_points_by_tag` sits inside `query`, and row 2 absorbs "
         "`query` — the closure is not being applied"
     )
@@ -1804,7 +1804,7 @@ def test_approved_menu_closure_comes_from_the_doc_not_a_copy(tmp_path, monkeypat
     # doc line-wraps the fourth (`... ingest_corpus` sit\ninside `index_files`), so a
     # literal-space match parsed three and left `index_files` without two members the doc
     # gives it — silently, because nothing bounded the closure count (#8930 review, P2).
-    for member in ("index_sessions", "ingest_corpus"):
+    for member in ("index_sessions", "_ingest_corpus"):
         assert member in menu["index_files"]["members"], (
             f"the doc says `{member}` sits inside `index_files`, and row 12 absorbs "
             "`index_files` — the WRAPPED closure statement is not being parsed"
@@ -1823,7 +1823,7 @@ def test_approved_menu_closure_comes_from_the_doc_not_a_copy(tmp_path, monkeypat
     path.write_text(stripped, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
     closed = bt._approved_menu()
-    assert "query_points_by_tag" not in closed["list_knowledge"]["members"], (
+    assert "_query_points_by_tag" not in closed["list_knowledge"]["members"], (
         "the closure survived deleting the doc's own sentence — so it is hard-coded "
         "somewhere instead of parsed"
     )
@@ -1960,11 +1960,11 @@ def test_approved_menu_guard_fails_closed_when_a_member_moves_after_the_em_dash(
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
 
     menu, closures, _ = bt._approved_state()
-    assert "annotate_operator" not in menu["adjust_relationship"]["members"], (
+    assert "_annotate_operator" not in menu["adjust_relationship"]["members"], (
         "the misplaced list must be the failure under test, so the member is gone here"
     )
     errs = bt._approved_errors(menu, closures)
-    assert errs and "AFTER" in errs[0] and "annotate_operator" in errs[0], (
+    assert errs and "AFTER" in errs[0] and "_annotate_operator" in errs[0], (
         f"a current tool name in the cell's prose did not fail the build: {errs}"
     )
 
@@ -2071,7 +2071,7 @@ def test_approved_menu_guards_fail_closed_when_a_closure_does_not_RESOLVE(
     path3.write_text(partial, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path3)
     menu3, closures3, _ = bt._approved_state()
-    assert "paginated_query" in menu3["list_knowledge"]["members"], (
+    assert "_paginated_query" in menu3["list_knowledge"]["members"], (
         "the real member resolved — so the failure below is about `zzz` alone"
     )
     errs = bt._approved_errors(menu3, closures3)
@@ -2254,13 +2254,13 @@ def test_multi_home_row_quotes_every_home_and_never_says_none_absorbs() -> None:
     menu = {
         "list_knowledge": {
             "lineno": 2,
-            "members": {"list_knowledge", "query"},
+            "members": {"list_knowledge", "_query"},
             "successors": [],
             "quote": "| 2 | `list_knowledge` | query |",
         },
         "poll_events": {
             "lineno": 8,
-            "members": {"poll_events", "query"},
+            "members": {"poll_events", "_query"},
             "successors": ["check_connection"],
             "quote": "| 8 | `poll_events` | query |",
         },
@@ -2303,19 +2303,19 @@ def test_approved_verdict_is_mechanical_in_all_five_directions() -> None:
     menu = {
         "poll_events": {"members": {"poll_events", "events_poll"}, "successors": []},
         "revise_knowledge": {
-            "members": {"revise_knowledge", "promote_point", "invalidate"},
+            "members": {"revise_knowledge", "_promote_point", "invalidate"},
             "successors": ["update_knowledge"],
         },
         "adjust_relationship": {
-            "members": {"adjust_relationship", "annotate_operator"},
+            "members": {"adjust_relationship", "_annotate_operator"},
             "successors": [],
         },
     }
-    assert _approved_verdict(menu, {"annotate_operator"}, "adjust_relationship") == "row"
-    assert _approved_verdict(menu, {"promote_point"}, "update_knowledge") == "successor"
-    assert _approved_verdict(menu, {"annotate_operator"}, "update_knowledge") == "refuted"
-    assert _approved_verdict(menu, {"belief_timeline"}, "poll_events") == "refuted"
-    assert _approved_verdict(menu, {"belief_timeline"}, "check_confidence") == "unstated"
+    assert _approved_verdict(menu, {"_annotate_operator"}, "adjust_relationship") == "row"
+    assert _approved_verdict(menu, {"_promote_point"}, "update_knowledge") == "successor"
+    assert _approved_verdict(menu, {"_annotate_operator"}, "update_knowledge") == "refuted"
+    assert _approved_verdict(menu, {"_belief_timeline"}, "poll_events") == "refuted"
+    assert _approved_verdict(menu, {"_belief_timeline"}, "check_confidence") == "unstated"
     # `rehomed`: the method HAS an approved home, the destination is a name the doc never
     # uses. That is a disagreement reached through a different door, not silence — the
     # difference is what stops an owner-facing row from denying its own quoted evidence.
@@ -2459,7 +2459,7 @@ def _assert_an_orphaned_continuation_fails_the_build(
         f"every row is still syntactically a row here ({len(menu)} parsed) — the orphan "
         "line is the ONLY evidence, which is why the body, not the row regex, decides"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
+    assert "_mitigate_operator" not in menu["adjust_relationship"]["members"], (
         "this shape is supposed to TRUNCATE row 21 — if it no longer does, the test no "
         "longer reproduces the defect"
     )
@@ -2491,7 +2491,7 @@ def _assert_an_orphaned_continuation_fails_the_build(
     assert row_errors_off == [], (
         f"the mutation did not disable the orphan test: {row_errors_off}"
     )
-    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "_mitigate_operator" not in menu_off["adjust_relationship"]["members"]
     assert bt.main() == 0, "with the orphan test disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
     assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
@@ -2593,11 +2593,11 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
         f"every line here is shaped like a row ({len(menu)} parsed) — which is why the "
         "row's IDENTITY, not its shape, is the datum"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
+    assert "_mitigate_operator" not in menu["adjust_relationship"]["members"], (
         "the discarded row must contribute NOTHING — merging it is the same truncation "
         "from the other side"
     )
-    assert "annotate_operator" in menu["adjust_relationship"]["members"], (
+    assert "_annotate_operator" in menu["adjust_relationship"]["members"], (
         "the row the doc states must survive intact"
     )
     assert len(row_errors) == 1, f"the repeated row was not reported exactly once: {row_errors}"
@@ -2626,7 +2626,7 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
     assert menu_off["adjust_relationship"]["members"] == {
         "adjust_relationship",
-        "mitigate_operator",
+        "_mitigate_operator",
     }, f"the mutation did not reproduce the overwrite: {menu_off['adjust_relationship']}"
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
@@ -2745,7 +2745,7 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
     assert menu_off["adjust_relationship"]["lineno"] == 24, (
         f"the mutation must reproduce the overwrite, got {menu_off['adjust_relationship']}"
     )
-    assert "annotate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "_annotate_operator" not in menu_off["adjust_relationship"]["members"]
     assert len(menu_off) == bt.APPROVED_MIN_ROWS, (
         f"the count is unchanged ({len(menu_off)}) — a repeat that only RENAMES leaves no "
         "count to see"
@@ -2786,7 +2786,7 @@ def test_a_continuation_after_a_blank_line_still_fails_the_build(
     assert len(menu) == bt.APPROVED_MIN_ROWS, (
         f"every row still parses here ({len(menu)}) — the fragment is the only evidence"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert "_mitigate_operator" not in menu["adjust_relationship"]["members"]
     assert len(row_errors) == 1, f"the fragment was not reported exactly once: {row_errors}"
     assert (
         "ORPHANED continuation line after row 21 (`adjust_relationship`), on the far side "
@@ -2806,7 +2806,7 @@ def test_a_continuation_after_a_blank_line_still_fails_the_build(
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
-    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "_mitigate_operator" not in menu_off["adjust_relationship"]["members"]
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
     assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
@@ -2839,7 +2839,7 @@ def test_a_separator_shaped_continuation_still_fails_the_build(
 
     menu, closures, row_errors = bt._approved_state()
     assert len(menu) == bt.APPROVED_MIN_ROWS
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert "_mitigate_operator" not in menu["adjust_relationship"]["members"]
     assert len(row_errors) == 1, f"the separator fragment was not reported once: {row_errors}"
     assert (
         "SEPARATOR-shaped line after row 21 (`adjust_relationship`)" in row_errors[0]
@@ -2898,7 +2898,7 @@ def test_a_pipe_less_continuation_after_a_blank_line_still_fails_the_build(
     assert len(menu) == bt.APPROVED_MIN_ROWS, (
         f"every row still parses here ({len(menu)}) — the bare remainder is the only evidence"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert "_mitigate_operator" not in menu["adjust_relationship"]["members"]
     assert len(row_errors) == 1, f"the bare fragment was not reported exactly once: {row_errors}"
     assert (
         "ORPHANED continuation line after row 21 (`adjust_relationship`), on the far side "
@@ -2921,7 +2921,7 @@ def test_a_pipe_less_continuation_after_a_blank_line_still_fails_the_build(
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
-    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "_mitigate_operator" not in menu_off["adjust_relationship"]["members"]
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
     assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
@@ -2962,7 +2962,7 @@ def test_a_fragment_that_is_not_the_first_line_after_the_close_still_fails_the_b
     assert len(menu) == bt.APPROVED_MIN_ROWS, (
         f"every row still parses here ({len(menu)}) — the fragment is the only evidence"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert "_mitigate_operator" not in menu["adjust_relationship"]["members"]
     assert len(row_errors) == 1, (
         "the fragment behind a prose line was not reported exactly once — the intervening "
         f"paragraph still shadows it: {row_errors}"
@@ -2987,7 +2987,7 @@ def test_a_fragment_that_is_not_the_first_line_after_the_close_still_fails_the_b
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
-    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "_mitigate_operator" not in menu_off["adjust_relationship"]["members"]
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
     assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
@@ -3135,7 +3135,7 @@ def test_a_leading_comma_remainder_fails_the_build(tmp_path, monkeypatch, capsys
         edited=_row_21_broken_at(real, "operator_action", remainder),
         name="leading-comma",
         remainder=remainder,
-        lost={"annotate_operator", "mitigate_operator"},
+        lost={"_annotate_operator", "_mitigate_operator"},
     )
 
 
@@ -3161,7 +3161,7 @@ def test_a_trailing_period_remainder_fails_the_build(tmp_path, monkeypatch, caps
         ),
         name="trailing-period",
         remainder=remainder,
-        lost={"mitigate_operator"},
+        lost={"_mitigate_operator"},
     )
 
 
@@ -3186,7 +3186,7 @@ def test_an_emphasis_remainder_fails_the_build(tmp_path, monkeypatch, capsys) ->
         ),
         name="emphasis",
         remainder=remainder,
-        lost={"mitigate_operator"},
+        lost={"_mitigate_operator"},
     )
 
 
@@ -3215,7 +3215,7 @@ def test_an_inline_annotation_remainder_fails_the_build(tmp_path, monkeypatch, c
         ),
         name="inline-annotation",
         remainder=remainder,
-        lost={"mitigate_operator"},
+        lost={"_mitigate_operator"},
     )
 
 
@@ -3249,7 +3249,7 @@ def test_a_mid_token_break_fails_the_build(tmp_path, monkeypatch, capsys) -> Non
         ),
         name="mid-token",
         remainder=remainder,
-        lost={"mitigate_operator"},
+        lost={"_mitigate_operator"},
     )
 
 
@@ -3317,7 +3317,7 @@ def test_the_normalised_member_list_test_still_leaves_real_prose_green(
     assert row_errors == [], f"the planted prose tripped the widened guard: {row_errors}"
     assert len(menu) == bt.APPROVED_MIN_ROWS == 23, len(menu)
     assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
-    assert "mitigate_operator" in menu["adjust_relationship"]["members"], (
+    assert "_mitigate_operator" in menu["adjust_relationship"]["members"], (
         "the planted prose cost the parse a row or a member"
     )
 
@@ -3382,7 +3382,7 @@ def test_ordinary_post_table_prose_stays_green(tmp_path, monkeypatch, capsys) ->
     assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
     # Row 21 is untouched here, and its third member is still read — the prose block did not
     # cost the parse a row, which is what a false positive would look like from a distance.
-    assert "mitigate_operator" in menu["adjust_relationship"]["members"]
+    assert "_mitigate_operator" in menu["adjust_relationship"]["members"]
 
     # NOT VACUOUS: every planted paragraph really is a COMMA LIST, so the green above is the
     # fragment test answering NO rather than the prose never reaching it. (The predicate's
@@ -3415,7 +3415,7 @@ def test_the_fragment_predicate_is_a_member_list_test_not_a_pipe_or_comma_test()
     known = bt._known_names()
     # FRAGMENTS — a bare member list, in every spelling a reflow produces.
     for fragment in (
-        "mitigate_operator",
+        "_mitigate_operator",
         "mitigate_operator,",  # a trailing comma kept from the cell
         "mitigate_operator, annotate_operator",
         "`mitigate_operator`, `annotate_operator`,",
@@ -3484,7 +3484,7 @@ def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -
     )
     assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
     # Row 21 is complete in the real doc, so the guard must see its third member.
-    assert "mitigate_operator" in menu["adjust_relationship"]["members"]
+    assert "_mitigate_operator" in menu["adjust_relationship"]["members"]
     # ...and the entry point the gate runs agrees.
     monkeypatch.setattr(sys, "argv", ["bridge_table.py", "--check"])
     assert bt.main() == 0, "--check went red on the unmodified approved doc"
@@ -3685,7 +3685,7 @@ def test_a_reworded_header_cannot_disarm_the_row_reflow_guard(
     # that can see this. The wrap has TRUNCATED row 21, and no ROW error reports it.
     menu, closures, row_errors = bt._approved_state()
     assert len(menu) == bt.APPROVED_MIN_ROWS, f"{len(menu)} rows parsed, expected all of them"
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
+    assert "_mitigate_operator" not in menu["adjust_relationship"]["members"], (
         "this shape is supposed to truncate row 21 — if it no longer does, the test no "
         "longer reproduces the defect"
     )

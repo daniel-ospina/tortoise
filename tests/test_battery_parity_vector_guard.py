@@ -86,7 +86,7 @@ class FakeSDK:
                      object_centric=True, leg_trace=None):
         if self.fail_probe:
             raise RuntimeError("store down")
-        self.calls.append({"query": query, "limit": limit,
+        self.calls.append({"_query": query, "limit": limit,
                            "object_centric": object_centric,
                            "traced": leg_trace is not None})
         rows = [{"entity_type": "point", "id": "p0",

@@ -431,7 +431,7 @@ def test_a_stored_subclass_still_gets_the_transition_check(env, monkeypatch):
             return _RowSet()
         return real(cypher, *args, **kwargs)
 
-    monkeypatch.setattr(graph, "query", query)
+    monkeypatch.setattr(graph, "_query", query)
 
     with pytest.raises(ValueError, match="refused the status transition"):
         sdk.update_knowledge(pid, status="draft")
@@ -518,7 +518,7 @@ def test_a_lying_eq_cannot_disarm_the_entailed_exemption(env, monkeypatch):
             return _RowSet()
         return real(cypher, *args, **kwargs)
 
-    monkeypatch.setattr(graph, "query", query)
+    monkeypatch.setattr(graph, "_query", query)
     with pytest.raises(ValueError, match="on a dead claim"):
         sdk.update_knowledge(pid2, status="live")
     assert _row(sdk, pid2) == before2, (

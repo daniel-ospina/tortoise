@@ -2200,7 +2200,7 @@ def test_replay_log_reports_the_marker_shape_it_observed(tmp_path, caplog,
                 params = {**params, "props": props}
         return _orig_query(obj, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_G, "query", _patched)
+    monkeypatch.setattr(_G, "_query", _patched)
 
     # Arm 1 — a concurrent write wins, so the captured marker did NOT land.
     with caplog.at_level(logging.INFO, logger="tortoise.projection"):

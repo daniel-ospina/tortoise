@@ -169,7 +169,7 @@ def test_the_record_precedes_the_stamp_statement(tmp_path, monkeypatch):
             })
         return real_query(self, cypher, *a, **k)
 
-    monkeypatch.setattr(projection._GuardedGraph, "query", _spy)
+    monkeypatch.setattr(projection._GuardedGraph, "_query", _spy)
     try:
         res = sdk._capture_session(CONV, session_id="sess_9350_ordering")
     finally:
@@ -213,7 +213,7 @@ def test_the_stamp_is_authorized_by_its_own_lane_under_an_armed_handle(
                 lanes.append(_CACHE_WRITE_AUTHORIZED.get())
             return real_query(self, cypher, *a, **k)
 
-        monkeypatch.setattr(projection._GuardedGraph, "query", _spy)
+        monkeypatch.setattr(projection._GuardedGraph, "_query", _spy)
         with _live_write_scope("test-standin: lanes #9349 declares"):
             res = sdk._capture_session(
                 [{"role": "user",
@@ -315,7 +315,7 @@ def test_the_stamp_write_cannot_touch_an_id_that_has_no_record(
                 seen["params"] = k.get("params") or {}
             return real_query(cypher, *a, **k)
 
-        monkeypatch.setattr(type(proj.g), "query", _spy)
+        monkeypatch.setattr(type(proj.g), "_query", _spy)
         ok = _stamp_capture_provenance(
             sdk, proj, ["p-a", "p-b"], event_id="evt-1",
             session_id="sess-1", harness="tortoise-sdk",
@@ -545,7 +545,7 @@ def test_a_rebuild_all_of_a_re_creation_drops_the_dead_provenance(
          "point": {"id": pid, "content": "first", "status": "live",
                    **_STAMPED}},
         {"event_id": "ev_del_9350", "ts": "2026-10-20T00:00:01+00:00",
-         "type": "EntityMutated", "op": "delete", "id": pid,
+         "type": "EntityMutated", "op": "_delete", "id": pid,
          "label": "Point", "initiated_by": "raw-producer",
          "projection_version": 2},
         {"event_id": "ev_reborn_9350", "ts": "2026-10-20T00:00:02+00:00",

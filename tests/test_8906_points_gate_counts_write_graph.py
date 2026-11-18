@@ -265,7 +265,7 @@ def test_write_graph_full_default_empty_is_REFUSED(env):
 
 def test_objects_and_subjects_doors_count_the_write_graph(env):
     """The /v1/objects and /v1/subjects doors share the defect — both counted
-    the default graph while ``sdk.create_object``/``sdk.create_subject`` write
+    the default graph while ``sdk._create_object``/``sdk._create_subject`` write
     the key's graph, and both are ``resource="points"`` doors (#1911)."""
     e = env(max_points=2)
     e.seed(e.default_ns, "default-a")

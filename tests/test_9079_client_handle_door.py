@@ -272,7 +272,7 @@ def test_a_split_spelling_is_refused_at_the_client_handle(armed_sdk, enforced):
     ("proj.g.execute_command",
      lambda proj: proj.g.execute_command(
          "GRAPH.QUERY", proj.graph_name, "CREATE (n:Once {id:'once'})")),
-    ("client.query", lambda proj: _client(proj).query("CREATE (n:Once {id:'once'})")),
+    ("client._query", lambda proj: _client(proj).query("CREATE (n:Once {id:'once'})")),
     ("client._query", lambda proj: _client(proj)._query("CREATE (n:Once {id:'once'})")),
     ("client.execute_command",
      lambda proj: _client(proj).execute_command(
@@ -311,7 +311,7 @@ def test_one_write_is_counted_exactly_once_whatever_the_channel(
     is decided once. Two independent nestings used to break it, both MEASURED:
     the write handle's dispatch re-took the decision at the client handle below
     it (`proj.g.execute_command` = 2), and one client call reaches the guarded
-    seams up to four times (`client.query` = 4, `client._query` = 3,
+    seams up to four times (`client._query` = 4, `client._query` = 3,
     `connection.execute_command` = 2).
     """
     label, issue = shape

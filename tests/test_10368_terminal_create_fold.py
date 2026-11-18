@@ -78,7 +78,7 @@ def test_a_content_fold_with_a_generic_prop_does_not_mutate_a_terminal_point(sdk
     assert "terminal_fold_refused" in _advisory_codes(again), (
         "the drop must be OBSERVABLE in the result, not only in the log: "
         f"{again.get('advisories')}")
-    assert "update_point" in str(again.get("advisories")), (
+    assert "_update_point" in str(again.get("advisories")), (
         "the advisory must name the ADDRESSED route that revises a dead "
         "claim deliberately")
 

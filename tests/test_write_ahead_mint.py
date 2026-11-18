@@ -34,7 +34,7 @@ REPO = Path(__file__).resolve().parent.parent
 # Every product function that mints a `:TeamMeta` graph — the guard fails
 # loudly if this set changes, so a new site must adopt the seam + register here.
 _MINT_SITES = {
-    ("tortoise/sdk.py", "org_create"),
+    ("tortoise/sdk.py", "_org_create"),
     ("tortoise/hosted_api.py", "provision_tenant"),
     ("tortoise/hosted_api.py", "register_user"),
     ("tortoise/hosted_api.py", "_eager_provision_org_graph"),
@@ -327,7 +327,7 @@ def test_sweep_drop_converges_on_a_never_created_name(tmp_path):
             return SimpleNamespace(result_set=[])
 
         def delete(self):
-            calls.append(("delete", self._name))
+            calls.append(("_delete", self._name))
 
     proj = SimpleNamespace(
         _host="localhost",
@@ -434,7 +434,7 @@ def _is_mint_create(call: ast.Call, eager_names: set[str]) -> bool:
     f = call.func
     if not isinstance(f, ast.Attribute):
         return False
-    if f.attr == "query":
+    if f.attr == "_query":
         arg_index = 0
     elif f.attr == "run_eager_init":
         # `run_eager_init(handle, cypher, params)` — the statement is arg 1.

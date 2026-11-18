@@ -196,7 +196,7 @@ def test_the_cache_delete_lands_before_the_destruction_record(env, monkeypatch):
     real_mutate = sdk._journal_entity_mutation
 
     def spy_mutate(label, id_val, op, **kwargs):
-        if op == "delete":
+        if op == "_delete":
             order.append("journal")
         return real_mutate(label, id_val, op, **kwargs)
 
@@ -209,7 +209,7 @@ def test_the_cache_delete_lands_before_the_destruction_record(env, monkeypatch):
             order.append("cache")
         return real_query(cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", spy_query)
+    monkeypatch.setattr(type(proj.g), "_query", spy_query)
 
     pid = sdk._create_point("observation", "delete me, in order")["id"]
     assert sdk._delete_point(pid) is True
@@ -266,12 +266,12 @@ def test_a_failed_cache_write_appends_no_destruction_record(env, monkeypatch):
                 "§17.1: this statement reached the cache without authorization")
         return real_query(_self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", failing_delete)
+    monkeypatch.setattr(type(proj.g), "_query", failing_delete)
 
     with pytest.raises(DirectCacheWriteRefused):
         sdk._delete_point(pid)
 
-    monkeypatch.setattr(type(proj.g), "query", real_query)
+    monkeypatch.setattr(type(proj.g), "_query", real_query)
 
     assert _live(proj, pid) is True, (
         "premise: the cache delete did not land")
@@ -323,7 +323,7 @@ def test_a_landed_destroy_whose_record_failed_is_reported(env, monkeypatch):
     with pytest.raises(WriteNotLandedError) as ei:
         sdk._delete_point(pid)
 
-    assert ei.value.operation == "delete_point", (
+    assert ei.value.operation == "_delete_point", (
         "the refusal must name the door that raised it (#7209)")
     assert ei.value.record_committed is False, (
         "the append raised, so nothing may claim the destruction is committed")
@@ -385,17 +385,17 @@ def test_a_lost_reply_over_an_applied_destroy_is_still_recorded(env,
             raise ConnectionError("simulated lost reply over an applied write")
         return real_query(_self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", land_then_lose)
+    monkeypatch.setattr(type(proj.g), "_query", land_then_lose)
     try:
         assert sdk._delete_point(pid) is True, (
             "the destroy DID land (the read-back proves it), so the call is a "
             "completed delete, not a failure")
     finally:
-        monkeypatch.setattr(type(proj.g), "query", real_query)
+        monkeypatch.setattr(type(proj.g), "_query", real_query)
 
     assert _live(proj, pid) is False, "premise: the statement applied"
     recs = _mutations(events, pid)
-    assert [(r["op"], r["label"]) for r in recs] == [("delete", "Point")], (
+    assert [(r["op"], r["label"]) for r in recs] == [("_delete", "Point")], (
         "the destruction landed and the journal never recorded it — a replay "
         f"would resurrect the Point silently: {recs!r}")
 
@@ -438,13 +438,13 @@ def test_the_landed_destroy_arm_does_not_claim_the_statement_succeeded(env,
     def _boom(_event):
         raise OSError("simulated journal append failure")
 
-    monkeypatch.setattr(type(proj.g), "query", land_then_lose)
+    monkeypatch.setattr(type(proj.g), "_query", land_then_lose)
     monkeypatch.setattr(log, "append", _boom)
     try:
         with pytest.raises(WriteNotLandedError) as ei:
             sdk._delete_point(pid)
     finally:
-        monkeypatch.setattr(type(proj.g), "query", real_query)
+        monkeypatch.setattr(type(proj.g), "_query", real_query)
 
     assert ei.value.record_committed is False
     assert ei.value.destroy_verified is True, (
@@ -494,15 +494,15 @@ def test_an_unreadable_after_state_writes_no_record_and_claims_nothing(
             raise ConnectionError("simulated unreachable engine")
         return real_query(_self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", everything_fails)
+    monkeypatch.setattr(type(proj.g), "_query", everything_fails)
     try:
         with pytest.raises(WriteNotLandedError) as ei:
             sdk._delete_point(pid)
     finally:
-        monkeypatch.setattr(type(proj.g), "query", real_query)
+        monkeypatch.setattr(type(proj.g), "_query", real_query)
 
     assert ei.value.record_committed is False
-    assert ei.value.operation == "delete_point"
+    assert ei.value.operation == "_delete_point"
     assert ei.value.destroy_verified is False, (
         "this arm must be distinguishable from the landed-destroy arm; without "
         "the flag the shared prose asserts a cache state nobody verified")
@@ -607,13 +607,13 @@ def test_a_deleted_graph_key_is_never_read_as_a_landed_destroy(env, monkeypatch)
             return 0
         return real_exec(_self, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", abort_then_read)
+    monkeypatch.setattr(type(proj.g), "_query", abort_then_read)
     monkeypatch.setattr(type(proj.g), "execute_command", key_is_gone)
     try:
         with pytest.raises(redis_exc.ResponseError) as ei:
             sdk._delete_point(pid)
     finally:
-        monkeypatch.setattr(type(proj.g), "query", real_query)
+        monkeypatch.setattr(type(proj.g), "_query", real_query)
         monkeypatch.setattr(type(proj.g), "execute_command", real_exec)
 
     assert reads_after_abort == [], (
@@ -624,7 +624,7 @@ def test_a_deleted_graph_key_is_never_read_as_a_landed_destroy(env, monkeypatch)
         "an absent key is the graph-abort family's loud surface, not this "
         "door's unverified arm")
     assert not [r for r in _journal(events)
-                if r.get("op") == "delete" or r.get("type") == "EntityMutated"], (
+                if r.get("op") == "_delete" or r.get("type") == "EntityMutated"], (
         "no destruction record may be written when the cache state is unknown")
 
 
@@ -680,13 +680,13 @@ def test_a_transport_failure_pays_the_presence_probe_too(env, monkeypatch):
             return 0
         return real_exec(_self, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", fail_then_read)
+    monkeypatch.setattr(type(proj.g), "_query", fail_then_read)
     monkeypatch.setattr(type(proj.g), "execute_command", key_is_gone)
     try:
         with pytest.raises(ConnectionError) as ei:
             sdk._delete_point(pid)
     finally:
-        monkeypatch.setattr(type(proj.g), "query", real_query)
+        monkeypatch.setattr(type(proj.g), "_query", real_query)
         monkeypatch.setattr(type(proj.g), "execute_command", real_exec)
 
     assert exists_calls, (
@@ -700,7 +700,7 @@ def test_a_transport_failure_pays_the_presence_probe_too(env, monkeypatch):
         "an absent key is the engine's own loud error, not this door's "
         "unverified arm")
     assert not [r for r in _journal(events)
-                if r.get("op") == "delete" or r.get("type") == "EntityMutated"], (
+                if r.get("op") == "_delete" or r.get("type") == "EntityMutated"], (
         "no destruction record may be written for a destroy nobody verified")
     assert _live(proj, pid) is True, (
         "premise: the injected transport failure never reached the engine")
@@ -767,13 +767,13 @@ def test_a_state_independent_refusal_is_never_read_as_a_landed_destroy(
             exists_calls.append(args)
         return real_exec(_self, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", slot_abort_then_zero)
+    monkeypatch.setattr(type(proj.g), "_query", slot_abort_then_zero)
     monkeypatch.setattr(type(proj.g), "execute_command", count_exists)
     try:
         with pytest.raises(redis_exc.ResponseError) as ei:
             sdk._delete_point(pid)
     finally:
-        monkeypatch.setattr(type(proj.g), "query", real_query)
+        monkeypatch.setattr(type(proj.g), "_query", real_query)
         monkeypatch.setattr(type(proj.g), "execute_command", real_exec)
 
     assert str(ei.value).startswith("another write is in progress"), (
@@ -835,12 +835,12 @@ def test_an_empty_read_back_claims_nothing(env, monkeypatch):
             return types.SimpleNamespace(result_set=[])
         return real_query(_self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(type(proj.g), "query", fail_then_read_empty)
+    monkeypatch.setattr(type(proj.g), "_query", fail_then_read_empty)
     try:
         with pytest.raises(WriteNotLandedError) as ei:
             sdk._delete_point(pid)
     finally:
-        monkeypatch.setattr(type(proj.g), "query", real_query)
+        monkeypatch.setattr(type(proj.g), "_query", real_query)
 
     assert readbacks, "premise: the read-back was issued (key confirmed present)"
     assert ei.value.destroy_verified is False, (
@@ -890,7 +890,7 @@ def test_the_delete_record_keeps_its_declared_shape(env):
     sdk._delete_point(pid)
 
     recs = _mutations(events, pid)
-    assert [(r["op"], r["label"]) for r in recs] == [("delete", "Point")]
+    assert [(r["op"], r["label"]) for r in recs] == [("_delete", "Point")]
     assert "state" not in recs[0], \
         "#3299's recorded shape carries nothing for a delete"
     assert not [e for e in _journal(events)
@@ -995,7 +995,7 @@ def test_an_append_that_lands_then_raises_is_reported_as_unconfirmed(
     assert ei.value.record_committed is False, (
         "the door cannot confirm the append, so it must not claim the record "
         "is committed — but it also must not claim nothing was written")
-    assert ei.value.operation == "delete_point"
+    assert ei.value.operation == "_delete_point"
     assert _live(proj, pid) is False, (
         "premise of #9207's order: the destroy landed BEFORE the append, so "
         "the refusal must not claim the cache still holds the Point")
@@ -1003,7 +1003,7 @@ def test_an_append_that_lands_then_raises_is_reported_as_unconfirmed(
     monkeypatch.setattr(log, "append", real_append)
 
     recs = _mutations(events, pid)
-    assert [(r["op"], r["label"]) for r in recs] == [("delete", "Point")], (
+    assert [(r["op"], r["label"]) for r in recs] == [("_delete", "Point")], (
         "premise: the append DID land, which is why the message cannot assert "
         f"that nothing was written: {recs!r}")
 
@@ -1098,7 +1098,7 @@ def test_the_message_names_the_doors_own_record_and_graph():
     from tortoise.exceptions import WriteNotLandedError
 
     committed_msg = str(WriteNotLandedError(
-        "p_1", "cache_graph", record_committed=True, operation="delete_point"))
+        "p_1", "cache_graph", record_committed=True, operation="_delete_point"))
     assert "EntityMutated op=delete" in committed_msg
     assert "PointAdded" not in committed_msg
     assert "in the record and not in the cache on graph 'cache_graph'" in committed_msg, (
@@ -1106,7 +1106,7 @@ def test_the_message_names_the_doors_own_record_and_graph():
         "sends a caller debugging a divergence to the wrong store")
 
     unconfirmed_msg = str(WriteNotLandedError(
-        "p_1", "cache_graph", operation="delete_point"))
+        "p_1", "cache_graph", operation="_delete_point"))
     assert "EntityMutated op=delete" in unconfirmed_msg
     assert "PointAdded" not in unconfirmed_msg
 
@@ -1116,7 +1116,7 @@ def test_the_message_names_the_doors_own_record_and_graph():
     # no read-back is involved on this arm" — self-refuting.
     with pytest.raises(ValueError, match="contradicts"):
         WriteNotLandedError("p_1", "cache_graph", record_committed=True,
-                            operation="delete_point", destroy_verified=True)
+                            operation="_delete_point", destroy_verified=True)
 
     # The same defect, one door over: `update_point` writes `PointRevised`
     # (#7951 increment 2), so a caller that omits `record` must not be told a
@@ -1124,7 +1124,7 @@ def test_the_message_names_the_doors_own_record_and_graph():
     # for that door today, which is why this is asserted here (constructing the
     # exception) rather than exercised through the SDK.
     revised_msg = str(WriteNotLandedError(
-        "p_1", "cache_graph", record_committed=True, operation="update_point"))
+        "p_1", "cache_graph", record_committed=True, operation="_update_point"))
     assert "PointRevised" in revised_msg, revised_msg
     assert "PointAdded" not in revised_msg, (
         "update_point never writes a PointAdded record: " + revised_msg)

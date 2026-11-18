@@ -863,7 +863,7 @@ _FSTRING_LABEL = re.compile(
 #      name ambiguous?", then refuse (`>1 -> never-guess` + a non-folded entry).
 #      Routing them through the resolver would turn "skip this one record,
 #      recorded" into "raise", a semantics change the issues defer.
-#   C. EXISTENCE / PRESENCE probe (sdk.ingest's `existed` dedup counter,
+#   C. EXISTENCE / PRESENCE probe (sdk._ingest's `existed` dedup counter,
 #      `assembly._probe_visible_successors`): the question is "does any live
 #      entity hold this name", never "which one". No identity is selected.
 #   D. SEARCH / DISPLAY (sdk's `e.name CONTAINS $q` query clause,

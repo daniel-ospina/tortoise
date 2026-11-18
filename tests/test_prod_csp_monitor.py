@@ -80,7 +80,7 @@ def _audit_step() -> dict:
     # Selected by `id`, not by a substring of the body: the "compose the finding
     # body" step also SPELLS the detector path (in its reproduce hint), so a
     # substring match is ambiguous and would let a test pick the wrong step.
-    return _step(lambda s: s.get("id") == "audit")
+    return _step(lambda s: s.get("id") == "_audit__svc")
 
 
 def _detector_module():

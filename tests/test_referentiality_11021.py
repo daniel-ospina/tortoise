@@ -1301,7 +1301,7 @@ def test_the_mention_record_reaches_the_claim_point_and_says_so():
     #    the engine is never handed an array of maps. `update_entity` delegates
     #    to `_update_entity`, which is where the Point branch writes caller
     #    props straight through.
-    for door in ("create_point", "update_point", "_update_entity"):
+    for door in ("_create_point", "_update_point", "_update_entity"):
         assert "_encode_json_record_props" in inspect.getsource(
             getattr(TortoiseSDK, door)), (
             f"{door} no longer encodes `mentions`, so the engine is handed an "
@@ -1357,7 +1357,7 @@ def test_the_mention_record_reaches_the_claim_point_and_says_so():
     # comment records for `confidence`/`authoredBy`. The verdict is "not a client
     # field", so the drop is correct; that nothing surfaces it is the trap, and
     # this row pins that the field does not reach the constructed model (the
-    # upstream of `sdk.create_point`'s kwarg list).
+    # upstream of `sdk._create_point`'s kwarg list).
     for _model in (hosted_api.CreatePointRequest,
                    selfhost_api.CreatePointRequest):
         _built = _model(content="the claim", kind="statement",
@@ -1368,23 +1368,23 @@ def test_the_mention_record_reaches_the_claim_point_and_says_so():
             "writer-produced record, not a client field (#11239)")
         assert not hasattr(_built, "mentions") or _built.mentions is None, (
             f"{_model.__name__} exposed `mentions` on the parsed body, so a "
-            "route could thread it into `sdk.create_point` — the one thing the "
+            "route could thread it into `sdk._create_point` — the one thing the "
             "door verdict forbids")
     # …and pin the ROUTE's own write, not only its request model (review P3 on
     # PR #11795: the pre-#11239 row asserted exactly this and the rewrite
     # dropped it, so a `body.mentions` kwarg could be threaded into the route's
-    # `sdk.create_point` call while both model assertions stayed green). BOTH
+    # `sdk._create_point` call while both model assertions stayed green). BOTH
     # mirrors: the self-host route below, and the hosted one whose
     # `_author_props` splat is one kwarg away from carrying the field (review
     # R3 on this head: the hosted half was deleted, not replaced, so the two
     # assertions are deliberately symmetric).
     assert "mentions" not in inspect.getsource(hosted_api.create_point), (
         "the hosted create route now forwards `mentions` into its "
-        "`sdk.create_point` call: the field is writer-produced, and a door that "
+        "`sdk._create_point` call: the field is writer-produced, and a door that "
         "reads it off the request body advertises it on the public REST surface")
     assert "mentions" not in inspect.getsource(selfhost_api.create_point), (
         "the self-host create route now forwards `mentions` into its "
-        "`sdk.create_point` call: the field is writer-produced, and a door that "
+        "`sdk._create_point` call: the field is writer-produced, and a door that "
         "reads it off the request body advertises it on the public REST surface")
 
     # …and both docstrings NAME the doors, so a reader can check the claim.

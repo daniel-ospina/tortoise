@@ -31,7 +31,7 @@ below fail if the mechanism mapping is wrong rather than if a number drifts:
     below-source target where coherence must too — but it also charges the
     opposite corner), and `test_support_LOWERS_when_the_source_sits_BELOW_the_target`
     would still pass, which is why both directions are asserted in ONE test;
-  * dropping the closed-set gate in `sdk.create_operator` → every `test_refuses_*`
+  * dropping the closed-set gate in `sdk._create_operator` → every `test_refuses_*`
     fails with "DID NOT RAISE";
   * widening the gate to `composedOf` → `test_a_part_whole_opcode_is_not_a_second_mechanism`
     fails.
@@ -1912,7 +1912,7 @@ def test_the_SVBP_decline_warning_survives_a_NULL_op_type(monkeypatch):
             result_set = rows if calls["n"] == 1 else []
         return _R()
 
-    proj.__dict__["g"] = type("G", (), {"query": staticmethod(_query)})()
+    proj.__dict__["g"] = type("G", (), {"_query": staticmethod(_query)})()
     factors, _meta = FalkorProjection.extract_svbp_factors(proj)
     assert factors == [], factors
 

@@ -110,7 +110,7 @@ def _run_question(qid: str, model: str, *, checkpoint=None, work_dir=None,
     judge — no LLM, gate runs for real). Returns (outcomes, report)."""
     instances = [next(q for q in _mini() if q["question_id"] == qid)]
     if seed_junk:
-        ns = runner.question_graph_namespace(model, "query", qid)
+        ns = runner.question_graph_namespace(model, "_query", qid)
         sdk = TortoiseSDK(namespace=ns)
         try:
             for i in range(seed_junk):
@@ -123,7 +123,7 @@ def _run_question(qid: str, model: str, *, checkpoint=None, work_dir=None,
         instances, reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
         split="s", work_dir=work_dir, checkpoint=checkpoint,
         ingest_mode="deterministic", db_uri=DB_URI, model=model,
-        query_prompt="query", **over)
+        query_prompt="_query", **over)
 
 
 def _question(qid: str) -> dict:
@@ -136,7 +136,7 @@ def test_docker_census_ratio_invariant_healthy():
     censuses all pass on the real client."""
     model = _unique_model("healthy")
     qid = "mini_ie_user_001"
-    ns = runner.question_graph_namespace(model, "query", qid)
+    ns = runner.question_graph_namespace(model, "_query", qid)
     try:
         outcomes, _ = _run_question(qid, model)
         out = outcomes[0]
@@ -155,7 +155,7 @@ def test_docker_gate_red_when_answer_session_absent():
     removals ARE visible without fresh-session machinery)."""
     model = _unique_model("absent")
     qid = "mini_ie_user_001"
-    ns = runner.question_graph_namespace(model, "query", qid)
+    ns = runner.question_graph_namespace(model, "_query", qid)
     try:
         outcomes, _ = _run_question(qid, model)
         assert outcomes[0]["gate_reasons"] == []
@@ -181,7 +181,7 @@ def test_docker_fresh_run_cleanup_wipes_leftovers():
     census_overflow)."""
     model = _unique_model("cleanup")
     qid = "mini_ie_user_001"
-    ns = runner.question_graph_namespace(model, "query", qid)
+    ns = runner.question_graph_namespace(model, "_query", qid)
     try:
         outcomes, _ = _run_question(qid, model, seed_junk=5)
         assert outcomes[0]["gate_reasons"] == []
@@ -195,7 +195,7 @@ def test_docker_read_verify_retries_faulted_first_read():
     stays gate-green (never a phantom graph_truncated)."""
     model = _unique_model("readverify")
     qid = "mini_ie_user_001"
-    ns = runner.question_graph_namespace(model, "query", qid)
+    ns = runner.question_graph_namespace(model, "_query", qid)
     state = {"faulted": False}
 
     def proxy(query_fn, cypher, params):
@@ -221,7 +221,7 @@ def test_docker_persistent_pool_fault_never_phantom_truncated():
     hard-class arm (P2-11: guaranteed-fail, no other arm samples it)."""
     model = _unique_model("persistfault")
     qid = "mini_ie_user_001"
-    ns = runner.question_graph_namespace(model, "query", qid)
+    ns = runner.question_graph_namespace(model, "_query", qid)
 
     def proxy(query_fn, cypher, params):
         if "count(DISTINCT p)" in cypher:
@@ -259,7 +259,7 @@ _MIN_POOL_RATIO = 0.9
 
 
 def _expected_denominator(outcome: dict) -> int:
-    ing = outcome.get("ingest") or {}
+    ing = outcome.get("_ingest") or {}
     if "points" in ing:
         return int(ing.get("turns", 0) + ing.get("chunks", 0)
                    + ing.get("points", 0))
@@ -282,7 +282,7 @@ def test_docker_mini_pipeline_pool_ratio_per_question():
         outcomes, _ = runner.run_evaluation(
             instances, reader=MockReader(), judge=MockJudge(), ks=(5,),
             top_k=5, split="s", ingest_mode="deterministic",
-            db_uri=DB_URI, model=model, query_prompt="query")
+            db_uri=DB_URI, model=model, query_prompt="_query")
         assert len(outcomes) == len(qids)
         for out in outcomes:
             expected = _expected_denominator(out)
@@ -293,7 +293,7 @@ def test_docker_mini_pipeline_pool_ratio_per_question():
     finally:
         for qid in qids:
             _clean_question(
-                runner.question_graph_namespace(model, "query", qid), qid)
+                runner.question_graph_namespace(model, "_query", qid), qid)
 
 
 def test_docker_v2_ingest_retry_gate_pool_ratio(monkeypatch):
@@ -339,7 +339,7 @@ def test_docker_v2_ingest_retry_gate_pool_ratio(monkeypatch):
         outcomes, _ = runner.run_evaluation(
             instances, reader=MockReader(), judge=MockJudge(), ks=(5,),
             top_k=5, split="s", ingest_mode="v2", extractor_model=_StubModel(),
-            db_uri=DB_URI, model=model, query_prompt="query",
+            db_uri=DB_URI, model=model, query_prompt="_query",
             ingest_write_retries=2)
         assert len(outcomes) == len(qids)
         for out in outcomes:
@@ -354,4 +354,4 @@ def test_docker_v2_ingest_retry_gate_pool_ratio(monkeypatch):
     finally:
         for qid in qids:
             _clean_question(
-                runner.question_graph_namespace(model, "query", qid), qid)
+                runner.question_graph_namespace(model, "_query", qid), qid)

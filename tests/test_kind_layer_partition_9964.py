@@ -472,7 +472,7 @@ def test_an_event_kind_on_the_point_door_lands_with_a_specific_warning(sdk):
     notes = _layer_notes(r)
     assert [n["code"] for n in notes] == ["kind_other_layer"], r.get("advisories")
     assert "Event" in notes[0]["message"]
-    assert "create_event" in notes[0]["message"]
+    assert "_create_event" in notes[0]["message"]
 
 
 def test_an_entity_kind_on_the_event_door_names_the_entity_door(sdk):
@@ -482,7 +482,7 @@ def test_an_entity_kind_on_the_event_door_names_the_entity_door(sdk):
     notes = _layer_notes(r)
     assert [n["code"] for n in notes] == ["kind_other_layer"], r.get("advisories")
     assert "Subject" in notes[0]["message"]
-    assert "create_subject" in notes[0]["message"]
+    assert "_create_subject" in notes[0]["message"]
 
 
 # ── the silences: they are what keeps the warning discriminating ─────────

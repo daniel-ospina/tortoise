@@ -1043,7 +1043,7 @@ def _key_failures(code: str) -> list[str]:
         f"the store is {method}-ed with {argument.strip()!r}, not the address — a key "
         "derived from the address reads a bucket nothing writes and refuses nobody"
         for method, argument in calls
-        if argument.strip() != "ip" and not (method == "delete" and argument.strip() == "k")
+        if argument.strip() != "ip" and not (method == "_delete" and argument.strip() == "k")
     )
     return failures
 

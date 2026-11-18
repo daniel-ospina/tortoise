@@ -706,7 +706,7 @@ def test_deploy_jobs_audit_every_bypassable_gate():
     by_var, by_input = _gates_by_var(), _gates_by_input()
     report_job = {key: job for job, _s, keys, _r in _sites("report", "key") for key in keys}
     audited: dict[str, str] = {}
-    for job_name, step, specs, run in _sites("audit", "state"):
+    for job_name, step, specs, run in _sites("_audit__svc", "state"):
         assert step.get("if") == "always()", f"{job_name} audit must run on failure too"
         assert not re.search(r"\$\{\{\s*vars\.", run), (
             "audit values must be env-bound, not interpolated"

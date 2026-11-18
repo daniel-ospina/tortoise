@@ -142,7 +142,7 @@ def test_rebuild_does_not_leak_deleted_incarnation_dims(sup, tmp_path):
     records.append({
         "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:00+00:00",
         "type": "EntityMutated", "initiated_by": "raw-producer",
-        "projection_version": 2, "op": "delete", "id": op,
+        "projection_version": 2, "op": "_delete", "id": op,
         "label": "Point",
     })
     recreate = dict(snap)
@@ -427,7 +427,7 @@ def test_apply_annotator_ignores_non_str_id(sup):
     # _GuardedGraph uses __slots__, so patch the CLASS method (instance
     # attributes are read-only). The discriminator: the guard must short-
     # circuit BEFORE issuing the Cypher.
-    with patch.object(type(proj.g), "query") as q:
+    with patch.object(type(proj.g), "_query") as q:
         assert proj._apply_annotator({
             "type": "OperatorAnnotated", "id": ["not", "a", "str"],
             "annotator_bias": 0.5,
@@ -439,7 +439,7 @@ def test_apply_annotator_ignores_non_str_id(sup):
     }) == 0  # no such node → fold-miss
     # A NUL / lone-surrogate id is ALSO rejected before any query (the id
     # rides as a Cypher param exactly like a value; review P1).
-    with patch.object(type(proj.g), "query") as q2:
+    with patch.object(type(proj.g), "_query") as q2:
         assert proj._apply_annotator({
             "type": "OperatorAnnotated", "id": "bad\x00id",
             "annotator_bias": 0.5,

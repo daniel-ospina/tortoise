@@ -158,7 +158,7 @@ def test_stored_key_alone_redirects_to_auth(page: Page) -> None:
 
 
 @pytest.mark.parametrize("claim_seed", [
-    "query",       # ?claim=1 only (the ANON funnel lands here pre-paste)
+    "_query",       # ?claim=1 only (the ANON funnel lands here pre-paste)
     "in_flight",   # tt_claim_key + tt_claim_pending (an OAuth claim returning)
 ])
 def test_claim_intent_shows_claim_paste(page: Page, claim_seed: str) -> None:
@@ -172,7 +172,7 @@ def test_claim_intent_shows_claim_paste(page: Page, claim_seed: str) -> None:
           document.cookie = 'tt_claim_pending=1; Path=/;';
         """)
     # query seeds via the URL itself
-    url = DASHBOARD_URL + ("?claim=1" if claim_seed == "query" else "")
+    url = DASHBOARD_URL + ("?claim=1" if claim_seed == "_query" else "")
     _wire_auth_intercept(page)
     page.add_init_script("window.__AUTH_BASE_URL = 'https://tortoise.premiselabs.co';")
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)

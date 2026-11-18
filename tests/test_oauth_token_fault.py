@@ -1160,7 +1160,7 @@ class _RoundTripCounter:
         return fn(*a, **k)
 
     def query(self, *a, **k):
-        return self._trip("query", self._inner.query, *a, **k)
+        return self._trip("_query", self._inner.query, *a, **k)
 
     def rpc(self, *a, **k):
         return self._trip("rpc", self._inner.rpc, *a, **k)

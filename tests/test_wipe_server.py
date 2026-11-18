@@ -444,7 +444,7 @@ def test_wipe_server_completeness(server_proj, monkeypatch):
     for g in ["test_ws_wipe_target", "test_ws_second_target"]:
         server_proj.db.select_graph(g).query("CREATE (:Point {id:'x'})")
         created.append(g)
-    monkeypatch.setattr(server_proj.db, "list_graphs", lambda: created)
+    monkeypatch.setattr(server_proj.db, "_list_graphs", lambda: created)
     # Ownership (#3133/#5222): scope = exactly the graphs THIS test created is
     # the documented per-session ownership path, so the completeness property
     # (every enumerated graph is cleared) is asserted against the caller's own
@@ -555,11 +555,11 @@ def test_drop_delete_uses_command_vector(monkeypatch):
             self._name = name
 
         def query(self, q, *a, **k):
-            calls.append(("query", self._name, q))
+            calls.append(("_query", self._name, q))
             return types.SimpleNamespace(result_set=[])
 
         def delete(self):
-            calls.append(("delete", self._name))
+            calls.append(("_delete", self._name))
 
     class _FakeDb:
         def __init__(self):
@@ -575,9 +575,9 @@ def test_drop_delete_uses_command_vector(monkeypatch):
         _host="localhost", _is_embedded=False,
         graph_name="test_ws_drop_a", db=_FakeDb())
     wipe_server(proj, scope={"test_ws_drop_a", "test_ws_drop_b"}, drop=True)
-    delete_calls = [c for c in calls if c[0] == "delete"]
-    assert delete_calls == [("delete", "test_ws_drop_a"),
-                            ("delete", "test_ws_drop_b")], \
+    delete_calls = [c for c in calls if c[0] == "_delete"]
+    assert delete_calls == [("_delete", "test_ws_drop_a"),
+                            ("_delete", "test_ws_drop_b")], \
         f"GRAPH.DELETE must ride execute_command (graph.delete()), got {calls}"
     assert not [c for c in calls if c[1] == "GRAPH.DELETE"], \
         "GRAPH.DELETE must never be sent as a query string"

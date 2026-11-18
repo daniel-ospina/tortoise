@@ -96,7 +96,7 @@ its own leg. Gap 6 — a writer outside `tortoise/` — cannot be probed from
 inside the walk, so it is STATED and not pinned, and no test here claims to
 block every future absolute, because none can.
 
-`sdk.supersede_point` WAS one of these until `#9417`. Its transfer to the
+`sdk._supersede_point` WAS one of these until `#9417`. Its transfer to the
 successor runs on the 2a-DIRECT leg, whose rows are discovered by
 `MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)`, so `rtype` is provably
 `IMPL|NAND`; the about edge is transferred by a separate
@@ -132,7 +132,7 @@ those keys. The structural-`DirectEdgeRepoint` fold's
 `etype` IS allowlisted and can be `aboutObject`, so there too what carries that
 statement is the map being built from a fixed attribute vocabulary — and since `#10139` that
 map is NO LONGER EMPTY: the structural repoint descriptor carries the retired
-edge's attributes (`sdk.supersede_point` emits them flat, the same keys
+edge's attributes (`sdk._supersede_point` emits them flat, the same keys
 `DIRECT_EDGE_ATTR_KEYS` holds) and the about/structural transfer re-applies them
 with `ON CREATE SET nr += $attrs`. So the statement that used to write nothing
 on an about edge now carries `confidence` there, and the row is a counted
@@ -387,7 +387,7 @@ WHAT IS PINNED (one entry per test, in file order)
    distance at all.
 30. `test_the_retracted_references_absolute_is_gone_from_production_docstrings`
    — the retraction also has to reach the prose that CITES §9.6. Six production
-   docstrings (`sdk.link_source_to_entity`, `search_engine.
+   docstrings (`sdk._link_source_to_entity`, `search_engine.
    read_reference_currency_links`, `tools/source_currency.py`) still called those
    links "property-free" and now scope the claim to the anchor. SITE-scoped on
    BOTH halves, not file-wide: the positive half first asked whether each FILE
@@ -416,7 +416,7 @@ WHAT IS PINNED (one entry per test, in file order)
    ⚠️ THE SYMBOL MOVED, and it is named once here so the next reader does not
    re-derive it: the about-capable, attribute-free emission is
    `tortoise/sdk.py::_record_structural_edge` — the recorder the projection's
-   edge mints call — NOT `sdk.create_edge`, whose door-level emission `#9827`
+   edge mints call — NOT `sdk._create_edge`, whose door-level emission `#9827`
    added and this change replaced with the mint-level one.
 33. `test_every_census_writer_carries_its_class_verdict_where_it_is_named` — the
    CLASS the tables put a writer in, stated in a sentence that actually names
@@ -726,7 +726,7 @@ MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
     #: (`SET nr += $attrs`, whitelisted to the RelationUpsert vocabulary), so an
     #: `about*` edge keeps the binder's `confidence`. It was a declared false
     #: positive until this landed. REBUILD is still bare — traced as #10139.
-    ("tortoise/sdk.py", "supersede_point"): (
+    ("tortoise/sdk.py", "_supersede_point"): (
         "SET nr += $attrs",
     ),
     #: #10139: the REBUILD half of `#9417`. The pass-2b structural repoint used to
@@ -807,7 +807,7 @@ FALSE_POSITIVE_ATTR_VOCAB: frozenset[str] = frozenset(
 #: `_record_structural_edges`), which journals
 #: `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutSource`/
 #: `aboutAction` as readily as `ownedBy` — and it is safe only because it emits
-#: no attribute at all. ⛔ NOT `sdk.create_edge`: `#9827` added that door's own
+#: no attribute at all. ⛔ NOT `sdk._create_edge`: `#9827` added that door's own
 #: emission and the mint-level one REPLACED it, so a census naming the door here
 #: describes a producer the tree does not have (`#10200` review: the tree holds
 #: exactly two emitters — `_record_structural_edge`'s
@@ -827,7 +827,7 @@ FALSE_POSITIVE_ATTR_VOCAB: frozenset[str] = frozenset(
 #: The value is the STATEMENT-level proof for an attribute-carrying producer,
 #: asserted against its own function body — not a claim about intent.
 DIRECT_EDGE_CREATED_ATTR_GUARDS: dict[tuple[str, str], str] = {
-    ("tortoise/sdk.py", "create_direct_edge"): (
+    ("tortoise/sdk.py", "_create_direct_edge"): (
         'op_type not in ("IMPL", "NAND")'
     ),
 }
@@ -901,7 +901,7 @@ EXPECTED_NAMES: dict[tuple[str, str], frozenset[str]] = {
     ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
         frozenset({MAP_FORM})
     ),
-    ("tortoise/sdk.py", "supersede_point"): frozenset({MAP_FORM}),
+    ("tortoise/sdk.py", "_supersede_point"): frozenset({MAP_FORM}),
 }
 #: A relationship pattern, captured as (variable, relationship-token). The
 #: variable may be EMPTY: `MERGE (s)-[:aboutObject {confidence:$c}]->(t)` is
@@ -916,7 +916,7 @@ _ABOUT_REL = re.compile(
 #: is about-bearing only when the writer validates/derives it from one of these
 #: (`link_entity` → `ENTITY_LINKED_RELS`, the replay fold → the record's `rel`,
 #: the binder → `_ROLE_TARGET`). Without this clause the census also catches
-#: unrelated interpolated writes (`sdk.ingest`'s `IMPL|NAND|hasPart` `r.idx`),
+#: unrelated interpolated writes (`sdk._ingest`'s `IMPL|NAND|hasPart` `r.idx`),
 #: and a false positive is how a guard gets deleted instead of fixed.
 #:
 #: The PREDICATE ALLOWLIST (`validate_rel_type` / `KNOWN_REL_TYPES`) and the
@@ -4289,7 +4289,7 @@ DENIAL_MARKERS: tuple[str, ...] = (
     # SUBJECT of the predicate instead of the object of a verb. The tuple above
     # lists only the AFFIRMATIVE phrasings (`carries no property`, `writes
     # nothing`), so changing one auxiliary escaped the owner's decision
-    # VERBATIM: *"`sdk.supersede_point` does not carry the binder's `confidence`
+    # VERBATIM: *"`sdk._supersede_point` does not carry the binder's `confidence`
     # on an about edge"* and *"`hosted_backup.restore_graph` itself never writes
     # the attribute set at all"* were both GREEN at the `#10200` head, while the
     # PR's own record claimed no passage may say it drops / carries no property
@@ -4310,7 +4310,7 @@ DENIAL_MARKERS: tuple[str, ...] = (
     # swapping `carries` for `writes` — and `MARKERS_ABSENT_BY_DESIGN` recorded
     # the absence as covered ('its determiner form is recorded above'), which made
     # the gap read as a closed direction. Measured at the `#10200` review cycle 7:
-    # *"`sdk.supersede_point` no longer writes the attribute set on an about
+    # *"`sdk._supersede_point` no longer writes the attribute set on an about
     # edge"* was GREEN while every other determiner form of the same sentence
     # reds.
     "no longer writes the",
@@ -4318,7 +4318,7 @@ DENIAL_MARKERS: tuple[str, ...] = (
 
 #: Denials whose spelling VARIES too much for a literal: one FRAME per VOICE.
 #: ⛔ A literal cannot pin these, and `#10200` review cycle 7 measured the gap the
-#: transfer-bare frame was added for: *"`sdk.supersede_point` transfers the about
+#: transfer-bare frame was added for: *"`sdk._supersede_point` transfers the about
 #: edge bare"* was GREEN while `transferred bare` — the PAST-tense tripwire for
 #: the retracted sentence — was a member, so the live denial and the retracted one
 #: were pinned in different tenses and only ONE of the two was pinned at all. The
@@ -4356,10 +4356,10 @@ DENIAL_MARKERS: tuple[str, ...] = (
 #: about/structural transfer is a separate BARE `MERGE`"* in a NEIGHBOURING clause
 #: is not read as a denial of this writer (and that sentence belongs to the EXEMPT
 #: row anyway, which `DENIAL_MARKERS` never governs). The VOICE frames use
-#: `[^;,]` instead, because a census KEY contains a period (`sdk.supersede_point`)
+#: `[^;,]` instead, because a census KEY contains a period (`sdk._supersede_point`)
 #: and a period-bounded class cannot reach across its own subject — measured: the
-#: first draft's `[^.;,]` left *"the guard exempts `sdk.supersede_point` from the
-#: census"* and *"Rule 2 keeps `sdk.supersede_point` out of the counted rows"*
+#: first draft's `[^.;,]` left *"the guard exempts `sdk._supersede_point` from the
+#: census"* and *"Rule 2 keeps `sdk._supersede_point` out of the counted rows"*
 #: GREEN, i.e. the frame was dead on arrival against its own probe.
 #: ⚠️ STATED LIMIT: the TRANSFER-bare frame reads the VERB forms only (`transfers`
 #: / `transferred`). The NOUN form (*"the transfer is still bare"*) is deliberately
@@ -4388,10 +4388,10 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
     (
         re.compile(rf"\b(?:drop|drops)\b[^.;,]{{0,30}}?\b{_PROPERTY_NOUN}\b"),
         (
-            "`sdk.supersede_point` is said to drop the property.",
-            "`sdk.supersede_point` will drop the binder's `confidence`.",
+            "`sdk._supersede_point` is said to drop the property.",
+            "`sdk._supersede_point` will drop the binder's `confidence`.",
         ),
-        "`sdk.supersede_point` does not drop the property.",
+        "`sdk._supersede_point` does not drop the property.",
     ),
     (
         # ⛔ THE OBJECT-NEGATION FRAME, in EVERY verb this record treats as
@@ -4402,7 +4402,7 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
         # verdict), and `does not write the` / `never writes the` / `write|writes
         # nothing` were already denials — so the same construction with the
         # subject swapped to a COUNTED writer was GREEN. Measured at
-        # `6d40e5732` (`#10200` review): *"`sdk.supersede_point` writes no property
+        # `6d40e5732` (`#10200` review): *"`sdk._supersede_point` writes no property
         # on an about edge"*, *"… writes no `confidence` …"* and *"… sets no
         # property …"* each left the whole module green, while the `carry` control
         # on the same code path red. One alternation, three reachable green paths.
@@ -4415,12 +4415,12 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
             rf"(?:no\s+{_PROPERTY_NOUN}|nothing)\b"
         ),
         (
-            "`sdk.supersede_point` is said to carry no property.",
-            "`sdk.supersede_point` carries no `confidence` on an about edge.",
-            "`sdk.supersede_point` is said to carry nothing.",
-            "`sdk.supersede_point` writes no property on an about edge.",
-            "`sdk.supersede_point` writes no `confidence` on an about edge.",
-            "`sdk.supersede_point` sets no property on an about edge.",
+            "`sdk._supersede_point` is said to carry no property.",
+            "`sdk._supersede_point` carries no `confidence` on an about edge.",
+            "`sdk._supersede_point` is said to carry nothing.",
+            "`sdk._supersede_point` writes no property on an about edge.",
+            "`sdk._supersede_point` writes no `confidence` on an about edge.",
+            "`sdk._supersede_point` sets no property on an about edge.",
         ),
         # ⛔ NOT the bare prefix `carry no` / `carries no`: measured, that reds at
         # least four TRUE §13 sentences that name a counted KEY (`DirectEdgeRepoint`
@@ -4432,7 +4432,7 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
     ),
     (
         re.compile(r"\b(?:write|writes)\s+nothing\b"),
-        ("`sdk.supersede_point` is said to write nothing.",),
+        ("`sdk._supersede_point` is said to write nothing.",),
         "The guard pins every shape that writes the binder's `confidence`.",
     ),
     # ── a POSITIVE predicate under negation, over the property/attribute object ─
@@ -4443,17 +4443,17 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
             rf"[^.;,]{{0,40}}?\b(?:{_PROPERTY_NOUN}|writers?|census|counted)\b"
         ),
         (
-            "`sdk.supersede_point` never sets a property on the about edge.",
-            "`sdk.supersede_point` does not count as a writer.",
+            "`sdk._supersede_point` never sets a property on the about edge.",
+            "`sdk._supersede_point` does not count as a writer.",
         ),
-        "`sdk.supersede_point` keeps the binder's `confidence` and never loses "
+        "`sdk._supersede_point` keeps the binder's `confidence` and never loses "
         "it on replay.",
     ),
     # ── the OBJECT voice: the writer is the verb's object, not its subject ─────
     (
         re.compile(r"\b(?:does\s+not|do\s+not|never)\s+count\b"),
-        ("The census does not count `sdk.supersede_point`.",),
-        "`sdk.supersede_point` counts as a writer of the attribute set.",
+        ("The census does not count `sdk._supersede_point`.",),
+        "`sdk._supersede_point` counts as a writer of the attribute set.",
     ),
     (
         re.compile(
@@ -4461,21 +4461,21 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
             r"(?:writers?|counted|members?)\b"
         ),
         (
-            "`sdk.supersede_point` and `hosted_backup.restore_graph` are not "
+            "`sdk._supersede_point` and `hosted_backup.restore_graph` are not "
             "writers of the attribute set.",
         ),
         # `the ONLY writer` is quantified-out by `_QUANTIFIER_NEGATION_RE` on the
         # class-marker half; the object frame must leave it alone for the same
         # reason ("not the only writer" does not deny that it is a writer).
-        "`sdk.supersede_point` is not the only writer that carries the set by "
+        "`sdk._supersede_point` is not the only writer that carries the set by "
         "property MAP.",
     ),
     (
         re.compile(
             r"\b(?:is|are)\s+excluded\s+from\s+the\s+(?:census|counted|writer)"
         ),
-        ("`sdk.supersede_point` is excluded from the census of writers.",),
-        "`sdk.supersede_point` is counted among the writers.",
+        ("`sdk._supersede_point` is excluded from the census of writers.",),
+        "`sdk._supersede_point` is counted among the writers.",
     ),
     (
         # ⛔ `exempts` — the third-person VERB only. The bare stem `exempt` is NOT
@@ -4485,17 +4485,17 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
         # §13's *"make both exemptions true instead of merely exempting them"* —
         # TRUE prose, since reworded away by `#10303`.
         re.compile(r"\bexempts\b[^;,]{0,80}?\b(?:census|counted)\b"),
-        ("The guard exempts `sdk.supersede_point` from the census.",),
+        ("The guard exempts `sdk._supersede_point` from the census.",),
         "The guard makes both exemptions true instead of merely exempting them, "
-        "and `sdk.supersede_point` re-materializes the set by property MAP.",
+        "and `sdk._supersede_point` re-materializes the set by property MAP.",
     ),
     (
         re.compile(
             r"\b(?:keeps?|leaves?)\b[^;,]{0,80}?\bout\s+of\s+the\s+"
             r"(?:census|counted)\b"
         ),
-        ("Rule 2 keeps `sdk.supersede_point` out of the counted rows.",),
-        "`sdk.supersede_point` keeps the binder's `confidence` on the about edge.",
+        ("Rule 2 keeps `sdk._supersede_point` out of the counted rows.",),
+        "`sdk._supersede_point` keeps the binder's `confidence` on the about edge.",
     ),
     # ── the PASSIVE ────────────────────────────────────────────────────────────
     (
@@ -4503,20 +4503,20 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
             rf"\bno\s+{_PROPERTY_NOUN}\s+(?:is|are|gets?)\s+"
             rf"(?:written|carried|set|stored)\b"
         ),
-        ("No property is written by `sdk.supersede_point` on an about edge.",),
-        "`sdk.supersede_point` carries the binder's `confidence` on the about edge.",
+        ("No property is written by `sdk._supersede_point` on an about edge.",),
+        "`sdk._supersede_point` carries the binder's `confidence` on the about edge.",
     ),
     # ── the ADJECTIVE / PREPOSITIONAL forms ────────────────────────────────────
     (
         re.compile(rf"\bwithout\s+(?:any\s+)?{_PROPERTY_NOUN}\b"),
-        ("`sdk.supersede_point` writes the edge without properties.",),
-        "`sdk.supersede_point` writes the edge with the binder's `confidence` "
+        ("`sdk._supersede_point` writes the edge without properties.",),
+        "`sdk._supersede_point` writes the edge with the binder's `confidence` "
         "and without a second name.",
     ),
     (
         re.compile(r"\bproperty\s+free\b"),
-        ("`sdk.supersede_point` leaves its about edge property free.",),
-        "`sdk.supersede_point` carries the binder's `confidence` on the about edge.",
+        ("`sdk._supersede_point` leaves its about edge property free.",),
+        "`sdk._supersede_point` carries the binder's `confidence` on the about edge.",
     ),
 )
 
@@ -4578,7 +4578,7 @@ _CLAUSE_BREAKS: tuple[str, ...] = (";", "\u2014", ":", "|", ",")
 #: Where the HISTORY escape's clause ends: `_CLAUSE_BREAKS` PLUS the coordinators
 #: that join two PREDICATES. ⛔ PUNCTUATION ALONE WAS FAIL-OPEN: a comma-less
 #: coordination put a history marker and a present-tense denial in ONE "clause",
-#: so `_history_in_clause` excused the denial — *"`sdk.supersede_point` was a
+#: so `_history_in_clause` excused the denial — *"`sdk._supersede_point` was a
 #: declared false positive before `#9417` and it still drops the property on an
 #: about edge"* was GREEN, one omitted comma away from the cycle-3 sentence this
 #: leg exists for (`#10200` review, cycle 6, executed). `and` / `but` / `yet` /
@@ -4604,7 +4604,7 @@ _HISTORY_BREAKS: tuple[str, ...] = (
 #: punctuation-window form it implemented is wrong in BOTH directions, measured
 #: (`#10200` review cycles 2 and 3): it CLEARED a real class negation whenever an
 #: unrelated clause carried a negator (*"Unlike `create_direct_edge`, which cannot
-#: name an about edge, `sdk.supersede_point` re-materializes the set by property
+#: name an about edge, `sdk._supersede_point` re-materializes the set by property
 #: MAP"*), and it CLEARED the exemption direction's own contradiction.
 #: `_marker_itself_negated` replaced it (see `_class_marker_negated`).
 #: ⛔ THE DEFECT THIS DELETION CLOSES: once `_clause_before` stopped being called,
@@ -4622,7 +4622,7 @@ _HISTORY_BREAKS: tuple[str, ...] = (
 
 #: A POST-positioned negator is still a negation of its predicate — English
 #: negates from behind as well as from in front, and these documents use that voice
-#: 14 times (`no longer`). Reading polarity only BACKWARD left *"`sdk.supersede_point`
+#: 14 times (`no longer`). Reading polarity only BACKWARD left *"`sdk._supersede_point`
 #: is a re-materializing writer no longer"* stating the class on both legs, and the
 #: exemption form *"… a declared false positive no longer: it re-materializes the
 #: set"* calling the exemption counted — the direction the recorded decision says
@@ -4658,7 +4658,7 @@ def _class_marker_negated(sentence: str, match) -> bool:
     ⛔ The window form is wrong in BOTH directions, measured at `#10200` review
     cycle 3: it CLEARED a class negation whenever an unrelated clause carried a
     negator (*"Unlike `create_direct_edge`, which cannot name an about edge,
-    `sdk.supersede_point` re-materializes the set by property MAP"* red as `not
+    `sdk._supersede_point` re-materializes the set by property MAP"* red as `not
     property MAP`), and it CLEARED the exemption direction's own contradiction
     (*"…which never loses a value, is a counted MAP form writer"* was green) —
     because three of this file's four call sites shared it. The AFTER half is
@@ -4718,7 +4718,7 @@ EXEMPT_COUNTED_MARKERS: tuple[str, ...] = (
 #: asserted to be a member of the six-writer population its own
 #: `NOT_AN_ABOUT_WRITER` row exempts it from — was GREEN in words AND in digits,
 #: while the pronominal control on the same code path red. The corpus writes the
-#: COUNTED direction exactly this way (§13: *"`sdk.supersede_point` IS one of
+#: COUNTED direction exactly this way (§13: *"`sdk._supersede_point` IS one of
 #: them since `#9417`"*), so the mirror sentence about the exemption is the
 #: documents' own idiom, not a paraphrase class this instrument never claimed.
 #: ⚠️ Same shape as `DENIAL_PATTERNS`: every entry declares its own probes, and
@@ -4739,7 +4739,7 @@ EXEMPT_COUNTED_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...
         ),
         # The documents' own COUNTED claim — pronominal, so this frame must not
         # read it. A widening to `is one of …` in general reds it.
-        "`sdk.supersede_point` IS one of them since `#9417`.",
+        "`sdk._supersede_point` IS one of them since `#9417`.",
     ),
 )
 
@@ -4938,7 +4938,7 @@ def _history_in_clause(low: str, match) -> bool:
     ⛔ PER OCCURRENCE, not per marker. Quantifying per marker (`any` over the
     marker's occurrences, which is what this function did) let ONE history-marked
     occurrence excuse a second, present-tense denial of the same marker in the
-    same sentence — *"`sdk.supersede_point` was a declared false positive before
+    same sentence — *"`sdk._supersede_point` was a declared false positive before
     `#9417`, and the guard still declares it a false positive at HEAD"* was green,
     and it is exactly the `#10149` class this leg exists for: history kept, the
     denial NOT corrected (`#10200` review, cycle 5, executed).
@@ -5020,8 +5020,8 @@ def _exempt_counted_by_pattern(sentence: str) -> list[str]:
 #: after it. ⛔ DELIBERATELY NOT the punctuation-window test `_class_marker_negated`
 #: uses: a negator anywhere in the comma-run does not negate the marker. Measured
 #: (`#10200` review, cycle 2): the window form suppressed the denial in *"Unlike
-#: `create_direct_edge`, which cannot name an about edge, `sdk.supersede_point` is
-#: a declared false positive"* and in *"`sdk.supersede_point`, which never loses
+#: `create_direct_edge`, which cannot name an about edge, `sdk._supersede_point` is
+#: a declared false positive"* and in *"`sdk._supersede_point`, which never loses
 #: the value, is a declared false positive"* — both RED at the previous head — so
 #: that suppression re-opened two sentences rather than refining one. The
 #: parenthetical alternation is what keeps `is not, however, an exemption` green,
@@ -5038,7 +5038,7 @@ _MARKER_NEGATION_BEFORE_RE = re.compile(
 #: ⛔ The old form searched the WHOLE CLAUSE in both directions, so a `no longer`
 #: belonging to a NEIGHBOURING predicate suppressed a class marker it does not
 #: govern — *"An unconditional `SET nr += $attrs` no longer applies to
-#: `sdk.supersede_point`; it uses `ON CREATE`"* red as `not SET nr +=`, and that
+#: `sdk._supersede_point`; it uses `ON CREATE`"* red as `not SET nr +=`, and that
 #: is TRUE prose (it paraphrases §13's own sentence). The clause-wide read is the
 #: same "negator of a neighbour" defect the BEFORE half's docstring cites as
 #: measured, on the other side (`#10200` review, cycle 6, executed).
@@ -5173,7 +5173,7 @@ def _denied_verdicts(
        no property on an about edge"* reds `supersede_point` as `carries no
        property`. That is the fail-CLOSED direction and it is deliberate: the
        measured retracted sentence is itself multi-key (*"`_rebuild_all_replay`
-       and `sdk.supersede_point` are not one of them, so **neither** carries a
+       and `sdk._supersede_point` are not one of them, so **neither** carries a
        property"*), and a clause-scoped rule would have to resolve the PLURAL
        antecedent (`neither` / `both` / `that row`) to keep it red — no mechanical
        reading of that was found that does not either fail open on the retracted
@@ -5306,7 +5306,7 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     and a numeral is satisfied by the right token anywhere in the section — so
     the sentence around it is unconstrained. Four review cycles on the five-line
     `#9417` fix were green while `STORAGE-ARCHITECTURE.md` §13 said
-    `sdk.supersede_point` *"**drops** the binder's `confidence`"* 130 words
+    `sdk._supersede_point` *"**drops** the binder's `confidence`"* 130 words
     before counting it as the fourth re-materializing writer. The tables already
     hold the exact keys and the exact class, so the claim is cheap to pin: a
     writer the census counts must be named in a sentence that says HOW it writes
@@ -5355,10 +5355,10 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     # OPPOSITE of it, so it must not count as stated (`#10200` review: this exact
     # sentence was green on leg 1 through its own marker).
     negated = (
-        ("probe", "`sdk.supersede_point` is not a re-materializing writer."),
+        ("probe", "`sdk._supersede_point` is not a re-materializing writer."),
     )
     assert any(
-        "supersede_point" in item for item in _unstated_verdicts(list(negated))
+        "_supersede_point" in item for item in _unstated_verdicts(list(negated))
     ), (
         "a sentence that NEGATES the class counts as stating it, so the one-word "
         "paraphrase of the retracted `#10149` cycle-3 sentence stays green"
@@ -5394,11 +5394,11 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     appositive = (
         (
             "probe",
-            "`sdk.supersede_point` is not, however, a re-materializing writer.",
+            "`sdk._supersede_point` is not, however, a re-materializing writer.",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _unstated_verdicts(list(appositive))
     ), (
         "a comma-separated parenthetical hides the negator from the affirmative "
@@ -5408,10 +5408,10 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     # as from in front (`no longer` appears 14 times in these documents), so a
     # marker followed by one must not count as stating the class.
     post_negated = (
-        ("probe", "`sdk.supersede_point` is a re-materializing writer no longer."),
+        ("probe", "`sdk._supersede_point` is a re-materializing writer no longer."),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _unstated_verdicts(list(post_negated))
     ), (
         "a negator AFTER the class marker is not read, so the class can be "
@@ -5445,12 +5445,12 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     subordinated = (
         (
             "probe",
-            "`sdk.supersede_point` is not, while the census says otherwise, a "
+            "`sdk._supersede_point` is not, while the census says otherwise, a "
             "re-materializing writer.",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _unstated_verdicts(list(subordinated))
     ), (
         "a comma-set SUBORDINATE clause is read as a conjunct boundary, so the "
@@ -5470,7 +5470,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     A sentence that names a COUNTED writer may not call it an exemption or say
     it drops / carries no property, and a sentence that names the EXEMPTION may
     not call it counted. Both were measured green: cycle 3's §13 sentence
-    (`sdk.supersede_point` *"is NOT one of them … it **drops** the binder's
+    (`sdk._supersede_point` *"is NOT one of them … it **drops** the binder's
     `confidence`"*) and cycle 4's (*"the guard declares that row a FALSE
     POSITIVE rather than counting it"*). The escape hatch is deliberate and
     narrow: a sentence about HISTORY — *"it was a declared false positive before
@@ -5489,12 +5489,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     cycle_3 = (
         (
             "probe",
-            "`sdk.supersede_point` is NOT one of them: it **drops** the "
+            "`sdk._supersede_point` is NOT one of them: it **drops** the "
             "binder's `confidence` on the `about*` edge.",
         ),
     )
     assert any(
-        "supersede_point" in item for item in _denied_verdicts(list(cycle_3))
+        "_supersede_point" in item for item in _denied_verdicts(list(cycle_3))
     ), (
         "the rule cannot see the cycle-3 sentence, which is the sentence this "
         "leg exists for"
@@ -5504,12 +5504,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     history = (
         (
             "probe",
-            "`sdk.supersede_point` was a declared FALSE POSITIVE before `#9417`; "
+            "`sdk._supersede_point` was a declared FALSE POSITIVE before `#9417`; "
             "it is a counted MAP-form writer now.",
         ),
     )
     assert not any(
-        "supersede_point" in item for item in _denied_verdicts(list(history))
+        "_supersede_point" in item for item in _denied_verdicts(list(history))
     ), (
         "the rule fires on a HISTORY-marked denial, which is true — it would "
         "make the correction record unwritable"
@@ -5572,11 +5572,11 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         (
             "probe",
             "Unlike `create_direct_edge`, which cannot name an about edge, "
-            "`sdk.supersede_point` re-materializes the set by property MAP.",
+            "`sdk._supersede_point` re-materializes the set by property MAP.",
         ),
         (
             "probe",
-            "`sdk.supersede_point`, which never loses the value, carries the "
+            "`sdk._supersede_point`, which never loses the value, carries the "
             "set by property MAP.",
         ),
         (
@@ -5601,10 +5601,10 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # `DENIAL_MARKERS` entry, which is exactly why leg 1's polarity fix alone
     # would not be enough: this is the backstop.
     negated = (
-        ("probe", "`sdk.supersede_point` is not a re-materializing writer."),
+        ("probe", "`sdk._supersede_point` is not a re-materializing writer."),
     )
     assert any(
-        "supersede_point" in item for item in _denied_verdicts(list(negated))
+        "_supersede_point" in item for item in _denied_verdicts(list(negated))
     ), (
         "a NEGATED class statement about a counted writer is not seen as a "
         "denial, so `#10149`'s claim restated in the class's own vocabulary "
@@ -5617,19 +5617,19 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # ⛔ This probe is the END-TO-END half; `DENIAL_PATTERNS`' own declared
     # `must_see`/`must_not_see` pairs are the frame-level half.
     other_voices = (
-        ("probe", "`sdk.supersede_point` is said to drop the property."),
-        ("probe", "`sdk.supersede_point` carries no `confidence` on an about edge."),
-        ("probe", "The guard exempts `sdk.supersede_point` from the census."),
+        ("probe", "`sdk._supersede_point` is said to drop the property."),
+        ("probe", "`sdk._supersede_point` carries no `confidence` on an about edge."),
+        ("probe", "The guard exempts `sdk._supersede_point` from the census."),
         (
             "probe",
-            "No property is written by `sdk.supersede_point` on an about edge.",
+            "No property is written by `sdk._supersede_point` on an about edge.",
         ),
-        ("probe", "`sdk.supersede_point` leaves its about edge property free."),
+        ("probe", "`sdk._supersede_point` leaves its about edge property free."),
     )
     missed_voices = [
         sentence
         for sentence in other_voices
-        if not any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        if not any("_supersede_point" in item for item in _denied_verdicts([sentence]))
     ]
     assert not missed_voices, (
         "the rule reads only the third-person, subject-position spelling, so the "
@@ -5643,12 +5643,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     negated_voices = (
         (
             "probe",
-            "`sdk.supersede_point` does not drop the property: it re-materializes "
+            "`sdk._supersede_point` does not drop the property: it re-materializes "
             "it by property MAP.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` is not the only writer that carries the set by "
+            "`sdk._supersede_point` is not the only writer that carries the set by "
             "property MAP.",
         ),
     )
@@ -5674,12 +5674,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     retracted_with_10139 = (
         (
             "probe",
-            "`sdk.supersede_point` drops the binder's `confidence` on the "
+            "`sdk._supersede_point` drops the binder's `confidence` on the "
             "`about*` edge (`#10139`).",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(retracted_with_10139))
     ), (
         "a bare `#10139` excuses the retracted sentence, so the escape is wider "
@@ -5692,12 +5692,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     half_corrected = (
         (
             "probe",
-            "`sdk.supersede_point` was a declared false positive before "
+            "`sdk._supersede_point` was a declared false positive before "
             "`#9417`, and it still drops the property on an about edge.",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(half_corrected))
     ), (
         "a comma-joined present-tense denial is excused by a history marker "
@@ -5776,11 +5776,11 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     appositive = (
         (
             "probe",
-            "`sdk.supersede_point` is not, however, a re-materializing writer.",
+            "`sdk._supersede_point` is not, however, a re-materializing writer.",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(appositive))
     ), (
         "a comma-separated parenthetical hides the negator, so an ordinary "
@@ -5791,10 +5791,10 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # polarity only backward left the trailing form stating the class on both legs
     # (`#10200` review), including the exemption direction.
     post_negated = (
-        ("probe", "`sdk.supersede_point` is a re-materializing writer no longer."),
+        ("probe", "`sdk._supersede_point` is a re-materializing writer no longer."),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(post_negated))
     ), (
         "a negator AFTER the class marker is not read, so the verdict can be "
@@ -5857,12 +5857,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     subordinated = (
         (
             "probe",
-            "`sdk.supersede_point` is not, while the census says otherwise, a "
+            "`sdk._supersede_point` is not, while the census says otherwise, a "
             "re-materializing writer.",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(subordinated))
     ), (
         "a comma-set SUBORDINATE clause is read as a conjunct boundary, so a "
@@ -5877,12 +5877,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     decision_noun = (
         (
             "probe",
-            "`sdk.supersede_point` re-materializes the set by property MAP, and "
+            "`sdk._supersede_point` re-materializes the set by property MAP, and "
             "it is an exemption from the census.",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(decision_noun))
     ), (
         "a counted writer called 'an exemption' is not seen, so the decision's "
@@ -5892,12 +5892,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     decision_verb = (
         (
             "probe",
-            "`sdk.supersede_point` re-materializes the set by property MAP and "
+            "`sdk._supersede_point` re-materializes the set by property MAP and "
             "then drops confidence on the about edge.",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(decision_verb))
     ), (
         "the non-articled property verb ('drops confidence') is not seen, so a "
@@ -5915,12 +5915,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     not_an_exemption = (
         (
             "probe",
-            "`sdk.supersede_point` is not an exemption: it re-materializes the "
+            "`sdk._supersede_point` is not an exemption: it re-materializes the "
             "set by property MAP.",
         ),
     )
     assert not any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(not_an_exemption))
     ), (
         "'is not an exemption' is treated as a denial of the class, so TRUE "
@@ -5936,16 +5936,16 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         (
             "probe",
             "Unlike `create_direct_edge`, which cannot name an about edge, "
-            "`sdk.supersede_point` is a declared false positive.",
+            "`sdk._supersede_point` is a declared false positive.",
         ),
         (
             "probe",
-            "`sdk.supersede_point`, which never loses the value, is a declared "
+            "`sdk._supersede_point`, which never loses the value, is a declared "
             "false positive.",
         ),
     )
     assert all(
-        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        any("_supersede_point" in item for item in _denied_verdicts([sentence]))
         for sentence in unrelated_negators
     ), (
         "a negator in an UNRELATED clause suppresses the denial, so a retracted "
@@ -5963,17 +5963,17 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     inflected_exemption = (
         (
             "probe",
-            "`sdk.supersede_point` re-materializes the set by property MAP; it "
+            "`sdk._supersede_point` re-materializes the set by property MAP; it "
             "is exempt from the census.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` re-materializes the set by property MAP; it "
+            "`sdk._supersede_point` re-materializes the set by property MAP; it "
             "is the exemption in §13.",
         ),
     )
     assert all(
-        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        any("_supersede_point" in item for item in _denied_verdicts([sentence]))
         for sentence in inflected_exemption
     ), (
         "a counted writer called 'exempt' / 'the exemption' is not seen, so the "
@@ -5985,12 +5985,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     qualified_negation = (
         (
             "probe",
-            "`sdk.supersede_point` is not a DECLARED false positive: it "
+            "`sdk._supersede_point` is not a DECLARED false positive: it "
             "re-materializes the set by property MAP.",
         ),
     )
     assert not any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(qualified_negation))
     ), (
         "a negated marker with a qualifier between ('is not a DECLARED false "
@@ -6002,17 +6002,17 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     verb_form = (
         (
             "probe",
-            "`sdk.supersede_point` re-materializes the set by property MAP but "
+            "`sdk._supersede_point` re-materializes the set by property MAP but "
             "carries nothing on an about edge.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` re-materializes the set by property MAP and "
+            "`sdk._supersede_point` re-materializes the set by property MAP and "
             "writes nothing on an about edge.",
         ),
     )
     assert all(
-        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        any("_supersede_point" in item for item in _denied_verdicts([sentence]))
         for sentence in verb_form
     ), (
         "a counted writer said to carry/write NOTHING on an about edge is not "
@@ -6026,12 +6026,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     history_then_present_denial = (
         (
             "probe",
-            "`sdk.supersede_point` was a declared false positive before `#9417`, "
+            "`sdk._supersede_point` was a declared false positive before `#9417`, "
             "and the guard still declares it a false positive at HEAD.",
         ),
     )
     assert all(
-        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        any("_supersede_point" in item for item in _denied_verdicts([sentence]))
         for sentence in history_then_present_denial
     ), (
         "a history-marked occurrence excuses a SECOND, present-tense denial of the "
@@ -6049,12 +6049,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     negated_then_real_denial = (
         (
             "probe",
-            "`sdk.supersede_point` is not a false positive, and it is a false "
+            "`sdk._supersede_point` is not a false positive, and it is a false "
             "positive.",
         ),
     )
     assert all(
-        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        any("_supersede_point" in item for item in _denied_verdicts([sentence]))
         for sentence in negated_then_real_denial
     ), (
         "one negated occurrence cancels a second, un-negated denial of the same "
@@ -6098,12 +6098,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     documents_own_exemption_prose = (
         (
             "probe",
-            "`sdk.supersede_point` counts now, and the guard pins the shapes that "
+            "`sdk._supersede_point` counts now, and the guard pins the shapes that "
             "make both exemptions true instead of merely exempting them.",
         ),
     )
     assert not any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(documents_own_exemption_prose))
     ), (
         "the documents' own TRUE sentence about the exemptions reds when it names "
@@ -6116,7 +6116,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     negated_auxiliary = (
         (
             "probe",
-            "`sdk.supersede_point` does not carry the binder's `confidence` on an "
+            "`sdk._supersede_point` does not carry the binder's `confidence` on an "
             "about edge.",
         ),
         (
@@ -6128,7 +6128,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     assert all(
         any(symbol in item for item in _denied_verdicts([sentence]))
         for sentence, symbol in zip(
-            negated_auxiliary, ("supersede_point", "restore_graph"), strict=True
+            negated_auxiliary, ("_supersede_point", "restore_graph"), strict=True
         )
     ), (
         "a counted writer denied with a NEGATED AUXILIARY ('does not carry the",
@@ -6141,17 +6141,17 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     comma_less_history = (
         (
             "probe",
-            "`sdk.supersede_point` was a declared false positive before `#9417` "
+            "`sdk._supersede_point` was a declared false positive before `#9417` "
             "and it still drops the property on an about edge.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` was a declared false positive before `#9417` "
+            "`sdk._supersede_point` was a declared false positive before `#9417` "
             "but it carries no property on an about edge.",
         ),
     )
     assert all(
-        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        any("_supersede_point" in item for item in _denied_verdicts([sentence]))
         for sentence in comma_less_history
     ), (
         "the history escape spans a COMMA-LESS coordination, so the cycle-3 "
@@ -6160,12 +6160,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # … and the TRUE history sentence stays green under the same coordinator rule
     # (a fix that reds the correction record is worse than the fail-open).
     assert not any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(
             [
                 (
                     "probe",
-                    "`sdk.supersede_point` was a declared false positive before "
+                    "`sdk._supersede_point` was a declared false positive before "
                     "`#9417` but it is a counted MAP-form writer now.",
                 )
             ]
@@ -6200,12 +6200,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     true_prose_neighbours = (
         (
             "probe",
-            "`sdk.supersede_point` is not merely a MAP form writer but the "
+            "`sdk._supersede_point` is not merely a MAP form writer but the "
             "canonical one.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` is not just a MAP form writer but the "
+            "`sdk._supersede_point` is not just a MAP form writer but the "
             "canonical one.",
         ),
         (
@@ -6235,20 +6235,20 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     other_verb_and_tense = (
         (
             "probe",
-            "`sdk.supersede_point` no longer writes the attribute set on an about "
+            "`sdk._supersede_point` no longer writes the attribute set on an about "
             "edge.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` transfers the about edge bare.",
+            "`sdk._supersede_point` transfers the about edge bare.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` transfers it bare.",
+            "`sdk._supersede_point` transfers it bare.",
         ),
     )
     assert all(
-        any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        any("_supersede_point" in item for item in _denied_verdicts([sentence]))
         for sentence in other_verb_and_tense
     ), (
         "the transfer denial is pinned in ONE verb or ONE tense, so the same "
@@ -6262,11 +6262,11 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     negated_transfer_bare = (
         (
             "probe",
-            "`sdk.supersede_point` does not transfer the about edge bare.",
+            "`sdk._supersede_point` does not transfer the about edge bare.",
         ),
     )
     assert not any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(negated_transfer_bare))
     ), (
         "a NEGATED transfer-bare statement is read as the denial it denies, so "
@@ -6284,14 +6284,14 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     retracted_multi_key = (
         (
             "probe",
-            "`projection._rebuild_all_replay` and `sdk.supersede_point` are not "
+            "`projection._rebuild_all_replay` and `sdk._supersede_point` are not "
             "one of them, so neither carries a property on an about edge, and the "
             "guard declares both census FALSE POSITIVES (`supersede_point` even "
             "DROPS the property, `#9417`).",
         ),
     )
     assert any(
-        "supersede_point" in item for item in _denied_verdicts(list(retracted_multi_key))
+        "_supersede_point" in item for item in _denied_verdicts(list(retracted_multi_key))
     ), (
         "the retracted §13.8 q2 sentence is no longer read as a denial, so the "
         "sentence this whole leg exists for is green again"
@@ -6299,13 +6299,13 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     contrast_split_into_sentences = (
         (
             "probe",
-            "`sdk.supersede_point` is a counted MAP form writer. "
+            "`sdk._supersede_point` is a counted MAP form writer. "
             "`projection._rebuild_all_replay` carries no property on an about "
             "edge.",
         ),
     )
     assert not any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(contrast_split_into_sentences))
     ), (
         "stating the two verdicts in separate SENTENCES still reds the counted "
@@ -6324,21 +6324,21 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     other_object_negations = (
         (
             "probe",
-            "`sdk.supersede_point` writes no property on an about edge.",
+            "`sdk._supersede_point` writes no property on an about edge.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` writes no `confidence` on an about edge.",
+            "`sdk._supersede_point` writes no `confidence` on an about edge.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` sets no property on an about edge.",
+            "`sdk._supersede_point` sets no property on an about edge.",
         ),
     )
     missed_object_negations = [
         sentence
         for sentence in other_object_negations
-        if not any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        if not any("_supersede_point" in item for item in _denied_verdicts([sentence]))
     ]
     assert not missed_object_negations, (
         "the object-negation frame reads ONE verb of the construction, so the "
@@ -6350,12 +6350,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # separates a denial from the record, so a verb plus `no` naming something
     # that is not a property/attribute is not this frame's business.
     assert not any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(
             [
                 (
                     "probe",
-                    "`sdk.supersede_point` writes no line numbers into §13.",
+                    "`sdk._supersede_point` writes no line numbers into §13.",
                 )
             ]
         )
@@ -6392,7 +6392,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # NEGATED population claim stay green: polarity still decides, and a red on
     # the documents' own §13 sentence would force its deletion.
     population_true_prose = (
-        ("probe", "`sdk.supersede_point` IS one of them since `#9417`."),
+        ("probe", "`sdk._supersede_point` IS one of them since `#9417`."),
         (
             "probe",
             "`projection._rebuild_all_replay` is not one of the six writers.",
@@ -6584,11 +6584,11 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     counted_object_negation = (
         (
             "probe",
-            "`sdk.supersede_point` re-materializes nothing on an about edge.",
+            "`sdk._supersede_point` re-materializes nothing on an about edge.",
         ),
     )
     assert any(
-        "supersede_point" in item
+        "_supersede_point" in item
         for item in _denied_verdicts(list(counted_object_negation))
     ), (
         "an object negation AFTER a class marker is invisible, so the class counts "
@@ -6606,18 +6606,18 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     coordinated_object_negation = (
         (
             "probe",
-            "`sdk.supersede_point` transfers the about edge bare and nothing "
+            "`sdk._supersede_point` transfers the about edge bare and nothing "
             "else.",
         ),
         (
             "probe",
-            "`sdk.supersede_point` transfers it bare but retains no property map.",
+            "`sdk._supersede_point` transfers it bare but retains no property map.",
         ),
     )
     suppressed_denials = [
         sentence
         for sentence in coordinated_object_negation
-        if not any("supersede_point" in item for item in _denied_verdicts([sentence]))
+        if not any("_supersede_point" in item for item in _denied_verdicts([sentence]))
     ]
     assert not suppressed_denials, (
         "an object negation belonging to the NEXT predicate suppresses the denial "
@@ -7824,7 +7824,7 @@ def test_the_rebuild_half_carries_what_the_live_half_carries():
     the two behavioural replay tests were what stood in for a statement-level
     pin. This leg is that pin, and it is cheap because the premises are literals:
 
-      1. the descriptor JOURNALS the payload — `sdk.supersede_point` spreads
+      1. the descriptor JOURNALS the payload — `sdk._supersede_point` spreads
          `edge_props`, and `edge_props` is filtered by the ONE shared tuple
          (`DIRECT_EDGE_ATTR_KEYS`). A second hand-written key list here is the
          drift class `#10139` is about.
@@ -7908,7 +7908,7 @@ def test_the_rebuild_half_carries_what_the_live_half_carries():
     )
     emitter = (ROOT / "tortoise/sdk.py").read_text(encoding="utf-8")
     assert "if k in DIRECT_EDGE_ATTR_KEYS" in emitter, (
-        "`sdk.supersede_point` builds its 2b payload from a key list of its own "
+        "`sdk._supersede_point` builds its 2b payload from a key list of its own "
         "again — the live half and the replay half then disagree about which "
         "keys a supersede moves, which is what one shared constant prevents "
         "(`#10139`)"

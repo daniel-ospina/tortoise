@@ -12,7 +12,7 @@ already eaten 7.2–9.3 s::
 i.e. it includes *"queueing for a worker slot"* (``tortoise/read_stages.py``).
 The read lane is 8 daemon workers (``CONTROL_PLANE_READ_WORKERS``); the read
 itself runs on it (``hosted_api._read_offload`` → ``pool="read"``), and
-``sdk.tortoise_fts_query`` calls ``EmbeddingModel.get()`` **synchronously** on
+``sdk._tortoise_fts_query`` calls ``EmbeddingModel.get()`` **synchronously** on
 that worker. ``get()`` blocks for the WHOLE one-time load — the caller's own
 ``load_timeout`` cannot bound it, because the time is spent waiting for
 ``cls._lock``, which the loading thread holds across ``__init__`` — and the

@@ -111,7 +111,7 @@ def test_create_point_with_unindexed_name_warns_and_still_lands(sdk, caplog):
     advisories = _advisories(caplog)
     assert len(advisories) == 1, advisories
     message = advisories[0]
-    assert "create_point" in message, message
+    assert "_create_point" in message, message
     # It names the two places the identifier CAN go, and says why.
     assert "content" in message and "search_keys" in message, message
     assert "name" in message, message
@@ -131,7 +131,7 @@ def test_update_point_with_unindexed_name_warns(sdk, caplog):
 
     advisories = _advisories(caplog)
     assert len(advisories) == 1, advisories
-    assert "update_point" in advisories[0], advisories[0]
+    assert "_update_point" in advisories[0], advisories[0]
     assert sdk._get_point(pid).get("name") == _TITLE
 
 

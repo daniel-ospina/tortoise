@@ -658,7 +658,7 @@ def test_prune_clears_an_already_orphaned_refs_stash(repo):
     repo.dirty(repo.a, "f.txt", "base\na\n")
     assert repo.lane(repo.a, "push", "-m", "A").returncode == 0
     # reproduce the wedge the pre-fix prune left behind
-    repo.git("reflog", "delete", "--updateref", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "--updateref", "refs/stash@{0}")
     assert repo.stash_shas() == [] and repo.stash_sha() is not None
     assert repo.lane(repo.a, "check").returncode == 1
 
@@ -1188,7 +1188,7 @@ def test_prune_cannot_lose_a_kept_entry_to_a_concurrent_push(repo, monkeypatch):
     def wrapping_git(*args, check=True, stdin=None):
         # A peer push in the verify -> delete window: the exact race the guard
         # and reconciliation exist for.
-        if args[:2] == ("reflog", "delete") and not injected["done"]:
+        if args[:2] == ("reflog", "_delete") and not injected["done"]:
             injected["done"] = True
             repo.dirty(repo.b, "f.txt", "base\nlate-push\n")
             repo.git("stash", "push", "-q", "-m", "late peer push", cwd=repo.b)
@@ -1243,7 +1243,7 @@ def test_prune_restores_a_kept_entry_even_when_the_loop_stops(repo, monkeypatch)
     injected = {"done": False}
 
     def wrapping_git(*args, check=True, stdin=None):
-        if args[:2] == ("reflog", "delete") and not injected["done"]:
+        if args[:2] == ("reflog", "_delete") and not injected["done"]:
             injected["done"] = True
             repo.dirty(repo.b, "f.txt", "base\nlate-stop\n")
             repo.git("stash", "push", "-q", "-m", "late stop", cwd=repo.b)
@@ -1269,7 +1269,7 @@ def test_prune_retains_the_guard_when_it_cannot_restore(repo, monkeypatch):
     injected = {"pushed": False, "failed": False}
 
     def wrapping_git(*args, check=True, stdin=None):
-        if args[:2] == ("reflog", "delete") and not injected["pushed"]:
+        if args[:2] == ("reflog", "_delete") and not injected["pushed"]:
             injected["pushed"] = True
             repo.dirty(repo.b, "f.txt", "base\nlate-guard\n")
             repo.git("stash", "push", "-q", "-m", "late guard", cwd=repo.b)
@@ -1311,7 +1311,7 @@ def test_prune_warns_when_a_concurrent_push_shifts_the_position(repo, monkeypatc
     injected = {"done": False}
 
     def wrapping_git(*args, check=True, stdin=None):
-        if args[:2] == ("reflog", "delete") and not injected["done"]:
+        if args[:2] == ("reflog", "_delete") and not injected["done"]:
             injected["done"] = True
             repo.dirty(repo.b, "f.txt", "base\nlate-warn\n")
             repo.git("stash", "push", "-q", "-m", "late warn", cwd=repo.b)
@@ -1351,14 +1351,14 @@ def test_prune_reports_a_register_changed_by_a_concurrent_remover(repo, monkeypa
     injected = {"done": False}
 
     def wrapping_git(*args, check=True, stdin=None):
-        if args[:2] == ("reflog", "delete") and not injected["done"]:
+        if args[:2] == ("reflog", "_delete") and not injected["done"]:
             injected["done"] = True
             repo.dirty(repo.b, "f.txt", "base\np1\n")
             repo.git("stash", "push", "-q", "-m", "p1", cwd=repo.b)
             repo.dirty(repo.b, "f.txt", "base\np2\n")
             repo.git("stash", "push", "-q", "-m", "p2", cwd=repo.b)
             # a concurrent peer prune reclaims the shared doomed entry
-            repo.git("reflog", "delete", "--updateref", "refs/stash@{3}")
+            repo.git("reflog", "_delete", "--updateref", "refs/stash@{3}")
         return real_git(*args, check=check, stdin=stdin)
 
     monkeypatch.setattr(mod, "_git", wrapping_git)
@@ -1395,13 +1395,13 @@ def test_prune_cannot_distinguish_a_cancelled_shift(repo, monkeypatch, capsys):
     injected = {"done": False, "p": None}
 
     def wrapping_git(*args, check=True, stdin=None):
-        if args[:2] == ("reflog", "delete") and not injected["done"]:
+        if args[:2] == ("reflog", "_delete") and not injected["done"]:
             injected["done"] = True
             repo.dirty(repo.b, "f.txt", "base\np\n")
             repo.git("stash", "push", "-q", "-m", "p", cwd=repo.b)
             injected["p"] = repo.stash_sha()
             # a concurrent remover reclaims the shared doomed entry
-            repo.git("reflog", "delete", "--updateref", "refs/stash@{1}")
+            repo.git("reflog", "_delete", "--updateref", "refs/stash@{1}")
         return real_git(*args, check=check, stdin=stdin)
 
     monkeypatch.setattr(mod, "_git", wrapping_git)
@@ -1440,14 +1440,14 @@ def test_prune_orphan_survives_a_reconciliation_store(repo, monkeypatch, capsys)
     injected = {"done": False, "p": None}
 
     def wrapping_git(*args, check=True, stdin=None):
-        if args[:2] == ("reflog", "delete") and not injected["done"]:
+        if args[:2] == ("reflog", "_delete") and not injected["done"]:
             injected["done"] = True
             repo.dirty(repo.b, "f.txt", "base\np\n")
             repo.git("stash", "push", "-q", "-m", "p", cwd=repo.b)
             injected["p"] = repo.stash_sha()
             # concurrent removals empty the register; refs/stash is left on `p`
-            repo.git("reflog", "delete", "--updateref", "refs/stash@{1}")  # doomed
-            repo.git("reflog", "delete", "--updateref", "refs/stash@{1}")  # kept
+            repo.git("reflog", "_delete", "--updateref", "refs/stash@{1}")  # doomed
+            repo.git("reflog", "_delete", "--updateref", "refs/stash@{1}")  # kept
         return real_git(*args, check=check, stdin=stdin)
 
     monkeypatch.setattr(mod, "_git", wrapping_git)
@@ -1477,7 +1477,7 @@ def test_recover_repairs_a_retained_orphan_and_frees_its_guard(repo, monkeypatch
     orphan = repo.stash_sha()
     # empty the reflog WITHOUT dropping refs/stash: the hazard state retention
     # exists to protect (a bare `git stash pop` can still take `orphan`)
-    repo.git("reflog", "delete", "--updateref", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "--updateref", "refs/stash@{0}")
     assert repo.stash_shas() == []
     monkeypatch.chdir(repo.a)
     capsys.readouterr()
@@ -1547,7 +1547,7 @@ def test_recover_refuses_rather_than_drop_a_diverged_register(repo, monkeypatch,
     assert peer is not None and own is not None and repo.stash_shas() == [own, peer]
     # bare git deletes the TOP reflog entry without moving the ref: refs/stash
     # still resolves to `own`, which is now absent from the register
-    repo.git("reflog", "delete", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "refs/stash@{0}")
     assert repo.stash_shas() == [peer]
     assert repo.stash_sha() == own
     monkeypatch.chdir(repo.a)
@@ -1569,7 +1569,7 @@ def test_recover_releases_a_guard_created_by_another_lane(repo, monkeypatch, cap
     repo.dirty(repo.b, "f.txt", "base\norphan\n")
     repo.git("stash", "push", "-q", "-m", "orphan", cwd=repo.b)
     orphan = repo.stash_sha()
-    repo.git("reflog", "delete", "--updateref", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "--updateref", "refs/stash@{0}")
     assert repo.stash_shas() == []
     assert orphan is not None
     # lane B's prune retains the orphan and guards it
@@ -1600,7 +1600,7 @@ def test_recover_accepts_an_abbreviated_sha(repo, monkeypatch, capsys):
     repo.git("stash", "push", "-q", "-m", "rescued", cwd=repo.b)
     sha = repo.stash_sha()
     assert sha is not None
-    repo.git("reflog", "delete", "--updateref", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "--updateref", "refs/stash@{0}")
     assert repo.stash_shas() == []
     monkeypatch.chdir(repo.a)
     capsys.readouterr()
@@ -1619,7 +1619,7 @@ def test_list_reports_a_retained_guard_as_the_durable_handle(repo):
     """
     repo.dirty(repo.b, "f.txt", "base\norphan\n")
     repo.git("stash", "push", "-q", "-m", "orphan", cwd=repo.b)
-    repo.git("reflog", "delete", "--updateref", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "--updateref", "refs/stash@{0}")
     assert repo.lane(repo.b, "prune", "--apply").returncode == 0
     listed = repo.lane(repo.b, "list")
     assert listed.returncode == 0
@@ -1665,7 +1665,7 @@ def test_recover_restores_the_ref_when_the_second_store_fails(repo, monkeypatch,
     repo.dirty(repo.b, "f.txt", "base\norphan\n")
     repo.git("stash", "push", "-q", "-m", "orphan", cwd=repo.b)
     orphan = repo.stash_sha()
-    repo.git("reflog", "delete", "--updateref", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "--updateref", "refs/stash@{0}")
     assert repo.stash_shas() == []
     assert orphan is not None
     monkeypatch.chdir(repo.a)
@@ -1711,7 +1711,7 @@ def test_recover_protects_a_diverged_registers_head(repo, monkeypatch, capsys):
     y = repo.stash_sha()
     # bare git drops the TOP reflog entry without moving the ref: refs/stash
     # stays on unpinned `y` while the register still enumerates `x`
-    repo.git("reflog", "delete", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "refs/stash@{0}")
     assert repo.stash_shas() == [x]
     assert repo.stash_sha() == y
     monkeypatch.chdir(repo.a)
@@ -1764,7 +1764,7 @@ def test_recover_refuses_when_the_orphan_cannot_be_pinned(repo, monkeypatch, cap
     repo.dirty(repo.b, "f.txt", "base\norphan\n")
     repo.git("stash", "push", "-q", "-m", "orphan", cwd=repo.b)
     orphan = repo.stash_sha()
-    repo.git("reflog", "delete", "--updateref", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "--updateref", "refs/stash@{0}")
     assert repo.stash_shas() == []
     monkeypatch.chdir(repo.a)
     monkeypatch.setattr(mod, "_guard_pin", lambda *a, **k: None)
@@ -1821,7 +1821,7 @@ def test_prune_refuses_a_diverged_registers_head(repo, monkeypatch, capsys):
     assert repo.stash_shas() == [orphan, kept, doomed]
     # bare git drops the TOP reflog entry without moving the ref: refs/stash
     # stays on `orphan`, which is no longer enumerated
-    repo.git("reflog", "delete", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "refs/stash@{0}")
     assert repo.stash_shas() == [kept, doomed]
     assert repo.stash_sha() == orphan
     monkeypatch.chdir(repo.a)
@@ -1850,7 +1850,7 @@ def test_prune_refuses_a_diverged_register_with_nothing_to_reclaim(repo, monkeyp
     repo.dirty(repo.b, "f.txt", "base\nx\n")
     repo.git("stash", "push", "-q", "-m", "x", cwd=repo.b)
     x = repo.stash_sha()
-    repo.git("reflog", "delete", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "refs/stash@{0}")
     assert repo.stash_shas() == [y]
     assert repo.stash_sha() == x
     monkeypatch.chdir(repo.a)
@@ -1917,7 +1917,7 @@ def test_prune_dry_run_refuses_a_diverged_register(repo, monkeypatch, capsys):
     repo.dirty(repo.b, "f.txt", "base\nx\n")
     repo.git("stash", "push", "-q", "-m", "x", cwd=repo.b)
     x = repo.stash_sha()
-    repo.git("reflog", "delete", "refs/stash@{0}")
+    repo.git("reflog", "_delete", "refs/stash@{0}")
     assert repo.stash_shas() == [y]
     assert repo.stash_sha() == x
     monkeypatch.chdir(repo.a)
@@ -2594,7 +2594,7 @@ def test_check_does_not_name_prune_as_reclaimable_on_a_diverged_register(repo):
     assert repo.lane(repo.a, "pop").returncode == 0  # unpinned + applied record
     repo.dirty(repo.b, "f.txt", "base\nb\n")
     repo.git("stash", "push", "-q", "-m", "B", cwd=repo.b)
-    repo.git("reflog", "delete", "refs/stash@{0}")  # no --updateref: diverges
+    repo.git("reflog", "_delete", "refs/stash@{0}")  # no --updateref: diverges
 
     check = repo.lane(repo.a, "check")
     assert check.returncode == 1, _fail(check)
@@ -2727,7 +2727,7 @@ def test_prune_retains_each_guard_by_its_own_ref_when_the_register_is_unreadable
 
     def wrapping_git(*args, check=True, stdin=None):
         cp = real_git(*args, check=check, stdin=stdin)
-        if args[:2] == ("reflog", "delete") and cp.returncode == 0:
+        if args[:2] == ("reflog", "_delete") and cp.returncode == 0:
             state["fail"] = True
         return cp
 

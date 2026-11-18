@@ -16,7 +16,7 @@ fix: the guarded handle without the declaration is the violation the guard
 exists to catch, and the declaration without the guarded handle is a ContextVar
 nothing reads (the escape is below the door that reads it).
 
-⛔ WHY THE RUNTIME TEST DRIVES `sdk.org_create` AND NOT A SYNTHETIC HANDLE. The
+⛔ WHY THE RUNTIME TEST DRIVES `sdk._org_create` AND NOT A SYNTHETIC HANDLE. The
 earlier draft of the #9121 residual pins asserted with a probe that built its
 own handle, opened its own scope and issued the statement itself — a tautology
 that passes on the pre-fix tree. This one calls the PRODUCT entry point and
@@ -70,7 +70,7 @@ def _spy_on_handle_writes(monkeypatch):
         seen.append((cypher, projection._CACHE_WRITE_AUTHORIZED.get(), self._proj))
         return real(self, cypher, params, timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
     return seen
 
 
@@ -83,7 +83,7 @@ def _is_eager_init(cypher: str) -> bool:
 def test_the_eager_init_create_reaches_the_projection_write_handle(sdk, monkeypatch):
     """RED on the pre-fix tree: issued on `proj.db.select_graph(...)`, escape (3).
 
-    MUTATION: revert `sdk.org_create` to
+    MUTATION: revert `sdk._org_create` to
     `proj.db.select_graph(graph_name).query(_init_q, params=_init_p)` and this
     fails with "never reached the handle" — which is exactly the pre-fix defect,
     not a style preference: a write the door cannot see is a write §17.1 cannot

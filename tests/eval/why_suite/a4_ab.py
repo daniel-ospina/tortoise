@@ -137,7 +137,7 @@ def measure(
         else:
             calibrated = abs(variance - CONTESTED_VARIANCE_THRESHOLD) < 1e-9
         variance_calibrated = variance_calibrated and calibrated
-        boosts = resolve_contested_relevance(proj, [contested], pair["query"])
+        boosts = resolve_contested_relevance(proj, [contested], pair["_query"])
         relevant = contested in boosts  # variance-agnostic: the NAND side
         # is query-relevant on every pair (query == the counter-claim).
         conflict_relevant = conflict_relevant and relevant
@@ -147,13 +147,13 @@ def measure(
         saved_flag = os.environ.get("TORTOISE_W4_ENRICHMENT")
         os.environ["TORTOISE_W4_ENRICHMENT"] = "1"
         try:
-            hits_on = rank_fn(sdk, pair["query"])
+            hits_on = rank_fn(sdk, pair["_query"])
         finally:
             if saved_flag is None:
                 os.environ.pop("TORTOISE_W4_ENRICHMENT", None)
             else:
                 os.environ["TORTOISE_W4_ENRICHMENT"] = saved_flag
-        hits_off = rank_fn(sdk, pair["query"])
+        hits_off = rank_fn(sdk, pair["_query"])
         pos_on = _positions(hits_on)
         pos_off = _positions(hits_off)
         clean = pair["clean_twin"]

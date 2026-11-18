@@ -3142,7 +3142,7 @@ def test_7951_registration_probe_failure_fails_open(tmp_path, monkeypatch):
                 raise RuntimeError("transient probe failure (test)")
             return real_query(self, q, params=params, **kw)
 
-        monkeypatch.setattr(_GuardedGraph, "query", flaky_query)
+        monkeypatch.setattr(_GuardedGraph, "_query", flaky_query)
         stats = _run(_indexer(MockGitHubTransport(issues=[gh_issue(1)])), sdk)
 
         assert not stats["errors"], (

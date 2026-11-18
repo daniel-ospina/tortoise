@@ -295,7 +295,7 @@ class TestFallbackTfidf:
 
     def test_empty_points_returns_empty(self):
         """Empty points list → [] (search_points also returns [])."""
-        result = fallback_tfidf("query", [])
+        result = fallback_tfidf("_query", [])
         assert result == []
 
     def test_points_missing_id_key(self):
@@ -308,7 +308,7 @@ class TestFallbackTfidf:
         points = [
             {"content": "point with no id", "pointKind": "statement", "context": "ctx"},
         ]
-        result = fallback_tfidf("query", points)
+        result = fallback_tfidf("_query", points)
         assert result == []
 
     def test_normal_search_returns_search_result_dicts(self):
@@ -342,7 +342,7 @@ class TestFallbackTfidf:
             "tortoise.embeddings.search_points",
             side_effect=RuntimeError("TF-IDF engine failure"),
         ):
-            result = fallback_tfidf("query", points)
+            result = fallback_tfidf("_query", points)
         assert result == []
 
     def test_point_kind_missing_in_meta_falls_back_to_empty_string(self):
@@ -352,7 +352,7 @@ class TestFallbackTfidf:
         ]
         points = [{"id": "p1", "content": "test"}]  # no pointKind
         with mock.patch("tortoise.embeddings.search_points", return_value=mock_results):
-            result = fallback_tfidf("query", points)
+            result = fallback_tfidf("_query", points)
         assert len(result) == 1
         assert result[0]["point_kind"] == ""
 
@@ -361,8 +361,8 @@ class TestFallbackTfidf:
         points = [{"id": f"p{i}", "content": f"c{i}", "pointKind": "stmt"} for i in range(10)]
         mock_results = [{"id": "p0", "content": "c0", "similarity": 0.5, "snippet": "c0"}]
         with mock.patch("tortoise.embeddings.search_points", return_value=mock_results) as sp:
-            fallback_tfidf("query", points, limit=3)
-            sp.assert_called_once_with("query", points, threshold=0.0, limit=3,
+            fallback_tfidf("_query", points, limit=3)
+            sp.assert_called_once_with("_query", points, threshold=0.0, limit=3,
                                        force_sparse=False)
 
     def test_heavy_imports_are_serialized(self, monkeypatch):

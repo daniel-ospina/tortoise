@@ -10,10 +10,10 @@ One contract: a point's confidence = the belief mean α/(α+β) of the
 PERSISTED posterior when EP has run (posterior_alpha/beta), else the
 persisted prior mean (ep_alpha/beta), else the neutral Beta(1,1) mean 0.5
 (unmeasured). Surfaces under test, all for the SAME claim:
-  * sdk.get_confidence()  → TortoiseEP.compute_confidence (posterior read)
+  * sdk._get_confidence()  → TortoiseEP.compute_confidence (posterior read)
   * annotate_ep_batch()   → the search annotation primitive (confidence_mean)
-  * sdk.tortoise_fts_query() ep.confidence_mean (search surface)
-  * sdk.recall_state() ep.confidence_mean + recall_ranking.confidence
+  * sdk._tortoise_fts_query() ep.confidence_mean (search surface)
+  * sdk._recall_state() ep.confidence_mean + recall_ranking.confidence
   * the persisted n.confidence graph property
 
 MUST run against a live FalkorDB (Docker). Test-prefixed isolated graph.
@@ -123,7 +123,7 @@ def _claim_surfaces(sdk, pid, query_text):
     ).result_set
     stored = rows[0] if rows else None
     return {
-        "get_confidence": gc["mean"],
+        "_get_confidence": gc["mean"],
         "annotate": ann.confidence_mean,
         "search_ep": (search_hit or {}).get("ep", {}).get("confidence_mean"),
         "recall_ep": (recall_hit or {}).get("ep", {}).get("confidence_mean"),
@@ -158,7 +158,7 @@ class TestCrossSurfaceAgreement:
 
             pid = opt["id"]
             surf = _claim_surfaces(sdk, pid, "quokka patrol schedule approved")
-            mean = surf["get_confidence"]
+            mean = surf["_get_confidence"]
             # Converged high — NOT the 0.5 prior (issue indicator 1).
             assert mean > 0.55, f"claim posterior unexpectedly low: {mean}"
             assert mean != pytest.approx(0.5, abs=1e-6)
@@ -195,7 +195,7 @@ class TestCrossSurfaceAgreement:
 
             pid = opt["id"]
             surf = _claim_surfaces(sdk, pid, "quokka patrol budget")
-            mean = surf["get_confidence"]
+            mean = surf["_get_confidence"]
             # Converged LOW — a posterior well below the 0.5 prior.
             assert mean < 0.45, f"claim posterior unexpectedly high: {mean}"
             assert mean != pytest.approx(0.5, abs=1e-6)
@@ -232,7 +232,7 @@ class TestCrossSurfaceAgreement:
             u = _make_point(sdk, "Quokka patrol unmeasured claim zzqx", kind="decision")
             pid = u["id"]
             surf = _claim_surfaces(sdk, pid, "quokka patrol unmeasured")
-            assert surf["get_confidence"] == pytest.approx(0.5, abs=1e-6)
+            assert surf["_get_confidence"] == pytest.approx(0.5, abs=1e-6)
             assert surf["posterior_persisted"] is False
             # Not a skip: this fixture is CONSTRUCTED to carry no belief, so a
             # stored belief appearing here means the fixture (or

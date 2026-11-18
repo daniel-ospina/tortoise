@@ -93,7 +93,7 @@ _SOURCE_SUFFIXES = (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx")
 # Keywords after which a `/` MUST open a regex literal rather than divide (#4446 review).
 _REGEX_PRECEDING_KEYWORDS = frozenset(
     {
-        "await", "case", "delete", "do", "else", "in", "instanceof", "new", "of",
+        "await", "case", "_delete", "do", "else", "in", "instanceof", "new", "of",
         "return", "throw", "typeof", "void", "yield",
     }
 )

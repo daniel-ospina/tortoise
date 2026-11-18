@@ -262,7 +262,7 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch, *, 
             issued["unmetered"] += 1
         return _real_query(self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(_GuardedGraph, "query", _counting_query)
+    monkeypatch.setattr(_GuardedGraph, "_query", _counting_query)
 
     sdk = TortoiseSDK(db_path=str(tmp_path / "gops.db"))
     try:

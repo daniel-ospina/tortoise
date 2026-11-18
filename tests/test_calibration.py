@@ -104,7 +104,7 @@ def test_require_calibration_default(sdk):
     """
     # Uncalibrated LIVE graph → fail-closed under the flipped default.
     sdk._create_point("statement", "Uncalibrated claim", status="live")
-    with pytest.raises(CalibrationError, match="calibrate_summary"):
+    with pytest.raises(CalibrationError, match="_calibrate_summary"):
         sdk._compute_confidence()  # default True
 
     # Companion: a calibrated graph succeeds under the default. The gate is
@@ -353,9 +353,9 @@ def test_ep_require_calibration_env_default(sdk, monkeypatch):
     p = sdk._create_point("statement", "Uncalibrated claim", status="live")
 
     # #1157 surfaces refuse by default (no explicit arg)
-    with pytest.raises(CalibrationError, match="dream"):
+    with pytest.raises(CalibrationError, match="_dream"):
         sdk._dream()
-    with pytest.raises(CalibrationError, match="get_confidence"):
+    with pytest.raises(CalibrationError, match="_get_confidence"):
         sdk._get_confidence(p["id"])
 
     # Explicit False is still the documented escape hatch on dream
@@ -593,7 +593,7 @@ def test_dream_local_gate_covers_the_passs_reexpansion(sdk):
     # own closure. If this ever stops holding the test is vacuous, so pin it.
     assert target["id"] not in sdk._ep_run_scope([chain[0]["id"]], 3)
 
-    with pytest.raises(CalibrationError, match="dream") as exc:
+    with pytest.raises(CalibrationError, match="_dream") as exc:
         sdk._dream(dirty_only=True, mode="local", max_hops=3,
                   require_calibration=True)
     assert target["id"] in str(exc.value), (
@@ -624,7 +624,7 @@ def test_dream_whole_graph_modes_keep_whole_graph_scope(sdk):
     _make_foreign(sdk, foreign["id"])
 
     for mode in ("full", "stale-first"):
-        with pytest.raises(CalibrationError, match="dream"):
+        with pytest.raises(CalibrationError, match="_dream"):
             sdk._dream(mode=mode, require_calibration=True)
 
 
@@ -674,7 +674,7 @@ def test_get_confidence_dirty_claim_still_gates_its_dream(sdk):
     sdk._create_operator("IMPL", mine["id"], [foreign["id"]])
     assert mine["id"] in sdk._dirty_roots
 
-    with pytest.raises(CalibrationError, match="dream") as exc:
+    with pytest.raises(CalibrationError, match="_dream") as exc:
         sdk._get_confidence(mine["id"], require_calibration=True)
     assert foreign["id"] in str(exc.value)
 
@@ -772,14 +772,14 @@ def test_guidance_the_error_offers_lists_the_point_it_named(sdk):
     """
     legacy = _make_legacy_point(sdk, "Legacy needing guidance", status="live")
 
-    with pytest.raises(CalibrationError, match="calibrate_summary") as exc:
+    with pytest.raises(CalibrationError, match="_calibrate_summary") as exc:
         sdk._compute_confidence(require_calibration=True)
     assert legacy["id"] in str(exc.value)
 
     rows = {row["id"]: row for row in sdk._calibrate_summary()}
     assert legacy["id"] in rows, sorted(rows)
     assert rows[legacy["id"]]["calibrated"] is False
-    assert "set_point_baseline" in rows[legacy["id"]]["suggestion"]
+    assert "_set_point_baseline" in rows[legacy["id"]]["suggestion"]
 
 
 def test_guidance_lists_every_consumed_shape_the_gate_demands(sdk):
@@ -989,7 +989,7 @@ def test_empty_point_kind_is_gated_like_an_absent_one(sdk):
     # …and so must the AUDIT surface it used to disagree with
     row = {r["id"]: r for r in sdk._calibrate_summary()}[empty["id"]]
     assert row["calibrated"] is False
-    assert "set_point_baseline" in row["suggestion"]
+    assert "_set_point_baseline" in row["suggestion"]
 
     # The consumed node is refused BEFORE the run stamps it — the #7478 class.
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
@@ -1068,7 +1068,7 @@ def test_truthy_non_boolean_baseline_flag_is_still_demanded(sdk):
 
     row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
-    assert "set_point_baseline" in row["suggestion"]
+    assert "_set_point_baseline" in row["suggestion"]
 
 
 def test_flag_without_an_alpha_is_still_demanded(sdk):
@@ -1143,7 +1143,7 @@ def test_mis_cased_evidence_kind_is_demanded(sdk):
     assert sdk._uncalibrated_ep_participants(None) == want
     row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
-    assert "set_point_baseline" in row["suggestion"]
+    assert "_set_point_baseline" in row["suggestion"]
 
     a = sdk._create_point("ASSESSMENT", "Mis-cased assessment", status="live")
     assert a["id"] not in sdk._uncalibrated_ep_participants(None)
@@ -1383,7 +1383,7 @@ def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):
                            extractedFrom=src)
     row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
-    assert "compute_confidence" in row["suggestion"]
+    assert "_compute_confidence" in row["suggestion"]
 
     # The advice, taken verbatim: the gate must now let the run through and the
     # inheritance must land a baseline on the legacy point.
@@ -1417,8 +1417,8 @@ def test_guidance_does_not_offer_an_advice_inheritance_will_refuse(sdk):
     assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
     row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
-    assert "set_point_baseline" in row["suggestion"]
-    assert "compute_confidence" not in row["suggestion"]
+    assert "_set_point_baseline" in row["suggestion"]
+    assert "_compute_confidence" not in row["suggestion"]
 
     # Take the advice: the gate clears, and the frozen row is NOT recomputed
     # (`baseline_set`/`ep_alpha` were already set by the writer).
@@ -1447,7 +1447,7 @@ def test_guidance_reports_the_blocking_row_of_a_duplicate_id(sdk):
     rows = [r for r in sdk._calibrate_summary() if r["id"] == "fanout-9063"]
     assert len(rows) == 1
     assert rows[0]["calibrated"] is False
-    assert "set_point_baseline" in rows[0]["suggestion"]
+    assert "_set_point_baseline" in rows[0]["suggestion"]
 
 
 def test_guidance_prefers_the_advice_that_can_actually_clear_a_frozen_id(sdk):
@@ -1477,7 +1477,7 @@ def test_guidance_prefers_the_advice_that_can_actually_clear_a_frozen_id(sdk):
 
     assert sdk._uncalibrated_ep_participants(None) == ["frozen-fan-9063"]
     row = {r["id"]: r for r in sdk._calibrate_summary()}["frozen-fan-9063"]
-    assert "set_point_baseline" in row["suggestion"]
+    assert "_set_point_baseline" in row["suggestion"]
 
     # Take the advice — it resolves for the whole fan-out.
     sdk._set_point_baseline("frozen-fan-9063", 3.0, 1.0)

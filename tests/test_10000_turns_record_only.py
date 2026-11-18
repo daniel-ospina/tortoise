@@ -349,7 +349,7 @@ def test_a_failed_prior_read_costs_one_cycle_not_the_residue(
             raise RuntimeError("transient graph error (test)")
         return real_query(self, cypher, *a, **kw)
 
-    monkeypatch.setattr(_GuardedGraph, "query", flaky)
+    monkeypatch.setattr(_GuardedGraph, "_query", flaky)
     _capture(sdk, "failed-read", turns[0:1], session_existed=True)
     assert fired, (
         "the injected failure never fired — the prior read's cypher moved and "
@@ -360,7 +360,7 @@ def test_a_failed_prior_read_costs_one_cycle_not_the_residue(
         "failure must sweep NOTHING")
 
     # The fault clears (a transient error, which is the documented posture).
-    monkeypatch.setattr(_GuardedGraph, "query", real_query)
+    monkeypatch.setattr(_GuardedGraph, "_query", real_query)
     _capture(sdk, "failed-read", turns[0:1], session_existed=True)
     assert sorted(sdk_mod._capture_turn_ids(proj, "failed-read")) == [
         "failed-read_t0"], (
@@ -416,7 +416,7 @@ def test_the_prior_mark_read_converts_the_index_and_the_count_separately(
              session_existed=True)
     deleted = sorted(
         str(ev.get("id")) for ev in sdk._get_event_log().read_all()
-        if ev.get("type") == "EntityMutated" and ev.get("op") == "delete"
+        if ev.get("type") == "EntityMutated" and ev.get("op") == "_delete"
         and str(ev.get("id", "")).startswith("legacy-mark_t"))
     assert deleted == [], (
         "the sweep named a surplus for a legacy session that holds no turn row "
@@ -1986,7 +1986,7 @@ def test_the_record_high_water_is_the_sweep_bound_when_the_graph_is_gone(
     _capture(sdk, "lost-session", turns[0:1], session_existed=False)
     deleted = sorted(r["id"] for r in seam.records
                      if r.get("type") == "EntityMutated"
-                     and r.get("op") == "delete")
+                     and r.get("op") == "_delete")
     assert deleted == ["lost-session_t1", "lost-session_t2",
                        "lost-session_t3"], (
         "a shorter re-capture on a session the GRAPH has lost swept nothing "
@@ -2054,7 +2054,7 @@ def test_a_write_breaker_does_not_hide_the_records_surplus_from_the_sweep(
 
     deleted = sorted(r["id"] for r in seam.records
                      if r.get("type") == "EntityMutated"
-                     and r.get("op") == "delete")
+                     and r.get("op") == "_delete")
     assert deleted == ["breaker-session_t1", "breaker-session_t2",
                        "breaker-session_t3"], (
         "a shorter re-capture during a record-write refusal swept nothing from "
@@ -3225,7 +3225,7 @@ def test_the_demo_seed_writes_no_turn_text_into_the_graph(monkeypatch):
 
     # ⛔ NON-VACUITY, and the reason this file's docstring calls a bare
     # "no turn node" assertion vacuous: the recorder only sees statements that
-    # reach `proj.g.query`. A refactor that wrote through `sdk.create_point` (or
+    # reach `proj.g.query`. A refactor that wrote through `sdk._create_point` (or
     # any helper holding its own projection) would record NOTHING and the
     # assertions above would pass on an empty list. So the seed's OWN known
     # writes must be visible — if they are not, the population is wrong, not

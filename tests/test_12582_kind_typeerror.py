@@ -86,7 +86,7 @@ class _StubSDK:
         self.kind_clause_applied = None
 
     def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
-        self.calls.append(("paginated_query", kind, skip, limit, kwargs))
+        self.calls.append(("_paginated_query", kind, skip, limit, kwargs))
         self.kind_clause_applied = bool(kind)
         return {"results": self.rows[skip:skip + limit], "total": len(self.rows),
                 "hasMore": skip + limit < len(self.rows)}

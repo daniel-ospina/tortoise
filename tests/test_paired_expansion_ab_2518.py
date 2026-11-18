@@ -318,7 +318,7 @@ def test_build_items_targets_a_different_session_without_the_name(tmp_path):
             "the target must NOT contain the name — that is what makes it the "
             "key-only join the expansion exists for")
         assert it["target_keys"]
-        assert it["query"]
+        assert it["_query"]
 
 
 def test_point_ids_are_deterministic_and_canonical():
@@ -403,7 +403,7 @@ def test_read_arm_records_the_ranked_list_for_every_arm():
             return [{"id": i} for i in ids]
 
     items = [{"item_id": "item-000000", "name": "the plan doc",
-              "query": "what did the plan doc say",
+              "_query": "what did the plan doc say",
               "target_point_id": "t1", "query_point_id": "q1",
               "object_id": "o1"}]
     off = P.read_arm(_FakeSDK(), items, arm="object", expansion=False,
@@ -2764,7 +2764,7 @@ def test_the_control_cites_a_call_site_symbol_that_resolves():
     assert "sdk.SDK.search_graph" not in note, (
         "that symbol does not exist — the conclusion must cite the call site it "
         "actually leans on")
-    assert hasattr(_sdk.TortoiseSDK, "tortoise_fts_query")
+    assert hasattr(_sdk.TortoiseSDK, "_tortoise_fts_query")
     assert not hasattr(_sdk, "SDK")
 
 
@@ -2946,7 +2946,7 @@ def test_a_population_file_drawn_for_another_sample_is_refused(tmp_path):
     reproduce command hits.
     """
     digest = "d" * 64
-    rows = [{"name": f"the name {i}", "query": "q", "target": "t"}
+    rows = [{"name": f"the name {i}", "_query": "q", "target": "t"}
             for i in range(5)]
     body = P.population_body(rows, snapshot_digest_=digest, population=1000,
                              sample=300, seed=20261117)

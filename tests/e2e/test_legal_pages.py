@@ -1997,7 +1997,7 @@ def test_security_soc2_roadmap_negation_safe(page: Page) -> None:
 
     # Roadmap milestones only — no target date, no auditor name (approved
     # 2026-08-15 decision).
-    for milestone in ("scoping", "readiness", "audit"):
+    for milestone in ("scoping", "readiness", "_audit__svc"):
         assert milestone in body, f"/security SOC 2 roadmap missing milestone: {milestone}"
 
     # Credential surfaces attributed per surface (runtime vs dashboard).

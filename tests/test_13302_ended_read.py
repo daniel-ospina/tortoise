@@ -632,7 +632,7 @@ def test_a_query_beside_ended_scope_is_refused_rather_than_dropped(sdk):
                               ended_scope=True)
     message = str(exc.value)
     assert "ended_scope" in message
-    assert "query" in message
+    assert "_query" in message
     # The repair is named (AX §5): an admissible refusal leaves a writable way out.
     assert "omit" in message
 
@@ -660,7 +660,7 @@ def test_a_family_without_a_lifecycle_is_refused_not_answered_empty(sdk):
 #: duplicated the `include_terminal` no-op case that still stands below. Every
 #: keyword either raises here or is that one documented no-op.
 _REFUSED_BESIDE_ENDED_SCOPE = (
-    ("query", {"query": "has anything been withdrawn"}),
+    ("_query", {"_query": "has anything been withdrawn"}),
     ("threshold", {"threshold": 0.5}),
     ("min_confidence", {"min_confidence": 0.5}),
     ("order_by", {"order_by": "confidence"}),
@@ -699,7 +699,7 @@ def test_every_retrieval_knob_beside_ended_scope_is_refused(sdk, knob, kwargs):
     caller learns the arm cannot record what they asked for.
     """
     call = dict(kwargs)
-    query = call.pop("query", None)
+    query = call.pop("_query", None)
     with pytest.raises(ValueError) as exc:
         sdk._tortoise_fts_query(query, entity_type="point", ended_scope=True, **call)
     message = str(exc.value)

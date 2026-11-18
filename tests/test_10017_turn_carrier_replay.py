@@ -674,7 +674,7 @@ def test_a_journaled_removal_survives_the_rebuild(tmp_path):
         # deleted identity AND the tier the row is left in.
         removal_records = [r for r in _records(log_path)
                            if r["type"] == "EntityMutated"
-                           and r.get("op") == "delete"
+                           and r.get("op") == "_delete"
                            and r.get("id") in EXPECTED_TURN_IDS]
         assert len(removal_records) == len(EXPECTED_TURN_IDS)
         for record in removal_records:
@@ -713,7 +713,7 @@ def test_the_removal_KEEPS_the_record_row_and_demotes_its_tier():
     later replay.
     """
     record = {"type": "EntityMutated", "id": f"{SESSION_ID}_t1",
-              "label": "Point", "op": "delete",
+              "label": "Point", "op": "_delete",
               "cache_tier": rp.RECORD_ONLY_TIER}
     statements = rp.mutations_for(record, org_id="o", graph_id="g")
 
@@ -766,7 +766,7 @@ def test_the_stale_sweep_journals_a_TIERLESS_delete_not_a_demote(
 
         removals = [r for r in _records(log_path)
                     if r.get("type") == "EntityMutated"
-                    and r.get("op") == "delete"
+                    and r.get("op") == "_delete"
                     and r.get("id") in EXPECTED_TURN_IDS]
         assert [r["id"] for r in removals] == EXPECTED_TURN_IDS[1:], (
             "the sweep journalled the wrong population (or nothing) — a "
@@ -875,7 +875,7 @@ def test_a_MIXED_generation_session_keeps_a_LEGACY_creation_with_NO_retraction(
         # though the feed still advertises it.
         removed = [r for r in _records(log_path)
                    if r.get("type") == "EntityMutated"
-                   and r.get("op") == "delete"
+                   and r.get("op") == "_delete"
                    and r.get("id") in EXPECTED_TURN_IDS]
         assert sorted(r["id"] for r in removed) == EXPECTED_TURN_IDS[1:], (
             f"the sweep journalled the wrong population: {removed}")
@@ -889,7 +889,7 @@ def test_a_tier_scoped_delete_of_a_non_point_is_REFUSED():
     another label would be SQL against a column that is not there."""
     with pytest.raises(rp.RefusedJournalOperation, match="cache_tier"):
         rp.mutations_for({"type": "EntityMutated", "id": "o1", "label": "Object",
-                          "op": "delete", "cache_tier": rp.RECORD_ONLY_TIER},
+                          "op": "_delete", "cache_tier": rp.RECORD_ONLY_TIER},
                          org_id="o", graph_id="g")
 
 

@@ -6,7 +6,7 @@ that has BOTH evidence and an operator.
 ``activate_beliefs`` promoted draft operators only when they were incident to a
 Point promoted in the SAME pass (``... c.id IN $ids``). An operator whose
 endpoints were already live was therefore promoted by NOTHING: no point is
-draft, so that query matched none, and ``sdk.promote_point`` cannot stand in —
+draft, so that query matched none, and ``sdk._promote_point`` cannot stand in —
 it refuses an operator node (``{blocked: True, reason: 'is_operator'}``) rather
 than sweeping its endpoints (``sdk.py::promote_point``).
 ``ep._live_only('o.status')`` then keeps the draft operator out of the factor

@@ -55,7 +55,7 @@ INVENTORY = REPO_ROOT / "config" / "rest-surface-inventory.yml"
 # Deliberately narrow: an unrecognised decorator form must NOT be silently
 # skipped, so the parser asserts every known module contributed routes (see
 # test_parser_is_live).
-_METHODS = ("get", "post", "put", "patch", "delete")
+_METHODS = ("get", "post", "put", "patch", "_delete")
 _ROUTER_PREFIX_RE = re.compile(r'APIRouter\(\s*prefix\s*=\s*"([^"]*)"')
 
 _VALID_CLASSES = {"tenant", "control-plane", "protocol"}

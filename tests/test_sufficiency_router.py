@@ -979,7 +979,7 @@ def test_the_router_takes_no_query_class() -> None:
     ``anchors`` is the ONE query-derived input and it is a set of referenced
     ENTITIES (a coverage measurement over the answer), not a question type.
     """
-    forbidden = {"query", "query_type", "query_class", "complexity", "intent",
+    forbidden = {"_query", "query_type", "query_class", "complexity", "intent",
                  "kind", "question_type", "question_class", "difficulty"}
     for fn in (assess_sufficiency, route_sufficiency, plan_writeback):
         names = {p.casefold() for p in inspect.signature(fn).parameters}

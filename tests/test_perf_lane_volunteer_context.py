@@ -386,7 +386,7 @@ def test_slo_breach_degrades_timeout_never_503(perf_server, monkeypatch):
         time.sleep(SLO_MS / 1000.0 + 0.1)  # breach the SLO on the worker thread
         return orig(self, window, *args, **kwargs)
 
-    monkeypatch.setattr(ha_mod.TortoiseSDK, "volunteer_context", _slow)
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "_volunteer_context", _slow)
 
     r = httpx.post(
         f"{perf_server}/v1/context", timeout=30.0,

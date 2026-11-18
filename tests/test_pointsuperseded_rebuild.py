@@ -1490,7 +1490,7 @@ def test_plan_point_restamp_folds_pins_the_shared_selection(caplog):
     decisions, fold_seq = plan_point_restamp_folds([
         {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
         {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
-        {"type": "EntityMutated", "id": "a", "op": "delete",
+        {"type": "EntityMutated", "id": "a", "op": "_delete",
          "label": "Point"},
         {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
     ])
@@ -1616,7 +1616,7 @@ def test_plan_keeps_the_stamp_a_fold_re_emit_would_otherwise_drop():
     decisions, _ = plan_point_restamp_folds([
         {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
         {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
-        {"type": "EntityMutated", "id": "a", "op": "delete",
+        {"type": "EntityMutated", "id": "a", "op": "_delete",
          "label": "Point"},
         {"type": "PointAdded", "point": dict(_folded)},
         {"type": "PointAdded", "point": {"id": "a", "content": "A2"}},
@@ -1624,7 +1624,7 @@ def test_plan_keeps_the_stamp_a_fold_re_emit_would_otherwise_drop():
     assert decisions[1] == (False, False)
     decisions, _ = plan_point_restamp_folds([
         {"type": "PointAdded", "point": {"id": "a", "content": "A"}},
-        {"type": "EntityMutated", "id": "a", "op": "delete",
+        {"type": "EntityMutated", "id": "a", "op": "_delete",
          "label": "Point"},
         {"type": "PointAdded", "point": dict(_folded)},
         {"type": "PointInvalidated", "id": "a", "corrected_by": "b"},
@@ -1672,7 +1672,7 @@ def test_rebuild_does_not_read_a_fold_as_the_delete_recreate(sup):
         _rec("PointAdded", point={"id": a, "label": "statement",
                                   "content": "A", "status": "live",
                                   "confidence": 0.1}),
-        _rec("EntityMutated", id=a, op="delete", label="Point"),
+        _rec("EntityMutated", id=a, op="_delete", label="Point"),
         # The FOLD: a re-emit of an existing id's snapshot.
         _rec("PointAdded", point={"id": a, "label": "statement",
                                   "content": "A", "status": "live",
@@ -1882,7 +1882,7 @@ def test_deferred_corrects_sweep_does_not_resurrect_a_deleted_successor(sup):
         "EntityMutated": {"event_id": sdk._ulid(), "ts": ts,
                           "initiated_by": "raw-producer",
                           "projection_version": 2, "type": "EntityMutated",
-                          "op": "delete", "id": "s2", "label": "Point"},
+                          "op": "_delete", "id": "s2", "label": "Point"},
         "PointsMerged": {"event_id": sdk._ulid(), "ts": ts,
                          "initiated_by": "raw-producer",
                          "projection_version": 2, "type": "PointsMerged",

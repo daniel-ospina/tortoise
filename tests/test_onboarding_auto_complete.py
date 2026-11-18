@@ -422,7 +422,7 @@ class _FakeSDK:
         self.calls = []
 
     def create_point(self, kind, content, **kwargs):
-        self.calls.append(("create_point", kind, content))
+        self.calls.append(("_create_point", kind, content))
         return {"id": "p-1", "pointKind": kind, "content": content}
 
     def write_question(self, options, evidence, choice):

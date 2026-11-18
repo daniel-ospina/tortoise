@@ -272,7 +272,7 @@ def _unmeasured_manifest(**over) -> dict:
     carrying a posterior.
 
     Two documented, reachable states produce exactly this: the window holds no
-    EP factors (``sdk.dream`` records ``no_op_reason = "no_ep_factors"`` and
+    EP factors (``sdk._dream`` records ``no_op_reason = "no_ep_factors"`` and
     returns — a v2 question whose extraction minted claims but no IMPL/NAND
     operators, common on single-session questions), and the #1163 stale-run
     stand-down ("zero writes is correct here"). The shape is pinned by
@@ -288,7 +288,7 @@ def _unmeasured_manifest(**over) -> dict:
 
 def test_a_pass_that_measured_nothing_is_never_activated():
     """RED (fresh-context review, P1 — fail-open): ``ep_ran`` is set by a bare
-    ``try`` around ``sdk.dream(...)``, which returns normally with ZERO
+    ``try`` around ``sdk._dream(...)``, which returns normally with ZERO
     belief-state writes in the two states documented above. Deciding the
     state from ``ep_ran``/``failed`` alone therefore let a run publish
     ``beliefs_activated: true`` for a graph in which not one claim carries a
@@ -791,7 +791,7 @@ def test_the_report_does_not_claim_the_eval_graphs_have_no_operators():
     """RED (fresh-context review, P1): §3 said "no operators/NANDs exist in the
     eval graphs" and attributed it to a ``dataset_audit.py`` divergence record.
     Both are false for the ``v2`` step-5 configuration §1 records —
-    ``ingest_v2`` writes IMPL/NAND operators (``sdk.create_operator``) and
+    ``ingest_v2`` writes IMPL/NAND operators (``sdk._create_operator``) and
     ``--activate-beliefs`` promotes and EPs exactly those, and
     ``dataset_audit.py`` never mentioned operators at all. A reader taking the
     bullet at face value concludes "the belief layer cannot matter here",

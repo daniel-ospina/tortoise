@@ -470,7 +470,7 @@ def test_fold_confidence_changed_keeps_a_label_index_anchor(sdk, monkeypatch):
             seen.append(text)
         return original(self, cypher, *args, **kwargs)
 
-    monkeypatch.setattr(_GuardedGraph, "query", spy)
+    monkeypatch.setattr(_GuardedGraph, "_query", spy)
     matched = proj._fold_confidence_changed(
         {"id": "evt-7853-idx", "confidence": 0.42})
 
@@ -576,7 +576,7 @@ def test_reference_fold_still_flags_a_buried_point_belief():
 
     events = [
         {"type": "PointAdded", "point": {"id": "pt-7936", "content": "c"}},
-        {"type": "EntityMutated", "op": "delete", "label": "Point",
+        {"type": "EntityMutated", "op": "_delete", "label": "Point",
          "id": "pt-7936"},
         {"type": "ConfidenceChanged", "id": "pt-7936", "confidence": 0.5},
     ]
@@ -618,7 +618,7 @@ def test_reference_fold_refuses_a_non_point_belief_buried_before_it(
     nid = creation["id"]
     events = [
         dict(creation),
-        {"type": "EntityMutated", "op": "delete", "label": label,
+        {"type": "EntityMutated", "op": "_delete", "label": label,
          "id": nid},
         {"type": "ConfidenceChanged", "id": nid, "confidence": 0.77},
     ]
@@ -647,7 +647,7 @@ def test_reference_fold_exempts_a_non_point_belief_a_later_delete_follows(
     events = [
         dict(creation),
         {"type": "ConfidenceChanged", "id": nid, "confidence": 0.77},
-        {"type": "EntityMutated", "op": "delete", "label": label,
+        {"type": "EntityMutated", "op": "_delete", "label": label,
          "id": nid},
     ]
     with collect_non_folded() as entries:
@@ -674,7 +674,7 @@ def test_reference_fold_refuses_a_belief_an_id_wide_delete_buried():
 
     events = [
         {"type": "SubjectAdded", "id": "n-7936", "name": "n"},
-        {"type": "EntityMutated", "op": "delete", "id": "n-7936"},
+        {"type": "EntityMutated", "op": "_delete", "id": "n-7936"},
         {"type": "ConfidenceChanged", "id": "n-7936", "confidence": 0.77},
     ]
     with collect_non_folded() as entries:
@@ -697,7 +697,7 @@ def test_consistency_reference_fold_refuses_a_buried_non_point_belief():
 
     events = [
         {"type": "ObjectRegistered", "id": "obj-7936", "name": "o"},
-        {"type": "EntityMutated", "op": "delete", "label": "Object",
+        {"type": "EntityMutated", "op": "_delete", "label": "Object",
          "id": "obj-7936"},
         {"type": "ConfidenceChanged", "id": "obj-7936", "confidence": 0.77},
     ]
@@ -734,7 +734,7 @@ def test_reference_and_graph_folds_agree_on_a_buried_non_point_belief(
     nid = creation["id"]
     events = [
         dict(creation),
-        {"type": "EntityMutated", "op": "delete", "label": label,
+        {"type": "EntityMutated", "op": "_delete", "label": label,
          "id": nid},
         {"type": "ConfidenceChanged", "id": nid, "confidence": 0.77},
     ]
@@ -936,7 +936,7 @@ def _m_rename(nid: str = _MATRIX_ID,
 
 
 def _m_delete(label=None, nid: str = _MATRIX_ID) -> dict:
-    ev = {"type": "EntityMutated", "op": "delete", "id": nid}
+    ev = {"type": "EntityMutated", "op": "_delete", "id": nid}
     if label is not None:
         ev["label"] = label
     return ev
@@ -1441,7 +1441,7 @@ def test_boundary_matrix_non_point_labels_all_agree():
     for label, creation in creations.items():
         # create → delete → RE-CREATE → belief: accepted (P1).
         accepted = [dict(creation),
-                    {"type": "EntityMutated", "op": "delete", "label": label,
+                    {"type": "EntityMutated", "op": "_delete", "label": label,
                      "id": "x"},
                     dict(creation),
                     {"type": "ConfidenceChanged", "id": "x",
@@ -1452,7 +1452,7 @@ def test_boundary_matrix_non_point_labels_all_agree():
             str(e) for e in entries])
         # delete → belief with NO re-creation: refused.
         buried = [dict(creation),
-                  {"type": "EntityMutated", "op": "delete", "label": label,
+                  {"type": "EntityMutated", "op": "_delete", "label": label,
                    "id": "x"},
                   {"type": "ConfidenceChanged", "id": "x",
                    "confidence": 0.77}]
@@ -1887,7 +1887,7 @@ def test_a_delete_anchored_by_a_later_creation_still_folds(tmp_path):
     from tortoise.consistency import _fold_journal, _fold_journal_entities
     from tortoise.projection.nonfolded import collect_non_folded, refused_events
 
-    journal = [{"type": "EntityMutated", "op": "delete", "id": "n-a"},
+    journal = [{"type": "EntityMutated", "op": "_delete", "id": "n-a"},
                {"type": "PointAdded", "point": {"id": "n-a"}}]
     with collect_non_folded() as entries:
         _fold_journal([dict(e) for e in journal])

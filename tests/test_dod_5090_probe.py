@@ -6918,7 +6918,7 @@ def test_the_row_carries_its_OWN_scope_so_MET_is_not_a_closure_proof(
     assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
     assert "measures the WRITER population, not every stored vector" in row.observed, (
         row.observed)
-    assert "create_point" in row.observed and "update_point" in row.observed, row.observed
+    assert "_create_point" in row.observed and "_update_point" in row.observed, row.observed
 
 
 def test_a_malformed_entry_is_NAMED_not_a_crash(tmp_path, monkeypatch):
@@ -7446,9 +7446,9 @@ def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
     # (`_search_fn=self.tortoise_fts_query`) — the ONE real shape in this tree —
     # while three artifacts certified that no such shape existed. Pinned on the
     # real tree, because that is where the claim was false.
-    assert "tortoise_fts_query" in declared, (
+    assert "_tortoise_fts_query" in declared, (
         f"a mention OF THE LEG is not declared: {declared}")
-    assert methods["recall_state"] == {"object", "point"}, methods
+    assert methods["_recall_state"] == {"object", "point"}, methods
     assert methods["_search_sessions"] == {"event"}, methods
     assert methods["_suggest_entry_points"] == {"point"}, (
         "a call that omits entity_type runs the SDK default, and it must be "
@@ -9080,7 +9080,7 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
         # pair that agreed, with the repair being to guess the wording from the
         # test body. The property is that the doc does not claim this method is
         # declared when the scan declares nothing.
-        assert "volunteer_context" not in text, (
+        assert "_volunteer_context" not in text, (
             "the scan declares nothing and the census doc still presents "
             "`volunteer_context` as a declared reach")
     else:
@@ -11308,7 +11308,7 @@ def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
     )
     monkeypatch.setattr(
         probe, "_sdk_methods_on_vector_leg",
-        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None, None))
+        lambda: ({"_recall_state": {"UNKNOWN(entity_type_var)"}}, None, None))
     sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
                              graph_names=["g"])["surface_consequence"]
     recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_recall")
@@ -11325,7 +11325,7 @@ def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
     """
     methods, error, _declared = probe._sdk_methods_on_vector_leg()
     assert error is None, error
-    assert methods["review_connections"] == {"point"}, methods
+    assert methods["_review_connections"] == {"point"}, methods
     named = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
     assert "tortoise_review_link_candidates" in named, sorted(named)
 

@@ -1110,7 +1110,7 @@ class TestSessionKeyMintSerialization1879:
                 direct_writes.append(method)
             return orig_query(table, method=method, **kw)
 
-        monkeypatch.setattr(fake, "query", _spy)
+        monkeypatch.setattr(fake, "_query", _spy)
         r = tc.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
 

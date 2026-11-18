@@ -130,7 +130,7 @@ class TestEnforceTeamLimit:
         limits = {"org_id": "team1", "max_points": 1000}
         def boom(*a, **kw):
             raise RuntimeError("db down")
-        monkeypatch.setattr(sdk._get_proj().g._g, "query", boom)
+        monkeypatch.setattr(sdk._get_proj().g._g, "_query", boom)
         with pytest.raises(QuotaCheckError) as exc_info:
             enforce_org_limit(limits, "points", sdk=sdk)
         sdk.close()

@@ -844,7 +844,7 @@ def test_the_alias_forms_discovery_still_cannot_see_are_named(tmp_path):
     # calls the seam, so it owes (and carries) no declaration. Re-derived from the instrument here
     # rather than trusted from the prose.
     shape_note = probe.UNDECIDABLE_WRITE_SHAPES["map-merge (`SET n += $p`)"]
-    for instance in ("_update_entity", "update_point"):
+    for instance in ("_update_entity", "_update_point"):
         assert instance in shape_note, (
             f"the map-merge blind-spot note names no {instance} — a live instance a reader of the "
             f"row cannot find is the #11398 defect: {shape_note!r}")
@@ -1561,7 +1561,7 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
         "tortoise/sdk.py", "_session_event_write",
         '"MERGE (e:Event {eventId:$eid}) "', frozenset({"Event"})),
     "tortoise.sdk::ingest_corpus": (
-        "tortoise/sdk.py", "ingest_corpus",
+        "tortoise/sdk.py", "_ingest_corpus",
         '"SET e += $props, " + set_embedding_clause("e")', frozenset({"Event"})),
     "tortoise.session_indexer::main": (
         "tortoise/session_indexer.py", "main",

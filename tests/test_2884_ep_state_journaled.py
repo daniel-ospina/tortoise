@@ -771,7 +771,7 @@ def test_a7_belief_fold_drops_across_delete_recreate(journaled):
     pid = sdk._create_point("statement", "c1", status="live")["id"]
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
                 posterior_alpha=9.0)
-    _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
+    _raw_append(events, sdk, "EntityMutated", op="_delete", id=pid,
                 label="Point")
     _raw_append(events, sdk, "PointAdded",
                 point={"id": pid, "content": "c2", "pointKind": "",
@@ -789,7 +789,7 @@ def test_a7_belief_fold_drops_across_delete_recreate(journaled):
          "point": {"id": pid, "content": "c1"}},
         {"type": "ConfidenceChanged", "id": pid, "confidence": 0.9,
          "posterior_alpha": 9.0},
-        {"type": "EntityMutated", "op": "delete", "id": pid,
+        {"type": "EntityMutated", "op": "_delete", "id": pid,
          "label": "Point"},
         {"type": "PointAdded",
          "point": {"id": pid, "content": "c2"}},
@@ -810,7 +810,7 @@ def test_a7_revise_belief_props_drop_across_delete_recreate(journaled):
     pid = sdk._create_point("statement", "c1", status="live")["id"]
     _raw_append(events, sdk, "PointRevised", id=pid, new_content="c2",
                 confidence=0.9, posterior_alpha=9.0)
-    _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
+    _raw_append(events, sdk, "EntityMutated", op="_delete", id=pid,
                 label="Point")
     _raw_append(events, sdk, "PointAdded",
                 point={"id": pid, "content": "c3", "pointKind": "",
@@ -828,7 +828,7 @@ def test_a7_revise_belief_props_drop_across_delete_recreate(journaled):
         {"type": "PointAdded", "point": {"id": pid, "content": "c1"}},
         {"type": "PointRevised", "id": pid, "new_content": "c2",
          "confidence": 0.9, "posterior_alpha": 9.0},
-        {"type": "EntityMutated", "op": "delete", "id": pid,
+        {"type": "EntityMutated", "op": "_delete", "id": pid,
          "label": "Point"},
         {"type": "PointAdded", "point": {"id": pid, "content": "c3"}},
         {"type": "PointRevised", "id": pid, "new_content": "c4",
@@ -1009,7 +1009,7 @@ def test_2884_retract_decay_drops_across_delete_recreate(journaled):
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
                 posterior_alpha=9.0)
     _raw_append(events, sdk, "PointRetracted", id=pid)
-    _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
+    _raw_append(events, sdk, "EntityMutated", op="_delete", id=pid,
                 label="Point")
     _raw_append(events, sdk, "PointAdded",
                 point={"id": pid, "content": "c2", "pointKind": "",
@@ -1043,7 +1043,7 @@ def test_2884_promote_belief_props_drop_across_delete_recreate(journaled):
                 point={"id": pid, "content": "c1", "pointKind": "",
                        "status": "live", "confidence": 0.9,
                        "posterior_alpha": 9.0})
-    _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
+    _raw_append(events, sdk, "EntityMutated", op="_delete", id=pid,
                 label="Point")
     _raw_append(events, sdk, "PointAdded",
                 point={"id": pid, "content": "c2", "pointKind": "",

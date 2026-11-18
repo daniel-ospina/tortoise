@@ -194,18 +194,18 @@ def test_cycles_query_uses_schema_valid_team_filter():
     captured: dict = {}
 
     def fake_query(query, variables=None):
-        captured["query"] = query
+        captured["_query"] = query
         captured["variables"] = variables
         return {"data": {"cycles": {"nodes": []}}}
 
     lc._query = fake_query
     assert lc._poll_cycles() == []
     assert captured["variables"].get("filter") == {"team": {"id": {"eq": "team-1"}}}
-    assert "$filter: CycleFilter" in captured["query"], \
+    assert "$filter: CycleFilter" in captured["_query"], \
         "query must declare $filter: CycleFilter"
-    assert "filter: $filter" in captured["query"], \
+    assert "filter: $filter" in captured["_query"], \
         "query must pass filter: $filter to cycles()"
-    assert "teamId" not in captured["query"], \
+    assert "teamId" not in captured["_query"], \
         "teamId is not a valid Query.cycles argument in the Linear schema"
 
 
@@ -216,7 +216,7 @@ def test_cycles_query_no_filter_without_team_id():
     captured: dict = {}
 
     def fake_query(query, variables=None):
-        captured["query"] = query
+        captured["_query"] = query
         captured["variables"] = variables
         return {"data": {"cycles": {"nodes": []}}}
 

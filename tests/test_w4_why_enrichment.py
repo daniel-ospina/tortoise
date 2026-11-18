@@ -1015,7 +1015,7 @@ def test_assembly_bounded_batch_reads(monkeypatch):
                 calls.append(cypher)
                 return real_query(cypher, params=params, timeout=timeout)
 
-            monkeypatch.setattr(_GuardedGraph, "query", _counting_query)
+            monkeypatch.setattr(_GuardedGraph, "_query", _counting_query)
             blocks = assemble_why_blocks(proj, batch)
             assert len(blocks) == len(batch)
             return len(calls)
@@ -1087,7 +1087,7 @@ def test_assembly_partial_dimension_fail_open(w4_flag, monkeypatch):
                 raise RuntimeError("forced tradeoffs failure")
             return real_query(cypher, params=params, timeout=timeout)
 
-        monkeypatch.setattr(_GuardedGraph, "query", _flaky_query)
+        monkeypatch.setattr(_GuardedGraph, "_query", _flaky_query)
         blocks = assemble_why_blocks(proj, [g["decision"]])
         assert fired, "the forced tradeoffs failure must actually fire"
         block = blocks[g["decision"]]

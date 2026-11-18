@@ -89,7 +89,7 @@ def _outcome(qid: str, *, valid: bool = True, label: bool = True,
         "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
         "pool_size": points_total or 100, "evidence_written": 1,
         "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
-        "ingest": ingest,
+        "_ingest": ingest,
         "points_total": points_total,
     }
 
@@ -185,7 +185,7 @@ def test_health_deterministic_no_points_never_falsely_degraded():
     points rule must NOT fire; a clean census classifies healthy (a
     deterministic run is never flagged by the semantic-points rule)."""
     o = _outcome("q")
-    assert "points" not in o["ingest"]
+    assert "points" not in o["_ingest"]
     assert _outcome_extraction_health(o) == "healthy"
 
 
@@ -197,7 +197,7 @@ def test_health_deterministic_tiny_pool_not_degraded():
     semantic extraction distinguishes real degradation from a small
     deterministic pool)."""
     o = _outcome("q", points_total=50)
-    assert "points" not in o["ingest"]
+    assert "points" not in o["_ingest"]
     assert _outcome_extraction_health(o) == "healthy"
 
 
@@ -217,7 +217,7 @@ def test_health_full_context_sentinel_healthy():
     degraded (it is distinguishable from a real zero-extract by its
     minimal key set; the v2/deterministic legs always record more)."""
     o = _outcome("q")
-    o["ingest"] = {"sessions": 3, "points": 0, "errors": []}
+    o["_ingest"] = {"sessions": 3, "points": 0, "errors": []}
     assert _outcome_extraction_health(o) == "healthy"
 
 
@@ -226,7 +226,7 @@ def test_health_full_context_sentinel_with_killer_census_still_degrades():
     killer census class on that shape still degrades (a tampered or
     billing-limited cell run must not escape the flag)."""
     o = _outcome("q", error_classes={"fatal_402_billing": 1})
-    o["ingest"] = {"sessions": 3, "points": 0, "errors": []}
+    o["_ingest"] = {"sessions": 3, "points": 0, "errors": []}
     assert _outcome_extraction_health(o) == "degraded"
 
 
@@ -237,7 +237,7 @@ def test_health_nonfinite_points_never_fabricate_verdict():
     poisoned value, mirroring _numeric's fail-closed discipline)."""
     for bad in (float("nan"), float("inf"), float("-inf")):
         o = _outcome("q")
-        o["ingest"]["points"] = bad
+        o["_ingest"]["points"] = bad
         assert _outcome_extraction_health(o) == "healthy"
 
 

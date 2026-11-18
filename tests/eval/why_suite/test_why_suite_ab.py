@@ -45,7 +45,7 @@ def _pair_set() -> dict:
                     "contested_twin": f"ct{index}",
                     "clean_twin": f"cl{index}",
                     "counter": f"co{index}",
-                    "query": f"ct{index} counterargument gamma",
+                    "_query": f"ct{index} counterargument gamma",
                 }
             )
             index += 1
@@ -113,7 +113,7 @@ def _default_order(seed) -> dict:
     control (boost never fires there)."""
     on, off = {}, {}
     for pair in seed["pairs"]:
-        q = pair["query"]
+        q = pair["_query"]
         if pair["tier"] == "at_threshold":
             on[q] = [pair["clean_twin"], pair["contested_twin"]]
             off[q] = [pair["clean_twin"], pair["contested_twin"]]
@@ -147,7 +147,7 @@ def test_boost_noop_records_not_measured_with_gap(monkeypatch):
     seed = _pair_set()
     same = {}
     for pair in seed["pairs"]:
-        same[pair["query"]] = [pair["clean_twin"], pair["contested_twin"]]
+        same[pair["_query"]] = [pair["clean_twin"], pair["contested_twin"]]
     _patch(monkeypatch)
     result = a4_ab.measure(_FakeSDK(), seed, rank_fn=_FakeRank(same, same))
     assert result["measured"] is False
@@ -164,7 +164,7 @@ def test_at_threshold_control_flip_is_boundary_violation(monkeypatch):
     seed = _pair_set()
     on, off = {}, {}
     for pair in seed["pairs"]:
-        q = pair["query"]
+        q = pair["_query"]
         if pair["tier"] == "at_threshold":
             on[q] = [pair["contested_twin"], pair["clean_twin"]]  # flip
         else:

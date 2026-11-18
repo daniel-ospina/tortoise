@@ -492,7 +492,7 @@ def test_a_silent_no_op_pass_records_its_reach(sdk, monkeypatch):
         dreamer._last_belief_write_count = 0
         return out
 
-    monkeypatch.setattr(dreamer, "dream", wrapped)
+    monkeypatch.setattr(dreamer, "_dream", wrapped)
     with pytest.raises(DreamNoOpError):
         sdk._dream(mode="local", require_calibration=False)
     p = _prop(sdk)

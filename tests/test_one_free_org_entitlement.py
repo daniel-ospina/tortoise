@@ -408,9 +408,9 @@ class _RecordingSDK:
                 "select_graph": staticmethod(_select_graph),
                 # #10180: `_registry_existing_graphs()` is the LISTING gate the
                 # default-graph door opens through.
-                "list_graphs": staticmethod(lambda: set(state.existing_graphs)),
+                "_list_graphs": staticmethod(lambda: set(state.existing_graphs)),
             })(),
-            "query": staticmethod(_query),
+            "_query": staticmethod(_query),
             "close": lambda self: None,
         })()
         return _proj

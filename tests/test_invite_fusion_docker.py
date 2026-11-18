@@ -441,7 +441,7 @@ class TestConcurrentClaimRace:
                 sdk._membership_create(org_id, winner_uid, "member")
             return orig_query(q, params=params, **kw)
 
-        monkeypatch.setattr(reg, "query", _wrapped)
+        monkeypatch.setattr(reg, "_query", _wrapped)
         invite_row = {"id": inv["invite_id"], "org_id": org_id,
                       "email": inv_email, "role": "member"}
 

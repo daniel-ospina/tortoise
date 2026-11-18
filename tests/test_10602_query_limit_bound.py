@@ -4,7 +4,7 @@
 ``eff_limit = limit if limit is not None else (20 if paginated else 100)``) that
 a plain structural query is bounded. It was not: ``paginated`` is
 ``offset is not None or page is not None``, so ``limit`` ALONE fell through to
-the plain path, which called ``sdk.query(kind, …)`` — and ``sdk.query`` has no
+the plain path, which called ``sdk._query(kind, …)`` — and ``sdk._query`` has no
 ``limit`` parameter at all (``tortoise/sdk.py``: ``MATCH (n:Point) WHERE …
 RETURN properties(n)``, no ``LIMIT``, no ``ORDER BY``). **The whole label came
 back**, and ``eff_limit`` was used only on the tag/text/paginated branches.
@@ -54,11 +54,11 @@ class _StubSDK:
         self.raises = raises
 
     def _query(self, kind=None, **kwargs):
-        self.calls.append(("query", kind, kwargs))
+        self.calls.append(("_query", kind, kwargs))
         return self.points
 
     def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
-        self.calls.append(("paginated_query", kind, skip, limit, kwargs))
+        self.calls.append(("_paginated_query", kind, skip, limit, kwargs))
         if self.raises is not None:
             raise self.raises
         total = len(self.points)
@@ -66,7 +66,7 @@ class _StubSDK:
                 "hasMore": skip + limit < total}
 
     def _query_points_by_tag(self, tag, *, _record_reads=True):
-        self.calls.append(("query_points_by_tag", tag, _record_reads))
+        self.calls.append(("_query_points_by_tag", tag, _record_reads))
         return [{"id": f"tag{i}"} for i in range(self.n_tag_points)]
 
 
@@ -120,16 +120,16 @@ def test_limit_is_honoured_on_the_plain_structural_path(stub_factory):
 def test_the_bound_reaches_the_accessor_not_just_the_response(stub_factory):
     """A handler-side slice would return 2 rows while STILL reading the label.
 
-    The bound must be pushed to the accessor, so `sdk.query` (no LIMIT in its
+    The bound must be pushed to the accessor, so `sdk._query` (no LIMIT in its
     Cypher at all) must not be the accessor used for a bounded plain read.
     """
     from tortoise.mcp_server import tortoise_query
     stub = stub_factory(n_points=500)
     tortoise_query(kind="statement", limit=2)
     name = stub.calls[-1][0]
-    assert name == "paginated_query", (
+    assert name == "_paginated_query", (
         "a bounded plain query must reach an accessor that applies LIMIT; "
-        f"got {name!r} (sdk.query has no LIMIT in its Cypher)")
+        f"got {name!r} (sdk._query has no LIMIT in its Cypher)")
 
 
 def test_default_plain_query_is_capped_at_the_computed_eff_limit(stub_factory):
@@ -403,7 +403,7 @@ def test_the_tag_arms_unbounded_read_and_non_total_order_are_censused():
         "recorded, so a lane reads the tool as fixed")
     row = rows[0]
     # The READ/response distinction is the whole point of the row.
-    assert "query_points_by_tag" in row, f"the row names no accessor: {row}"
+    assert "_query_points_by_tag" in row, f"the row names no accessor: {row}"
     assert "**no** bound on the READ" in row, (
         f"the row does not say the read is unbounded — a lane would re-derive "
         f"the handler-side slice as a fix: {row}")

@@ -47,7 +47,7 @@ def test_r2_items_anchor_deliberation_constructs_positively():
                                              "downside", "pitfall"),
         "support-vs-oppose weighing": ("support", "oppose"),
         "revision after counter-evidence": ("revis", "revised",
-                                             "revisiting", "update"),
+                                             "revisiting", "_update"),
     }
     for construct, words in anchors.items():
         assert any(w in texts for w in words), \

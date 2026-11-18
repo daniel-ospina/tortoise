@@ -126,7 +126,7 @@ def lane():
     finally:
         try:
             graph.query("MATCH (n) DETACH DELETE n")
-            client.delete(graph_name)
+            client._delete(graph_name)
         except Exception:  # pragma: no cover - best-effort teardown
             pass
 

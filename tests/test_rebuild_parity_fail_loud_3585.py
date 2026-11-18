@@ -205,7 +205,7 @@ class TestShapeAUnjournaledRenameThenDelete:
         _raw(events, type="ObjectRegistered", id="obj-shape-a-2",
              name="SHARED", status="live", event_id="e-sa-2")
         _raw(events, type="EntityMutated", label="Object", id="obj-shape-a-1",
-             op="delete", event_id="e-sa-del")
+             op="_delete", event_id="e-sa-del")
 
     def test_shape_a_matches_live_on_every_engine(self, env, tmp_path):
         """FAILS IF: any engine leaves the SIBLING carrier retracted/absent, or
@@ -397,7 +397,7 @@ class TestFailClosedRebuild:
         exception (#4743), and the run must still complete.
         REACHABLE: `EntityMutated op=delete` for an id with no creation."""
         sdk, events = env
-        _raw(events, type="EntityMutated", op="delete", label="Object",
+        _raw(events, type="EntityMutated", op="_delete", label="Object",
              id="obj-never-existed", event_id="e-del-miss")
         with caplog.at_level("WARNING"):
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)  # must NOT raise
@@ -492,7 +492,7 @@ class TestEntityParityBounds:
         sdk, events = env
         oid = sdk.create_entity("object", name="live-only",
                                 objectKind="k")["node"]["id"]
-        _raw(events, type="EntityMutated", op="delete", label="Object",
+        _raw(events, type="EntityMutated", op="_delete", label="Object",
              id=oid, event_id="e-del")
         r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
         assert r["divergent_entity_count"] >= 1
@@ -605,7 +605,7 @@ class TestReferenceFoldMirrorsTheWriters:
         sdk, events = env
         oid = sdk.create_entity("object", name="NC",
                                 objectKind="k")["node"]["id"]
-        _raw(events, type="EntityMutated", op="delete", label="Objects",
+        _raw(events, type="EntityMutated", op="_delete", label="Objects",
              id=oid, event_id="e-nc")
         sdk.close()
         proj = _fresh(tmp_path, "nc")
@@ -662,7 +662,7 @@ class TestOneClassifierForTheNonFoldedSet:
         REACHABLE: an Object hard-delete plus an unfoldable `PointSuperseded`
         for a Point that merely shares the id."""
         sdk, events = env
-        _raw(events, type="EntityMutated", op="delete", label="Object",
+        _raw(events, type="EntityMutated", op="_delete", label="Object",
              id="shared-X", event_id="e-del-X")
         _raw(events, type="PointSuperseded", id="shared-X", new_id="p-new",
              event_id="e-sup-X")
@@ -1371,7 +1371,7 @@ class TestCycleThreeFinalStateResolution:
         _raw(events, type="ObjectRegistered", id="obj-5285-g", name="G1",
              status="live", event_id="e-g1")
         _raw(events, type="EntityMutated", label="Object", id="obj-5285-g",
-             op="delete", event_id="e-g2")
+             op="_delete", event_id="e-g2")
         _raw(events, type="ObjectRegistered", id="obj-5285-g", name="G2",
              status="live", event_id="e-g3")
         expected = [("obj-5285-g", "G2", "superseded")]
@@ -1414,9 +1414,9 @@ class TestCycleThreeFinalStateResolution:
         _raw(events, type="ObjectSuperseded", name="AMB3",
              supersedes_by="s", event_id="e-amb3-2")
         _raw(events, type="EntityMutated", label="Object", id="obj-5285-amb-a",
-             op="delete", event_id="e-amb3-3")
+             op="_delete", event_id="e-amb3-3")
         _raw(events, type="EntityMutated", label="Object", id="obj-5285-amb-b",
-             op="delete", event_id="e-amb3-4")
+             op="_delete", event_id="e-amb3-4")
         _raw(events, type="ObjectSuperseded", name="AMB3",
              supersedes_by="s", event_id="e-amb3-5")
         with pytest.raises(NonFoldedEventsError):
@@ -1566,7 +1566,7 @@ class TestCycleFourSingleSweepAndNameCollapse:
         _raw(events, type="ObjectSuperseded", id=oid, name="INLINE",
              supersedes_by="y", event_id="e-i1")
         _raw(events, type="EntityMutated", label="Object", id=oid,
-             op="delete", event_id="e-i2")
+             op="_delete", event_id="e-i2")
         _raw(events, type="ObjectRegistered", id=oid, name="INLINE",
              status="live", event_id="e-i3")
         # APPLY/REFUSE parity: every engine ACCEPTS the journal.
@@ -2114,7 +2114,7 @@ class TestExistenceMapForwardReferences:
         _sdk, events = env
         pid = "p-del-state"
         _raw_point(events, pid, event_id="e-del-state-add")
-        _raw(events, type="EntityMutated", op="delete", label="Point", id=pid,
+        _raw(events, type="EntityMutated", op="_delete", label="Point", id=pid,
              event_id="e-del-state-del")
         _raw(events, type="EntityMutated", op="restatus", label="Point",
              id=pid, state={"status": "archived"},
@@ -2135,7 +2135,7 @@ class TestExistenceMapForwardReferences:
         _sdk, events = env
         pid = "p-del-retract"
         _raw_point(events, pid, event_id="e-del-ret-add")
-        _raw(events, type="EntityMutated", op="delete", label="Point", id=pid,
+        _raw(events, type="EntityMutated", op="_delete", label="Point", id=pid,
              event_id="e-del-ret-del")
         _raw(events, type="PointRetracted", id=pid, event_id="e-del-ret-ret")
         _expect_refusal("rebuild_all", tmp_path, events, "delret-ra",
@@ -2439,7 +2439,7 @@ class TestSharedTerminalizerClassifier:
         events = [
             {"type": "PointAdded", "point": {"id": "p"},
              "event_id": "e1"},
-            {"type": "EntityMutated", "op": "delete", "label": "Point",
+            {"type": "EntityMutated", "op": "_delete", "label": "Point",
              "id": "p", "event_id": "e2"},
             {"type": "PointAdded", "point": {"id": "p"},
              "event_id": "e3"},
@@ -2451,7 +2451,7 @@ class TestSharedTerminalizerClassifier:
         # unwritable id cannot silently suppress its own delete.
         unwritable = [
             {"type": "PointAdded", "point": {"id": ""}, "event_id": "e1"},
-            {"type": "EntityMutated", "op": "delete", "label": "Point",
+            {"type": "EntityMutated", "op": "_delete", "label": "Point",
              "id": "", "event_id": "e2"},
         ]
         assert _hard_deleted_any(
@@ -2466,11 +2466,11 @@ class TestSharedTerminalizerClassifier:
         events = [
             {"type": "PointAdded", "point": {"id": "p"},
              "event_id": "e1"},
-            {"type": "EntityMutated", "op": "delete", "label": "Point",
+            {"type": "EntityMutated", "op": "_delete", "label": "Point",
              "id": "p", "event_id": "e2"},
             {"type": "PointAdded", "point": {"id": "p"},
              "event_id": "e3"},
-            {"type": "EntityMutated", "op": "delete", "label": "Point",
+            {"type": "EntityMutated", "op": "_delete", "label": "Point",
              "id": "p", "event_id": "e4"},
         ]
         assert _hard_deleted_any(
@@ -2482,7 +2482,7 @@ class TestSharedTerminalizerClassifier:
         from tortoise.projection import _hard_deleted_any, hard_deleted_pairs
 
         events = [
-            {"type": "EntityMutated", "op": "delete", "label": "Object",
+            {"type": "EntityMutated", "op": "_delete", "label": "Object",
              "id": "x", "event_id": "e1"},
         ]
         gated = hard_deleted_pairs(events)
@@ -3276,7 +3276,7 @@ def test_registered_object_recreated_after_delete_folds_again(env):
     sdk, events = env
     _raw(events, type="ObjectRegistered", id="obj-b2", name="ACME-B2",
          status="live", event_id="e-b2-reg1")
-    _raw(events, type="EntityMutated", op="delete", label="Object",
+    _raw(events, type="EntityMutated", op="_delete", label="Object",
          id="obj-b2", event_id="e-b2-del")
     _raw(events, type="ObjectRegistered", id="obj-b2", name="ACME-B2",
          status="live", event_id="e-b2-reg2")
@@ -3357,7 +3357,7 @@ def test_id_wide_delete_of_a_registered_object_refuses_on_every_engine(env):
     sdk, events = env
     _raw(events, type="ObjectRegistered", id="obj-wide", name="WIDE",
          status="live", event_id="e-w-reg")
-    _raw(events, type="EntityMutated", op="delete", id="obj-wide",
+    _raw(events, type="EntityMutated", op="_delete", id="obj-wide",
          event_id="e-w-del")  # ⛔ NO label: the id-wide fallback
     _raw(events, type="ObjectSuperseded", name="WIDE", supersedes_by="y",
          event_id="e-w-sup")
@@ -3738,7 +3738,7 @@ def test_hard_deleted_target_keeps_its_own_bound_and_precedence(
     sdk, events = env
     _raw(events, type="ObjectRegistered", id="obj-del-1", name="DELOBJ",
          status="live", event_id="e-del-reg")
-    _raw(events, type="EntityMutated", op="delete", label="Object",
+    _raw(events, type="EntityMutated", op="_delete", label="Object",
          id="obj-del-1", event_id="e-del-del")
     _raw(events, type="ObjectSuperseded", id="obj-del-1",
          supersedes_by="other", event_id="e-del-sup")

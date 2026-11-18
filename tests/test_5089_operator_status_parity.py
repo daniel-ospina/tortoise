@@ -11,7 +11,7 @@ gives it a canonical write path; `consistency.py` states the corresponding *rule
 So when the journal carries no `status`, the graph MUST hold `'live'` — anything else is
 a divergence by the repo's own consistency model.
 
-**The defect.** `sdk.create_operator` sets the operator node's status ONLY on the
+**The defect.** `sdk._create_operator` sets the operator node's status ONLY on the
 extraction posture (`promote_source=False` → `'draft'`). With the DEFAULT
 (`promote_source=True`) it writes no status at all, so the live node is born
 `status=None`. The replay writer's coalesce default is `'live'`, so a rebuild does NOT

@@ -201,7 +201,7 @@ class _GuardProbe:
                 )
             return original(self, cypher, params, timeout)
 
-        monkeypatch.setattr(_GuardedGraph, "query", instrumented)
+        monkeypatch.setattr(_GuardedGraph, "_query", instrumented)
         return self
 
     def mutating(self) -> list[tuple[str, str | None]]:

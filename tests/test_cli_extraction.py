@@ -550,7 +550,7 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                     dump(out)
         absent = str(cm.exception)
         for fragment in ("matched NO point", "TORTOISE_RECORD_DSN",
-                         "get_session", "--allow-empty"):
+                         "_get_session", "--allow-empty"):
             self.assertIn(fragment, absent)
         # ...and the predicate-mismatch cause is named TOO. That is the cause
         # #9932 itself was, and the first cut of this message offered only two
@@ -677,7 +677,7 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                              "otherwise consume the truncated transcript")
         refused = str(cm.exception)
         for fragment in ("PARTIAL", "TAIL", "#10000", "TORTOISE_RECORD_DSN",
-                        "PER TURN", "get_session", "--allow-partial"):
+                        "PER TURN", "_get_session", "--allow-partial"):
             self.assertIn(fragment, refused,
                           "the operator needs the cause and the remedy, not only "
                           "the verdict")
@@ -1004,15 +1004,15 @@ class TestWriterScript(unittest.TestCase):
         self.assertNotIn("__LOG__", WRITER_SCRIPT)
 
     def test_uses_public_doors_not_private_handles(self):
-        for door in ("create_point", "manage_source_trust", "get_source_reliability",
-                     "compute_confidence", "sdk.query"):
+        for door in ("_create_point", "manage_source_trust", "_get_source_reliability",
+                     "_compute_confidence", "sdk._query"):
             self.assertIn(door, WRITER_SCRIPT)
         self.assertNotIn("_get_proj", WRITER_SCRIPT)
 
     def test_validates_all_claims_before_first_mutation(self):
         # the validation loop must precede the create_point loop
         self.assertLess(WRITER_SCRIPT.index("prepared = []"),
-                        WRITER_SCRIPT.index("sdk.create_point"))
+                        WRITER_SCRIPT.index("sdk._create_point"))
         self.assertIn("unknown claim kind", WRITER_SCRIPT)
 
     # The warning-tripwire scoping and the non-live guarantee are pinned

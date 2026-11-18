@@ -401,7 +401,7 @@ def validate_manifest(
     for model in ("arctic-xs", "arctic-s"):
         prompts = {c.get("prompt") for c in configs
                    if isinstance(c, dict) and c.get("model") == model}
-        if prompts != {None, "query"}:
+        if prompts != {None, "_query"}:
             errors.append(f"(a) {model} must run both the no-prefix config "
                           f"and the vendor prompt_name=\"query\" config — "
                           f"got prompts {sorted(str(p) for p in prompts)}")

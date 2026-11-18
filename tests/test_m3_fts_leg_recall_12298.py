@@ -1008,7 +1008,7 @@ def test_the_identifier_class_cannot_match_its_own_node(tool_mod,
 
 # ── 2. the control is verified, not assumed ─────────────────────────────────
 
-@pytest.mark.parametrize("query", [
+@pytest.mark.parametrize("_query", [
     "the diff",
     "the admin-merge rail",
     "web_search",
@@ -2046,7 +2046,7 @@ def test_brief_fixture_table_is_the_artifact(artifact, brief: str) -> None:
         arm: {r["stored"]: r for r in artifact["arms"][arm]["identifier_fixture"]["results"]}
         for arm in arms
     }
-    rows = _table(_scope_slice(brief, "3.5"), "stored name", "query")
+    rows = _table(_scope_slice(brief, "3.5"), "stored name", "_query")
     assert len(rows) == 5, f"§3.5 no longer has its five fixture rows: {len(rows)}"
     for cells in rows:
         stored = _plain(cells[0])

@@ -2492,7 +2492,7 @@ def _stub_resolver_port(monkeypatch, hits, name_rows):
     hydration: dict = {}
 
     def fake_run_fts_query(graph, query, **kw):
-        captured["query"] = query
+        captured["_query"] = query
         captured.update(kw)
         return list(hits)
 
@@ -2538,7 +2538,7 @@ def test_resolver_fts_leg_is_the_name_index_not_the_hybrid(monkeypatch):
         {"id": "obj-a", "name": "couch"},
         {"id": "obj-b", "name": "sofa"},
     ]
-    assert captured["query"] == "couch"
+    assert captured["_query"] == "couch"
     assert captured["entity_type"] == "object"
     assert captured["limit"] == 8
     # the port's own NARROW set — not the read surface's wider vocabulary

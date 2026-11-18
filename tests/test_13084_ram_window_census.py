@@ -91,7 +91,7 @@ def test_the_human_render_prints_the_seed_holes_beside_n_a(tmp_path, capsys):
     """
     ledger = tmp_path / "l.jsonl"
     ledger.write_text(
-        json.dumps({"event": "query", "kind": "traversal", "label": "Point",
+        json.dumps({"event": "_query", "kind": "traversal", "label": "Point",
                     "returned": 2, "seed": None,
                     "at": "2026-11-16T10:00:00+00:00", "tenant": "t1"}) + "\n",
         encoding="utf-8")
@@ -169,7 +169,7 @@ def test_the_restore_probe_NEVER_deletes_the_graph(monkeypatch, capsys):
     the key, so `RESTORE … REPLACE` rebuilds in place and a rejected payload
     leaves the live graph untouched — the reason the separate `DEL` was removed.
 
-    Mutation this REDs: put `client.delete(graph)` back before the restore (the
+    Mutation this REDs: put `client._delete(graph)` back before the restore (the
     pre-fix shape) — a `("DEL", "g")` call is recorded and the assertion fails.
     """
     client = _RestoreProbeClient()

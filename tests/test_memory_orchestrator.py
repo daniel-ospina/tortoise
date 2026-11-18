@@ -477,7 +477,7 @@ def test_cross_domain_query_unknown_domain():
     """crossDomainQuery() skips unknown domains, returns empty."""
     router = _make_router(with_domain=False)
     db = _mock_db({})
-    result = router.crossDomainQuery(["nonexistent"], "query", db)
+    result = router.crossDomainQuery(["nonexistent"], "_query", db)
     assert result.mergedCount == 0
     print("✓ crossDomainQuery unknown domain")
 
@@ -502,7 +502,7 @@ def test_cross_domain_query_multi_domain():
         "custom-domain": [[[2, ["Source"], [["title", "doc1"]]]]],
     })
     result = router.crossDomainQuery(
-        ["product-strategy", "custom-domain"], "query", db
+        ["product-strategy", "custom-domain"], "_query", db
     )
     assert result.mergedCount == 2
     assert "product-strategy" in result.totalByOntology
@@ -530,7 +530,7 @@ def test_cross_domain_query_partial_failure():
         return g
     db.select_graph = _select
 
-    result = router.crossDomainQuery(["good", "bad"], "query", db)
+    result = router.crossDomainQuery(["good", "bad"], "_query", db)
     assert result.mergedCount == 1
     assert "bad" in result.failedOntologies
     print("✓ crossDomainQuery partial failure")
@@ -542,7 +542,7 @@ def test_cross_domain_query_timeout_per_domain():
     db = _mock_db({
         "product-strategy": [[[1, ["Point"], [["content", "jtbd"]]]]],
     })
-    result = router.crossDomainQuery(["product-strategy"], "query", db)
+    result = router.crossDomainQuery(["product-strategy"], "_query", db)
     assert result.mergedCount == 1
     # timeout config was set to 3.0 — no way to assert from mock, but it ran
     print("✓ crossDomainQuery per-domain timeout")

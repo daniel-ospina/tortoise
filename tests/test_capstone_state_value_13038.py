@@ -74,7 +74,7 @@ def test_every_recipe_declares_its_capability_needs():
 
 
 def test_every_ingest_op_has_a_handler_and_declared_capabilities(narrative):
-    ops = narrative["ingest"]["ops"]
+    ops = narrative["_ingest"]["ops"]
     assert ops, "the narrative ingests nothing"
     for op in ops:
         name = op.get("op")
@@ -87,7 +87,7 @@ def test_every_ingest_op_has_a_handler_and_declared_capabilities(narrative):
 
 
 def test_every_question_names_scenario_refs_that_exist(narrative):
-    refs = {op.get("ref") for op in narrative["ingest"]["ops"] if op.get("ref")}
+    refs = {op.get("ref") for op in narrative["_ingest"]["ops"] if op.get("ref")}
     for q in narrative["questions"]:
         named = set(q.get("must_appear") or []) | set(q.get("must_not_appear") or [])
         assert named <= refs, (
@@ -98,7 +98,7 @@ def test_every_question_names_scenario_refs_that_exist(narrative):
 
 def test_the_narrative_contains_every_shape_it_claims(narrative):
     """The six shapes of #13038 are only covered if the ops actually perform them."""
-    ops = narrative["ingest"]["ops"]
+    ops = narrative["_ingest"]["ops"]
     shapes = {s["id"] for s in narrative["shapes"]}
     assert shapes == {
         "plan",
@@ -110,10 +110,10 @@ def test_the_narrative_contains_every_shape_it_claims(narrative):
     }
     performed = {op["op"] for op in ops}
     assert {"object", "advance_stage"} <= performed  # the plan / terminal stage
-    assert "supersede_point" in performed  # the named successor
+    assert "_supersede_point" in performed  # the named successor
     assert "deprecate_object" in performed  # the successorless ending
     assert "judge_goal" in performed  # achievement from a reading
-    assert "retract_point" in performed  # the withdrawn claim
+    assert "_retract_point" in performed  # the withdrawn claim
     stages = [s for op in ops if op["op"] == "declare_pipeline" for s in op["stages"]]
     terminal = [s for s in stages if s["slot"] == "terminal"]
     assert len(terminal) >= 2, "a plan needs a terminal stage to cancel into"
@@ -343,7 +343,7 @@ def test_a_degraded_read_is_recorded_as_evidence_not_as_a_verdict():
     ans.calls.append(
         cap.Call(
             "search",
-            {"query": "withdrawn"},
+            {"_query": "withdrawn"},
             True,
             read_status={"status": "degraded"},
             rows=[{"id": "p1", "what": "Q4 pricing"}],
@@ -363,7 +363,7 @@ def test_a_retired_id_served_as_current_is_a_signal():
     ans.calls.append(
         cap.Call(
             "search",
-            {"query": "cancelled call"},
+            {"_query": "cancelled call"},
             True,
             rows=[{"id": "abc", "what": "Thursday partner call"}],
         )
@@ -409,7 +409,7 @@ def test_the_rendered_scoreboard_carries_verdict_answer_reason_and_meaning(narra
     answered.calls.append(
         cap.Call(
             "search",
-            {"query": "what are we committed to", "entity_type": "point"},
+            {"_query": "what are we committed to", "entity_type": "point"},
             True,
             rows=[{"id": "x", "what": "Q4 pricing", "status": "live", "score": 1.0}],
             overlap={"rows": 1, "zero_overlap_rows": 0},
@@ -453,7 +453,7 @@ def test_the_rendered_scoreboard_carries_verdict_answer_reason_and_meaning(narra
 def test_the_top_table_is_short_and_the_detail_keeps_the_payload(narrative):
     answered = cap.Answer("Q1")
     answered.calls.append(
-        cap.Call("search", {"query": "q"}, True, rows=[{"id": "x", "what": "A" * 400}])
+        cap.Call("search", {"_query": "q"}, True, rows=[{"id": "x", "what": "A" * 400}])
     )
     board = cap.build_scoreboard(
         narrative={"questions": [narrative["questions"][0]]},
@@ -494,10 +494,10 @@ def test_every_recipe_declares_the_refs_it_needs(narrative):
     # the guard green (measured: 51 passed with `withdrawn = [..., "core:plan"]`).
     identities = {
         op["ref"]
-        for op in narrative["ingest"]["ops"]
+        for op in narrative["_ingest"]["ops"]
         if op.get("op") in ("object", "point", "reading") and op.get("ref")
     }
-    produced = {cap.ingest_ref_key(op) for op in narrative["ingest"]["ops"]} - {""}
+    produced = {cap.ingest_ref_key(op) for op in narrative["_ingest"]["ops"]} - {""}
     for recipe, refs in cap.RECIPE_REFS.items():
         unknown = set(refs) - identities
         assert not unknown, (
@@ -576,7 +576,7 @@ def test_an_unresolved_ref_is_reported_and_never_silently_ignored():
 def test_a_failed_or_absent_call_blocks_the_question_rather_than_scoring_it():
     """`blocked` is "we could not ask" — it must win over an empty answer."""
     ans = cap.Answer("Q2")
-    ans.calls.append(cap.Call("search", {"query": "launch event"}, True, rows=[]))
+    ans.calls.append(cap.Call("search", {"_query": "launch event"}, True, rows=[]))
     ans.calls.append(
         cap.Call("read_entity", {"id": "p1"}, False, "StoreUnavailable", role="plan_node")
     )
@@ -585,7 +585,7 @@ def test_a_failed_or_absent_call_blocks_the_question_rather_than_scoring_it():
     assert "plan_node" in ans.reason and "events" in ans.reason
 
     ok = cap.Answer("Q2")
-    ok.calls.append(cap.Call("search", {"query": "launch event"}, True, rows=[], role="search"))
+    ok.calls.append(cap.Call("search", {"_query": "launch event"}, True, rows=[], role="search"))
     ok.calls.append(
         cap.Call("read_entity", {"id": "p1"}, True, rows=[{"id": "p1"}], role="plan_node")
     )
@@ -738,7 +738,7 @@ def test_render_obeys_the_same_exit_rule_as_run_and_judge():
     board = {
         "schema": "capstone-state-value-scoreboard/v1",
         "header": {},
-        "ingest": [],
+        "_ingest": [],
         "rows": [],
         "tally": {"right": 0, "wrong": 0, "blocked": 0, "unjudged": 6},
     }
@@ -781,7 +781,7 @@ def test_all_three_producers_return_the_same_exit_rule(tmp_path):
     unjudged = {
         "schema": "capstone-state-value-scoreboard/v1",
         "header": {},
-        "ingest": [],
+        "_ingest": [],
         "rows": [],
         "tally": {"right": 0, "wrong": 0, "blocked": 0, "unjudged": 6},
     }
@@ -1295,7 +1295,7 @@ def test_a_by_id_read_never_fires_retired_as_current():
         "attributed to the read path in the one field a reader uses for that"
     )
     ans.calls.append(
-        cap.Call("search", {"query": "partner call"}, True, rows=[{"id": "abc"}], role="by_name")
+        cap.Call("search", {"_query": "partner call"}, True, rows=[{"id": "abc"}], role="by_name")
     )
     cap._signal_refs(ans, {"partner_call": "abc"}, {"must_not_appear": ["partner_call"]})
     assert any(s.startswith("RETIRED-AS-CURRENT") for s in ans.signals), (
@@ -1799,7 +1799,7 @@ class _EndedRecordingTarget:
 
     def search(self, query=None, *, entity_type="point", limit=10,
                include_terminal=False, ended_scope=False, role=""):
-        self.calls.append({"query": query, "entity_type": entity_type,
+        self.calls.append({"_query": query, "entity_type": entity_type,
                            "ended_scope": ended_scope, "role": role})
         rows = []
         if ended_scope:
@@ -1809,7 +1809,7 @@ class _EndedRecordingTarget:
                  "stage": {"id": "cancelled", "slot": "terminal",
                            "outcome": "withdrawn"},
                  "linkedEvents": []}]
-        return cap.Call("search", {"query": query, "entity_type": entity_type,
+        return cap.Call("search", {"_query": query, "entity_type": entity_type,
                                    "ended_scope": ended_scope},
                         True, f"{len(rows)} rows", {}, rows, role=role)
 
@@ -1830,7 +1830,7 @@ def test_q5_and_q6_ask_the_read_whose_question_they_are():
         cap.RECIPES[recipe](target, {}, {})
         ended = [c for c in target.calls if c["ended_scope"]]
         assert ended, f"{recipe} never asks the ended-scope read"
-        assert all(c["query"] is None for c in ended), (
+        assert all(c["_query"] is None for c in ended), (
             "an ended-scope read takes no query (a state question is not a text match)"
         )
         assert any(c["role"] == "ended" for c in ended), (
@@ -1919,7 +1919,7 @@ def test_a_query_less_call_is_not_reported_as_a_corpus_ranking():
     """
     ans = cap.Answer("Q6")
     ans.calls.append(
-        cap.Call("search", {"query": None, "ended_scope": True}, True,
+        cap.Call("search", {"_query": None, "ended_scope": True}, True,
                  rows=[{"id": "p1", "what": "the beach club confirmed our booking"}],
                  overlap={"rows": 1, "zero_overlap_rows": 1})
     )
@@ -1945,8 +1945,8 @@ def test_an_ended_scope_call_is_labelled_as_one():
     failure the scoreboard exists to catch.
     """
     label = cap._search_label(
-        {"query": None, "entity_type": "point", "ended_scope": True})
-    plain = cap._search_label({"query": None, "entity_type": "point"})
+        {"_query": None, "entity_type": "point", "ended_scope": True})
+    plain = cap._search_label({"_query": None, "entity_type": "point"})
 
     assert "ended_scope" in label, (
         "an ended-scope enumeration must be LABELLED as one — it renders "
@@ -1959,7 +1959,7 @@ def test_an_ended_scope_call_is_labelled_as_one():
     # the same call renders two ways in one document.
     assert label == plain.replace(")", ", ended_scope)")
     assert "ended_scope" in cap._search_label(
-        {"query": None, "entity_type": "point", "ended_scope": True}, tick=False)
+        {"_query": None, "entity_type": "point", "ended_scope": True}, tick=False)
 
 
 def _inline_search_label_sites(source: str) -> list[str]:
@@ -2084,7 +2084,7 @@ def test_both_renderers_carry_the_ended_scope_marker():
     signature — `` `search(None, object)` → 0 rows `` — while the scan stays local
     to `tools/`.
     """
-    request = {"query": None, "entity_type": "object", "ended_scope": True}
+    request = {"_query": None, "entity_type": "object", "ended_scope": True}
 
     empty = cap.Answer("Q1")
     empty.calls.append(cap.Call("search", request, True, rows=[]))
@@ -2195,7 +2195,7 @@ class _SupersededPointTarget:
              "status": "superseded"},
             new_row,
         ]
-        return cap.Call("search", {"query": query, "entity_type": entity_type},
+        return cap.Call("search", {"_query": query, "entity_type": entity_type},
                         True, f"{len(rows)} rows", {}, rows, role=role)
 
     def read_entity(self, entity_id, *, role=""):

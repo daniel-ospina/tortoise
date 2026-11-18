@@ -609,7 +609,7 @@ class TestFailureInjection:
                 return orig_query(self, cypher, params=params,
                                   timeout=timeout)
 
-            monkeypatch.setattr(guarded_type, "query", _raise_on_probe)
+            monkeypatch.setattr(guarded_type, "_query", _raise_on_probe)
             with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
                 sdk.create_entity("object", "fail-open-name",
                                   objectKind="core:other", is_episodic=False)

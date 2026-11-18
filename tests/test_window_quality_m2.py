@@ -252,7 +252,7 @@ def test_point_population_gives_every_query_exactly_one_canonical():
            "and more text here to pass the length gate")
     pop = build_point_population([dup, dup, dup], 10, sanitise=lambda s: s)
     assert len(pop) == 1
-    assert len({r["query"] for r in pop}) == len(pop)
+    assert len({r["_query"] for r in pop}) == len(pop)
     assert len({r["id"] for r in pop}) == len(pop)
 
 
@@ -754,7 +754,7 @@ def test_the_point_population_accounts_for_every_drop():
     # queries must be DISTINCT. The assertion here used to compare `pop` to
     # itself — an identity that cannot fail, in the one test whose subject is
     # `duplicate_span` (#13126 round 5, Finding 5/P3).
-    queries = [r["query"] for r in pop]
+    queries = [r["_query"] for r in pop]
     assert len(set(queries)) == len(queries), queries
     assert all(q.strip() for q in queries), queries
     # …and each query really is a span of the text that SURVIVED, so "distinct"
@@ -3353,8 +3353,8 @@ def _sdk_boolean_levers() -> tuple[str, ...]:
     tree = ast.parse((ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8"))
     defs = [n for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "tortoise_fts_query"]
-    assert len(defs) == 1, ("tortoise/sdk.py", "tortoise_fts_query", len(defs))
+            and n.name == "_tortoise_fts_query"]
+    assert len(defs) == 1, ("tortoise/sdk.py", "_tortoise_fts_query", len(defs))
     kwonly = defs[0].args.kwonlyargs
     defaults = defs[0].args.kw_defaults
     assert len(kwonly) == len(defaults), (len(kwonly), len(defaults))
@@ -3422,7 +3422,7 @@ def _call_keywords(path: Path, func: str) -> tuple[dict[str, ast.expr], tuple[st
     assert len(owners) == 1, (path, func, "expected exactly one definition")
     calls = [n for n in ast.walk(owners[0])
              if isinstance(n, ast.Call)
-             and getattr(n.func, "attr", None) == "tortoise_fts_query"]
+             and getattr(n.func, "attr", None) == "_tortoise_fts_query"]
     assert len(calls) == 1, (path, func, f"expected one call, found {len(calls)}")
     named = {kw.arg: kw.value for kw in calls[0].keywords if kw.arg is not None}
     splats = tuple(ast.unparse(kw.value)
@@ -3487,7 +3487,7 @@ def test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does():
     assert {"include_terminal", "_record_reads", "_valid_time_rerank",
             "_rerank_candidates"} <= set(flags), flags
     mirror_kw, mirror_splats = _call_keywords(
-        ROOT / "tools" / "window_quality_m2.py", "query")
+        ROOT / "tools" / "window_quality_m2.py", "_query")
     reference_kw, reference_splats = _call_keywords(
         ROOT / "tortoise" / "extractor_v2.py", "_fts_rows")
     # A `**mapping` hands the read names this pin cannot read, so the MIRROR — the

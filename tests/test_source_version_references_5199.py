@@ -469,7 +469,7 @@ def test_document_call_sites_express_derivation_not_containment():
         calls = [n for n in ast.walk(tree)
                  if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == "link_source_to_entity"]
+                 and n.func.attr == "_link_source_to_entity"]
         # The label VARIABLES that reach a document call site's third argument.
         # The conditional-assignment arm below must be scoped to these: a bare
         # `label = A if c else B` is not a document call site, and matching every

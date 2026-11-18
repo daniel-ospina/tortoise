@@ -1,7 +1,7 @@
 """A12 (epic #902, issue #1050) — docs/behavior conformance test.
 
 Closes the cycle-22 doc/behavior drift disease class: INGEST_CONTRACT.md's
-response examples must stay key-set-equal to the REAL sdk.ingest /
+response examples must stay key-set-equal to the REAL sdk._ingest /
 tortoise_ingest responses, the tool description must name the gated
 default, and the skill (J8) must carry the operational markers.
 

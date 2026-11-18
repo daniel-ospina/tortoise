@@ -444,7 +444,7 @@ class TestFailureInjection:
                 return orig_query(self, cypher, params=params,
                                   timeout=timeout)
 
-            monkeypatch.setattr(guarded_type, "query", _record_query)
+            monkeypatch.setattr(guarded_type, "_query", _record_query)
             sdk.create_entity("subject", "fail-open-person",
                               subjectKind="core:other",
                               is_episodic=False)

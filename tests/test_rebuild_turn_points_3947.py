@@ -586,7 +586,7 @@ def test_rebuild_all_tolerates_a_journaled_hard_delete(tmp_path):
          "point": {"id": pid, "content": "[user] hi", "pointKind": "event",
                    "is_episodic": True, "status": "draft"}},
         {"event_id": "e2", "ts": "2026-01-01T00:00:01Z", "type": "EntityMutated",
-         "initiated_by": "sdk", "id": pid, "op": "delete", "label": "Point"},
+         "initiated_by": "sdk", "id": pid, "op": "_delete", "label": "Point"},
     ]
     (tmp / "sdk.jsonl").write_text(
         "".join(json.dumps(e) + "\n" for e in lines), encoding="utf-8")

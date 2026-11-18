@@ -3595,10 +3595,10 @@ def test_restoration_exemption_boundary():
     # … while carve-out stems are excluded by name. test_guard is a
     # TEST_NO_REDIRECT_STEMS-only stem (NOT in _EXEMPT_FROM_ENV_MUTATION_
     # GUARD) — it exercises the stem-normalized carve-out mechanism.
-    assert "test_guard" in TEST_NO_REDIRECT_STEMS
-    assert "test_guard" not in _EXEMPT_FROM_ENV_MUTATION_GUARD
+    assert "_test_guard" in TEST_NO_REDIRECT_STEMS
+    assert "_test_guard" not in _EXEMPT_FROM_ENV_MUTATION_GUARD
     assert (_TESTS_ROOT / "test_guard.py").exists()
-    for carve_out in ("test_guard", "test_reaper", "test_embedded_lifecycle",
+    for carve_out in ("_test_guard", "test_reaper", "test_embedded_lifecycle",
                       "test_flip_gate", "test_ops_safety"):
         assert carve_out in exempt, (
             f"carve-out stem {carve_out} must be in the exemption set")

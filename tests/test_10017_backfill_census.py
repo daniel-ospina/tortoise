@@ -115,7 +115,7 @@ class _FakeDB:
         self.calls: list[str] = []
 
     def list_graphs(self):
-        self.calls.append("list_graphs")
+        self.calls.append("_list_graphs")
         return list(self._names)
 
     def select_graph(self, name):
@@ -605,7 +605,7 @@ def test_main_checks_existence_before_it_selects_or_queries(monkeypatch) -> None
     assert _run_main(monkeypatch, db, ["census", "--graph", "g",
                                        "--uri-env", "CENSUS_TEST_URI"]) == 0
 
-    assert db.calls == ["list_graphs", "select_graph:g"], (
+    assert db.calls == ["_list_graphs", "select_graph:g"], (
         "GRAPH.LIST must run before the graph is selected: a read against a "
         "missing graph CREATES its keyspace")
     assert len(graph.queries) == 6
@@ -618,7 +618,7 @@ def test_main_refuses_a_missing_graph_without_issuing_one_query(monkeypatch) -> 
         _run_main(monkeypatch, db, ["census", "--graph", "typo",
                                     "--uri-env", "CENSUS_TEST_URI"])
     assert "does not exist" in str(exc.value)
-    assert db.calls == ["list_graphs"]
+    assert db.calls == ["_list_graphs"]
     assert graph.queries == []
 
 
@@ -628,7 +628,7 @@ def test_main_admits_a_missing_graph_only_with_the_explicit_opt_in(monkeypatch) 
     assert _run_main(monkeypatch, db, ["census", "--graph", "typo",
                                        "--uri-env", "CENSUS_TEST_URI",
                                        "--create-if-missing"]) == 0
-    assert db.calls == ["list_graphs", "select_graph:typo"]
+    assert db.calls == ["_list_graphs", "select_graph:typo"]
 
 
 def test_main_refuses_a_sessionless_census_and_writes_no_artifact(

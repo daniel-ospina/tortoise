@@ -131,7 +131,7 @@ def _wire_stripe_webhook(monkeypatch, order: list[str]):
                         lambda sdk, org_id, event: ("billing_upgrade", org_id))
 
     async def _audit(*a, **k):
-        order.append("audit")
+        order.append("_audit__svc")
 
     monkeypatch.setattr(ha, "_async_audit", _audit)
 
@@ -300,7 +300,7 @@ def test_stripe_billing_notify_raise_cannot_500_the_webhook(monkeypatch):
         f"a notifier raise 500'd a claimed webhook: {resp.status_code} "
         f"{resp.body[:200]!r} (#4456)"
     )
-    assert order == ["notify", "audit", "analytics"], (
+    assert order == ["notify", "_audit__svc", "analytics"], (
         f"a notifier raise aborted the following legs: {order} — the audit and "
         "telemetry legs must still run (#4456)"
     )
@@ -358,7 +358,7 @@ def test_stripe_billing_notify_bound_miss_returns_promptly(monkeypatch):
         f"(#4456)"
     )
     assert started.wait(5.0), "the notify worker never started"
-    assert order == ["notify", "audit", "analytics"], order
+    assert order == ["notify", "_audit__svc", "analytics"], order
     assert elapsed < 0.5, (
         f"the webhook took {elapsed:.2f}s for a 1.0s notify with a 0.1s offload "
         f"bound — it waited for the notification instead of letting the seam "

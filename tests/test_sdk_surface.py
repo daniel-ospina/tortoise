@@ -320,7 +320,7 @@ def test_a_vanished_public_method_is_a_failure(tmp_path, monkeypatch):
     import tools.sdk_surface as sdk_surface
 
     live = _declared()
-    target = "create_point"
+    target = "_create_point"
     assert target in live, "the fixture name must actually be on the surface"
 
     source = bridge_table.SDK_SRC.read_text(encoding="utf-8")

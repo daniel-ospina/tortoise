@@ -939,7 +939,7 @@ def test_concurrent_rotate_of_one_row_admits_exactly_one(client, fake, monkeypat
             gate.wait(timeout=60)
         return real_query(table, **kwargs)
 
-    monkeypatch.setattr(fake, "query", _rendezvous_at_claim)
+    monkeypatch.setattr(fake, "_query", _rendezvous_at_claim)
 
     results: list = [None, None]
     errors: list[BaseException] = []

@@ -112,7 +112,7 @@ def authorizations(monkeypatch):
         seen.append((" ".join(str(cypher).split()), _CACHE_WRITE_AUTHORIZED.get()))
         return real(self, cypher, params=params, timeout=timeout)
 
-    monkeypatch.setattr(_GuardedGraph, "query", query)
+    monkeypatch.setattr(_GuardedGraph, "_query", query)
     return seen
 
 

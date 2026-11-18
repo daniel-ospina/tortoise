@@ -104,7 +104,7 @@ def run_ep(sdk):
     ).result_set
     op_ids = [r[0] for r in rows] if rows else []
 
-    # Hydrate evidence from graph-persisted baselines (matches sdk.compute_confidence)
+    # Hydrate evidence from graph-persisted baselines (matches sdk._compute_confidence)
     ev_rows = proj.g.query(
         "MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NULL "
         "RETURN n.id, n.ep_alpha, n.ep_beta"

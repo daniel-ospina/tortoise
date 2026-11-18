@@ -2111,7 +2111,7 @@ class _RecordingDb:
         self.calls: list[tuple] = []
 
     def list_graphs(self):
-        self.calls.append(("list_graphs",))
+        self.calls.append(("_list_graphs",))
         return ["tortoise"]
 
     def select_graph(self, name):
@@ -2288,7 +2288,7 @@ class _PresentDb:
         self.connection = _LockRefusingConn()
 
     def list_graphs(self):
-        self.calls.append(("list_graphs",))
+        self.calls.append(("_list_graphs",))
         return [self.name]
 
     def select_graph(self, name):
@@ -3022,7 +3022,7 @@ def test_5206_live_producer_agrees_with_replay_on_aboutdocument_targets(live_pro
     """#5206: the LIVE producer path and the REPLAY resolver must agree on what
     an ``aboutDocument`` target may be — in BOTH directions.
 
-    Measured before this fix, end to end: ``sdk.create_edge('aboutDocument',
+    Measured before this fix, end to end: ``sdk._create_edge('aboutDocument',
     point, <provenance Source>)`` returned ``created=True``, supersede reported
     ``edges_transferred=1``, and ``rebuild_all`` then dropped the edge — leaving
     it on NEITHER the old nor the successor node, so the live state could not be
@@ -3087,7 +3087,7 @@ def test_5206_live_producer_agrees_with_replay_on_aboutdocument_targets(live_pro
 def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
     """#5206: the `aboutDocument` target contract — a `:Source` carrying
     `documentKind` — must hold on the live producer, and a violation reached
-    through `sdk.ingest` must arrive as the ingest contract's OWN error.
+    through `sdk._ingest` must arrive as the ingest contract's OWN error.
 
     The producer (`create_edge`) accepted ANY resolved target while the replay
     resolver refused a non-document one, so an edge built live was transferred
@@ -3565,7 +3565,7 @@ class TestVocabEdgeValidation:
         """#5025: `related` is the neutral association predicate — pinned.
 
         `related` is a LIVE, agent-writable predicate — `tortoise_create_edge`
-        (`tortoise/tool_registry.py` tool def → `sdk.create_edge`), the ingest
+        (`tortoise/tool_registry.py` tool def → `sdk._create_edge`), the ingest
         `connections` path, and `security.KNOWN_REL_TYPES` all reach it — so its
         neutrality is NOT emptiness. It is a property of the three maps it is
         absent from, and the load-bearing one is SUPERSEDE:
@@ -5286,7 +5286,7 @@ def test_prewipe_snapshot_written_before_wipe_and_cleared_after():
                     seen["sidecar_at_wipe"] = os.path.exists(sidecar)
                 return real_query(gself, cypher, *args, **kwargs)
 
-            with mock.patch.object(type(proj.g), "query", spy):
+            with mock.patch.object(type(proj.g), "_query", spy):
                 result = proj.rebuild_all(d, confirm_destructive=True)
             assert seen.get("sidecar_at_wipe") is True, (
                 "the durable snapshot must exist BEFORE MATCH (n) DETACH "
@@ -5352,7 +5352,7 @@ def test_prewipe_snapshot_capture_failure_aborts_before_wipe():
                     raise RuntimeError("simulated capture failure")
                 return real_query(gself, cypher, *args, **kwargs)
 
-            with mock.patch.object(type(proj.g), "query", spy), \
+            with mock.patch.object(type(proj.g), "_query", spy), \
                     pytest.raises(RuntimeError,
                                    match="could not be captured"):
                 proj.rebuild_all(d, confirm_destructive=True)

@@ -184,7 +184,7 @@ async def test_the_real_recall_tool_is_classified_through_its_wider_payload(
 
     monkeypatch.setattr(ms, "_get_org_sdk", _RaisingRecallSDK)
 
-    result = await ms.mcp.call_tool("tortoise_recall", {"query": "q"})
+    result = await ms.mcp.call_tool("tortoise_recall", {"_query": "q"})
 
     # The wire is unchanged: the caller still sees the mode-spread failure.
     assert result.structured_content == {
@@ -287,7 +287,7 @@ async def test_a_union_envelope_tool_is_classified_through_the_envelope(
     def union_tool(query: str = "q") -> list[dict] | dict:
         return ms._safe(_QuotaSDK()._query, query)
 
-    result = await _call("_8135_union", union_tool, {"query": "q"})
+    result = await _call("_8135_union", union_tool, {"_query": "q"})
 
     assert result.structured_content == {
         "result": {"error": "points quota exceeded", "code": ms.ERR_QUOTA}}
@@ -367,7 +367,7 @@ async def test_an_array_envelope_tool_agrees_with_the_repair(events, stdio):
     def search_tool(query: str = "q") -> list[dict]:
         return ms._safe(_QuotaSDK()._query, query)
 
-    await _call("_8135_search", search_tool, {"query": "q"})
+    await _call("_8135_search", search_tool, {"_query": "q"})
 
     row = events[-1]
     assert row["status"] == "exec_error", row
@@ -422,7 +422,7 @@ async def test_a_dispatch_that_recovered_from_a_secondary_failure_stays_ok(
             pass
         return ms._safe(_RecoveredSDK().suggest_entry_points, query)
 
-    result = await _call("_8135_recovered", recovering_tool, {"query": "q"})
+    result = await _call("_8135_recovered", recovering_tool, {"_query": "q"})
 
     assert result.structured_content == {"result": [{"id": "pt_1",
                                                      "name": "Acme"}]}

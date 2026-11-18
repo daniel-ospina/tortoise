@@ -1,6 +1,6 @@
 """#4971 — ``apply_payload_operators`` needs a ``(op_type, src, dst)`` guard.
 
-``sdk.create_operator`` mints a FRESH ULID node on every call with no existence
+``sdk._create_operator`` mints a FRESH ULID node on every call with no existence
 probe, so a commit that reaches the operator pass twice mints a SECOND operator
 Point for one bridge. The shared helper already carries the MITIGATES
 deep-miss rule; the sibling writers each carry an idempotency probe (the eval

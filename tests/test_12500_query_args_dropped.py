@@ -3,8 +3,8 @@ accepted by `tortoise_query` and DROPPED on the arms that cannot apply them.
 
 The tool's signature takes ``min_confidence`` and ``order_by``, and its docstring
 presents them as general arguments — but only the ``text=`` arm consumes them
-(forwarded into ``sdk.tortoise_fts_query``). Both structural arms call
-``sdk.paginated_query(kind, skip, limit, include_retracted, **filters)``, whose
+(forwarded into ``sdk._tortoise_fts_query``). Both structural arms call
+``sdk._paginated_query(kind, skip, limit, include_retracted, **filters)``, whose
 signature has **neither** parameter (``tortoise/sdk.py:26642-26645``), and the tag
 arm calls ``query_points_by_tag(tag, _record_reads=False)``, which takes the tag and that
 private flag and nothing else.
@@ -70,7 +70,7 @@ class _StubSDK:
     def _tortoise_fts_query(self, query=None, kind=None, *, entity_type="point",
                            min_confidence=0.0, order_by="relevance",
                            limit=10, include_terminal=False, **kwargs):
-        self.calls.append(("tortoise_fts_query", query, kind, {
+        self.calls.append(("_tortoise_fts_query", query, kind, {
             "min_confidence": min_confidence, "order_by": order_by,
             "limit": limit, "include_terminal": include_terminal, **kwargs}))
         # FIXTURE FIDELITY (round-26 P2 1): the real SDK JUDGES both of these
@@ -99,13 +99,13 @@ class _StubSDK:
         return self.rows
 
     def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
-        self.calls.append(("paginated_query", kind, skip, limit, kwargs))
+        self.calls.append(("_paginated_query", kind, skip, limit, kwargs))
         total = len(self.rows)
         return {"results": self.rows[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
     def _query_points_by_tag(self, tag, *, _record_reads=True):
-        self.calls.append(("query_points_by_tag", tag, _record_reads))
+        self.calls.append(("_query_points_by_tag", tag, _record_reads))
         return self.rows
 
 
@@ -205,20 +205,20 @@ def test_the_tag_arm_refuses_arguments_it_cannot_apply(stub, argument, value) ->
     assert _is_refusal(result), (
         f"tag= with {argument}={value!r} was accepted and DROPPED"
     )
-    assert [c for c in stub.calls if c[0] == "query_points_by_tag"] == [], (
+    assert [c for c in stub.calls if c[0] == "_query_points_by_tag"] == [], (
         f"the tag read happened before refusing: {stub.calls}"
     )
     # The reason must be the TAG arm's, not the structural accessor's — a shared
     # one-size-fits-all explanation shipped "the structural arms read through
-    # sdk.paginated_query" on a tag= refusal (rounds 4 and 5, both measured).
-    assert "paginated_query" not in result["error"], result["error"]
+    # sdk._paginated_query" on a tag= refusal (rounds 4 and 5, both measured).
+    assert "_paginated_query" not in result["error"], result["error"]
 
 
 def test_a_falsy_tag_is_still_the_tag_arm(stub) -> None:
     """`tag=""` is a SET tag, and the arm test must key on `is not None`.
 
     `tag` is a string, so keying the arm on its truthiness looks harmless — but
-    then `tag=""` is refused with the STRUCTURAL reason ("sdk.paginated_query …")
+    then `tag=""` is refused with the STRUCTURAL reason ("sdk._paginated_query …")
     while `query_points_by_tag` is the arm that would have answered (round-5
     finding 5b: the mutant `if tag` kept the whole suite green). Fails if the arm
     is decided by truthiness instead of presence.
@@ -229,7 +229,7 @@ def test_a_falsy_tag_is_still_the_tag_arm(stub) -> None:
 
     assert _is_refusal(result), "no refusal to read a message off"
     assert "tag=" in result["error"], result["error"]
-    assert "paginated_query" not in result["error"], result["error"]
+    assert "_paginated_query" not in result["error"], result["error"]
 
 
 def test_the_refusal_names_the_argument_it_dropped(stub) -> None:
@@ -278,7 +278,7 @@ def test_the_text_arm_still_APPLIES_them(stub, argument, value) -> None:
     result = tortoise_query(text="anything", **{argument: value})
 
     assert not _is_refusal(result), f"refused a legitimate text= read: {result}"
-    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    fts = [c for c in stub.calls if c[0] == "_tortoise_fts_query"]
     assert fts, f"the fts leg was never read: {stub.calls}"
     assert fts[0][3][argument] == value, (
         f"{argument} did not reach the fts leg: {fts[0][3]}"
@@ -580,7 +580,7 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
         # round-26), so the caller gets the SDK's own complaint rather than a
         # `#12500` paragraph that is false about the value and whose route
         # dead-ends.
-        fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+        fts = [c for c in stub.calls if c[0] == "_tortoise_fts_query"]
         assert fts and fts[-1][3]["min_confidence"] == bad, (
             f"min_confidence={bad} never reached the accessor — this guard "
             f"answered for a value it cannot judge: {result} / {fts}"
@@ -601,7 +601,7 @@ def test_an_unusable_floor_is_left_to_the_sdk_to_refuse(stub) -> None:
     # is the SDK's own complaint, not a `#12500` paragraph.
     text_floor = tortoise_query(text="x", entity_type="document",
                                min_confidence="0.9")
-    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    fts = [c for c in stub.calls if c[0] == "_tortoise_fts_query"]
 
     assert fts and fts[-1][3]["min_confidence"] == "0.9", (
         f"the string floor never reached the accessor, so this guard answered "
@@ -634,7 +634,7 @@ def test_the_stub_judges_order_by_the_way_the_sdk_does(stub) -> None:
 
     result = tortoise_query(text="x", order_by="garbage")
 
-    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    fts = [c for c in stub.calls if c[0] == "_tortoise_fts_query"]
     assert fts and fts[-1][3]["order_by"] == "garbage", (
         f"order_by never reached the accessor, so this fixture cannot judge it: "
         f"{result} / {fts}"
@@ -672,7 +672,7 @@ def test_the_text_arm_still_applies_the_floor_to_POINTS(stub) -> None:
             f"refused the arm that CAN apply the floor (entity_type={entity_type!r}):"
             f" {result}"
         )
-        fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+        fts = [c for c in stub.calls if c[0] == "_tortoise_fts_query"]
         assert fts and fts[-1][3]["min_confidence"] == _CONFIDENCE_FLOOR
 
 
@@ -703,7 +703,7 @@ def test_the_single_argument_ordering_reason_is_the_arms_own(stub) -> None:
     assert _is_refusal(structural_only) and _is_refusal(tag_only)
     # One name, so the verb is singular — and the reason is the accessor's.
     assert "order_by is not applied" in structural_only["error"], structural_only["error"]
-    assert "paginated_query" in structural_only["error"], structural_only["error"]
+    assert "_paginated_query" in structural_only["error"], structural_only["error"]
     assert "takes no ordering" in structural_only["error"], structural_only["error"]
     assert ("tag mode reads a tag and nothing else"
             in tag_only["error"]), tag_only["error"]
@@ -805,7 +805,7 @@ def test_the_tag_arm_still_refuses_when_text_is_also_passed(stub, kwargs) -> Non
 
     assert _is_refusal(result), f"served {sorted(kwargs)} on the tag= arm"
     assert "tag=" in result["error"], result["error"]
-    assert not [c for c in stub.calls if c[0] == "query_points_by_tag"], (
+    assert not [c for c in stub.calls if c[0] == "_query_points_by_tag"], (
         "the tag arm READ before refusing — rows can be served on an error path"
     )
 
@@ -938,7 +938,7 @@ def test_the_relevance_ordering_is_served_for_every_type(
         f"refused order_by='relevance' for entity_type={entity_type!r}: that IS "
         f"the order those rows already have, so it is always applied"
     )
-    fts = [c for c in stub.calls if c[0] == "tortoise_fts_query"]
+    fts = [c for c in stub.calls if c[0] == "_tortoise_fts_query"]
     assert fts and fts[-1][3]["order_by"] == "relevance"
 
 
@@ -1166,7 +1166,7 @@ _DOCSTRING_BEHAVIOUR_CLAIMS = (
     # which arm applies the floor at all (inverted: "for every type")
     '`min_confidence` only for `entity_type="point"`',
     # why an accepted structural value was discarded (inverted: "declares both")
-    "read through sdk.paginated_query, which declares neither",
+    "read through sdk._paginated_query, which declares neither",
     # the feature does not exist (inverted: "is a shipped feature")
     "structural filtering by confidence is Phase 2 in the hybrid-search plan, "
     "not a shipped feature",

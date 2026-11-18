@@ -1228,9 +1228,9 @@ class TestDryRunKeepsValidation:
 
         preview = mcp.tortoise_invalidate(old, new, dry_run=True)
         assert preview.get("error"), preview
-        assert "retract_point" in str(preview["error"])
+        assert "_retract_point" in str(preview["error"])
         # the write path refuses the SAME input, identically
-        with pytest.raises(ValueError, match="retract_point"):
+        with pytest.raises(ValueError, match="_retract_point"):
             sdk._invalidate_point(old, new)
         assert _graph_counts(sdk) == before
 

@@ -1221,7 +1221,7 @@ def test_terminal_statuses_mirror_the_read_paths_RENDERED_predicate():
 
     ⛔ THIS IS THE LEAF, NOT THE READ PATH, and the two pins below close the links this one
     cannot see. `census.json`'s `denominator` names "the two conjuncts of
-    `search_engine._exclude_status_clause`", and `sdk.query` reaches them through that shim
+    `search_engine._exclude_status_clause`", and `sdk._query` reaches them through that shim
     (`sdk.py::clauses.append(_exclude_status_clause("n"))`, passing NO flag, so the SHIM's
     `include_outdated_flag=True` default is what turns the flag half on for the Point path).
     Measured in review: a mutation of the SHIM's default to False left a pin that only called
@@ -1273,7 +1273,7 @@ def test_the_read_paths_composed_predicate_carries_both_conjuncts():
 
     from tortoise.search_engine import _exclude_status_clause
 
-    composed = _exclude_status_clause("n")  # the exact call `sdk.query` appends
+    composed = _exclude_status_clause("n")  # the exact call `sdk._query` appends
 
     assert set(re.findall(r"n\.status <> '([^']*)'", composed)) == qp.TERMINAL_STATUSES, (
         "the composed clause's status vocabulary must be EXACTLY the probe's — a status added "
@@ -1291,21 +1291,21 @@ def test_the_read_paths_composed_predicate_carries_both_conjuncts():
 
 @pytest.mark.parametrize("method, kwargs", [
     # sdk.py:24334 — the un-paginated read
-    ("query", {"_record_reads": False}),
+    ("_query", {"_record_reads": False}),
     # sdk.py:24407 — `paginated_query`, and THIS is the arm the census traversed: the probe
     # asks `tortoise_query(limit, offset)` (probe::_page), `mcp_server` dispatches the offset
     # arm to `paginated_query` (`mcp_server.py:3905`), and the row denominator the artifact
     # publishes IS that WHERE. Measured in review: mutating ONLY this arm left every other
     # pin in this file green.
-    ("paginated_query", {"skip": 0, "limit": 500}),
+    ("_paginated_query", {"skip": 0, "limit": 500}),
 ])
 def test_every_read_arm_that_serves_points_carries_both_conjuncts(method, kwargs):
     """FAILS IF either SDK read arm stops passing the Point WHERE through the composed
     clause, or starts passing `include_outdated_flag=False` for it.
 
     The census's denominator claim is about the population "the default read serves", so the
-    CALL SITES are the last link and prose cannot pin them: `sdk.query` and
-    `sdk.paginated_query` each build their WHERE from `_operator_scope_clauses(kind)` plus
+    CALL SITES are the last link and prose cannot pin them: `sdk._query` and
+    `sdk._paginated_query` each build their WHERE from `_operator_scope_clauses(kind)` plus
     their OWN `_exclude_status_clause("n")` append — two separate statements, `sdk.py:24334`
     and `sdk.py:24407` — and the probe measured through the SECOND one. This captures the
     Cypher each arm hands to `proj.g.query` and asserts the same three things on it.

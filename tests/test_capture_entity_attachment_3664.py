@@ -324,7 +324,7 @@ def test_entity_linked_not_resurrected_by_same_id_recreate(journal_sdk):
     id: a replayed registration, a restored backup, an explicit
     ``_server_id``), so without a hard-delete boundary the deleted link
     RESURRECTED on replay while live had no such edge (live != rebuild).
-    Reached through the public surface: ``sdk.delete_entity`` journals
+    Reached through the public surface: ``sdk._delete_entity__svc`` journals
     ``EntityMutated op=delete``.
 
     ⚠️ MIGRATED (#3590 D1, owner RULED 2026-10-26). The same-id re-create used
@@ -616,7 +616,7 @@ def test_session_link_survives_same_id_non_session_delete(tmp_path):
                    "pointKind": "statement"}},
         # ...hard-deleted. Live deletes the POINT only; the Session survives
         # WITH its edge.
-        {"type": "EntityMutated", "id": "session-X", "op": "delete",
+        {"type": "EntityMutated", "id": "session-X", "op": "_delete",
          "label": "Point"},
     ]
     sdk = TortoiseSDK(str(tmp_path / "session-src.db"))
@@ -664,7 +664,7 @@ def test_nested_entity_mutated_delete_suppresses_entity_link(tmp_path):
          "target_id": "obj-n", "edge_type": "aboutObject"},
         # NESTED shape: the delete payload rides under `point`.
         {"type": "EntityMutated",
-         "point": {"id": "pt-n", "op": "delete", "label": "Point"}},
+         "point": {"id": "pt-n", "op": "_delete", "label": "Point"}},
         {"type": "PointAdded",
          "point": {"id": "pt-n", "content": "c2",
                    "pointKind": "statement"}},
@@ -710,8 +710,8 @@ def test_nested_entity_mutated_delete_is_exempt_from_recreatable_guard(tmp_path)
     from tortoise.projection import FalkorProjection
 
     nested = {"type": "EntityMutated",
-              "point": {"id": "p1", "op": "delete", "label": "Point"}}
-    flat = {"type": "EntityMutated", "id": "p1", "op": "delete",
+              "point": {"id": "p1", "op": "_delete", "label": "Point"}}
+    flat = {"type": "EntityMutated", "id": "p1", "op": "_delete",
             "label": "Point"}
 
     nested_ids = FalkorProjection._journal_hard_deleted_ids([nested])
@@ -823,7 +823,7 @@ def test_hard_delete_boundary_is_per_id_and_label(tmp_path):
         {"type": "ObjectRegistered", "id": "obj-z", "name": "obj-z"},
         # An EARLIER hard delete of "dup" naming the Object kind — removes
         # ONLY ``Object`` (#3860: the fold is scoped to its own label).
-        {"type": "EntityMutated", "id": "dup", "op": "delete",
+        {"type": "EntityMutated", "id": "dup", "op": "_delete",
          "label": "Object"},
         # The Object is RE-CREATED under the same id.
         {"type": "ObjectRegistered", "id": "dup", "name": "dup"},
@@ -938,7 +938,7 @@ def test_foreign_kind_delete_does_not_suppress_surviving_kind_link(
         # The POINT-kind delete of "dup" — AFTER both links. It removes the
         # Point "dup" only: it suppresses the seq-3 Point-side link and must
         # NOT suppress the seq-5 Object-side link.
-        {"type": "EntityMutated", "id": "dup", "op": "delete",
+        {"type": "EntityMutated", "id": "dup", "op": "_delete",
          "label": "Point"},
         # Re-create the POINT "dup": the endpoint exists again, so the seq-3
         # link's absence is SUPPRESSION, not an absent endpoint.

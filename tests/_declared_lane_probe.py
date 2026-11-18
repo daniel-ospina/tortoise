@@ -172,7 +172,7 @@ class LaneProbe:
                 )
             return original(handle, cypher, params=params, timeout=timeout)
 
-        monkeypatch.setattr(_GuardedGraph, "query", instrumented)
+        monkeypatch.setattr(_GuardedGraph, "_query", instrumented)
         return self
 
     # ── the two views ───────────────────────────────────────────────────────

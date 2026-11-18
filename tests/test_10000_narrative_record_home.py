@@ -138,12 +138,12 @@ def test_an_empty_journal_path_is_not_an_armed_journal(tmp_path, monkeypatch):
     assert _prose_on_nodes(empty) == []
 
 
-@pytest.mark.parametrize("door", ["create_point", "update_point"])
+@pytest.mark.parametrize("door", ["_create_point", "_update_point"])
 def test_the_point_doors_refuse_the_narrative(sdk, door):
     """§9.1 says "not a `Point`", and neither Point door consults a deny-set —
     `update_point` writes raw `SET n += $props` and journals `PointRevised`
     (measured, review cycle 3), so a fold-only deny would make live ≠ replay."""
-    if door == "create_point":
+    if door == "_create_point":
         with pytest.raises(ValueError) as exc:
             sdk._create_point("statement", "a claim", story_arc=PROSE)
         assert "cannot be written on a Point" in str(exc.value)

@@ -76,7 +76,7 @@ def test_rubric_is_retrieval_relevance_not_extraction():
     assert GRADE_VOCAB == ("non_relevant", "partially", "relevant")
     assert "non-relevant" in RELEVANCE_RUBRIC_SYSTEM.lower()
     assert "pool" in RELEVANCE_RUBRIC_SYSTEM.lower()
-    assert "query" in RELEVANCE_RUBRIC_SYSTEM.lower()
+    assert "_query" in RELEVANCE_RUBRIC_SYSTEM.lower()
     # Extraction-axis vocabulary (probe_extractor closed vocab + the
     # extraction rubric's relations/entities) must be entirely absent.
     import re as _re

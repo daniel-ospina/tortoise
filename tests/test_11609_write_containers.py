@@ -99,7 +99,7 @@ def test_the_props_arm_member_routes_at_update_knowledge_not_update(monkeypatch)
     """#12915 review F1 — the ONE routing decision the container's `props` arm
     inherits from `tortoise_update`.
 
-    `sdk.update` sends a Point to `update_point`: no `restatus` journal record
+    `sdk._update` sends a Point to `update_point`: no `restatus` journal record
     (the `derived = replay(journal)` class) and a fixed-sentence refusal that
     names neither the target status nor the transition. `sdk.update_knowledge`
     is the relay the absorbed `tortoise_update_point` / `tortoise_update_entity`

@@ -282,7 +282,7 @@ def seed_a4_twin_pairs(sdk) -> dict:
                     "contested_twin": contested["claim"],
                     "clean_twin": clean_twin,
                     "counter": counter,
-                    "query": query,
+                    "_query": query,
                 }
             )
             index += 1

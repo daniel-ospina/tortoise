@@ -131,7 +131,7 @@ def provisioned(client, tmp_path):
 @pytest.fixture
 def ingest_base(tmp_path, monkeypatch):
     """A server-owned sandbox for staged docs (set before the job runs)."""
-    base = str(tmp_path / "ingest")
+    base = str(tmp_path / "_ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     return base
 

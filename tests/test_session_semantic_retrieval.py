@@ -84,7 +84,7 @@ _CONCEPT_AXES = (
         "signin", "session", "token", "credential", "expires", "expire",
         "locked", "locked out", "account",
     }),
-    frozenset({"database", "postgres", "sql", "query", "index", "migration"}),
+    frozenset({"database", "postgres", "sql", "_query", "index", "migration"}),
     frozenset({"sourdough", "baked", "bread", "crust", "recipe", "oven"}),
 )
 

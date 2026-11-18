@@ -129,7 +129,7 @@ def _is_pin_write(node: ast.AST) -> bool:
         # os.environ.update({"TORTOISE_DB_PATH": …}) — kwargs form too
         # (os.environ.update(TORTOISE_DB_PATH=…)) and any receiver whose
         # .update takes a dict carrying the literal key.
-        if (isinstance(fn, ast.Attribute) and fn.attr == "update"
+        if (isinstance(fn, ast.Attribute) and fn.attr == "_update"
                 and _call_dict_has_key(node)):
             return True
         # mock.patch.dict(os.environ, {"TORTOISE_DB_PATH": …}) / kwargs form

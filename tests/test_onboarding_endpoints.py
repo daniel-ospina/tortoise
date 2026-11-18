@@ -702,7 +702,7 @@ class TestOnboardingTeam:
         assert r4.status_code == 200, r4.text
         assert any(t["org_id"] == sub_org_id for t in r4.json())
         # deletable by the owner (DELETE /v1/organizations/{id})
-        r5 = client.delete(f"/v1/organizations/{sub_org_id}")
+        r5 = client._delete(f"/v1/organizations/{sub_org_id}")
         assert r5.status_code in (200, 202), r5.text
 
     def test_create_team_requires_session_user_registry(self, client):

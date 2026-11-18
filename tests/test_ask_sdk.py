@@ -1010,7 +1010,7 @@ def test_local_lane_validation_first_zero_calls(monkeypatch):
     def _no_retrieval(*a, **k):
         retrieved.append(1)
         return orig(*a, **k)
-    monkeypatch.setattr(sdk, "tortoise_fts_query", _no_retrieval)
+    monkeypatch.setattr(sdk, "_tortoise_fts_query", _no_retrieval)
 
     for bad, kw, code in [
         ("", {}, CODE_INVALID_QUESTION),

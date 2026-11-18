@@ -174,7 +174,7 @@ class _RecordingGraph:
         self.calls: list[tuple] = []
 
     def delete(self, *args, **kwargs):
-        self.calls.append(("delete", args, kwargs))
+        self.calls.append(("_delete", args, kwargs))
         return "OK"
 
     def execute_command(self, *args, **kwargs):
@@ -213,7 +213,7 @@ class _QueryRecordingGraph(_NamedRecordingGraph):
     """
 
     def query(self, cypher, params=None, timeout=None):
-        self.calls.append(("query", cypher, params))
+        self.calls.append(("_query", cypher, params))
         return "OK"
 
 
@@ -461,7 +461,7 @@ def test_the_same_decision_covers_both_spellings():
     one of them silently drifts open the next time the other is narrowed; the
     repo's #3595 convention is one shared decision per class.
     """
-    assert hasattr(_GuardedGraph, "delete"), (
+    assert hasattr(_GuardedGraph, "_delete"), (
         "`delete` must be DEFINED on the wrapper — a forwarded attribute is "
         "unreachable by any verb-level guard by construction (#9209)"
     )
@@ -703,7 +703,7 @@ def test_the_bulk_wipe_statement_door_judges_the_handles_own_graph():
     # the rule is "judge the handle's name", not "refuse every foreign handle".
     own = _QueryRecordingGraph("test_9209")
     _GuardedGraph(own, proj).query("MATCH (n) DETACH DELETE n")
-    assert [c[0] for c in own.calls] == ["query"], (
+    assert [c[0] for c in own.calls] == ["_query"], (
         "the declared lane must still reach a disposable graph named like the "
         f"projection's; calls={own.calls!r}"
     )
@@ -898,7 +898,7 @@ def test_a_handle_without_a_name_is_refused_not_judged_by_the_projection():
             self.calls = []
 
         def delete(self, *args, **kwargs):
-            self.calls.append(("delete", args, kwargs))
+            self.calls.append(("_delete", args, kwargs))
             return "OK"
 
     proj = _armed_projection(graph_name="test_9209", embedded=False)
@@ -1457,7 +1457,7 @@ def test_delete_judges_the_handles_own_graph_not_the_projections():
     own = _NamedRecordingGraph("test_9209")
     with _replay_write_scope():
         assert _GuardedGraph(own, proj).delete() == "OK"
-    assert [c[0] for c in own.calls] == ["delete"], (
+    assert [c[0] for c in own.calls] == ["_delete"], (
         "the declared lane must still reach a disposable graph named like the "
         "projection's"
     )
@@ -1477,7 +1477,7 @@ def test_a_declared_scope_reaches_a_disposable_graph():
 
     with _replay_write_scope():
         assert guarded.delete() == "OK"
-    assert ("delete", (), {}) in proj.g.calls
+    assert ("_delete", (), {}) in proj.g.calls
     assert proj._graph_name.startswith("test_"), (
         "this case must exercise L2's NAME branch (embedded=False), so the "
         "permitted path is proven with the disposability check actually "
@@ -1543,7 +1543,7 @@ def test_an_unarmed_projection_still_applies_the_name_rule():
     assert _GuardedGraph(handle, disposable).delete() == "OK"
     assert _GuardedGraph(handle, disposable).execute_command(
         "DEL", "test_9209_disposable") == "OK"
-    assert [c[0] for c in handle.calls] == ["delete", "execute_command"], (
+    assert [c[0] for c in handle.calls] == ["_delete", "execute_command"], (
         "an unarmed projection must still be able to drop a disposable graph"
     )
 
@@ -1620,8 +1620,8 @@ for _kind in ("node", "edge"):
 #: procedure string into CYPHER position, so a forwarded attribute was a write
 #: channel no verb-level guard could see.
 _GUARDED_ON_THE_WRAPPER = frozenset(
-    {"query", "ro_query", "_query", "profile", "explain", "execute_command",
-     "delete", "call_procedure"}
+    {"_query", "ro_query", "_query", "profile", "explain", "execute_command",
+     "_delete", "call_procedure"}
 )
 
 #: Statement-bearing channels that are NOT this suite's: they carry Cypher, so
@@ -1676,7 +1676,7 @@ def test_every_handle_verb_is_classified(sdk_with_journal):
     assert not stale, (
         f"the ledger declares verbs the handle does not have: {sorted(stale)}"
     )
-    assert "delete" in wrapper_defined, (
+    assert "_delete" in wrapper_defined, (
         "`delete` (GRAPH.DELETE) must be DEFINED on the wrapper, not forwarded: "
         "a forwarded attribute is exactly the #9209 hole"
     )

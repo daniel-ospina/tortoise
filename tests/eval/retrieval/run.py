@@ -373,11 +373,11 @@ def _run_oracle_query(q: dict, ctx: dict, oracle) -> tuple[dict, dict, dict]:
         # #1348 positive control: a per-query duck-typed stub projection whose
         # .g.query returns oracle-grade-derived signals (query-conditioned).
         stub = _StubOracleProjection(
-            ctx.get("oracle"), ctx.get("live_ids_by_topic"), q["query"])
+            ctx.get("oracle"), ctx.get("live_ids_by_topic"), q["_query"])
         _STUB_CURRENT.oracle_target = q.get("oracle_target")
     try:
         ranked = retrieve_per_strategy(
-            ctx["graph"], q["query"], q.get("kind"), ctx["vecs"].get(q["id"]),
+            ctx["graph"], q["_query"], q.get("kind"), ctx["vecs"].get(q["id"]),
             ctx["tfidf_points"], ctx["is_embedded"], ctx["limit"],
             depth=ctx.get("depth"), k_sweep=ctx.get("k_sweep", False),
             proj=ctx.get("proj"), graph_ranker_arm=ctx.get("graph_ranker_arm", False),
@@ -413,7 +413,7 @@ def _run_authored_query(q: dict, ctx: dict) -> dict[str, list[tuple[str, float]]
     # is not None → treated as a projection; _fetch_signals swallows the
     # AttributeError). Always None here (code-review P1 fix).
     return retrieve_per_strategy(
-        ctx["graph"], q["query"], q.get("kind"), ctx["vecs"].get(q["id"]),
+        ctx["graph"], q["_query"], q.get("kind"), ctx["vecs"].get(q["id"]),
         ctx["tfidf_points"], ctx["is_embedded"], ctx["limit"],
         depth=ctx.get("depth"), k_sweep=ctx.get("k_sweep", False),
         proj=ctx.get("proj"), graph_ranker_arm=ctx.get("graph_ranker_arm", False),
@@ -659,9 +659,9 @@ def _query_vecs(oracle, queries, seed: int, *, space: str):
     vecs: dict[str, list[float]] = {}
     for q in queries:
         if model is None:
-            vecs[q["id"]] = oracle.query_vector_for(q["query"], seed)
+            vecs[q["id"]] = oracle.query_vector_for(q["_query"], seed)
         else:
-            vecs[q["id"]] = [float(x) for x in model.encode([q["query"]])[0]]
+            vecs[q["id"]] = [float(x) for x in model.encode([q["_query"]])[0]]
     return vecs, model is not None
 
 
@@ -1061,7 +1061,7 @@ def _run_with_sdk(args, sdk) -> dict:
         if k_metrics:
             oracle_k_metrics[q["id"]] = k_metrics
         oracle_pool_results[q["id"]] = {
-            "_query": q["query"],
+            "_query": q["_query"],
             **{strat: [
                 {"id": pid, "content": next(
                     (p["content"] for p in points if p["id"] == pid), ""),
@@ -1082,7 +1082,7 @@ def _run_with_sdk(args, sdk) -> dict:
     for q in authored_set["queries"]:
         ranked = _run_authored_query(q, ctx)
         authored_pool_results[q["id"]] = {
-            "_query": q["query"],
+            "_query": q["_query"],
             **{strat: [
                 {"id": pid, "content": next(
                     (p["content"] for p in points if p["id"] == pid), ""),

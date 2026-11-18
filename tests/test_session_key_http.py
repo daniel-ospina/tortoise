@@ -340,7 +340,7 @@ class TestRecoveryMint:
             return (orig_query(self, cypher, params=params, **kwargs)
                     if params is not None else orig_query(self, cypher, **kwargs))
 
-        monkeypatch.setattr(graph_cls, "query", _spy)
+        monkeypatch.setattr(graph_cls, "_query", _spy)
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 402, r.text
 

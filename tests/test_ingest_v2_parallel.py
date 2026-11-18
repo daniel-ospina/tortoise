@@ -525,7 +525,7 @@ def test_parallel_worker_usage_sink_attached_and_attributed(monkeypatch):
     assert env is not None, (
         "parallel ingest usage rows were not attributed to the question "
         "(keyless overhead)")
-    bucket = env["by_stage"]["ingest"]["deepseek"]["fake-wire"]
+    bucket = env["by_stage"]["_ingest"]["deepseek"]["fake-wire"]
     assert bucket["calls"] == n
     assert bucket["prompt_tokens"] == 10 * n
     assert bucket["completion_tokens"] == 4 * n
@@ -659,7 +659,7 @@ def test_extractor_warnings_reach_the_report_end_to_end(monkeypatch):
         "error_classes": {}, "leg_mix": {"tfidf": 2},
         "leg_mix@k": {"5": {"tfidf": 2}}, "pool_size": 5,
         "evidence_written": 1, "evidence_retrieved@k": {"5": 1},
-        "ingest_latency_ms": 1.0, "gate_reasons": [], "ingest": stats,
+        "ingest_latency_ms": 1.0, "gate_reasons": [], "_ingest": stats,
     }
     audit = audit_dataset([{
         "question_id": "q-audit", "haystack_session_ids": ["s0"],

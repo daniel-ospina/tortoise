@@ -1646,7 +1646,7 @@ def test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions(
     # The documented guarantee names the producer it costs (P1-3's deliverable).
     from tortoise.entity_identity import resolve_fold_name
     doc = resolve_fold_name.__doc__ or ""
-    assert "capture-metadata" in doc and "ingest" in doc, (
+    assert "capture-metadata" in doc and "_ingest" in doc, (
         "the exemption no longer names the live in-repo producer that keeps "
         "losing these edges — the recorded guarantee was deleted")
 

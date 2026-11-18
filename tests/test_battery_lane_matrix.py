@@ -11,7 +11,7 @@ single allowlisted exception is ``_scenario_graph``: raw test-support
 (read-back for assertions), never reachable from the runtime write/read
 path. The reference-lane raw seeder (setup.py ``batch_setup``) lives in
 battery/runner/setup.py and is NOT parsed here — the arm itself holds no
-raw channel (Task-2 swapped the real seed channel to sdk.ingest).
+raw channel (Task-2 swapped the real seed channel to sdk._ingest).
 
 Why source-level and not runtime tracing: every SDK verb internally issues
 ``proj.g.query`` — instrumenting the SDK/projection boundary would flag the

@@ -827,7 +827,7 @@ def test_a_row_whose_content_looks_like_a_bundle_ref_cannot_cycle():
 def test_bundle_carries_no_deletion():
     plan = C.build_plan([row("a", kind="decision", content="d")], source_graph="old", target_graph="new", packs={})
     body = json.dumps(plan.bundle())
-    for verb in ("delete", "DELETE", "retract", "supersede"):
+    for verb in ("_delete", "DELETE", "retract", "supersede"):
         assert verb not in body
 
 
@@ -2174,9 +2174,9 @@ def test_every_overview_section_the_reader_asks_for_is_advertised():
     silently empty census. Pin the names against the server's own tuple."""
     used = _first_arg_strings({"_section"}, CLI_SRC)
     # NON-VACUITY: all five sections the two verbs read must be present.
-    assert {"status", "structure", "sources", "graphs", "audit"} <= used, used
+    assert {"status", "structure", "sources", "graphs", "_audit__svc"} <= used, used
     declared = _declared_overview_sections()
-    assert {"audit", "status", "structure", "sources", "graphs"} <= set(declared), declared
+    assert {"_audit__svc", "status", "structure", "sources", "graphs"} <= set(declared), declared
     assert used <= set(declared), f"not an overview section: {sorted(used - set(declared))}"
 
 # ── round-29 review findings ──────────────────────────────────────────────
@@ -2770,7 +2770,7 @@ def test_the_cli_refuses_a_target_spelling_the_graphs_surface_cannot_resolve(
     """Round-37 P3-2 — the SHIPPED shape of the `graphs` section.
 
     `graphs()` wraps each string from `tortoise_list_graphs()` as `{"namespace": s}`
-    (`sdk.list_graphs() -> list[str]`), so the surface exposes exactly the strings it
+    (`sdk._list_graphs() -> list[str]`), so the surface exposes exactly the strings it
     lists. A `--target` spelled differently from every exposed string is therefore
     REFUSED by the identity guard — never silently re-sent, and never skipped: that is
     the honest contract on today's surface, and this arms it.
@@ -3761,7 +3761,7 @@ def test_inventory_and_plan_answer_the_same_exit_code_for_a_surface_fault(
     assert plan == inv, (plan, inv)
 
 
-@pytest.mark.parametrize("failing", ["status", "structure", "sources", "graphs", "audit",
+@pytest.mark.parametrize("failing", ["status", "structure", "sources", "graphs", "_audit__svc",
                                       "points"])
 def test_every_census_read_answers_the_designed_refusal(
         monkeypatch, capsys, tmp_path, failing):
@@ -4433,7 +4433,7 @@ def test_an_event_layer_above_the_ceiling_is_refused(monkeypatch, tmp_path, caps
 def test_a_truncation_shaped_event_read_is_refused(monkeypatch, tmp_path, capsys):
     """A response that FILLS the limit, with nothing vouching for it, may be truncated.
 
-    `sdk.get_events` is `MATCH (e:Event) … LIMIT $lim` with no `SKIP`, so "a full page"
+    `sdk._get_events` is `MATCH (e:Event) … LIMIT $lim` with no `SKIP`, so "a full page"
     and "a truncated layer" are the same bytes. Deleting this arm reds this test.
     """
     mod = _tool_module()

@@ -98,7 +98,7 @@ def _outcome(qid: str, *, er=None, tr=None, eturns: int = 0,
         "n_ingest_errors": 0,
         "context_tokens": 100,
         "context_point_count": 3,
-        "ingest": {"evidence_turns": eturns, "evidence_points": epoints},
+        "_ingest": {"evidence_turns": eturns, "evidence_points": epoints},
     }
 
 
@@ -135,7 +135,7 @@ def _reval3_outcomes() -> list[dict]:
             "n_ingest_errors": 0,
             "context_tokens": 100,
             "context_point_count": 3,
-            "ingest": {"evidence_turns": 1,
+            "_ingest": {"evidence_turns": 1,
                         "evidence_points": q["evidence_written"]},
         })
     return outs
@@ -972,7 +972,7 @@ def _pilot_shape_outcomes() -> tuple[list[dict], dict, dict]:
             "answer_string_evidence_recall@k": {"20": aser20},
             "n_ingest_errors": 0, "context_tokens": 100,
             "context_point_count": 20,
-            "ingest": {"evidence_turns": 1, "evidence_points": n_ss,
+            "_ingest": {"evidence_turns": 1, "evidence_points": n_ss,
                        "evidence_marks": {
                            "source_session": n_ss, "verbatim": 1 if qi == 2 else 0,
                            "raw_chunk": 1 if qi == 9 else 0,
@@ -995,9 +995,9 @@ def test_report_answer_string_rebaseline_synthetic_pilot():
     number; the census totals reproduce the pilot's shape."""
     outcomes, old_mean, as_mean = _pilot_shape_outcomes()
     # pilot-shape census rollup (472 / 6 verbatim / 1 raw_chunk / 6 answer)
-    ss_total = sum(o["ingest"]["evidence_marks"]["source_session"]
+    ss_total = sum(o["_ingest"]["evidence_marks"]["source_session"]
                    for o in outcomes)
-    as_total = sum(o["ingest"]["evidence_marks"]["answer_string"]
+    as_total = sum(o["_ingest"]["evidence_marks"]["answer_string"]
                    for o in outcomes)
     assert ss_total == 472
     assert as_total == 6

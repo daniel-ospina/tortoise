@@ -1377,7 +1377,7 @@ def test_prior_turn_count_read_failure_does_not_500_a_recapture(
             raise RuntimeError("transient graph error (test)")
         return real_query(self, cypher, *a, **kw)
 
-    monkeypatch.setattr(_GuardedGraph, "query", flaky)
+    monkeypatch.setattr(_GuardedGraph, "_query", flaky)
     meter.clear()
     r2 = client.post("/v1/sessions", json={
         "conversation": conv, "session_id": "s-priorread"})
