@@ -1246,7 +1246,9 @@ by the turn read itself: an unscoped connection reads ZERO rows under this polic
 cannot be the opener's caller's job) — 11 → 12.
 
 ⚠️ **Re-measured 2026-11-17 (#13320's lane, at `34bd33d22a`): 19 again** — the count the
-sentence above carries. ⛔ **Its attribution is wrong on the third line**, and only blame settles
+sentence above carried at that head; the 2026-11-18 re-measurement below moves it to **20**, so
+read this number as the *then* count and the paragraph at the end as the live one. ⛔ **Its
+attribution is wrong on the third line**, and only blame settles
 it: the `tortoise/record_allocator.py` mention that landed with `#13043`'s work (commit
 `0a82790893`, PR `#13137`) is in the **`scope_tenant`** docstring — a function that commit
 introduced — not in `seed()`. `git log -L` puts all three delta lines in that one commit:
