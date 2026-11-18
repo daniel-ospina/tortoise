@@ -1731,12 +1731,15 @@ def _document_embedding_parts(
     the GRAPH's function makes drift impossible instead of detectable: change the
     graph's composition and the record's text moves with it.
 
-    The import is LAZY for the reason every other lazy import in this module is
-    (see `derived_embedding_columns`): `projection` is the write-side package and
-    is not imported at `record_writer` import time, so a module-level import
-    would buy a cycle for one pure function.
+    The import is LAZY, and deliberately: importing `projection.entities` at
+    module scope would make `record_writer`'s own import pull in the write-side
+    `projection` package (`tortoise/projection/__init__.py` imports this module
+    back, at `:841`, inside a function — which is exactly the shape a package
+    import is allowed to rely on and a module-level one is not), for one pure
+    string function. A record-only fold (`tools/record_runner.py`) never composes
+    a document text and so never pays for it.
 
-    The width/envelope is a single part so the shared arms below still apply:
+    The composition arrives as ONE part so the shared arms below still apply:
     blank text derives nothing, and a composition that RAISES (a truthy non-string
     `topics` entry, which aborts the graph's `" ".join` outside its `try`)
     derives nothing here — the record stays the quieter of the two, as stated.
