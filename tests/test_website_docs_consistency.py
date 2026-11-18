@@ -441,6 +441,90 @@ def test_docs_lists_every_canonical_point_status() -> None:
                 )
 
 
+def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
+    """`docs.html` may not claim EVERY read surface HIDES an `outdated` row.
+
+    The `outdated` boolean is a dead marker for retrieval — `_terminal_excluded`
+    ANDs its `coalesce(n.outdated, false) = false` conjunct by default
+    (`tortoise/live.py:159`) — but it is NOT hidden on every read.
+    `belief_timeline` (`tortoise/sdk.py:27720`) takes no opt-in flag: its
+    primary query (`:27821`) matches `{pointKind:'decision'}` and applies NO
+    status/outdated conjunct to the POINT (the terminal predicate sits on the
+    topic OBJECT), so an invalidated decision Point — which keeps its
+    `aboutObject` edge, `invalidate_point` transfers no edges — comes back
+    as-is, and a superseded one is re-attached down the CORRECTS chain
+    (`:27834-27844`) — but only when the SUCCESSOR is itself a decision about
+    the topic: `supersede_point` hands the prior's `aboutObject` to the
+    successor, and the re-attach's `WHERE cur.id IN $ids` (`:27835`) can only
+    match when that successor is one of the topic's decisions, so a decision
+    superseded by a point of another kind drops out of the history.
+    `get_point` (`:29952`) returns the row by address. That
+    the prior SURVIVES is asserted by
+    `tests/test_de2e6_temporal.py::TestDe2e6ReviewFixes::test_timeline_keeps_superseded_prior`
+    (`:405`, its assertions at `:420-422`: `len(timeline) >= 2` plus a `CORRECTS`
+    link). The `outdated` key the
+    page names is pinned as well — the same test asserts the re-attached prior is
+    marked, so `sdk.py`'s `if outdated: entry["outdated"] = True` cannot be
+    deleted with the suite still green (measured: removing it fails that case).
+
+    Two absolutes are pinned here, both measured on a real page:
+    `no longer writable at all` — falsified by the server's three `outdated`
+    writers, and the error this branch's first commit fixed — and
+    `every read surface hides` — a replacement absolute that is wider than the
+    code, the same defect one commit later. A replacement that is wider than
+    the code is the same error, not a smaller one, on the page whose subject is
+    precision about this word. `docs/ONTOLOGY.md:1174` states the bounded
+    version ("readers … must continue to honour") and `:1182` scopes the
+    exclusion to the DEFAULT query surfaces, so this pin holds the page to the
+    ontology: every read treats the row as ENDED, the default query surfaces
+    drop it, and the addressed/history reads still show it.
+
+    ⚠️ `no longer writable at all` is banned only UNQUALIFIED. Scoped to the
+    STATUS word the sentence is TRUE ("as a status, `outdated` is no longer
+    writable at all"), and a pin that banned the phrase outright would red on a
+    page more accurate than the one it protects.
+
+    The scope is checked per SENTENCE, not per character window: a backward
+    window both false-passes (a `status` token from the NEIGHBOURING sentence
+    qualifies an unqualified claim) and false-fails (English often puts the
+    qualifier AFTER the phrase, which a backward window never sees). Measured
+    on both bodies by the cycle-3 review before this was a sentence split.
+    """
+    html = _read(DOCS)
+    for _sentence in re.split(r"(?<=[.!?])\s+", " ".join(html.split())):
+        if "no longer writable at all" not in _sentence:
+            continue
+        assert "status" in _sentence, (
+            "website/docs.html calls `outdated` no longer writable AT ALL in a "
+            "sentence that never names the STATUS word. The *status* is "
+            "refused (`read_caller_status` raises with a repair naming "
+            "`deprecated`/`superseded`), but the *property* of the same name "
+            "is live and server-stamped on supersede, on invalidate, and when "
+            "a newer assessment of the same source is written by the same "
+            "assessor (`tortoise/record_projection.py` "
+            "PointSuperseded/PointInvalidated, `tortoise/sdk.py` "
+            "`_assess_source`). Scope the claim to the status word."
+        )
+    assert "every read surface hides" not in html, (
+        "website/docs.html claims every read surface HIDES an `outdated` row. "
+        "That is not true: `get_point` returns ANY flagged row by address, and "
+        "`belief_timeline` returns a SUPERSEDED prior down the CORRECTS chain "
+        "by default — see "
+        "tests/test_de2e6_temporal.py::TestDe2e6ReviewFixes::test_timeline_keeps_superseded_prior, "
+        "which passes on main. State the bounded fact instead: every read treats "
+        "it as ENDED, the default QUERY surfaces drop it, and the addressed / "
+        "history reads still show it (the history read for a superseded or "
+        "invalidated DECISION point — an `assessment` is not one)."
+    )
+    assert "belief_timeline" in html, (
+        "website/docs.html no longer names the read surface that KEEPS an "
+        "`outdated` row (`belief_timeline`). Without it the paragraph's scoping "
+        "generalises to the reader's whole API, which the SDK contradicts. If "
+        "the carve-out is now described another way, update this pin with the "
+        "reasoning rather than deleting it."
+    )
+
+
 # ── The belief mechanism (the #3332 headline defect) ─────────────────────────
 
 
