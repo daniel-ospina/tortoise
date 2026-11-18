@@ -290,9 +290,12 @@ def test_SDK_a_cache_hit_still_answers_when_the_record_misses(armed):
 def test_SDK_an_EVENT_is_not_hot_and_never_an_empty_answer(armed):
     """#9721 is the named dependency, and it is NOT silently widened here.
 
-    A record-sourced `:Event` loses SEVEN fold-written `ON CREATE` properties
-    (`id`, `eventKind`, `subject`, `object`, `startedAt`, `classificationLevel`,
-    `format`, `participants`) and `FOLD_ON_CREATE_DEFAULTS` has no `Event` row —
+    A record-sourced `:Event` loses the fold-written `ON CREATE` properties its
+    row does not carry, PER COLUMN: #9721's measured set is seven (`id`, `subject`,
+    `object`, `startedAt`, `classificationLevel`, `format`, `participants`) for the
+    shape it probed (a producer that supplied `event_kind`), `eventKind` is an
+    eighth when that column is NULL, and all eight are carried — and none lost —
+    when the row has them. `FOLD_ON_CREATE_DEFAULTS` has no `Event` row —
     so `parity_difference(label='Event')` reports them UNEXPLAINED. Serving it
     would ship a silent parity gap (a lost `id`) through the door whose whole
     purpose is honest reads; answering `{}` would claim it does not exist. The
@@ -1701,6 +1704,60 @@ def test_the_deferred_and_inline_paths_spell_one_coordinate(armed):
     assert seen[0] == f"union:{'|'.join(rs.ENTITY_UNION_LABELS)}:obj-1", seen[0]
 
 
+def _assert_labels_are_ADDRESSABLE(labels, state):
+    """The real guard: each label's contract key IS one of its cache branches.
+
+    ⛔ ONE DIRECTION, NOT AN EQUALITY (#13392 review, P2 — the same shape as
+    cycle-4 finding 1, one issue later, for `Source` instead of `Event`). A
+    SECOND cache branch is not by itself a reason a label cannot be served.
+    `Source` has two (`_RESOLVE_BRANCHES`: `id` and `url`) while its record key
+    is `url`, and the repair the module itself names is a Source-by-`id`
+    **probe in this read** (`record_serve.ENTITY_UNION_ADDRESS_RESIDUALS` →
+    #13351) — which moves neither `_RESOLVE_BRANCHES` nor `KEY_PROPERTY`. The
+    latter is schema-bound: `url` comes from the generated
+    `public.node_identity` CASE and `chk_source_node_key_is_contract_key` pins
+    `node_key = url`, and a generated column's value "cannot be written to
+    directly … cannot be overridden" (PostgreSQL 18 §5.4) — only a migration
+    moves it, and #13351 is not a migration. So at the repair state an EQUALITY
+    reddens with a message — "a label with a second branch is the address
+    residual, not a served label" — that tells the `#13351` lane the repair they
+    were told to make cannot exist.
+
+    What addressability actually means: the branch that yields the bare value
+    the record's `node_key` carries EXISTS, so a value the cache resolved can
+    address the record row. That still reds on both real defects — `KEY_PROPERTY`
+    drift, and a served label losing its contract-key branch — the two failures
+    the old `KEY_PROPERTY == "id"` literal could not see, because it reddened on
+    CORRECT states (`Event`, `Source`) instead.
+
+    ⛔ AND NOTHING HERE IS SAID ABOUT A *SECOND* BRANCH, DELIBERATELY. Whether an
+    extra branch is addressed by the record is `ENTITY_UNION_ADDRESS_RESIDUALS`'
+    question, derived and pinned by
+    `test_the_two_coverage_facts_are_SEPARATE_and_Event_is_not_a_residual` — and a
+    guard here that demanded "declare it as a residual" would be the SAME defect
+    one step later: `#13351`'s repair RETIRES that entry (the probe covers the
+    branch), so the message would send that lane backwards. One home per question:
+    this row pins the contract key, the residual map pins what the read does not
+    cover, and a second blocker with a misdirecting message is what #13392 review,
+    P2 removed.
+    """
+    from tortoise.cache_projection import KEY_PROPERTY
+    from tortoise.projection import FalkorProjection
+
+    for label in labels:
+        branch_props = {prop for lab, prop in FalkorProjection._RESOLVE_BRANCHES
+                        if lab == label}
+        contract_key = KEY_PROPERTY.get(label)
+        assert contract_key in branch_props, (
+            f"{state}: {label} has cache branches {sorted(branch_props)} but the "
+            f"record addresses it by {contract_key!r} — a label whose contract "
+            f"key is not one of its cache branches is resolved from a value the "
+            f"record row cannot carry, which is an ADDRESSABILITY defect, not a "
+            f"residual (#13351 repairs the reverse case: a branch the read does "
+            f"not probe yet, which is ENTITY_UNION_ADDRESS_RESIDUALS' question "
+            f"and not this row's)")
+
+
 def test_the_served_labels_are_the_ones_with_measured_parity():
     """The declaration, pinned to the evidence rather than to a count.
 
@@ -1713,7 +1770,7 @@ def test_the_served_labels_are_the_ones_with_measured_parity():
     to be updated when #9721 lands. The only acceptable greening is a GROWN
     union — never a shrunken jurisdiction, and never a label taken back out.
 """
-    from tortoise.cache_projection import FOLD_ON_CREATE_DEFAULTS, KEY_PROPERTY
+    from tortoise.cache_projection import FOLD_ON_CREATE_DEFAULTS
 
     assert set(rs.ENTITY_UNION_LABELS) == {"Point", "Subject", "Object"}
     assert {"Subject", "Object"} <= set(FOLD_ON_CREATE_DEFAULTS), (
@@ -1722,11 +1779,51 @@ def test_the_served_labels_are_the_ones_with_measured_parity():
     assert "Event" not in FOLD_ON_CREATE_DEFAULTS, (
         "if #9721 lands, revisit ENTITY_UNION_LABELS — the abstention is caused "
         "by THIS gap")
-    # Every served label must be addressable by the bare id this door is handed.
-    for label in rs.ENTITY_UNION_LABELS:
-        assert KEY_PROPERTY.get(label) == "id", (
-            f"{label} is keyed by {KEY_PROPERTY.get(label)!r} in the record, so "
-            "a bare id cannot address it — that is Source's own exclusion")
+    # ⛔ EVERY SERVED LABEL MUST BE ADDRESSABLE — MEASURED, NOT ASSERTED AS
+    # `KEY_PROPERTY == "id"` (#13353 review cycle 4, finding 1). That spelling is
+    # the conflation this PR removed: `Event` IS addressable by a bare id while its
+    # key is `eventId` (that is #13347's finding), so the literal would redden at
+    # exactly the repair state #9721 produces — and its message ("a bare id cannot
+    # address it") would tell the next lane the opposite of the fix.
+    _assert_labels_are_ADDRESSABLE(rs.ENTITY_UNION_LABELS, "the served union")
+
+
+def test_the_addressability_guard_does_NOT_prohibit_the_13351_repair():
+    """The invariant is asserted at the state the repair produces, not against it.
+
+    ⛔ #13392 review, P2. The repair state is two steps the module itself names:
+    `#9721` adds `Source` to `ENTITY_UNION_LABELS` (the union must GROW — a
+    shrunken jurisdiction is the false PASS `test_TODAYs_two_blockers…`
+    forbids), and `#13351` gives THIS READ a Source-by-`id` probe over the column
+    the record already has. Neither step touches `_RESOLVE_BRANCHES` (`Source`
+    keeps both branches) nor `KEY_PROPERTY["Source"]` (`url`, schema-bound), so a
+    guard spelled as EQUALITY reddens there and its message tells the #13351
+    lane the repair cannot exist.
+
+    So the invariant is asserted over the whole JURISDICTION — which is that
+    state with `Event` included — rather than over today's smaller served set:
+    every label a bare value can name has its contract key among its cache
+    branches. What the record does NOT cover (a second branch, until a probe
+    does) stays `ENTITY_UNION_ADDRESS_RESIDUALS`' question, derived and pinned by
+    the sibling row — see the helper's docstring for why it must not be doubled
+    here.
+    MEASURED non-vacuous: under the previous equality spelling this row reds
+    today, on `Source` (`{'id', 'url'} != {'url'}`).
+    """
+    from tortoise.cache_projection import KEY_PROPERTY
+    from tortoise.projection import FalkorProjection
+
+    source_branches = {prop for lab, prop in FalkorProjection._RESOLVE_BRANCHES
+                       if lab == "Source"}
+    assert source_branches == {"id", "url"}, (
+        f"this row's premise: a Source is resolved by two properties, only one of "
+        f"which is its record key — got {sorted(source_branches)}")
+    assert KEY_PROPERTY["Source"] == "url", (
+        "and that one is `url`: the generated `node_identity` CASE, which no code "
+        "change moves (#5012)")
+
+    _assert_labels_are_ADDRESSABLE(rs.ENTITY_UNION_JURISDICTION,
+                                   "the #9721 + #13351 repair state")
 
 
 # ── 5. the internal accessor stays cache-only ──────────────────────────────
