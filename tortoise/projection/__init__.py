@@ -13147,14 +13147,21 @@ class FalkorProjection(
             # always applied it.
             p = ev.get("point")
             if not isinstance(p, dict):
-                # #12943 (review cycle 4, P2): neither the `if` nor the `elif`
-                # runs for a non-dict/missing `point`, so no statement is
-                # issued. Marked rather than left to the reader.
+                # #12943 (review cycle 4, P2; the absent-`point` half of this
+                # note moved HERE in cycle 7, P3, where it is true): a non-dict
+                # `point` — including NO `point` payload AT ALL — issues no
+                # statement, so nothing is written and the fold must not count
+                # as a landed write. This guard is the one that makes
+                # `_skip()`'s "an unwritable or ABSENT id on the
+                # point/operator/promote arms" claim true; the `else: _skip()`
+                # and the `elif isinstance(p, dict)` a previous draft carried
+                # below were both unreachable-by-construction: once this guard
+                # fails, `p` IS a dict.
                 _skip()
             elif _writable_id(p.get("id")):
                 self._upsert(gated_promote_payload(
                     p, self._point_status(p["id"])))
-            elif isinstance(p, dict):
+            else:
                 # #7369: a truthy-but-unwritable id is skipped, not MERGEd —
                 # the skip must be observable (see `_log_identity_skip`).
                 # #8840 review P3 (Issue 4): `absent_is_ordinary=False` +
