@@ -614,9 +614,11 @@ figure (`1,624` / `108` at `34bd33d22a`; `1,623` / `108` at `31bddb1dd9`) and th
 (`1,630` → `1,629`) are drawn from a predicate `#13265` did not touch — it added **0** door calls and
 exactly **1** verb occurrence (`git show 34bd33d22a -- tortoise/ | grep '^+' |
 grep -cE '\.(ro_)?(query|execute)\s*\('` → `0`; `… | grep -oiE '\b(MATCH|MERGE)\s*\('` → `1`).
-The 13-occurrence one-file whole-text gap and the nine-prose/four-Cypher split are UNCHANGED by it
-(the added match is single-line, not cross-line, and §1 counts the same 13 sites — nine prose, four
-Cypher examples).
+The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED by it
+(the added match is single-line, not cross-line, and §1 counts the same 13 sites — ten prose, three
+Cypher examples). `record_projection.py` is the one file on both sides of that split: one of its two
+matches wraps a Cypher example, where the next line opens the `MATCH` pattern, and the other wraps
+prose, where the next line opens a parenthetical.
 ⛔ **AND IT MOVED AGAIN, TWICE, BEFORE THIS PR COULD MERGE — each figure bound to the ONE tree it was
 measured on.** At `origin/main` **`31bddb1dd9`** the appendix `main` carried was stale in **96 of its
 1,311 rows** over exactly two files: `#13330` (`3bcb6c6531`) added `+438 / −47` to
