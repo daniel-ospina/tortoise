@@ -634,20 +634,35 @@ def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
     arm is unreachable.
 
     ``no_embedder`` is the same shape of input and is pinned here for the same
-    reason (#13534 review round 6, P3): the RULE is the translator's, so the
+    reason (#13534 review rounds 6–7, P3): the RULE is the translator's, so the
     unconditional ``no_embedder -> not_installed`` that ``main``'s
     ``_READ_DECLINE_FAILURE_KIND`` dict applied is now just one state of it —
-    the state where that kind was RECORDED. With nothing recorded the honest
-    answer is the documented ``model_unavailable`` fallback, and that is
-    reachable: ``absent_reason()`` publishes ``no_embedder`` whenever
-    ``_last_failure_kind`` is unset, which is the #4123 "provisioning succeeded,
-    the load still broke" exit, so an armed refusal in that state must not say
-    ``not_installed`` ("install the extra") about an extra that IS installed.
+    the state where that kind was RECORDED. With nothing recorded, the
+    documented ``model_unavailable`` fallback is the honest answer, and an armed
+    refusal must not say ``not_installed`` ("install the extra") on the
+    translator's behalf.
+
+    ⛔ THIS PAIRING IS DEFENSIVE, AND THAT IS THE POINT OF PINNING IT AT THE
+    SEAM. ``absent_reason()`` does return ``no_embedder`` when
+    ``_last_failure_kind`` is unset, but every ``__init__`` load-failure branch
+    stamps a kind (``not_installed`` / ``load_failed`` / ``load_timeout``), and
+    the #4123 "provisioning succeeded, the load still broke" exit inherits
+    whichever one was stamped — so no fixture, and no live arm, is claimed here
+    to reach ``_unavailable(kind="no_embedder")`` with nothing recorded. What is
+    asserted is the CONTRACT for that input: ``main``'s unconditional mapping
+    silently changed it, and the RULE must answer the fallback rather than
+    invent a cause. (Named honestly after round 7 caught this docstring citing
+    the #4123 exit as the reachable state — it is not; the record a broken load
+    leaves is ``load_failed`` / ``load_timeout``.)
+
     ⛔ Restoring ``main``'s unconditional mapping reds THIS row and no other —
-    measured on this head with the first assertion below reverted to
-    ``no_embedder -> not_installed``: ``1 failed``, and the translator's
-    ``load_in_flight`` assertions beside it still pass, so the red is
-    attributed to the missing-cause arm and not to the arm above.
+    measured on this head with ``if reason == "no_embedder": return
+    "not_installed"`` inserted after the ``FAILURE_KINDS`` early return:
+    ``1 failed, 13 passed`` in this file — and that count is re-measured, not
+    quoted. The mutant intercepts ``no_embedder`` ONLY, so the
+    ``load_in_flight`` assertions below are untouched by its shape and pass in
+    the unmutated run above it; the red is therefore attributed to the
+    missing-cause arm.
     """
     EmbeddingModel._reset()
     try:
