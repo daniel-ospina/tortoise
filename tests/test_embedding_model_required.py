@@ -53,7 +53,7 @@ from tortoise.embeddings import (
     EMBEDDING_MODEL_REVISION,
     EmbeddingModel,
 )
-from tortoise.exceptions import EmbedderUnavailableError
+from tortoise.exceptions import FAILURE_KINDS, EmbedderUnavailableError
 
 REQUIRED_ENV = "TORTOISE_EMBEDDING_MODEL_REQUIRED"
 
@@ -177,6 +177,86 @@ def test_error_defaults_kind_when_none_recorded(monkeypatch):
     with pytest.raises(EmbedderUnavailableError) as ei:
         EmbeddingModel.get()
     assert ei.value.failure_kind == "model_unavailable"
+
+
+def test_every_recorded_failure_kind_is_in_the_declared_vocabulary():
+    """The producers' literals and :data:`FAILURE_KINDS` cannot drift apart.
+
+    ``FAILURE_KINDS`` (``exceptions.py``) is the ONE declaration of the
+    ``failure_kind`` vocabulary. ``EmbeddingModel._as_failure_kind`` answers the
+    documented ``model_unavailable`` fallback for anything outside it — the same
+    value it answers when nothing was recorded — so a producer that starts
+    recording a NEW literal would silently downgrade an ARMED refusal to
+    "nothing was recorded" without any error. That is the #5275 mis-attribution
+    class one level down (#13534 review round 2, B).
+
+    ⛔ DERIVED, not re-typed. The producers are found by PARSING
+    ``tortoise/embeddings.py`` for ``<x>._last_failure_kind = <value>``
+    assignments, so adding a fifth kind at a producer reds here rather than
+    needing this test to have been remembered — the drift class ``MEMORY.md``
+    records under ``[vocab]`` (two hand copies never catch their SHARED drift).
+
+    ⛔ AND A NON-LITERAL PRODUCER IS REFUSED, not skipped: a check that compares
+    only ``ast.Constant`` values would leave a producer assigned from a module
+    constant — the likely refactor once ``FAILURE_KINDS`` exists — unmeasured,
+    reporting the vocabulary as pinned while an armed refusal silently degraded
+    it (#13534 review round 3, A and B).
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "tortoise" / "embeddings.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    def _records_kind(target: ast.expr) -> bool:
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == "_last_failure_kind"
+        )
+
+    assignments = [
+        node for node in ast.walk(tree)
+        if (isinstance(node, ast.Assign) and any(_records_kind(t) for t in node.targets))
+        or (isinstance(node, ast.AnnAssign) and _records_kind(node.target))
+    ]
+    assert assignments, (
+        "the AST scan found no ``_last_failure_kind`` assignments — the producer "
+        "pattern moved, so this pin is no longer measuring anything")
+    non_literal = [
+        node for node in assignments
+        if getattr(node, "value", None) is None
+        or not isinstance(node.value, ast.Constant)
+    ]
+    assert not non_literal, (
+        "a producer assigns ``_last_failure_kind`` a value this pin cannot compare "
+        f"against FAILURE_KINDS (lines {[n.lineno for n in non_literal]}) — inline "
+        "the literal, or widen this pin; an unmeasurable producer reports the "
+        "vocabulary as pinned while an armed refusal degrades it silently")
+    recorded = {
+        node.value.value for node in assignments
+        if isinstance(node.value.value, str)
+    }
+    assert recorded, (
+        "the AST scan found no recorded kind literals — the producer pattern "
+        "moved, so this pin is no longer measuring anything")
+    assert recorded <= FAILURE_KINDS, (
+        f"a producer records a kind outside the declared vocabulary: "
+        f"{sorted(recorded - FAILURE_KINDS)!r}; an armed refusal would report "
+        f"``model_unavailable`` for it, indistinguishable from nothing recorded")
+
+
+@pytest.mark.parametrize("kind", sorted(FAILURE_KINDS))
+def test_every_declared_kind_passes_through_the_translation(monkeypatch, kind):
+    """A reason already IN the vocabulary names its own cause — unchanged.
+
+    ``_as_failure_kind`` has two arms; the recorded-cause arm is pinned in
+    ``tests/test_13528_read_never_blocks_on_embedder.py`` next to the decline it
+    translates. This row pins the OTHER arm over the whole declared vocabulary:
+    every member passes through untouched, so a translator that "helpfully"
+    re-mapped one of them would red here.
+    """
+    monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", None)
+    assert EmbeddingModel._as_failure_kind(kind) == kind
 
 
 # --------------------------------------------------------------------------

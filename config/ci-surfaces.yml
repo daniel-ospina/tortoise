@@ -5021,7 +5021,7 @@ surfaces:
   # select(['tortoise/why.py'], 'pull_request') -> ['core']).
   - test_why_operator_mediation.py
   - test_why_layer_rate.py  # #3990: the why-layer rate instrument (W0/W1/W2/W3 + M4/M5/M6 movement control); `tools/why_layer_rate.py` is in ci_selection.CORE_ALSO so a tool-only diff selects `core` too
-  - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
+  - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (`exceptions.py` selects `core`; `embeddings.py` does NOT — it is an exact `eval` SOURCE_PATTERN, so the pin on its producers is dual-registered in `eval:`)
   - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
   - test_embedded_evidence.py
   - test_installer_preserves_foreign_skill_content.py
@@ -10306,6 +10306,15 @@ surfaces:
   # the #13224 row above does for `await_write_ready_reason`. Same module as
   # `test_13224_cold_embedder_write_bound.py` directly above.
   - test_13528_read_never_blocks_on_embedder.py
+  # #13528 / review: DUAL-REGISTERED with `core` (below). `tortoise/embeddings.py`
+  # is an EXACT `eval` SOURCE_PATTERN and a named-surface match REPLACES the `core`
+  # fallback, so an embeddings.py-only diff hides the `core` row — and that diff is
+  # precisely the one this pin exists for (a `_last_failure_kind` producer literal
+  # drifting out of `FAILURE_KINDS`). Measured on this head:
+  # select(['tortoise/embeddings.py'],'pull_request') -> ['eval'], full=False, and
+  # the pin is absent from the 168 selected test files (169 with it); without this
+  # arm the drift merges and reds main's push lane rather than this PR's.
+  - test_embedding_model_required.py
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
   # `tortoise/**`, and `tortoise/cross_lens.py` / `embeddings.py` select `eval`,
@@ -11595,7 +11604,8 @@ carve_out:
 # and run NOTHING on a docker leg).
 - test_13224_cold_embedder_write_bound.py
 # #13528: the READ bound — a read must not wait for a COLD embedder; the vector leg is
-# declined inside `READ_EMBED_BUDGET_S` and the reason (`load_timeout`) is recorded on
+# declined inside `READ_EMBED_BUDGET_S` and the reason (`load_in_flight`, not
+# `load_timeout` — that term names a load that actually BROKE) is recorded on
 # the leg trace. Embedded-lane by design: every case builds a `TortoiseSDK(<tmp_path>)`
 # path store and the cold-window assertions compare against the simulated load, so a
 # URI-set lane would redirect the construction and grade the server's already-warm

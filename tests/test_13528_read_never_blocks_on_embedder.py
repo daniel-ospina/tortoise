@@ -515,6 +515,52 @@ def test_a_rearm_that_cannot_spawn_answers_absent(monkeypatch):
         EmbeddingModel._reset()
 
 
+def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
+    """The translator's recorded-cause arm, pinned directly (#13528 review P2).
+
+    ``load_in_flight`` names no failure, but a load CAN fail between the read's
+    decline and the raise that carries it, and ``_last_failure_kind`` then holds
+    the operator's real answer. The earlier shape special-cased ``no_embedder``
+    and returned the ``model_unavailable`` fallback for everything else, so that
+    recorded cause was discarded. No cold-window ROW in this suite reaches that
+    state (each leaves nothing recorded), but the READ PATH does: a failure older
+    than ``_FAIL_COOLDOWN_S`` leaves ``load_in_flight`` on the trace with a
+    recorded kind, and ``_as_failure_kind`` then reports that kind. It is pinned
+    at the seam because no fixture reproduces that staleness — not because the
+    arm is unreachable.
+
+    ⛔ THE #13543 DEFECT THIS PINS. ``main`` translated with a FIXED dict
+    (``_READ_DECLINE_FAILURE_KIND``) that ignored ``_last_failure_kind`` entirely
+    and answered ``model_unavailable`` for ``load_in_flight`` — the contract's
+    documented "nothing was recorded" fallback — so an ARMED process was told
+    silence while the operator's real answer sat in ``_last_failure_kind``. The
+    two recorded-state assertions below (``load_failed``, ``not_installed``) are
+    the rows that red under that dict; the ``load_timeout`` row is a pass-through
+    the dict also got right.
+    """
+    EmbeddingModel._reset()
+    try:
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == \
+            "model_unavailable", (
+            "with nothing recorded the contract's documented fallback is the "
+            "honest answer — the load was in flight, nothing broke")
+
+        EmbeddingModel._last_failure_kind = "load_failed"
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == "load_failed", (
+            "a cause recorded by the time the refusal is raised must be named, "
+            "not replaced by the fallback")
+
+        EmbeddingModel._last_failure_kind = "not_installed"
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == "not_installed", (
+            "the recorded kind is the answer whatever it is, not only for "
+            "`no_embedder` — the special-case shape this replaces")
+
+        assert EmbeddingModel._as_failure_kind("load_timeout") == "load_timeout", (
+            "a reason already in the refusal's vocabulary is passed through")
+    finally:
+        EmbeddingModel._reset()
+
+
 # ── the budget itself ─────────────────────────────────────────────────────
 
 

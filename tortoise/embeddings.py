@@ -27,7 +27,7 @@ import numpy as np
 
 from . import embed_gate  # #5008: the S5 EMBED gate (which rows earn a vector)
 from .env_truthy import env_flag  # #4097: the declared truthy contract
-from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
+from .exceptions import FAILURE_KINDS, EmbedderUnavailableError  # #4861: the REQUIRED contract
 from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
     import_sentence_transformer,
     import_tfidf_vectorizer,
@@ -940,13 +940,16 @@ class EmbeddingModel:
         set does not contain, and precisely the designed-absence term #5275
         forbids an armed refusal from carrying. The mapping below is that
         translation, in ONE place, so a caller never has to know it exists and
-        the two vocabularies cannot be conflated again.
+        the two vocabularies cannot be conflated again: a reason already in the
+        vocabulary passes through unchanged, a trace-only word yields the kind
+        that WAS recorded, and only when nothing was recorded is
+        ``model_unavailable`` the honest answer.
         """
         if not cls._embedder_required():
             return None
         failure_kind = None
         if kind is not None:
-            failure_kind = _READ_DECLINE_FAILURE_KIND.get(kind, kind)
+            failure_kind = cls._as_failure_kind(kind)
         raise EmbedderUnavailableError(
             failure_kind=(failure_kind or cls._last_failure_kind
                           or "model_unavailable"),
@@ -955,6 +958,31 @@ class EmbeddingModel:
             last_error=cls._last_error,
             context=context,
         )
+
+    @classmethod
+    def _as_failure_kind(cls, reason: str) -> str:
+        """Translate a LEG-TRACE reason into ``failure_kind`` (#13528 review P1-1).
+
+        The trace and the refusal answer different questions, and this module is
+        the only place that knows both vocabularies. ``no_embedder`` is the
+        trace word for the designed absence, so the CAUSE is whatever kind was
+        recorded — ``not_installed`` in the missing-extra state the word is
+        published for. A reason outside the vocabulary names no cause OF ITS OWN
+        (``load_in_flight`` is the read's own decline, not a failure), so the
+        kind that WAS recorded is the operator's answer whenever there is one —
+        a load that broke since the decline is exactly that case — and only when
+        nothing was recorded is the contract's documented ``model_unavailable``
+        fallback the honest answer.
+
+        A reason already IN the vocabulary is returned unchanged (no translation
+        needed). The ``get()`` exits are preserved by a different mechanism:
+        each passes ``kind=None``, so this function never runs on them — which
+        is why the historical ``failure_kind`` values cannot drift here.
+        """
+        if reason in FAILURE_KINDS:
+            return reason
+        recorded = cls._last_failure_kind
+        return recorded if recorded in FAILURE_KINDS else "model_unavailable"
 
     @classmethod
     def absent_reason(cls) -> str:
@@ -1897,18 +1925,10 @@ READ_EMBED_BUDGET_S = 0.25
 #: kept ``embed_get`` and ``embed_encode`` apart on #10893.
 _READ_DECLINE_LOAD_IN_FLIGHT = "load_in_flight"
 
-#: Leg-trace reason → ``EmbedderUnavailableError.failure_kind`` (#13528 review
-#: P1-1). Two vocabularies, one translation, at the ONE seam that writes both:
-#: ``no_embedder`` is the trace's name for a DESIGNED ABSENCE, whose failure kind
-#: is ``not_installed``; every other trace term already equals its kind. A term
-#: with no entry (an ``encode_failed``, say) falls through unchanged, so a future
-#: reason cannot be silently misfiled as ``not_installed``.
-_READ_DECLINE_FAILURE_KIND: dict[str, str] = {
-    "no_embedder": "not_installed",
-    "load_failed": "load_failed",
-    "load_timeout": "load_timeout",
-    _READ_DECLINE_LOAD_IN_FLIGHT: "model_unavailable",
-}
+#: The ``EmbedderUnavailableError.failure_kind`` vocabulary is declared by its
+#: owner (``exceptions.FAILURE_KINDS``) and imported above — never re-typed here,
+#: or this module becomes the second hand copy of a vocabulary it translates into
+#: (the drift class ``MEMORY.md`` records under ``[vocab]``).
 
 def _in_replay_scope() -> bool:
     """True when this fold is a journal REPLAY, not a live door (#13224).
