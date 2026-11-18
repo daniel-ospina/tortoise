@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-P3-1795014051-p3212313-78aab6f7",
+  "_sha": "e539a88cec3bd904a4b44c73f82843a7f8e5c839",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/P3.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/11609-p3-sdk-40"
+    },
+    {
+      "kind": "sha",
+      "value": "5dc78c5a5cd55df8327b7b654fc32f7824893e88"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/P3"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "duration_s": 7231,
+  "ended_at": 1795021282,
+  "exit_code": 143,
+  "heartbeat_at": 1795021282,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-P3-1795014051-p3212313-78aab6f7",
+  "lease_until": 1795029082,
+  "pid": 3212313,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795014051,
+  "state": "FAILED",
+  "tag": "P3",
+  "worktree": "/home/cmux/.worktrees/P3"
+}
