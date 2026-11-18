@@ -639,15 +639,19 @@ the alphabet *(single quote, double quote, backslash, `#`, space, `a`)* up to fi
 as the oracle, and asserts the two directions in which a bad value gets THROUGH: a shape the parser
 REFUSES must not come back with a COMPARING verdict, and a comparing verdict's body must equal what
 the parser read. Measured: 277 shapes reach a comparing verdict, **0** refusals reported green,
-**0** body mismatches. Non-vacuity: the same sweep driven through `main`'s `_closing_quote` +
-`_split_comment` finds **1** — `'''''` (five quotes), which YAML refuses as unterminated and `main`
+**0** body mismatches. Non-vacuity: the same sweep driven through `main`'s `_split_comment` +
+`_quoted_style` finds **1** — `'''''` (five quotes), which YAML refuses as unterminated and `main`
 reports as `single-quoted` with body `''` — and mutating this head's wholeness test back to main's
-`not value.endswith(q)` reds the new pin (`4 failed, 14 passed`, restored after the run).
+`not value.endswith(q)` reds the new pin (`4 failed, 14 passed`, restored after the run). ⛔ The
+pairing is named exactly: `_closing_quote` does NOT exist on `main` (it is introduced by this
+branch), so the replay is of main's SCALAR VERDICT path — `_split_comment` + `_quoted_style` —
+which is where the compared verdict is decided.
 
 It stops at length 5 because at 6 the sweep finds FIVE PRE-EXISTING discrepancies this change
 neither causes nor clears — and they are NOT all one kind, so naming only the harmless one would
-mis-describe the bound. All five reproduce IDENTICALLY through `origin/main`'s `_closing_quote` +
-`_split_comment` (measured shape by shape), so the exclusion is about ownership, not severity.
+mis-describe the bound. All five reproduce IDENTICALLY through `origin/main`'s `_split_comment` +
+`_quoted_style` (measured shape by shape) — that pairing, not `_closing_quote`, which does not
+exist on `main` — so the exclusion is about ownership, not severity.
 
 - FOUR are the pin's FIRST and most severe direction — **refused-but-green**, a comparing verdict
   on input a real parser REJECTS — all of the `''''X'` form: `''''"'`, `''''\'`, `'''' '`,

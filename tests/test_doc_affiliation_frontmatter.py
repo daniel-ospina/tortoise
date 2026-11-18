@@ -580,8 +580,15 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     space-preceded `#` ends at that `#` (YAML admits `#` in a plain scalar only
     with a non-space lookbehind), so
     `aboutObjects: A, #11395 reopen, #13220` parses to `A,` — key present, block
-    parseable, seven references gone. Measured on main: 68 blocks, 8 truncated,
-    every one an `aboutObjects`; the merged dossier's landed at 57 of 141 chars.
+    parseable, seven references gone. On `main` **before `#13476` landed** —
+    `035ed183fc`, which is `a5f1e7db46^` — that probe measured 68 blocks, 8
+    truncated, every one an `aboutObjects`; the merged dossier's landed at 57 of
+    141 chars. ⛔ The figure is TIED to that head on purpose: `#13476` is on
+    `main` now, so the same probe over the same glob at this head reports
+    **0** truncated values (`files: 103 blocks: 68 broken(truncated): 0`,
+    re-measured at `10a3d694`). Stating `8` as a present-tense `main` measurement
+    would be the exact defect this module exists to prevent — the same scoping
+    the plan doc §1 already carries, which this docstring did not.
     Presence, and even parseability, is not survival.
 
     Both are read through the SAME consumer the index pipeline uses, so this
@@ -1474,8 +1481,12 @@ def test_an_unlexable_key_is_what_makes_the_fail_open_a_RED(
 _SHAPE_ALPHABET = ("'", '"', "\\", "#", " ", "a")
 #: Length bound, stated rather than discovered. At 6 the sweep starts finding FIVE
 #: PRE-EXISTING discrepancies this change neither causes nor clears — all five
-#: reproduce IDENTICALLY through `origin/main`'s `_closing_quote` + `_split_comment`
-#: (measured shape by shape), so the exclusion is about ownership, not severity.
+#: reproduce IDENTICALLY through `origin/main`'s `_split_comment` + `_quoted_style`
+#: (measured shape by shape). ⛔ That pairing is named precisely: `_closing_quote`
+#: does NOT exist on `main` — it is introduced by THIS branch — so a reader who
+#: greps main for it finds nothing and concludes the replay was fabricated. What
+#: is replayed is main's SCALAR VERDICT path, which is where these five are
+#: decided. The exclusion is about ownership, not severity.
 #: ⛔ They are NOT all the same kind, and naming only the harmless one would tell a
 #: lane that raises this bound that 5→6 is safe for a reason it is not:
 #:
