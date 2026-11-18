@@ -6,7 +6,7 @@ three costs is bound by a recorded decision that forbids its obvious "fix", cite
 
 | | |
 |---|---|
-| **Artifacts** | [`write-path-costs.json`](write-path-costs.json) — **run 1**, 2026-11-18T02:14:49Z, load **6.1–7.6** (written before the `box.git_*` provenance fields existed) · [`write-path-costs-run2.json`](write-path-costs-run2.json) — **run 2**, 2026-11-18T02:52:37Z, load **9.5–10.4**, whose `box.git_head` names the tree it measured. Two runs because one sample on a shared box is a number, not a measurement; and the second records **which tree** it measured, so the provenance claim is checkable from the artifact instead of from this sentence. |
+| **Artifacts** | [`write-path-costs.json`](write-path-costs.json) — **run 1**, 2026-11-18T02:14:49Z, load **6.1–7.6** (written before the `box.git_*` provenance fields existed) · [`write-path-costs-run2.json`](write-path-costs-run2.json) — **run 2**, 2026-11-18T03:01:16Z, load **9.4–9.9**, whose `box.git_head` names the tree it measured and whose `git_dirty` is EMPTY. Two runs because one sample on a shared box is a number, not a measurement; and the second records **which tree** it measured, so the provenance claim is checkable from the artifact instead of from this sentence. |
 | **Instrument** | [`tools/measure_13436_write_costs.py`](../../../tools/measure_13436_write_costs.py) |
 | **Box** | docker lane `falkordb/falkordb-server:v4.20.6`, `graph` ver **42006 (4.20.6)**, Python 3.12.3 |
 
@@ -28,7 +28,7 @@ none, a shape paying a varying number of reads, and a `_schema_is_current()` tha
 `True` (which would make the sample the full sweep's cost, not the probe's).
 
 ⚠️ **Both runs are reported for every figure, and where they disagree both numbers stand.** The box
-carried load **6.1–7.6** in run 1 and **9.5–10.4** in run 2 — two different machines-under-load, one
+carried load **6.1–7.6** in run 1 and **9.4–9.9** in run 2 — two different machines-under-load, one
 of them heavily oversubscribed — which is why the ABSOLUTE cost is the figure this file leads with and
 the derived SHARES are given as ranges.
 
@@ -41,41 +41,41 @@ return, `create_edge`'s return, and **once per Point** in `ingest`.
 
 | Points | rows returned | `content` moved | nudge call (run 1 / run 2) | create WITHOUT → WITH nudge | **delta** |
 |---|---|---|---|---|---|
-| 1,000 | 400 (the cap) | 117.1 KiB | **12.77 / 12.74 ms** | 6.35 → 18.41 (run 1) · 5.22 → 16.56 (run 2) | **+12.06 / +11.34 ms** |
-| 5,000 | 400 (the cap) | 117.1 KiB | **12.28 / 14.12 ms** | 5.70 → 16.81 (run 1) · 5.29 → 18.31 (run 2) | **+11.12 / +13.02 ms** |
+| 1,000 | 400 (the cap) | 117.1–117.2 KiB | **12.77 / 13.24 ms** | 6.35 → 18.41 (run 1) · 5.69 → 17.97 (run 2) | **+12.06 / +12.28 ms** |
+| 5,000 | 400 (the cap) | 117.1–117.2 KiB | **12.28 / 13.33 ms** | 5.70 → 16.81 (run 1) · 5.98 → 18.81 (run 2) | **+11.12 / +12.84 ms** |
 
 The point COUNT does not move it: the same 400 rows come back at 1,000 and at 5,000 Points, and the
-call reads **12.3–14.1 ms** in the four cells.
+call reads **12.3–13.3 ms** in the four cells.
 
 The door delta is self-controlled **on ONE graph**: same seeds, same door, the only difference is an
 instance-attribute patch (`sdk._nudge_candidates = lambda *a, **k: []`). ⚠️ **The two blocks are
 SEQUENTIAL, not interleaved** (with-nudge first, then patched), so a load drift between them lands
 entirely in the delta — the artifact publishes load before AND after so a reader can see that it did
-not drift materially in either run. ⇒ **an advisory field is ~66–71 % of the `create_entity` latency
-measured here** (12.06/18.41 = 65.5 %, 11.12/16.81 = 66.1 %, 11.34/16.56 = 68.5 %, 13.02/18.31 = 71.1 %)
-— **+11.1 to +13.0 ms of a 16.6–18.4 ms write.**
+not drift materially in either run. ⇒ **an advisory field is ~65–68 % of the `create_entity` latency
+measured here** (12.06/18.41 = 65.5 %, 11.12/16.81 = 66.1 %, 12.28/17.97 = 68.3 %, 12.84/18.81 = 68.2 %)
+— **+11.1 to +12.8 ms of a 16.8–18.8 ms write.**
 
 **The payload axis — and the first cut of this instrument got it wrong.** Content length against the
 same 1,000-Point population, seeded from a real word list so bytes AND tokenisation scale together:
 
 | content chars/row (declared → measured) | `content` moved | nudge call run 1 | nudge call run 2 |
 |---|---|---|---|
-| 60 → **59.84** | 23.4 KiB | 9.10 ms | 9.07 ms |
-| 300 → **299.81** | 117.1 KiB | 12.84 ms | 14.20 ms |
-| 1,200 → **1,199.98** | 468.7 KiB | **23.35 ms** | **23.20 ms** |
+| 60 → **59.84** (run 1) / **60.00** (run 2) | 23.4 KiB | 9.10 ms | 9.98 ms |
+| 300 → **299.81** / **300.00** | 117.1–117.2 KiB | 12.84 ms | 14.56 ms |
+| 1,200 → **1,199.98** / **1,200.00** | 468.7–468.8 KiB | **23.35 ms** | **23.42 ms** |
 
-⇒ **20× the content length (20× the bytes moved) takes the call from 9.1 ms to 23.35 / 23.20 ms in the
-two runs — 2.57× / 2.56× — so the content IS a term, and the shape is close to linear above 300 chars.**
+⇒ **20× the content length (20× the bytes moved) takes the call from 9.1 ms to 23.35 / 23.42 ms in the
+two runs — 2.57× / 2.35× — so the content IS a term, and the shape is close to linear above 300 chars.**
 
 ⚠️ **«Declared → measured» is not decoration** (`#13436` review). The word-list seeder aimed at the
 declared length and could land **up to one character short** — `" ".join(out)[:chars]` returns the WHOLE
-join when that join is a character short — so these two runs average **59.84 / 299.81 / 1,199.98**
-chars/row. Both artifacts carry `content_chars_requested` beside the MEASURED `content_chars_per_row` /
+join when that join is a character short — so run 1 averages **59.84 / 299.81 / 1,199.98**
+chars/row, while **run 2 measures exactly 60 / 300 / 1,200**. Both artifacts carry `content_chars_requested` beside the MEASURED `content_chars_per_row` /
 `content_bytes_per_row`, re-derived from their own `content_bytes_returned / rows_returned` (the seed is
 an ASCII word bank, so bytes = characters for these runs). The instrument now **pads to exactly the
-declared length and raises otherwise**, so a re-run's axis is 60 / 300 / 1,200 to the character. ⚠️ The
+declared length and raises otherwise** — which is why run 2's axis is 60 / 300 / 1,200 to the character. ⚠️ The
 multiplier is quoted from the DECLARED axis (**20×**) because that is what the axis is chosen on; at the
-measured lengths it is 1,199.975 / 59.84 = **20.05×**, the same number to the precision this box holds.
+measured lengths it is 1,199.975 / 59.84 = **20.05×** in run 1 and exactly **20.0×** in run 2, the same number to the precision this box holds.
 (The first cut was 7 characters short — 53 / 293 / 1,193 published as 60 / 300 / 1,200 — which is where
 the irreconcilable "22×" came from, and why this is now a pinned invariant rather than a comment.)
 ⛔ **A first cut seeded `"x" * n` and concluded the opposite (~flat).** That seed varies BYTES while
@@ -86,7 +86,7 @@ was an artefact. Both the seed and the conclusion were replaced; the retraction 
 
 ⚠️ **The two arms are separate graph populations, and they agree less at higher load:** the
 1,000-Point population arm seeds the same 300 chars and read 12.77 vs the content arm's 12.84 in run 1
-(0.5 %), but 12.74 vs 14.20 in run 2 (10.3 %). That is why the axis is reported per run rather than
+(0.5 %), but 13.24 vs 14.56 in run 2 (9.9 %). That is why the axis is reported per run rather than
 pooled, and why the 60-and-1,200-char endpoints — which agree to 1 % across both runs — carry the
 conclusion rather than the middle point.
 
@@ -106,20 +106,20 @@ Points, approval set `{dev}`**; run 1 / run 2:
 
 | shape | gate reads per request | request run 1 → run 2 | one gate read (single / double) |
 |---|---|---|---|
-| `create_point` `core:Project` (control) | **0** | 12.92 → 11.38 ms | — |
-| `create_point` bare `statement` (control) | **0** | 10.94 → 12.73 ms | — |
-| `create_point` `dev:epic` | **1** | 30.52 → 34.55 ms | 16.27 / 19.28 ms |
-| `create_point(..., pointKind="dev:epic")` (props passthrough) | **1** | 34.65 → 31.24 ms | 16.27 / 19.28 ms |
-| `create_entity(object, objectKind="dev:epic")` | **1** | 43.12 → 40.18 ms | 16.27 / 19.28 ms |
-| ⛔ `create_point("dev:epic", …, pointKind="dev:epic")` — **SAME kind, TWO spellings** | **2** | 61.33 → 62.02 ms | 32.54 / 38.56 ms |
-| ⛔ `create_entity(object, objectKind=…, object_kind=…)` — **SAME kind, TWO spellings** | **2** | 63.75 → 75.28 ms | 32.54 / 38.56 ms |
+| `create_point` `core:Project` (control) | **0** | 12.92 → 11.95 ms | — |
+| `create_point` bare `statement` (control) | **0** | 10.94 → 13.97 ms | — |
+| `create_point` `dev:epic` | **1** | 30.52 → 31.89 ms | 16.27 / 16.89 ms |
+| `create_point(..., pointKind="dev:epic")` (props passthrough) | **1** | 34.65 → 33.52 ms | 16.27 / 16.89 ms |
+| `create_entity(object, objectKind="dev:epic")` | **1** | 43.12 → 38.73 ms | 16.27 / 16.89 ms |
+| ⛔ `create_point("dev:epic", …, pointKind="dev:epic")` — **SAME kind, TWO spellings** | **2** | 61.33 → 51.53 ms | 32.54 / 33.78 ms |
+| ⛔ `create_entity(object, objectKind=…, object_kind=…)` — **SAME kind, TWO spellings** | **2** | 63.75 → 61.70 ms | 32.54 / 33.78 ms |
 
 ⇒ **A namespaced kind named ONCE pays exactly ONE whole-graph read** — the synthesis's *"paid twice per
 request for a namespaced kind"* is **FALSIFIED for that shape** at this head, across three doors. A
-single read costs **16.3–19.3 ms at 5,000 Points** against a **10.9–13.0 ms** bare/`core:` write in the
-same run, so naming a pack costs **2.4–3.0× the same run's control** (run-matched: 30.52/10.94 = 2.79×
-and 34.55/12.73 = 2.71× against bare; 30.52/12.92 = 2.36× and 34.55/11.38 = 3.04× against `core:`),
-and an object write pays the same one read inside a 40.2–43.1 ms request.
+single read costs **16.3–16.9 ms at 5,000 Points** against a **10.9–14.0 ms** bare/`core:` write in the
+same run, so naming a pack costs **2.3–2.8× the same run's control** (run-matched: 30.52/10.94 = 2.79×
+and 31.89/13.97 = 2.28× against bare; 30.52/12.92 = 2.36× and 31.89/11.95 = 2.67× against `core:`),
+and an object write pays the same one read inside a 38.7–43.1 ms request.
 
 ⇒ **The two-read request exists, and its trigger is the NUMBER OF KIND-VALUED PROPERTIES IN THE WRITE,
 not the namespace.** `_refuse_unapproved_kinds_in_props` pays one read per kind-valued property it finds
@@ -128,12 +128,12 @@ twice when the same kind arrives through two spellings (positional + props, came
 when two *different* pack kinds arrive in one write (`create_event(eventKind="dev:a", uses=[{"kind":
 "dev:b"}])` — mechanism, not measured here).
 
-Measured share of the request: **37.7–55.8 %** for a single-spelling namespaced write (run 1: 53.3 % on
-`point_ns`, 37.7 % on `object_ns`; run 2: 55.8 % / 48.0 %) and **51.0–62.2 %** for a two-spelling one
-(run 1: 53.1 % / 51.0 %; run 2: 62.2 % / 51.2 %). ⚠️ **The share is the unstable figure** — it moves with
+Measured share of the request: **37.7–53.3 %** for a single-spelling namespaced write (run 1: 53.3 % on
+`point_ns`, 37.7 % on `object_ns`; run 2: 53.0 % / 50.4 % / 43.6 %) and **51.0–65.6 %** for a two-spelling
+one (run 1: 53.1 % / 51.0 %; run 2: 65.6 % / 54.7 %). ⚠️ **The share is the unstable figure** — it moves with
 how fast the rest of the door happens to run on a loaded box, and one draft's "share of the part above a
 bare write" exceeded 100 % on a later run, because the control itself got slower. **The stable figure is
-the absolute cost of a read: 16.3–19.3 ms at 5,000 Points.** Two earlier percentages in this file are
+the absolute cost of a read: 16.3–16.9 ms at 5,000 Points.** Two earlier percentages in this file are
 retracted rather than reworded: *"~85 % of the write"* (a cross-row mix — doubled gate ÷ single-spelling
 request) and *"65–78 % of the part above a bare write"* (an unstable denominator).
 
@@ -153,18 +153,18 @@ not weaken the gate** (an unvalidated `ns:kind` made a whole pack writable).
 
 | Points | verdict | probe run 1 → run 2 | µs/point (run 1 / run 2) |
 |---|---|---|---|
-| 1,000 | `True` | 5.44 → 4.91 ms | 5.44 / 4.91 |
-| 5,000 | `True` | 8.52 → 5.65 ms | 1.70 / 1.13 |
-| 20,000 | `True` | 10.00 → 8.55 ms | 0.50 / 0.43 |
+| 1,000 | `True` | 5.44 → 5.30 ms | 5.44 / 5.30 |
+| 5,000 | `True` | 8.52 → 6.83 ms | 1.70 / 1.37 |
+| 20,000 | `True` | 10.00 → 8.76 ms | 0.50 / 0.44 |
 
-⇒ **marginal 0.19–0.24 µs/point across the two runs** (1k→20k slopes: 0.240 and 0.192 µs/pt) with a
-**4.9–5.4 ms fixed floor on this box**. ⚠️ **The floor is the term that differs from the function's own
+⇒ **marginal 0.18–0.24 µs/point across the two runs** (1k→20k slopes: 0.240 and 0.182 µs/pt) with a
+**5.3–5.4 ms fixed floor on this box**. ⚠️ **The floor is the term that differs from the function's own
 docstring** (1.25 ms @1k at 4.20.6, same engine version) and the slope **brackets** its "≈0.2 µs/point"
-(0.19 below it, 0.24 above it, and a third run read 0.26) — so **this artifact corrects that constant in
+(0.18 below it, 0.24 above it, and an earlier run read 0.26) — so **this artifact corrects that constant in
 neither direction**: the slope reproduces within host variation, the FLOOR is what this box adds. An
 earlier draft DID claim a 2× correction from one sample; the later runs falsified it, which is why the
-claim is gone rather than reworded. The 5,000 reading is the noisy one in both runs (8.52 vs 5.65); the
-1,000 and 20,000 readings each agree across runs to within ~11 %.
+claim is gone rather than reworded. The 5,000 reading is the noisy one in both runs (8.52 vs 6.83); the
+1,000 and 20,000 readings each agree across runs to within ~13 %.
 
 **Who owns it — checked, and the answer is "nobody, and the source says otherwise".** `#5444` and
 `#5482`, the two issues the function's docstring names for removing this cost, are **both CLOSED**
