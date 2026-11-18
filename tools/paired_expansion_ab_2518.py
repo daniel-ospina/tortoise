@@ -61,9 +61,11 @@ WHAT IS MEASURED, IN ONE TOOL
    exact test, and **not** pre-stated: π is this run's own discordant share, so
    the figure cannot exist until both arms have been read (`#13267` review 4 F3;
    an earlier revision of this line claimed it was fixed in advance).
-   `#13118`'s two-arms-need-755 framing is recomputed for contrast — ⛔ that
-   estimate is quoted, not derived, and is published nowhere this repo can point
-   to (`#13267` review 3); what this tool computes is the DERIVATION.
+   The two-arms-need-755 estimate is recomputed for contrast — ⛔ that estimate is
+   quoted, not derived, and is published nowhere this repo can point to (`#13267`
+   reviews 3 and 16: `#13118`'s body, its comments and its own brief carry no such
+   number, so it is NOT "`#13118`'s framing"); what this tool computes is the
+   DERIVATION.
 5. **The harm side, measured too.** "Help or hurt" needs both directions: the tool
    records how much of each arm's top-k the expansion's merged, re-ranked pass
    DISPLACES (`_entity_key_dense_pass`'s docstring names this as real behaviour,
