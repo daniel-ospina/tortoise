@@ -484,6 +484,23 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
                             raising=True)
         monkeypatch.setattr(TortoiseSDK, "_get_proj",
                             lambda _self: type("P", (), {"g": None})(), raising=True)
+        # ⛔ THE OBJECT ARM'S OWN IDENTITY SEAM (#13490). The three arms that pass
+        # through `_entity_identity_for` above are the SDK helper; `create_entity
+        # ("object", ...)` does NOT use it — #12869 made that arm resolve its
+        # target inside its own `entity_create_lock`, through
+        # `entity_identity.resolve_or_mint`, so the status-landing guard can ask
+        # the same "will this call create the node?" question the write answers.
+        # That resolver reads the graph, which this test does not have (`.g` is
+        # None on the stub above) — it is a leg this case does NOT measure, so
+        # stub it to the single-mint answer. Without the stub the failure is an
+        # `AttributeError: 'NoneType' object has no attribute 'query'` from
+        # `entity_identity._name_holder_ids`, which reads as a storage defect in
+        # a test that asserts DISPATCH. Nothing here weakens the assertion pair
+        # below: the label, the event type and the kind bag all still come from
+        # the real `create_entity` dispatch.
+        monkeypatch.setattr("tortoise.entity_identity.resolve_or_mint",
+                            lambda _g, _label, _name, explicit_id=None: (
+                                explicit_id or "fixed-id", True), raising=True)
         monkeypatch.setattr(TortoiseSDK, "_nudge_candidates",
                             lambda _self, _name, exclude_ids=None: [], raising=True)
         monkeypatch.setattr(TortoiseSDK, "_provenance_advisory",
