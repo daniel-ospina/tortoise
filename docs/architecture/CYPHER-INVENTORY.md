@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1314** | **100** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,096** | **826** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **8,951** | **826** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -131,9 +131,11 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 299 files finds exactly 13 — the verb-at-end-of-line scan alone finds **178**
-(every one of them a COMMENT or docstring line whose next line opens a parenthetical, which the
-case-insensitive predicate counts), which is why
+predicate over the same 299 files finds exactly 13 — the verb-at-end-of-line scan alone finds **178**,
+and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
+enumerated, and the other **165** are a COMMENT or docstring line that simply ENDS on the word (“any
+failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, …) with nothing following,
+which the case-insensitive predicate counts and which is why the predicate has to be stated
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
@@ -756,7 +758,11 @@ first one is a defect this cut REPAIRS:
   **298→299** — because it adds one product module (`tortoise/derived_embedding.py`) that carries **no**
   Cypher statement site (`files_with_sites` stays **100**, every `shape_*` and `partial` pin unchanged).
   So the only census delta in this whole PR is the one the paragraph above already attributes
-  (`#13422`'s prefetch `SELECT`, non-Cypher 258→259 / `ast_door_calls` 1572→1573).
+  (`#13422`'s prefetch `SELECT`, non-Cypher 258→259 / `ast_door_calls` 1572→1573). A PEER lane's own
+  integration commits (`033f82b0a1`, `56ab87e73a`) were then merged on top, and they move no census
+  scalar either — measured on this final tree, which reads **1314 / 100 / 299** exactly as it did
+  before they were taken. Every number in this section is therefore re-derived at ONE tree, the one
+  that carries them.
 
 Re-measured on the merged tree with the predicates §1 states, NOT carried and NOT shifted by a delta:
 door **1,627 / 109**; verb **2,346 / 145** whole-text and **2,333 / 144** line-based (the 13-occurrence,
