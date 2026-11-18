@@ -215,8 +215,11 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 #: discards the count declared earlier in this literal — and because what survives IS a count, the test
 #: below passes on a tree whose reviewed value is gone (measured: green on the tree `#13345` landed
 #: three duplicated keys on). `ruff`'s F601 is the only instrument that sees a duplicate, and it runs on
-#: the PR event rather than the push to `main` — which is why `main` was lint-red until this removal.
-#: #9314 is the pytest-level guard this file does not have.
+#: BOTH events — the PR event (`ci.yml`) and the push to `main` (`main-lint.yml`, #2174). Neither gated
+#: the merge that landed the duplicate: on `#13345` the PR-event `lint` RED on the PR's own sha but its
+#: run STARTED 11 min after the merge (18:31:33Z vs 18:20:40Z), and the push-to-`main` gate that first
+#: reported (18:24:17Z on `549bad0c77`) is post-merge by construction. That is why `main` was lint-red
+#: until this removal. #9314 is the pytest-level guard this file does not have.
 _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4797-4801'): 1,
