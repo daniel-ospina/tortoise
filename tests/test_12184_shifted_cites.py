@@ -246,8 +246,8 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
         "124 of this document's 211",
-        "dedupes the 314 as-written spellings to 211 — 103",
-        "314 written spellings → 211 pairs → 103 collisions → 124 drifters of the 211 comparable",
+        "dedupes the 316 as-written spellings to 211 — 105",
+        "316 written spellings → 211 pairs → 105 collisions → 124 drifters of the 211 comparable",
         "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
