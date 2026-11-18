@@ -1557,6 +1557,23 @@ class TestAMentionIsNotAnOccurrence:
         rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
         assert rows["Nothing linked at all"]["mentions"] == 0
 
+    def test_a_linked_Event_with_NO_kind_is_a_mention(self, sdk):
+        """The `coalesce(…, '')` arm: absence is a mention, not an occurrence.
+
+        A raw/foreign writer can wire an Event that carries no `eventKind` at all;
+        `'' IN $occurrence_kinds` is false, so it must classify as a mention —
+        the arm the code comments most and the one nothing else pinned.
+        """
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Linked from an unkinded Event")
+        g.query("CREATE (e:Event {eventId:'nokind-1'})")
+        g.query("MATCH (e:Event {eventId:'nokind-1'}), (p:Object {id:$p}) "
+                "CREATE (e)-[:aboutObject]->(p)", params={"p": plan["id"]})
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert "Linked from an unkinded Event" in rows, (
+            "a kind-less linked Event was read as the occurrence")
+        assert rows["Linked from an unkinded Event"]["mentions"] == 1
+
     def test_a_mention_does_not_change_an_ENDED_plan_s_ending(self, sdk):
         """Q5's capstone row: a cancelled plan with a note about it.
 

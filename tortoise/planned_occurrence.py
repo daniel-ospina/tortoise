@@ -165,9 +165,11 @@ OCCURRENCE_EVENT_KIND = DEFAULT_OCCURRENCE_KIND
 #:
 #: ⛔ **THE KIND IS EVIDENCE, NOT PROOF, and the difference is stated rather
 #: than glossed.** ``occurrence`` is ONTOLOGY §5's *generic extracted
-#: occurrence* and the repo's own declared fallback for an ``eventKind`` a
-#: writer cannot classify (``pack_state._KIND_GENERAL_FALLBACKS["eventKind"]``,
-#: and `unapproved_kind_refusal` PRESCRIBES it in its remedy text). So not every
+#: occurrence* and the repo's declared fallback for an ``eventKind`` a writer
+#: cannot classify — BOTH spellings: ``pack_state._KIND_GENERAL_FALLBACKS
+#: ["eventKind"]`` (bare, and `unapproved_kind_refusal` PRESCRIBES it in its
+#: remedy text) and ``extractor_v2._EVENT_FALLBACK["kind"] = "core:occurrence"``
+#: (namespaced — the spelling this change newly counts). So not every
 #: Event of this kind is an occurrence, and a mention written under it still
 #: reads as the occurrence. What the kind buys is the whole ORDINARY mention set
 #: (``email`` / ``meeting`` / ``note`` / ``turn`` / ``decision`` …) plus a writer
