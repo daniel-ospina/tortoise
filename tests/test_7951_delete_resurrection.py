@@ -1049,6 +1049,88 @@ class TestOrphanedWriteSweepIsJournaled:
             "the sweep must journal the container removal (SessionDeleted "
             "removes the orphaned agentSession Source too) (#7951)")
 
+    def test_sweep_records_its_cache_write_target(self, hosted, monkeypatch):
+        """#12943 (review cycle 7, F1): the sweep's own recorder is pinned.
+
+        `_sweep_orphaned_writes` issues raw `DETACH DELETE`s that fold no record,
+        so without its `note_live_write_target(proj)` call a process whose live
+        traffic is this lane reads `cache_write_targets() == {}` —
+        byte-identical to "this process took no live cache write", the illusion
+        the #12943 registry exists to end. The call was real but unpinned: the
+        sibling `_capture_session_impl` hook is masked by the capture's own
+        folds, and deleting THIS one left the whole repo green (measured, and
+        disclosed by `test_12943_cache_leg.py::
+        test_hosted_session_delete_records_its_target`'s docstring).
+
+        The registry is reset AT the sweep's own last statement, so the count
+        asserted below is the sweep's contribution alone — the capture's earlier
+        folds cannot mask the missing recorder. Measured both ways: `1` at this
+        head, `0` with the recorder call deleted.
+        """
+        from tortoise.cache_leg import (
+            cache_write_targets,
+            reset_cache_write_targets,
+        )
+
+        tc, sdk = hosted
+        real_proj = sdk._get_proj()
+        real_query = real_proj.g.query
+        sid = "s-12943-sweep-target"
+        seen: dict = {"reset": False, "after": None}
+
+        def fake_query(query, params=None, **kw):
+            if seen["reset"] and seen["after"] is None:
+                # The FIRST statement after the sweep: the recorder (if any) has
+                # already run, and no later fold of this capture has.
+                seen["after"] = sum(cache_write_targets().values())
+            merged = dict(params or {})
+            merged.update(kw)  # state helpers pass params as **kwargs
+            if "DETACH DELETE" in query and (
+                    "p.id IN $ids" in query or "e.eventId = $eid" in query):
+                return type("Rows", (), {"result_set": [[1]]})()
+            if "DETACH DELETE" in query and "src:Source {url:$url}" in query:
+                # The sweep's LAST statement, immediately before its recorder.
+                reset_cache_write_targets()
+                seen["reset"] = True
+                return type("Rows", (), {"result_set": [[1]]})()
+            if "count(s)" in query and "{id:$sid}" in query:
+                # "the delete already won": 0 Sessions, null state columns.
+                return type("Rows", (), {
+                    "result_set": [[0, None, None, None]]})()
+            return real_query(query, params=merged)
+
+        class _FakeProj:
+            g = type("G", (), {"query": staticmethod(fake_query)})()
+            query = staticmethod(fake_query)
+
+            def __getattr__(self, name):  # delegate everything else
+                return getattr(real_proj, name)
+
+        class _GuardSdk:
+            def _get_proj(self):
+                return _FakeProj()
+
+            def __getattr__(self, name):
+                return getattr(sdk, name)
+
+        real_make_sdk = _ha._make_sdk
+
+        def patched_make_sdk(namespace=None, **kw):
+            if namespace == TEAM_ID:
+                return _GuardSdk()
+            return real_make_sdk(namespace=namespace, **kw)
+
+        monkeypatch.setattr(_ha, "_make_sdk", patched_make_sdk)
+        r = tc.post("/v1/sessions", json={"conversation": CONV,
+                                          "session_id": sid})
+        assert r.status_code == 200, r.text
+        assert seen["reset"], "the sweep never ran — test is vacuous"
+        assert seen["after"] == 1, (
+            "the sweep deleted nodes and the registry recorded no target "
+            f"(after={seen['after']!r}): the `note_live_write_target(proj)` "
+            "call in `_sweep_orphaned_writes` is gone, so this lane's live "
+            "traffic reads as `{}` (#12943)")
+
     def test_recapture_winning_the_sweep_race_is_not_journaled_deleted(
             self, hosted, monkeypatch):
         """P2-d: the sweep's `SessionDeleted` must be gated on the guarded

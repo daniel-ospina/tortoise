@@ -1317,7 +1317,11 @@ def test_hosted_session_delete_records_its_target(monkeypatch, tmp_path):
     own statements run against a real embedded graph. Measured: with the recorder
     call removed from `delete_session`, this test reds; with only the sibling
     `_capture_session_impl` call removed, it stays green (that lane also folds,
-    so its target is recorded by the fold hook regardless).
+    so its target is recorded by the fold hook regardless). ⚠️ That green is not
+    coverage: the sibling recorder is pinned by its OWN test,
+    `test_7951_delete_resurrection.py::TestOrphanedWriteSweepIsJournaled::
+    test_sweep_records_its_cache_write_target`, which resets the registry at the
+    sweep's last statement so no fold can mask it (#12943 review cycle 7, F1).
     """
     import asyncio
 
