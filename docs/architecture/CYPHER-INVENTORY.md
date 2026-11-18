@@ -605,9 +605,9 @@ section exists to name.
 a metric or a base it did not measure: one said "31 of 1,313 rows" (`1,313` is the table's LINE
 count — the table carried **1,313 rows over 1,315 lines** at the base it landed on — and `31` was attributed to no
 metric), and another said "137 of 1,311 rows", measured against a `origin/main` that `#13317` has
-since regenerated. The counts above are the only ones in this paragraph a reader can reproduce from
-the MERGE tree **`48585c94ff`** (`git show 340d500491:docs/architecture/CYPHER-INVENTORY.md` versus a
-fresh `--markdown` at that commit).
+since regenerated. ⛔ Every count in this paragraph is reproducible only from the tree named beside
+it: the recipe that yields `237/237` at `48585c94ff` prints `226/226` at `6264dc670c`, so a reader who
+re-cuts without checking which tree a figure was bound to will "correct" the figure that is right.
 A count taken off the wrong unit, off a base that has since moved, or off an unnamed metric is the
 defect class this paragraph exists to name.
 **The cut before that, `main`'s own, kept as the record of it** — the PINS by `main`'s

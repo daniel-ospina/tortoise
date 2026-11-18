@@ -68,8 +68,9 @@ Lifecycle decision table (THE rule):
   ⚠️ The WIDER terms — ``status='outdated'`` and the legacy ``outdated=true`` flag —
   are NOT latched: ``_fold_object_stage``'s set has no ``outdated`` member, the
   CLOSE fold cannot reach such a row (no live holder) while the REOPEN fold can
-  (``_reopen_targets_closed``), so they are answered from the POSITION, per
-  direction. See ``_status_is_latched`` / ``_row_is_frozen`` / the reader below.
+  (``_reopen_targets_closed``). Answered from the POSITION where the row HAS one
+  and from the WORD where it has none — ⛔ NOT "the POSITION, per direction",
+  which is one case short. Cases: ``_object_state_to_issue_state``'s docstring.
   ⛔ FAMILIES 1 AND 2 ARE ANSWERED BEFORE THE POLARITY (closed/open) ARMS, on
   purpose: their answer therefore does not depend on ``isClosed``. It must not,
   because ``is_position_ended`` short-circuits on the marker alone and never looks
