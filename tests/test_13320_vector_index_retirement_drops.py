@@ -504,7 +504,7 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
     #     (this fixture takes the full-sweep lane: measured 2 reads per sweep).
     #   * `_ensure_indexes_declared` issues its own two `DROP INDEX ON
     #     :Point(is_operator)` / `:Point(is_operator, lastDreamedAt)` statements
-    #     (:21276-21277), so an unfiltered drop count grows too. This file already
+    #     (:21275-21276), so an unfiltered drop count grows too. This file already
     #     records exactly that hazard for these two statements — the ⛔ "Scoped to
     #     the retirement's candidates" note in
     #     `test_a_foreign_Point_vector_index_neither_arms_the_sweep_nor_is_reported`.
@@ -537,7 +537,9 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
         "store repaired between sweeps must still be able to announce the "
         f"repair (retirement drops: {len(retirement_drops)} -> "
         f"{len(retirement_drops_after_second)}; all drops: {graph.drops})")
-    # ⛔ THE DROP LOOP IS NOT THE MEASURE+REPORT (#13376 review round 2, finding 4).
+    # ⛔ THE DROP LOOP IS NOT THE MEASURE+REPORT (#13419 review of `bb247aa008`,
+    # finding 1 — a `#13376` round-2 citation here named a review of the OTHER PR
+    # that returned NO ISSUES FOUND, so it sent a reader to a clean verdict).
     # Measured: a latch applied AFTER the drop loop — `if not
     # self._retirement_failure_is_news("armed-post-drop"): return` right before
     # `_ambiguous_write` (:21872) — leaves the DROP assertion above GREEN while
