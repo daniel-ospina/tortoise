@@ -6763,9 +6763,21 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # row GREEN. The sentence is therefore read WHOLE, with its number DERIVED from the
     # source, so both halves are graded: a source move the document did not follow reds, and
     # a document re-point the source did not make reds.
-    _dedup_filter_line = next(
+    _dedup_filter_lines = [
         _n for _n, _ln in enumerate(sources["sdk"], 1)
-        if "dedup_reviewed IS NULL" in _ln)
+        if "dedup_reviewed IS NULL" in _ln]
+    # ⛔ NOT `next(...)`: a bare `next` raises `StopIteration` with no message the moment the
+    # anchor is gone, which pre-empts the pin rows' own reporting and makes the mutant
+    # UNATTRIBUTABLE (agent-infra#3442 rule 2 — MEASURED: with the token removed the whole case
+    # died on `E StopIteration` and printed no row at all). And the pin row's discrimination
+    # rests on this being the file's ONLY occurrence, so that is asserted here rather than
+    # only claimed in the comment above it.
+    assert len(_dedup_filter_lines) == 1, (
+        "tortoise/sdk.py must carry `dedup_reviewed IS NULL` EXACTLY once — the pin row scoped "
+        "to `the content-review queue filter that cite named` is only discriminating because "
+        f"this is the file's ONLY occurrence; this tree has {len(_dedup_filter_lines)} "
+        f"occurrence(s), at line(s) {_dedup_filter_lines}")
+    _dedup_filter_line = _dedup_filter_lines[0]
     _dedup_clause = (
         "the content-review queue filter that cite named, `dedup_reviewed IS NULL`, sits at "
         f"`sdk.py:{_dedup_filter_line}` at this head")
