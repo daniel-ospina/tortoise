@@ -118,6 +118,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "| `tortoise/sdk.py:37392` |", _SDK, 37392, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     (_AUDIT, "the `-[r]->` walk (`sdk.py:37392`)", _SDK, 37392, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     (_AUDIT, "they are `:37369` and", _SDK, 37369, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
+    # (`:3005`, `:6933`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
+    # `#13551` lane's previous pass re-derived on the PRE-merge tree — is a docstring line at this
+    # head, at `f07b73b1de` and on `origin/main`, where the statement is `:57276` (the `#13550` /
+    # `#13584` integration inserted 186 lines above it). A cite re-derived before a merge is stale
+    # after it, which is D5's own rule; the pin is what makes the next one red instead of silent.
+    (_AUDIT, '`sdk.py:57276` passes `"event"`', _SDK, 57276, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -261,6 +268,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37392` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37392`)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37369` and'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57276` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
@@ -485,8 +493,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # proximity paragraph, `:37183`) for statements that are on `:37392` / `:37369` at every head the
     # row names — measured above the rows. The pair pins could not see them: a `:37392` anywhere on
     # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6938` was.
+    # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
+    # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`).
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
-    assert len(_PINS) == 58
+    assert len(_PINS) == 59
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
