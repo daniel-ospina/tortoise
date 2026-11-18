@@ -759,6 +759,11 @@ def test_no_redirect_stems_registry_exact():
     from tests._embedded import TEST_NO_REDIRECT_STEMS
     expected = frozenset({
         "test_backup_e2e",
+        # #13417: the counter/backfill loop builds its own embedded projection by
+        # PATH per test, so a URI lane would grade a shared container (#5084).
+        # Mirrors config/ci-surfaces.yml `carve_out:` and
+        # tests/_embedded.TEST_NO_REDIRECT_STEMS — the three-way mirror.
+        "test_13417_vectorless_rows",
         "test_config",
         "test_embedded_concurrency",
         # #2879: embedded AOF durability drift pin (carve-out — the docker
