@@ -2108,11 +2108,13 @@ class EventLog:
         the count started, exactly as ``position()`` documents for the same
         window (it has no ``None`` to give either). Nothing CROSS-PROCESS is
         written by such a count: no sidecar and no lock-state stamp, so a peer
-        cannot inherit it. The INSTANCE memo IS refreshed on the way out
-        (``_records_before`` installs ``_position_memo`` unconditionally,
-        #13345 review P3-3), so a later call on this same instance may answer
-        from it — but only on an exact ``(size, mtime_ns)`` match, which is what
-        keeps that from hiding a peer append.
+        cannot inherit it. The INSTANCE memo IS refreshed on every path that
+        DERIVES a count (``_records_before`` installs ``_position_memo``
+        there, #13345 review P3-3) — though not on its two ``None`` arms, which
+        return before the install, and the install itself is suppressed — so a
+        later call on this same instance may answer from it, but only on an
+        exact ``(size, mtime_ns)`` match, which is what keeps that from hiding
+        a peer append.
         """
         try:
             st = os.stat(self.path)
