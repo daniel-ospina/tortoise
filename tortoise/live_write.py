@@ -128,6 +128,38 @@ Append = Callable[[], int | None]
 #: wrapper so the door's import guard and durability read keep ONE home.
 Project = Callable[[Mapping[str, Any], int | None], Any]
 
+#: This module's OWN refusal token for the one arm where the record seam never
+#: ANSWERED — it raised, or could not be imported, after the append committed.
+#: Minted here, never by the seam, which is why :attr:`LiveWrite.armed` can read
+#: it and answer ``None`` (unmeasured) rather than ``False`` (#13345 review I2).
+PROJECTION_RAISED = "projection_raised"
+
+
+def _is_durable_decline(outcome: Any) -> bool:
+    """Is this the seam's HEALTHY-ARMED DECLINE (a scratch buffer, #9231)?
+
+    ``RecordWrite.applied`` publishes the rule this obeys: *"A consumer must
+    branch on ``refusal``, not on ``applied is False``, before calling a decline
+    an error."* ``no_durable_journal`` is the M2 session-capture lane — a scratch
+    buffer with no journal by design — so nothing a replay could restore is
+    missing, and there is no journal line the record failed to take. Reading
+    ``applied is False`` alone reported a lost write for every ``capture_session``
+    emit on an armed record (#13345 review I1).
+
+    The TOKEN is read from the seam that mints it, never respelled here: a second
+    copy of a closed vocabulary is how a rename stops matching silently. The
+    import is lazy and swallowed for the same reason the seam itself is imported
+    inside ``write``'s ``try`` — an unimportable ``record_writer`` must not raise
+    out of a classification. A failed import answers ``False``, the fail-closed
+    direction: a decline reported as a loss is a false alarm; a loss reported as
+    a decline is a silent gap.
+    """
+    try:
+        from .record_writer import NON_DURABLE_JOURNAL_REFUSAL
+    except Exception:
+        return False
+    return getattr(outcome, "refusal", None) == NON_DURABLE_JOURNAL_REFUSAL
+
 
 @dataclass(frozen=True)
 class LiveWrite:
@@ -138,13 +170,18 @@ class LiveWrite:
     append is the truth store's failure, not a record refusal), so a caller
     never receives an outcome that claims a write whose line is missing.
 
-    ``record`` is ``None`` when the record was UNARMED (no DSN) or DECLINED the
-    record (a scratch buffer has no journal to replay from) — the two cases
-    `write_live_record` returns ``None`` for. It is a ``RecordWrite`` otherwise,
-    whose ``applied`` answers whether the record holds the row.
+    ``record`` is ``None`` only when the record was UNARMED (no DSN) — the ONE
+    case `write_live_record` returns ``None`` for. A DECLINE is a ``RecordWrite``
+    like any other armed answer (#8447): the scratch-buffer decline
+    (``no_durable_journal``) is ``applied=False`` carrying that token as its
+    ``refusal``, and it is NOT an unprojected disagreement — see ``unprojected``.
+    It is a ``RecordWrite`` otherwise, whose ``applied`` answers whether the
+    record holds the row.
 
     ``unprojected`` is the named disagreement: ``1`` when the journal holds a
-    line the record did NOT take, ``0`` otherwise. It is deliberately an
+    line the record did NOT take, ``0`` otherwise. A DECLINE is ``0``: a scratch
+    buffer has no journal, so no line exists for the record to have missed
+    (#13345 review I1). It is deliberately an
     integer over this one record rather than a boolean, so `record_reconcile`'s
     count and this value are the same quantity at different scopes. ⚠️ It is
     returned to the caller and read by no production door — see the module
@@ -166,9 +203,34 @@ class LiveWrite:
         return bool(getattr(self.record, "applied", False))
 
     @property
-    def armed(self) -> bool:
-        """Was the record armed at all? (A refusal is armed-but-not-written.)"""
-        return self.record is not None
+    def armed(self) -> bool | None:
+        """Was the RECORD armed for this write? ``True``/``False``/``None`` (unmeasured).
+
+        ``True`` — the seam ANSWERED, and only an armed call answers: an unarmed
+        deployment returns ``None`` from ``write_live_record``, so any
+        ``RecordWrite`` held here — APPLIED, any refusal, or the healthy
+        ``no_durable_journal`` decline — is an armed record.
+
+        ``False`` — nothing came back and nothing is at stake: the unarmed path.
+
+        ``None`` — **UNMEASURED**, and the third state is the point (#13345 review
+        I2). In the ``projection_raised`` arm the seam never answered (it raised,
+        or could not be imported), so arming is *unknown*: this deployment may or
+        may not hold a DSN. Deriving ``armed`` from ``record is not None`` made
+        that arm report ``False`` WHILE ``unprojected == 1`` — "the record was not
+        armed" and "the journal holds a line the record did not take" asserted
+        together, though the second is precisely why the first cannot be claimed.
+        An unknown answer must not be spelled as a measurement — the same rule
+        ``JournalCoverage.unprojected_unknown_reason`` enforces one surface over.
+        A consumer needing a boolean reads ``record is not None``
+        (armed-and-answered) or ``unprojected`` (did a line go untaken); those two
+        ARE measured.
+        """
+        if self.record is not None:
+            return True
+        if self.refusal == PROJECTION_RAISED:
+            return None
+        return False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -271,15 +333,19 @@ def write(event: Mapping[str, Any], *,
         raised = False
 
     refusal = None if outcome is None else getattr(outcome, "refusal", None)
-    # `record is None` = unarmed OR declined (no durable journal): neither is a
-    # lost row — nothing claimed it. A RecordWrite that did not apply IS one.
+    # `record is None` = UNARMED: nothing claimed the write, nothing lost. The
+    # seam's healthy-armed DECLINE is that same verdict by another route — a
+    # scratch buffer has no journal, so there is no line it failed to take
+    # (#13345 review I1). Every OTHER `applied is False` IS a line the record did
+    # not take, and `refusal` keeps the seam's own token or names the loss.
     unprojected = 0
-    if outcome is not None and not getattr(outcome, "applied", False):
+    if (outcome is not None and not getattr(outcome, "applied", False)
+            and not _is_durable_decline(outcome)):
         unprojected = 1
         refusal = refusal or "write_failed"
     if raised:
         unprojected = 1
-        refusal = "projection_raised"
+        refusal = PROJECTION_RAISED
 
     if record_sink is not None:
         record_sink.append(outcome)

@@ -23,7 +23,7 @@ import types
 import pytest
 
 import tortoise
-from tortoise import live_write
+from tortoise import live_write, monitoring, record_projection, record_writer
 from tortoise.reconciliation import ReconciliationReport
 from tortoise.record_projection import JournalCoverage
 from tortoise.record_reconcile import (
@@ -49,10 +49,12 @@ class _Log:
     durable = True
 
     def __init__(self, seq: int | None = 7, order: list | None = None,
-                 raises: BaseException | None = None):
+                 raises: BaseException | None = None,
+                 durable: bool = True):
         self.seq = seq
         self.order = order if order is not None else []
         self.raises = raises
+        self.durable = durable
         self.appended: list = []
 
     def append(self, event):
@@ -156,6 +158,7 @@ def test_a_refused_record_is_a_named_unprojected_disagreement_and_the_fold_still
     assert result.unprojected == 1
     assert result.refusal == "write_failed"
     assert result.applied is False
+    assert result.armed is True             # the seam ANSWERED: it is armed
     assert order == ["append", "project", "fold"]
     assert projection.applied == [{"type": "PointAdded"}]
 
@@ -213,7 +216,11 @@ def test_a_record_seam_that_cannot_be_imported_is_reported_not_raised_after_the_
     assert result.seq == log.seq
     assert result.refusal == "projection_raised"
     assert result.unprojected == 1
-    assert result.armed is False            # nothing claimed the write
+    # ⛔ NOT `False` (#13345 review I2). The seam never ANSWERED — it could not be
+    # imported — so whether this box holds a DSN is UNMEASURED, and saying "not
+    # armed" beside `unprojected == 1` asserted a contradiction: something took a
+    # journal line the record did not.
+    assert result.armed is None
     assert order == ["append", "fold"]     # ⛔ the fold is NOT skipped
     assert len(projection.applied) == 1
 
@@ -225,9 +232,93 @@ def test_an_unarmed_record_is_not_an_unprojected_disagreement():
                               project=_record(lambda e, s: None, order))
 
     assert result.record is None
-    assert result.armed is False
+    assert result.armed is False            # MEASURED: the seam answered `None`
     assert result.unprojected == 0
     assert result.refusal is None
+
+
+def test_a_scratch_buffer_decline_is_not_a_lost_write(monkeypatch):
+    """#13345 review I1 — the seam's healthy DECLINE is not an unprojected line.
+
+    `EventAPI._emit` hands the seam `durable=False` on the M2 capture lane
+    (`_InMemoryEventLog`), and the seam answers with a REAL `RecordWrite` —
+    `applied=False`, `refusal="no_durable_journal"` — not with the `None` that
+    ONLY an unarmed deployment returns. Reading `applied is False` alone therefore
+    reported `unprojected == 1` ("the journal holds a line the record did not
+    take") for every captured session on an ARMED record, while a scratch buffer
+    has no journal at all. `RecordWrite.applied` publishes the rule the
+    chokepoint broke: *"A consumer must branch on ``refusal``, not on
+    ``applied is False``, before calling a decline an error."*
+
+    Driven through the REAL seam (no `project=`), because the arm is unreachable
+    from a stub: `test_an_unarmed_record_is_not_an_unprojected_disagreement`
+    stubs `project` to `return None` and never arrives here. `_default_connect` is
+    rigged to fail, so this also re-proves the decline opens nothing.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: pytest.fail(
+        "a DECLINED non-journal write opened a record connection"))
+    before = dict(monitoring.record_non_journal_skip_counts())
+
+    result = live_write.write({"type": "PointAdded"}, log=_Log(durable=False))
+
+    assert result.appended is True
+    assert result.record is not None           # the seam ANSWERED …
+    assert result.refusal == "no_durable_journal"   # … and named its decline
+    assert result.applied is False             # nothing was written …
+    assert result.armed is True                # … on an ARMED record
+    assert result.unprojected == 0, (
+        "a scratch buffer has no journal, so there is no line the record failed "
+        "to take — a decline is not an unprojected disagreement")
+    assert dict(monitoring.record_non_journal_skip_counts()).get(
+        "no_durable_journal", 0) > before.get("no_durable_journal", 0)
+
+
+def test_the_decline_is_recognised_by_the_seam_s_own_token(monkeypatch):
+    """The vocabulary has ONE home: rename the seam's token and this follows it.
+
+    A respelled `"no_durable_journal"` in the chokepoint would pass the test above
+    and silently stop matching the day the seam's token moves — the exact drift a
+    closed vocabulary exists to prevent. Patching the seam's own constant renames
+    it on BOTH sides (the verdict returns it, the classification compares it), and
+    a hardcoded copy here would go red: the outcome would be reported as a lost
+    write under a token nothing had seen before.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: pytest.fail(
+        "a DECLINED non-journal write opened a record connection"))
+    monkeypatch.setattr(record_writer, "NON_DURABLE_JOURNAL_REFUSAL",
+                        "scratch_buffer")
+
+    result = live_write.write({"type": "PointAdded"}, log=_Log(durable=False))
+
+    assert result.refusal == "scratch_buffer"   # the seam's renamed token, kept
+    assert result.unprojected == 0
+
+
+def test_the_outcome_serializes_what_it_claims():
+    """#13345 review, calibration note 1 — `as_dict` had no assertion at all.
+
+    Every key it publishes is what a log reader or an operator sees, and no other
+    test varied the method, so an `as_dict` regression left the suite green. The
+    two rows below pin an armed refusal and the unarmed path, so each published
+    value — including the `unprojected` this PR introduces — is derived, not
+    assumed.
+    """
+    refused = _outcome(applied=False, refusal="write_failed", outcome="refused")
+    armed = live_write.write({"type": "PointAdded"}, log=_Log(seq=9),
+                             project=lambda e, s: refused)
+    assert armed.as_dict() == {
+        "seq": 9, "appended": True, "record": "refused",
+        "refusal": "write_failed", "folded": False, "unprojected": 1}
+
+    unarmed = live_write.write({"type": "PointAdded"}, log=_Log(seq=3),
+                               project=lambda e, s: None)
+    assert unarmed.as_dict() == {
+        "seq": 3, "appended": True, "record": None,
+        "refusal": None, "folded": False, "unprojected": 0}
 
 
 def test_the_record_outcome_travels_to_the_capture_sink():
@@ -343,6 +434,60 @@ def test_contiguous_covers_both_edges():
     assert _coverage(3, 3, 1, 3).contiguous is True
     assert _coverage(2, 3, 1, 2, gap=2).contiguous is False
     assert _coverage(2, 3, 2, 2).contiguous is False   # starts above 1
+
+
+class _FakeCursor:
+    """A cursor whose `fetchone()` answers from a queue — no Postgres needed."""
+
+    def __init__(self, rows, statements):
+        self._rows = list(rows)
+        self.statements = statements
+        self.closed = False
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+
+    def fetchone(self):
+        return self._rows.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self.statements: list = []
+        self.cursor_obj = _FakeCursor(rows, self.statements)
+
+    def cursor(self):
+        return self.cursor_obj
+
+
+def test_a_coverage_read_that_returns_no_row_RAISES_rather_than_reporting_zero():
+    """#13345 review, calibration note 2 — the no-row refusal had no assertion.
+
+    `journal_coverage`'s contract is "⛔ IT RAISES ON A FAILED READ": an aggregate
+    over an empty set always returns one row, so a MISSING row is unreadable, not
+    empty. Nothing asserted it — the CLI test stubs the reader and the
+    `record_vector` tests stub it too — so deleting the `raise` left the whole
+    suite green and a failed read would come back as `present=0`, the vacuous
+    green this module refuses everywhere else (`_refuse_vacuous`, one surface
+    over): a fully-consumed journal would read as fully unprojected, or the
+    reverse, with a `clean` verdict on it.
+
+    The first `fetchone()` belongs to `scope_connection` (#9600), whose read-back
+    must be answered before the coverage statement is even issued — so the queue
+    also pins that ordering.
+    """
+    scope_row = ("org-1", False)         # (tenant GUC applied, role bypassing)
+    conn = _FakeConn([scope_row, None])   # …then the coverage read answers NOTHING
+
+    with pytest.raises(record_projection.RecordProjectionError,
+                       match="returned no row"):
+        record_projection.journal_coverage(conn, org_id="org-1", graph_id="g-1",
+                                          enumerated=5)
+
+    assert conn.cursor_obj.closed, "the cursor must be closed on the raising arm too"
 
 
 def _result(*, journal=None, divergent=0, checked=1):
