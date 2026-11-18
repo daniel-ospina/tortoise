@@ -1869,6 +1869,17 @@ def _strip_sql_comments(sql: str) -> str:
             # `a$E'…'` is ONE identifier and not an escape string — the same rule
             # `tortoise/record_projection.py:2380` already encodes as `in "_$"`, and
             # omitting it here stripped `SELECT a$E'\'' AS q; -- c`.
+            # ⛔ WHAT THIS TEST CANNOT SEE, stated rather than glossed: the check is a
+            # bare character test, so it also suppresses the rule after a `$` that
+            # CLOSES a `$tag$` (`$q$x$q$E'…'`) or stands alone (`$E'…'`) — where PG's
+            # lexer does start a fresh token. That divergence runs in the FAIL-OPEN
+            # direction (escape suppressed → literal reopens → a comment the server
+            # would execute as data can be deleted), but no VALID-SQL input reaches it:
+            # adjacent constants need an operator or whitespace, so the shape is a
+            # parse error; measured 0 `$E'`/`$e'` in all 88 `supabase/migrations` files
+            # and byte-identical stripped output under both set members. The shipped
+            # lexer carries the same corner BY CONSTRUCTION, which is why the model
+            # matching it is the correct side of this trade.
             # ⛔ A closing `"` is NOT such a character: it ENDS a quoted identifier,
             # so `"a"E'…'` starts a fresh token and the escape rule must still apply —
             # excluding `"` here left that form blind to EOF (`SELECT "a"E'\'' AS q;
