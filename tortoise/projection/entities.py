@@ -5452,12 +5452,17 @@ class _EntityHandlers:
         if not ev.get("suppress_embedding") and st and st.strip():
             # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:
-                # ⛔ THE SEAM (#13447) — see `_upsert_subject`. ⚠️ The TEXT here
-                # is `st` (`_build_search_text(title, summary, topics)`), which is
-                # NOT the record's `title`+`content` rule: that divergence is
-                # #13412's, and until it lands the two callers encode DIFFERENT
-                # strings, so the memo cannot dedupe a document write (stated in
-                # `derived_embedding.TEXT_PARTS_BY_RECORD_TYPE`).
+                # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The TEXT here is `st`
+                # (`_build_search_text(title, summary, topics)`), and it is ALSO the
+                # record's text: `#13412` LANDED in main and the seam's
+                # `DocumentCreated` rule CALLS this same function
+                # (`derived_embedding._document_embedding_parts`), so the record column
+                # and this fold compose ONE string and the text-keyed memo serves this
+                # second leg at zero model calls — a document write pays ONE encode,
+                # like every other label. ⚠️ This comment said the opposite until
+                # review cycle 8 (P3): it was written while `#13412` was still unlanded,
+                # the re-cut made it false, and it then contradicted the seam module's
+                # own `DocumentCreated` paragraph ("the document pair dedupes for free").
                 from tortoise import derived_embedding
                 # #13224: DERIVED vector — see `_upsert_subject` for the scope.
                 embedding = derived_embedding.encode(

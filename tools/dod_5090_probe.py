@@ -1114,6 +1114,11 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     * the receiver is NOT bound in the writer's own scope (`_locally_bound`) — belt AND braces,
       because the caller already drops shadowed aliases through `_keep_shadowed_aliases` and this
       function is also called directly (its unit test, and any future caller) with a hand-fed map.
+      That second half is PINNED, not assumed: the DIRECT-CALL arm of
+      `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`
+      hands this function an alias map that still RESOLVES the receiver while the node's own `def`
+      binds it, which is the one shape this guard can save (`#13447` review cycle 8, P3 — the
+      mutant that deleted the guard survived every other row in the file).
 
     An UNRESOLVED receiver — including the shape no rule in this file resolves
     (`import tortoise.derived_embedding as de`, an `ast.Import`, which `_import_aliases` does not

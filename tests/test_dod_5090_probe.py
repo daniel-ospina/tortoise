@@ -14118,6 +14118,17 @@ def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
     ⛔ This arm is the SPELLING half only. The BINDING half — a receiver that resolves
     to the module's name but is bound to something else — is
     `test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach`.
+
+    ⛔ And the last arm here is the DIRECT-CALL half (`#13447` review cycle 8, P3):
+    `_seam_module_calls`'s docstring justifies its own `name in bound` guard as belt AND
+    braces, "because the caller already drops shadowed aliases through
+    `_keep_shadowed_aliases` and this function is also called directly (its unit test,
+    and any future caller) with a hand-fed map" — and nothing pinned that clause. The
+    mutant that DELETED the guard survived the whole file (measured: `278 passed, 2
+    skipped` either way), so the docstring named a witness its own test did not supply.
+    The shape below is the only one the guard can save: a node whose own `def` binds the
+    receiver, plus a map that still RESOLVES it — exactly what a caller passing its own
+    hand-fed map does. Deleting the guard reds it (`{'encode'}` vs `set()`).
     """
     positive = ast.parse(
         "derived_embedding.encode('Acme')\n"
@@ -14155,6 +14166,21 @@ def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
         "a receiver that only CONTAINS the seam module's name was credited as a "
         "gated reach of `encode_for_row` — the census then reports the writer as "
         "covered and it owes no declaration (the fail-open direction)")
+
+    # …and the DIRECT-CALL arm: the docstring's belt-and-braces clause, made falsifiable.
+    # ⛔ `name in bound` is unreachable THROUGH `_embedding_writers` (that caller drops the
+    # alias first), so the only witness is a direct call with a map that still resolves the
+    # name while the NODE binds it. Delete the guard and this returns `{"encode"}`.
+    locally_bound = ast.parse(
+        "def _w(derived_embedding):\n"
+        "    return derived_embedding.encode('Acme')\n"
+    ).body[0]
+    assert probe._seam_module_calls(
+        locally_bound, {probe.SEAM_MODULE: probe.SEAM_MODULE}) == set(), (
+        "the direct-call guard (`name in bound`) did not refuse a receiver the NODE binds "
+        "itself — a hand-fed map would then credit a local parameter as the module, which "
+        "is the fail-open direction this docstring's belt-and-braces clause promises to "
+        "close for every caller")
 
 
 #: The three shapes `#13447` review cycle 7 (P2) measured as credited by SPELLING, each paired with
