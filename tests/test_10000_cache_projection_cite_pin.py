@@ -61,12 +61,15 @@ TESTS = ROOT / "tests"
 #: which reports a name the author never wrote; and allowing uppercase alone is
 #: not enough, because the alternation-free class lets the engine BACKTRACK to a
 #: shorter match that satisfies `(?!\.py)`, so `test_foo_cites.py` would still
-#: describe a fragment. The alnum lookahead makes the match `maximal`, so a
-#: truncated prefix of a FILENAME can never be the answer, and the `.py`
-#: lookahead then skips the filename whole. ⚠️ Named residual: a dotted suffix
-#: that is not `.py` (`` `test_foo.bar` ``) still truncates to `test_foo`, so an
-#: exotic cite could resolve against the wrong leg. Not worth a wider class —
-#: rejecting a following `.` would also drop a cite a sentence ends on.
+#: describe a fragment. The alnum lookahead makes the match MAXIMAL over
+#: `[A-Za-z0-9_]`, so the answer is never a prefix of the cited name or of a
+#: `.py` filename, and the `.py` lookahead then skips the filename whole.
+#: ⚠️ Two NAMED residuals, both measured with the same regex:
+#:   `` `test_foo.bar` `` -> `test_foo` (a dotted suffix that is not `.py`), and
+#:   `` test_foo-v2.py `` -> `test_foo` (a filename stem carrying a character
+#:   outside the class). Either could resolve against the wrong leg. A wider class
+#: is deliberately NOT adopted: rejecting a trailing `.` would also drop a cite
+#: that a sentence ends on (`see test_foo. It` must keep resolving).
 _CITED = re.compile(r"(?<![/\w])(test_[A-Za-z0-9_]+)(?!\.py)(?![A-Za-z0-9_])")
 
 #: A `def test_…(` at the start of a line, allowing indentation and `async`.

@@ -874,11 +874,14 @@ def test_the_fold_defaults_keys_are_property_space_and_their_columns_exist():
     drift does not reach it; and adding `"widgetKind"` to
     `FOLD_ON_CREATE_DEFAULTS["Object"]` REDs this test on the own-table arm AND
     that antecedent pin, because a new fold default is the one edit both are built
-    to see. What is NOT true, and is therefore not claimed here: that this arm is
-    the only one that notices a column-side drift — several other arms in this
-    file red under the same mutation. The asymmetry is in the OTHER direction: the
-    first edit (drop `object_kind`) leaves the antecedent pin GREEN and reds only
-    this test.
+    to see.
+
+    ⛔ NO UNIQUENESS CLAIM, in either direction. Measured on a scratch copy: the
+    `object_kind` drop reds this test AND several other arms in this file while
+    staying GREEN on the antecedent pin, and the `widgetKind` addition reds both
+    named arms. So the antecedent pin's blindness to a column-side drift is the
+    one asymmetry here, and "what only this arm sees" is simply not measured — it
+    appeared in an earlier revision of this docstring and was false.
     """
     owned = dict(_FOLD_LABEL_TABLES)
     column_space = {table: set(cp.projected_columns(table))
