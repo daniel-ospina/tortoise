@@ -92,8 +92,8 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > treats `retracted` exactly as it treats `archived`: `lifecycle_vocabulary.LIFECYCLE_STATUS_SYNONYMS`
 > maps both to `deprecated` for every kind (measured at this head —
 > `read_caller_status('retracted', kind=':Subject')` returns `deprecated`). That row is owner-approved
-> text inside the approved hunks, so it is not this edit's to rewrite; the correction belongs with the
-> other two, on #11824, under the same exact-text gate.
+> text inside the approved hunks, so it is not this edit's to rewrite; like the other two it is owed to the
+> owner on #11824, under the same exact-text gate.
 >
 > **What did NOT change:** the §4 field tables other than those five rows; every `Impl` status; the
 > valid-time rules (§4.7); the pack-declaration mechanics; and every stored value. Nothing is migrated
