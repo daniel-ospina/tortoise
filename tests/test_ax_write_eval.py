@@ -2030,7 +2030,7 @@ def test_the_write_first_index_row_cites_symbols_that_exist():
     `test_7949_capstone_measure.py` scopes to the `#7949` row), so the row stayed
     green while the numbers named unrelated code: #10214 itself inserted the
     #9116 seam 152 lines ABOVE them, so all seven shifted and one landed on a
-    blank line. `ONTOLOGY.md:1182` was blank from the day the row was authored.
+    blank line. `ONTOLOGY.md:1187` was blank from the day the row was authored.
 
     The fix is the durable one: a SYMBOL cannot re-stale. This pin resolves each
     one against the shipped file, so a rename reds here instead of silently
