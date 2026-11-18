@@ -2553,11 +2553,16 @@ is not the latency section, and the second ending one line before the clause it 
 `:1213–1217` and `:1080–1168` were each **correct when written and still correct at this head**. ⇒ **So the failure is
 not "some cites went stale" as a single event: it is that a line number is a function of every edit ABOVE it** —
 authored against a base that moved, correct-then-rotted, or luckily still correct are three outcomes of one cause, and
-which one a given writer gets is not something that writer can see. ⛔ **And the citation guards were green through all of it**, because
-they check line PRESENCE and say so (`tests/test_docs_citation_refs.py`: *"This is line PRESENCE, not semantic
-correctness"*), so a passing guard was never evidence here. The rule this repo already records is the fix —
-*"assertions by NAME — never by line number, and never by row ordinal. Both go stale the same way"*
-(`docs/architecture/S2-DECISION-SEAM.md`) — and it is what this entry now does.
+which one a given writer gets is not something that writer can see. ⛔ **And NO citation guard ever resolved these
+pointers — which is why they stayed green.** `tests/test_docs_citation_refs.py` owns pointers into `docs/scoping/` and
+`docs/research/` only (its `_TARGET_SCOPE`), so a pointer into `docs/architecture/` is *skipped rather than checked* —
+its own `test_the_guard_ignores_targets_outside_its_declared_scope` asserts exactly that — and its **STATED LIMITS**
+record that a bare `:NN` continuation *"carries no document name, so it cannot be resolved in isolation and is NOT
+checked"*; where it does resolve a pointer it checks line PRESENCE alone (*"This is line PRESENCE, not semantic
+correctness"*). ⇒ **The green was evidence about nothing, not evidence that presence happened to hold** — the stronger
+form of this entry's lesson, and the reason the rule below is the fix rather than a tidier guard. The rule this repo
+already records is the fix — *"assertions by NAME — never by line number, and never by row ordinal. Both go stale the
+same way"* (`docs/architecture/S2-DECISION-SEAM.md`) — and it is what this entry now does.
 
 **⚠️ And the pre-removal readings are now labelled as such — a review finding, fixed before merge.** The first landed
 version said the app path *"pays"* the `queryNodes` round trips, present tense, and concluded *"both slower than the
