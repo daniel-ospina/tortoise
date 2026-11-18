@@ -28,8 +28,12 @@ version is recorded in the artifact) through the SHIPPED code, never a re-implem
 
 * **arm `nudges`** — `TortoiseSDK._nudge_candidates` called directly (its latency and
   its PAYLOAD: rows returned and bytes of `content` moved), plus the SAME door with and
-  without the nudge call, in one graph, alternating: the delta is what the advisory
-  actually costs the write path. The counterfactual is an instance-attribute patch
+  without the nudge call, in one graph, in two CONSECUTIVE blocks (with-nudge first,
+  then patched): the delta is what the advisory actually costs the write path. ⚠️ The
+  blocks are SEQUENTIAL, not interleaved — so a load drift between them lands entirely
+  in the delta, and the delta is a block-pair estimate rather than a paired one. That is
+  stated rather than fixed: interleaving would halve each block's sample count for the
+  same wall clock, and the artifact publishes load before/after so a reader can see it. The counterfactual is an instance-attribute patch
   (`sdk._nudge_candidates = lambda *a, **k: []`) — the same object, the same graph, the
   same seeds, so nothing but the nudge differs between the two medians.
 * **arm `kindgate`** — the gate's own read is counted, not inferred. `pack_state.

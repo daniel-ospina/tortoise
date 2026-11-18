@@ -55721,11 +55721,11 @@ class TortoiseSDK:
         scan returns the FULL ``content`` of all 400 rows and the only product is
         the advisory below: **12.3-14.0 ms per call at 1,000 Points AND at 5,000**
         (the 400-row cap is constant), moving **117.1 KiB** of content, and the
-        CALLER pays **+11.1 to +13.0 ms** of a ~17-20 ms ``create_entity`` (~63-68 %
+        CALLER pays **+11.1 to +13.0 ms** of a 16.8-19.6 ms ``create_entity`` (~63-68 %
         of it, the one ratio that is stable across both runs). The
         CONTENT LENGTH is a real term once the seed is realistic: 60 / 300 / 1,200
         chars per row measured **9.1 / 12.8 / 23.4 ms** (run 1) and **9.1 / 13.6 /
-        24.9 ms** (run 2) — so 20x the length roughly doubles the call. ⚠️ A first
+        24.9 ms** (run 2) — 20x the length costs 2.6x / 2.7x the call, close to linear. ⚠️ A first
         cut of the instrument seeded a repeated character and concluded the
         opposite; that seed holds TOKENISATION constant while varying bytes, and
         this method scores by token overlap, so the reading was an artefact.
