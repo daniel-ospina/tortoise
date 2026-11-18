@@ -3148,10 +3148,11 @@ GENERATED_COLUMNS: frozenset[str] = frozenset({
 #:     disagree.
 #:   * **`source`** — the same NAME, a different property, and the reason it is
 #:     not here is NOT "the record never derives one" any more: since `#13418`
-#:     `derived_embedding_columns` derives a vector for `SourceCreated` too (from
-#:     `ev._searchText or ev.title`, the text `_upsert_source` writes to the node)
-#:     and for `DocumentCreated` (from `_build_search_text`, `#13412`). It stays
-#:     out of this table for TWO narrower reasons:
+#:     `derived_embedding_columns` derives a vector for `SourceCreated` too — from
+#:     `_searchText`, the ONE text the record row is known to hold (it is the key
+#:     the split binds `_search_text` from; a title-only record states no text and
+#:     derives nothing) — and for `DocumentCreated` (from `_build_search_text`,
+#:     `#13412`). It stays out of this table for TWO narrower reasons:
 #:     * `SourceCreated` HONOURS a carried vector (like `event`):
 #:       `_SOURCE_EXTRA_PROPS` (`projection/entities.py`) declares `embedding` a
 #:       caller passthrough, so the caller's vector is the node's own and the

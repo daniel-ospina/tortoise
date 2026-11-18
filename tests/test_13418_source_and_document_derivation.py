@@ -139,13 +139,20 @@ def test_the_document_composition_IS_the_graphs_function_not_a_copy(encoder, mon
         "composition is the defect #13412 exists to prevent")
 
 
-def test_the_document_rule_names_the_graphs_three_fields_and_not_content():
-    """The declaration a shared seam (#13447) reads: which payload fields compose it."""
-    rule = rw._RECORD_EMBEDDING_TEXT["DocumentCreated"]
-    assert rule.fields == ("title", "summary", "topics"), (
-        f"the document rule declares {rule.fields!r}; `_build_search_text` "
-        "composes title + summary + topics and `content` is retired (#13412)")
-    assert "content" not in rule.fields
+def test_the_document_rule_composes_from_the_graphs_fields_and_not_content():
+    """The plug point a shared seam (#13447) reads is the callable, not a field list.
+
+    `(name, value)` parts rather than declared field names, deliberately: this
+    composition has ONE part (the function that builds it), and a field-name list
+    a seam could join would stringify `topics` (a list) and let `content` back in
+    — the retired input of `#13412`.
+    """
+    parts = rw._RECORD_EMBEDDING_TEXT["DocumentCreated"]({
+        "title": "Q3 pricing", "summary": "the memo",
+        "topics": ["pricing", "q3"], "content": "the long body text"})
+    assert [name for name, _ in parts] == ["title+summary+topics"], parts
+    assert parts[0][1] == "Q3 pricing the memo pricing q3", parts
+    assert "long body text" not in parts[0][1]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -153,14 +160,13 @@ def test_the_document_rule_names_the_graphs_three_fields_and_not_content():
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_a_plain_source_derives_from_the_search_text_the_node_holds(encoder):
-    """`s._searchText = ev._searchText or ev.title` — `_upsert_source`'s own line.
+def test_a_plain_source_derives_from_the_text_the_RECORD_row_holds(encoder):
+    """`_searchText` is the one text the row is known to hold — and it is enough.
 
-    `projection/entities.py:7106` composes the source node's FTS surface as
-    `ev.get("_searchText") or ev.get("title")` and writes it at `:7194`
-    (`s._searchText = $st`). The record derives from THAT expression: same
-    datum, same text, so the source's sparse and dense legs agree exactly as a
-    document's do after #8419.
+    `projection/entities.py:7106` composes `ev.get("_searchText") or ev.get("title")`
+    and writes it to the node at `:7194`; the record binds its own `_search_text`
+    column from the payload's `_searchText` key (the split), so this is the one
+    arm where the vector and the column are provably one datum. `#13418`.
     """
     out = rw.derived_embedding_columns({
         "type": "SourceCreated",
@@ -169,61 +175,31 @@ def test_a_plain_source_derives_from_the_search_text_the_node_holds(encoder):
         "_searchText": "acme pricing discounts renewal",
     })
     assert encoder.text == "acme pricing discounts renewal", (
-        "a plain `:Source` must encode the text its node holds in "
-        "`_searchText` (`_upsert_source`, #13418)")
-    assert set(out.columns) == {"embedding", "_search_text"}
-    assert out.columns["_search_text"] == encoder.text, (
-        "the row's dense and sparse legs must be ONE text: the derived vector is "
-        "bound together with the `_search_text` column it indexes")
+        "a plain `:Source` must encode the text its row carries in "
+        "`_search_text` (`_upsert_source`, #13418)")
+    assert set(out.columns) == {"embedding"}, (
+        "the vector is the ONLY column this derivation writes — the split already "
+        "bound `_search_text` from the same payload key")
 
 
-def test_a_plain_source_falls_back_to_its_title(encoder):
-    """No `_searchText` ⇒ `title`, the same `or` arm the graph takes."""
+def test_a_title_only_source_ABSTAINS_and_names_the_text_carrier_gap(encoder):
+    """No `_searchText` ⇒ the row holds no text ⇒ no vector, and the reason says why.
+
+    ⛔ The `title` fallback the GRAPH applies is deliberately NOT mirrored. It would
+    encode text the row's own indexed column does not hold, and on a
+    `SourceCreated` that resolves onto a DOCUMENT row it would overwrite the
+    `_build_search_text` vector `DocumentCreated` composed — for a row
+    `document_kind IS NOT NULL` still routes to the `document` dense leg
+    (`record_vector.py:169`/`:171`). The gap is the journal's
+    (`register_source(url, kind, title=…)` puts the title in `**props` and states
+    no `_searchText`) and its root is `#13474`: the producer carries the text.
+    """
     out = rw.derived_embedding_columns({
         "type": "SourceCreated", "url": "https://example.com/a",
         "title": "Acme pricing page",
     })
-    assert encoder.text == "Acme pricing page"
-    assert out.columns["_search_text"] == "Acme pricing page", (
-        "#13474's source half: the journal carries no `_searchText`, so without "
-        "this binding the record's FTS column stays NULL while its vector "
-        "describes the title")
-
-
-def test_the_source_row_is_COHERENT_after_two_writers(encoder):
-    """A vector and a text column written from DIFFERENT records is the defect.
-
-    The scenario a review of this change measured: a `DocumentCreated` composes
-    the row's text (and a `public.source._search_text` value) for a URL, then a
-    later `SourceCreated` for the same URL carries only a `title`. If the
-    derivation bound the vector alone, the row would hold an embedding of
-    `"Acme pricing page"` next to a `_search_text` describing the MEMO — a dense
-    leg answering something its own sparse leg does not contain. Both are bound
-    from one composed string (`_TEXT_COLUMN_RULES`), so whichever record wrote
-    last, the row agrees with itself.
-
-    ⛔ What this does NOT claim: that the RECORD matches the graph's
-    hash-gated `coalesce($st, s._searchText)` (`_upsert_source`), which
-    preserves the node's text on a same-hash re-emit. The record is the truth
-    and the graph is its derived cache (§2.0), and the record already binds
-    `title` unconditionally on this arm; the durable fix for the text half of
-    the family is the producer carrying the composed text (`#13474`).
-    """
-    doc = rw.derived_embedding_columns({
-        "type": "DocumentCreated", "id": "https://example.com/a",
-        "title": "Q3 pricing", "summary": "the memo",
-    })
-    assert "_search_text" not in doc.columns, (
-        "a document's row has no `_search_text` column — Postgres composes its "
-        "indexed text from the other columns")
-    src = rw.derived_embedding_columns({
-        "type": "SourceCreated", "url": "https://example.com/a",
-        "title": "Acme pricing page",
-    })
-    assert [c[0] for c in encoder.calls] == ["Q3 pricing the memo",
-                                             "Acme pricing page"]
-    assert src.columns["_search_text"] == encoder.calls[-1][0], (
-        "the source's vector and its `_search_text` came from ONE statement")
+    assert out.columns == {} and encoder.calls == []
+    assert "#13474" in out.skipped and "no _searchText" in out.skipped, out.skipped
 
 
 def test_a_plain_source_never_embeds_its_IDENTITY(encoder):
@@ -236,17 +212,34 @@ def test_a_plain_source_never_embeds_its_IDENTITY(encoder):
     """
     rw.derived_embedding_columns({
         "type": "SourceCreated", "url": "https://example.com/pricing",
-        "title": "Acme pricing page",
+        "_searchText": "acme pricing discounts renewal",
     })
     assert "example.com" not in encoder.text
 
 
-def test_a_plain_source_with_no_text_derives_nothing(encoder):
-    """No `_searchText`, no `title` ⇒ blank text ⇒ no vector (the graph's own arm)."""
-    out = rw.derived_embedding_columns({
-        "type": "SourceCreated", "url": "https://example.com/a"})
-    assert out.columns == {}
-    assert encoder.calls == []
+def test_the_source_STATEMENT_does_not_clobber_a_document_rows_vector(encoder):
+    """The two-record pin: `[DocumentCreated(url=X), SourceCreated(url=X, title)]`.
+
+    A document IS a `:Source` (D10), one row carries both served labels, and
+    `record_projection`'s upsert emits `embedding = EXCLUDED.embedding` on
+    conflict. So a derivation that accepted a title-only `SourceCreated` would let
+    the plain-source composition take a document row's vector while
+    `document_kind IS NOT NULL` keeps routing that row to the `document` dense leg
+    — one label answering a text its owner never composed (found in review of this
+    change, measured on the plan).
+    """
+    doc = {"type": "DocumentCreated", "id": "https://example.com/a",
+           "title": "Q3 pricing", "summary": "the memo"}
+    src = {"type": "SourceCreated", "url": "https://example.com/a",
+           "title": "Acme pricing page"}
+    plans = rp.replay_plan([doc, src], org_id="org", graph_id="g",
+                           derived={0: rw.derived_embedding_columns(doc).columns,
+                                    1: rw.derived_embedding_columns(src).columns})
+    upserts = [s for s in plans if s.sql.startswith("INSERT INTO public.source ")]
+    assert len(upserts) == 2, [s.sql[:60] for s in upserts]
+    assert "embedding" in upserts[0].param_columns
+    assert "embedding" not in upserts[1].param_columns, (
+        "the source statement must not bind a vector: the document's survives")
 
 
 def test_a_session_source_derives_NOTHING_and_says_why(encoder):
@@ -306,7 +299,8 @@ def test_a_source_written_to_an_armed_record_CARRIES_a_vector(encoder):
     a Python list the driver would adapt as an ARRAY.
     """
     record = {"type": "SourceCreated", "url": "https://example.com/pricing",
-              "title": "Acme pricing page"}
+              "title": "Acme pricing page",
+              "_searchText": "acme pricing discounts renewal"}
     derived = rw.derived_embedding_columns(record)
     assert derived.columns, (
         "the record derived no embedding for a plain `:Source` — the served "
@@ -370,9 +364,11 @@ def test_the_event_rule_is_the_graph_folds_own_composition():
         f"the graph's event composition changed to {keys!r} — the record's rule "
         "must be re-derived from it, not left on the old keys")
     rule = rw._RECORD_EMBEDDING_TEXT["EventRecorded"]
-    assert rule.fields == tuple(keys), (
-        f"the record's event rule declares {rule.fields!r} while the graph "
-        f"composes {keys!r} — two stores, two texts")
+    composed = tuple(name for name, _ in rule(
+        {"subject": "s", "eventKind": "k", "object": "o"}))
+    assert composed == tuple(keys), (
+        f"the record's event rule composes {composed!r} while the graph composes "
+        f"{keys!r} — two stores, two texts")
 
 
 def test_an_event_still_derives_the_graphs_text(encoder):
