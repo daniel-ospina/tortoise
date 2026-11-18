@@ -382,7 +382,7 @@ def _status_is_latched(status) -> bool:
       applies the CURRENCY predicate — and ``outdated`` is in
       ``live.TERMINAL_EXCLUDED_STATUSES``/the ``outdated`` flag conjunct, so such
       a row has NO live holder and the fold is never dispatched. Nothing can
-      move it, so any state this read answers about it re-fires forever.
+      close it, so any state this read answers about it re-fires forever.
     * the REOPEN fold takes ``_reopen_targets_closed`` (``entities.py:6187-6190``),
       which bypasses the live-holder requirement when there is exactly one
       registered incarnation — so for that direction the fold IS dispatched, and
