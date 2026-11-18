@@ -1367,6 +1367,183 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         assert not flagged(line), f"the class check is a false positive on: {line!r}"
 
 
+#: The one deferral `STORAGE-ARCHITECTURE.md` must never again state as a STATUS:
+#: the anchored-read cutover's.
+#:
+#: WHY THIS IS NOT AN ARM ON THE CLASS CHECK. `_STATUS_WORDS` / `_STATUS_LOWER`
+#: are the delivery-state vocabulary, and `DEFERRED` is deliberately not in
+#: either — the document legitimately defers TWO other things (the
+#: stored-vs-derived edge question, owner ruling 2026-09-23; and `#9213`'s
+#: restore-reason lane), so a bare `DEFERRED` arm would red on correct content,
+#: which is the noisy half of "dead or noisy". What is wrong is not the WORD; it
+#: is the word attached to THIS cutover. So the arm is scoped to the subject.
+#:
+#: NON-VACUITY is asserted in the test below and was measured against the
+#: pre-fix revision: the retired §2.0 sentence (*"`#7970`'s anchored-read
+#: cutover therefore stays DEFERRED by §2.0"*, present at `f392d513`) fires the
+#: FIRST alternative. Note it spans a line break in the document — the class
+#: check's arms are per-line (`[^.\n]`), which is one reason they could not have
+#: carried this shape even if `DEFERRED` were in their vocabulary.
+_DEFERRED_CUTOVER = re.compile(
+    r"\b(?:anchored[- ]read|cutover)\b[^.]{0,80}?\bDEFERRED\b"
+    r"|\bDEFERRED\b[^.]{0,80}?\b(?:anchored[- ]read|cutover)\b",
+    re.IGNORECASE,
+)
+
+#: ⛔ THE THIRD PRE-FIX SITE NAMED NEITHER THE READ NOR ITS ISSUE, so the arm above
+#: cannot see it: `origin/main` carried, in §17.3's reader paragraph, *"the
+#: node-naming read that will drive this in production is deferred by §2.0"* —
+#: subject named by DESCRIPTION, deferral attributed to the RULING. That sentence
+#: was one of the three this change removed and the arm above would pass it.
+#:
+#: `§2.0` on its own is NOT a token, which is why this is a second pattern rather
+#: than a third alternative: §12.2b's *"Lever 5 … is deferred until there are
+#: users"* sits inside 80 characters of a `§2.0` and is a DIFFERENT ruling, so a
+#: bare `§2.0` token would red on correct content. The arm is on the ATTRIBUTION
+#: (`deferred BY §2.0`) and on the section's own deferral being spoken of as a
+#: thing that stands.
+_DEFERRAL_BY_RULING = re.compile(
+    r"\b(?:DEFERRED|deferred|postponed)\s+by\s+§2\.0|§2\.0'?s?\s+deferral\b",
+    re.IGNORECASE,
+)
+
+#: The arms the scan below runs, in ONE tuple.
+#: ⛔ WHY IT IS A NAME AND NOT AN INLINE TUPLE: the non-vacuity rows call each
+#: regex directly, so removing an arm from the scan's tuple left this whole test
+#: GREEN (measured: dropping `_DEFERRAL_BY_RULING` from the scan, `1 passed`) —
+#: the guard could be unwired without a red, which is the "assert whose value
+#: cannot vary" #3442 rule 3 names, one level above the regexes. The fixtures go
+#: through `_deferral_offenders` for the same reason the scan does.
+_DEFERRAL_ARMS = (_DEFERRED_CUTOVER, _DEFERRAL_BY_RULING)
+
+
+def _deferral_offenders(text: str) -> list[str]:
+    """Every deferral claim in `text`, tagged with the line it sits on.
+
+    Shared by the document scan and by the non-vacuity fixtures, so an arm that
+    stops being WIRED reds the fixture rather than passing in isolation.
+    """
+    return [
+        f"line {text[:match.start()].count(chr(10)) + 1}: {match.group(0)!r}"
+        for rx in _DEFERRAL_ARMS
+        for match in rx.finditer(text)
+    ]
+
+
+def test_the_storage_document_does_not_defer_the_anchored_read_cutover():
+    """`STORAGE-ARCHITECTURE.md` §2.0 states the cutover; it does not defer it.
+
+    The 2026-11-07 split recorded the cutover as *"`#7970`'s anchored-read
+    cutover therefore stays DEFERRED by §2.0"*; the owner rescinded that
+    deferral on 2026-11-18 (`#7970` comment `6965853268`), and `#8542` moved the
+    record of the move to `STORAGE-ARCHITECTURE-CHANGELOG.md`. The class guard
+    above could not see it: `DEFERRED` is not in its state vocabulary, and its
+    arms are per-line while the retired sentence wraps. Measured at the pre-fix
+    head (`f392d513`), the class check was green with that sentence in the
+    document.
+
+    The arm is subject-scoped on purpose, so it does NOT red on the document's
+    two legitimate deferrals — the stored-vs-derived edge question (owner ruling
+    2026-09-23) and `#9213`'s restore-reason lane — which is the whole content of
+    the scoping and the reason a bare `DEFERRED` arm was refused.
+
+    WHAT THE ARM DELIBERATELY DOES NOT DO: tell a status claim from prose that
+    DENIES the deferral (*"the cutover is NOT deferred"*) or from the argument
+    that the deferral protects nothing. Measured at `f392d513`, the second of
+    the two pre-fix hits was that argumentative shape, not a status claim. The
+    arm reds on any co-occurrence of the subject and `deferred` in one sentence,
+    on purpose: the owner ruled the *"was deferred, now it isn't"* narration out
+    of this document (2026-11-18), so the honest place for a sentence that puts
+    this cutover next to the word `deferred` is
+    `STORAGE-ARCHITECTURE-CHANGELOG.md`, and the failure message says so rather
+    than calling the author's sentence a status claim. No negation exemption is
+    offered: *"not deferred until the cache is complete"* is still a deferral,
+    and an exemption that cannot tell that apart from a denial is a hole.
+    """
+    text = STORAGE.read_text(encoding="utf-8")
+    offenders = [f"STORAGE-ARCHITECTURE.md:{found}" for found in _deferral_offenders(text)]
+    assert not offenders, (
+        "§2.0 states the anchored-read cutover as the ARMED capability it is. Two "
+        "shapes are ruled out here: a DEFERRED STATUS for this cutover (the claim "
+        "the owner rescinded on 2026-11-18), and the narration that re-tells the "
+        "move — *\"was deferred, now it isn't\"*, in either word order. This arm "
+        "cannot tell those two apart, so it reds on both: the record of the move "
+        "belongs in STORAGE-ARCHITECTURE-CHANGELOG.md, which is where a sentence "
+        "putting this cutover next to the word `deferred` should go:\n  - "
+        + "\n  - ".join(offenders)
+    )
+
+    # NON-VACUITY — the arm fires on the retired sentence, verbatim, including the
+    # line break the document carried it across.
+    assert _DEFERRED_CUTOVER.search(
+        "the 2026-11-07 split recorded here as *\"`#7970`'s anchored-read\n"
+        "cutover therefore stays DEFERRED by §2.0\"* — rescinded by the owner"
+    ), "the pin no longer fires on the pre-fix §2.0 sentence it was written against"
+    # …and in the other order, which `_STATUS_ADJACENT` also pins for its own class.
+    # ⛔ The fixture must put the STATE WORD FIRST, or it exercises the first
+    # alternative and leaves the second one with no row at all. Measured: the
+    # sentence that stood here (*"The cutover is DEFERRED until the record serves
+    # every label."*) is subject-first, so deleting the `DEFERRED … subject`
+    # alternative left this assert GREEN (16 passed) — an assert whose value
+    # cannot vary under the mutation it claims to cover (#3442 rule 3).
+    assert _DEFERRED_CUTOVER.search(
+        "DEFERRED until the record serves every label, the anchored-read cutover "
+        "is not safe to arm."
+    ), "the pin does not fire on the state-word-first order"
+
+    # NOT NOISY — the document's two legitimate deferrals, and the armed statement.
+    for ok in (
+        "**The stored-vs-derived question is DEFERRED to post-launch, not left open.**",
+        "disclosed as DEFERRED to `#9213`, not claimed truthful.",
+        "**The anchored-read cutover is ARMED, and it is this ruling's second half:**",
+        # The near-miss the ATTRIBUTION arm is scoped against: a DIFFERENT ruling's
+        # deferral that happens to sit next to a `§2.0` reference.
+        "Lever 5 is the largest remaining ENGINE-side lever — the central cost move is the "
+        "record/cache split itself (§2.0) — and it is deferred until there are users.",
+        # …and the armed status stated WITH the section's name, which §14.2 does.
+        "`record` follows that count (§2.0 states the armed status).",
+    ):
+        assert not _DEFERRED_CUTOVER.search(ok), (
+            f"the pin is a false positive on ordinary deferral prose: {ok!r}"
+        )
+        assert not _DEFERRAL_BY_RULING.search(ok), (
+            f"the attribution arm is a false positive on: {ok!r}"
+        )
+
+    # NON-VACUITY for the ATTRIBUTION arm — the third pre-fix site, verbatim from
+    # `origin/main` at `f462ad3acbb4`, which the subject-scoped arm does NOT see.
+    assert not _DEFERRED_CUTOVER.search(
+        "the set-level polarity is unchanged, and the node-naming read that will drive this "
+        "in production is deferred by §2.0."
+    ), "this fixture is for the ATTRIBUTION arm; the subject arm seeing it would make the "
+    assert _DEFERRAL_BY_RULING.search(
+        "the set-level polarity is unchanged, and the node-naming read that will drive this "
+        "in production is deferred by §2.0."
+    ), "the attribution arm no longer fires on the third pre-fix site it was written against"
+    assert _DEFERRAL_BY_RULING.search(
+        "`TORTOISE_RECORD_SERVE` is OFF by default — §2.0's deferral stands: this builds the "
+        "capability the epic's acceptance names, not a wider read path."
+    ), "the attribution arm does not fire on the section's deferral spoken of as standing"
+
+    # WIRING — every arm must still be IN THE SCAN, not merely a regex that
+    # matches when called directly. Measured before this block existed: deleting
+    # `_DEFERRAL_BY_RULING` from the scan's tuple left the whole test GREEN, so a
+    # future lane could unwire the guard with nothing reddening (#3442 rule 3).
+    assert any(
+        "stays DEFERRED" in hit
+        for hit in _deferral_offenders(
+            "the 2026-11-07 split recorded here as *\"`#7970`'s anchored-read\n"
+            "cutover therefore stays DEFERRED by §2.0\"* — rescinded by the owner"
+        )
+    ), "the subject-scoped arm is no longer wired into the document scan"
+    assert any(
+        "deferred by §2.0" in hit
+        for hit in _deferral_offenders(
+            "The node-naming read that will drive this in production is deferred by §2.0."
+        )
+    ), "the attribution arm is no longer wired into the document scan"
+
+
 CHANGELOG = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE-CHANGELOG.md"
 
 
