@@ -354,8 +354,9 @@ def test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence() -> None:
 #: PR's tree — so deleting it bought nothing and cost the only arm that DERIVES the address instead of
 #: comparing two hardcoded literals. `_PINS` cannot replace it: a coordinate edit of the doc token, the
 #: pin line and the pin fragment satisfies every pin while two documents still name two different lines.
-#: Its docstring said exactly that ("The CROSS-DOCUMENT arm — `_PINS` cannot see it") and nothing at
-#: HEAD re-implemented it (`grep -n 'address_beside' tests/test_12184_shifted_cites.py` -> no match).
+#: Its docstring said exactly that ("The CROSS-DOCUMENT arm — `_PINS` cannot see it"), and nothing at
+#: HEAD re-implemented it: `grep -n 'address_beside' tests/test_12184_shifted_cites.py` returned no
+#: match at `1038810281` — it returns matches NOW, because this is the restore that put them back.
 
 def test_the_dedup_filter_is_one_address_in_both_documents_that_promise_it() -> None:
     """The CROSS-DOCUMENT arm — `_PINS` cannot see it.
