@@ -51125,10 +51125,13 @@ class TortoiseSDK:
 
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
-    # ⛔ ONE ENCODE PER WRITE (#13447): this door folds BEFORE it journals
-    # (contract exception 2), so the scope spans the pair in THAT order; either way
-    # the second encode of the same text is free
-    # (`derived_embedding.one_encode_scope`).
+    # ⛔ ONE ENCODE PER WRITE (#13447): this door runs the record write and the
+    # fold in BOTH orders depending on the LABEL — its Object/Subject/Event blocks
+    # fold before they journal (contract exception 2's neighbour), while
+    # `DocumentCreated` journals first and folds after — so the scope spans the
+    # PAIR order-independently; either way the second encode of the same text is
+    # free (`derived_embedding.one_encode_scope`, whose docstring states the
+    # per-label rule this comment must not contradict).
     @derived_embedding.one_encode_scope
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
