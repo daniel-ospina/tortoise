@@ -1601,6 +1601,299 @@ class TestAMentionIsNotAnOccurrence:
         assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_SCHEDULED
         assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
 
+    def test_a_LYING_SUBCLASS_kind_cannot_slip_past_the_refusal(self, sdk):
+        """The refusal asks the RENDERING, not `__eq__` (#13578 review).
+
+        A `str` subclass whose `__ne__` returns False makes
+        `event_kind != OCCURRENCE_EVENT_KIND` False, so a `__eq__`-trusting
+        refusal does not fire — and `create_entity` files the kind under its
+        name. The plan then advances to terminal `held` while the read
+        honestly serves it as *planned and never happened*: the exact inversion
+        this guard exists to make unrepresentable, with nothing raising. The
+        assertions are the same three post-conditions the plain-`str` case
+        uses, because a refusal that fires late leaves the same wreckage.
+        """
+
+        class _Kind(str):
+            """Lies to equality in BOTH directions, as the file's `_KeyHash` does."""
+
+            def __eq__(self, other):
+                return False
+
+            def __ne__(self, other):
+                return False
+
+            def __repr__(self):
+                # ⛔ A LYING `__repr__` on purpose (#13586 review, finding 1):
+                # `str.__str__` ignores it, which is WHY the rendering is the
+                # right primitive. Without this override the raw object and its
+                # rendering format identically, so the message assertion below
+                # passed for a message built from the RAW `event_kind!r` — i.e.
+                # it could not pin the normalisation it claims to pin.
+                return "<lying _Kind>"
+
+            __hash__ = str.__hash__
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held as a lying meeting")
+        with pytest.raises(ValueError) as exc:
+            PO.record_occurrence(sdk, plan["id"], event_kind=_Kind("meeting"))
+        message = str(exc.value)
+        assert "MENTION" in message and "create_entity" in message, message
+        # …and the message names the kind that was REFUSED, not a `!r` the
+        # subclass could have rewritten. `_Kind.__repr__` LIES, so the assertion
+        # that PINS this is the second one: the message interpolates the kind
+        # TWICE (the refusal span and the WHAT TO DO example), so
+        # `"'meeting'" in message` alone is satisfied by the example even when the
+        # refusal span formats the raw object — measured: with the refusal span
+        # reverted to `event_kind!r` this row stayed GREEN until the assertion
+        # below was added (#13586 review R1, finding 2).
+        assert "'meeting'" in message, message
+        assert "<lying _Kind>" not in message, message
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+        assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_SCHEDULED
+        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
+
+    def test_a_NON_STRING_kind_cannot_slip_past_the_refusal(self, sdk):
+        """The non-`str` arm is REFUSED, not compared (#13586 review, finding 2).
+
+        `kind != OCCURRENCE_EVENT_KIND` on a non-`str` is that object's OWN
+        `__ne__`, so an object outside the `str` hierarchy — which the rendering
+        normalisation never touches — skipped the refusal and reached
+        `create_entity(eventKind=<object>)`, past `sdk.py`'s `if not eventKind`
+        guard (an instance is truthy). The inversion is the same one the `str`
+        subclass arms above close: a plan at terminal `held` with no occurrence
+        `:Event`, served by the read as *planned and never happened*. A guard
+        that asks a caller-supplied object whether it is the occurrence kind is
+        not a guard; `is_plan_kind` (:176) already fails CLOSED for a non-`str`.
+        """
+
+        class _NotAString:
+            """Outside `str` entirely, and lying in both directions."""
+
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held as a non-string liar")
+        with pytest.raises(ValueError) as exc:
+            PO.record_occurrence(sdk, plan["id"], event_kind=_NotAString())
+        message = str(exc.value)
+        assert "MENTION" in message and "create_entity" in message, message
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+        assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_SCHEDULED
+        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
+
+    def test_a_LYING_SUBCLASS_of_the_occurrence_kind_is_written_as_its_RENDERING(
+            self, sdk):
+        """Normalising must cover the value WRITTEN, not only the one CHECKED.
+
+        A subclass that IS the occurrence kind (but lies about equality) is
+        accepted — and `create_entity` must receive the plain rendering, because
+        a guard that compares one kind and writes another admits, one writer
+        call later, the shape it just refused. The `eventKind` kwarg is captured
+        at the door: comparing `==` alone cannot tell a subclass from its
+        rendering (the store flattens it), so the assertion is on the TYPE. This
+        is also the positive control for the rows ABOVE it: without it, a mutant
+        that refuses EVERY kind would redden only the negatives they add. (The
+        pre-existing plain-`str` acceptance row catches a blanket refusal too —
+        what it cannot see is the TYPE written, which is what this row pins
+        (#13586 review, observation 3).)
+        """
+
+        class _Kind(str):
+            def __eq__(self, other):
+                return False
+
+            def __ne__(self, other):
+                return False
+
+            __hash__ = str.__hash__
+
+            def __str__(self):
+                # ⛔ A LYING `__str__` on purpose (#13586 review, observation 2):
+                # `str.__str__` ignores this override, which is WHY it is the
+                # right primitive. Without the override a mutant that wrote
+                # `str(event_kind)` here would keep this row green (both are
+                # exact `str`) while re-opening the "`__str__` can lie" hole.
+                return "held"
+
+        class _Door:
+            """The sdk with `create_entity` observed, everything else delegated."""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self.kwargs = None
+
+            def __getattr__(self, attr):
+                return getattr(self._inner, attr)
+
+            def create_entity(self, *args, **kwargs):
+                self.kwargs = kwargs
+                return self._inner.create_entity(*args, **kwargs)
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held, lying kind")
+        door = _Door(sdk)
+        recorded = PO.record_occurrence(
+            door, plan["id"], event_kind=_Kind(PO.OCCURRENCE_EVENT_KIND))
+        assert recorded["move"].applied is True
+        written = door.kwargs["eventKind"]
+        assert type(written) is str, (
+            f"the subclass {type(written).__name__} reached the write, not its "
+            f"rendering — the guard checked one kind and the store keeps another")
+        assert written == PO.OCCURRENCE_EVENT_KIND
+        stored = g.query(
+            "MATCH (e:Event)-[:aboutObject]->(:Object {id:$p}) "
+            "RETURN e.eventKind",
+            params={"p": plan["id"]}).result_set
+        assert [row[0] for row in stored] == [PO.OCCURRENCE_EVENT_KIND]
+        assert plan["id"] not in {r["id"]
+                                 for r in PO.planned_without_occurrence(g)}
+
+    def test_a_LYING_SUBCLASS_STAGE_cannot_settle_a_plan_at_held(self, sdk):
+        """``settle_plan``'s ``stage not in (…)`` is an ``__eq__`` test too.
+
+        Membership is ``any(x is e or x == e for e in …)``, so a ``str``
+        subclass whose ``__eq__`` returns True is CONTAINED and the refusal does
+        not fire. The value then reaches ``advance_stage``, whose ``resolve`` does
+        ``ref.strip()`` — an exact ``str`` on a subclass — so ``held`` resolves
+        and the terminal move APPLIES: a plan reading as held with no occurrence
+        ``:Event``, which is the inversion ``settle_plan``'s refusal exists to
+        make unrepresentable (#13586 review, finding 1). A refusal that fires
+        late leaves the same wreckage, so the three post-conditions are the same
+        ones the plain-``str`` case uses.
+        """
+
+        class _AlwaysEqual(str):
+            """Lies TOWARDS membership: every ``in`` test finds it."""
+
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+            __hash__ = str.__hash__
+
+        plan = PO.create_plan(sdk, "Held through the twin door")
+        with pytest.raises(ValueError) as exc:
+            PO.settle_plan(sdk, plan["id"], _AlwaysEqual(PO.STAGE_HELD))
+        message = str(exc.value)
+        assert "not a no-occurrence ending" in message, message
+        # ⛔ NO "nothing was written" POST-CONDITIONS HERE, and not because of
+        # style: `settle_plan` contains no write call at all (it resolves, moves
+        # a stage and returns), so `MATCH (:Event)-[:aboutObject]->…` is 0 under
+        # EVERY mutant on this path, and `planned_without_occurrence` lists any
+        # plan with no occurrence `:Event` — which on this path is always. Both
+        # would be constant-true, so the pin lives where a write door EXISTS:
+        # the `record_occurrence` rows above (:1654-1657, :1689-1692), where a
+        # guard moved after `create_entity` leaves the `:Event` behind. What the
+        # rows here can show is that the refusal is the EARLY one and that the
+        # plan did not move — which is what they assert.
+        cur = _stage(sdk, plan["id"])
+        assert cur["stageId"] == PO.STAGE_SCHEDULED
+        assert cur["isClosed"] is False
+
+    def test_a_NON_STRING_stage_cannot_settle_a_plan(self, sdk, monkeypatch):
+        """`settle_plan`'s non-`str` arm: refuse it BEFORE the resolve (#13586 f2).
+
+        `stage not in (…)` on a non-`str` consults that object's own `__eq__`,
+        so a non-`str` liar is "contained" and the refusal never fires. What
+        follows is NOT the sibling arm's wreckage — measured, and the reason
+        this row asserts different things (#13586 review, finding 1):
+        `pipeline.advance_stage` classifies a non-`str` as *no stage reported*
+        (`pipeline.py:1126-1130`) and returns
+        `StageMove(applied=False, reason="no-stage")` **before any write** —
+        nothing is parked, nothing is written, so no inversion is reachable
+        through THIS door (that door is the `str`-subclass row above, where a
+        lying `__eq__` is contained, `resolve`'s `ref.strip()` returns an exact
+        `str`, and the terminal move really does apply).
+
+        The pre-fix defect here is a LATE refusal with the wrong remedy:
+        `settle_plan`'s unapplied-move branch (:827-835) interpolates
+        `({move.reason})`, so the caller is told the plan "could not reach
+        <object> (no-stage)" and prescribed a stale-date repair — for a plan
+        that is merely `scheduled` and was never asked anything.
+
+        So the assertions below are the two consequences this arm can actually
+        show, and each reddens on a different mutant: the refusal is the EARLY
+        one (it names the offending value as a bad ending, never as a `no-stage`
+        move), and `advance_stage` is never called at all. The "nothing was
+        written" post-conditions are NOT repeated here — `settle_plan` has no
+        write call, so on this path they cannot fail under any mutant; that pin
+        lives in the `record_occurrence` rows (:1654-1657, :1689-1692), which sit
+        behind a real write door.
+        """
+
+        class _NotAString:
+            """Outside `str` entirely; `__eq__` says it IS every ending."""
+
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+        plan = PO.create_plan(sdk, "Held through the non-string door")
+
+        # Installed AFTER `create_plan` (which advances the plan into
+        # `scheduled` through this same function) so the list holds only the
+        # call `settle_plan` makes.
+        calls = []
+        real_advance = pipeline.advance_stage
+
+        def _spy(*args, **kwargs):
+            calls.append(args)
+            return real_advance(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline, "advance_stage", _spy)
+
+        with pytest.raises(ValueError) as exc:
+            PO.settle_plan(sdk, plan["id"], _NotAString())
+        message = str(exc.value)
+        assert "not a no-occurrence ending" in message, message
+        # ⛔ Measured: reverting the guard to `if stage not in (STAGE_MISSED,
+        # STAGE_CANCELLED):` reddens BOTH lines below — the pre-fix refusal is
+        # the unapplied-move branch, which interpolates `(no-stage)` verbatim.
+        assert "(no-stage)" not in message, message
+        # ⛔ Measured: moving the guard BELOW `advance_stage` reddens this one.
+        assert calls == [], (
+            "the refused stage reached `advance_stage` — the guard fired late")
+
+    def test_a_SUBCLASS_stage_that_IS_a_no_occurrence_ending_still_settles(
+            self, sdk):
+        """The positive control: normalising must not become a blanket refusal.
+
+        A ``str`` subclass that compares TRUTHFULLY is still the ending it names —
+        the fix flattens the TYPE, it does not reject the caller's object. This
+        row passes on the pre-fix code too, which is why it is the control rather
+        than the discriminator: without it, a mutant that refused every stage
+        value would redden only negatives.
+        """
+
+        class _Ending(str):
+            """A ``str`` subclass with no lying comparison — only a new type."""
+
+        plan = PO.create_plan(sdk, "Missed through a subclass")
+        settled = PO.settle_plan(sdk, plan["id"], _Ending(PO.STAGE_MISSED))
+        assert settled["move"].applied is True
+        cur = _stage(sdk, plan["id"])
+        assert cur["stageId"] == PO.STAGE_MISSED
+        assert cur["outcome"] == "lost"
+        assert cur["isClosed"] is True
+        # The absence of an occurrence `:Event` is `settle_plan`'s contract, but
+        # not an assertion that can fail here: it never writes one (see the
+        # sibling `_AlwaysEqual` row). `isClosed`/`outcome`/`stageId` above are
+        # the discriminating half of this control.
+
     def test_the_explicit_occurrence_kind_is_accepted(self, sdk):
         g = sdk._get_proj().g
         plan = PO.create_plan(sdk, "Held, kind stated")
