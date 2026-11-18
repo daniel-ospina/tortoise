@@ -289,7 +289,12 @@ def _split_comment(raw: str) -> str:
     """
     close = _closing_quote(raw)
     if close == -1:
-        return raw  # never closes: the caller must report `malformed`
+        # `-1` means no quote in this text TERMINATES the scalar, so there is no
+        # close to split at and nothing YAML can keep. The caller reports
+        # `malformed` for it — `_quoted_style` re-runs this same parity scan
+        # rather than trusting `endswith`, because a body whose last character is
+        # an ESCAPED quote ends in the quote char anyway.
+        return raw
     i = raw.find(" #")
     while i != -1:
         if len(raw[:i].rstrip()) - 1 == close:
@@ -314,20 +319,32 @@ def _has_unescaped_dq(body: str) -> bool:
 def _quoted_style(raw: str) -> tuple[str, str | None]:
     """``(style, body)`` for a quoted value; ``("plain", None)`` when unquoted.
 
-    ``broken`` is the truncation check (C) exists for: an UNESCAPED inner `"`, an
-    unbalanced `'`, or no closing quote — YAML ends the scalar there (measured:
-    `"a, "#1" KEEP"` parses to `'a, '`). The unescaped-quote test runs BEFORE the
-    escape branch, because an escaped body can still carry an unescaped quote and
-    an earlier order let that truncation through green (found in review).
+    ``broken`` is the TRUNCATION check (C) exists for: the scalar closes at an
+    inner quote, so YAML ends the value there — an UNESCAPED inner `"`, or an
+    unbalanced `'` (measured: `"a, "#1" KEEP"` parses to `'a, '`). The
+    unescaped-quote test runs BEFORE the escape branch, because an escaped body can
+    still carry an unescaped quote and an earlier order let that truncation through
+    green (found in review).
+
+    ``malformed`` is the NO-CLOSE check, a different shape: no quote in the value
+    terminates the scalar (``_closing_quote`` returns ``-1``), so YAML keeps none
+    of it. It is decided by that parity scan, NOT by ``endswith`` — a body whose
+    last character is an ESCAPED quote ends in the quote char yet never closes, and
+    trusting ``endswith`` sent it to ``escaped``, where the comparison is declined
+    (found in review: the shape escaped measurement entirely).
 
     ``escaped`` declines the value comparison (hand de-quoting cannot reproduce
-    `\\t`, `\\uXXXX`) but has already been checked for ``broken``.
+    `\\t`, `\\uXXXX`) but has already been checked for ``broken`` and
+    ``malformed``.
     """
     if raw[:1] not in ('"', "'"):
         return "plain", None
     q = raw[0]
     value = _split_comment(raw)
-    if len(value) < 2 or not value.endswith(q):
+    # Wholeness is decided by the SAME parity scan that locates the close. A
+    # truncation shape still closes at an inner quote, so `_closing_quote` finds
+    # it (`"a, "#1" KEEP"` -> 4) and it keeps reaching `broken` below.
+    if _closing_quote(value) == -1 or not value.endswith(q):
         return "malformed", None
     body = value[1:-1]
     if q == '"':
@@ -1141,6 +1158,50 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
         "that quote (YAML reads `a\\tb\" `) — `escaped` would skip the comparison "
         "and let the truncation through"
     )
+
+
+def test_a_never_closing_quoted_scalar_is_malformed_not_escaped() -> None:
+    """A quote the parity scan never closes is `malformed` — never `escaped`.
+
+    Wholeness used to be decided by ``value.endswith(q)`` alone, and that test is
+    FOOLED by a double-quoted body whose last character is an ESCAPED quote: the
+    value ends in the quote char, so it passed the wholeness test, reached the
+    escape branch and was reported ``('escaped', None)`` — a style that DECLINES the
+    value comparison. A scalar YAML cannot close therefore escaped measurement
+    while (D) still counted it as measured (found in review; the false statement
+    this falsified was `_split_comment`'s `-1` arm, which claimed the caller
+    refused these shapes and did not).
+
+    YAML agrees the shape is unparseable, not merely uncomparable: a quoted scalar
+    requires a MATCHING closing quote, and PyYAML raises *while scanning a quoted
+    scalar, found unexpected end of stream*. So the verdict is `malformed` — the
+    same one the helper already gave the plainly truncated shape.
+
+    Non-vacuity: on the pre-fix helper the FIRST entry below fails —
+    ``_quoted_style`` returned ``('escaped', None)`` for it — while the other two
+    returned ``('broken', None)`` and ``('malformed', None)``. Nothing else in this
+    file reds: the truncation pins assert ``broken`` for shapes that DO close at an
+    inner quote (``_closing_quote`` finds them, so this branch never sees them).
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    # `_closing_quote` returns -1 for every one of these; the FIRST is the escape
+    # from measurement, because it is the only one that still ENDS in the quote
+    # char while having no terminating quote.
+    for raw in ('"a\\"', "'''", '"abc\\'):
+        assert _closing_quote(raw) == -1, (
+            f"{raw!r} is expected to have NO closing quote — re-point this guard"
+        )
+        assert _quoted_style(raw) == ("malformed", None), (
+            f"{raw!r} never closes, so YAML keeps none of it — `escaped` would "
+            f"decline the comparison and let it through; got {_quoted_style(raw)!r}"
+        )
+
+    # …and the consumer agrees, which is what makes this classification safe to
+    # tighten: the PARSE arm (`parse_frontmatter` degrading to `{}`) is the check
+    # that reds such a file, so narrowing `escaped` invents no red the pipeline
+    # lacks.
+    assert parse_frontmatter('---\ntitle: x\naboutObjects: "a\\"\n---\n') == {}
 
 
 def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
