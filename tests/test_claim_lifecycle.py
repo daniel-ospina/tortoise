@@ -393,13 +393,88 @@ def test_ontology_transitions_column_matches_the_guard_map():
     (`Status | Kind | Write path | Transitions to | Notes`), so `cells[2]` is the
     *Write path* column and the parse yields `frozenset()` — the pin still reds,
     but on `set()` against `{live, deprecated, superseded}`, not on a missing edge.
+
+    Both shapes are driven as fixtures in
+    ``test_transitions_pin_reds_on_the_tables_it_was_written_for``, so the
+    claim is checkable rather than merely confident.
+    """
+    _transition_edges_by_status(_ontology_status_section())
+
+
+def test_transitions_pin_reds_on_the_tables_it_was_written_for():
+    """Non-vacuity for ``test_ontology_transitions_column_matches_the_guard_map``.
+
+    The pin above claims it would have caught two table shapes, and each claim is
+    only worth the artifact behind it — so each shape is reproduced here in the
+    shape the real doc carried, and the pin is driven with it. Nothing here
+    touches ``docs/ONTOLOGY.md``; the section is injected.
+
+    (a) the INTERMEDIATE v3.37 table (`17c81841e8` -> `cd38f7a74b`, never
+        shipped): four columns, `draft` states `live` alone. The pin must red on
+        the two MISSING EDGES and say ``['live']``.
+    (b) the LAST SHIPPED artifact (`origin/main`, v3.36): FIVE columns, so the
+        cell the pin reads is the `Write path` column — `create_point(status='draft')`
+        and friends, which yield NO `` `word` `` run at all. The pin must still
+        red (it is non-vacuous on main's real doc), but through an EMPTY stated
+        set plus the six-row set assert — and its message must say ``[]``, which
+        is the proof that main's shape is not the `{live}` shape.
+    """
+    intermediate_v337 = (
+        "### Point Status Vocabulary (canonical, #432/#690)\n"
+        "\n"
+        "| Status | Kind | Transitions to | Notes |\n"
+        "|--------|------|----------------|-------|\n"
+        "| `draft` | initial (opt-in, #1088) | `live` | Inert for EP |\n"
+        "| `live` | active | `deprecated`, `superseded` | Full EP |\n"
+        "| `deprecated` | terminal | *(none)* | Ended (#11824) |\n"
+        "| `superseded` | terminal | *(none)* | Replaced |\n"
+    )
+    with pytest.raises(AssertionError) as intermediate_red:
+        _transition_edges_by_status(intermediate_v337)
+    assert "states transitions ['live'] but the guards allow" in str(
+        intermediate_red.value), (
+        "the pin no longer reds on the intermediate v3.37 table's `draft` row "
+        "through the two missing edges — that is the shape it was written for")
+
+    # `origin/main`'s §5 (v3.36): the `Write path` column sits at cells[2].
+    shipped_v336 = (
+        "### Point Status Vocabulary (canonical, #432/#690)\n"
+        "\n"
+        "| Status | Kind | Write path | Transitions to | Notes |\n"
+        "|--------|------|------------|----------------|-------|\n"
+        "| `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, "
+        "`EventAPI._point` | `live` | Inert for EP |\n"
+        "| `live` | active | `create_point`, `update_point` | `retracted`, "
+        "`superseded` | Full EP |\n"
+        "| `retracted` | terminal | `retract_point` | *(none)* | Tombstone |\n"
+        "| `superseded` | terminal | `supersede_point` | *(none)* | Replaced |\n"
+        "| `outdated` | terminal (legacy flag) | `invalidate_point` | *(none)* | Flag |\n"
+        "| `archived` | terminal (reserved) | *(no v1 SDK write path)* | *(none)* | Reserved |\n"
+    )
+    with pytest.raises(AssertionError) as shipped_red:
+        _transition_edges_by_status(shipped_v336)
+    assert "states transitions [] but the guards allow" in str(shipped_red.value), (
+        "the pin does not red on main's five-column table the way the docstring "
+        "says it does (the Write path cell, parsed to an EMPTY set) — if it now "
+        "reads `{live}` there, the column index moved and the docstring is wrong "
+        "again")
+
+
+def _transition_edges_by_status(section: str) -> dict[str, frozenset[str]]:
+    """Each §5 status row's `Transitions to` cell, keyed by status word.
+
+    Refuses rather than skipping on every shape it cannot read (a table of fewer
+    than three lines, a Status cell that is not a bare `` `word` ``), so a table
+    the pin cannot parse is a RED and never a silent pass. ``section`` is
+    injectable so the non-vacuity pin can drive the two table shapes this guard
+    was written for without touching the real file
+    (``test_transitions_pin_reds_on_the_tables_it_was_written_for``).
     """
     from tortoise.sdk import _ALLOWED_TRANSITIONS
 
-    section = _ontology_status_section()
     rows = [ln for ln in section.splitlines() if ln.startswith("|")]
     assert len(rows) >= 3, f"§5's table parsed to {len(rows)} line(s); got {rows!r}"
-    seen: set[str] = set()
+    seen: dict[str, frozenset[str]] = {}
     for row in rows[1:]:
         cells = [c.strip() for c in row.split("|")[1:-1]]
         if len(cells) < 3 or set(cells[0]) <= set("-: "):
@@ -409,14 +484,15 @@ def test_ontology_transitions_column_matches_the_guard_map():
             f"§5's Transitions pin cannot read this Status cell: {cells[0]!r}")
         status = status_match.group(1)
         stated = frozenset(re.findall(r"`([a-z_]+)`", cells[2]))
-        seen.add(status)
+        seen[status] = stated
         assert stated == _ALLOWED_TRANSITIONS[status], (
             f"§5's `{status}` row states transitions {sorted(stated)} but the guards "
             f"allow {sorted(_ALLOWED_TRANSITIONS[status])} (#11824). The table is "
             "canonical; either the row is stale or the guard moved without the doc")
-    assert seen == POINT_STATUS_VALUES, (
+    assert set(seen) == POINT_STATUS_VALUES, (
         f"this pin read the transitions of {sorted(seen)}, not the four model words "
         f"{sorted(POINT_STATUS_VALUES)} — a table row it cannot reach is unpinned")
+    return seen
 
 
 def test_ontology_discloses_the_legacy_words_it_no_longer_lists():
