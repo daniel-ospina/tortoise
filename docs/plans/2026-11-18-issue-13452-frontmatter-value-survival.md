@@ -436,7 +436,7 @@ file stays GREEN (`2 failed, 11 passed` at `3b8de63b8a`, the same two pre-existi
 values the consumer TRUNCATES change what the arm reports — and only ONE of them escapes
 measurement. `"a, "#1" KEEP"` (YAML reads `'a, '`) goes `('broken', None)` →
 `('double-quoted', 'a, "#1" KEEP')`, so the scalar branch still compares it and still reds, with
-*does not SURVIVE the parse* (`len 14 → 3`) where it used to say TERMINATED. `"a\tb\" "#1" KEEP"`
+*does not SURVIVE the parse* (`len 12 → 3`, the BODY's length — the raw is 14) where it used to say TERMINATED. `"a\tb\" "#1" KEEP"`
 (YAML reads `'a\tb" '`) goes `('broken', None)` → `('escaped', None)`, and `escaped` declines the
 comparison entirely: THAT is the value escaping measurement — the #13452 defect this guard exists to
 prevent — behind green CI, and it is the only branch of this helper whose loss is a fail-open rather

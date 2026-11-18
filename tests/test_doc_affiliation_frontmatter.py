@@ -1113,7 +1113,7 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
     ⛔ Only the SECOND of those is a fail-open, and the difference has to be stated
     because the first shape still reds — with a different message. Under the mutant
     `"a, "#1" KEEP"` is measured as `('double-quoted', 'a, "#1" KEEP')`, so the scalar
-    branch still COMPARES it and still reports *does not SURVIVE the parse* (`len 14 →
+    branch still COMPARES it and still reports *does not SURVIVE the parse* (`len 12 →
     3`) where it used to say TERMINATED: the verdict changes, the comparison does not
     disappear. The second shape carries a legal backslash escape, so it reaches
     `('escaped', None)` and the `escaped` branch `continue`s BEFORE any comparison —
