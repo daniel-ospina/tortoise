@@ -230,6 +230,7 @@ three** hold:
    saving and its blast radius are both counted instead of quoted from retired arithmetic.
 
 **The honest case against D:**
+
 - R1 is **already approved**; leaving it unscheduled risks reading as inertia, and the `#13220` history shows
   exactly how a granted ruling sat unimplemented for weeks.
 - The rent is real *today*, at 584× the price of disk, against a ~78 MB solo ceiling.
@@ -337,6 +338,7 @@ contract, which is a **record semantic**, not a latency trade. **Then do C2**: o
 derived pair, which is the only *measured* waste in this whole dossier that neither R1 nor R2 addresses.
 
 **The honest case against:**
+
 - **Full deferral is the honest end-state for a system whose embedder can be 57 s cold.** A bound of 0.25 s is
   a bet that the model is warm; the recorded `#13108` measurement (dense leg drops to keyword-only in **45 %**
   of eval windows, recall@3 = 75 %) says the read path already pays for that bet, and `#13156` says a
