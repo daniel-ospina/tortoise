@@ -869,7 +869,13 @@ def test_product_served_text_is_not_redacted_AT_THE_CALL_SITES():
 
     src = inspect.getsource(cap)
     for needle, what in (
-        ('r.get("content") or r.get("snippet") or "", 120, redact=False', "excerpt `what`"),
+        # `or r.get("name")` joined this needle with #13302: an ENDED Object row serves
+        # its text under `name`, and a projection that dropped it would hand the reader
+        # an empty `what` — the same harm the redaction rule guards, one step earlier.
+        (
+            'r.get("content") or r.get("name") or r.get("snippet") or "", 120, redact=False',
+            "excerpt `what`",
+        ),
         ('row.get("because") or "", 400, redact=False', "verdict `because`"),
         ('row.get("cause") or "", 240, redact=False', "verdict `cause`"),
         ("r.get('what'), 70, redact=False", "scoreboard row `what`"),
@@ -1773,3 +1779,115 @@ def test_every_post_ingestion_refusal_drops_the_graph(monkeypatch, tmp_path):
         "the refusal happened AFTER artifacts were written: "
         f"{sorted(p.name for p in scratch.iterdir())}"
     )
+
+
+# ── #13302: the two questions that were unaskable now have a door ───────────────
+
+
+class _EndedRecordingTarget:
+    """A target that records the calls a recipe makes and serves the ended shape.
+
+    A stub, not a graph: what is pinned here is that the RECIPE asks the question
+    the ended-scope read answers, and that its answer reaches the payload — the read
+    itself is pinned against a real store in `tests/test_13302_ended_read.py`.
+    """
+
+    capability = "ended"
+
+    def __init__(self):
+        self.calls = []
+
+    def search(self, query=None, *, entity_type="point", limit=10,
+               include_terminal=False, ended_scope=False, role=""):
+        self.calls.append({"query": query, "entity_type": entity_type,
+                           "ended_scope": ended_scope, "role": role})
+        rows = []
+        if ended_scope:
+            rows = [{"id": "dead-1", "what": "withdrawn thing", "kind": "statement",
+                     "status": "retracted"}] if entity_type == "point" else [
+                {"id": "plan-1", "what": "cancelled plan", "kind": "core:plan",
+                 "stage": {"id": "cancelled", "slot": "terminal",
+                           "outcome": "withdrawn"},
+                 "linkedEvents": []}]
+        return cap.Call("search", {"query": query, "entity_type": entity_type,
+                                   "ended_scope": ended_scope},
+                        True, f"{len(rows)} rows", {}, rows, role=role)
+
+    def read_entity(self, entity_id, *, role=""):
+        return cap.Call("read_entity", {"id": entity_id}, True, "one node", {},
+                        [{"id": entity_id, "status": "retracted"}], role=role)
+
+
+def test_q5_and_q6_ask_the_read_whose_question_they_are():
+    """Both questions must reach the ENDED-SCOPE read, with no query and no id.
+
+    Without these calls the instrument keeps measuring a surface that cannot answer
+    them at all, and a `wrong` row would blame the product for a question nobody
+    asked it (#13302).
+    """
+    for recipe in ("planned_never_happened", "withdrawn"):
+        target = _EndedRecordingTarget()
+        cap.RECIPES[recipe](target, {}, {})
+        ended = [c for c in target.calls if c["ended_scope"]]
+        assert ended, f"{recipe} never asks the ended-scope read"
+        assert all(c["query"] is None for c in ended), (
+            "an ended-scope read takes no query (a state question is not a text match)"
+        )
+        assert any(c["role"] == "ended" for c in ended), (
+            "the call needs a role, or `_require_call` cannot block the question when "
+            "the read fails and a missing call would be scored as a product defect"
+        )
+        assert "ended_scope" in cap.RECIPE_NEEDS[recipe]
+
+
+def test_the_ended_rows_reach_the_payload_a_reader_scores():
+    """The reader must SEE how it ended — the payload, not the call list, is scored."""
+    for recipe, key in (("planned_never_happened", "ended_objects"),
+                        ("withdrawn", "ended_points")):
+        answer = cap.RECIPES[recipe](_EndedRecordingTarget(), {}, {})
+        rows = answer.payload[key]
+        assert rows, f"{recipe} drops the ended rows from its payload"
+        if recipe == "withdrawn":
+            assert rows[0]["status"] == "retracted"
+        else:
+            assert rows[0]["stage"]["slot"] == "terminal"
+            assert rows[0]["linkedEvents"] == []
+
+
+def test_an_empty_linked_events_list_survives_the_served_projection():
+    """`linkedEvents` is keyed on PRESENCE, not truthiness — and that is pinned here.
+
+    #13302 review F3.3: the payload case above reads the STUB target's rows, which
+    bypass `_served_row`/`_ended_fields` entirely, so `if r.get("linkedEvents")`
+    (dropping the empty list) left everything green. An empty list is the product's
+    own statement that nothing is linked — half of "planned and never happened" —
+    so it must reach a reader, and a current-scope row (which carries no ending at
+    all) must stay byte-identical.
+    """
+    served = cap._served_row({"id": "plan-1", "name": "cancelled call",
+                              "linkedEvents": []})
+    assert "linkedEvents" in served, (
+        "an EMPTY linkedEvents is evidence, not absence: dropping it as falsy "
+        "deletes the 'nothing happened' half of the plan answer"
+    )
+    assert served["linkedEvents"] == []
+    # The pre-#13302 shape: a current-scope row carries no ending, so the ended
+    # half contributes nothing at all.
+    assert "linkedEvents" not in cap._served_row({"id": "live-1", "name": "live"})
+
+
+def test_a_query_less_call_is_not_reported_as_a_corpus_ranking():
+    """`NO-RELATION-TO-QUESTION` describes a failed TEXT match; an enumeration is not one.
+
+    The signal is read by a fresh judge as evidence of a degraded read. Firing it on a
+    call that took no query would point a reader at a corpus ranking that never
+    happened — a false signal in the one field a failure is attributed to.
+    """
+    ans = cap.Answer("Q6")
+    ans.calls.append(
+        cap.Call("search", {"query": None, "ended_scope": True}, True,
+                 rows=[{"id": "p1", "what": "the beach club confirmed our booking"}],
+                 overlap={"rows": 1, "zero_overlap_rows": 1})
+    )
+    cap._signal_refs(ans, {}, {})
+    assert not any("NO-RELATION-TO-QUESTION" in s for s in ans.signals)

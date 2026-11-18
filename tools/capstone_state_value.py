@@ -149,6 +149,10 @@ CAPABILITIES = (
     "judgement",
     "search_points",
     "search_objects",
+    # #13302: the ENDED-SCOPE read ("what ended, and how"). A target that cannot
+    # enumerate the ended population cannot be asked Q5 or Q6 at all, so the two
+    # questions BLOCK rather than scoring an unaskable question as a wrong answer.
+    "ended_scope",
     "read_entity",
     "read_events",
     "read_status",
@@ -421,13 +425,47 @@ def _served_row(r: dict) -> dict:
     """
     return {
         "id": r.get("id"),
-        "what": _cut(r.get("content") or r.get("snippet") or "", 120, redact=False),
-        "kind": r.get("point_kind"),
+        # `or r.get("name")` (#13302): an ENDED Object/Subject row carries its label
+        # under `name` (a Point's is `content`), and the served text of the two
+        # questions this read answers is an Object's name. Without it the reader
+        # would score a row whose text was silently EMPTY.
+        "what": _cut(
+            r.get("content") or r.get("name") or r.get("snippet") or "", 120, redact=False
+        ),
+        "kind": (r.get("point_kind") or r.get("objectKind") or r.get("subjectKind")
+                 or r.get("pointKind")),
         "status": r.get("status"),
         "score": (r.get("scores") or {}).get("rrf"),
         "match": r.get("match_source"),
         "supersedes": [s.get("id") for s in (r.get("supersedes") or [])],
+        **_ended_fields(r),
     }
+
+
+def _ended_fields(r: dict) -> dict:
+    """The #13302 half of a served row: HOW the record ended, when it says so.
+
+    Conditional on the row CARRYING the field, so a current-scope row is
+    byte-identical to the pre-#13302 projection (this function returns ``{}`` for
+    one) — the packet a reader sees for Q1–Q4 must not change shape because a new
+    read exists beside it.
+
+    ``linkedEvents`` is keyed on PRESENCE, not truthiness: an empty list is the
+    product's own statement that nothing is linked to the record, which is half of
+    the "planned and never happened" answer (`stage.slot == 'terminal'` is the
+    other half). Dropping it as falsy would delete exactly that evidence.
+    """
+    out: dict = {}
+    for key in ("successorId", "endedAt"):
+        if r.get(key) is not None:
+            out[key] = r[key]
+    if r.get("stage"):
+        out["stage"] = r["stage"]
+    if r.get("isClosed"):
+        out["isClosed"] = True
+    if "linkedEvents" in r:
+        out["linkedEvents"] = r["linkedEvents"]
+    return out
 
 
 class LocalTarget:
@@ -593,11 +631,12 @@ class LocalTarget:
 
     def search(
         self,
-        query: str,
+        query: str | None,
         *,
         entity_type: str = "point",
         limit: int = 10,
         include_terminal: bool = False,
+        ended_scope: bool = False,
         role: str = "",
     ) -> Call:
         """The product's search surface, with its OWN read verdict carried out.
@@ -607,6 +646,9 @@ class LocalTarget:
         re-labelled by this tool. They are requested rather than inferred because the
         SDK's search returns a bare list, so a caller that does not ask cannot tell a
         full-corpus fallback from a match set.
+
+        `ended_scope` (#13302) is the read whose QUESTION is "what ended, and how" —
+        a state enumeration rather than a relevance read, so it takes no query.
         """
         request = {
             "query": query,
@@ -614,6 +656,8 @@ class LocalTarget:
             "limit": limit,
             "include_terminal": include_terminal,
         }
+        if ended_scope:
+            request["ended_scope"] = True
         status: dict = {}
         trunc: dict = {}
         trace: list = []
@@ -627,6 +671,7 @@ class LocalTarget:
                     entity_type=entity_type,
                     limit=limit,
                     include_terminal=include_terminal,
+                    ended_scope=ended_scope,
                     read_status_out=status,
                     _truncation_out=trunc,
                     leg_trace=trace,
@@ -656,12 +701,16 @@ class LocalTarget:
             for t in trace
             if isinstance(t, dict)
         ]
-        overlap = _overlap(query, served)
+        overlap = _overlap(query, served) if query else {}
         detail = (
             f"{len(served)} rows · status={status.get('status')!r} · "
             f"truncated={trunc.get('truncated')} · "
-            f"zero-overlap rows={overlap['zero_overlap_rows']}/{overlap['rows']} · "
-            f"legs={[(t.get('leg'), t.get('reason'), t.get('degraded')) for t in legs][:6]}"
+            + (
+                f"zero-overlap rows={overlap['zero_overlap_rows']}/{overlap['rows']} · "
+                if overlap
+                else ""
+            )
+            + f"legs={[(t.get('leg'), t.get('reason'), t.get('degraded')) for t in legs][:6]}"
         )
         return Call("search", request, True, detail, status, served, legs, overlap, role=role)
 
@@ -1039,6 +1088,12 @@ def _signal_refs(answer: Answer, refs: dict[str, str], spec: dict) -> None:
     for call in answer.calls:
         if call.surface != "search" or not call.ok:
             continue
+        # A call with no QUERY is not a failed text match (#13302): the ended-scope
+        # read selects by STATE, so "every row shares no word with the question"
+        # would be a true sentence about a question nobody asked — an evidence line
+        # pointing a reader at a corpus ranking that never happened.
+        if not call.request.get("query"):
+            continue
         ov = call.overlap or {}
         if ov.get("rows") and ov.get("zero_overlap_rows") == ov.get("rows"):
             answer.signals.append(
@@ -1212,6 +1267,16 @@ def recipe_planned_never_happened(target: LocalTarget, refs: dict[str, str], spe
             "what was planned and never happened", entity_type="object", limit=10, role="question"
         )
     )
+    # #13302: the read whose question this IS. "What was planned and never happened"
+    # is a STATE question, so a text match cannot answer it (measured pre-fix: 0 rows)
+    # — the ended-scope enumeration of the Object family returns the plans that
+    # ENDED, each with the stage it ended on and the events linked to it. A plan is
+    # `stage.slot == 'terminal'` with no linked event; a live plan is not in this
+    # population at all, which is why "is not returned as never happened" is a
+    # property of the read rather than of the reader's judgement.
+    ans.calls.append(
+        target.search(None, entity_type="object", limit=50, ended_scope=True, role="ended")
+    )
     ans.calls.append(
         target.search("thursday partner call", entity_type="object", limit=10, role="by_name")
     )
@@ -1222,6 +1287,7 @@ def recipe_planned_never_happened(target: LocalTarget, refs: dict[str, str], spe
     served = [r for r in ans.rows("by_name") if r.get("id") == call_id]
     ans.payload = {
         "served_for_the_question": ans.rows("question"),
+        "ended_objects": ans.rows("ended"),
         "served_for_the_cancelled_call": ans.rows("by_name"),
         "the_cancelled_plan": {
             k: node.get(k)
@@ -1250,7 +1316,7 @@ def recipe_planned_never_happened(target: LocalTarget, refs: dict[str, str], spe
             f"(status={served[0].get('status')!r}) — the S1 gap (#13034's predicate "
             "reads neither the terminal slot nor isClosed)"
         )
-    _require_call(ans, "question", "by_name", "cancelled_plan")
+    _require_call(ans, "question", "ended", "by_name", "cancelled_plan")
     _signal_refs(ans, refs, spec)
     return ans
 
@@ -1264,6 +1330,15 @@ def recipe_withdrawn(target: LocalTarget, refs: dict[str, str], spec: dict) -> A
             limit=10,
             role="question",
         )
+    )
+    # #13302: "has anything been withdrawn?" is the ended-scope question, and it is
+    # asked WITHOUT knowing an id, a query string that matches the record's words, or
+    # which surface accepts a terminal flag. The pre-fix path (below) needed all
+    # three: the default-scope reads are a DEGRADED corpus ranking here (0 of 2 rows
+    # share a word with the question, score 0.0) and the claim surfaces only when
+    # terminal scope is forced by name.
+    ans.calls.append(
+        target.search(None, entity_type="point", limit=50, ended_scope=True, role="ended")
     )
     ans.calls.append(
         target.search("beach club confirmed booking", entity_type="point", limit=10, role="by_name")
@@ -1283,19 +1358,27 @@ def recipe_withdrawn(target: LocalTarget, refs: dict[str, str], spec: dict) -> A
     node = ans.first("claim_node")
     ans.payload = {
         "served_default_scope": ans.rows("question"),
+        "ended_points": ans.rows("ended"),
         "served_for_the_claim_default_scope": ans.rows("by_name"),
         "served_for_the_claim_include_terminal": ans.rows("include_terminal"),
         "the_claim_node": {k: node.get(k) for k in ("id", "content", "status")} if node else None,
     }
     if node:
         ans.signals.append(f"claim status={node.get('status')!r} (a by-id read_entity)")
+    if ans.rows("ended"):
+        ended_ids = [r.get("id") for r in ans.rows("ended")]
+        ans.signals.append(
+            "the ended-scope read served "
+            f"{len(ended_ids)} withdrawn record(s) without the id being supplied: "
+            f"{ended_ids}"
+        )
     if not ans.rows("by_name"):
         ans.signals.append(
             "the withdrawn claim is absent from the default-scope search — correct for "
             "currency, but a customer asking 'has anything been withdrawn' is then told "
             "nothing, which is the wrong direction of absence"
         )
-    _require_call(ans, "question", "by_name", "include_terminal", "claim_node")
+    _require_call(ans, "question", "ended", "by_name", "include_terminal", "claim_node")
     _signal_refs(ans, refs, spec)
     return ans
 
@@ -1315,8 +1398,8 @@ RECIPE_NEEDS = {
     "plan_vs_occurrence": ["search_objects", "read_entity", "read_events"],
     "why_changed": ["search_points", "read_entity"],
     "goal_met": ["read_entity", "read_events", "judgement"],
-    "planned_never_happened": ["search_objects", "read_entity"],
-    "withdrawn": ["search_points", "read_entity"],
+    "planned_never_happened": ["search_objects", "read_entity", "ended_scope"],
+    "withdrawn": ["search_points", "read_entity", "ended_scope"],
 }
 
 #: Identities the SCENARIO creates that no question is scored against, and why each is

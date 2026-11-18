@@ -1,0 +1,39 @@
+{
+  "_provenance": {
+    "packet": "/private/tmp/capstone-13302-final/judge-packet.json",
+    "reader": "fresh",
+    "elapsed_s": 84.5,
+    "reason": "",
+    "note": "Written by this instrument. `--verdicts <this file>` re-scores the same packet without spawning a reader."
+  },
+  "Q1": {
+    "verdict": "wrong",
+    "because": "It serves Q4 pricing ($39) and the uptime target but omits the pending 12 December launch plan, which the narrative counts as a current commitment, so the 'what we are committed to' set is incomplete.",
+    "cause": "Plans vocabulary / S0-S7 slice: the plan object (core:plan) is not returned by an object-scope 'current commitments' search (0 rows, vector leg no_embedder, fts empty), so the only served items are points."
+  },
+  "Q2": {
+    "verdict": "right",
+    "because": "It serves the launch as a core:plan node with stage 'scheduled', isClosed=false and no occurrence event anywhere in the graph, so plan and fact are told apart.",
+    "cause": null
+  },
+  "Q3": {
+    "verdict": "right",
+    "because": "The served rows name Q4 pricing ($39) as the replacement, carry supersedes=[Q3 id] and a live successor node, and invent no rationale.",
+    "cause": null
+  },
+  "Q4": {
+    "verdict": "right",
+    "because": "It reports unmet with the basis given as the 99.72% November reading measured against the >=99.9 target (comparison false), not a bare status word.",
+    "cause": null
+  },
+  "Q5": {
+    "verdict": "right",
+    "because": "The ended scope serves the Thursday partner call \u2014 6 November as a closed plan with terminal stage 'cancelled', while the still-pending December launch is not reported as never happened.",
+    "cause": null
+  },
+  "Q6": {
+    "verdict": "right",
+    "because": "The retracted beach-club confirmation is excluded from default scope and served with status 'retracted' when terminal scope is included, so it both stops counting and can be reported as withdrawn.",
+    "cause": null
+  }
+}

@@ -3163,6 +3163,17 @@ surfaces:
   # scenario-or-instrument-only diff takes the tier-1 early return and would run this ZERO
   # times — the one change class that can silently make the instrument ask the wrong question.
   - test_capstone_state_value_13038.py
+  # #13302 review F1: the ended-scope read's own live-store pins (a withdrawn claim
+  # is discoverable without its id, a cancelled plan without its name, the ending
+  # the record carries, `kind` narrowing, and the closed refusal list). `core`
+  # because BOTH subjects — `tortoise/ended.py` and `tortoise/live.py` (the shared
+  # currency predicate whose change redefines what "ended" means) — classify as
+  # `core` with no SOURCE_PATTERN row of their own; before this row the suite ran
+  # only as an accident of the diff, because `tortoise/sdk.py` selects the full
+  # matrix (`select(['tortoise/ended.py'])` selected 898/902 `core` files and NOT
+  # this one — measured, #13416). Docker lane (`tests/_live_utils.py` skips when no
+  # store is reachable) — so NOT dual-registered with the hermetic `tier1`.
+  - test_13302_ended_read.py
   # #5612: concurrent journal appends are serialised and the recovery read
   # salvages a damaged mid-file line. `tortoise/log.py` matches no
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
