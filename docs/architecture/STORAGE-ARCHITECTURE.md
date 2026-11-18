@@ -654,7 +654,7 @@ FALKORDB — entities · Points (beliefs — "claims" in prose, never a type) ·
 - **`_searchText` is still the name of the full-text field** on those rows (§12.1b's inventory row for `Document`; `SOURCE_SEARCH_TEXT_FIELD = "_searchText"`), so a grep for `:Document` finds the field even though no `:Document` node exists. ⚠️ **Two composition rules share the name, and they are not interchangeable:** a document row's value comes from `projection.entities._build_search_text` (`title` + `summary` + `topics`), while `sdk._source_search_text` composes it for session and corpus Sources — `search_engine.py` names the two as distinct rules.
 - **`#8419` is that debt's EMBEDDING half:** `_upsert_document` derives the document vector from the retired `title + content` — text the node no longer holds — so the vector disagrees with the `_searchText` surface its own FTS leg searches. It carries the embedding half of exactly this debt, and D10's landing did not absorb it.
 
-⛔ **Do not restate the migration history here** — the append-only sequence that landed D10 is §9.5's and the *CHANGELOG's, and this note is STATE: the label is retired, the four code surfaces above still name it.
+⛔ **Do not restate the migration history here** — the append-only sequence that landed D10 is §9.5's and the `*CHANGELOG.md`'s, and this note is STATE: the label is retired, the three code surfaces above still name it — and `#8419` carries the debt.
 
 **✅ Cross-check against the evidence, and it agrees.** The field's nearest comparable (GAAMA, 2026) deliberately keeps a **raw episode layer verbatim** and a **separate distilled node layer** — and Microsoft's consolidation work reports **97.2% retention precision at 58% store reduction**. **Both are the same two-layer instinct: keep the raw as raw, keep the distilled as distilled, and never let one pretend to be the other.**
 
@@ -1129,7 +1129,7 @@ no Point FTS field (#11706 review P2-5).
 **✅ DATED PLACEMENT NOTE (2026-11-17) — the inventory above answers *shape*; the ruling answers *place*.**
 The label inventory is unchanged in shape since 2026-09-24: `Point` is the only label with a **graph** VECTOR index
 (`CALL db.indexes()`, the table above). What changed on 2026-11-17 is the PLACEMENT answer (owner, `#13220`, §14.3):
-**every served label's vectors live in Postgres and are indexed there**, so a graph-side absence in that table is no
+**every served label's vectors BELONG in Postgres, and each served label has a column and an HNSW index there**, so a graph-side absence in that table is no
 longer a gap to be closed on this engine. The per-label state — each item read from this repo, nothing inferred:
 
 - **`Point`** — the one **graph** VECTOR index (`Point.embedding`, `similarityFunction: 'cosine'`), and the record's
@@ -1140,7 +1140,7 @@ longer a gap to be closed on this engine. The per-label state — each item read
   control carrying the same names and vectors (`docs/research/2026-11-17-13108-dense-leg/research-brief.md` §3.1,
   `#13108`). ⚠️ **`:Event`, `:Source` and `:Subject` were NOT sampled** — that brief states their `scan_fallback` is
   **inferred from this census** (one VECTOR index, on `Point`), and says so. What the scan costs at our size is the
-  2026-09-24 table below (`object` 16.96 ms vs `point` 4.97 ms p50); the 2026-11-17 re-read has the same pair at 34.45 /
+  2026-09-24 table above (`object` 16.96 ms vs `point` 4.97 ms p50); the 2026-11-17 re-read has the same pair at 34.45 /
   21.04 ms p50 (under load, `object` 133.25 ms p50 / 634.50 ms p99 — 7/60 windows over the 500 ms budget).
 - **`object`, `subject` in the RECORD** — the columns exist: `embedding` `jsonb` plus a GENERATED
   `embedding_vec vector(384)` and its own HNSW index, added by `20261117000001_record_object_subject_embedding.sql`
@@ -1157,7 +1157,7 @@ longer a gap to be closed on this engine. The per-label state — each item read
   `_RECORD_EMBEDDING_TEXT` has no `SourceCreated` rule, so a session `:Source` row carries a vector only where a caller
   passed one (§14.3 V2).
 - **`Document`** — no graph VECTOR index, and the label itself is retired (D10, §9.3); its record half is the
-  `document_kind IS NOT NULL` rows of `public.source` (§14.3 V2's `document` key), and those ARE derived
+  `document_kind IS NOT NULL` rows of `public.source` (`record_vector.LABEL_SERVED["document"]`, above), and those ARE derived
   (`DocumentCreated` → `("title", "content")`).
 
 ⇒ **The gap this section measures is therefore no longer "the graph has no index for these labels"; it is "the
