@@ -45,6 +45,7 @@ document.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -54,6 +55,7 @@ _SUBSTRATE = "docs/architecture/SUBSTRATE-REBUILD-MAP.md"
 _M3_BRIEF = "docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md"
 _CENSUS = "docs/evidence/13083-capability-census/README.md"
 _EVIDENCE = "docs/architecture/ENTITY-VERDICT-BANDS.md"
+_INDEX = "docs/00_index.md"
 _SE = "tortoise/search_engine.py"
 _CP = "tortoise/cache_projection.py"
 _AU = "tortoise/audit.py"
@@ -140,6 +142,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # and `2976-3000` is the `build_or_query` byte-identity comment block, not the filter. The pin below
     # is anchored on the line that IS the filter, so the next offset-only edit reds instead of shipping.
     (_EVIDENCE, "search_engine.py:3081-3096", _SE, 3081, "if label in _STATUS_FILTERED_LABELS"),
+    # --- the D-1 dedup filter, in BOTH documents that promise to carry the SAME address.
+    # ⛔ `#13345`'s re-derivation moved these to `27866` / left them at `27861` by adding a line delta,
+    # and the pair then named two different lines, neither of which was the filter (measured at
+    # `d1bfef778f` and at every later head: `27866` is prose and `27861` is the PRE-`#13290` value).
+    # The row above is what makes "carries the same number" a fact instead of a promise; these two are
+    # what make the NUMBER the live site rather than merely a matching one.
+    (_EVIDENCE, "sdk.py:28014", _SDK, 28014, "n.dedup_reviewed IS NULL"),
+    (_INDEX, "sdk.py:28014", _SDK, 28014, "n.dedup_reviewed IS NULL"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2755", _CP, 2755, "tail_denied = forbidden | {"),
     (_AUDIT, 'sdk.py:21745', 'tortoise/sdk.py', 21745, 's.summary=CASE WHEN $sum'),
@@ -233,6 +243,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4906'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4825`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3081-3096'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28014'): 1,
+    ('docs/00_index.md', 'sdk.py:28014'): 1,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2755'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21745'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21868`'): 2,
@@ -265,6 +277,60 @@ def test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence() -> None:
     assert declared == pinned, (
         f"_TOKEN_OCCURRENCES and _PINS disagree: {sorted(declared - pinned)} is declared with no pin; "
         f"{sorted(pinned - declared)} is pinned with no count."
+    )
+
+
+def test_the_dedup_filter_is_one_address_in_both_documents_that_promise_it() -> None:
+    """The CROSS-DOCUMENT arm — `_PINS` cannot see it.
+
+    `docs/00_index.md`'s D-1 row states the promise in as many words: *"the filter it names is at
+    `sdk.py:<n>` at this head, and `ENTITY-VERDICT-BANDS.md` carries the same number"*. Every row in
+    `_PINS` is satisfied by its OWN document, so two documents naming two DIFFERENT lines both pass every
+    pin — which is the shipped `#13345` state, measured: `docs/00_index.md` `sdk.py:27866` (prose at the
+    head, and the filter at no head) against `ENTITY-VERDICT-BANDS.md` `sdk.py:27861` (the value before
+    `#13290` moved it). The row that claims agreement was the only thing that had to hold, and nothing
+    checked it: the `+5` delta was applied to one document and not the other, and the promise broke
+    while reading as a correction.
+
+    NON-VACUOUS on that tree: the two addresses differ (`27866` vs `27861`), so the first assertion reds;
+    and neither opens on `dedup_reviewed IS NULL`, so the second reds independently. The address is
+    read out of each document by regex rather than hardcoded, so this arm survives a legitimate future
+    re-derivation of BOTH rows together (which is the only edit that keeps the promise true).
+    """
+    def address_beside(doc_rel: str) -> str:
+        lines = (REPO / doc_rel).read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if "dedup_reviewed" not in line:
+                continue
+            # `ENTITY-VERDICT-BANDS.md` puts the address on the line AFTER the marker; `00_index.md`
+            # carries both on one line. One line of slack covers both, and the regex is anchored on
+            # the qualified `sdk.py:` form so a bare `:NNNN` elsewhere on the line cannot be picked up.
+            window = " ".join(lines[i:i + 2])
+            found = re.search(r"sdk\.py:(\d{4,5})", window)
+            if found:
+                return found.group(1)
+        raise AssertionError(
+            f"{doc_rel} carries no `sdk.py:NNNN` address beside its `dedup_reviewed` marker — the D-1 "
+            "filter cite was dropped rather than re-derived."
+        )
+
+    index_addr = address_beside(_INDEX)
+    bands_addr = address_beside(_EVIDENCE)
+    assert index_addr == bands_addr, (
+        f"the two documents disagree on the D-1 dedup filter: `docs/00_index.md` says `sdk.py:{index_addr}` "
+        f"and `ENTITY-VERDICT-BANDS.md` says `sdk.py:{bands_addr}`, while `docs/00_index.md` promises the "
+        "latter \"carries the same number\". Only one address can open at any head, so one of the two "
+        "readers is sent to the wrong line. Re-derive BOTH from the statement "
+        "(`grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py`) rather than re-pointing one by a delta."
+    )
+    target = (REPO / _SDK).read_text(encoding="utf-8").splitlines()
+    assert 0 < int(bands_addr) <= len(target), (
+        f"`sdk.py:{bands_addr}` is out of range ({len(target)} lines) — the file shrank under the cite."
+    )
+    assert "dedup_reviewed IS NULL" in target[int(bands_addr) - 1], (
+        f"both documents agree on `sdk.py:{bands_addr}`, but that line is "
+        f"{target[int(bands_addr) - 1].strip()[:100]!r} — agreeing on the wrong line is still wrong, and "
+        "it is the reason this arm checks content as well as agreement."
     )
 
 
@@ -397,12 +463,13 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     count both move together only when a row is added on purpose.
     """
     docs = {row[0] for row in _PINS}
-    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 47, (
-        "46 before this row was added. The bound is not a target: a row DELETED to make the suite pass is "
-        "the failure mode, so this number moves only when a row is added on purpose — the `:6938` row was "
-        "added because §2.5 row 8's `(\"Object\", [\"name\"])` cite was the one address in that block no "
-        "pin reached (it kept the pre-merge `:6869` while its four siblings were re-pointed)."
+    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX}
+    assert len(_PINS) == 49, (
+        "47 before the `#13345` review added the D-1 dedup filter's two addresses (one per document that "
+        "promises to carry the same number). The bound is not a target: a row DELETED to make the suite "
+        "pass is the failure mode, so this number moves only when a row is added on purpose — the `:6938` "
+        "row was added because §2.5 row 8's `(\"Object\", [\"name\"])` cite was the one address in that "
+        "block no pin reached (it kept the pre-merge `:6869` while its four siblings were re-pointed)."
     )
 
 
