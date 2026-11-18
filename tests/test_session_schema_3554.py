@@ -3789,8 +3789,9 @@ def test_every_positional_changelog_pointer_lands_on_a_release_header() -> None:
     `docs/ONTOLOGY-CHANGELOG.md:<line>` beside the issue that block records), and
     even there it must resolve to a release header.
 
-    ⛔ STATED LIMIT: this pin resolves only pointers written with the full
-    `docs/ONTOLOGY-CHANGELOG.md` path. A bare `:NNN` shorthand names no file, so
+    ⛔ STATED LIMIT: this pin resolves any `ONTOLOGY-CHANGELOG.md:<line>` pointer, with
+    or without the `docs/` prefix — the pattern is not anchored to `docs/`, and
+    saying otherwise was false of it. A bare `:NNN` shorthand names no file, so
     the module text alone cannot resolve it, and it is not read here; a line
     pointer into a DIFFERENT document has its own resolver
     (`tests/test_status_as_reported_single_declaration_10524.py` covers the
