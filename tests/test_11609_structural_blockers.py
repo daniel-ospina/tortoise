@@ -481,9 +481,16 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         does not rebind `a` — CPython's execution model §4.2.1).
 
         So recurse over the BINDING shapes — `Name`, the elements of `Tuple`/`List`, and
-        `Starred` — and answer `[]` for `Attribute`/`Subscript`. Both consumers
-        (`_note_binding`, `_apply_assignment`) share this one function, so the fix lands in
-        both and they cannot drift apart.
+        `Starred` — and answer `[]` for `Attribute`/`Subscript`.
+
+        ⛔ THE TWO CALLERS NO LONGER SHARE THIS ONE FUNCTION (`#13585` P2, the value-side fix).
+        `_note_binding` (the block-locality pass) asks this function WHICH NAMES a target
+        binds; `_apply_assignment` asks `_binding_pairs` WHICH VALUE each name is bound to. The
+        shapes therefore differ in exactly one place, deliberately: this function answers the
+        names INSIDE a `Starred` (block locality needs them), while `_binding_pairs` skips a
+        starred target ELEMENT because its middle slice has no static value. So a binding shape
+        added here does NOT reach `_apply_assignment` — extend `_binding_pairs` with it, or the
+        value side silently stops pairing.
         """
         if isinstance(target, ast.Name):
             return [target.id]
@@ -507,7 +514,10 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
 
         So pair a destructuring target with a destructuring value whenever the arity matches
         (recursing through nested tuples/lists, and through ONE `Starred`, whose middle slice is
-        left unpaired because a slice has no static value).
+        skipped because a slice has no static value: the elements AFTER it are paired from the
+        right, `a, *b, c = (1, 2, 3, 4)` → `c` is `4`). That parenthesised arm is the ONLY
+        starred path here: a bare starred target (`*a = [1]`) is a `SyntaxError`, so there is
+        no separate `Starred`-target arm to keep in sync with it.
 
         ⛔ AN UNPAIRABLE DESTRUCTURING MAKES NO CLAIM AT ALL (`return []`), rather than binding
         every name `SHADOWED`. The value is determinate at run time but unreadable here, so
@@ -520,13 +530,13 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         """
         if isinstance(target, ast.Name):
             return [(target.id, value)]
-        if isinstance(target, ast.Starred):
-            return [(name, None) for name in _target_names(target.value)]
         if isinstance(target, (ast.Tuple, ast.List)):
             value_elts = value.elts if isinstance(value, (ast.Tuple, ast.List)) else None
             stars = [i for i, e in enumerate(target.elts) if isinstance(e, ast.Starred)]
             if (
                 value_elts is not None
+                # defensive: Python's parser rejects two stars (`*a, *b = …` is a
+                # SyntaxError), so this can only be true for a hand-built AST.
                 and len(stars) <= 1
                 and not any(isinstance(e, ast.Starred) for e in value_elts)
                 and len(value_elts) >= len(target.elts) - len(stars)
@@ -1658,8 +1668,8 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # every name in the target was bound `SHADOWED` — the alias was lost, and a module that
     # really wires the adapter through `A, b = A, object` reported `[]`. `main` reported the
     # site (it skipped every non-`Name` target, so it never dropped the import binding), which
-    # makes this a REGRESSION in the false-PASS direction, and the two mirror rows below are the
-    # polar control: on `main` they ALSO reported a site, and that report was wrong — `A` is
+    # makes this a REGRESSION in the false-PASS direction, and the mirror row below is the
+    # polar control: on `main` it ALSO reported a site, and that report was wrong — `A` is
     # `object` there. Element-wise pairing answers both directions; ignoring the target, which
     # is what `main` did, answers neither.
     assert _adapter_instantiation_sites(
@@ -1674,23 +1684,78 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "def wire(app):\n"
         "    return tr.FastAPIRouterAdapter(app)\n"
     ), "a DESTRUCTURING value erased a MODULE alias — the module spelling of the row above"
+    # NESTING: the adapter is in the INNER element (index 1, `(b, c)`), so this row is
+    # load-bearing on the RECURSION at `_binding_pairs`'s tuple arm — replacing it with a
+    # no-claim for nested elements (`(n, None) for n in _target_names(element)`) binds `b`
+    # `SHADOWED` and reds this row. (The adapter in the OUTER element would leave it green, so
+    # that shape is covered by the row above, not this one.)
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
-        "(a1, (b, c)) = (A, (1, 2))\n"
-        "a1(app)\n"
-    ), "a NESTED destructuring value erased the alias paired into it"
+        "(a1, (b, c)) = (object, (A, 2))\n"
+        "b(app)\n"
+    ), ("a NESTED destructuring value erased the alias paired into it — `b` is bound to `A` "
+        "through the inner tuple, so the recursion into nested elements is what answers here")
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "A, b = object, A\n"
         "A(app)\n"
     ) == [], ("`A, b = object, A` reads as a site — element-wise pairing must place the value "
               "where it BELONGS, not report every destructuring (this reported a site on `main`)")
+    # ⛔ AN UNPAIRABLE DESTRUCTURING MAKES NO CLAIM (`_binding_pairs`'s `return []`). `A` IS in
+    # the target here — that is the whole point: the value is a CALL, so the pair is
+    # undeterminable and the reader must leave the import binding in force rather than claim
+    # `SHADOWED`. Restoring the pre-fix claim (`[(name, None) for name in _target_names(target)]`)
+    # binds `A` `SHADOWED` and reds this row — the documented false PASS (`main` reported the
+    # site) would otherwise return with every row green.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A, b = build_pair()\n"
+        "A(app)\n"
+    ), ("an UNREADABLE destructuring value made a claim it cannot support: `A, b = "
+        "build_pair()` determines nothing statically, so `A`'s import binding must stand")
+    # …the orthogonal control: a destructuring that does not NAME `A` cannot touch it either.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "b, c = build_pair()\n"
         "A(app)\n"
-    ), ("an UNREADABLE destructuring value made a claim it cannot support: `b, c = "
-        "build_pair()` must not touch `A`'s binding")
+    ), "an unrelated destructuring (`b, c = build_pair()`) touched `A`'s binding"
+    # ⛔ THE STARRED HALF (`#13585` P2). The two offset formulas only diverge when the star
+    # actually CAPTURES, so the value list must be longer than the target: with a 2-element
+    # value `A, *rest = A, 2` pairs the same under either formula. These rows red the two most
+    # likely rot points — `offset = index` (right-anchored elements mispaired) and an
+    # unconditional right-anchor (left-anchored elements mispaired).
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A, *rest = A, 2, 3\n"
+        "A(app)\n"
+    ), ("a STAR before the tail misplaced the left-anchored element — `A` is `A` in "
+        "`A, *rest = A, 2, 3`, so an unconditional right-anchor loses the site")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "*rest, A = 1, 2, 3, A\n"
+        "A(app)\n"
+    ), ("a STAR before the tail misplaced the right-anchored element — `A` is the LAST value "
+        "in `*rest, A = 1, 2, 3, A`, so a left-anchored offset loses the site")
+    # the arity guard: with one star the value needs at least `n - 1` items. An EMPTY star is
+    # the only shape that separates `>=` from `>`, and it must be a longer TARGET with a short
+    # value (`A, b, *rest = 2, 3` binds `A = 2`, `rest = []`). Pairing it honestly stops the
+    # call being a site; falling through the guard makes no claim, which leaves the import
+    # binding in force and would REPORT the site — so the `== []` is what reds `>=` → `>`.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A, b, *rest = 2, 3\n"
+        "A(app)\n"
+    ) == [], ("an EMPTY star skipped the arity check — `A` is `2` in `A, b, *rest = 2, 3`, "
+              "so the call is not a site (falling through the guard would report one)")
+    # …and a STARRED VALUE is unreadable here (`(*x, 1)` has no static element at the star), so
+    # the value-side guard must refuse to pair rather than pair `A` with the `Starred` node.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "x = (object,)\n"
+        "A, *rest = (*x, 1)\n"
+        "A(app)\n"
+    ), ("a STARRED VALUE was paired element-wise — `(*x, 1)` has no static element at the "
+        "star, so no claim may be made and `A`'s import binding must stand")
     # and the forward-reference half must survive the per-position read: Python resolves a name
     # at CALL time, so a chain declared below its use still instantiates the adapter.
     assert _adapter_instantiation_sites(

@@ -41,8 +41,9 @@ tree that carries this change — `tests/test_11609_door_retirement.py:638` is
 of the four was a structural blocker), so the 9 / 3 / 1 split and `− 1` are unchanged; only the
 total and the derived arithmetic below move. Writing 14 or 16 here would be honest at this
 branch's base and FALSE the moment `main` is merged, which is why the figures are stated once,
-against the tree that will carry them (re-measured on this branch's merged tree, `origin/main` at
-`b29049b303`: `PROTECTED` is still 12 five commits after `#13550` landed at `2c1065a52e`).
+against the tree that will carry them (re-measured on this branch's base, `origin/main` at
+`66ddcf305a` — twelve commits after `#13550` landed at `2c1065a52e`, and again at `b29049b303`
+nine after: `PROTECTED` is still 12).
 
 ⛔ **Reason 2 is FALSE on `main`** and that is this lane's headline finding: no REST route is
 derived from a registry row (§1.5), so retiring those names deletes no route. `issue_insight`
