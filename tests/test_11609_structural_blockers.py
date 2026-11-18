@@ -722,10 +722,18 @@ def test_every_envelope_door_destination_is_one_of_the_six_containers():
     unblocking it while every pin stayed green. `tools/bridge_table.py`'s `DESTINATION` is
     the map that decides it, so it is read rather than restated.
 
-    ⛔ It iterates `S1_DOORS` (nine), NOT `ENVELOPE_DOORS` (eight): the plan's headline
-    count and `16 → 7` both rest on `tortoise_search` landing in one of these six
-    containers, and a review round found that edge unpinned — re-pointing `search` in
-    `DESTINATION` left every pin green while the count went wrong.
+    ⛔ It iterates `S1_DOORS` (nine), NOT `ENVELOPE_DOORS` (eight): the plan's S2 arithmetic
+    (`12 → 3` — `PROTECTED` holds 12 and S2 retires 9 of them, per
+    `test_11609_door_retirement.py`'s own `assert len(PROTECTED) == 12`) rests on
+    `tortoise_search` landing in one of these six containers, and a review round found that
+    edge unpinned — re-pointing `search` in `DESTINATION` left every pin green while the
+    count went wrong.
+
+    ⛔ THE FIGURE IS CITED, NEVER RESTATED (#13585 review P3#2). This docstring said
+    `16 → 7` while the same change corrected the doc to `12 → 3`: `main` moved the tree twice
+    under that number (`#13556` retired `create_point`/`diary_write` from the no-arm class,
+    `#13550` retired `compute_confidence`/`recall`, so that class is now empty). A count
+    written twice is a count that drifts; the authority file asserts it.
     """
     from tools.bridge_table import DESTINATION
 
@@ -1031,12 +1039,15 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     # until #13585 review P3).
     # What it therefore does NOT catch, stated rather than hidden: a field name built at
     # runtime (`getattr(e, "rest" + "_spec")`), which no static read can answer.
-    # ⛔ THE WIRING IS EXTRACTED SO IT CAN BE FALSIFIED (#13585 review P3#1). The predicate had
-    # its own test, but nothing pinned the CALL SITE — and reverting this comprehension to
-    # `"rest_spec" in source.read_text(...)` reded no row, because the scanned population is one
-    # file (`tortoise/tool_registry.py`) and the line below excludes exactly that name. A guard
-    # whose contract can be reverted silently is the defect this PR exists to remove.
-    readers = _rest_spec_readers(scanned, repo)
+    # ⛔ THE SEAM, NOT THIS LINE, IS WHAT IS PINNED (#13585 review P2#1). The predicate had its
+    # own test and this wiring had none: reverting it to the pre-PR
+    # `"rest_spec" in source.read_text(...)` comprehension reded NO row, because the scanned
+    # population's only mention of the field sits in the one module that comprehension excludes
+    # by name. Glob + name exclusion + predicate now live in ONE function (`_rest_spec_scan`)
+    # that both this pin and its falsifier drive, so a revert of ANY of the three reds a row.
+    # What remains unfalsifiable is this STATEMENT, by construction — a test cannot falsify its
+    # own call — so the guarantee is scoped to the seam rather than claimed for the call site.
+    readers = _rest_spec_scan(repo)
     # ⛔ `tool_registry.py` is NOT exempt — it is where the route-deriving code LIVES, so a
     # filename exclusion leaves the one module that could host the loop unwatched (measured:
     # a `for e in TOOL_REGISTRY: app.add_api_route(e.rest_spec.path, …)` appended to that
@@ -1369,39 +1380,43 @@ def test_the_rest_spec_read_is_an_attribute_not_a_substring(tmp_path):
     assert reads("spec = vars(entry)['rest_spec']\n"), (
         "`vars(entry)['rest_spec']` is a constant subscript and IS statically readable, so the "
         "residual list that called it unreachable understated this reader's coverage")
+    assert reads("row.rest_spec = spec\n") == [], (
+        "a STORE (`row.rest_spec = spec`) counts as a read — it is not one, and it derives no "
+        "route; the predicate gates on `ast.Load` since #13585 review P3#3")
+    assert reads("entry['rest_spec'] = spec\n") == [], (
+        "a subscript STORE counts as a read — only a `Load` is a read")
 
 
 def test_the_rest_spec_scan_is_wired_to_the_attribute_reader(tmp_path):
-    """Falsifier for the CALL SITE, not just the predicate (#13585 review P3#1).
+    """Falsifier for the SEAM the product scan runs through (#13585 review P2#1).
 
-    The helper had its own test above, but nothing pinned the wiring: reverting the scan's
-    `and _rest_spec_attribute_reads(source)` to `and "rest_spec" in source.read_text(...)`
-    reded NO row on the real tree, because the scanned population is exactly one file
-    (`tortoise/tool_registry.py`) and the same comprehension excludes that name. So the guard's
-    contract could be reverted silently — the class of defect this PR exists to remove.
+    The predicate had its own test above, but the wiring had none: reverting the call to the
+    pre-PR inline `"rest_spec" in source.read_text(...)` comprehension reded NO row on the real
+    tree, because the scanned population's only mention of the field sits in the one module that
+    comprehension excludes by name. So the guard's contract could be reverted silently — the
+    class of defect this PR exists to remove.
 
-    Measured against a population that makes the two predicates disagree instead of relying on
-    the product tree: a module whose ONLY mention of the field is a comment must not be
-    reported, and an attribute reader must be.
+    Glob + name exclusion + attribute predicate now live in ONE function (`_rest_spec_scan`),
+    and this drives THAT function over a stub root, so a revert of any of the three reds a row
+    instead of leaving the file green. `tortoise/sub/` is deliberate: a non-recursive walk would
+    report "nothing" for a claim about the whole product, and that revert must red here too.
     """
-    product = tmp_path / "product"
-    product.mkdir()
+    product = tmp_path / "tortoise"
+    (product / "sub").mkdir(parents=True)
     (product / "comment_only.py").write_text(
         "# the registry rest_spec is unrelated to this container\nx = 1\n", encoding="utf-8")
-    (product / "reads.py").write_text(
+    (product / "sub" / "reads.py").write_text(
         "for e in TOOL_REGISTRY:\n    app.add_api_route(e.rest_spec.path, handler)\n",
         encoding="utf-8")
-    # the exempt-by-name module is NOT exempt here: the scan's filename exclusion is the
-    # caller's, and this falsifies the caller's arm too (a substring predicate would report
-    # `comment_only.py` regardless of that exclusion).
+    # the exempt-by-name module is NOT exempt from this test: the exclusion is the scan's own,
+    # so a substring predicate would report `comment_only.py` regardless of it.
     (product / "tool_registry.py").write_text("x = 1  # rest_spec\n", encoding="utf-8")
 
-    assert _rest_spec_readers(sorted(product.glob("*.py")), tmp_path) == [
-        "product/reads.py"
-    ], (
-        "the `rest_spec` scan is not wired to the ATTRIBUTE reader — a comment-only module was "
-        "reported, or the real attribute read was missed — so reverting the predicate to a "
-        "substring would red no row and the F2 fix could be undone silently"
+    assert _rest_spec_scan(tmp_path) == ["tortoise/sub/reads.py"], (
+        "the `rest_spec` scan is not wired to the ATTRIBUTE reader over a RECURSIVE walk — a "
+        "comment-only module was reported, the real attribute read was missed, a subpackage "
+        "was never reached, or the name exclusion was lost — so the F2 fix could be undone "
+        "silently with every row green"
     )
 
 
@@ -1463,8 +1478,18 @@ def _is_rest_spec_read(node: ast.AST) -> bool:
     NEITHER arm — excluded by name from one, invisible to the other — in the one module the
     pin's own comment calls "where the route-deriving code LIVES". An exclusion is only as good
     as the reader that replaces it, and two predicates are free to drift; one cannot.
+    ⛔ A WRITE IS NOT A READ (#13585 review P3#3): `row.rest_spec = spec` carries the same
+    `ast.Attribute(attr="rest_spec")` shape as `row.rest_spec.path`, so BOTH arms gate on
+    `ast.Load`. While they did not, every STORE was flagged while this docstring said "read" —
+    over-blocking rather than under-blocking, so no row was falsely green, but the copy and the
+    code disagreed, and a store derives no route. The store case is now a measured row in the
+    falsifier below rather than an assertion in prose.
     """
-    if isinstance(node, ast.Attribute) and node.attr == _REST_SPEC_FIELD:
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == _REST_SPEC_FIELD
+        and isinstance(node.ctx, ast.Load)
+    ):
         return True
     if (
         isinstance(node, ast.Call)
@@ -1476,9 +1501,29 @@ def _is_rest_spec_read(node: ast.AST) -> bool:
         return True
     return (
         isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, ast.Load)
         and isinstance(node.slice, ast.Constant)
         and node.slice.value == _REST_SPEC_FIELD
     )
+
+
+def _rest_spec_scan(root: Path) -> list[str]:
+    """The `rest_spec` scan AS THE PRODUCT RUNS IT: recursive glob, then the attribute reader.
+
+    ⛔ ONE seam, driven from both ends (#13585 review P2#1). The predicate had a test and the
+    call line did not: reverting `readers = _rest_spec_readers(scanned, repo)` to the pre-PR
+    inline `"rest_spec" in source.read_text(...)` comprehension red NO row, because the scanned
+    population's only mention of the field sits in the one module that comprehension excludes
+    by name — so the whole F2 fix could be undone with this file green. Extracting glob and the
+    name exclusion TOGETHER with the predicate means the falsifier drives the same code the pin
+    does, and a revert of any of the three reds a row.
+
+    Stated rather than hidden: the enclosing pin's one-line call of THIS function is still not
+    falsifiable — a test cannot falsify its own call statement — which is why the claim there
+    is "the seam is pinned", not "the call site is pinned".
+    """
+    scanned = sorted((root / "tortoise").rglob("*.py"))
+    return _rest_spec_readers(scanned, root)
 
 
 def _rest_spec_readers(paths: list[Path], root: Path) -> list[str]:
@@ -1506,6 +1551,9 @@ def _rest_spec_attribute_reads(source: Path) -> list[int]:
     (`e["rest_spec"]`). A comment or a docstring is not an `ast.Attribute`, so it cannot red
     the pin — which is the whole point (#13537 review F2; the sibling reader's docstring above
     records the identical false BLOCK for the literal `FastAPIRouterAdapter(`).
+
+    ⛔ "Access" means `ast.Load`: a WRITE (`row.rest_spec = spec`, `entry["rest_spec"] = spec`)
+    has the same node shape and is NOT a read, so both arms gate on it (#13585 review P3#3).
 
     Deliberately NOT matched, stated rather than hidden: a field name assembled at runtime
     (`getattr(e, "rest" + "_spec")`), which no static pass can answer.
