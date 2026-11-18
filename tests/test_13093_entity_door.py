@@ -553,10 +553,10 @@ def test_the_coverage_domain_is_the_cache_resolvers_branch_labels():
 
 
 def test_the_two_coverage_facts_are_SEPARATE_and_Event_is_not_a_residual():
-    """"Fixable by parity" and "fixable only by re-addressing" are different facts.
+    """Parity-fixable and re-addressing-fixable are DIFFERENT facts.
 
-    #13322's second review sharpened this on the record and it decides what the
-    "next lane does: a bare id DOES address an Event — `Event.id == eventId` for
+    #13322's second review sharpened this on the record, and it decides what the
+    next lane does: a bare id DOES address an Event — `Event.id == eventId` for
     all current writes, and the record's `node_key` for an Event IS the eventId —
     so `Event`'s only gap is parity (#9721). A Source is the opposite: the cache
     resolves it by `id` and by `url`, while the record's key for it is
@@ -565,13 +565,9 @@ def test_the_two_coverage_facts_are_SEPARATE_and_Event_is_not_a_residual():
     look reachable.
 
     ⛔ THESE ARE *TODAY'S* DECLARATIONS, AND THE DIRECTION THEY MUST MOVE IS THE
-    ONE THAT GROWS THE UNION. `Event` is not a residual because a bare id DOES
-    address it — `Event.id == eventId` for all current writes, and the record's
-    `node_key` for an Event IS the eventId — so Event's only gap is parity
-    (#9721). A Source is the opposite: the cache resolves it by `id` and by
-    `url`, while the record's key for it is `node_key = url`, so a bare Source
-    *id* names a node the record read would miss. Folding the two into one
-    condition is what let the previous predicate look reachable.
+    ONE THAT GROWS THE UNION — never a jurisdiction shrunk to whatever the union
+    happens to serve, which would green this row while making the door abstain
+    for a label class for ever.
 
     ⛔ AND THE PIN IS ON THE MECHANISM, NOT ON `KEY_PROPERTY == "id"`: that
     spelling is the conflation this PR removed, and it would red at the state
@@ -622,6 +618,20 @@ def test_the_two_coverage_facts_are_SEPARATE_and_Event_is_not_a_residual():
             "must still be False — otherwise the door claims an absence for a "
             "Source id it never asked about")
 
+    # ⛔ THE OTHER HALF, WHICH NOTHING ELSE PINS (#13353 review cycle 3, finding
+    # 1, MEASURED: deleting the completeness conjunct left the suite 29/29 green).
+    # Without this row the predicate silently degrades to "no address residual",
+    # so the moment #13351 retires that entry WITHOUT #9721 parity landing it
+    # flips True — and answers `{}`, a claimed absence, for an `Event` the record
+    # cannot reproduce. That is #13093 re-opened behind a green suite: a fail-open
+    # on exactly the verdict this PR exists to make conservative.
+    with mock.patch.object(rs, "ENTITY_UNION_ADDRESS_RESIDUALS", {}):
+        assert set(rs.ENTITY_UNION_LABELS) < set(rs.ENTITY_UNION_JURISDICTION), (
+            "this row is only discriminating while the union is INCOMPLETE — if "
+            "#9721 has landed, MOVE the pin rather than delete it")
+        assert rs.entity_coverage_complete() is False, (
+            "with no address residual but an INCOMPLETE union, coverage must "
+            "still be False — an unserved label can hold the node a bare id names")
 
 def test_read_entity_addresses_each_label_by_its_OWN_contract_key():
     """The reader and the declaration agree STRUCTURALLY, not by accident.
