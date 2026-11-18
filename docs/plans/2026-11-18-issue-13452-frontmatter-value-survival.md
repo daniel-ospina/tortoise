@@ -409,8 +409,9 @@ NEW branch — and nothing else in the file reds when it goes: measured with the
 `f426ea53fa` (no pin in the file yet) the file stayed at `2 failed, 10 passed` — the same two
 pre-existing absence reds, nothing else noticing — while this shape regressed. Pinned now by
 `test_a_double_quoted_backslash_escape_before_a_comment_is_measured`; with the pin in place the same
-mutant measures `3 failed, 10 passed` at this head (the 2 pre-existing reds **plus** this test, which
-reds alone under `-k double_quoted_backslash`: `1 failed, 12 deselected`). Same finding shape as the parity
+mutant reds this test alone (`-k double_quoted_backslash`: `1 failed, 12 deselected`), so the file's
+total under that mutant is the 2 pre-existing absence reds **plus** this one — no file-wide count is
+printed here, because it moves every time another test is appended. Same finding shape as the parity
 half above, and the same reason it is worth its own test: `_closing_quote` added branches, and a
 branch nothing asserts is a branch a later simplification is free to drop.
 

@@ -1044,12 +1044,15 @@ def test_a_double_quoted_backslash_escape_before_a_comment_is_measured(
 ) -> None:
     """The ``"`` BACKSLASH skip, pinned separately from the ``''`` parity skip.
 
-    ``"a\"" # c`` is legal YAML — ``parse_frontmatter`` returns ``a"`` — and the
-    escaped ``"`` sits immediately before the `` #``, so a close found without
-    skipping backslash escapes lands ON that escaped quote, the split takes
-    everything after it as the comment, and the value no longer ends with a
-    quote: the arm reports ``('malformed', None)``, the *remove the inner quote*
-    class of false remedy this whole change removes.
+    ``"a\"" # c`` is legal YAML — ``parse_frontmatter`` returns ``a"`` — and the close
+    sits immediately before the `` #`` (the escaped quote is at index 3, the true
+    close at 4). Without the skip the close is found ON that escaped quote (index
+    3), so NO `` #`` satisfies the split predicate: ``_split_comment`` returns the
+    raw text unstripped, that text no longer ends in a quote, and the arm reports
+    ``('malformed', None)`` — the *remove the inner quote* class of false remedy
+    this whole change removes. The mechanism is stated exactly because it is NOT
+    a mis-landed split: no split fires at all (measured; the same distinction the
+    sibling parity test records).
 
     This is the one arm the PRE-fix helper already got right (it never scanned
     for a close at all — it cut at the `` #`` whose left side ended in the quote
@@ -1057,10 +1060,11 @@ def test_a_double_quoted_backslash_escape_before_a_comment_is_measured(
     a NEW branch, and nothing else in this file reds when it goes.
 
     Non-vacuity: deleting the two-line backslash skip in ``_closing_quote``
-    leaves the rest of this file GREEN (measured: ``2 failed, 10 passed``, the
-    same two pre-existing absence reds) while ``_quoted_style`` returns
+    leaves the rest of this file GREEN while ``_quoted_style`` returns
     ``('malformed', None)`` here, so the ``style`` assertion below is the only
-    thing that notices.
+    thing that notices. (No file-wide pass count is quoted: §9 carries it, and a
+    count printed here goes stale the moment another test is appended to this
+    file — which has already happened twice.)
     """
     from tortoise.file_indexer import parse_frontmatter
 
