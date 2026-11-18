@@ -13,9 +13,9 @@
           "gate_reads_per_request": 0,
           "note": "control \u2014 names no pack",
           "request_ms": {
-            "max_ms": 14.305,
-            "median_ms": 11.625,
-            "min_ms": 10.492,
+            "max_ms": 14.374,
+            "median_ms": 12.922,
+            "min_ms": 11.193,
             "n": 7
           },
           "shape": "point_core"
@@ -26,74 +26,74 @@
           "gate_reads_per_request": 0,
           "note": "control \u2014 names no pack",
           "request_ms": {
-            "max_ms": 11.906,
-            "median_ms": 11.07,
-            "min_ms": 9.72,
+            "max_ms": 13.838,
+            "median_ms": 10.944,
+            "min_ms": 10.244,
             "n": 7
           },
           "shape": "point_bare"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 18.367,
+          "gate_ms_per_request": 16.271,
           "gate_reads_per_request": 1,
           "note": "names a pack",
           "request_ms": {
-            "max_ms": 48.846,
-            "median_ms": 37.421,
-            "min_ms": 30.664,
+            "max_ms": 31.911,
+            "median_ms": 30.519,
+            "min_ms": 27.858,
             "n": 7
           },
           "shape": "point_ns"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 18.367,
+          "gate_ms_per_request": 16.271,
           "gate_reads_per_request": 1,
           "note": "names a pack through the props passthrough",
           "request_ms": {
-            "max_ms": 43.182,
-            "median_ms": 37.169,
-            "min_ms": 36.075,
+            "max_ms": 39.309,
+            "median_ms": 34.648,
+            "min_ms": 31.821,
             "n": 7
           },
           "shape": "point_ns_in_props"
         },
         {
           "expected_gate_reads": 1,
-          "gate_ms_per_request": 18.367,
+          "gate_ms_per_request": 16.271,
           "gate_reads_per_request": 1,
           "note": "names a pack",
           "request_ms": {
-            "max_ms": 47.711,
-            "median_ms": 43.816,
-            "min_ms": 39.647,
+            "max_ms": 52.916,
+            "median_ms": 43.116,
+            "min_ms": 38.572,
             "n": 7
           },
           "shape": "object_ns"
         },
         {
           "expected_gate_reads": 2,
-          "gate_ms_per_request": 36.734,
+          "gate_ms_per_request": 32.542,
           "gate_reads_per_request": 2,
           "note": "SAME pack named twice (positional + props)",
           "request_ms": {
-            "max_ms": 69.08,
-            "median_ms": 60.244,
-            "min_ms": 58.824,
+            "max_ms": 68.862,
+            "median_ms": 61.325,
+            "min_ms": 53.666,
             "n": 7
           },
           "shape": "point_ns_twice"
         },
         {
           "expected_gate_reads": 2,
-          "gate_ms_per_request": 36.734,
+          "gate_ms_per_request": 32.542,
           "gate_reads_per_request": 2,
           "note": "SAME pack named twice (camel + snake)",
           "request_ms": {
-            "max_ms": 69.656,
-            "median_ms": 64.043,
-            "min_ms": 60.593,
+            "max_ms": 72.203,
+            "median_ms": 63.745,
+            "min_ms": 61.201,
             "n": 7
           },
           "shape": "object_ns_twice"
@@ -103,17 +103,17 @@
       "hosted_commit_composition": {
         "measured_as": "composition of measured parts \u2014 not an HTTP sample",
         "per_entity_site": "tortoise/sdk.py::_create_entity \u2192 _refuse_unapproved_kinds_in_props",
-        "per_entity_writes": 2,
+        "per_entity_writes": 1,
         "pre_check_reads": 1,
         "pre_check_site": "tortoise/hosted_api.py:23946 (deliberately NOT rescanned at :23976)",
         "rule": "1 pre-check read per request + 1 read per namespaced entity written",
-        "single_entity_commit_total_reads": 3
+        "single_entity_commit_total_reads": 2
       },
       "points": 5000,
       "single_gate_read": {
-        "max_ms": 19.616,
-        "median_ms": 18.367,
-        "min_ms": 16.516,
+        "max_ms": 17.391,
+        "median_ms": 16.271,
+        "min_ms": 15.604,
         "n": 7
       }
     },
@@ -121,36 +121,36 @@
       "arm": "nudges",
       "by_content_length": [
         {
-          "content_bytes_returned": 21200,
+          "content_bytes_returned": 23936,
           "content_chars_per_row": 60,
           "nudge_call": {
-            "max_ms": 10.688,
-            "median_ms": 9.427,
-            "min_ms": 7.899,
+            "max_ms": 11.759,
+            "median_ms": 9.099,
+            "min_ms": 8.805,
             "n": 7
           },
           "points": 1000,
           "rows_returned": 400
         },
         {
-          "content_bytes_returned": 117200,
+          "content_bytes_returned": 119925,
           "content_chars_per_row": 300,
           "nudge_call": {
-            "max_ms": 9.813,
-            "median_ms": 8.731,
-            "min_ms": 8.406,
+            "max_ms": 13.148,
+            "median_ms": 12.838,
+            "min_ms": 12.555,
             "n": 7
           },
           "points": 1000,
           "rows_returned": 400
         },
         {
-          "content_bytes_returned": 477200,
+          "content_bytes_returned": 479990,
           "content_chars_per_row": 1200,
           "nudge_call": {
-            "max_ms": 9.781,
-            "median_ms": 9.606,
-            "min_ms": 9.42,
+            "max_ms": 23.786,
+            "median_ms": 23.354,
+            "min_ms": 23.048,
             "n": 7
           },
           "points": 1000,
@@ -160,31 +160,32 @@
       "by_size": [
         {
           "nudge_call": {
-            "max_ms": 13.446,
-            "median_ms": 12.185,
-            "min_ms": 11.881,
+            "max_ms": 24.315,
+            "median_ms": 12.773,
+            "min_ms": 12.325,
             "n": 7
           },
           "nudges_produced": 3,
           "object_create_ms": {
-            "delta_ms": 11.22,
+            "delta_ms": 12.06,
             "with_nudge": {
-              "max_ms": 17.108,
-              "median_ms": 16.491,
-              "min_ms": 15.622,
+              "max_ms": 19.749,
+              "median_ms": 18.411,
+              "min_ms": 17.348,
               "n": 7
             },
             "without_nudge": {
-              "max_ms": 5.728,
-              "median_ms": 5.271,
-              "min_ms": 4.867,
+              "max_ms": 7.184,
+              "median_ms": 6.351,
+              "min_ms": 5.587,
               "n": 7
             }
           },
           "points": 1000,
           "scan": {
-            "content_bytes_per_row": 302.4,
-            "content_bytes_returned": 120980,
+            "content_bytes_per_row": 299.8,
+            "content_bytes_returned": 119925,
+            "content_chars_returned": 119925,
             "name_bytes_returned": 5490,
             "row_cap": 400,
             "rows_returned": 400
@@ -192,31 +193,32 @@
         },
         {
           "nudge_call": {
-            "max_ms": 16.88,
-            "median_ms": 13.068,
-            "min_ms": 12.436,
+            "max_ms": 12.39,
+            "median_ms": 12.281,
+            "min_ms": 12.077,
             "n": 7
           },
           "nudges_produced": 3,
           "object_create_ms": {
-            "delta_ms": 11.087,
+            "delta_ms": 11.115,
             "with_nudge": {
-              "max_ms": 18.03,
-              "median_ms": 17.19,
-              "min_ms": 15.737,
+              "max_ms": 23.539,
+              "median_ms": 16.814,
+              "min_ms": 16.224,
               "n": 7
             },
             "without_nudge": {
-              "max_ms": 6.565,
-              "median_ms": 6.103,
-              "min_ms": 5.579,
+              "max_ms": 7.223,
+              "median_ms": 5.699,
+              "min_ms": 5.409,
               "n": 7
             }
           },
           "points": 5000,
           "scan": {
-            "content_bytes_per_row": 302.4,
-            "content_bytes_returned": 120980,
+            "content_bytes_per_row": 299.8,
+            "content_bytes_returned": 119925,
+            "content_chars_returned": 119925,
             "name_bytes_returned": 5490,
             "row_cap": 400,
             "rows_returned": 400
@@ -231,34 +233,34 @@
         {
           "points": 1000,
           "probe_ms": {
-            "max_ms": 5.95,
-            "median_ms": 5.167,
-            "min_ms": 4.926,
+            "max_ms": 9.193,
+            "median_ms": 5.437,
+            "min_ms": 5.079,
             "n": 7
           },
-          "us_per_point": 5.167,
+          "us_per_point": 5.437,
           "verdict": true
         },
         {
           "points": 5000,
           "probe_ms": {
-            "max_ms": 5.923,
-            "median_ms": 5.594,
-            "min_ms": 5.489,
+            "max_ms": 10.748,
+            "median_ms": 8.515,
+            "min_ms": 7.075,
             "n": 7
           },
-          "us_per_point": 1.119,
+          "us_per_point": 1.703,
           "verdict": true
         },
         {
           "points": 20000,
           "probe_ms": {
-            "max_ms": 11.903,
-            "median_ms": 9.691,
-            "min_ms": 8.896,
+            "max_ms": 11.555,
+            "median_ms": 10.004,
+            "min_ms": 8.979,
             "n": 7
           },
-          "us_per_point": 0.485,
+          "us_per_point": 0.5,
           "verdict": true
         }
       ],
@@ -268,18 +270,30 @@
   "box": {
     "db_uri_env": "docker://:@127.0.0.1:16402/tortoise_test_matrix",
     "engine": "graph ver 42006 (4.20.6)",
+    "graphs_measured": [
+      "test_measure13436_version_0_2605048",
+      "test_measure13436_nudge_1000_2605048",
+      "test_measure13436_nudge_5000_2605048",
+      "test_measure13436_nudgec60_1000_2605048",
+      "test_measure13436_nudgec300_1000_2605048",
+      "test_measure13436_nudgec1200_1000_2605048",
+      "test_measure13436_kindgate_5000_2605048",
+      "test_measure13436_schema_1000_2605048",
+      "test_measure13436_schema_5000_2605048",
+      "test_measure13436_schema_20000_2605048"
+    ],
     "loadavg_at_end": [
-      5.67,
-      5.12,
-      5.86
+      7.6,
+      6.45,
+      6.15
     ],
     "loadavg_at_start": [
-      5.85,
-      5.11,
-      5.88
+      7.3,
+      6.32,
+      6.11
     ],
     "python": "3.12.3"
   },
   "issue": 13436,
-  "measured_at": "2026-11-18T01:59:57Z"
+  "measured_at": "2026-11-18T02:14:49Z"
 }

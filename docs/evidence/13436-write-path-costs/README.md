@@ -2,128 +2,149 @@
 
 **Nothing here is optimised, and nothing here proposes an optimisation.** `#13436` names the failure
 that would be: *"An optimisation off an unmeasured cost is the regression path."* Every one of these
-three costs also has a recorded decision that forbids its obvious "fix", cited beside the number.
+three costs is bound by a recorded decision that forbids its obvious "fix", cited beside the number.
 
 | | |
 |---|---|
-| **Artifact** | [`write-path-costs.json`](write-path-costs.json) — every arm, every sample statistic, the box |
+| **Artifacts** | [`write-path-costs.json`](write-path-costs.json) (run 1, load **7.3**) · [`write-path-costs-run2.json`](write-path-costs-run2.json) (run 2, load **7.3**) — a second run because one sample on a shared box is a number, not a measurement. Each carries its own box, load, and the graphs it measured. |
 | **Instrument** | [`tools/measure_13436_write_costs.py`](../../../tools/measure_13436_write_costs.py) |
-| **Box** | docker lane `falkordb/falkordb-server:v4.20.6`, `graph` ver **42006 (4.20.6)**, load avg **5.9** at start / **5.9** at end |
+| **Box** | docker lane `falkordb/falkordb-server:v4.20.6`, `graph` ver **42006 (4.20.6)** |
 | **Taken** | 2026-11-18, seven samples per measurement after warm-ups, medians reported |
 
-Reproduce:
+Reproduce — **one process, because the lane's `export` lines do not survive into a second `uv run`**:
 
 ```bash
-uv run python tools/test_lane.py run -- true          # a private lane; it prints the export lines
-uv run python tools/measure_13436_write_costs.py --reps 7 --json /tmp/costs.json
+eval "$(uv run python tools/test_lane.py uri)"        # starts the lane; prints the four exports
+uv run python tools/measure_13436_write_costs.py --reps 7 \
+    --json docs/evidence/13436-write-path-costs/write-path-costs.json
 ```
 
-The tool refuses rather than reports when an arm cannot be measured as posed: a seeded population
-that did not land (read back, never assumed), a control that paid a gate read, a namespaced write
-that paid none, and a `_schema_is_current()` that returned `False` (which would make the sample the
-full sweep's cost, not the probe's).
+(`tools/test_lane.py run -- …` is the *pytest* runner — `argv = [python, "-m", "pytest", *extra]`, so
+`run -- true` is a collection error, not a no-op. The citation is the same one `#13436` uses for the
+suite lane; here the tool is not a pytest target.)
 
-⚠️ **TWO RUNS ARE RECORDED, AND THEY DO NOT AGREE TO THE DECIMAL.** The committed artifact is the
-run at **load ≈5.9**; an earlier run at **load ≈3.5** is quoted beside it wherever the two differ,
-because a single sample on a shared box would be a number, not a measurement. Where a figure moves
-between them, the range is stated and no constant is asserted.
+The tool REFUSES rather than reports when an arm cannot be measured as posed: a seeded population that
+did not land (read back, never assumed), a control that paid a gate read, a namespaced write that paid
+none, a shape paying a varying number of reads, and a `_schema_is_current()` that returned anything but
+`True` (which would make the sample the full sweep's cost, not the probe's).
+
+⚠️ **Where the two runs differ, both numbers are given.** The box carried load 6–7.3 during both runs;
+a single figure in this file is a median from one run, stated with the run it came from.
 
 ## 1 · `_nudge_candidates` — a 400-row `:Point` scan returning FULL `content`
 
 `TortoiseSDK._nudge_candidates` (`tortoise/sdk.py`) runs
 `MATCH (n:Point) WHERE NOT n.id IN $ex RETURN n.id, n.content, n.name, n.label, n.is_operator LIMIT 400`
-and produces only the ADVISORY `nudges` field of the write response. It is called from
-`create_entity`'s return, from `create_edge`'s return, and once per Point in `ingest`.
+and produces only the ADVISORY `nudges` field of the write response. Call sites: `create_entity`'s
+return, `create_edge`'s return, and **once per Point** in `ingest`.
 
-| Points | rows the scan returns | `content` moved | nudge call (median) | object create WITHOUT nudge | WITH nudge | **delta** |
-|---|---|---|---|---|---|---|
-| 1,000 | 400 (the cap) | 118.1 KiB | **12.19 ms** | 5.0–6.0 ms | 16.2–17.3 ms | **+11.22 ms** |
-| 5,000 | 400 (the cap) | 118.1 KiB | **13.07 ms** | 5.2–5.7 ms | 15.6–16.8 ms | **+11.09 ms** |
+| Points | rows returned | `content` moved | nudge call (run 1 / run 2) | create WITHOUT / WITH nudge | **delta** |
+|---|---|---|---|---|---|
+| 1,000 | 400 (the cap) | 117.1 KiB | **12.77 / 12.68 ms** | 5.36 / 17.42 ⟶ **+12.06 ms** (run 1)<br>6.02 / 14.81 ⟶ **+8.79 ms** (run 2) | **+8.8 – +12.1 ms** |
+| 5,000 | 400 (the cap) | 117.1 KiB | **12.28 / 12.85 ms** | 5.91 / 17.03 ⟶ **+11.12 ms** (run 1)<br>6.05 / 17.06 ⟶ **+11.01 ms** (run 2) | **+11.0 – +11.1 ms** |
 
-The door delta is self-controlled **on one graph**: same seeds, same door, the only difference is an
+The door delta is self-controlled **on ONE graph**: same seeds, same door, the only difference is an
 instance-attribute patch (`sdk._nudge_candidates = lambda *a, **k: []`). ⇒ **an advisory field is
-~65–70 % of an object create's latency at these sizes**, and the cost is FLAT in Point count because
-the 400-row cap is.
+~55–70 % of the `create_entity` latency measured here** (the share moves with how fast the rest of the
+door happens to run on a loaded box; the absolute delta, +8.8 to +12.1 ms, is the stable figure).
 
-The payload axis — same Point count, only the seeded content length differs (**this run**):
+**The payload axis — and the first cut of this instrument got it wrong.** Content length against the
+same 1,000-Point population, seeded from a real word list so bytes AND tokenisation scale together:
 
-| content chars/row | `content` moved | nudge call (median) |
-|---|---|---|
-| 60 | 20.7 KiB | 9.43 ms |
-| 300 | 114.5 KiB | 8.73 ms |
-| 1,200 | 466.0 KiB | 9.61 ms |
+| content chars/row | `content` moved | nudge call run 1 | nudge call run 2 |
+|---|---|---|---|
+| 60 | 23.4 KiB | 9.10 ms | 9.37 ms |
+| 300 | 117.1 KiB | 12.84 ms | 13.34 ms |
+| 1,200 | 468.7 KiB | **23.35 ms** | **24.24 ms** |
 
-⛔ **The payload axis is FLAT WITHIN NOISE — 22× the content, no movement beyond the spread.** The
-earlier run at lower load showed 8.01 / 9.35 / 9.95 ms, i.e. at most ~1.9 ms across the same 22×,
-which is the same conclusion with the noise the other way. ⇒ **what is paid is the label scan plus
-row materialisation (the shape `#4997`'s unindexed-label class names), NOT the transferred bytes.**
-This matters for the tempting "stop returning `content`" change: it would save at most ~1–2 ms of a
-~9–12 ms call, so the honest entry point is the scan, not the column list — and ⛔ **that decision is
-not taken here.**
+⇒ **20× the content length (22× the bytes moved) takes the call from ~9 ms to ~24 ms — the content IS
+a term, roughly linear above 300 chars.** ⛔ **A first cut seeded `"x" * n` and concluded the opposite
+(~flat).** That seed varies BYTES while holding tokenisation constant (one repeated character is one
+distinct token), and `_nudge_candidates` scores by TOKEN OVERLAP — so the shape was blind to the
+scoring leg and its "flat within noise" reading was an artefact. Both the seed and the conclusion were
+replaced; the retraction is recorded here because *"the payload does not matter"* is exactly the kind
+of sentence that would have been quoted later.
 
-⚠️ **Not measured:** the production graph (`#13232`'s "Unknown 2" — *is it ms or seconds there* — is
-answered here only for 1k/5k nodes of OUR content shape), and any cold-start effect (`#13229`'s
-cost, measured there).
+**Internal consistency check:** the point-population arm at 1,000 Points uses the same 300-char seed, and
+it reads 12.77 / 12.68 ms against the content axis's 12.84 / 13.34 ms at 300 chars — the two arms agree
+within ~5 %, which is what makes the axis comparison meaningful.
+
+**Who owns this cost — checked, because the first cut of this file said "nobody" and that was wrong.**
+**`#11796` (OPEN)** owns the `ingest` half: *"the write-nudge block runs a placeholder keyed on the
+literal word `related` — and scans 400 Points **per written point**"*. It does **not** cover the other
+two doors, where one scan per write is paid by `create_entity` and `create_edge` on every call — **that
+half is unowned**, and that gap is what P7 surfaces. ⚠️ Not measured here: the ingest door's N-scans
+(`#11796` measured them; this arm calls `_nudge_candidates` directly and through `create_entity`), and
+any cold-process effect (`#13229`'s cost, measured there).
 
 ## 2 · the `#5475` approved-kind gate — the whole-graph approval read, COUNTED
 
 `pack_state.graph_installed_namespaces` is wrapped with a counter (the gate resolves it through an
 in-function import, so the module attribute is the seam) and one request per shape is timed. **5,000
-Points, approval set `{dev}`**:
+Points, approval set `{dev}`**; run 1 / run 2:
 
-| shape | gate reads per request | request (median) | gate's share |
+| shape | gate reads per request | request (median) | gate's share of the request |
 |---|---|---|---|
-| `create_point` `core:Project` (control) | **0** | 11.63 ms | 0 |
-| `create_point` bare `statement` (control) | **0** | 11.07 ms | 0 |
-| `create_point` `dev:epic` | **1** | 37.42 ms | 18.37 ms |
-| `create_point(..., pointKind="dev:epic")` (props passthrough) | **1** | 37.17 ms | 18.37 ms |
-| `create_entity(object, objectKind="dev:epic")` | **1** | 43.82 ms | 18.37 ms |
-| ⛔ `create_point("dev:epic", …, pointKind="dev:epic")` — **SAME pack, TWO spellings** | **2** | 60.24 ms | 36.73 ms |
-| ⛔ `create_entity(object, objectKind=…, object_kind=…)` — **SAME pack, TWO spellings** | **2** | 64.04 ms | 36.73 ms |
+| `create_point` `core:Project` (control) | **0** | 12.92 / 14.18 ms | 0 |
+| `create_point` bare `statement` (control) | **0** | 10.94 / 16.76 ms | 0 |
+| `create_point` `dev:epic` | **1** | 30.52 / 46.41 ms | 16.27 / 19.73 ms |
+| `create_point(..., pointKind="dev:epic")` (props passthrough) | **1** | 34.65 / 36.25 ms | 16.27 / 19.73 ms |
+| `create_entity(object, objectKind="dev:epic")` | **1** | 43.12 / 49.95 ms | 16.27 / 19.73 ms |
+| ⛔ `create_point("dev:epic", …, pointKind="dev:epic")` — **SAME kind, TWO spellings** | **2** | 61.33 / 67.38 ms | 32.54 / 39.45 ms |
+| ⛔ `create_entity(object, objectKind=…, object_kind=…)` — **SAME kind, TWO spellings** | **2** | 63.75 / 62.26 ms | 32.54 / 39.45 ms |
 
-⇒ **The count is a property of the SPELLING, not of the namespace.** A namespaced kind named ONCE
-pays **exactly one** whole-graph read — the synthesis's *"paid twice per request for a namespaced
-kind"* is **FALSIFIED for that shape at this head**, across three doors. The two-read request exists,
-but its trigger is a write that names the SAME pack kind through **two spellings** (the point door's
-positional `kind` *plus* the props passthrough, or the camel `objectKind` *plus* the fold's snake
-`object_kind` the gate also screens) — and there it is paid **per spelling**, 2 reads / 36.7 ms in one
-request, i.e. **~85 % of the write** is the gate.
+⇒ **A namespaced kind named ONCE pays exactly ONE whole-graph read** — the synthesis's *"paid twice per
+request for a namespaced kind"* is **FALSIFIED for that shape** at this head, across three doors. A
+single read costs **16.3–19.7 ms at 5,000 Points** against a **10.9–16.8 ms** bare/`core:` write, so
+naming a pack roughly doubles a point write and is **~1.6×** an object write.
 
-⇒ **the hosted commit leg's own two reads are a DIFFERENT composition** (`hosted_commit_composition`
-in the artifact, stated as arithmetic on measured parts rather than a request-level sample): one
-deliberate pre-check read per request (`hosted_api.py:23946`, which does **not** rescan at `:23976`,
-by its own comment) **plus one read per namespaced entity written** (`_create_entity` →
-`_refuse_unapproved_kinds_in_props`) = **2 for a single-entity commit**.
+⇒ **The two-read request exists, and its trigger is the NUMBER OF KIND-VALUED PROPERTIES IN THE WRITE,
+not the namespace.** `_refuse_unapproved_kinds_in_props` pays one read per kind-valued property it finds
+(the `_KIND_PROP_KEYS` loop, the `_kind_spellings` alias loop, and **each `uses[]` item**), so it is paid
+twice when the same kind arrives through two spellings (positional + props, camel + snake) **and equally**
+when two *different* pack kinds arrive in one write (`create_event(eventKind="dev:a", uses=[{"kind":
+"dev:b"}])`). Measured share: **≈53–59 % of the request**, or **≈65–78 % of the part above a bare write**;
+the earlier "~85 %" in this file was a cross-row mix (doubled gate ÷ single-spelling request) and is
+retracted.
+
+⇒ **the hosted commit leg's own two reads are a DIFFERENT composition** (`hosted_commit_composition` in
+each artifact, stated as arithmetic on measured parts and **not** an HTTP sample): one deliberate
+pre-check read per request (`hosted_api.py:23946`, which does **not** rescan at `:23976`, by its own
+comment) **plus one read per namespaced entity written** (`_create_entity` →
+`_refuse_unapproved_kinds_in_props`) = **2 for a single-entity commit** — derived from the
+single-spelling shape by name, after a first cut mistakenly derived it from the two-spelling row and
+published 3.
 
 ⛔ **The owner of both shapes is `#8977`**, whose acceptance is *"a capture of M pack-kinded entities
-performs O(1) approval-set reads"* and whose recorded warning is the one that matters here: **the fix
-may not weaken the gate** (an unvalidated `ns:kind` made a whole pack writable).
+performs O(1) approval-set reads"* and whose recorded warning is the one that matters here: **the fix may
+not weaken the gate** (an unvalidated `ns:kind` made a whole pack writable).
 
 ## 3 · `projection._schema_is_current()` — the fail-closed pre-check
 
-| Points | verdict | probe (median) | µs/point |
-|---|---|---|---|
-| 1,000 | `True` | **5.17 ms** | 5.17 |
-| 5,000 | `True` | **5.59 ms** | 1.12 |
-| 20,000 | `True` | **9.69 ms** | 0.48 |
+| Points | verdict | probe run 1 | probe run 2 | µs/point (run 1 / run 2) |
+|---|---|---|---|---|
+| 1,000 | `True` | 5.44 ms | 5.33 ms | 5.44 / 5.33 |
+| 5,000 | `True` | 8.52 ms | 6.55 ms | 1.70 / 1.31 |
+| 20,000 | `True` | 10.00 ms | 10.01 ms | 0.50 / 0.50 |
 
-⚠️ **Do not read that table as a slope; fit it, and check the second run.** The marginal cost here is
-**≈0.24–0.27 µs/point** (1k→20k: 0.238; 5k→20k: 0.273) with a **≈4.7 ms fixed floor**; the earlier
-run at lower load read **≈0.43 µs/point** with a **≈4.5 ms floor**. ⇒ **the per-point term is
-load-sensitive, and the docstring's own "≈0.2 µs/point" (4.20.4, one-disjunct shape — a table that
-function already retracts as pre-`#11682`) sits at the fast end of a range this box reproduces on the
-SAME engine version; what differs from the docstring's 4.20.6 sweep (1.25 / 2.74 / 7.91 ms at
-1k/5k/20k) is the FIXED floor (~4.5–5.2 ms here), not the slope.** ⛔ **So this artifact does not
-correct that constant** — an earlier draft of this README claimed a 2× discrepancy from one sample,
-and the second run falsified the claim; both runs are recorded rather than the flattering one.
+⇒ **marginal ≈0.24 µs/point in BOTH runs** (1k→20k slopes: 0.240 and 0.247 µs/pt) with a **≈5.2 ms fixed
+floor on this box**. ⚠️ **The floor is the term that differs from the function's own docstring**
+(1.25 ms @1k at 4.20.6, same engine version): the per-point slope reproduces — the docstring's
+"≈0.2 µs/point" sits just under this box's 0.24 — so **this artifact does not correct that constant**;
+an earlier draft did, from ONE sample, and the second run falsified it. The 5,000 reading is the noisy
+one (8.52 vs 6.55); the 1,000 and 20,000 readings agree across runs to ~2 %.
 
-⛔ **Do not "optimise" this by dropping the `IS NOT NULL` conjuncts or by trusting the
-`point_fts_v2` marker** — the docstring at the function measures both, and `#5444` is the sanctioned
-route (a write-maintained signal). This artifact changes neither.
+**Who owns it — checked, and the answer is "nobody, and the source says otherwise".** `#5444` and
+`#5482`, the two issues the function's docstring names for removing this cost, are **both CLOSED**
+(`#5444` COMPLETED 2026-10-13 — it is what SHIPPED the expensive-but-correct precondition, not what
+removes it). ⇒ **cost 3 is unowned**, and the docstring's attribution is stale (a dated note was added
+at the function; the docstring's own numbers are left alone). ⛔ Dropping the `IS NOT NULL` conjuncts or
+trusting the `point_fts_v2` marker remains refused by that docstring's measurements — a write-maintained
+signal is the sanctioned route and it has no open issue.
 
 ## What these numbers do NOT decide
 
 - no threshold, no budget, no "fast/slow" verdict;
-- no owner: `#8977` owns cost 2, `#5444` owns cost 3, and cost 1 has **no issue at all** — that
-  absence is the finding `#13436` P7 was written to produce, and it is left as an absence rather than
-  converted into a fix by this lane.
+- **no ownership invented**: cost 1's `ingest` half is `#11796`'s and its `create_entity`/`create_edge`
+  half is nobody's; cost 2 is `#8977`'s; cost 3 is nobody's (`#5444`/`#5482` are closed). Naming an
+  absence is the finding; converting it into a fix here is what `#13436` forbids.
