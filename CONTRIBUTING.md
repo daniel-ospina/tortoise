@@ -350,6 +350,53 @@ finding issue is opened (and on demand via `workflow_dispatch`), annotating an u
 with the `provenance-stale` label instead of letting it be acted on silently. It exempts
 `beta-feedback` reports — an external report is about a released version, not a commit.
 
+## A test asserts behaviour; a document states the target
+
+> ⛔ **THE RULE.** A test's subject is what the code DOES — an output, a refusal, a durable
+> state — never the text of a document. A document may state a target the code has not
+> reached yet; that is the document doing its job, not a missing pin.
+>
+> **WHY IT EXISTS.** A test that asserts *the document matches the code as it is today* is
+> circular. The document may not state a target the code has not reached, and the code is
+> never judged against the design, so neither side can move first and the pair freezes in
+> whatever state it happened to be in. The result is an inversion: **improving the code
+> towards the design reddens the suite.** A mechanism that has to be defended against the
+> product is not a guard rail.
+>
+> **THE LOOP, IN ORDER.** canonical document → behaviour test → code change. Never
+> document → pin the current code → freeze both.
+>
+> **WHAT TO DO.** Before adding a test that reads a file under `docs/`, ask which of the
+> two classes it is:
+>
+> - **invariant-protecting** — holds regardless of implementation: a cited symbol still
+>   exists (`tests/_cite_resolution.py`'s real job), a document's frontmatter contract
+>   validates, a design's own table stays internally consistent. **Keep it**, and say in
+>   the test's own docstring which invariant it protects and why it survives a code change,
+>   so the next reader does not have to re-litigate the decision.
+> - **state-locking** — asserts that the document matches today's code or today's plan
+>   text. **Convert it.** Assert the behaviour the document describes: build the state,
+>   call the code, and check the output. If the behaviour is already asserted elsewhere,
+>   delete the pin and leave a comment in that test naming the document it now carries —
+>   never delete the pin when nothing asserts the behaviour, because an unasserted
+>   behaviour is a regression, not a cleanup.
+>
+> **A RED IS A TO-DO, NOT AN ARGUMENT.** When a behaviour test cannot pass without a code
+> change, file the code change with the failing test as its evidence. Do not soften the
+> assertion to keep the old pin green, and do not edit the document to match the current
+> behaviour — that reproduces the circularity in the opposite direction.
+>
+> **MUTATION EVIDENCE.** A behaviour test is worth its run only if some reachable change to
+> the code makes it fail. State that change in the test (the repo's `(1) what value makes
+> this test fail? / (2) does the test reach it?` doctrine), and for a conversion say which
+> named test now carries the behaviour — the design decisions and this file's own citations
+> are the record.
+
+The MCP-surface rule above and this one are the same shape: a rule about *what the code
+is allowed to claim*, enforced by a mechanism that cannot be talked around by editing the
+prose next to it. See issue #13439 for the census that retired the first batch of
+doc↔code pins.
+
 ## Contribution license note
 
 This project follows the pattern used by MariaDB (the BSL originators) for
