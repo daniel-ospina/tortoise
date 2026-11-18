@@ -59,6 +59,7 @@ is scoped to the record fall-through and must not shave the pre-#11642 path.
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import pathlib
 import re
@@ -693,6 +694,54 @@ def _binds_the_read_budget(
     return False
 
 
+#: The budgets a fused-read call site may fall back to when the caller gave
+#: none, and WHY that statement is allowed a number other than the read's own.
+#:
+#: `VECTOR_LEG_BUDGET_MS` is the read's: every leg the fused read JOINS runs on
+#: it, because `degradation_chain` waits on its workers' exit, so a leg on
+#: another budget is a leg the cap cannot bound.
+#:
+#: ⛔ A SECOND MEMBER IS ADMITTED ONLY FOR A STATEMENT THAT IS NOT JOINED
+#: (`#13302` review F1). `tortoise/ended.py`'s `ENDED_SCAN_BUDGET_MS` bounds the
+#: family-wide `MATCH … OPTIONAL MATCH … collect() … ORDER BY … LIMIT` that
+#: `tortoise_fts_query`'s ended arm issues, and that arm RETURNS before the
+#: retrieval machinery — so the hazard the read's budget exists to prevent (the
+#: read JOINS a straggler, and the caller pays its latency) cannot reach it:
+#: there is no sibling to straggle against, and the scan is bounded on its own
+#: (`GRAPH.QUERY … TIMEOUT <ms>` terminates the statement). What 500 ms DID do
+#: there is degrade the population the arm exists for to an empty answer
+#: (measured: 50k-ended points returned `[]` + `incomplete` at a 500 ms bound;
+#: 100k ended points cost 1.2 s unbounded). The 10 000 ms is the vendor's own
+#: general-query default (`ConnectionConfig.query_timeout_ms = 10_000`, FalkorDB
+#: GraphRAG), not a guess.
+#:
+#: The register is what ADMITS a fallback, so it cannot be widened by an edit
+#: alone: the scan below resolves every member from the module that owns it.
+DECLARED_LEG_BUDGETS: dict[str, tuple[str, str]] = {
+    "VECTOR_LEG_BUDGET_MS": (
+        "tortoise.search_engine",
+        "the fused read's own budget — every leg it JOINS runs on it"),
+    "ENDED_SCAN_BUDGET_MS": (
+        "tortoise.ended",
+        "the ended-scope scan, which returns BEFORE the retrieval machinery, so "
+        "it is not a leg the fused read joins (#13302 review F1)"),
+}
+
+
+def _names_a_declared_budget(node: ast.expr) -> bool:
+    """Does the expression read one of `DECLARED_LEG_BUDGETS`' names?
+
+    Separate from :func:`_names_the_budget` on purpose: the per-site pins below
+    are about ONE statement — the dense leg's — and must keep naming
+    `VECTOR_LEG_BUDGET_MS` specifically. This predicate is for the repo-wide
+    scan, whose defect class is a LITERAL fallback, not a fallback that names a
+    budget the register declares and justifies.
+    """
+    return any((isinstance(n, ast.Name) and n.id in DECLARED_LEG_BUDGETS)
+               or (isinstance(n, ast.Attribute) and n.attr in DECLARED_LEG_BUDGETS)
+               for n in ast.walk(node))
+
+
 def _names_the_budget(node: ast.expr) -> bool:
     """Does the expression READ `VECTOR_LEG_BUDGET_MS` anywhere?
 
@@ -772,7 +821,22 @@ def test_the_expansion_pass_binds_the_constant_not_a_literal():
 
 
 def test_no_leg_in_the_fused_read_carries_its_own_budget_literal():
-    """REPO-WIDE: every `int(_elevated_timeout_ms or …)` names the constant.
+    """REPO-WIDE: every `int(_elevated_timeout_ms or …)` names a DECLARED budget.
+
+    The defect class is the LITERAL: `int(_elevated_timeout_ms or 500)` is a
+    number with no home, so moving the constant splits the read's budget without
+    one pin noticing. A fallback that names a budget is the opposite of that —
+    it is greppable, and the register above requires a reason for every member
+    (`ENDED_SCAN_BUDGET_MS` is admitted there only because its statement is not
+    one the fused read joins; the per-site pins keep `VECTOR_LEG_BUDGET_MS` as
+    the dense leg's one home).
+    
+    ⛔ NOT A LOOSENING: the mutation this pin exists for still reds it —
+    replacing the ended arm's `ENDED_SCAN_BUDGET_MS` with `10_000` at
+    `sdk.py:45534` reports that site (measured, see the PR's evidence). The
+    register is checked below, so a name that resolves to nothing cannot be used
+    to buy a site off.
+    "
 
     `search_engine.py` states the rule this protects: "the fused read JOINS its
     workers, so a leg on a different budget is a leg the cap cannot bound." The
@@ -801,13 +865,28 @@ def test_no_leg_in_the_fused_read_carries_its_own_budget_literal():
                 and isinstance(inner.values[0], ast.Name)
                 and inner.values[0].id == "_elevated_timeout_ms"):
             continue
-        if not _names_the_budget(inner.values[1]):
+        if not _names_a_declared_budget(inner.values[1]):
             offenders.append(
                 f"sdk.py:{node.lineno} binds {ast.unparse(node)} — the budget's "
-                f"fallback is a literal, so this leg keeps its own number")
+                f"fallback names no budget in DECLARED_LEG_BUDGETS, so this leg "
+                f"keeps its own number")
     assert not offenders, (
         "legs of the fused read carry their own budget literal:\n  "
         + "\n  ".join(offenders))
+
+    # POSITIVE CONTROL — the register is what admits a fallback, so every member
+    # must resolve to a real budget in the module that owns it, and the read's
+    # own budget must still be in it. A typo'd or invented entry buys nothing.
+    assert "VECTOR_LEG_BUDGET_MS" in DECLARED_LEG_BUDGETS, (
+        "the read's own budget was dropped from DECLARED_LEG_BUDGETS — the "
+        "register is not a place to retire it")
+    for name, (module_name, why) in DECLARED_LEG_BUDGETS.items():
+        declared = getattr(importlib.import_module(module_name), name, None)
+        assert isinstance(declared, int) and declared > 0, (
+            f"DECLARED_LEG_BUDGETS admits {name!r} via {module_name}, which does "
+            f"not define it as a positive int ({declared!r}) — a register entry "
+            f"that resolves to nothing admits nothing")
+        assert why.strip(), f"{name} is admitted with no reason recorded"
 
 
 def sdk_module_file() -> str:
