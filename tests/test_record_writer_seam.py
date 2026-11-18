@@ -235,37 +235,32 @@ def _no_ambient_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _derivation_pinned_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The record's DERIVED embeddings are pinned OFF for this file. Why:
+def _no_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No embedder, so the seam emits EXACTLY the plan's columns.
 
-    `record_writer.write` asks `derived_embedding_columns` for the values the
-    RECORD computes and the journal does not carry (#13220) and threads them
-    into the plan as ``derived`` — so the statement set this file compares
-    changes shape with the EMBEDDER'S state: with a cached, warm model the
-    `object` upsert gains an ``embedding`` column and a 384-float bind, while
-    ``replay_plan(records, …)`` — the expectation every test here builds — is
-    called with no ``derived`` and yields the column-less shape. The same file
-    was then GREEN on a cold box and RED on a warm one (5 failures), which is
-    the one thing a contract pin must never be: a verdict about the runner's
-    model cache rather than about the seam.
+    ⛔ TWO lanes met here with the SAME fix and different mechanisms, and the
+    newer one is kept (`#13447`, `origin/main`): the seam enriches a
+    derived-entity row with the record's `embedding` column
+    (`record_writer.derived_embedding_columns`, `#13220`) and `rp.replay_plan` —
+    the ONE declaration this file holds the seam to — does not, because the
+    column is an ENRICHMENT derived from an embedder that may be absent. So
+    "the seam emits exactly the record plan" is only measurable with the
+    derivation OFF, and without a pin the five equality assertions below pass on
+    a lane with no model and FAIL on any lane that has one (measured on the
+    sibling cut of this same file: GREEN cold, RED warm, 5 failures — the one
+    thing a contract pin must never be, a verdict about the runner's cache).
 
-    Pinned at the SEAM the seam itself calls (pytest's own rule — patch the
-    reference the system under test resolves, not the real dependency), so the
-    comparison is exact and deterministic in every lane. The threading itself is
-    pinned by `test_the_derived_columns_are_the_plans_own_binding` below, with a
-    STUBBED derivation — the real encoder's values are
+    `EmbeddingModel.get()` → `None` is the documented "uninstalled embedder" arm
+    (`compute_embeddings` then answers one `None` per text), so nothing private
+    is patched. The threading itself is pinned by
+    `test_the_derived_columns_are_the_plans_own_binding` below, with a STUBBED
+    derivation — the real encoder's values are
     `tests/test_13220_record_label_embeddings.py`'s subject, not this file's.
-
-    ⛔ THIS SUBSUMES `main`'s `_no_embedder` (`#13447`), which pinned the same
-    hazard one seam lower (`EmbeddingModel.get()` → `None`, so
-    `compute_embeddings` answers one `None` per text). Both make the file
-    hermetic; pinning `derived_embedding_columns` is the stronger of the two
-    because it cannot depend on how the real encoder arm handles a `None`, and
-    it is the reference `record_writer.write` actually resolves (`:2205`).
-    Keeping both autouse fixtures would be two pins on one hazard.
     """
-    monkeypatch.setattr(rw, "derived_embedding_columns",
-                        lambda record: rw._DerivedEmbedding())
+    from tortoise import embeddings
+
+    monkeypatch.setattr(embeddings.EmbeddingModel, "get",
+                        classmethod(lambda cls, *a, **k: None))
 
 
 # ════════════════════════════════════════════════════════════════════════════

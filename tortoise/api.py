@@ -11,6 +11,12 @@ from __future__ import annotations
 
 import logging
 
+# #13447/#13456: `derived_embedding` is the one derive-and-encode seam this door
+# now shares with `mining` — main's addition, kept. ⛔ `record_writer` is NOT
+# imported here: this door reaches the record only through
+# `live_write.write`, the chokepoint `test_9078…::test_only_the_shipped_package_
+# can_satisfy_the_wiring_gate` holds it to, so main's second name on this import
+# would be an unused import that re-opens the direct seam call that gate refuses.
 from . import derived_embedding
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid

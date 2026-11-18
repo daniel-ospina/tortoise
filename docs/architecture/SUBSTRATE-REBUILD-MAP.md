@@ -287,7 +287,7 @@ count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
 the pre-D10 dump/restore refusal and repair prose — #11682's BM25 corpus-join
 comment (`tortoise/search_engine.py:3451` — the counted `:Document` line; the block opens at
-`:3449`, one added line in an existing file, re-measured at this head because the
+`:3447`, one added line in an existing file, re-measured at this head because the
 `:2107`/`:2109` this sentence used to carry was true only at `d06c001ff9` and had
 drifted since) — #12015's edge-vector prose, which added three lines to that same
 `hosted_backup.py` bound and one to `tortoise/cache_projection.py` (a file the
@@ -304,7 +304,7 @@ names the retired label in order to explain a rule about it — and it is the fi
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
 retirement prose in `tortoise/mcp_server.py:4382`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:36676,36718`, one line each in a file this population already
+`tortoise/sdk.py:36687,36718`, one line each in a file this population already
 reached, whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a

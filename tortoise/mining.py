@@ -23,6 +23,11 @@ from datetime import datetime, timezone
 
 from typing import Any
 
+# #13447/#13456: `derived_embedding` is the one derive-and-encode seam this door
+# shares with `api` — main's addition, kept. ⛔ `record_writer` is NOT imported
+# here: this door reaches the record only through `live_write.write` (the
+# chokepoint), so the direct seam name would be unused and would re-open the
+# write path `test_7951_write_doors.py` classifies.
 from . import derived_embedding
 from .api import EventAPI
 from .extractor import (
