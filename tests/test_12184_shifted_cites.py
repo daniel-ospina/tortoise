@@ -56,6 +56,11 @@ _CENSUS = "docs/evidence/13083-capability-census/README.md"
 _EVIDENCE = "docs/architecture/ENTITY-VERDICT-BANDS.md"
 _SE = "tortoise/search_engine.py"
 _CP = "tortoise/cache_projection.py"
+_AU = "tortoise/audit.py"
+_PI = "tortoise/projection/__init__.py"
+_SDK = "tortoise/sdk.py"
+_MCP = "tortoise/mcp_server.py"
+_RS = "tortoise/record_serve.py"
 
 #: (document, cite token the document must still carry, target file, 1-based line, fragment at that line)
 _PINS: tuple[tuple[str, str, str, int, str], ...] = (
@@ -84,6 +89,26 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # carried `:2648-2649` here, so the cite-token arm fires on that tree (measured).
     (_AUDIT, "`:2653-2654`", _CP, 2654, "un-indexes a restored session"),
     (_AUDIT, "cache_projection.py:2715", _CP, 2715, "tail_denied = forbidden | {"),
+    # --- the rest of the header's enumerated `main` set, pinned by CONTENT like every other row.
+    # `_MAIN_SET_MISSED` below pins the EIGHT the header was missing; these are the entries the header
+    # already named. Without them the enumeration is a promise: `#13290` moved every `search_engine.py`
+    # entry in it and NOTHING red — the document went on naming held addresses over a tree that had
+    # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
+    # the list into a guard.
+    (_AUDIT, "`:2876`", _SDK, 2876, "SET s.capture_redactions=$redactions"),
+    (_AUDIT, "`sdk.py:36985`", _SDK, 36985, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    (_AUDIT, "`:37008`", _SDK, 37008, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
+    (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
+    (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
+    (_AUDIT, "`mcp_server.py:5089`", _MCP, 5089, "entity_type=entity_type"),
+    (_AUDIT, "`:5529`", _MCP, 5529, "entity_type=entity_type"),
+    (_AUDIT, "`:8034`", _MCP, 8034, "entity_type=entity_type"),
+    (_AUDIT, "`:6854-6870`", _PI, 6854, "_FULLTEXT_INDEX_LABEL_FIELDS"),
+    (_AUDIT, "`:6864`", _PI, 6864, '("Event", ["subject", "name"])'),
+    (_AUDIT, "`:6865`", _PI, 6865, '("Subject", ["name"])'),
+    (_AUDIT, "`:6870`", _PI, 6870, '("Source", ["_searchText"])'),
+    (_AUDIT, "record_serve.py:461", _RS, 461, "READ_POINT_BY_ID: AnchoredRead("),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3449", _SE, 3449, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3447`", _SE, 3447, "# #11682: the corpus join is PER FAMILY"),
@@ -187,7 +212,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 24
+    assert len(_PINS) == 38
 
 
 def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -> None:
