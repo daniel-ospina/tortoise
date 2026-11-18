@@ -3408,7 +3408,7 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
         782: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        902: r"test_the_changes_job_carries_no_job_scope_env",
+        907: r"test_the_changes_job_carries_no_job_scope_env",
         # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
         # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
         25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
@@ -3460,7 +3460,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:902` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:907` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3530,7 +3530,7 @@ _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     26: r"^\| `ubuntu-24\.04` \| 10 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     90: r"still does \*\*not\*\* claim any",
     95: r"DROPS the whole class on re-registration",
-    880: r"^\| `40986603502`",
+    885: r"^\| `40986603502`",
 }
 
 
@@ -3616,7 +3616,7 @@ _SHORTHAND_RE = re.compile(r"`:(?P<start>\d+)(?:-(?P<end>\d+))?`")
 _SHORTHAND_RUNBOOK_ANCHORS: dict[int, str] = {
     54: r"the ARM64 VMs register `self-hosted, Linux, ARM64",
     806: r"The OPT-IN split \(`CI_SHARD_ROUTING=pool-split`\)",
-    921: r"three pool legs were killed at their own watchdogs",
+    926: r"three pool legs were killed at their own watchdogs",
 }
 
 
@@ -4085,8 +4085,14 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # merge, which is the whole point. The pin reads the citation from the FILE and resolves it
     # against the workflow, so a fixer re-anchoring should trust the red, not this note.
     # Both sentences are load-bearing there: the first carries the "ARM64 VMs resolve
-    # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at 32m12s
-    # of a 30m budget" measurement the section argues a fold-routing decision on.
+    # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at its 27m
+    # shard watchdog" measurement the section argues a fold-routing decision on. ⛔ The BUDGET is
+    # DERIVED, not fixed (`shard_watchdog_minutes()` builds `matrix.watchdog_minutes` from the
+    # shard's packed estimate), so the pin reads BOTH numbers out of the cited workflow line rather
+    # than restating one here. The revision before this one hard-coded "32m12s of a 30m budget" — a
+    # 30m budget no artifact carries: job 123849604825 (run 40986603502) logs `WATCHDOG: pytest
+    # killed after 27m`, and the 32m12s is the JOB wall, not the watchdog. A pin that states a
+    # number the cited line does not is the drift this pin exists to catch, one level up.
     #
     # Pinned by SENTENCE, like the refs above, so an offset-shifted number reds here instead of
     # passing the `1 <= n <= EOF` range check that let it ship.
@@ -4107,16 +4113,23 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     )
 
     m = re.search(
-        r"killed the canary at \*\*32m12s of a 30m budget\*\* \(`python-ci\.yml:(\d+)`\)", batch
+        r"killed the canary at its \*\*(\d+)m shard watchdog\*\*, a 32m12s job wall "
+        r"\(`python-ci\.yml:(\d+)`\)",
+        batch,
     )
     assert m is not None, (
-        "batch-integration.md no longer cites `python-ci.yml:<line>` for the canary killed at "
-        "32m12s of a 30m budget — re-anchor this pin rather than deleting it"
+        "batch-integration.md no longer cites `python-ci.yml:<line>` for the canary killed at its "
+        "shard watchdog — re-anchor this pin rather than deleting it"
     )
-    n = int(m.group(1))
-    assert "32m12s of a 30m budget" in at(".github/workflows/python-ci.yml", n), (
-        f"batch-integration.md cites python-ci.yml:{n} for the canary killed at 32m12s, but that "
-        f"line is {at('.github/workflows/python-ci.yml', n)!r}"
+    budget_min, n = m.group(1), int(m.group(2))
+    cited = at(".github/workflows/python-ci.yml", n)
+    assert f"watchdog fired at {budget_min}m" in cited, (
+        f"batch-integration.md cites python-ci.yml:{n} quoting a {budget_min}m watchdog, but that "
+        f"line is {cited!r}"
+    )
+    assert "32m12s" in cited, (
+        f"batch-integration.md cites python-ci.yml:{n} for the 32m12s job wall, but that line is "
+        f"{cited!r}"
     )
 
     # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
@@ -5043,7 +5056,7 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # sentence (the fifth reason, `test-record-postgres`'s client-major pin), so the
         # relay was re-derived from THIS head rather than carried forward — the same
         # discipline this comment already records for the 866 → 869 move.
-        ("docs/ops/ci-runner-x64.md", 902): r"test_the_changes_job_carries_no_job_scope_env",
+        ("docs/ops/ci-runner-x64.md", 907): r"test_the_changes_job_carries_no_job_scope_env",
         # ⛔ the capstone pin's re-cut history is NOT here, and its absence is the fix, not a gap:
         # it used to be ("tests/test_capstone_preregistration_9075.py", 1703), and that number was
         # re-derived SEVEN times (1590 → 1596 → 1673 → 1682 → 1693 → 1701 → 1703) because the
@@ -5440,6 +5453,17 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
     `redis-guard.yml::redis-guard`. Revert the two `runs-on:` values instead and it is green — the
     defect it pins is the unrecorded pin, which only exists while both halves are in the tree, so
     the `assert pins` arm below keeps an empty scan from passing as agreement.
+
+    WHAT THIS DOES NOT CHECK, stated so a green run is not over-read (review, 2026-11-18):
+
+    * **Attribution.** The rule is "both names occur in a departure record", not "this record
+      attributes THIS job to THIS file". A record that swapped the two jobs between their files
+      stays green. Pairing them would need a heuristic over prose the page is free to reword, and a
+      false RED here blocks a correct record — so attribution stays the reviewer's job, and the
+      guard's job stays "an unrecorded pin cannot land silently".
+    * **Which record.** Any departure block on the page satisfies it, so a passing mention inside
+      an UNRELATED departure record also counts. Tightening that would mean pinning the page's
+      section layout, which is the churn this pin exists to stop.
     """
     import yaml
 
@@ -5497,7 +5521,7 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
           `python-ci.yml` read as recording `ci.yml::repo-harnesses`, the #10237 canary's pin.
 
         So BOTH halves are matched on `[\w.-]` boundaries: the occurrence inside `<name>.yml` does
-        not count, while ``` `closes-coherence` job ``` and `(`ci.yml:1556`)` do.
+        not count, while ``` `closes-coherence` job ``` and `(`ci.yml:1623`)` do.
         """
         workflow, job = pin.split("::")
         return all(
