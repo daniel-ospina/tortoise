@@ -358,7 +358,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """REVERT GUARD, not a re-measurement — say what this does NOT prove.
 
     The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
-    the counts still read `322`/`216`/`106` for a file that measures `326`/`214`/`112`, and the pin-side
+    the counts still read `322`/`216`/`106` for a file that measures `326`/`215`/`111`, and the pin-side
     prose described `:3778` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; `:3778`
     is `for prop in sorted(STORED_VECTOR_PROPS):`) and `:2755` as `placement_spellings()` (that function is
     the pin's `:1798`; `:2755` is `if k not in tail_denied})`). Nothing asserted them, so both could revert
@@ -366,13 +366,21 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
 
     ⛔ It does NOT prove the figures are CURRENT: a figure goes stale the moment this file gains or loses a
     cite, and this test would happily pass over a newly-wrong number. Re-measuring is the header's own
-    instruction, and the rule it states is reproducible with `git show <head>:<path> | sed -n '<N>p'`.
+    instruction, and `test_the_published_denominator_is_the_count_of_this_file` below is the half of that
+    which CAN be checked without history; the NUMERATOR (the drifter count) cannot be, because it compares
+    two historical blobs: `git show <head>:<path> | sed -n '<N>p'` at each of them, text for text.
+
+    ⚠️ The `215`/`111` here were re-measured at the `#13550` repair, which is the SECOND time this sentence
+    was wrong for the same reason: `214`/`112`/`122` was measured correct at `9f830c6dbc` and two later
+    merges added a cited pair each without re-running the rule (`326 → 216 → 110 → 124`); the repair's own
+    re-point then retired seven pairs and wrote six. A revert guard cannot see that, which is why the
+    denominator is now counted rather than asserted.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "122 of this document's 214",
-        "dedupes the 326 as-written spellings to 214 — 112",
-        "326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable",
+        "123 of this document's 215",
+        "dedupes the 326 as-written spellings to 215 — 111",
+        "326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215 comparable",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -405,6 +413,191 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         assert falsified not in text, (
             f"the header again describes an address by content it does not carry at the pin ({falsified!r}) "
             "— open the pin's line before describing it."
+        )
+
+
+#: An as-written one-token `path.py:NNNN` spelling — the header's stated population. A RANGE cite is one
+#: spelling and counts once, at its START line (`(\d+)` stops there); the two-code-span form the header
+#: describes is deliberately NOT matched, exactly as the header says it is resolved but not counted.
+_SPELLING = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py):(\d+)")
+_TRIPLE = re.compile(r"dedupes the (\d+) as-written spellings to (\d+) — (\d+)")
+_QUADRUPLE = re.compile(
+    r"(\d+) written spellings → (\d+) pairs → (\d+) collisions → (\d+) drifters of the (\d+) comparable"
+)
+_ALT_BASIS = re.compile(r"counting that form gives \*\*(\d+) pairs and (\d+) drifters\*\*")
+
+
+def _resolved_pairs(text: str, repo: Path = REPO) -> tuple[int, set[tuple[str, int]]]:
+    """(as-written spellings, unique `(resolved path, start line)` pairs) for a document.
+
+    The header's own resolution rule, as code: a written path that exists repo-relative (`tests/…`, `tools/…`,
+    `tortoise/…`) is used AS WRITTEN and never prefixed; a directory-qualified path is the same rule with
+    `tortoise/` restored (`projection/__init__.py`); a bare `name.py` is `tortoise/name.py` when that file
+    exists, and the one file of that name otherwise (`entities.py` is `tortoise/projection/entities.py`).
+    """
+    spellings = _SPELLING.findall(text)
+    pairs: set[tuple[str, int]] = set()
+    for written, line in spellings:
+        if (repo / written).is_file():
+            resolved = written
+        elif (repo / "tortoise" / written).is_file():
+            resolved = f"tortoise/{written}"
+        else:
+            hits = sorted(
+                p.relative_to(repo).as_posix() for p in (repo / "tortoise").rglob(written)
+            )
+            assert len(hits) == 1, (
+                f"`{written}:{line}` resolves to {len(hits)} files under `tortoise/` ({hits}) — the header's "
+                "rule assumes exactly one, so the pair it forms with is not the one the header counts."
+            )
+            resolved = hits[0]
+        pairs.add((resolved, int(line)))
+    return len(spellings), pairs
+
+
+def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
+    """Every way the header's published drift figures disagree with a recount of the file they describe.
+
+    Only the DENOMINATOR half is recomputed here (spellings, pairs, collisions, and the "N of those M"
+    cross-references to them). The drifter numerator compares two historical blobs and needs history:
+    `git show <head>:<path> | sed -n '<N>p'` at the pin and at the named `main`. So the numerator is checked
+    only for INTERNAL agreement with the denominator and across its three published mentions.
+    """
+    problems: list[str] = []
+    spellings, pairs = _resolved_pairs(text, repo)
+    collisions = spellings - len(pairs)
+    triple = _TRIPLE.search(text)
+    quadruple = _QUADRUPLE.search(text)
+    if not triple:
+        return ["the header no longer publishes `dedupes the N as-written spellings to P — C`"]
+    if not quadruple:
+        return ["the header no longer publishes the `N written spellings → P pairs → C collisions → D drifters` "
+                "sentence"]
+    if tuple(map(int, triple.groups())) != (spellings, len(pairs), collisions):
+        problems.append(
+            f"the header publishes spellings/pairs/collisions {triple.groups()}, but this file MEASURES "
+            f"{spellings}/{len(pairs)}/{collisions} by the header's own rule"
+        )
+    published_spellings, published_pairs, published_collisions, drifters, comparable = map(
+        int, quadruple.groups()
+    )
+    if published_spellings != spellings:
+        problems.append(
+            f"the figures sentence counts {published_spellings} spellings; this file writes {spellings}"
+        )
+    if published_pairs != len(pairs):
+        problems.append(
+            f"the figures sentence counts {published_pairs} pairs; this file MEASURES {len(pairs)}"
+        )
+    if published_collisions != published_spellings - published_pairs:
+        problems.append(
+            f"{published_collisions} collisions is not {published_spellings} − {published_pairs}: the "
+            "collision count is arithmetic on the pair count, so it moves WITH it (the `#13550` repair's "
+            "inverse: `112` was carried forward over a pair count that had already moved to 216)"
+        )
+    if comparable != published_pairs:
+        problems.append(
+            f"the sentence says `of the {comparable} comparable` while the denominator is "
+            f"{published_pairs} — the ratio has to name its own denominator"
+        )
+    if not 0 < drifters <= published_pairs:
+        problems.append(f"{drifters} drifters is not a numerator over {published_pairs} pairs")
+    for pattern, what in (
+        (re.compile(r"\*\*(\d+) of this document's (\d+)\*\*"), "the `N of this document's M` header line"),
+        (re.compile(r"\*\*The drift is (\d+) of those (\d+)\.\*\*"), "the `The drift is N of those M` restatement"),
+    ):
+        found = pattern.search(text)
+        if not found:
+            problems.append(f"{what} is gone — the ratio is published in three places on purpose")
+        elif tuple(map(int, found.groups())) != (drifters, published_pairs):
+            problems.append(
+                f"{what} reads {found.groups()} while the figures sentence reads "
+                f"{(drifters, published_pairs)} — they are one measurement"
+            )
+    alt = _ALT_BASIS.search(text)
+    if not alt:
+        problems.append("the header no longer states the alternative counting basis")
+    else:
+        alt_pairs, alt_drifters = map(int, alt.groups())
+        if alt_pairs != published_pairs + 1:
+            problems.append(
+                f"the alternative basis reads {alt_pairs} pairs, but it differs from the primary basis by "
+                f"exactly ONE pair (the two-code-span `cache_projection.py` `:2485` form), so over "
+                f"{published_pairs} it is {published_pairs + 1}"
+            )
+        if alt_drifters < drifters:
+            problems.append(
+                f"the alternative basis reads {alt_drifters} drifters, FEWER than the primary basis's "
+                f"{drifters} — adding a pair cannot remove a drifter"
+            )
+    return problems
+
+
+def test_the_published_denominator_is_the_count_of_this_file() -> None:
+    """The figures are COUNTED from the file they describe, not asserted as literals.
+
+    `#13550`'s repair inherited `326 → 214 → 112 → 122` and shipped it green through a re-point that retired
+    three pairs and wrote two: the written-spelling count is invariant under a re-point (326 either way),
+    which is what the PR body verified — but the PAIR count is not, and `112 collisions` is arithmetic on it.
+    A revert guard of literal strings cannot see that (`test_the_measured_figures_…` above spells out why),
+    so the denominator is recomputed here from the document itself plus the tree, hermetically.
+
+    ⚠️ That the scheme below is the HEADER's, and not a second one, is measurable against the header's own
+    recorded history: it reproduces `314 → 217` at `43028d178b` and `320 → 216` at `295c26ebc8`, the two
+    editions the paragraph at the end of this header re-measures — including the drifter numerators.
+
+    NON-VACUOUS, measured on the pre-fix document: it reads `214`/`112` while the file measures `216`/`110`,
+    so this test reds on the tree it was written for. `test_a_carried_forward_figure_is_reported` is the
+    negative control for the comparator itself.
+    """
+    problems = _figure_problems((REPO / _AUDIT).read_text(encoding="utf-8"))
+    assert problems == [], (
+        "the audit header's published drift figures disagree with this file's own measurement:\n  "
+        + "\n  ".join(problems)
+        + "\nRe-measure by the header's rule (count the one-token `path.py:NNNN` spellings, resolve each, "
+        "dedupe to `(path, start line)`, and compare the pin's line against the named `main`'s text for "
+        "text) and update all of its sites together — never by applying a delta to the published number."
+    )
+
+
+def test_a_carried_forward_figure_is_reported() -> None:
+    """The comparator's negative case, reachable: a stale triple and a broken arithmetic relation red."""
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    assert _figure_problems(text) == [], "the shipped document must measure clean before it is mutated here"
+    quadruple = (
+        "326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215 comparable"
+    )
+    for source, stale, why in (
+        (
+            "dedupes the 326 as-written spellings to 215 — 111",
+            "dedupes the 326 as-written spellings to 214 — 112",
+            "the PRE-FIX state: the inherited pair count and its collision arithmetic, restored together",
+        ),
+        (
+            quadruple,
+            "326 written spellings → 215 pairs → 112 collisions → 123 drifters of the 215 comparable",
+            "collisions stops following the pair count it is arithmetic on",
+        ),
+        (
+            quadruple,
+            "326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 214 comparable",
+            "the ratio names a denominator it does not carry",
+        ),
+        (
+            "**123 of this document's 215**",
+            "**122 of this document's 215**",
+            "one of the three mentions of the ratio disagrees with the others",
+        ),
+        (
+            "counting that form gives **216 pairs and 124 drifters**",
+            "counting that form gives **215 pairs and 124 drifters**",
+            "the alternative basis is one pair over the primary, not level with it",
+        ),
+    ):
+        mutated = text.replace(source, stale)
+        assert mutated != text, f"the negative control for {why!r} did not change the text"
+        assert _figure_problems(mutated) != [], (
+            f"a document carrying {stale!r} ({why}) reported no problem — the comparator is decoration"
         )
 
 
