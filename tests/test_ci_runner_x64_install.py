@@ -4088,9 +4088,9 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at its 27m
     # shard watchdog" measurement the section argues a fold-routing decision on. ⛔ The BUDGET is
     # DERIVED, not fixed (`shard_watchdog_minutes()` builds `matrix.watchdog_minutes` from the
-    # shard's packed estimate), so the pin reads the budget OUT of the cited workflow line and
-    # asserts the wall against it — the wall literal below is what the cited line must contain, not
-    # a second number the pin reads. The revision before this one hard-coded "32m12s of a 30m budget" — a
+    # shard's packed estimate), so the pin reads the budget out of THIS file and asserts BOTH
+    # numbers against the cited workflow line — the wall literal below is what that line must
+    # contain, not a second number the pin reads. The revision before this one hard-coded "32m12s of a 30m budget" — a
     # 30m budget no artifact carries: job 123849604825 (run 40986603502) logs `WATCHDOG: pytest
     # killed after 27m`, and the 32m12s is the JOB wall, not the watchdog. A pin that states a
     # number the cited line does not is the drift this pin exists to catch, one level up.

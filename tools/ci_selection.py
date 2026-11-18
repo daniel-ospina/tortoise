@@ -6264,8 +6264,8 @@ def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
         # moving the producer onto a different class would make it a comparison of
         # runner classes, which is the failure measured 2026-10-27..30: run
         # `40986603502` (head `5a2ae6aa1`) had `test (i)`, the canary, taken by
-        # `pi-runner-vm-5` (ARM64), where the leg's own 27m watchdog fired (job wall 32m12s) —
-        # 27m from `python-ci.yml:2172`, wall from `docs/ops/ci-runner-x64.md:885`, `:926`.
+        # `pi-runner-vm-5` (ARM64), where the leg's own 27m watchdog fired (job wall 32m12s): both
+        # numbers on `python-ci.yml:2172`, the kill on `docs/ops/ci-runner-x64.md:885`, `:926` (the pool legs' own-watchdog sentence).
         # A fold gets priority on the nine legs that carry the wall (the fast
         # matrix's 10 shards minus the canary_producer row); the producer
         # stays where the streak expects it. `warn=(i == 0)` keeps ONE annotation for
