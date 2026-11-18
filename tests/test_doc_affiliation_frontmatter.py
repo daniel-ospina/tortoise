@@ -483,7 +483,20 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
         if missing:
             failures[rel] = f"parsed, but drops {missing}"
             continue
+        # DECLARED is the PARSED block, not only what `_values` could lex.
+        # `_KV` is a lexer for the spellings this population uses (key at column
+        # 0, colon immediately after it), but YAML also accepts `aboutObjects :`,
+        # `"aboutObjects":` and an indented block — all three parse fine, all
+        # three keep the key, all three truncate the value at ` #`, and `_KV`
+        # matches NONE of them. Deriving `declared` from `_values` alone left
+        # both `declared` and `measured` empty for such a file, so (D) — the arm
+        # whose whole job is "no affiliation value escapes measurement" — had
+        # nothing to compare and passed a 57-of-141-char value GREEN under the
+        # full seven-arm suite (measured: `aboutObjects : <unquoted>`).
+        # `parsed` is the authoritative list of declared keys; uniting it here is
+        # what makes a spelling the lexer cannot see FAIL rather than vanish.
         declared |= {(rel, k) for k, _, _ in _values(fm) if k in AFFILIATION_KEYS}
+        declared |= {(rel, k) for k in AFFILIATION_KEYS if k in parsed}
 
         bad: list[str] = []
         for key, kind, payload in _values(fm):
@@ -574,10 +587,15 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                 expected = texts[0]  # plain: YAML performs no transform
             got = parsed.get(key)
             if not isinstance(got, str):
+                # NOT always a truncation: a plain scalar may legally resolve to
+                # a non-string through YAML implicit typing (`2026-11-18` ->
+                # date, `13452` -> int, `true` -> bool). Nothing was lost, so
+                # claiming truncation would send the reader after a defect that
+                # is not there. The remedy is the same, so it still fails.
                 bad.append(
-                    f"`{key}` does not survive the parse: the raw value "
-                    f"{texts[0]!r} became {got!r} — a plain scalar has no legal "
-                    "transform, so this is a truncation. Quote the value."
+                    f"`{key}` resolves to {type(got).__name__} ({got!r}), not a "
+                    "string — YAML implicit typing, not a truncation. Quote the "
+                    "value."
                 )
                 continue
             compared += 1

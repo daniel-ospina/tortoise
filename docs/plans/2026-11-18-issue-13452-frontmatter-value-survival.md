@@ -214,6 +214,20 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    | M18 | `aboutObjects: A, # section 2` (affiliation tail is a comment) | RED (B), fail-closed | RED |
    | M19 | sequence item truncated mid-text (`, #4333 census, #5380`) | RED (E) | RED |
    | M20 | quoted sequence item cut at an inner quote | RED (E) | RED |
+   | M21 | `aboutObjects : <unquoted value>` (one space before the colon) | RED (D) | RED |
+   | M22 | `"aboutObjects": <unquoted value>` (quoted key) | RED (D) | RED |
+
+   M21/M22 are the FAIL-OPEN a second review found, and they are the reason check (D)'s `declared`
+   set is now derived from the **parsed** block as well as from `_values`. `_KV` lexes one spelling
+   (key at column 0, colon immediately after it); YAML also accepts a space before the colon and a
+   quoted key, and both spellings keep the key, truncate the value at a space-preceded `#`, and
+   match `_KV` not at
+   all — so `declared` and `measured` were BOTH empty for such a file and the round-1 tree reported
+   all seven arms green over a 57-of-141-character value. Measured, one mutation at a time, tree
+   restored between: round-1 tree GREEN on both, this head RED on both. A wholly indented
+   frontmatter block was the third spelling offered; it is caught one arm earlier, by
+   `frontmatter block does not parse (degraded to {})`, because YAML does not accept it as a
+   top-level mapping at all.
 
    (An earlier draft also listed "an extra item appended" as a mutant; that is a legitimate edit, not a
    truncation, and it correctly stays green — the expectation was wrong, not the arm.)
