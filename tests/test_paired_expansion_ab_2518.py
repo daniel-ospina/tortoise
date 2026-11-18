@@ -580,9 +580,13 @@ def _build_fake_artifact(*, point_off, point_on, object_off, object_on,
 
 @pytest.fixture()
 def _no_embedder_probe(monkeypatch):
-    """The artifact's structure is what these two tests assert, and
-    `EmbeddingModel.get()` loads a model on first call (~2 min on this box) — a
-    cost that belongs to a real RUN, not to a structural pin."""
+    """Every structural pin here asserts structure over a SYNTHETIC artifact, and
+    `_build_artifact` calls `_has_embedder()` → `EmbeddingModel.get()`, which loads
+    a model on first call (~2 min on a box that has one) — a cost that belongs to a
+    real RUN, not to a structural pin.
+
+    ⛔ No count of its consumers is quoted (`#13267` review 12 F2): it began as two
+    and is nine now, and a count in a docstring re-stales silently."""
     monkeypatch.setattr(P, "_has_embedder", lambda: False)
 
 
