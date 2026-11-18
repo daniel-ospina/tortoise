@@ -818,7 +818,9 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #: declined and it does NOT know whether the row already held a vector. Two
 #: consequences, both measured (2026-11-17) rather than assumed:
 #:
-#: * **A cold RE-WRITE counts and loses nothing.** Every DERIVED fold's write
+#: * **A cold RE-WRITE of the SAME text counts and loses nothing** — where the
+#:   fold cannot change its text on match (see the ⛔ bullet below for the two
+#:   that can). Every DERIVED fold's write
 #:   clause preserves a stored vector against a null incoming one
 #:   (`vector_write.set_embedding_clause`, ``preserve_on_null=True``; only the
 #:   `Event` CREATE arm passes False). So `_upsert_subject`/`_upsert_object`

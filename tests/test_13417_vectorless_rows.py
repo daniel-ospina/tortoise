@@ -266,7 +266,10 @@ def test_a_cold_re_write_of_an_embedded_row_counts_but_loses_nothing(
     """⛔ THE COUNTER'S OVER-STATEMENT, PINNED (#13417 review).
 
     The count is emitted at the SEAM, which knows the encoder declined and does
-    NOT know whether the row already held a vector. Every DERIVED fold's write
+    NOT know whether the row already held a vector. It is pinned here for the
+    SAME-text case; the changed-text case (Event/Document, whose folds rewrite
+    their text on match) leaves a STALE vector the null-only repair cannot see —
+    #13451, documented at the counter. Every DERIVED fold's write
     clause preserves a stored vector against a null incoming one
     (`vector_write.set_embedding_clause`, `preserve_on_null=True`), so a cold
     re-registration of an already-embedded entity — the ordinary ON MATCH path —
