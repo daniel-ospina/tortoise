@@ -208,6 +208,21 @@ RETIRED_LITERAL: dict[str, str] = {
         'tortoise_create_entity(type="diary", name=<entry>, '
         'props={"authoredBy": ..., "topic": ..., "wing": ...})'
     ),
+    # #11609 P2 — the CONFIDENCE ARMS wave. Two more doors retired forward into
+    # `tortoise_check_confidence`, which was already advertised: the container grew a
+    # `recompute=` and a `recall=` PARAMETER instead of a row, so no container row
+    # arrives and the map grows by exactly the two retired names — 62 + 2 = 64, which
+    # is `RETIRED_TOOL_REGISTRY`'s size and the row count the doc renders. Each pointer
+    # NAMES the arm: the container's default is a DIFFERENT operation (the stored
+    # calibration view), so a pointer without it would look like a successful
+    # migration and answer something else.
+    "tortoise_compute_confidence": (
+        'tortoise_check_confidence(recompute=True, factors=..., evidence=..., anchors=...)'
+    ),
+    "tortoise_recall": (
+        'tortoise_check_confidence(recall=True, query=..., mode="state", '
+        'min_confidence=..., limit=...)'
+    ),
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -621,13 +636,16 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # 60 after the #11609 DOOR-RETIREMENT wave's seven — a wave that arrives with NO
     # container row (its destinations were already advertised), so it contributes only
     # retired names: 53 + 7 = 60.
-    # 62 at THIS head: #11609 lane P1 retires the two POINT-shaped doors
-    # (`create_point`, `diary_write`) into `create_entity`'s new `type="point"` /
-    # `type="diary"` ARMS — again no container row, because the arms are built on a
-    # tool that was already advertised. 60 + 2 = 62, which is exactly
+    # 62 after #11609 lane P1: the two POINT-shaped doors (`create_point`,
+    # `diary_write`) retire into `create_entity`'s new `type="point"` / `type="diary"`
+    # ARMS — again no container row, because the arms are built on a tool that was
+    # already advertised. 60 + 2 = 62.
+    # 64 at THIS head: #11609 P2's CONFIDENCE-ARMS wave adds two more the same way,
+    # into `tortoise_check_confidence`'s `recompute=`/`recall=` PARAMETERS rather than a
+    # row, so again only retired names arrive: 62 + 2 = 64, which is exactly
     # `counts.retired` in `config/surface-manifest.yml` at this merge.
-    assert len(RETIRED_LITERAL) == 62, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 62"
+    assert len(RETIRED_LITERAL) == 64, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 64"
     )
 
 

@@ -55,13 +55,17 @@ TESTS = ROOT / "tests"
 #: path instead of on a cited leg (the same arm the write-site guard carries in
 #: `tests/test_10000_source_prose.py`).
 #:
-#: ⛔ `[A-Za-z0-9_]` and the closing `(?![A-Za-z0-9_])` are load-bearing together,
-#: for two different reasons. A name-only `[a-z0-9_]` class TRUNCATES a cite that
-#: carries an uppercase letter (`test_theWidget` matched as `test_the`, measured),
-#: which reports a name the author never wrote; and allowing uppercase alone is
-#: not enough, because the engine BACKTRACKS to a shorter match that still
-#: satisfies `(?!\.py)`, so `test_foo_cites.py` would describe a fragment. With
-#: both, the match is maximal WITHIN the class: `test_theWidget` resolves whole,
+#: ⛔ `[A-Za-z0-9_]` and the closing `(?![A-Za-z0-9_])` are load-bearing together.
+#: A name-only `[a-z0-9_]` class DROPS an uppercase cite entirely — with the
+#: closing lookahead kept, `test_theWidget` matches NOTHING, so the cited leg
+#: silently stops being required (a false green, which is worse than a loud red);
+#: and the truncation hazard is real but belongs to a variant WITHOUT that
+#: lookahead, which is exactly what the write-site guard at
+#: `tests/test_10000_source_prose.py:222` is (`test_theWidget` -> `test_the`
+#: there, measured). Allowing uppercase alone is not sufficient here either,
+#: because the engine BACKTRACKS to a shorter match that still satisfies
+#: `(?!\.py)`, so `test_foo_cites.py` would describe a fragment. With both guards
+#: the match is maximal WITHIN the class: `test_theWidget` resolves whole,
 #: `tests/test_foo.py` and `test_foo_cites.py` match nothing.
 #: ⚠️ Measured residuals, where the real name ESCAPES the class — each one
 #: truncates, and the truncation could resolve against the wrong leg:
