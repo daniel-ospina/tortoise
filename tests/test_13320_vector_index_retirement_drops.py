@@ -488,28 +488,45 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
     # asserted below, because "still runs" is the half that keeps a store
     # repaired between sweeps able to announce the repair).
     #
-    # ⛔ THE ASSERTION IS THE CATALOGUE READ, not the DROP count (#13330 review,
-    # finding 2). `graph.drops` counts DROP attempts, so it cannot tell "the
-    # report is latched" from "the whole measure+report block is latched" — and
-    # at the tip this rebases onto (`5c5ccfac`), a DEFINITIVE `no such index`
-    # refusal no longer forces the post-drop confirmation re-read, so a DROP
-    # count would pass over a sweep that re-measured nothing at all. The gate's
-    # `CALL db.indexes()` is issued on EVERY armed sweep regardless of that, so
-    # it is the read that must not be silenced.
-    reads_after_first = [c for c in graph.calls if "db.indexes()" in c.lower()]
-    drops_after_first = len(graph.drops)
+    # ⛔ SCOPED TO THE RETIREMENT'S OWN DROPs, and the reads assertion is GONE
+    # (#13376 review, finding 1 — the earlier cut could not fail). Both counters
+    # the first version used are sweep-wide, not retirement-wide, and both move
+    # on a sweep that latched the WHOLE measure+report block:
+    #   * `_schema_is_current` issues its own `CALL db.indexes()` on every sweep
+    #     (:20638), so an unfiltered read count grows with the retirement latched;
+    #     and the retirement does not even issue its own read on a repeat sweep —
+    #     it is handed the schema sync's rows (`_index_catalogue_rows`, :21229).
+    #   * `_ensure_indexes_declared` issues its own two
+    #     `DROP INDEX ON :Point(is_operator…)` statements (:21278), so an
+    #     unfiltered drop count grows too. This file already records exactly that
+    #     hazard for these two statements at :791-793.
+    # Measured (mutant M3b): latch the whole block — `if not
+    # self._retirement_failure_is_news("armed-block"): return` before the DROP
+    # loop — and the unfiltered version stayed GREEN (`1 passed`) over a sweep
+    # that measured nothing at all.
+    #
+    # What CAN be attributed is the retirement's own statement: only its three
+    # candidates name the `Point.embedding` index. And because the DROP loop is
+    # GATED on the parsed catalogue (`_has_vector_index`, :21739), a re-attempted
+    # retirement DROP is positive evidence of BOTH halves — the second sweep
+    # re-read the catalogue and re-ran the block — which is why no separate read
+    # assertion is needed (measured: 2 catalogue reads and 3 retirement DROPs on
+    # each of the two sweeps).
+    retirement_drops = [d for d in graph.drops if "embedding" in d.lower()]
+    assert retirement_drops, (
+        "the FIRST sweep attempted no retirement DROP — the gate, not the "
+        f"latch, is being tested (drops: {graph.drops})")
     with caplog.at_level(logging.DEBUG):
         _bare(graph)._ensure_indexes()
 
-    reads_after_second = [c for c in graph.calls if "db.indexes()" in c.lower()]
-    assert len(reads_after_second) > len(reads_after_first), (
-        "the latch silenced the MEASUREMENT, not just the line: the second "
-        "sweep issued no catalogue read at all, so a store repaired between "
-        f"sweeps could never announce the repair (reads: {len(reads_after_first)}"
-        f" -> {len(reads_after_second)})")
-    assert len(graph.drops) > drops_after_first, (
-        "the second sweep did not even re-attempt its DROPs — the latch must "
-        f"silence the LINE only (drops: {len(graph.drops)})")
+    retirement_drops_after_second = [
+        d for d in graph.drops if "embedding" in d.lower()]
+    assert len(retirement_drops_after_second) > len(retirement_drops), (
+        "the second sweep did not re-attempt the RETIREMENT's own DROP: the "
+        "latch must silence the LINE only, so the measure+report block must "
+        "still run and a store repaired between sweeps can still announce the "
+        f"repair (retirement drops: {len(retirement_drops)} -> "
+        f"{len(retirement_drops_after_second)}; all drops: {graph.drops})")
     assert len(_retirement_warnings(caplog)) == 1, (
         "the survivor line is not latched: two sweeps on one store produced "
         f"{len(_retirement_warnings(caplog))} #13320 WARNINGs. On the hosted "
