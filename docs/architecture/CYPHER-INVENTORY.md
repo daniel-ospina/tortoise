@@ -462,7 +462,8 @@ appendix arm reddened on the merge over
 `main`'s **`b8723c0f16`** (`#13430`), which added **132** lines to that file, **117** of them above the
 single site (two hunks — `@@ -806,6 +806,89 @@` **+83** and `@@ -2816,6 +2899,40 @@` **+34** —
 whose sum is the row's shift); the other **15** sit BELOW it, in two hunks (`@@ -7622,6 +7739,12 @@`
-**+6**, `@@ -7832,6 +7955,15 @@` **+9**), and move nothing. ⚠️ The paragraph two above says `main`
+**+6**, `@@ -7832,6 +7955,15 @@` **+9**), and move nothing. ⚠️ The **`340d500491`**
+"this regeneration's base" paragraph above says `main`
 had touched `tortoise/` not at all since `340d500491`; that was true of ITS base, and `b8723c0f16`
 now does — the `file:line`-versus-SCALAR gap this section describes, from a fourth side: every SCALAR
 stayed green while the appendix had already rotted, because line numbers are only graded by the

@@ -561,16 +561,19 @@ def test_every_graded_lookup_has_a_coverage_row():
         "arms: a DUPLICATED row proves nothing twice and is invisible to the set comparison")
     assert len({row[0] for row in _GRADED_LOOKUPS}) == len(_GRADED_LOOKUPS), (
         "two rows share an arm id, so one of their cases reports under the other's name")
-    # Whitespace-tolerant on purpose: `_exactly_one (` after an auto-format is the same call,
-    # and a `str.count` of the tight spelling would miss it (`#13458` review note 2).
+    # Both counts are whitespace-tolerant on purpose: a formatter's `_exactly_one (` or
+    # `re.search (` is the same call, and a `str.count` of the tight spelling would miss it
+    # (`#13458` review notes). The pair must stay symmetric — a tolerant arm count next to a
+    # tight bounds count is the asymmetry that let a spaced third `re.search` pass.
     arm_calls = len(re.findall(r"_exactly_one\s*\(", source))
     assert arm_calls == len(_GRADED_LOOKUPS), (
         f"`_grade_doc_text` makes {arm_calls} `_exactly_one` calls but the\n"
         f"table lists {len(_GRADED_LOOKUPS)} arms. The `what=` scan above only sees a\n"
         "double-quoted literal, so an arm added with `what=f\"…\"` or `what='…'` would pass it\n"
         "silently — add a row for the arm, and this count keeps the two in step")
-    assert source.count("re.search(") == _UNGRADED_BOUNDS_LOOKUPS, (
-        f"`_grade_doc_text` makes {source.count('re.search(')} bare `re.search` lookups; only\n"
+    assert len(re.findall(r"re\.search\s*\(", source)) == _UNGRADED_BOUNDS_LOOKUPS, (
+        f"`_grade_doc_text` makes {len(re.findall(r're\.search\s*\(', source))} bare "
+        "`re.search` lookups; only\n"
         f"the {_UNGRADED_BOUNDS_LOOKUPS} section bounds are allowed to be ungraded. A new one\n"
         "is either an ARM (use `_exactly_one` and add a `_GRADED_LOOKUPS` row) or it needs its\n"
         "own justification written down where the bounds are established")
