@@ -1864,13 +1864,17 @@ def _strip_sql_comments(sql: str) -> str:
             in_literal = True
             # `E'…'` / `e'…'` — the `E` must abut the quote and start its own token,
             # which it does unless the preceding character CONTINUES an identifier or
-            # a number (`_`, an alnum). ⛔ A closing `"` is NOT such a character: it
-            # ENDS a quoted identifier, so `"a"E'…'` starts a fresh token and the
-            # escape rule must still apply — excluding `"` here left that form blind
-            # to EOF (`SELECT "a"E'\'' AS q; -- c` kept its comment), which is this
-            # fix's own fail-open in miniature.
+            # a number: `_`, `$`, or an alnum. ⛔ `$` is in that set because §4.1
+            # admits it in an unquoted identifier after the first character, so
+            # `a$E'…'` is ONE identifier and not an escape string — the same rule
+            # `tortoise/record_projection.py:2380` already encodes as `in "_$"`, and
+            # omitting it here stripped `SELECT a$E'\'' AS q; -- c`.
+            # ⛔ A closing `"` is NOT such a character: it ENDS a quoted identifier,
+            # so `"a"E'…'` starts a fresh token and the escape rule must still apply —
+            # excluding `"` here left that form blind to EOF (`SELECT "a"E'\'' AS q;
+            # -- c` kept its comment), which is this fix's own fail-open in miniature.
             escape_literal = bool(i) and sql[i - 1] in "Ee" and (
-                i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] == "_"))
+                i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] in "_$"))
             out.append(ch)
             i += 1
             continue
@@ -2613,12 +2617,14 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
         "recognised, a body written `e'\''` blinds the strip to end of file again")
 
     # 6. The prefix test must not SUPPRESS the rule after a CLOSED quoted identifier.
-    #    `""` ends an identifier, so `"a"E'…'` starts a fresh token and the escape
-    #    still applies. An earlier cut listed `"` among the characters that continue a
-    #    token, which turned the rule off for exactly that form and left
-    #    `SELECT "a"E'\'' AS q; -- c` with its comment INTACT — the E-escape fail-open
-    #    restored by one set member. Measured: with `"` in that set this row's input
-    #    came back verbatim; without it the comment is removed.
+    #    A single `"` ends an identifier — it is `""` that ESCAPES one, so the two
+    #    quotes are an escaped quote and not a close (see the `"…"` row below) — so
+    #    `"a"E'…'` starts a fresh token and the escape still applies. An earlier cut
+    #    listed `"` among the characters that continue a token, which turned the rule
+    #    off for exactly that form and left `SELECT "a"E'\'' AS q; -- c` with its
+    #    comment INTACT — the E-escape fail-open restored by one set member. Measured:
+    #    with `"` in that set this row's input came back verbatim; without it the
+    #    comment is removed.
     assert _strip_sql_comments('SELECT "a"E\'\\\'\' AS q; -- c\n') == (
         'SELECT "a"E\'\\\'\' AS q; \n'), (
         "a closing `\"` does not continue a token: `\"a\"E'…'` must still be read as "
@@ -2630,6 +2636,15 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
         "SELECT aE'\\'' AS q; -- c\n"), (
         "`aE'…'` is an identifier tail, not an escape string — if the prefix test is "
         "gone entirely this strips, and the row above stops discriminating")
+    # `$` CONTINUES an identifier too (§4.1), so `a$E'…'` is ONE identifier and the
+    # escape must not arm there. Pinned because omitting `$` from the set is silent:
+    # the true lexing keeps `-- c` inside a literal that never closes, so a stripping
+    # scanner has DELETED a comment the server would have executed as data. Measured:
+    # with `== "_"` (the pre-fix set) this input came back stripped.
+    assert _strip_sql_comments("SELECT a$E'\\'' AS q; -- c\n") == (
+        "SELECT a$E'\\'' AS q; -- c\n"), (
+        "`a$E'…'` is an identifier tail, not an escape string — a `$`-blind prefix "
+        "test strips the comment that PostgreSQL keeps inside the open literal")
 
 
 def test_a_quoted_IDENTIFIER_is_not_a_literal_and_cannot_blind_the_strip():
