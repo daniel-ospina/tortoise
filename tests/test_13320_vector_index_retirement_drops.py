@@ -483,33 +483,80 @@ def test_a_vector_index_that_SURVIVES_is_not_silent(monkeypatch, caplog):
     # drove ONE setup, so `if self._retirement_failure_is_news("index-survived")`
     # could be deleted with the suite green — the property was asserted in prose
     # and nowhere in code. A SECOND sweep on the same store must produce no
-    # second line; only the LINE is latched, so the sweep still runs — its gate
-    # still READS the catalogue and its DROPs are still re-attempted (both
-    # asserted below, because "still runs" is the half that keeps a store
-    # repaired between sweeps able to announce the repair).
+    # second line; only the LINE is latched, so the sweep still runs — its DROPs
+    # are still re-attempted and its inventory still MEASURES the catalogue (both
+    # asserted below, because "still runs" is the half that keeps a store repaired
+    # between sweeps able to announce the repair; the REPORT half of that block is
+    # pinned at file level by
+    # `test_an_UNCONFIRMED_sweep_does_not_swallow_the_CONFIRMED_survivor`, which
+    # reds when a latch is placed between the inventory and the report).
     #
-    # ⛔ THE ASSERTION IS THE CATALOGUE READ, not the DROP count (#13330 review,
-    # finding 2). `graph.drops` counts DROP attempts, so it cannot tell "the
-    # report is latched" from "the whole measure+report block is latched" — and
-    # at the tip this rebases onto (`5c5ccfac`), a DEFINITIVE `no such index`
-    # refusal no longer forces the post-drop confirmation re-read, so a DROP
-    # count would pass over a sweep that re-measured nothing at all. The gate's
-    # `CALL db.indexes()` is issued on EVERY armed sweep regardless of that, so
-    # it is the read that must not be silenced.
-    reads_after_first = [c for c in graph.calls if "db.indexes()" in c.lower()]
-    drops_after_first = len(graph.drops)
+    # ⛔ SCOPED TO THE RETIREMENT'S OWN DROPs, and the reads assertion is GONE
+    # (#13376 review, finding 1 — the earlier cut could not fail). Both counters
+    # the first version used are sweep-wide, not retirement-wide, and both move
+    # on a sweep that latched the WHOLE measure+report block:
+    #   * `_schema_is_current` issues its OWN `CALL db.indexes()` on every sweep
+    #     (:20638), regardless of what the retirement does — and on the `#4465`
+    #     fast path the retirement is then handed those rows through
+    #     `_index_catalogue_rows` (:21229), while on the full-sweep lane it reads
+    #     for itself (:21749). Either way the read count is the sweep's, not the
+    #     retirement's, so an unfiltered count grows with the retirement latched
+    #     (this fixture takes the full-sweep lane: measured 2 reads per sweep).
+    #   * `_ensure_indexes_declared` issues its own two `DROP INDEX ON
+    #     :Point(is_operator)` / `:Point(is_operator, lastDreamedAt)` statements
+    #     (:21275-21276), so an unfiltered drop count grows too. This file already
+    #     records exactly that hazard for these two statements — the ⛔ "Scoped to
+    #     the retirement's candidates" note in
+    #     `test_a_foreign_Point_vector_index_neither_arms_the_sweep_nor_is_reported`.
+    #     ⛔ Cited by CONTENT, not by line: both earlier cuts of this comment
+    #     carried a LINE number for it that this same edit had already moved.
+    # Measured (mutant M3b): latch the whole block — `if not
+    # self._retirement_failure_is_news("armed-block"): return` before the DROP
+    # loop — and the unfiltered version stayed GREEN (`1 passed`) over a sweep
+    # that measured nothing at all.
+    #
+    # What CAN be attributed is the retirement's own statement: only its three
+    # candidates name the `Point.embedding` index (measured: no other statement in
+    # a sweep carries that substring, and all three candidates do). And because
+    # the DROP loop is GATED on the parsed catalogue (`if _has_vector_index:`,
+    # :21826), a re-attempted retirement DROP is positive evidence that the second
+    # sweep re-read the catalogue and re-entered the block.
+    retirement_drops = [d for d in graph.drops if "embedding" in d.lower()]
+    assert retirement_drops, (
+        "the FIRST sweep attempted no retirement DROP — the gate, not the "
+        f"latch, is being tested (drops: {graph.drops})")
+    second = _bare(graph)
     with caplog.at_level(logging.DEBUG):
-        _bare(graph)._ensure_indexes()
+        second._ensure_indexes()
 
-    reads_after_second = [c for c in graph.calls if "db.indexes()" in c.lower()]
-    assert len(reads_after_second) > len(reads_after_first), (
-        "the latch silenced the MEASUREMENT, not just the line: the second "
-        "sweep issued no catalogue read at all, so a store repaired between "
-        f"sweeps could never announce the repair (reads: {len(reads_after_first)}"
-        f" -> {len(reads_after_second)})")
-    assert len(graph.drops) > drops_after_first, (
-        "the second sweep did not even re-attempt its DROPs — the latch must "
-        f"silence the LINE only (drops: {len(graph.drops)})")
+    retirement_drops_after_second = [
+        d for d in graph.drops if "embedding" in d.lower()]
+    assert len(retirement_drops_after_second) > len(retirement_drops), (
+        "the second sweep did not re-attempt the RETIREMENT's own DROP: the "
+        "latch must silence the LINE only, so the sweep must still run and a "
+        "store repaired between sweeps must still be able to announce the "
+        f"repair (retirement drops: {len(retirement_drops)} -> "
+        f"{len(retirement_drops_after_second)}; all drops: {graph.drops})")
+    # ⛔ THE DROP LOOP IS NOT THE MEASURE+REPORT (#13419 review of `bb247aa008`,
+    # finding 1 — a `#13376` round-2 citation here named a review of the OTHER PR
+    # that returned NO ISSUES FOUND, so it sent a reader to a clean verdict).
+    # Measured: a latch applied AFTER the drop loop — `if not
+    # self._retirement_failure_is_news("armed-post-drop"): return` right before
+    # `_ambiguous_write` (:21872) — leaves the DROP assertion above GREEN while
+    # `_record_vector_index_inventory` (and the value-latched #4997 pair report it
+    # emits) never runs on the second sweep, so a store repaired between sweeps
+    # still could not announce it. The inventory is what re-populates
+    # `_vector_index_props` (:20071 is its per-call reset), and `_bare()` hands the
+    # second sweep a FRESH projection whose `_vector_index_props` is `None` — so a
+    # non-`None` value here is positive evidence the second sweep MEASURED, not
+    # merely that it issued DDL. Measured: `{'Point': frozenset({'embedding'})}`
+    # unmutated, `None` under that mutant.
+    assert second._vector_index_props is not None, (
+        "the second sweep issued its DROPs but never re-measured the catalogue "
+        "— the latch must silence the LINE only, and the measure+report block "
+        "is the half that lets a repaired store stop being reported as broken "
+        f"(`_vector_index_props` is {second._vector_index_props!r} on the "
+        "second sweep's fresh projection)")
     assert len(_retirement_warnings(caplog)) == 1, (
         "the survivor line is not latched: two sweeps on one store produced "
         f"{len(_retirement_warnings(caplog))} #13320 WARNINGs. On the hosted "
