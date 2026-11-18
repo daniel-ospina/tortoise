@@ -2696,3 +2696,29 @@ this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pi
 `tests/test_10000_source_prose.py`, `tests/test_10122_point_name_not_indexed.py`,
 `tests/test_11821_journal_vector_width.py`, `tests/test_7951_create_point_outbox.py`,
 `tests/test_7951_delete_point_outbox.py`, `tests/_about_call_time_census.py`).
+
+---
+
+## §14.3 V2's "the rule that FILLS it landed at PR `#13473`" — the RULE stays, the delivery state leaves (`#13494`, 2026-11-18)
+
+**What changed in the design document.** Row **V2** of the §14.3 register stated the embedding rule
+*and* its delivery state in one clause:
+
+> ✅ **The rule that FILLS it landed at PR `#13473`, closing `#13418`:** …
+
+`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
+reads that as an issue-state claim — `landed` within 40 characters of a `#NNNN`, which is the shape the
+guard exists for (`#8542`) — so it was **RED on `main`** for a defect no PR in that lane introduced.
+
+**What stayed, unchanged and verbatim.** The rule itself, which is the design and the whole point of
+the row: `record_writer._RECORD_EMBEDDING_TEXT["SourceCreated"]` derives from the payload's
+`_searchText` **ALONE**, the same payload key the split binds into `public.source._search_text`, so
+vector and column describe one datum by construction. The clause now reads
+"✅ **The rule that FILLS it:**", with no tracker narration.
+
+**What left.** Only the delivery sentence: that the rule landed at PR `#13473` and that this closed
+`#13418`. That is a tracker fact — the two issues carry it — and a design document states the design.
+
+**Gate at this change.** `tests/test_extractor_v4_citation_rot.py` (17 passed on the tree that carries
+this move). ⚠️ **The arm is CLASS-level, not a literal**: it fires on any issue-state adjacent to a
+`#NNNN`, so a later edit that reintroduces the shape reds wherever it lands, not only on this row.
