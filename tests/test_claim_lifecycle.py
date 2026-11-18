@@ -377,15 +377,22 @@ def test_ontology_transitions_column_matches_the_guard_map():
 
     The sibling test above pins the status WORDS; this one pins the EDGES between
     them, which is the other half of the same table and went stale the same way.
-    The shipped v3.37 table stated `draft` → `live` alone while
-    `_ALLOWED_TRANSITIONS` allows a draft point to END before it ever went live
-    (`tortoise/sdk.py`: `"draft": frozenset({"live", "deprecated",
-    "superseded"})`, with the guard-side comment saying so) — and this very file
-    asserts `"deprecated" in _ALLOWED_TRANSITIONS["draft"]` twenty lines up, so the
-    model and its own guard contradicted each other.
+    The INTERMEDIATE v3.37 table on this branch (`17c81841e8`, before
+    `cd38f7a74b`) stated `draft` → `live` alone while `_ALLOWED_TRANSITIONS`
+    allows a draft point to END before it ever went live (`tortoise/sdk.py`:
+    `"draft": frozenset({"live", "deprecated", "superseded"})`, with the
+    guard-side comment saying so) — and this very file asserts
+    `"deprecated" in _ALLOWED_TRANSITIONS["draft"]` twenty lines up, so the model
+    and its own guard contradicted each other. v3.37 has never SHIPPED: the last
+    released artifact, `origin/main`, is v3.36, and its own table reds this pin by
+    the other path below.
 
-    NON-VACUOUS on that table: `draft` parses to `{live}` against the code's
-    `{live, deprecated, superseded}`, failing on the two missing edges.
+    NON-VACUOUS on both shapes, by different paths (both measured at the refs, not
+    reasoned). On that intermediate 4-column table `draft` parses to `{live}` and
+    reds on the two missing edges. On `origin/main`'s §5 the table has FIVE columns
+    (`Status | Kind | Write path | Transitions to | Notes`), so `cells[2]` is the
+    *Write path* column and the parse yields `frozenset()` — the pin still reds,
+    but on `set()` against `{live, deprecated, superseded}`, not on a missing edge.
     """
     from tortoise.sdk import _ALLOWED_TRANSITIONS
 
@@ -441,9 +448,14 @@ def test_ontology_discloses_the_legacy_words_it_no_longer_lists():
             f"§5's read-side legacy note no longer names {word!r} — the retired "
             "words are read-side legacy over stored rows and must stay disclosed "
             "(#12855); naming it elsewhere in §5 is not the note")
-    assert "read-side legacy" in note, (
-        "§5's note no longer calls the retired words read-side legacy — without it "
-        "the table reads as 'the code never produced these'")
+    # ⛔ The `assert "read-side legacy" in note` that stood here was DELETED, not
+    # relocated (review P3). `_read_side_legacy_note` selects its paragraphs BY that
+    # substring (`:322`), so a truthy `note` already implies it: no mutation of the
+    # document makes this the assertion that reds — deleting the note reds at the
+    # existence check above, never here. Relocating it to the raw section does not
+    # buy a verdict either, since a non-empty `note` already implies the phrase is
+    # in §5. The verdict is carried by the existence check above and the per-word
+    # checks below, which DO vary on their own mutants.
     assert "`retract_point`" in note and "still writes `retracted`" in note, (
         "§5 no longer discloses that `retract_point` still writes `retracted` — that "
         "is the one place the code diverges from this model (#11824 S2)")
