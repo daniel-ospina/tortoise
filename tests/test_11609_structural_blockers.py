@@ -1091,7 +1091,7 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     # merely NAMES the field reded these three rows with "routes may be registry-derived
     # again", a claim about a string — measured: one comment line above `def tortoise_query(`
     # in `tortoise/mcp_server.py` was enough. That is the same defect the sibling reader above
-    # documents for `FastAPIRouterAdapter` (:190-196), so this scan is an AST read too.
+    # documents for `FastAPIRouterAdapter` (:188-189), so this scan is an AST read too.
     # What it still catches: `e.rest_spec.path`, `getattr(e, "rest_spec")`, `e["rest_spec"]`,
     # and `vars(e)["rest_spec"]` (a constant subscript — the residual list claimed otherwise
     # until #13585 review P3).
