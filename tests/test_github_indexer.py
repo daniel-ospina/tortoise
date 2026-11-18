@@ -865,7 +865,7 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
         mints = [_run(_indexer(t), sdk)["events_minted"] for _ in range(3)]
         assert mints == [0, 0, 0], (
             f"{why}: the row was read as OPEN, so every poll minted another close "
-            f"({mints}) while the close fold cannot reach it")
+            f"({mints}) while no fold can close it")
         # …and the CONTROL, on the same fixture: a row the fold WOULD move mints
         # exactly one close and then stops. Without this, a reader that never
         # answers "closed" at all would pass the loop above.
