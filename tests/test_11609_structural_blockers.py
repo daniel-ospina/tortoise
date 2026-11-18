@@ -1039,15 +1039,18 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     # until #13585 review P3).
     # What it therefore does NOT catch, stated rather than hidden: a field name built at
     # runtime (`getattr(e, "rest" + "_spec")`), which no static read can answer.
-    # ⛔ THE SEAM, NOT THIS LINE, IS WHAT IS PINNED (#13585 review P2#1). The predicate had its
-    # own test and this wiring had none: reverting it to the pre-PR
+    # ⛔ THE SEAM *AND THE STATEMENT THAT CONSUMES IT* ARE PINNED (#13585 review P2#1). The
+    # predicate had its own test and this wiring had none: reverting it to the pre-PR
     # `"rest_spec" in source.read_text(...)` comprehension reded NO row, because the scanned
     # population's only mention of the field sits in the one module that comprehension excludes
-    # by name. Glob + name exclusion + predicate now live in ONE function (`_rest_spec_scan`)
-    # that both this pin and its falsifier drive, so a revert of ANY of the three reds a row.
-    # What remains unfalsifiable is this STATEMENT, by construction — a test cannot falsify its
-    # own call — so the guarantee is scoped to the seam rather than claimed for the call site.
-    readers = _rest_spec_scan(repo)
+    # by name. Glob + name exclusion + predicate live in ONE function (`_rest_spec_scan`), and
+    # the assertion that consumes it lives in `_assert_no_product_rest_spec_reads(root)` — which
+    # takes the ROOT, so a falsifier drives that same call over a stub tree where the two
+    # predicates DISAGREE. Both halves are falsified by name — the seam by the
+    # `…_scan_is_wired_to_the_attribute_reader` falsifier, and the call by
+    # `test_the_product_assertion_is_reachable_from_a_stub_root` — rather than declared
+    # unfalsifiable.
+    _assert_no_product_rest_spec_reads(repo)
     # ⛔ `tool_registry.py` is NOT exempt — it is where the route-deriving code LIVES, so a
     # filename exclusion leaves the one module that could host the loop unwatched (measured:
     # a `for e in TOOL_REGISTRY: app.add_api_route(e.rest_spec.path, …)` appended to that
@@ -1060,11 +1063,6 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
         f"`tortoise/tool_registry.py` uses `rest_spec` / `add_api_route` OUTSIDE "
         f"`FastAPIRouterAdapter` at line(s) {outside} — that is the registry-derived route "
         "vector §1.5 says does not exist; re-derive the `rest_spec` half of the plan")
-
-    assert readers == [], (
-        f"product module(s) {readers} now read `rest_spec` — routes may be "
-        "registry-derived again; re-derive §1.5 before trusting the `rest_spec` half of "
-        "the plan")
 
 
 def test_the_mount_reading_is_not_comment_blind():
@@ -1408,9 +1406,13 @@ def test_the_rest_spec_scan_is_wired_to_the_attribute_reader(tmp_path):
     (product / "sub" / "reads.py").write_text(
         "for e in TOOL_REGISTRY:\n    app.add_api_route(e.rest_spec.path, handler)\n",
         encoding="utf-8")
-    # the exempt-by-name module is NOT exempt from this test: the exclusion is the scan's own,
-    # so a substring predicate would report `comment_only.py` regardless of it.
-    (product / "tool_registry.py").write_text("x = 1  # rest_spec\n", encoding="utf-8")
+    # The exempt-by-name module carries a REAL read (the adapter's own — legitimate, and the
+    # reason it is exempt at all), so dropping the name exclusion reports it and REDS this row:
+    # the exclusion is the scan's own, and this row pins it instead of crediting the real pin.
+    (product / "tool_registry.py").write_text(
+        "class FastAPIRouterAdapter:\n"
+        "    def register(self, entry):\n"
+        "        return entry.rest_spec.path\n", encoding="utf-8")
 
     assert _rest_spec_scan(tmp_path) == ["tortoise/sub/reads.py"], (
         "the `rest_spec` scan is not wired to the ATTRIBUTE reader over a RECURSIVE walk — a "
@@ -1418,6 +1420,36 @@ def test_the_rest_spec_scan_is_wired_to_the_attribute_reader(tmp_path):
         "was never reached, or the name exclusion was lost — so the F2 fix could be undone "
         "silently with every row green"
     )
+
+
+def test_the_product_assertion_is_reachable_from_a_stub_root(tmp_path):
+    """Falsifier for the STATEMENT the pin runs, not only for the scan (#13585 review P2#1).
+
+    The seam test above drives `_rest_spec_scan`; this drives
+    `_assert_no_product_rest_spec_reads(root)` — the assertion the pin actually executes — over
+    a stub root. That is what makes the CALLER falsifiable. Reverting the call inside it to the
+    pre-PR inline `"rest_spec" in source.read_text(...)` comprehension now reports the
+    comment-only module and reds the first row here; while the assertion was inlined in the
+    test that only ever sees the product tree, the same revert reded 0 of 46 rows, because the
+    real population's only mention of the field sits in the module the comprehension excludes
+    by name.
+
+    Both directions are asserted: silence on a tree that only NAMES the field, and a refusal
+    once a module actually reads it.
+    """
+    product = tmp_path / "tortoise"
+    product.mkdir()
+    (product / "tool_registry.py").write_text("x = 1\n", encoding="utf-8")
+    (product / "comment_only.py").write_text(
+        "# the registry rest_spec is unrelated to this container\nx = 1\n", encoding="utf-8")
+    # prose is not a read: a false BLOCK here would red the pin on a docs-only edit
+    _assert_no_product_rest_spec_reads(tmp_path)
+
+    (product / "reads.py").write_text(
+        "for e in TOOL_REGISTRY:\n    app.add_api_route(e.rest_spec.path, handler)\n",
+        encoding="utf-8")
+    with pytest.raises(AssertionError, match=r"now read `rest_spec`"):
+        _assert_no_product_rest_spec_reads(tmp_path)
 
 
 def test_the_excluded_module_is_graded_by_the_same_predicate(tmp_path):
@@ -1518,12 +1550,35 @@ def _rest_spec_scan(root: Path) -> list[str]:
     name exclusion TOGETHER with the predicate means the falsifier drives the same code the pin
     does, and a revert of any of the three reds a row.
 
-    Stated rather than hidden: the enclosing pin's one-line call of THIS function is still not
-    falsifiable — a test cannot falsify its own call statement — which is why the claim there
-    is "the seam is pinned", not "the call site is pinned".
+    Stated rather than hidden: no test can falsify its OWN call statement, so the pin's
+    one-line invocation of the assertion is un-falsifiable by construction — but that line is a
+    call of the ASSERTION, not a re-implementation of it, and the assertion's own call of this
+    scan is driven from a stub root by
+    `test_the_product_assertion_is_reachable_from_a_stub_root`. A revert of the reading logic
+    therefore reds a row instead of leaving the file green.
     """
     scanned = sorted((root / "tortoise").rglob("*.py"))
     return _rest_spec_readers(scanned, root)
+
+
+def _assert_no_product_rest_spec_reads(root: Path) -> None:
+    """The pin's `rest_spec` assertion, root-parameterised so the CALL is falsifiable.
+
+    ⛔ #13585 review P2#1 landed on exactly this call. The pin used to invoke the scan inline
+    (`readers = _rest_spec_readers(scanned, repo)`) and no falsifier could reach it: reverting
+    it to the pre-PR `"rest_spec" in source.read_text(...)` comprehension reded 0 of 46 rows,
+    because the real population's only mention of the field sits in the module that
+    comprehension excludes by name. Keeping the ASSERTION and its call in a function that
+    takes the ROOT — instead of leaving them as the tail of a test that only ever sees the
+    product — lets `test_the_product_assertion_is_reachable_from_a_stub_root` drive the same
+    statement over a stub tree where the two predicates disagree.
+    """
+    readers = _rest_spec_scan(root)
+    if readers:
+        raise AssertionError(
+            f"product module(s) {readers} now read `rest_spec` — routes may be "
+            "registry-derived again; re-derive §1.5 before trusting the `rest_spec` half of "
+            "the plan")
 
 
 def _rest_spec_readers(paths: list[Path], root: Path) -> list[str]:
