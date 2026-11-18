@@ -691,11 +691,24 @@ def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
     raw = getattr(graph, "g", None)  # FalkorProjection -> its raw handle
     with _onboarding_write_scope(cypher):
         if raw is not None and hasattr(raw, "query"):
-            return raw.query(cypher, params=params)
-        try:
-            return graph.query(cypher, **params)
-        except TypeError:
-            return graph.query(cypher, params=params)
+            result = raw.query(cypher, params=params)
+        else:
+            try:
+                result = graph.query(cypher, **params)
+            except TypeError:
+                result = graph.query(cypher, params=params)
+    # #12943: this funnel writes the cache without folding a record, so it is one
+    # of the lanes the write-target registry would otherwise miss. Two gates,
+    # both borrowed rather than re-decided: the statement must be one §17.1's own
+    # classifier calls a WRITE (a read through this funnel is not a cache write,
+    # and the registry's name would be a lie about it), and the handle must be a
+    # projection at all (a raw handle has no store identity to name).
+    if raw is not None:
+        from tortoise.projection import _statement_writes, note_live_write_target
+
+        if _statement_writes(cypher):
+            note_live_write_target(graph)
+    return result
 
 
 def _relations_created(result) -> int:

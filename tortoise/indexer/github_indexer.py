@@ -68,8 +68,12 @@ Lifecycle decision table (THE rule):
   ⚠️ The WIDER terms — ``status='outdated'`` and the legacy ``outdated=true`` flag —
   are NOT latched: ``_fold_object_stage``'s set has no ``outdated`` member, the
   CLOSE fold cannot reach such a row (no live holder) while the REOPEN fold can
-  (``_reopen_targets_closed``), so they are answered from the POSITION, per
-  direction. See ``_status_is_latched`` / ``_row_is_frozen`` / the reader below.
+  (``_reopen_targets_closed``). Answered from the POSITION where the row has one —
+  and `None` while that position is LIVE — and, where it has NONE, `"closed"`
+  unless the word maps to `open`, which is withheld (a close against a row with no
+  live holder re-fires for ever). ⛔ NOT "the POSITION, per direction", and not
+  "the WORD where it has none" either: both are one case short. The cases are
+  enumerated once, in ``_object_state_to_issue_state``'s docstring.
   ⛔ FAMILIES 1 AND 2 ARE ANSWERED BEFORE THE POLARITY (closed/open) ARMS, on
   purpose: their answer therefore does not depend on ``isClosed``. It must not,
   because ``is_position_ended`` short-circuits on the marker alone and never looks
@@ -327,7 +331,7 @@ def _row_is_frozen(status, outdated) -> bool:
     ⚠️ The invariant is "the CLOSING direction has no live holder", NOT "no
     writer can clear it" — the stronger claim is false. A coherent un-supersede
     (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
-    admitted at ``sdk.py:54219-54228`` — the NOT MONOTONE exception, documented
+    admitted at ``sdk.py:54241-54250`` — the NOT MONOTONE exception, documented
     at ``cache_projection.py:807``) DOES clear ``superseded``, and this read
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
@@ -359,7 +363,7 @@ def _row_is_frozen(status, outdated) -> bool:
     # refuse it at intake (`lifecycle_vocabulary.py:279-286`, reached from S0's
     # `_read_caller_status` on both the update and create paths). It is kept readable
     # because rows persist — `lifecycle_vocabulary.py:263-264` records the history
-    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:54067-54069`
+    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:54089-54091`
     # enumerates the routes from the other side (a pre-fix SDK, a raw Cypher producer, a
     # JSONL replay of either) — and this repo deliberately keeps readers wider than its
     # doors (`live.py:100-108`). ⛔ Deliberately NOT citing the individual `sdk.py` call
@@ -1315,8 +1319,14 @@ class GitHubIndexer:
         axis, OR one of the guards below applies — a latched word (always), an
         unplaceable position, or a WIDE (`outdated`) term. ⚠️ The WIDE term is the
         per-direction case, not a blanket `None`: its CLOSE fold is never dispatched
-        (no live holder), so it answers the POSITION where the row HAS one, the WORD
-        where it has none, and `None` only where that position is live (`_project_issue`).
+        (no live holder), so it answers the POSITION where the row has an ENDED one,
+        `None` where that position is LIVE (it must get no opinion, and a close minted
+        against a row with no live holder re-fires for ever), and `"closed"` where the
+        row has no position at all — UNLESS the word maps to `open` (`_STATUS_TO_STATE`:
+        `in_progress`, `live`, `open`), which is withheld as `None` for that same
+        reason. A word OUTSIDE the map (`outdated`, NULL) is therefore answered
+        `"closed"`: it names no state to withhold on, and only a reopen can fold.
+        (`_project_issue`)
 
         ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
         the connector folds off that axis — a close now folds the terminal STAGE
@@ -1339,10 +1349,11 @@ class GitHubIndexer:
         in the FOLD's latch set, the legacy `outdated` flag) are NOT one question,
         and the rule is per-direction, not per-term: a LATCHED word answers `None`
         always (`_status_is_latched` — the fold refuses both ways); the WIDE terms
-        answer the POSITION, and `None` only where the position is live
+        answer the POSITION where the row has an ENDED one, `None` where it is LIVE,
+        and `"closed"` where there is no position unless the word maps to `open`
         (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
         is not). "Written once and never cleared" was the earlier, WRONG summary:
-        a coherent un-supersede does clear `superseded` (`sdk.py:54219-54228`). Answering `"closed"` there was the fix's own regression:
+        a coherent un-supersede does clear `superseded` (`sdk.py:54241-54250`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
         """
@@ -1392,7 +1403,7 @@ class GitHubIndexer:
         # `deprecated`) on an issue that stays OPEN on GitHub: `[1, 1, 1]` before
         # this arm.
         # ⚠️ "While set", not "for ever": a coherent un-supersede DOES clear
-        # `superseded` (`sdk.py:54219-54228`; the NOT-MONOTONE bullet at
+        # `superseded` (`sdk.py:54241-54250`; the NOT-MONOTONE bullet at
         # `cache_projection.py:807`), so the earlier "permanent" wording was one claim
         # too strong. It does not weaken the answer: this read derives from the
         # STORED row, so it resumes on the write that clears the word, and until
@@ -1483,15 +1494,19 @@ class GitHubIndexer:
         # dispatched under DIFFERENT rules (`_status_is_latched`): the CLOSE fold
         # needs a LIVE holder, and an `outdated` row has none, so the close can never
         # be applied and must get no opinion; the REOPEN fold takes
-        # `_reopen_targets_closed` and DOES apply. So this read answers the POSITION
-        # for these rows, which is what converges — measured on a row at
-        # `status='outdated'` + closed position, GitHub reopened:
+        # `_reopen_targets_closed` and DOES apply. So for these rows this read answers
+        # the POSITION where the row has an ENDED one — which is what converges —
+        # `None` where it is LIVE (a close could never be dispatched, so it must get no
+        # opinion), and where it has NO position, `None` if the word maps to `open` and
+        # `"closed"` otherwise — the opposite of answering with the word, because a
+        # close minted for a row with no live holder re-fires for ever. Measured on a row
+        # at `status='outdated'` + closed position, GitHub reopened:
         #
         #   `None` for both directions  -> [0, 0, 0], row stays `done`/`isClosed=true`
         #                                 — a reopen the projection WOULD apply is dropped
         #   position (this arm)         -> [1, 0, 0], row reaches `in_progress`/`active`
         #
-        # and the not-ended shape (no live holder, so no close can ever fold) gets
+        # and the not-ended POSITION (no live holder, so no close can ever fold) gets
         # `None`, which is the only answer that cannot mint without bound. The one
         # residual is recorded on the PR: after such a reopen the word is still
         # `outdated`, so a SUBSEQUENT GitHub close mints nothing — unavoidable, since
@@ -1631,8 +1646,8 @@ class GitHubIndexer:
         # Cost, stated: the shape the bug was measured on (a falsy marker on a LIVE
         # position, the row every props door can produce — `update_knowledge(id,
         # isClosed=0)` stores the integer verbatim: `update_knowledge`
-        # (`sdk.py:22394-22569`) relays through `_update_entity_any` to
-        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54668`)
+        # (`sdk.py:22416-22591`) relays through `_update_entity_any` to
+        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54690`)
         # applies the caller's props unchanged — `isClosed` is no reserved name, so
         # nothing coerces it) then records NO transition at all: `prev_state is None`
         # gates the mint off and nothing repairs the marker, so nothing re-fires.

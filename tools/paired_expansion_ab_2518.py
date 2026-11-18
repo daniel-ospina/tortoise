@@ -42,13 +42,19 @@ WHAT IS MEASURED, IN ONE TOOL
    digest (``MANIFEST.json``). Every arm reads the snapshot; nothing reads the
    live directory. When the snapshot already exists its digests are VERIFIED, not
    re-copied — a corpus that moved under a finished run is refused, not renamed.
-   This is the single change that makes two runs comparable (`#13118`'s own brief
-   names it: the live corpus drifted ~11 % between a run and its re-run).
+   This is the single change that makes two runs comparable (`#11901` measured a
+   re-harvest returning **−10.8 % to −11.0 %** fewer distinct names ~2 h later;
+   `#13118`'s own brief measures the drift between ITS runs at 2 corpus lines /
+   20 harvested names and 130 names across five harvests — ~0.1 % — and names the
+   frozen snapshot as the control it did NOT run, which is the gap this file
+   closes).
 2. **One sample, evaluated twice.** The population is drawn ONCE and written to
    ``--population-file``; both arms read that file. A re-run reuses it, and any
-   snapshot/population mismatch is REFUSED. `#13118` recorded that pairing was
-   impossible because "pairing needs the sampled population written out
-   (--population-file), which this harness does not do" — that is this file's job.
+   snapshot/population mismatch is REFUSED. `#13118` recorded the population
+   digest differing in all five of its runs ("a count identity is not a member
+   identity"), and **`#11901`** recorded why a paired re-run was impossible:
+   "pairing needs the sampled population written out (--population-file), which
+   this harness does not do" — that is this file's job.
 3. **Per-item outcomes.** One read per item per arm at ``--read-limit``, so every
    k is a PREFIX of the same ranked list and the arms cannot differ by read width.
    For the point arm the item is the class the mechanism targets: a same-subject
@@ -176,6 +182,70 @@ def _count_lines(path: Path) -> int:
         return sum(1 for _ in fh)
 
 
+# ── serialization: every artifact this tool writes is STRICT JSON ────────────
+def _json_safe(obj):
+    """Map every non-finite float to ``None`` so the dump is strict JSON.
+
+    ⛔ ``json.dumps`` defaults to ``allow_nan=True`` and writes the bare tokens
+    ``NaN`` / ``Infinity`` / ``-Infinity``, which RFC 8259 does not admit in its
+    number grammar. The consequence is not cosmetic and it is not local to one
+    cell: a STRICT parser rejects the WHOLE DOCUMENT (measured: node's
+    ``JSON.parse`` raises ``SyntaxError: Unexpected token 'N', … "rho": NaN,``),
+    so the evidence becomes readable only by Python's lenient decoder. And the
+    TOLERANT readers (``jq``, ``JSON.stringify``) map the token to ``null`` — the
+    same cell a field that was never recorded occupies, which is precisely the
+    distinction this artifact exists to keep (`_ids_digest(None)` is *unrecorded*
+    while ``_ids_digest([]) == sha256(b"")`` is *recorded empty*, and
+    ``identity_measured: false`` + ``identity_note`` exist so a null count cannot
+    read as a measured one).
+
+    ⛔ No information is lost, and the two kinds of null stay distinguishable —
+    but by TWO DIFFERENT carriers, and this docstring must not read as one. The
+    MDE's null carries its reason in ``mde_note`` beside it ("NOT ESTIMABLE: no
+    discordant pair was observed …"). The ``correlation`` block's ``rho`` and
+    ``se_reduction`` nulls carry NO note: both keys are always written, so it is
+    key PRESENCE that separates "recorded, not estimable" from "never recorded",
+    and the reason is `outcome_correlation`'s own documented one — one or both
+    arms have zero outcome variance (measured at `#13267`: every committed
+    correlation null is that case, e.g. the point artifacts' off-arm hits are
+    all 0). A consumer must not read the block's absent note as an absent
+    measurement; the suite pins the key-presence separation.
+
+    Convention taken from this repo's sibling artifact writer,
+    `tools/longmem_eval/report.py::_json_safe` (``#1747`` rounds 11-15, pinned by
+    `tests/test_eval_report_integrity.py` with ``allow_nan=False``), rather than
+    invented here.
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+def _write_json(path: Path, obj) -> None:
+    """Write ``obj`` as strict, sorted, indented JSON.
+
+    ``allow_nan=False`` is the second layer: if a non-finite float ever reaches
+    this call by a route `_json_safe` does not cover, the write RAISES instead of
+    emitting a document no strict parser can load. A silent ``NaN`` token is the
+    defect; an exception here is the guard.
+
+    The trailing newline is part of the convention the THREE committed EVIDENCE
+    artifacts already carry, so re-serializing one of them changes the non-finite
+    cells and nothing else.
+    ⛔ The fourth committed JSON, ``corpus-snapshot-manifest.json``, does NOT end with
+    a newline (4,272 bytes, last byte ``}``): writing it through this function adds
+    one byte, so a one-byte diff there is this convention asserting itself, not
+    tampering. Do not "fix" the manifest back to no-newline either — a file this
+    writer owns should carry what this writer produces.
+    """
+    path.write_text(json.dumps(_json_safe(obj), indent=2, sort_keys=True,
+                               allow_nan=False) + "\n")
+
+
 def snapshot_digest(manifest: dict) -> str:
     """The aggregate digest: sha256 over ``name:sha256:bytes``, sorted by name.
 
@@ -219,7 +289,7 @@ def freeze_snapshot(src: Path, dst: Path) -> dict:
     for f in files:
         shutil.copy2(f, dst / f.name)
     manifest = _build_manifest(dst, source=str(src))
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    _write_json(manifest_path, manifest)
     return manifest
 
 
@@ -425,7 +495,7 @@ def load_or_make_population(path: Path, *, harvested, snapshot_digest_: str,
     body = population_body(rows, snapshot_digest_=snapshot_digest_,
                            population=population, sample=sample, seed=seed)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(body, indent=2, sort_keys=True))
+    _write_json(path, body)
     return rows, body
 
 
@@ -1130,7 +1200,7 @@ def run(args: argparse.Namespace) -> int:
     out = Path(os.path.expanduser(args.out)) if args.out else None
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(artifact, indent=2, sort_keys=True))
+        _write_json(out, artifact)
     _print_summary(artifact)
     # ⛔ Rebuilt from the artifact's own two parallel lists, so the exit rule reads
     # the CLASS of each refusal and `--allow-mixed-modes` can be scoped to the
