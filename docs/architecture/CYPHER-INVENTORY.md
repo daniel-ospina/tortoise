@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **298** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **299** files scanned |
 | files carrying at least one statement site | **100** |
 | **statement sites (this census)** | **1314** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **860** (579 read, 281 write) |
@@ -92,7 +92,7 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 298 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 299 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
@@ -109,17 +109,17 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (298 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (299 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 298 files>` → **1,626** across **109** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 299 files>` → **1,626** across **109** files: exactly the
 tool's number. A bare `rg … tortoise/` gives 1,632 / 110, the 6 extra occurrences living in
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,626 / 109 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 298 files>` → **2,333** across **144** files, while the tool
-reports 2,346 / 145. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 299 files>` → **2,334** across **145** files, while the tool
+reports 2,347 / 146. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -131,14 +131,14 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 298 files finds exactly 13 — the verb-at-end-of-line scan alone finds 177 (one
+predicate over the same 299 files finds exactly 13 — the verb-at-end-of-line scan alone finds 177 (one
 `#13399` added is a COMMENT line ending “post-merge”, which is the point), which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,067, and `-i` without the exclusion 2,405 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 298
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 299
 `.py` files the same two predicates read **2,064** and **2,333**; with `-t py` and the test-module
 exclusion dropped they read **2,066** and **2,336**. The 69-occurrence 2,336→2,405 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
@@ -454,6 +454,18 @@ now does touch `tortoise/indexer/github_indexer.py` — measured, it moves **no*
 (`non_cypher_door_calls` stays 258), so this cut's numbers are unaffected. `--check` reports **`25
 pinned counts match`**.
 
+**Cut by `#13447` (PR #13456):** `files_scanned` 298→**299**, and NOTHING else moves. The seam module
+`tortoise/derived_embedding.py` is a new product-surface file, so the population grows by one, while it
+carries **0** statement sites and **0** door calls — its single `MATCH|MERGE` predicate match is a
+COMMENT line quoting `MERGE (s:Source {url:$id})`, not Cypher the resolver sees. So `sites`,
+`files_with_sites`, `unresolved`, `candidates`, `partial` and both door totals are unchanged and
+`--check` re-derives `25 pinned counts match`. §1's reconciliation is re-measured at this tree: door
+**1,626 / 109** (unchanged, exactly as the paragraph above predicted), and the verb predicate reads
+**2,334 / 145** against the tool's **2,347 / 146** — the same one-file, 13-occurrence WHOLE-TEXT gap,
+now with this module's own single-line comment on the `rg` side of it. ⛔ `#13447`'s review asked for this
+re-pin because the required `differential` leg (`tools/cypher_inventory.py --check`) reads the two
+numbers against each other and reds on `DRIFT files_scanned: doc=298 tool=299`.
+
 **Where these SCALARS were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
 forward merges (`0774035055`, then `9d13dc1bf7`) — re-derived by RUNNING the tool on the FINAL
 merged tree, never by arithmetic on the markers. `main`'s two commits between them move no census
@@ -669,7 +681,7 @@ the order was fixed (`#13098` review F8).
 
 <!-- cypher-inventory:sites = 1314 -->
 <!-- cypher-inventory:files = 100 -->
-<!-- cypher-inventory:files_scanned = 298 -->
+<!-- cypher-inventory:files_scanned = 299 -->
 <!-- cypher-inventory:unresolved = 108 -->
 <!-- cypher-inventory:candidates = 579 -->
 <!-- cypher-inventory:shape_adjacency = 292 -->
