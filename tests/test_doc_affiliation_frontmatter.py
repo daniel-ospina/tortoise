@@ -365,11 +365,12 @@ def _unkeepable_quoted(subject: str, style: str) -> str:
             "block scalar."
         )
     return (
-        f"{subject} is malformed — this arm cannot read where the value closes. "
-        "Either the scalar never closes, or its closing quote is followed by "
-        "a comment with no space between (put one space before the `#`); a "
-        "quoted scalar continued onto the next line is refused here too. Keep "
-        "the whole value on one line inside its quotes, or use a block scalar."
+        f"{subject} is malformed — this arm will not compare it. Either the quoted "
+        "scalar never closes (a value continued onto the next line is refused here "
+        "too), or its closing quote is not the last thing in the value: a comment "
+        "with no space before the `#` (put one space before the `#`) or other text "
+        "after the close. Keep the whole value on one line inside its quotes, or "
+        "use a block scalar."
     )
 
 
@@ -1401,13 +1402,23 @@ def test_a_malformed_value_names_a_true_remedy(
     assert "malformed" in msg, msg
     assert "Remove the inner quote" not in msg, msg
     assert "put one space before the `#`" in msg, msg
-    # The OPENING clause must not contradict the case it is printing for: this
-    # shape HAS a closing quote (index 2), so "no closing quote on that line" was
-    # false in the very sentence that went on to name the space fix. Pinned
-    # because the "Remove the inner quote" / "put one space" assertions above are
-    # both satisfied by a message whose first clause lies.
+    # The OPENING clause must not contradict the case it is printing for. This
+    # shape HAS a closing quote — measured just below, not assumed — and the arm
+    # FINDS it, so BOTH "no closing quote on that line" and its replacement "this
+    # arm cannot read where the value closes" were false in the very sentence that
+    # went on to name the space fix. The second one survived a round that fixed the
+    # first, which is why it is pinned by ABSENCE: a corrected clause is not a
+    # corrected claim, and the "Remove the inner quote" / "put one space"
+    # assertions above are both satisfied by a message whose first clause lies.
+    assert _closing_quote(_split_comment('"x"# note')) == 2, (
+        "re-point this pin: the close is located at index 2, and that measurement "
+        "is what makes the two clauses below false"
+    )
     assert "no closing quote on that line" not in msg, msg
-    assert "cannot read where the value closes" in msg, msg
+    assert "cannot read where the value closes" not in msg, msg
+    # …and the TRUE cause is named: the close is located, but it is not the last
+    # thing in the value, so the arm refuses to compare it.
+    assert "not the last thing in the value" in msg, msg
 
     # (b) LEGAL YAML refused as `malformed`: a quoted scalar continued on the
     # next line. The remedy names the one-line form / block scalar.
