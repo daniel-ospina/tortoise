@@ -237,6 +237,63 @@ def test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node():
                 "own docstring. Point at the artifact that says it")
 
 
+def test_the_cache_projection_docstring_does_not_claim_a_re_capture_heals_a_pre_fix_node():
+    """`cache_projection`'s module docstring must not re-arm the retracted premise.
+
+    CARRIED HERE by `#13439` out of `tests/test_10000_cache_projection_doc_pin.py`,
+    whose docstring framed the pair: *"the doc IS a paraphrase of
+    `cache_projection`'s module docstring, so this arm keeps the pair in step in
+    both directions"*. That module pinned the epic DOC's wording and was retired
+    — a document's text is not a test's subject. THIS half is source prose, the
+    same class as `test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node`
+    directly above, and it cannot be retired by the same argument: no behaviour
+    test can catch a comment that promises the wrong mechanism, because the
+    tests measure what the code DOES, never what a comment says. A reader who
+    believes the population self-heals re-SETs on the replay arm, which reverses
+    #2104/#1727 — that is how a stale comment becomes a wrong code change.
+
+    Both directions, so deleting the sentence cannot pass: the retracted shapes
+    are ABSENT, and the correction is PRESENT.
+
+    MUTATION (run at `1be58f3d1d`): re-insert ``until it is re-captured`` into
+    the docstring → this test REDs; nothing else in the suite does.
+    """
+    from tortoise import cache_projection
+
+    doc = cache_projection.__doc__ or ""
+    assert doc.strip(), (
+        "`tortoise/cache_projection.py` lost its module docstring — it is the "
+        "source the epic artifact paraphrases, so the projection door's "
+        "rationale would then live only in the artifact")
+
+    # The shapes a future lane re-introduces the premise in. Two casings for the
+    # routes sentence, because the doc and the docstring emphasise it
+    # differently; the rest are the retracted mechanism itself.
+    for retracted in (
+        "until it is re-captured",
+        "the capture now overwrites the pair",
+        "now overwrites the pair",
+        "heals on re-capture",
+        "HEALS on re-capture",
+        "The routes that DO clear it are a capture under a NEW",
+        "The routes that do clear it are a capture under a NEW",
+    ):
+        assert retracted not in doc, (
+            f"`cache_projection`'s module docstring re-arms the RETRACTED "
+            f"mechanism ({retracted!r}). A re-capture does not heal a pre-fix "
+            "node — the mint gate makes it a #1727 no-op replay, so the "
+            "write site's SETs are never reached. Restore the corrected "
+            "sentence; the epic artifact paraphrases this docstring and "
+            "would inherit the retraction")
+
+    assert "NOT a re-capture" in doc, (
+        "`cache_projection`'s module docstring no longer states that the repair "
+        "for a legacy node is NOT a re-capture. That sentence is the source "
+        "the epic artifact paraphrases and the reason its cost bullet is "
+        "correct; deleting it is not a repair (the retracted premise then "
+        "returns unchallenged at the projection door)")
+
+
 # NOTE (reconciliation, `#10852`, retired by `#13439`): a projection-door DOC
 # guard once lived here and then in `tests/test_10000_cache_projection_doc_pin.py`.
 # `#13439` retired it: it asserted the doc's wording, and the behaviour it stood in
