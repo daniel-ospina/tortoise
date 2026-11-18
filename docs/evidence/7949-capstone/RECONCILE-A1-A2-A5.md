@@ -95,7 +95,7 @@ record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
 `TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:21509` (`relation_write = apply_relation_edges(` —
-the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:21497`, and the
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:21508`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
@@ -194,7 +194,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    the capture path at `tortoise/sdk.py:21949`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both, and `#11835`'s seam stamp moved them once more; both now read
-   `:21938`.)  <!-- Re-derived at the merge of `origin/main` (`#13133`) into this branch, off
+   `:21949`.)  <!-- Re-derived at the merge of `origin/main` (`#13133`) into this branch, off
    `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py` on the MERGED tree — the only
    figure that survives, because this number depends on BOTH sides' `sdk.py` growth:
    `origin/main` carried a figure correct for `main`, and this branch's head had ALREADY moved
@@ -854,7 +854,7 @@ grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml
 # *the writer landed, the corpus was not re-measured* (and no rollup query exists, §1).
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '21938p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '21949p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
 # BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
