@@ -141,6 +141,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_EVIDENCE, "search_engine.py:3079-3094", _SE, 3079, "if label in _STATUS_FILTERED_LABELS"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2715", _CP, 2715, "tail_denied = forbidden | {"),
+    # ⚠️ Row 13b's Source-writer cite, added because the site had NO pin at all — the same shape
+    # the `:6938` row above was added for. It sat at `:19637` (a comment about provenance loss in
+    # the `sessionCaptured` stamp block) for merges without a red, because
+    # `rg -n '19637' docs/ tests/ tools/ config/` reached this one row and no `_PINS` /
+    # `_TOKEN_OCCURRENCES` entry covered it. ⛔ `#13486` moved the writer under this row, so it is
+    # re-derived here to the line that actually carries `search_text = _source_search_text(`
+    # (`grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py`), not carried.
+    (_AUDIT, 'sdk.py:21687', _SDK, 21687, 'search_text = _source_search_text(topics=topics)'),
     (_AUDIT, 'sdk.py:21729', 'tortoise/sdk.py', 21729, 's.summary=CASE WHEN $sum'),
     (_AUDIT, '`:21852`', 'tortoise/sdk.py', 21852, 's.summary, s.topics, s.'),
     (_AUDIT, 'hosted_api.py:22925', 'tortoise/hosted_api.py', 22925, 'MERGE (s:Source {url:$did})'),
@@ -235,6 +243,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4823`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3079-3094'): 1,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21687'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21729'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21852`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22925'): 3,
@@ -388,10 +397,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    # 47: `#13489`'s review added the `:6938` row (`("Object", ["name"])`, the §2.5 address that
+    # 48: `#13489`'s review added the `:6938` row (`("Object", ["name"])`, the §2.5 address that
     # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6933`/`:6934`/`:6939`
-    # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th).
-    assert len(_PINS) == 47
+    # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th), and row
+    # 13b's Source-writer pin (`sdk.py:21687` — `:21648` before `#13486` moved the writer) is the
+    # same shape added again, for the same reason.
+    assert len(_PINS) == 48
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
