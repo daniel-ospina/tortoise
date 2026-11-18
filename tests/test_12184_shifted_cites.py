@@ -105,6 +105,19 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:2882`", _SDK, 2882, "SET s.capture_redactions=$redactions"),
     (_AUDIT, "`sdk.py:37369`", _SDK, 37369, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     (_AUDIT, "`:37392`", _SDK, 37392, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    # ⛔ The three rows below pin SITES the pair rows above cannot reach, because those rows carry
+    # TABLE/ROW context on purpose (a bare `:37392` is satisfied by the header enumeration or by the
+    # proximity paragraph, so the §2.5 rows could be re-pointed alone with nothing red). MEASURED, at
+    # the head before this pin: §2.5's adjacency row and row 8 both cited `sdk.py:37206` for the
+    # `-[r]->(n)` walk — a line that is `bd_id: bd.confidence_mean` at this head, a document line at
+    # the pin's neighbours and `RETURN type(r)…` on `:37392` — so the walk's ADDRESS resolved on NO
+    # head the row named, while `len(_PINS)` and every count arm stayed green. The proximity
+    # paragraph above §2.5 carried the same rot in the other direction: it named `:37183` (a `#11702`
+    # comment at every head) as the address "the row carries" — the one thing that paragraph says
+    # must never disagree with the row.
+    (_AUDIT, "| `tortoise/sdk.py:37392` |", _SDK, 37392, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "the `-[r]->` walk (`sdk.py:37392`)", _SDK, 37392, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "they are `:37369` and", _SDK, 37369, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -245,6 +258,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2882`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37369`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37392`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37392` |'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37392`)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37369` and'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
@@ -465,8 +481,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 52 -> 55 at review cycle 6: the three addresses review P2-2 measured as pinned NOWHERE —
     # `sdk.py:28008` in `00_index.md` and in `ENTITY-VERDICT-BANDS.md`, and `sdk.py:28372` there too —
     # where a `+1` mutation on all three left 441 tests green. Same shape, same reason.
+    # 55 -> 58 at the #13551 fix lane: the three §2.5 sites that cited `sdk.py:37206` (or, in the
+    # proximity paragraph, `:37183`) for statements that are on `:37392` / `:37369` at every head the
+    # row names — measured above the rows. The pair pins could not see them: a `:37392` anywhere on
+    # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6938` was.
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
-    assert len(_PINS) == 55
+    assert len(_PINS) == 58
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
