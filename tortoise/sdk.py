@@ -4812,12 +4812,14 @@ CROSS_LENS_ANN_TOP_K = 20
 CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
-# table in code, PLUS one code-review decision the doc does not carry: a DRAFT
-# may terminalize before it is ever live (``draft -> deprecated/superseded``), so
-# the map is a SUPERSET of §5's `draft` row and an exact match of its `live`
-# row. ``tests/test_claim_lifecycle.py`` cross-checks the terminal words and the
-# doc's declared transitions; the `draft` widening is pinned there as the #432
-# decision, not as doc↔map equality.
+# table in code. The four MODEL rows match the doc ROW FOR ROW since v3.37; the
+# three legacy keys below (``retracted``, ``outdated``, ``archived``) are READ
+# deltas whose value is ``{}`` — that emptiness is what makes a stored word
+# terminal — so the map is a SUPERSET of the table BY KEY SET and an exact match
+# on every row the table states. ⛔ THAT ROW EQUALITY IS PINNED by
+# ``tests/test_claim_lifecycle.py::test_ontology_transitions_column_matches_the_
+# guard_map``, which compares every ``Transitions to`` cell against this map:
+# narrowing §5's `draft` cell to ``live`` reds it — the doc is not a subset.
 # NOT consulted by update_point per-call (update_point only promotes
 # draft→live; every claim transition is observable via a Task 3 emit hook, and
 # no transition can slip through update_point unemitted).
@@ -4856,6 +4858,15 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "outdated": frozenset(),
     "archived": frozenset(),
 }
+
+#: ``live``'s declared target set, RENDERED for the refusal messages that must
+#: state it. ⛔ DERIVED from the map ON PURPOSE (v3.37 review): the reviewers found
+#: THREE hand-written copies of this set in this one function, and two of them had
+#: already gone stale — one still said ``{retracted, superseded}`` and told a
+#: caller `archived` was "REFUSED as reserved" on a Point, which both the map and
+#: the synonym normalisation refute. A message may NAME a set; it may not keep a
+#: second copy of one.
+_LIVE_DECLARED_TEXT = "{" + ", ".join(sorted(_ALLOWED_TRANSITIONS["live"])) + "}"
 
 
 def _lifecycle_meaning(word: str) -> str:
@@ -6642,23 +6653,44 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     # the same clause the sibling successor repair carries. The
                     # `superseded` arm was made carrier-aware in an earlier
                     # round and the `abandoned` arm was left carrier-BLIND, so
-                    # its first-named repair was `status='archived'` — which
-                    # `_ALLOWED_TRANSITIONS` REFUSES on a `:Point` (*"terminal
-                    # (reserved — no v1 write path)"*, ONTOLOGY §5), i.e. the
+                    # its first-named repair was `status='archived'` — which on a
+                    # `:Point` GOAL is refused by the #13035 goalState-coherence arm
+                    # (`status='archived'` ends the goal while `goalState='active'`
+                    # still describes a live commitment — measured), NOT by any §5
+                    # reservation: that row was deleted in v3.37, and `archived` is
+                    # only `deprecated`'s synonym on a plain Point (measured:
+                    # `update_knowledge(<fact>, status='archived')` -> `deprecated`),
+                    # i.e. the
                     # first thing this message told a Point caller to do, the
-                    # same door then refused. Measured in the new suite
-                    # (`test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal`):
-                    # the pre-fix text raised `update_entity refused the status
-                    # transition 'live' -> 'archived'` from the call it
-                    # prescribed. `retracted` is a declared transition from
-                    # every live state on BOTH carriers, so it is named first on
-                    # the one carrier where `archived` is not reachable.
+                    # same door then refused.
+                    # ⛔ v3.37 ALSO CORRECTED THE REASON THIS COMMENT GAVE, measured
+                    # at this head: the refusal above is the #13035
+                    # goalState-coherence arm, NOT `update_entity refused the
+                    # status transition 'live' -> 'archived'` — that message is
+                    # UNREACHABLE for `archived`, because the `_update_entity` door —
+                    # the one that raises that message, NOT this helper — calls
+                    # `_read_caller_status(_status, kind=":Point")`, which normalises
+                    # the word to `deprecated`, BEFORE it reads
+                    # `_ALLOWED_TRANSITIONS.get(...)`. ⛔ NAMED, NOT NUMBERED, and
+                    # named by its DOOR: a line-number pointer here went stale twice in
+                    # one review cycle (a sibling lane's +9 lines, then this comment's
+                    # own +1), and a first cut of this rewrite named the call without
+                    # naming the function it belongs to — which read as this helper's
+                    # own call and resolved nowhere (rounds 7-8).
+                    # And `retracted`
+                    # is not a declared target of `live` either: it is a spelling
+                    # that normalises to `deprecated`, which IS a declared target.
+                    # So the message prescribes the DECLARED word on each carrier,
+                    # discloses the spellings, and names both fields — instead of
+                    # prescribing a spelling and calling the canonical word
+                    # unperformable (the sibling arm's own fix, `364ea06d`).
                     "status='archived' on an Object/Subject goal, or "
-                    "status='retracted' on a :Point goal (whose declared "
-                    "transitions from a live state are exactly "
-                    "{retracted, superseded}, so 'archived' is REFUSED there as "
-                    "reserved); the legacy 'deprecated' spelling is accepted on "
-                    "goals whose door carries it")
+                    "status='deprecated' on a :Point goal (the transitions this "
+                    "door DECLARES from a live state are "
+                    f"{_LIVE_DECLARED_TEXT}; 'retracted' and 'archived' are "
+                    "the spellings that normalise to it, so either lands "
+                    "the same ending) — and set BOTH fields: the word ends the "
+                    "goal and `goalState` never ends it alone (#13035)")
                 + f";\n"
                 f"  2. drop the ending from `goalState` — pass a word that "
                 f"describes a live commitment {sorted(GOAL_LIVE_STATES)} (or "
@@ -6694,14 +6726,13 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 f"that resolves it to the name;\n"
                 f"  2. if nothing replaced it, say so — pass "
                 f"goalState='abandoned' with a status that ENDS it on the door "
-                f"you are using: status='retracted' on a :Point goal (its "
-                f"declared transitions from a live state are exactly "
-                f"{{retracted, superseded}}, so the 'archived' ending is REFUSED "
-                f"there as reserved), or status='archived' on an "
-                f"Object/Subject goal. ⛔ Not the legacy 'deprecated' spelling: "
-                f"no Point door accepts it, so prescribing it would send a "
-                f"caller in a circle (measured: `ValueError: Invalid status "
-                f"'deprecated'`)."
+                f"you are using: status='deprecated' on a :Point goal (the "
+                f"transitions this door DECLARES from a live state are "
+                f"{_LIVE_DECLARED_TEXT}; 'retracted' is the legacy spelling "
+                f"that normalises to it, and 'archived' likewise), or "
+                f"status='archived' on an "
+                f"Object/Subject goal. ⛔ Set BOTH fields: the word ends the "
+                f"goal and `goalState` never ends it alone (#13035)."
             )
         return
 
@@ -6816,12 +6847,17 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             f"over it: the node keeps the ending it had.\n"
             f"Two ways to fix it, either is accepted:\n"
             # ⛔ ROUND 22, findings 1 and 2: the same two defects the arms above
-            # fixed, in the family's LAST refusal. `archived` is not reachable
-            # on a `:Point` (ONTOLOGY §5), and `supersededBy` holds a NAME.
+            # fixed, in the family's LAST refusal. `archived` is not a DISTINCT
+            # word on a `:Point` — since ONTOLOGY v3.37 §5 carries no `archived`
+            # row and the word is only `deprecated`'s write-side synonym, so a
+            # write of it is ACCEPTED and STORED as `deprecated` (measured at this
+            # head; the "reserved on Points" row this clause used to cite was
+            # deleted) — and `supersededBy` holds a NAME.
             f"  1. keep the ending — pass status='archived' with "
             f"goalState='abandoned' on an Object/Subject goal, or "
-            f"status='retracted' with goalState='abandoned' on a :Point goal "
-            f"(whose 'archived' ending is REFUSED there as reserved); or "
+            f"status='deprecated' with goalState='abandoned' on a :Point goal "
+            f"('retracted' and 'archived' are its legacy spellings, normalised "
+            f"to `deprecated` and landing the same ending); or "
             f"status='superseded' plus supersededBy=<successor name> (the column "
             f"holds the successor's name, not its id);\n"
             f"  2. if this is genuinely a NEW goal, give it its own id "
@@ -12568,8 +12604,11 @@ _GUARDED_LIFECYCLE_PROPS = frozenset({"status"}) | _TEMPORAL_RESTAMP_PROPS
 #: this arm is the door a caller promotes one through.
 #:
 #: The SECOND conjunct is the fix. The legacy ``outdated=true`` flag is a
-#: TERMINALITY signal — §5's ``outdated`` row: "Terminal on every read surface
-#: and for every lifecycle transition" — and ``update_entity``'s guard already
+#: TERMINALITY signal — the row that used to say so ("Terminal on every read
+#: surface and for every lifecycle transition") was deleted from §5 in v3.37, and
+#: it now says the same thing as a note: the boolean "remains a second, flag-based
+#: dead marker (#2498) that readers — including EP's currency predicate — must
+#: continue to honour" — and ``update_entity``'s guard already
 #: read it, so without this conjunct this door ACCEPTED a flag-dead point and
 #: stored ``status='live'`` beside the flag: a claim that reads terminal to
 #: every reader while carrying a live status. That is the two-facts-disagree
@@ -52385,8 +52424,9 @@ class TortoiseSDK:
         # ⛔ POINT WINS THE WORDING, not the first nameless row (#12592 review
         # P2). `nameless` is built Object→Subject→Point, so a `:Point:Object`
         # hybrid whose Object arm is nameless while its Point arm is satisfied
-        # would otherwise be told to `archived` — a word §5 declares RESERVED on
-        # Points and that this door REFUSES on the Point arm — while the
+        # would otherwise be told to `archived` — which on a Point is only
+        # `deprecated`'s write-side SYNONYM (`lifecycle_vocabulary.py:95`), not the
+        # tombstone verb, and carries no CORRECTS edge — while the
         # recovery actually available to it (`retract_point`, or the CORRECTS
         # edge `supersede_knowledge()` writes through the Point path) is not offered. The
         # prescription must be performable on every label it is spoken from.
@@ -52405,15 +52445,19 @@ class TortoiseSDK:
         # explicit pair is what a caller who knows only the successor's NAME can
         # send; and the successorless retirement is named with the word the model
         # gives it — `archived` for an Object/Subject (§4.3/§4.2), and for a
-        # Point `retract_point`, because §5 declares `archived` RESERVED on
-        # Points ("no v1 write path") and naming it there would advertise a
-        # write the model does not offer.
+        # Point `retract_point`. ⛔ NOT because `archived` would be REFUSED:
+        # measured at this head, `update_knowledge(<point>, status='archived')` is
+        # ACCEPTED and stored as `deprecated`, because it is a declared SYNONYM on
+        # every kind (`lifecycle_vocabulary.py:95`) and normalisation runs before
+        # `_ALLOWED_TRANSITIONS` is consulted. What a Point needs here is a VERB —
+        # the tombstone, which journals the transition and writes no successor —
+        # and a status word alone provides none (AX rule 2).
         if first == "Point":
             model_clause = (
                 "That is not a supersession at all: a Point retired with no "
                 "successor is 'retracted' (`retract_point`), and 'deprecated' is "
-                "an independent terminal state that needs none (`archived` is "
-                "RESERVED on Points — ONTOLOGY §5: no v1 write path). ")
+                "an independent terminal state that needs none (`archived` is only "
+                "its write-side synonym, so it names no verb). ")
             retirement_word = f"`retract_point({_refusal_repr(id_val)})`"
             retirement = f"or, if nothing replaced it, {retirement_word}."
             # ⛔ THE CARRIER CLAUSE IS LABEL-CONDITIONAL, because the carrier IS.
@@ -53593,19 +53637,23 @@ class TortoiseSDK:
                     # actually take. The DECLARED targets are named, the two
                     # verbs that reach them are named where they exist, and the
                     # mint-and-supersede route covers the case the status itself
-                    # was wrong. `archived` gets its own sentence because it is
-                    # *"reserved — no v1 write path"* on a Point (ONTOLOGY §5),
-                    # so naming it in a transition list would advertise a write
-                    # the model does not offer. For a declared target the verbs
+                    # was wrong. `archived` gets its own sentence because §5 has no
+                    # `archived` ROW — the word is only `deprecated`'s write-side
+                    # synonym (`lifecycle_vocabulary.py:95`), so a transition list
+                    # naming it would advertise a target the model does not carry
+                    # (the "reserved — no v1 write path" row that used to say so was
+                    # deleted in v3.37). For a declared target the verbs
                     # are named too (`retract_point` / `supersede_point`) even
                     # though this door would accept the status: they are the
                     # routes that also journal the transition and, for
                     # `superseded`, mint the successor (#12403).
-                    _reserved = (
-                        " `archived` is reserved on Points (ONTOLOGY §5: no v1 "
-                        "write path) — `retract_point(...)` is the SDK route to "
-                        "retirement."
-                        if _status == "archived" else "")
+                    # ⛔ THE `_reserved` SENTENCE IS GONE (v3.37 review, round 2).
+                    # It claimed "`archived` is reserved on Points (ONTOLOGY §5: no
+                    # v1 write path)" and was DEAD CODE twice over: `_status` is
+                    # normalised above (`_read_caller_status`), so it can never be
+                    # `"archived"` here, and the claim itself is false —
+                    # `update_knowledge(<point>, status='archived')` is ACCEPTED and
+                    # stored as `deprecated` (measured at this head).
                     # AX rule 2's third part, and it must be PERFORMABLE: the
                     # prescription names the RESOLVED id, not the address the
                     # caller typed. A `:Point:Event` addressed by its `eventId`
@@ -53637,10 +53685,11 @@ class TortoiseSDK:
                         f"{_refusal_repr(_named_id)}{_addressed_as}: "
                         f"this door's declared Point transitions from "
                         f"{_refusal_repr(_stored)} are {{{_declared_text}}} "
-                        f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table, plus "
-                        f"#432's decision that a draft may terminalize before it "
-                        f"is ever live), so {_refusal_repr(_status)} is not a "
-                        f"declared transition through this door.{_reserved} Use "
+                        f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table in code, "
+                        f"which since v3.37 carries #432's decision that a draft "
+                        f"may terminalize before it is ever live), so "
+                        f"{_refusal_repr(_status)} is not a "
+                        f"declared transition through this door. Use "
                         f"a declared transition, or — "
                         f"if the claim itself changed — mint a new Point and "
                         f"supersede this one with "
