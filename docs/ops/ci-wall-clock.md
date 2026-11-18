@@ -136,7 +136,7 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 | `changes` | 27 | 0.38 | 0.58 | 1.25 | 5 |
 | `manifest-integrity` | 28 | 0.28 | 0.33 | 0.40 | 5 |
 | `workflow-lint` | 32 | 0.19 | 0.26 | 0.30 | 5 |
-| `ci-introduced-failure` (#9984) | — | not yet measured | — | — | 15 |
+| `ci-introduced-failure` (#9984) | — | not yet measured | — | — | **25 (was 15)** |
 | **`packs-compile`** | 19 | 0.60 | 0.76 | 0.80 | **15 (was none)** |
 | **`python-ci-gate`** (REQUIRED) | 34 | 0.00 | 0.02 | 0.02 | **15 (was none)** |
 
@@ -144,7 +144,21 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 delegates a failed test arm to), so its cap is what bounds a stalled required check
 when the predicate job is what wedged. It has no p50/p95 here yet because it landed
 after this sample was taken — take a fresh measurement (`filter=all`, completed jobs
-only, §2's command) before moving the cap, rather than inferring one from a sibling.
+only, §2's command) before moving the cap for a DURATION reason, rather than inferring
+one from a sibling.
+
+⛔ **The 15 → 25 move was NOT a duration change, and must not be read as one.** It moved
+because the job's own script now enforces a budget that has to fit inside the cap
+(#13513): the predicate's main-baseline sweeps
+(`ci-failure-set.sh --main-union-rates/--main-union-signatures`, ten main runs each)
+exceeded the hardcoded 300 s per-call bound — measured on run `44308191683` attempt 2,
+where the REQUIRED `python-ci-gate` failed CLOSED as UNMEASURED over a tree the predicate
+could certify. The per-call bound is now `NFG_SUBPROCESS_TIMEOUT` (600 s) and the
+ACROSS-call budget is `NFG_TOTAL_BUDGET_S` (1300 s), so the module refuses in its own
+words *before* the runner would kill the job — and a job killed at its cap reports
+`timed_out`, which names nothing. The cap is therefore budget-plus-margin, not a measured
+wall clock: `tests/test_ci_new_failure_gate.py`
+`::test_the_verdict_job_cap_leaves_room_for_the_verification_budget` pins the margin.
 
 ⚠ `test-record-postgres` **false-killed on 2026-11-05 at its 20 m cap — and the remedy is
 RESTORE-ONLY, not a raised cap.** The false kill is real and worth keeping on the record.
