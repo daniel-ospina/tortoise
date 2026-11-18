@@ -146,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 549bad0c77b7956a3aec424e3f16b8eb7ceac5e0
+cut_at_commit: 4ec1eb80fc6c53024660316a5f08a64c72098928
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -2980,11 +2980,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_direct_edge.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
+  dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, other-tooling'
+  reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false

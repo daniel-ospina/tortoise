@@ -988,9 +988,10 @@ class EmbeddingModel:
         unaffected — ``absent_reason()`` publishes ``no_embedder`` for it and the
         recorded-cause arm translates that record back to ``not_installed``, pinned
         end-to-end by ``test_a_designed_absence_is_refused_with_not_installed``. The
-        route where NOTHING was recorded is the deliberate change declared in the
-        paragraph below: it answers ``model_unavailable``, not an assertion that
-        the extra is absent.
+        route where NOTHING was recorded is the deliberate change declared RIGHT
+        HERE: it answers ``model_unavailable``, not an assertion that the extra is
+        absent, and it is pinned by
+        ``test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason``.
 
         ⛔ THE SECOND BEHAVIOUR CHANGE, RECORDED HERE BECAUSE IT IS NOT THE ONE
         THE ``no_embedder`` NOTE NAMES. ``main`` published an UNMAPPED reason as
