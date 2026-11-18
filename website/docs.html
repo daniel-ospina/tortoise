@@ -138,8 +138,9 @@
          here for mechanism, so update this page first and let /faq follow.
          tests/test_website_docs_consistency.py checks each page against its
          canonical source independently (not against the other page):
-         docs.html must list all six statuses from POINT_STATUS_VALUES in
-         tortoise/sdk.py, while /faq may list none; and it fails if either page
+         docs.html must list all four lifecycle statuses from
+         POINT_STATUS_VALUES in tortoise/sdk.py, while /faq may list none; and it
+         fails if either page
          pins an ontology version inline, drops the docs/ONTOLOGY.md link, omits
          expectation propagation, or revives the retired linear-system
          description of confidence (that test holds the forbidden-strings list,
@@ -151,11 +152,10 @@
       <ul>
         <li><code>status: draft</code> — created but not yet connected (not counted in confidence)</li>
         <li><code>status: live</code> — promoted when its first edge is created; participates in confidence computation</li>
+        <li><code>status: deprecated</code> — ended, and nothing replaced it (retired, withdrawn, rejected). <code>retracted</code> and <code>archived</code> are accepted as synonyms on write and are stored as <code>deprecated</code></li>
         <li><code>status: superseded</code> — replaced by a newer Point, which is linked to it, so the old claim is kept rather than deleted</li>
-        <li><code>status: retracted</code> — withdrawn with no replacement; kept as a tombstone</li>
-        <li><code>outdated</code> — a legacy server-managed flag, kept as a back-compat status value, set alongside supersession or an explicit invalidation</li>
-        <li><code>status: archived</code> — retired</li>
       </ul>
+      <p>Those four are the lifecycle vocabulary a <em>write</em> may use. <em>Reading</em> stays wider, deliberately: rows written before the vocabulary closed keep <code>retracted</code>, <code>archived</code> or <code>outdated</code>, and every read surface still treats them as ended. <code>outdated</code> is no longer writable at all — it says "ended" without saying whether anything replaced it, so it is refused with a repair that names <code>deprecated</code> and <code>superseded</code>.</p>
       <p>A content hash (SHA-256 of <code>content</code>) is stored on every Point. With <code>dedup</code> enabled — the default over MCP — creating the same content twice returns the existing Point instead of duplicating it; the REST endpoint defaults <code>dedup</code> to false and will create a second Point.</p>
     </div>
     <div class="card">
