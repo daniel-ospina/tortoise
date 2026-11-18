@@ -768,9 +768,13 @@ def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
         "consume pair as `:<n>`/`:<n>` — this arm reads that sentence, so if it was "
         "reworded, re-scope this regex rather than deleting the arm")
     sdk = (REPO / _SDK).read_text(encoding="utf-8").splitlines()
+    # `strict=True`: the regex has exactly two groups and the tuple exactly two needles, so a
+    # mismatch is a defect in this arm, not a shorter iteration to be tolerated (ruff B905 red at
+    # `46d7eddbc8` — the lane that landed this guard with a bare `zip` left `ruff check .` failing).
     for n, needle in zip(addendum.groups(),
                          ("subject_binding_available,",
-                          "and not subject_binding_available(graph):")):
+                          "and not subject_binding_available(graph):"),
+                         strict=True):
         assert sdk[int(n) - 1].strip() == needle, (
             f"the addendum's consume pair cites sdk.py:{n}, which reads "
             f"{sdk[int(n) - 1].strip()!r}, not {needle!r} — re-derive the pair by content "
