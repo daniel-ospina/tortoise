@@ -70,7 +70,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:15701-15707`` and
 ``result["vet"]`` at ``:15711-15715``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:21474``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:21496``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -276,9 +276,9 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/projection/edges.py:3032-3057``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:3058-3083``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:21872`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:21894`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -293,7 +293,7 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/projection/edges.py:3032-3057 link_source_to_event, reached from "
+    "tortoise/projection/edges.py:3058-3083 link_source_to_event, reached from "
     f"the capture path at {LINK_SOURCE_CITE} "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
@@ -3314,7 +3314,7 @@ def _a4_pointkind(projection) -> dict:
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:14389-14391`, `# Ensure pointKind is present
+    with no kind — `tortoise/projection/__init__.py:14669-14671`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
     `projection/entities.py:2979`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
