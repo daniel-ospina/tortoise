@@ -14120,15 +14120,15 @@ def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
     `test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach`.
 
     ⛔ And the last arm here is the DIRECT-CALL half (`#13447` review cycle 8, P3):
-    `_seam_module_calls`'s docstring justifies its own `name in bound` guard as belt AND
+    `_seam_module_calls`'s docstring justifies its own shadow check as belt AND
     braces, "because the caller already drops shadowed aliases through
     `_keep_shadowed_aliases` and this function is also called directly (its unit test,
     and any future caller) with a hand-fed map" — and nothing pinned that clause. The
-    mutant that DELETED the guard survived the whole file (measured: `278 passed, 2
+    mutant that DELETED the check survived the whole file (measured: `278 passed, 2
     skipped` either way), so the docstring named a witness its own test did not supply.
-    The shape below is the only one the guard can save: a node whose own `def` binds the
+    The shape below is the only one the check can save: a node whose own `def` binds the
     receiver, plus a map that still RESOLVES it — exactly what a caller passing its own
-    hand-fed map does. Deleting the guard reds it (`{'encode'}` vs `set()`).
+    hand-fed map does. Deleting the check reds it (`{'encode'}` vs `set()`).
     """
     positive = ast.parse(
         "derived_embedding.encode('Acme')\n"
@@ -14162,22 +14162,32 @@ def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
         "my_derived_embedding.encode('Acme')\n"
         "my_derived_embedding.derive_row('Object', {})\n"
     )
-    assert probe._seam_module_calls(negative, {}) == set(), (
+    assert probe._seam_module_calls(negative, {
+        # ⛔ The map is what makes this arm SENSITIVE to the spelling rules it names (`#13447`
+        # review cycle 10, P3): with `{}` the function returns `set()` for every receiver as soon
+        # as `aliases.get(name) is None`, so re-adding containment (`SEAM_MODULE in name`) or the
+        # `"_" + SEAM_MODULE` suffix BEFORE the map lookup left this assertion green — it only
+        # discriminated the pre-cycle-7 code that ignored the map entirely. These two entries
+        # RESOLVE (so the map lookup passes and the binding test is reached) but to a module that
+        # is not the seam, which is exactly the state a spelling rule cannot survive.
+        "derived_embedding_client": "client_lib",
+        "my_derived_embedding": "client_lib",
+    }) == set(), (
         "a receiver that only CONTAINS the seam module's name was credited as a "
         "gated reach of `encode_for_row` — the census then reports the writer as "
         "covered and it owes no declaration (the fail-open direction)")
 
     # …and the DIRECT-CALL arm: the docstring's belt-and-braces clause, made falsifiable.
-    # ⛔ `name in bound` is unreachable THROUGH `_embedding_writers` (that caller drops the
+    # ⛔ The shadow check is unreachable THROUGH `_embedding_writers` (that caller drops the
     # alias first), so the only witness is a direct call with a map that still resolves the
-    # name while the NODE binds it. Delete the guard and this returns `{"encode"}`.
+    # name while the NODE binds it. Delete the check and this returns `{"encode"}`.
     locally_bound = ast.parse(
         "def _w(derived_embedding):\n"
         "    return derived_embedding.encode('Acme')\n"
     ).body[0]
     assert probe._seam_module_calls(
         locally_bound, {probe.SEAM_MODULE: probe.SEAM_MODULE}) == set(), (
-        "the direct-call guard (`name in bound`) did not refuse a receiver the NODE binds "
+        "the direct-call shadow check did not refuse a receiver the NODE binds "
         "itself — a hand-fed map would then credit a local parameter as the module, which "
         "is the fail-open direction this docstring's belt-and-braces clause promises to "
         "close for every caller")
@@ -14248,6 +14258,35 @@ def test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach(shape, tmp_path)
         "{'e': derived_embedding.encode('x')})\n",
         encoding="utf-8")
 
+    # ⛔ NESTED-SCOPE rows (`#13447` review cycle 10, P2). The writer's OWN scope is not the only
+    # place a receiver is rebound: `_seam_module_calls` walks the WHOLE subtree, so a nested `def`'s
+    # parameter — or an assignment inside a nested body — binds the name only INSIDE that subtree.
+    # With the shadow read as "writer's own scope only" these two measured `gated` (outside
+    # `NEEDS_A_DECLARATION`: owing no declaration while never reaching the gate), so the assertions
+    # below are the rows that red; the shadow is threaded DOWNWARD instead, which is why the
+    # healthy control above stays `gated` (a legitimate closure that reaches the module).
+    nested_sources = {
+        "nested_parameter": (
+            "from tortoise import derived_embedding\n"
+            "def _w_np(proj):\n"
+            "    def helper(derived_embedding):\n"
+            "        return derived_embedding.encode('x')\n"
+            "    return proj.g.query('MATCH (n:Point) SET n.embedding = $e', "
+            "{'e': helper(None)})\n"
+        ),
+        "nested_assignment": (
+            "from tortoise import derived_embedding\n"
+            "def _w_na(proj):\n"
+            "    def helper():\n"
+            "        derived_embedding = make()\n"
+            "        return derived_embedding.encode('x')\n"
+            "    return proj.g.query('MATCH (n:Point) SET n.embedding = $e', "
+            "{'e': helper()})\n"
+        ),
+    }
+    for module_name, source in nested_sources.items():
+        (tmp_path / "tortoise" / f"{module_name}.py").write_text(source, encoding="utf-8")
+
     writers = probe._embedding_writers(tmp_path)
     # ⛔ The healthy control: the module import IS a reach, so the row below is a binding verdict
     # and not a resolver that credits nothing.
@@ -14261,6 +14300,20 @@ def test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach(shape, tmp_path)
         "writer owes no declaration while never reaching the gate (the fail-open direction)")
     assert writers["tortoise.shadow::_w"]["callee"] != probe.SEAM_CALL, (
         "the shadowed receiver was credited to the seam anyway — the binding was not consulted")
+
+    # ⛔ The nested rows: the SAME rebinding, one scope down. Each module is its own file (see the
+    # healthy-control note above), so the module-wide alias pass cannot muddy the verdict.
+    for module_name, writer_name in (("nested_parameter", "_w_np"),
+                                     ("nested_assignment", "_w_na")):
+        nested_kind = writers[f"tortoise.{module_name}::{writer_name}"]["kind"]
+        assert nested_kind in ("unresolved_write", "ungated"), (
+            f"a receiver rebound in a NESTED scope ({module_name}) was credited as a gated reach "
+            f"of `encode_for_row` (measured {nested_kind!r}) — the shadow is threaded DOWNWARD, so "
+            f"a nested parameter/assignment must not credit the writer, which otherwise stops "
+            f"owing a declaration while never reaching the gate")
+        assert writers[f"tortoise.{module_name}::{writer_name}"]["callee"] != probe.SEAM_CALL, (
+            f"the {module_name} receiver was credited to the seam anyway — the nested scope's "
+            f"binding was not consulted")
 
 
 def test_every_aliasable_name_has_a_canonical_order_entry() -> None:

@@ -1111,14 +1111,25 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
       `SEAM_MODULE` is enrolled in `_ALIASABLE_CALL_NAMES` / `_ALIAS_HOMES` so `_import_aliases`
       resolves `from tortoise import derived_embedding` and `from . import derived_embedding`
       unchanged, and `_imports_that_REBIND` counts a foreign import as the rebinding it is;
-    * the receiver is NOT bound in the writer's own scope (`_locally_bound`) — belt AND braces,
-      because the caller already drops shadowed aliases through `_keep_shadowed_aliases` and this
-      function is also called directly (its unit test, and any future caller) with a hand-fed map.
-      That second half is PINNED, not assumed: the DIRECT-CALL arm of
+    * the receiver is NOT bound where the call sits — belt AND braces, because the caller already
+      drops shadowed aliases through `_keep_shadowed_aliases` and this function is also called
+      directly (its unit test, and any future caller) with a hand-fed map. That second half is
+      PINNED, not assumed: the DIRECT-CALL arm of
       `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`
       hands this function an alias map that still RESOLVES the receiver while the node's own `def`
-      binds it, which is the one shape this guard can save (`#13447` review cycle 8, P3 — the
-      mutant that deleted the guard survived every other row in the file).
+      binds it, which is the one shape this check can save (`#13447` review cycle 8, P3 — the
+      mutant that deleted it survived every other row in the file).
+
+    ⛔ "where the call sits" — NOT "in the writer's own scope" (`#13447` review cycle 10, P2,
+    measured). This walk descends the whole subtree, so a nested `def`'s PARAMETER bound only
+    inside it, and reading the writer's own scope once left the same rebinding forgiven one scope
+    down: a writer with `def helper(derived_embedding): return derived_embedding.encode('x')` and
+    an own ungated write clause measured `gated` — outside `NEEDS_A_DECLARATION`, i.e. owing no
+    declaration while never reaching the gate. The shadow is therefore threaded DOWNWARD per scope
+    (the shape `_named_callees` already uses, and for the same reason: "own scope only" would drop
+    the legitimate closure). Pinned — in both directions — by
+    `tests/test_dod_5090_probe.py::test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach`'s
+    nested rows.
 
     An UNRESOLVED receiver — including the shape no rule in this file resolves
     (`import tortoise.derived_embedding as de`, an `ast.Import`, which `_import_aliases` does not
@@ -1139,28 +1150,45 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     """
     import ast
 
-    # ONE binding question per writer, asked once rather than per call.
-    bound = _locally_bound(node)
     out: set[str] = set()
-    for call in ast.walk(node):
-        if not isinstance(call, ast.Call):
-            continue
-        func = call.func
-        if not isinstance(func, ast.Attribute) or func.attr not in SEAM_MODULE_CALLS:
-            continue
-        receiver = func.value
-        name = getattr(receiver, "id", None)
-        if name is None:
-            continue
-        # ⛔ `aliases.get(name)` with NO bare-name fallback: `aliases.get(name, name)` made the
-        # resolution a no-op, so the guard below could never fire for a name the writer never
-        # imported — the only case that matters (`#13447` review cycle 7, P2).
-        canonical = aliases.get(name)
-        if canonical is None or canonical.split(".")[-1] != SEAM_MODULE:
-            continue
-        if name in bound:
-            continue
-        out.add(func.attr)
+
+    def visit(current: ast.AST, shadowed: frozenset[str]) -> None:
+        """Walk the subtree, adding each NESTED scope's own bindings for ITS subtree only.
+
+        ⛔ The shadow is threaded DOWNWARD, never read as "own scope only" (`#13447` review cycle
+        10, P2 — measured): the previous body asked `_locally_bound(node)` ONCE and then walked
+        with `ast.walk(node)`, which descends into nested `def`/`lambda` bodies, so the SAME
+        rebinding this file reds one scope up was silently forgiven one scope down —
+
+            def _w(proj):
+                def helper(derived_embedding):     # binds in `helper` only
+                    return derived_embedding.encode('x')
+                return proj.g.query('MATCH (n:Point) SET n.embedding = $e', …)
+
+        measured `('gated', 'encode_for_row')`, i.e. outside `NEEDS_A_DECLARATION`: the writer
+        stopped owing a declaration while never reaching the gate. `_named_callees` already
+        threads its shadow the same way, and its docstring states the reason ("the fix is NOT
+        'own scope only'" — that would drop the legitimate closure).
+        """
+        if isinstance(current, _NEW_SCOPE_NODES):
+            # Includes the ROOT when it is itself a writer `def`, so the seeding below is not the
+            # only path — and it is idempotent, because the two sets are the same question.
+            shadowed = shadowed | frozenset(_own_scope_bindings(current))
+        if isinstance(current, ast.Call):
+            func = current.func
+            if isinstance(func, ast.Attribute) and func.attr in SEAM_MODULE_CALLS:
+                name = getattr(func.value, "id", None)
+                if name is not None and name not in shadowed:
+                    # ⛔ `aliases.get(name)` with NO bare-name fallback: `aliases.get(name, name)`
+                    # made the resolution a no-op, so this guard could never fire for a name the
+                    # writer never imported — the only case that matters (`#13447` cycle 7, P2).
+                    canonical = aliases.get(name)
+                    if canonical is not None and canonical.split(".")[-1] == SEAM_MODULE:
+                        out.add(func.attr)
+        for child in ast.iter_child_nodes(current):
+            visit(child, shadowed)
+
+    visit(node, frozenset(_own_scope_bindings(node)))
     return out
 
 
