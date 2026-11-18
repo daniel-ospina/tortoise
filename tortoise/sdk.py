@@ -6653,21 +6653,27 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     # `update_knowledge(<fact>, status='archived')` -> `deprecated`),
                     # i.e. the
                     # first thing this message told a Point caller to do, the
-                    # same door then refused. Measured in the new suite
-                    # (`test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal`):
-                    # the pre-fix text raised `update_entity refused the status
-                    # transition 'live' -> 'archived'` from the call it
-                    # prescribed. `deprecated` is the DECLARED transition from a
-                    # live state on both carriers — `_ALLOWED_TRANSITIONS['live']`
-                    # is `{deprecated, superseded}` — so it is named first, and
-                    # `retracted`/`archived` are disclosed as the spellings that
-                    # normalise to it. ⛔ `archived` was called "RESERVED on Points"
-                    # here until v3.37 deleted that §5 row (review round 3).
+                    # same door then refused.
+                    # ⛔ v3.37 ALSO CORRECTED THE REASON THIS COMMENT GAVE, measured
+                    # at this head: the refusal above is the #13035
+                    # goalState-coherence arm, NOT `update_entity refused the
+                    # status transition 'live' -> 'archived'` — that message is
+                    # UNREACHABLE for `archived`, because `_read_caller_status`
+                    # normalises the word to `deprecated` at `:53508` before
+                    # `_ALLOWED_TRANSITIONS` is read at `:53601`. And `retracted`
+                    # is not a declared target of `live` either: it is a spelling
+                    # that normalises to `deprecated`, which IS a declared target.
+                    # So the message prescribes the DECLARED word on each carrier,
+                    # discloses the spellings, and names both fields — instead of
+                    # prescribing a spelling and calling the canonical word
+                    # unperformable (the sibling arm's own fix, `364ea06d`).
                     "status='archived' on an Object/Subject goal, or "
-                    "status='deprecated' on a :Point goal (the transitions "
-                    "declared from a live state are {deprecated, superseded}; "
-                    "'retracted' and 'archived' are the spellings that normalise "
-                    "to it)")
+                    "status='deprecated' on a :Point goal (the transitions this "
+                    "door DECLARES from a live state are "
+                    "{deprecated, superseded}; 'retracted' and 'archived' are "
+                    "the spellings that normalise to it, so either lands "
+                    "the same ending) — and set BOTH fields: the word ends the "
+                    "goal and `goalState` never ends it alone (#13035)")
                 + f";\n"
                 f"  2. drop the ending from `goalState` — pass a word that "
                 f"describes a live commitment {sorted(GOAL_LIVE_STATES)} (or "
@@ -6824,15 +6830,17 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             f"over it: the node keeps the ending it had.\n"
             f"Two ways to fix it, either is accepted:\n"
             # ⛔ ROUND 22, findings 1 and 2: the same two defects the arms above
-            # fixed, in the family's LAST refusal. `supersededBy` holds a NAME, and
-            # the Point route is the canonical `deprecated` — the "`archived` is
-            # reserved on a Point" clause this carried was false from v3.37
-            # (review round 3: `_ALLOWED_TRANSITIONS['live']` is `{deprecated,
-            # superseded}` and `archived` normalises to `deprecated`).
+            # fixed, in the family's LAST refusal. `archived` is not a DISTINCT
+            # word on a `:Point` — since ONTOLOGY v3.37 §5 carries no `archived`
+            # row and the word is only `deprecated`'s write-side synonym, so a
+            # write of it is ACCEPTED and STORED as `deprecated` (measured at this
+            # head; the "reserved on Points" row this clause used to cite was
+            # deleted) — and `supersededBy` holds a NAME.
             f"  1. keep the ending — pass status='archived' with "
             f"goalState='abandoned' on an Object/Subject goal, or "
             f"status='deprecated' with goalState='abandoned' on a :Point goal "
-            f"('retracted'/'archived' are the spellings that normalise to it); or "
+            f"('retracted' and 'archived' are its legacy spellings, normalised "
+            f"to `deprecated` and landing the same ending); or "
             f"status='superseded' plus supersededBy=<successor name> (the column "
             f"holds the successor's name, not its id);\n"
             f"  2. if this is genuinely a NEW goal, give it its own id "
