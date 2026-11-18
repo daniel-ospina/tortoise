@@ -35,8 +35,11 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 > **Changelog v3.38 (2026-11-18 — `confidence` is EP's output, not an input; "Facts = confidence 1.0" withdrawn):**
 >
-> **Owner approval of the exact change:** 2026-11-18, given in-session, after the EP-across-entities audit
-> (#13563) measured the behaviour. The artifact is the text itself.
+> **Owner approval of the exact changes:** the owner ruled on **2026-11-18, in-session**, on the
+> EP-across-entities audit (#13563), and the ruling is relayed onto **#11824** as comment `6993778525`:
+> *"'Facts = confidence 1.0' (ONTOLOGY:105) is a stale sentence."* Citing the comment is what lets a
+> reader resolve the approval instead of being told it is the text itself — the form the owner rejected
+> for v3.36 (comment `6965147045`).
 >
 > **What was wrong.** §3's Principle ended with *"Facts = confidence 1.0."* The audit measured the opposite:
 > an `:Object` created `confidence=1.0` is **served** at 1.0, **seeded** at `Beta(1,1)` = 0.5 (EP reads
@@ -54,11 +57,13 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >
 > **What did NOT change:** every other §3 statement, the §4 metadata rows (which already described
 > `confidence` as the posterior mean — they were right, this sentence disagreed with them), and every
-> stored value. Whether entity declared priors should exist at all remains open (#9063).
+> stored value. Whether entity declared priors should exist at all is tracked by **no open issue** —
+> the code cites #9063, which closed COMPLETED on 2026-10-20 and is about the calibration gate, not
+> about entity declared priors. Recorded here so silence is not read as a decision.
 >
 > **Residue, named not absorbed:** the audit also measured that an ended node still **votes** when it is an
 > operator *input* (`ep.py:2258` reads `status` + the `outdated` flag only, while the predicate it mirrors
-> reads four conditions). That is a code defect with its own issue; it is not a sentence to rewrite.
+> reads four conditions). That is a code defect, tracked by **#13450**; it is not a sentence to rewrite.
 >
 > **Changelog v3.37 (2026-11-17 — §5's vocabulary table states the model, not the code; the last six-word restatements go):**
 >
