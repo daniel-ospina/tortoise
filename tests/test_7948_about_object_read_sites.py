@@ -3600,14 +3600,17 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # parser that produces `attributed`: a PARTIAL door-kind parse regression removes
     # entries from both sides, so the equality below cannot see it (the pre-#10226 arm
     # carried `>= 31` and this merge lost it). The numeral is HAND-COUNTED on purpose —
-    # a derived floor would inherit exactly the blindness it is here to catch. It is 28
+    # a derived floor would inherit exactly the blindness it is here to catch. It is 29
     # at this head: the table lost its SDK traversal row when that method was retired
     # (31 -> 30), #11609 batch 1 archived `tortoise_backfill_v25`, taking row 32's
-    # MCP door with it (30 -> 29), and #12901 retired the row's surviving SDK door
-    # `backfill_v25` itself (29 -> 28). A table change moves this numeral with the table.
-    assert attributed >= 28, (
+    # MCP door with it (30 -> 29), #12901 retired the row's surviving SDK door
+    # `backfill_v25` itself (29 -> 28), and #13448 registered row 45
+    # (`ended.py::build_cypher`), whose ONE door is the SDK's (28 -> 29 — its MCP twin
+    # cannot pass `ended_scope`, so it is not a door; see that row's reach cell).
+    # A table change moves this numeral with the table.
+    assert attributed >= 29, (
         f"only {attributed} door attributions were attempted across the "
-        f"customer-callable rows, and this arm cross-checks against NO fewer than 28 "
+        f"customer-callable rows, and this arm cross-checks against NO fewer than 29 "
         f"hand-counted occurrences — a partial `_doors()` regression (one door KIND "
         f"resolving for only some of its rows) subtracts from `attributed` and "
         f"`expected` alike, so this floor is the only thing that reds on it"
@@ -3930,12 +3933,14 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
 _13_8_ENUMERATION = (
     "sites are customer-callable",
     # ⚠️ the marker follows the sentence that ACTUALLY starts the tail — it was re-worded to
-    # "Outside this seventeen, ..." to stop a re-verifier counting those five inside the
-    # enumeration (#12901 moved the numeral 18 -> 17 when it retired row 32, so this marker
-    # moves WITH it). The numeral in it is a LOCATOR, not the figure under test: the figure is
+    # "Outside this eighteen, ..." to stop a re-verifier counting those five inside the
+    # enumeration — the numeral in it moves WITH the count (it went 18 -> 17 when #12901
+    # retired row 32, and 17 -> 18 when #13448 added the `ended.py::build_cypher` row —
+    # NOT #8542, whose merged commit `8a04a96630` does not carry that row), so this
+    # marker tracks it). The numeral is a LOCATOR, not the figure under test: the figure is
     # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
     # with it cannot make a wrong count pass.
-    "Outside this seventeen, two are default-ON on the ingestion path",
+    "Outside this eighteen, two are default-ON on the ingestion path",
 )
 
 #: `` `token` `` — the unit §13.8 names a reader (or a door) with.
