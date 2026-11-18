@@ -1367,19 +1367,15 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # `run_vector_query`, which moves every row below: +25 for the rows above that
     # function's body, +55 for the rows after it. Re-derived against the live file
     # again — the pin caught it, which is what it is for.
-    # ⛔ THIRD RECURRENCE of the same class (#12604): #13290 moved `run_fts_query`
-    # 2866 -> 2886 and the brief's Cypher span 3078 -> 3098, updated the BRIEF and
-    # the code, and left THIS pin behind — so the row reds with "§1 no longer
-    # cites", not with a line-number disagreement. That is the failure mode the
-    # pin exists for and it is why both halves move together. Re-derived by
-    # `grep -nF <symbol>` against the live file at this head, never by adding a
-    # constant (the #12536 lesson): 2886 / 3098 (span 3098-3107) / 2728 / 4904.
     ("tortoise/search_engine.py", 2886, "def run_fts_query(",
      "`tortoise/search_engine.py:2886`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
-    # moves the two LATE rows and only them: the FTS call +1 (3038 -> 3039,
-    # span 3039-3048) and the rank loop +2 (4544 -> 4546). Re-derived against
-    # the live file after the forward-merge, not nudged by a constant.
+    # moves the two LATE rows and only them: the FTS call and the rank loop.
+    # Re-derived against the live file after the forward-merge, not nudged by a
+    # constant. ⛔ Name NO line number in THIS comment (#12731): a number here
+    # drifts with every edit and reads as authoritative, and the tuples below
+    # are the only place this block may state one — the historical numbers in
+    # the rows ABOVE are the record of a drift, not a locator to trust.
     ("tortoise/search_engine.py", 3098, "CALL db.idx.fulltext.queryNodes",
      "`:3098-3107`"),
     ("tortoise/search_engine.py", 2728, "def recency_tie_clause(",

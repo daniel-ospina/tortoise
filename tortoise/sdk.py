@@ -45697,7 +45697,7 @@ class TortoiseSDK:
         query_vec = None
         _vec_reason: str | None = None
         if strategies.get("vector") and query and query.strip():
-            from .embeddings import EmbeddingModel
+            from .embeddings import READ_EMBED_BUDGET_S, EmbeddingModel
             from .exceptions import EmbedderUnavailableError
             # #10893: stage marks for the wait-bound breach. `mark` is a NO-OP
             # when no timeline is bound (every CLI/test/SDK-user process), so
@@ -45710,18 +45710,56 @@ class TortoiseSDK:
             # them is how the two got argued as one thing on #10893.
             _mark_read_stage(STAGE_EMBED_GET)
             model = None
-            try:
-                model = EmbeddingModel.get()
-            except EmbedderUnavailableError:
-                raise  # #5275: REQUIRED — fail loud, never an FTS-only read
-            except Exception:  # noqa: BLE001, RUF100
-                model = None
-            if model is None:
+            # ⛔ #13528 — THE ACQUIRE IS BOUNDED, AND IT IS BOUNDED HERE. This
+            # used to be a bare ``EmbeddingModel.get()``, which blocks for the
+            # WHOLE one-time load (13.5 s on a warm model cache, ~57 s cold) and
+            # — when a load is already in flight — blocks on the class LOCK the
+            # loading thread holds across ``__init__``, so the caller's own
+            # ``load_timeout`` could not bound it. Production measured the result
+            # as ``stage=embed_get`` with HTTP=504 at t=11.52 s against this
+            # lane's 8 s bound.
+            #
+            # The cost was never one request's latency: the read lane is 8 daemon
+            # workers (``monitoring.CONTROL_PLANE_READ_WORKERS``), so every
+            # worker parked in that lock makes the reads behind it QUEUE — the
+            # ``pre_handler: 9295.0`` in the same measurement, i.e. reads that
+            # had not started yet paying the wait before their first mark.
+            #
+            # ⛔ THE DECLINE IS THE SAME SHAPE THE READ ALREADY HAS: with no
+            # model the vector strategy is never submitted and the leg trace
+            # records WHY (``ran=False``, ``reason=<the cause>``), which
+            # ``search_engine.declared_degraded_read`` turns into the read's
+            # declared single-leg marker. Nothing new is traded — a read inside
+            # the cold window is keyword-only, exactly as it is on a host with no
+            # embeddings extra, and the dense leg returns on the next read after
+            # the load lands.
+            _read_decline = EmbeddingModel.await_read_ready_reason(
+                READ_EMBED_BUDGET_S)
+            if _read_decline is not None:
+                # Not warm and the read declined to wait. It still goes through
+                # the ONE absent exit, so ``TORTOISE_EMBEDDING_MODEL_REQUIRED``
+                # (#4861/#5275) keeps failing LOUD rather than degrading
+                # silently, and the refusal names the cause this read actually
+                # resolved (a load still IN FLIGHT has recorded no failure of its
+                # own, so ``_last_failure_kind`` alone would answer the
+                # designed-absence term).
+                EmbeddingModel._unavailable(
+                    context="read: embedder not warm within the read's budget",
+                    kind=_read_decline)
+                _vec_reason = _read_decline
+            else:
+                try:
+                    model = EmbeddingModel.get()
+                except EmbedderUnavailableError:
+                    raise  # #5275: REQUIRED — fail loud, never an FTS-only read
+                except Exception:  # noqa: BLE001, RUF100
+                    model = None
+            if model is None and _read_decline is None:
                 # #5275: a present-but-BROKEN embedder (load_failed /
                 # load_timeout) is not the designed absence the
                 # ``no_embedder`` term names — carry the recorded cause.
                 _vec_reason = EmbeddingModel.absent_reason()
-            else:
+            elif model is not None:
                 _mark_read_stage(STAGE_EMBED_ENCODE)
                 try:
                     query_vec = model.encode([_dense_query])[0].tolist()
