@@ -51,7 +51,7 @@ envelope. The names stay in `PROTECTED` — a stale reason is a reason to report
 re-decide, never to retire quietly.
 There is no "no arm on the container" residue left to account for: `#13556` retired
 `create_point` / `diary_write` and `#13550` retired `compute_confidence` / `recall`, so that
-class is **empty** on `main` (its own comment records it, `:216-223`). The 9
+class is **empty** on `main` (its own comment records it, `:216-222`). The 9
 `NO_CONTAINER_YET` are a separate population, measured in §1.4 because the brief asks for
 them; they are not `PROTECTED` and are not part of the count above.
 
