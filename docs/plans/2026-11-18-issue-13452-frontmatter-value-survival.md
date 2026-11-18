@@ -15,7 +15,8 @@ subjects.team: epistemic-team
 > **For Pi:** `executing-plans`, one task. Both halves are small; the mutant proof is the
 > load-bearing evidence, not the diff size.
 
-**Status:** Draft (pre PLAN-VERIFY)
+**Status:** Implemented — PLAN-VERIFY closed at 3 cycles (the standard cap, budget disclosed in §8);
+PROVE evidence is measured in §7.
 **Complexity:** Standard (tier=Standard)
 **Goal:** quotes restored on 8 `aboutObjects` values, and the `docs/research/` frontmatter arm
 asserts **value survival** rather than key presence, so the class cannot silently re-land.
