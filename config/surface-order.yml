@@ -236,6 +236,14 @@ family_rank:
 # unmoved rows are the check's own output against the merged registry. ⛔ The two waves'
 # notes are kept in sequence rather than rewritten into one: each records the measurement
 # IT made against its own base, and P1's `create` 10 -> 8 arithmetic is the input P2 saw.
+# #11609 REST_SPEC PAIR (P6): a further 44 -> 42, and TWO counts moved with the two doors
+# that left: `find` 3 -> 2 (`issue_insight` -> `search_knowledge(mode="issue_insight", ...)`)
+# and `trace` 2 -> 1 (`session_context` -> `check_confidence(session=True)`). Again no
+# container row arrives — both arms already existed on tools that were already advertised —
+# so no other keyword can move. ⛔ The reason these two doors leave is a SURFACE one and not
+# a shape one: lane P4 measured that no product module derives a route from a registry row
+# (`docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §1.5), so retiring the row deletes no
+# REST route. The eight unmoved rows are the check's own output against the merged registry.
 baseline_counts:
   fetch: 9
   create: 8
@@ -243,7 +251,7 @@ baseline_counts:
   check: 5
   operate: 2
   update: 5
-  find: 3
+  find: 2
   delete: 4
   link: 2
-  trace: 2
+  trace: 1

@@ -824,9 +824,12 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # arrives: 60 + 2 = 62, matching `counts.retired` at that merge.
     # 62 -> 64: #11609 P2's CONFIDENCE-ARMS wave retires `compute_confidence` and `recall`
     # forward into `tortoise_check_confidence`, which was already advertised — two more rows
-    # gain a `use_instead` and no container row arrives: 62 + 2 = 64, which is the count
-    # `counts.retired` and Part B's own header state at THIS head.
-    assert len(retired) == 64, f"expected 64 retired rows, got {len(retired)}"
+    # gain a `use_instead` and no container row arrives: 62 + 2 = 64.
+    # 64 -> 66: #11609 P6's `rest_spec` pair (`issue_insight`, `session_context`) retires into
+    # arms `search_knowledge` / `check_confidence` already carried — again two more rows gain a
+    # `use_instead` and no container row arrives: 64 + 2 = 66, the count `counts.retired` and
+    # Part B's own header state at THIS head.
+    assert len(retired) == 66, f"expected 66 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "

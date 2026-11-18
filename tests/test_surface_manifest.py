@@ -405,8 +405,9 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "canonical-mcp-tools.md's parenthetical stopped stating a wave's subtraction and its "
         "result; that is how the movement this container's own arithmetic records is told")
     # ⛔ ONE CLAUSE PER WAVE, IN ORDER, AND THE LAST ONE IS THE HEAD. The record has grown
-    # four times now (the three container waves, then the door wave, then #11609 lane P1's
-    # POINT/DIARY wave, then #11609 P2's confidence-arms wave), and each append left the
+    # five times now (the three container waves, then the door wave, then #11609 lane P1's
+    # POINT/DIARY wave, then #11609 P2's confidence-arms wave, then #11609 P6's `rest_spec`
+    # pair), and each append left the
     # previous clause stating an INTERMEDIATE figure — so binding any single clause to `live`
     # is a false RED on a correct record the next time it grows (measured: P1's `48 − 2 = 46`
     # was bound by name and went stale the moment P2 appended `−2 = 44`). The chain is
@@ -5310,7 +5311,13 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # already advertised; the arms are PARAMETERS on it (`recompute=` / `recall=`), so again
     # the live delta is exactly −2 with no `+ n` term and no SDK movement — the container
     # grew parameters, never a method.
-    assert live["mcp"] == manifest["counts"]["tools"] == 44
+    # #11609 REST_SPEC PAIR (#11609 P6): a further 44 -> 42 — `tortoise_issue_insight` and
+    # `tortoise_session_context` retire FORWARD into arms the containers already had
+    # (`search_knowledge(mode="issue_insight")`, `check_confidence(session=True)`). Their
+    # recorded reason was a SURFACE one (`rest_spec` ⇒ "the row IS the REST route") and lane
+    # P4 measured it FALSE — no product module derives a route from a registry row — so again
+    # the live delta is exactly −2 with no `+ n` term and no SDK movement.
+    assert live["mcp"] == manifest["counts"]["tools"] == 42
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

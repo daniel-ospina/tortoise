@@ -16,7 +16,7 @@ those are what this file measures:
      reach it — not by reading a docstring. A container that answers with something else
      is the failure mode this wave exists to avoid: it would delete the door and keep the
      name, with no capability behind either.
-     ⛔ ALL SEVEN, and the two shapes differ on purpose:
+     ⛔ ALL ELEVEN, and the shapes differ on purpose:
        · the three READ doors (`get_session`, `list_batch`, `get_cross_lens_candidates`)
          are substituted at their container's own METHOD — the pointer's `type=`/`kind=`
          is what selects the arm, so the read is measured through `tortoise_get_entity` /
@@ -54,12 +54,12 @@ THAT UNBLOCKS IT, not silently:
     leave the held list only in the batch that makes its stated reason untrue, with a
     test behind it, not silently and not in two steps.
 
-  8 (envelope) + 3 (rest_spec) + 1 (paged destination) + 0 (no arm) + 9 (destination
-  not an MCP door yet) = 21, and `TestProtectedDoorsStayLive` reads EVERY one of the
-  first twelve back from the code — a name that lands in this list without an
-  assertion behind it is the shape the #13052 review caught.
+  8 (envelope) + 1 (rest_spec: `search` — the other two retired in lane P6) + 1 (paged
+  destination) + 0 (no arm) + 9 (destination not an MCP door yet) = 19, and
+  `TestProtectedDoorsStayLive` reads EVERY protected name back from the code — a name that
+  lands in this list without an assertion behind it is the shape the #13052 review caught.
 
-⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, AND 23 UNTIL LANE P2. `create_point` and
+⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, AND 19 UNTIL LANE P6. `create_point` and
 `diary_write` were two of those twenty-five, held by ONE reason each — "create_entity has
 no point arm" / "…no diary arm". That is the reason this file's own contract is written
 around: a door may leave `PROTECTED` only in the batch that makes its stated reason FALSE,
@@ -67,8 +67,11 @@ and lane P1 built the two arms (`create_entity` now dispatches `type="point"` an
 `type="diary"`) and retired both doors in the same change. `compute_confidence` and
 `recall` were two of the remaining twenty-three on the same terms, and lane P2 built
 their arms (`check_confidence(recompute=True)` / `check_confidence(recall=True)`) and
-retired both. The arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the
-population 25 became 23 became 21 — a count left at 25 would have been a table claiming
+retired both. `issue_insight` and `session_context` were two of the remaining twenty-one
+and left on the same terms in lane P6: their recorded reason (`rest_spec` — *the row IS the
+REST route*) was MEASURED FALSE by lane P4, and P6 is the batch that acts on that
+measurement. The arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the
+population 25 became 23 became 19 — a count left at 21 would have been a table claiming
 two names that are no longer live, which is the rot the population check exists to red.
 
 NO ARCHIVE ROW IS EXPECTED HERE. `archive/mcp-tools/` holds doors with NO destination
@@ -113,6 +116,13 @@ RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
     # arm defaults to `statement` when unsent; `tortoise_diary_write` pins `diary`.
     "tortoise_create_point": ("create_entity", 'type="point"'),
     "tortoise_diary_write": ("create_entity", 'type="diary"'),
+    # #11609 lane P6 — the `rest_spec` pair, retired by the batch that ACTED on lane P4's
+    # measurement that the reason was false (`docs/architecture/11609-STRUCTURAL-BLOCKERS.md`
+    # §1.5 / §2.2): no route is derived from a registry row, so the row going deletes no
+    # route. Each pointer names the container ARM that dispatches to the very method the
+    # door ran, so a migrating caller keeps the whole call.
+    "tortoise_issue_insight": ("search_knowledge", 'mode="issue_insight"'),
+    "tortoise_session_context": ("check_confidence", 'session=True'),
 }
 
 
@@ -208,8 +218,12 @@ PROTECTED = {
     "tortoise_check_structure": "list envelope (#8482, #10914)",
     "tortoise_calibrate_summary": "list envelope (#8482, #12951)",
     # `rest_spec`: retiring the registry entry deletes the REST route with it.
-    "tortoise_issue_insight": "rest_spec GET /v1/issue-insight",
-    "tortoise_session_context": "rest_spec GET /v1/context",
+    # ⛔ `tortoise_issue_insight` / `tortoise_session_context` USED to sit here on that
+    # basis and left in #11609 lane P6 — lane P4 measured the coupling FALSE (§1.5 of
+    # `docs/architecture/11609-STRUCTURAL-BLOCKERS.md`): no product module derives a route
+    # from a registry row, and both routes are hand-written decorators that reach the SDK
+    # directly, so the row going deletes nothing. The reason stays REAL for `search`,
+    # which is held by the envelope as well.
     "tortoise_search": "list envelope + rest_spec GET /v1/search",
     # The paged destination of two already-retired pointers.
     "tortoise_query": "paged destination of paginated_query/query_points_by_tag",
@@ -222,7 +236,7 @@ PROTECTED = {
     # grew the arms. Do not restore them without first removing those arms.
 }
 
-#: The other NINE of the registry block's 25: live, off the 27-target, and held for a
+#: The other NINE of the registry block's 19: live, off the 27-target, and held for a
 #: reason with no PROPERTY to assert — their recorded destination is not live on `main`
 #: yet, so there is no container to answer through and nothing that can be measured
 #: beyond "still live, still not retired" (which `TestProtectedDoorsStayLive` pins for
@@ -400,8 +414,8 @@ class TestEveryPointerResolvesInOneHop:
         48 minus 2 minus 2 — because each merged on its own; the pin is the SUM, which is
         what the merged registry actually advertises.
         """
-        assert len(TOOL_REGISTRY) == 44, (
-            f"live surface is {len(TOOL_REGISTRY)}, not 44 — these waves remove doors only "
+        assert len(TOOL_REGISTRY) == 42, (
+            f"live surface is {len(TOOL_REGISTRY)}, not 42 — these waves remove doors only "
             "(each builds ARMS on a container that already existed; no new tool ships), "
             "so the number can only fall")
 
@@ -441,6 +455,47 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             record("get_cross_lens_candidates"), raising=True)
         sdk.review_link_candidates("cross_lens", limit=3)
         assert [r[0] for r in reached] == ["get_cross_lens_candidates"], reached
+
+    @pytest.mark.parametrize("tool,arm_kwargs,door", [
+        ("tortoise_search_knowledge", {"title": "t", "mode": "issue_insight"},
+         "issue_insight"),
+        ("tortoise_check_confidence", {"session": True}, "session_context"),
+    ])
+    def test_a_rest_spec_door_lands_on_the_method_it_retired_into(
+            self, tool, arm_kwargs, door, monkeypatch):
+        """Lane P6's pair: the container ARM reaches the very method the door ran.
+
+        ⛔ WHY THIS IS THE ROW THE BATCH OWES. The two doors left `PROTECTED` on a
+        measured finding (`docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §1.5: no route
+        is derived from a registry row). That finding only makes the retirement SAFE if
+        the container arm answers what the door answered — otherwise the door's removal
+        deletes a capability and keeps a pointer to something a migrating caller cannot
+        use. Substituting the SDK METHOD is the seam: `search_knowledge(mode="issue_insight")`
+        dispatches to `issue_insight`, `check_confidence(session=True)` to
+        `session_context` — so a container that rerouted either arm reds HERE instead of
+        shipping a pointer that resolves to a different operation.
+
+        The MCP door is driven (not the SDK method directly) because the MCP door is what
+        a migrating caller's client actually calls, and `_safe`'s auth gate is stubbed to
+        dev mode for the same reason `test_get_entity_session_reaches_get_session` does:
+        this measures DISPATCH, not auth.
+        """
+        reached: list[tuple] = []
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+
+        def _fn(_self, *args, **kwargs):
+            reached.append((args, kwargs))
+            return {"door": door}
+
+        monkeypatch.setattr(TortoiseSDK, door, _fn, raising=True)
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
+        monkeypatch.setattr(ms, "_is_dev_mode", lambda: True)
+        token = ms._transport_mode.set("stdio")
+        try:
+            assert getattr(ms, tool)(**arm_kwargs) == {"door": door}
+        finally:
+            ms._transport_mode.reset(token)
+        assert len(reached) == 1, f"one call produced {len(reached)} reads: {reached}"
 
     def test_get_entity_session_reaches_get_session(self, monkeypatch):
         """The MCP door dispatches `type=` through `tortoise_get`, so measure THERE."""
@@ -603,14 +658,16 @@ class TestProtectedDoorsStayLive:
 
     ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
     named 25 live doors off the 27-target; TWO of them (`create_point`, `diary_write`) were
-    retired by #11609 lane P1 in the change that gave `create_entity` their arms, so the
-    population is 23 and FOURTEEN of them carry a retaining PROPERTY, and EVERY ONE is read
-    back from the code below — none is a name that only appears in the `PROTECTED` dict,
+    retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO more
+    (`issue_insight`, `session_context`) by lane P6 in the change that acted on P4's
+    measurement that their `rest_spec` reason was false, so the population is 19 and TEN
+    of them carry a retaining PROPERTY, and EVERY ONE is read back from the code below —
+    none is a name that only appears in the `PROTECTED` dict,
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052
     review F3):
 
       · 8 envelope doors — the `-> list[dict]` annotation, from `inspect.signature`;
-      · 3 `rest_spec` doors — the registry entry's own `rest_spec`;
+      · 1 `rest_spec` door (`search`) — the registry entry's own `rest_spec`;
       · 1 paged destination (`tortoise_query`) — the two retired pointers that name it,
         and the paging parameters those pointers and the live door agree on;
       · 0 "no arm on the recorded container" doors — the category is EMPTY, and that is
@@ -635,8 +692,8 @@ class TestProtectedDoorsStayLive:
 
     def test_the_two_tables_cover_the_enumerated_population_and_do_not_overlap(self):
         live = _live()
-        assert len(PROTECTED) == 12, (
-            f"PROTECTED holds {len(PROTECTED)}: the registry block names 12 doors with a "
+        assert len(PROTECTED) == 10, (
+            f"PROTECTED holds {len(PROTECTED)}: the registry block names 10 doors with a "
             "retaining property — if a door gained or lost one, move it in the batch that "
             "changed the code, not to wherever a green run lands")
         assert len(NO_CONTAINER_YET) == 9, (
@@ -645,8 +702,8 @@ class TestProtectedDoorsStayLive:
         both = set(PROTECTED) & set(NO_CONTAINER_YET)
         assert not both, f"a door is in both tables, which is a contradiction: {both}"
         population = set(PROTECTED) | set(NO_CONTAINER_YET)
-        assert len(population) == 21, (
-            f"the two tables cover {len(population)} names, not the 21 live names off the "
+        assert len(population) == 19, (
+            f"the two tables cover {len(population)} names, not the 19 live names off the "
             "27-target that the registry block enumerates — a live door dropped from both "
             "is a door with NO recorded reason to stay live")
         missing = sorted(n for n in population if n not in live)
@@ -679,7 +736,7 @@ class TestProtectedDoorsStayLive:
             "protected table in the batch that gives its container an envelope")
 
     @pytest.mark.parametrize("name", [
-        "tortoise_issue_insight", "tortoise_session_context", "tortoise_search",
+        "tortoise_search",
     ])
     def test_the_rest_route_is_still_what_keeps_it_live(self, name):
         entry = _live()[name]

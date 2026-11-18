@@ -234,13 +234,16 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > (#4282 Phase 2, the seven doors whose containers the three waves above had already
 > advertised) took the live surface 55 → 48**, then **#11609 lane P1 built the POINT and DIARY
 > arms on `create_entity` and took it 48 → 46** by retiring `tortoise_create_point` /
-> `tortoise_diary_write` into them, and then **#11609 P2's confidence arms took it 46 → 44 —
+> `tortoise_diary_write` into them, and then **#11609 P2's confidence arms took it 46 → 44**,
+> and then **#11609 P6's `rest_spec` retirements took it 44 → 42 —
 > which is the live advertised count at this head** (`uv run python tools/surface_manifest.py
 > check` is the live count). Each of those last two moves retires doors by GROWING a container
 > rather than by landing one: `tortoise_check_confidence` gained a `recompute=True` arm
 > (absorbing `tortoise_compute_confidence`) and a `recall=True` arm (absorbing
 > `tortoise_recall`), so the two doors' whole argument sets are parameters on a tool that was
-> already advertised and no container row arrives with them.
+> already advertised and no container row arrives with them. P6 is the other shape: its two
+> doors were held by a SURFACE claim (*the registry row IS the REST route*) that lane P4
+> measured FALSE, so they retire into arms the containers already had.
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
@@ -399,28 +402,45 @@ migrating recall caller's answer 5× with no error. The SDK count is NOT moved b
 both arms are parameters, not methods (it reads **105** at this head only because main's P3
 implemented its eleven approved names; the composed figure below is the authority).
 
+**Amended 2026-11-18** (execution record, #11609 P6 — the `rest_spec` pair):
+`tortoise_issue_insight` and `tortoise_session_context` retire FORWARD into container arms that
+already existed — `tortoise_search_knowledge(mode="issue_insight")` (which dispatches to
+`TortoiseSDK.issue_insight`, the very body the door ran) and
+`tortoise_check_confidence(session=True)` (which dispatches to `TortoiseSDK.session_context`).
+Their recorded reason was that *retiring the registry entry deletes its REST route with it*, and
+lane P4 measured that FALSE on `main` (`docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §1.5):
+`FastAPIRouterAdapter.register_all` — the only thing that would derive a route from a
+`rest_spec` — is instantiated in no product module, and `GET /v1/issue-insight` / `GET
+/v1/context` are hand-written decorators in `tortoise/hosted_api.py` that reach the SDK
+directly. **Both routes stay served, unchanged**; only the two MCP names leave `tools/list`
+(**44 → 42 advertised**) and keep answering through the #3883 shims (**64 → 66
+retired-forward**), so the SERVED population does not move — **108 rows (42 live + 66
+shims)** — and no parameter, schema or SDK method changes. status: unchanged (the surface
+remains the approved one) · principal: daniel-ospina · date: 2026-11-18.
+
 **Composed at this head — ALL THREE waves.** The records above describe waves that are now on the
 SAME tree, so they COMPOSE rather than replace one another, and no single wave's number is the
 answer (each was measured on its own base). They retire DISJOINT door sets — the READ/QUERY
 wave's nine, the WRITE/MUTATE wave's fourteen and the SOURCES/MINE/SESSION wave's seven share no
 name — so the composed surface is:
 
-- the surface is now **44 advertised tools** with **64** retired-forward entries: the three
-  container waves, the door-retirement wave, the POINT/DIARY wave and the confidence-arms wave
-  compose on ONE tree — each wave was measured on its own base, so
+- the surface is now **42 advertised tools** with **66** retired-forward entries: the three
+  container waves, the door-retirement wave, the POINT/DIARY wave, the confidence-arms wave and
+  the `rest_spec` pair compose on ONE tree — each wave was measured on its own base, so
   (68 − 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 with no container row arriving =
   48, then the POINT/DIARY wave's −2 with no container row arriving = 46, then the confidence-arms
-  wave's −2 with no container row arriving = 44, and
-  23 + 9 + 14 + 7 + 7 + 2 + 2 = 64) over a SERVED population of
-  **108** rows (44 live + 64 shims) — the registry total `tools/bridge_table.py --check` reports
+  wave's −2 with no container row arriving = 44, then the P6 wave's −2 with no container row arriving =
+  42, and
+  23 + 9 + 14 + 7 + 7 + 2 + 2 + 2 = 66) over a SERVED population of
+  **108** rows (42 live + 66 shims) — the registry total `tools/bridge_table.py --check` reports
   as `current (108 registry tools)` and `tools/mcp_rename_table.py` prints as
-  `served tools: 108` — and `surface_manifest.py check` re-derives the 44/64 split.
-  ⛔ The SERVED total is unchanged by those last two waves, which is the property that makes them
-  consolidations: four doors stopped being advertised and started being shims, and the capability
-  each named moved into an arm of a live tool (48 + 60 = 46 + 62 = 44 + 64 = 108).
+  `served tools: 108` — and `surface_manifest.py check` re-derives the 42/66 split.
+  ⛔ The SERVED total is unchanged by those last three waves, which is the property that makes them
+  consolidations: six doors stopped being advertised and started being shims, and the capability
+  each named moved into an arm of a live tool (48 + 60 = 46 + 62 = 44 + 64 = 42 + 66 = 108).
   ⛔ NOT `config/surface-order.yml`: that file is the ordering / keyword table (its header says
   the lint "must not be satisfiable by editing the rows it checks"), and its `baseline_counts`
-  sum to the **advertised 44**, not the served 108, so it cannot total a served population;
+  sum to the **advertised 42**, not the served 108, so it cannot total a served population;
 - **105 public SDK methods**, composed the same way, on a surface this wave does not touch:
   125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in,
   fourteen read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110
@@ -437,7 +457,7 @@ Three consequences for readers of the paragraph below, which is left as written 
 the 2026-10-27 ruling, not the current state:
 
 1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
-   **64** now (the composition this document works out below), and it is still 64 of 64 verified —
+   **66** now (the composition this document works out below), and it is still 66 of 66 verified —
    every pointer names a call that resolves.
 2. `tortoise_health` no longer redirects to `tortoise_overview`: that name is itself retired, and
    `RETIRED_USE_INSTEAD` resolves ONE hop (aliases are not transitive — the same limit GitHub's own
@@ -454,11 +474,12 @@ the 2026-10-27 ruling, not the current state:
    payload the array schema cannot otherwise express, while a `-> Any` container cannot carry it —
    retiring the door first would move the repair off the advertised path. The section and the door
    answer the same rows today.
-   `tortoise_issue_insight` is **not** part of this batch at all: its Phase-0.1 destination
+   `tortoise_issue_insight` is **not** part of this batch: its Phase-0.1 destination
    (`tools/bridge_table.py` `DESTINATION`) is **`search_knowledge`**, so it retires with that
    container. Folding it in here as a section would also have given one SDK method two different
-   `limit` defaults — the door's own `2` against a container-wide `50` — and it remains **live and
-   advertised** until `search_knowledge` lands.
+   `limit` defaults — the door's own `2` against a container-wide `50`. **It retired in #11609
+   lane P6**, into `tortoise_search_knowledge(mode="issue_insight", ...)`, which preserves the
+   door's own `limit=2` default at that arm.
 
 No SDK method is added, removed or renamed by that batch (150 public methods before and after); the
 SDK leg of this list is a separate change.

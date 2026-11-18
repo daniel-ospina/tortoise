@@ -48,7 +48,11 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from tortoise import mcp_server as ms
-from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter
+from tortoise.tool_registry import (
+    RETIRED_TOOL_REGISTRY,
+    TOOL_REGISTRY,
+    FastAPIRouterAdapter,
+)
 
 #: The eight doors `PROTECTED` holds for the #8482 array-envelope reason.
 ENVELOPE_DOORS = (
@@ -379,6 +383,22 @@ def _live() -> dict:
     return {t.name: t for t in TOOL_REGISTRY}
 
 
+def _any_entry(name: str) -> "object | None":
+    """The entry for `name` from EITHER registry — live first, then retired.
+
+    ⛔ The route pins below read this, not `_live()`, and that is the point of the
+    retirement they document (#11609 lane P6): a door may leave the ADVERTISED surface while
+    its hand-written REST route keeps serving, and the customer promise is about the ROUTE.
+    Reading only `_live()` would make these pins red the moment the door retired — which
+    would either block a correct retirement or, worse, invite deleting the pin that proves
+    the route survives. A name that is in NEITHER registry still fails, so this is not a
+    relaxation of "the row exists".
+    """
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+
+    return _live().get(name) or {t.name: t for t in RETIRED_TOOL_REGISTRY}.get(name)
+
+
 def _schema(name: str) -> dict | None:
     """The tool's advertised `output_schema`, read from the LIVE server.
 
@@ -643,22 +663,25 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
           defines the field, whose only permitted uses are inside `FastAPIRouterAdapter`.
           Without it, no other path derives a route either.
 
-    The registry records that *"retiring the registry entry deletes its REST route with it"*,
-    and `PROTECTED` lists three doors on that basis. It is not true on `main`:
+    The registry recorded that *"retiring the registry entry deletes its REST route with
+    it"*, and `PROTECTED` listed three doors on that basis. It is not true on `main`:
 
       · `FastAPIRouterAdapter` — the only thing that would derive a route from a `rest_spec` —
         is instantiated **nowhere** in product code (only in tests). Measured, below.
       · the served routes are hand-written decorators on FastAPI apps that call the **SDK**
         directly; `hosted_api.py` does not read `TOOL_REGISTRY` for routes at all.
 
-    So this pin asserts the fact that MAKES the reason stale. If a future change wires the
-    adapter (the #3875 direction), this test reds — which is correct: the reason would then
-    become true again and `PROTECTED` would deserve the coupling it claims.
+    So this pin asserts the fact that MAKES the reason stale — and #11609 lane P6 carried it
+    out: `tortoise_issue_insight` and `tortoise_session_context` retired FORWARD, and this pin
+    still reads their rows (from `RETIRED_TOOL_REGISTRY`) and their served routes, which is
+    how the customer promise is kept checkable after the registry row leaves `tools/list`.
+    If a future change wires the adapter (the #3875 direction), this test reds — which is
+    correct: the reason would then become true again.
     """
     from tortoise import hosted_api, selfhost_api
 
     method, path = spec
-    entry = _live().get(door)
+    entry = _any_entry(door)
     assert entry is not None, f"{door} is not advertised — re-derive this pin"
     assert entry.rest_spec is not None, (
         f"{door} lost its `rest_spec`, which is the only thing `PROTECTED` cites for it")
@@ -1008,7 +1031,7 @@ def test_the_serving_handler_reaches_the_sdk_not_the_mcp_door(door, spec):
       · the body DOES reach the SDK object (`sdk.<method>`), which is what makes the route
         independent of the MCP surface.
     """
-    entry = _live().get(door)
+    entry = _any_entry(door)
     assert entry is not None and entry.rest_spec is not None, (
         f"{door} is not advertised with a `rest_spec` — re-derive this pin")
     # ⛔ From the LITERAL table, not off the row: a row re-pointed to another METHOD shares
@@ -1104,8 +1127,10 @@ def test_register_all_would_derive_the_route_from_the_row():
     Two distinct facts — "this would happen" and "this does happen" — and collapsing them is
     how a dead adapter reads as the serving path (#3875).
     """
-    entries = [e for e in TOOL_REGISTRY if e.name == "tortoise_issue_insight"]
-    assert entries, "tortoise_issue_insight left TOOL_REGISTRY — re-derive this pin"
+    entries = [e for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+               if e.name == "tortoise_issue_insight"]
+    assert entries, (
+        "tortoise_issue_insight left BOTH registries — re-derive this pin")
     # The LITERAL table, not the row: a row whose method changed would make this pin assert
     # whatever the mutated row now says, and `/v1/context` shows the path is not unique per
     # verb, so both the method and the path have to come from the literal.
@@ -1115,15 +1140,22 @@ def test_register_all_would_derive_the_route_from_the_row():
         f"{entries[0].rest_spec.path}, not {method} {path}")
 
     full = _RecordingRouter()
-    all_handlers = {e.name: (lambda: None) for e in TOOL_REGISTRY if e.rest_spec is not None}
-    FastAPIRouterAdapter(full).register_all(TOOL_REGISTRY, all_handlers)
+    all_handlers = {e.name: (lambda: None)
+                    for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+                    if e.rest_spec is not None}
+    FastAPIRouterAdapter(full).register_all(
+        (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY), all_handlers)
     assert any(p == path and m == (method,) for p, m, _ in full.routes), (
         f"no {method} {path} route was registered by the adapter — {full.routes}")
 
     # …and without THIS row, with a handler for every surviving route-bearing row, exactly
     # that one route disappears. (A short handler map would register nothing at all and so
     # would not measure the removal.)
-    survivors = [e for e in TOOL_REGISTRY if e.name != entries[0].name]
+    # ⛔ The SERVED set, not `TOOL_REGISTRY`: #11609 lane P6 retired this row, and a probe
+    # over the advertised set alone would report the route as never derivable — a FALSE RED
+    # on a retirement whose whole premise is that the ROW still carries the route.
+    survivors = [e for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+                 if e.name != entries[0].name]
     without_row = _RecordingRouter()
     FastAPIRouterAdapter(without_row).register_all(survivors, all_handlers)
     assert not any(p == path and m == (method,) for p, m, _ in without_row.routes), (
