@@ -1888,7 +1888,7 @@ def test_the_lifecycle_clause_extraction_ignores_the_rest_of_the_row() -> None:
 def test_the_4_3_status_lifecycle_clause_must_be_quoted_verbatim_by_some_changelog_block() -> None:
     """A changelog that quotes a sentence the model does not carry is a false record.
 
-    ``docs/ONTOLOGY.md:41`` and ``ONTOLOGY-CHANGELOG.md:32`` both require
+    ``docs/ONTOLOGY.md:41`` and the changelog's own CRITICAL RULE both require
     *explicit approval of the exact changes*, and the approval is of **exact
     text** — so any block that quotes the §4.3 lifecycle sentence must quote the
     sentence the model carries, and a release that CHANGES that sentence must
@@ -2929,9 +2929,9 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     sentence said "3 of 39" and added that
     v3.33 — the block that landed `D2 — A` for this very question — *cites none*:
     BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:296` (issue
-    #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` at
-    `:334` — an accepted form, enumerated below, in the sentence the old text
-    contradicted. So v3.33 is not evidence for the narrow scope; the 36 blocks that
+    #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` — an
+    accepted form, enumerated below, in the sentence the old text contradicted.
+    So v3.33 is not evidence for the narrow scope; the 36 blocks that
     cite nothing are.)
     What the approval rule actually needs is that no
     release RECORDS owner-approved §4.3 text without naming where that approval
@@ -3758,3 +3758,58 @@ def test_seed_demo_graph_derives_its_session_id_from_the_declaration() -> None:
     body = ast.get_source_segment(src, fn) or ""
     assert "demo_session_id(org_id)" in body
     assert "session_demo_" not in body
+
+
+# ── a positional changelog pointer must still identify a block ─────────────
+
+
+_CHANGELOG_LINE_POINTER_RE = re.compile(r"ONTOLOGY-CHANGELOG\.md:(\d+)")
+
+
+def test_every_positional_changelog_pointer_lands_on_a_release_header() -> None:
+    """A positional pointer is only an IDENTITY if it lands on a block's header.
+
+    Successive review rounds on #13404 found the same class repeatedly: a line
+    pointer into `docs/ONTOLOGY-CHANGELOG.md` left un-re-based by a release that
+    inserted a block above it, and NOTHING reds when that happens, because this
+    suite resolves citations by CONTENT and a moved number still parses. The
+    measured worst case is why "just renumber it" is not enough: one pointer had
+    already been stale on `main` BEFORE the PR re-based it, so the arithmetic
+    that looked correct landed a second wrong number.
+
+    So the invariant is not "renumber carefully" — it is that a number must at
+    least still identify a BLOCK. A pointer that resolves to a release header
+    names something a reader can follow even after an insertion; a pointer that
+    resolves to a sentence inside some block (or to the CRITICAL RULE banner)
+    names nothing recoverable. The durable form is the one this repo already
+    records (`docs/00_index.md`: cited by SYMBOL, not by line, because a symbol
+    cannot re-stale): cite the release (``v3.NN``) or the permalink of the
+    comment the block quotes. A positional pointer is tolerated only where a pin
+    requires one for a block's IDENTITY (the SCOPE pin below reads
+    `docs/ONTOLOGY-CHANGELOG.md:<line>` beside the issue that block records), and
+    even there it must resolve to a release header.
+
+    ⛔ STATED LIMIT: this pin resolves only pointers written with the full
+    `docs/ONTOLOGY-CHANGELOG.md` path. A bare `:NNN` shorthand names no file, so
+    the module text alone cannot resolve it, and it is not read here; a line
+    pointer into a DIFFERENT document has its own resolver
+    (`tests/test_status_as_reported_single_declaration_10524.py` covers the
+    `ONTOLOGY.md` idiom pointer). Widening this arm to the shorthand needs the
+    enclosing sentence's file reference, not a bigger regex.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8").splitlines()
+    bad = []
+    for pointer in _CHANGELOG_LINE_POINTER_RE.findall(source):
+        line_no = int(pointer)
+        text = (changelog[line_no - 1]
+                if 0 < line_no <= len(changelog) else "")
+        if _BLOCK_VERSION_RE.search(text) is None:
+            bad.append(f":{pointer} reads {text.strip()[:70]!r}")
+    assert bad == [], (
+        "a positional pointer into the changelog no longer lands on a RELEASE "
+        "HEADER, so it identifies no block a reader can recover: "
+        + "; ".join(bad)
+        + ". Cite the release (`v3.NN`) or the permalink of the comment the "
+        "block quotes — a number that points at prose inside a block rots on "
+        "the next insertion and nothing else in this suite reds.")
