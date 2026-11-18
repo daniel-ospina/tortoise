@@ -1346,7 +1346,7 @@ def _newest_block_body(changelog: str) -> str:
     Measured at head ``7e6baffc5d``: this returns 11375 characters, equal to
     ``len(_block_bodies(changelog)[0])``; the after-the-header cut returned 11269
     and the two were not equal. No block currently writes a citation in its header
-    (measured: 0 of 41 headers carry one), so the wider extent changes no verdict
+    (measured: 0 of 42 headers carry one), so the wider extent changes no verdict
     today — it closes the blind spot rather than reacting to a live miscount.
     """
     first = _BLOCK_VERSION_RE.search(changelog)
@@ -1381,8 +1381,8 @@ def _block_bodies(changelog: str) -> list[str]:
 
     ``^`` is load-bearing: a block's prose can QUOTE an older header
     (``> > **Changelog v3.7 …`` inside the v3.2 entry), and an unanchored
-    pattern counts that quote as a release — measured at this head: 42 pieces
-    for 41 blocks, one of them a fragment starting at the quoted header.
+    pattern counts that quote as a release — measured at this head: 43 pieces
+    for 42 blocks, one of them a fragment starting at the quoted header.
     """
     starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
     # `pairwise` over the spans plus the end offset — the spans are DELIBERATELY
@@ -1764,7 +1764,7 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     head ``7e6baffc5d``: 11269 characters against 11375 for
     ``_block_bodies(...)[0]``, and the two were not equal. Equality (header
     included) is the contract below; nothing else in the file would have caught a
-    revert, because 0 of 41 headers carry a citation at this head, so every
+    revert, because 0 of 42 headers carry a citation at this head, so every
     citation verdict is unchanged either way.
     """
     changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
@@ -1789,7 +1789,7 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     # become false while the extent pin stayed green.
     assert sum(1 for block in blocks
                if _CITATION_RE.search(block.split("\n", 1)[0])) == 0, (
-        "a block's HEADER line now carries a comment citation, so the `0 of 41 "
+        "a block's HEADER line now carries a comment citation, so the `0 of 42 "
         "headers cite` justification the wider extent rests on is FALSE — restate "
         "that claim. (The citing COUNTS are measured live by the citation pin, so a "
         "header citation on an already-citing block does not move them, and this "
@@ -1968,8 +1968,8 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     Finding 1 of #12089: the sibling pin's SCOPE paragraph offered *"3 of 39 blocks
     cite a comment id, and v3.33 — the block that landed `D2 — A` for this very
     question — cites none"* as the evidence for narrowing a gate's scope. Measured with
-    this module's own tools the count is **5 of 41**, and that block DOES cite — the permalink
-    ``#issuecomment-5619843002`` (v3.33's issue-#11824 block, ``docs/ONTOLOGY-CHANGELOG.md:305``):
+    this module's own tools the count is **6 of 42**, and that block DOES cite — the permalink
+    ``#issuecomment-5619843002`` (v3.33's issue-#11824 block, ``docs/ONTOLOGY-CHANGELOG.md:365``):
     the citing versions are listed below, one entry per block, and the sentences that
     quote them are checked by this pin. Both halves
     of the sentence were wrong, in a file whose subject is removing unverified
@@ -2033,7 +2033,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # ⛔ WHITESPACE IS NORMALISED BEFORE MATCHING, in both the scan text and the
     # docstring: markdown line wrapping is not part of a fact, and a scan that
     # cannot see a re-wrapped sentence reds with a message denying the prose says
-    # what it does (measured: re-wrapping `**5 of 41**\n blocks cite a comment id`
+    # what it does (measured: re-wrapping `**6 of 42**\n blocks cite a comment id`
     # produced "must appear exactly ONCE … found 0", with no second copy anywhere).
     module_source = re.sub(
         r"\s+", " ", Path(__file__).read_text(encoding="utf-8"))
@@ -2321,8 +2321,8 @@ def test_every_declared_sweep_arm_refuses_a_stale_restatement() -> None:
     wrong_ordinal = "second" if lands_first else "first"
     # ⛔ A NUMERATOR THAT IS STALE IN BOTH DIRECTIONS: `k + 1` collides with the
     # complement when `k + 1 == n - k`, i.e. `2k + 1 == n` — a collision only an ODD
-    # block count can produce. With 41 blocks and 5 citing, `k + 1` cannot collide
-    # with the complement — `2·5 + 1 = 11 ≠ 41` — so
+    # block count can produce. With 42 blocks and 6 citing, `k + 1` cannot collide
+    # with the complement — `2·6 + 1 = 13 ≠ 42` — so
     # the fixture below is a deliberate construction rather than a state this file
     # reaches; what it pins is that the arm rejects a stale numerator in EITHER
     # direction, which is as true of a hand-built pair as of a real one.
@@ -2551,7 +2551,7 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
     # ⛔ THE STATED PAIR IS RE-ASSERTED HERE (review finding, measured). The bold arm
     # in `_assert_no_stale_citation_claim` accepts BOTH true pairs — the citing count
     # and its complement — so if the pin's own `stated` assertion were deleted, a
-    # docstring claiming 36 of 41 blocks cite a comment id (5 do) would pass it.
+    # docstring claiming 36 of 42 blocks cite a comment id (6 do) would pass it.
     # Measured: deleting that assertion plus editing the sentence left 57 passed. The
     # sibling's pair is read from its docstring and compared against the block counts
     # the pin itself handed to the sweep arm.
@@ -2580,8 +2580,8 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
                 "refuses a stale pair)")
         # ⛔ AND THIS PIN'S OWN DOCSTRING, WHICH THE BOLD ARM CANNOT REFUSE EITHER
         # (review finding, measured). `allowed_bold` accepts the citing count AND its
-        # complement in ANY position, so changing this docstring's `count is **5 of
-        # 41**` to `**36 of 41**` — a false claim, since five blocks cite — left the
+        # complement in ANY position, so changing this docstring's `count is **6 of
+        # 42**` to `**36 of 42**` — a false claim, since six blocks cite — left the
         # whole suite at 57 passed. The sentence makes a CITING claim (`the count is
         # <N of M>`), so the citing pair is what it must state.
         # ⛔ AND THE TWO ADJACENT CLAIMS ON THE SAME SENTENCE (review finding,
@@ -2913,8 +2913,8 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
     the next release that touches §4.5 (verified with a synthetic `v3.35`), and
-    the file's practice does not support the demand: **5 of 41** blocks cite a
-    comment id, so **36 of 41** cite none; citing versions: v3.36, v3.34, v3.33, v3.33, v3.32
+    the file's practice does not support the demand: **6 of 42** blocks cite a
+    comment id, so **36 of 42** cite none; citing versions: v3.37, v3.36, v3.34, v3.33, v3.33, v3.32
     — one entry per block, the first of the two v3.33 entries being the block
     that landed `D2 — A`. An unconditional demand reds a legitimate release that
     changes something else. (Measured with this module's own ``_block_bodies`` and
@@ -2928,7 +2928,7 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     patterned sentences are held to one copy each.) An earlier cut of this
     sentence said "3 of 39" and added that
     v3.33 — the block that landed `D2 — A` for this very question — *cites none*:
-    BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:305` (issue
+    BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:365` (issue
     #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` — an
     accepted form, enumerated below, in the sentence the old text contradicted.
     So v3.33 is not evidence for the narrow scope; the 36 blocks that
