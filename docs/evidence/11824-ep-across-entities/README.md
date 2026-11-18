@@ -11,7 +11,8 @@ aboutObjects: "#11824, docs/ONTOLOGY.md, tortoise/ep.py, tortoise/live.py, torto
 
 # EP across entity kinds — a measured audit of `docs/ONTOLOGY.md`
 
-**Branch:** `audit/ep-across-entities` · **Base measured:** `340d500491` · **Tracker:** #11824
+**Branch:** `audit/ep-across-entities` · **Measured at:** `340d500491` · **Citations at this head**
+(re-anchored after this branch integrated `main`) · **Tracker:** #11824
 
 **Status: evidence only.** This change does **not** edit `docs/ONTOLOGY.md`, and it contains **no**
 replacement ontology text. `docs/ONTOLOGY.md` carries:
@@ -68,12 +69,12 @@ evidence *hydrated* with the same filter a Point's is?
 
 | Kind | (1) Operator source? target? | (2) Confidence: propagates, or fixed/neutral? | (3) What excludes it from belief | (4) Evidence hydrated like a Point's? |
 |---|---|---|---|---|
-| **`:Point`** | **source ✅ / target ✅** — **⟨measured⟩** `Point -> Point WROTE`. **⟨code⟩** operator discovery is `MATCH (o:Point)-[r:IMPL\|NAND]->(c)` (`ep.py:2012`), with the far endpoint widened by a per-label `epistemic_label_queries` sweep (`ep.py:2007-2008`), and the input-assembly leg states the widening directly, `epistemic_disjunction('c')` (`ep.py:2220-2222`) — so an input may carry any of the four labels. | **propagates.** Seed = `coalesce(posterior_alpha, ep_alpha, 1.0)` on the direct read (**⟨code⟩** `ep.py:801`); on the warm batched load it is **only** `coalesce(ep_alpha, 1.0)` — no `posterior_alpha` arm (**⟨code⟩** `ep.py:507`; see §6.6). A **declared** prior is writable and immutable: `set_point_baseline` (`sdk.py:40833`, write at `:40982`), honoured by the `keep_prior` / `baseline_set` CASE in both write paths (**⟨code⟩** `ep.py:629-635`, `ep.py:822-826`). | **four conditions on every Cypher leg:** the 5-word status set ∪ the legacy `outdated` flag ∪ `isClosed` ∪ a `terminal` pipeline slot (**⟨code⟩** `live.py:114` for the words, `live.py:159` `_terminal_excluded`, `live.py:372` the Python mirror, `live.py:588` `_live_only`). **But only two of the four in the Python participation test for an operator *input*** — **⟨code⟩** `ep.py:2258`; **⟨measured⟩** §5 F1. `goalState` never excludes (see `:Object`). | **yes — and it is the only kind that is.** `_hydrate_evidence` is `MATCH (n:Point) WHERE n.baseline_set = true … AND {_terminal_excluded('n.status')}` (**⟨code⟩** `sdk.py:40757`), so it gets the *same* predicate as every other read. **⟨measured⟩** the hydrated evidence set held 4 ids and **no** non-Point. |
-| **`:Operator`** (`:Point {is_operator: true}`) | It **is** a Point, so it is addressable by an id — but an operator-shaped node is **stripped out of another operator's inputs**: `is_operator_shaped` is tested by identity against `None`/`False` and never participates, under **both** `include_draft` modes (**⟨code⟩** `ep.py:2257-2260`). **⟨measured⟩** every operator minted over an `:Object`/`:Event`/`:Subject` endpoint is `['Point'], is_operator=True, op_type=IMPL, status=live`. | **it holds no propagated belief of its own.** It supplies a *mechanism* and a *weight*: the factor potential is chosen from `op_type` (**⟨code⟩** `ep.py:47-52` → `quadrature.py:90`/`:124`/`:143`), and a mitigation scales the weight as `w_eff = w × (1 − strength)` (**⟨code⟩** `weights.py:232`, `weights.py:65`). Its **inputs'** beliefs are what move. | Same as `:Point` (it is one). Additionally the mechanism census counts live **and** draft operators (**⟨code⟩** `sdk.py:13555-13559`), so a draft operator still occupies its pair. | **n/a** — an operator is not evidence, and never enters `_hydrate_evidence` (it has no `baseline_set`). |
-| **`:Object`** | **source ✅ / target ✅** — **⟨measured⟩** `Object -> Point WROTE` and `Point -> Object WROTE`; as a target EP wrote `posterior_alpha 1.7769 / posterior_beta 0.9561 / confidence 0.6502` onto it. | **propagates, but the seed is vacuity.** With no prior of its own the seed is `Beta(1,1)` → mean **0.5**. The stored `confidence` property is **never an EP input** — `n.confidence` appears in `ep.py` only inside `SET` clauses (**⟨code⟩** `ep.py:632`, `:822`, `:2976`), and the one place it is read is that clause's own `THEN n.confidence` (`ep.py:2977`), which *preserves* the mirror rather than consuming it; neither posterior seed (`ep.py:507`, `:801`) mentions it. **⟨measured⟩** an Object created `confidence=1.0` was *served* at 1.0, **seeded at 0.5**, and then had its 1.0 **overwritten to 0.5** by the run. There is **no declared-prior writer**: `set_point_baseline` refuses a non-Point (**⟨code⟩** `sdk.py:40982` + refusal at `:41066-41070`), and the refusal names **#9063** as the open belief-model decision. | The **Point** vocabulary words ∪ `isClosed` ∪ terminal stage — but note the vocabulary mismatch: `completed` / `in_progress` are *not* endings for EP (**⟨measured⟩** a `status='completed'` Object **participated** — the probe prints the target's posterior and a participated/dropped suffix, not a comparison against a control). On the Cypher legs the position axis is read (**⟨measured⟩** the direct-edge leg **dropped** an `isClosed` and a `terminal`-slot endpoint, `0.0 / 0.0`); in `ep.py:2258` it is **not** (**⟨measured⟩** a closed Object with a `(9,1)` posterior **contributed**). `goalState` **never** excludes (**⟨measured⟩** §2 consequence 3, and §5 F4). | **no.** `_hydrate_evidence` is `:Point`-anchored (**⟨code⟩** `sdk.py:40757`), and `set_point_baseline` refuses (**⟨code⟩** above). An Object is filtered by a *different* population, not a looser one. |
+| **`:Point`** | **source ✅ / target ✅** — **⟨measured⟩** `Point -> Point WROTE`. **⟨code⟩** operator discovery is `MATCH (o:Point)-[r:IMPL\|NAND]->(c)` (`ep.py:2012`), with the far endpoint widened by a per-label `epistemic_label_queries` sweep (`ep.py:2007-2008`), and the input-assembly leg states the widening directly, `epistemic_disjunction('c')` (`ep.py:2220-2222`) — so an input may carry any of the four labels. | **propagates.** Seed = `coalesce(posterior_alpha, ep_alpha, 1.0)` on the direct read (**⟨code⟩** `ep.py:801`); on the warm batched load it is **only** `coalesce(ep_alpha, 1.0)` — no `posterior_alpha` arm (**⟨code⟩** `ep.py:507`; see §6.6). A **declared** prior is writable and immutable: `set_point_baseline` (`sdk.py:40924`, write at `:41073`), honoured by the `keep_prior` / `baseline_set` CASE in both write paths (**⟨code⟩** `ep.py:629-635`, `ep.py:822-826`). | **four conditions on every Cypher leg:** the 5-word status set ∪ the legacy `outdated` flag ∪ `isClosed` ∪ a `terminal` pipeline slot (**⟨code⟩** `live.py:114` for the words, `live.py:159` `_terminal_excluded`, `live.py:372` the Python mirror, `live.py:588` `_live_only`). **But only two of the four in the Python participation test for an operator *input*** — **⟨code⟩** `ep.py:2258`; **⟨measured⟩** §5 F1. `goalState` never excludes (see `:Object`). | **yes — and it is the only kind that is.** `_hydrate_evidence` is `MATCH (n:Point) WHERE n.baseline_set = true … AND {_terminal_excluded('n.status')}` (**⟨code⟩** `sdk.py:40848`), so it gets the *same* predicate as every other read. **⟨measured⟩** the hydrated evidence set held 4 ids and **no** non-Point. |
+| **`:Operator`** (`:Point {is_operator: true}`) | It **is** a Point, so it is addressable by an id — but an operator-shaped node is **stripped out of another operator's inputs**: `is_operator_shaped` is tested by identity against `None`/`False` and never participates, under **both** `include_draft` modes (**⟨code⟩** `ep.py:2257-2260`). **⟨measured⟩** every operator minted over an `:Object`/`:Event`/`:Subject` endpoint is `['Point'], is_operator=True, op_type=IMPL, status=live`. | **it holds no propagated belief of its own.** It supplies a *mechanism* and a *weight*: the factor potential is chosen from `op_type` (**⟨code⟩** `ep.py:47-52` → `quadrature.py:90`/`:124`/`:143`), and a mitigation scales the weight as `w_eff = w × (1 − strength)` (**⟨code⟩** `weights.py:232`, `weights.py:65`). Its **inputs'** beliefs are what move. | Same as `:Point` (it is one). Additionally the mechanism census counts live **and** draft operators (**⟨code⟩** `sdk.py:13620-13624`), so a draft operator still occupies its pair. | **n/a** — an operator is not evidence, and never enters `_hydrate_evidence` (it has no `baseline_set`). |
+| **`:Object`** | **source ✅ / target ✅** — **⟨measured⟩** `Object -> Point WROTE` and `Point -> Object WROTE`; as a target EP wrote `posterior_alpha 1.7769 / posterior_beta 0.9561 / confidence 0.6502` onto it. | **propagates, but the seed is vacuity.** With no prior of its own the seed is `Beta(1,1)` → mean **0.5**. The stored `confidence` property is **never an EP input** — `n.confidence` appears in `ep.py` only inside `SET` clauses (**⟨code⟩** `ep.py:632`, `:822`, `:2976`), and the one place it is read is that clause's own `THEN n.confidence` (`ep.py:2977`), which *preserves* the mirror rather than consuming it; neither posterior seed (`ep.py:507`, `:801`) mentions it. **⟨measured⟩** an Object created `confidence=1.0` was *served* at 1.0, **seeded at 0.5**, and then had its 1.0 **overwritten to 0.5** by the run. There is **no declared-prior writer**: `set_point_baseline` refuses a non-Point (**⟨code⟩** `sdk.py:41073` + refusal at `:41157-41161`), and the refusal names **#9063** as the open belief-model decision. | The **Point** vocabulary words ∪ `isClosed` ∪ terminal stage — but note the vocabulary mismatch: `completed` / `in_progress` are *not* endings for EP (**⟨measured⟩** a `status='completed'` Object **participated** — the probe prints the target's posterior and a participated/dropped suffix, not a comparison against a control). On the Cypher legs the position axis is read (**⟨measured⟩** the direct-edge leg **dropped** an `isClosed` and a `terminal`-slot endpoint, `0.0 / 0.0`); in `ep.py:2258` it is **not** (**⟨measured⟩** a closed Object with a `(9,1)` posterior **contributed**). `goalState` **never** excludes (**⟨measured⟩** §2 consequence 3, and §5 F4). | **no.** `_hydrate_evidence` is `:Point`-anchored (**⟨code⟩** `sdk.py:40848`), and `set_point_baseline` refuses (**⟨code⟩** above). An Object is filtered by a *different* population, not a looser one. |
 | **`:Subject`** | **source ✅ / target ✅** — **⟨measured⟩** `Subject -> Point WROTE`; as a target it took `1.7769 / 0.9561`. | Same as `:Object` — **⟨measured⟩** as an operator input a Subject read `posterior [0.5, 1.0, 1.0]`, i.e. it participated from vacuity and was written. | Same as `:Object`. `SUBJECT_TERMINAL_STATUSES` is a subset of the Point set (**⟨code⟩** `live.py:654-658`). Both position arms apply on the Cypher legs; `ep.py:2258` omits them as for `:Object`. | **no** — `:Point`-anchored hydration; `set_point_baseline` refuses. |
 | **`:Event`** | **source ✅ / target ✅** — **⟨measured⟩** an `Event → Point` direct edge **wrote**, and an Event in the **target** slot took `1.7769 / 0.9561`. | Same as `:Object` — **⟨measured⟩** the Event's own belief after a run read `confidence 0.5 / posterior (1,1)`, i.e. seeded at vacuity and then written. | **nothing.** An Event has **no lifecycle at all**: the write door **refuses** a `status` on it (**⟨code⟩** `live.py:961` `refuse_event_lifecycle_state`, #13100) and `STATUS_CARRYING_EPISTEMIC_LABELS` is `{Point, Subject, Object}` (**⟨code⟩** `live.py:683`). The NULL-status arm of `_live_only` therefore reads it LIVE (**⟨code⟩** `live.py:588`). Its identity is `id`-or-`eventId` (**⟨code⟩** `live.py:1204`). `goalState` never applies. | **no** — `:Point`-anchored hydration. **⟨measured⟩** no Event reached the evidence set. |
-| **`:Source`** | ❌ **refused, both slots.** **⟨measured⟩** `Source -> Point` → `ValueError: Cannot create operator: Points ['…'] do not exist` (**⟨code⟩** raised at `sdk.py:28910`), because the endpoint probe sweeps `EPISTEMIC_LABELS` only (**⟨code⟩** `sdk.py:28893-28896`). | **not an EP node**, so it has no belief of its own. A Source reaches belief **only** as a Beta prior written onto an extracted **Point**: `_apply_source_inheritance` (**⟨code⟩** `sdk.py:41191`, its `MATCH (n:Point)-[:extractedFrom]->(s:Source)` at `:41358`). | n/a for EP. The Point-side inherited prior is then filtered by the *Point's* currency predicate when it is hydrated. | n/a — a Source is never a member of the evidence set, only its provenance for a Point. |
+| **`:Source`** | ❌ **refused, both slots.** **⟨measured⟩** `Source -> Point` → `ValueError: Cannot create operator: Points ['…'] do not exist` (**⟨code⟩** raised at `sdk.py:29001`), because the endpoint probe sweeps `EPISTEMIC_LABELS` only (**⟨code⟩** `sdk.py:28984-28987`). | **not an EP node**, so it has no belief of its own. A Source reaches belief **only** as a Beta prior written onto an extracted **Point**: `_apply_source_inheritance` (**⟨code⟩** `sdk.py:41282`, its `MATCH (n:Point)-[:extractedFrom]->(s:Source)` at `:41449`). | n/a for EP. The Point-side inherited prior is then filtered by the *Point's* currency predicate when it is hydrated. | n/a — a Source is never a member of the evidence set, only its provenance for a Point. |
 | **`:PipelineStage`** | ❌ **not an epistemic node.** Not in `EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")` (**⟨code⟩** `live.py:667`), so no EP leg can address it (`epistemic_disjunction` / `epistemic_label_queries`, `live.py:1263`/`:1277`). | **none.** It reaches belief only as the **slot an entity sits in** — the position axis, `TERMINAL_STAGE_SLOT = "terminal"` (**⟨code⟩** `live.py:127`) over `PIPELINE_SLOTS = ("entry", "active", "suspended", "terminal")` (**⟨code⟩** `pipeline.py:56`). It is a *source of an ending*, never a belief node. | n/a — but it **causes** an exclusion: a row whose stage resolves to the `terminal` slot is ended on the position axis (**⟨code⟩** `live.py:212-214`). | n/a. |
 | **`:Batch`** | ❌ **not an epistemic node** (same declaration as above, `live.py:667`). | **none — no EP role at all.** `lifecycle_vocabulary.py` states it explicitly: *"operational node kinds (`:PipelineStage`, `:Batch`) keep their own vocabularies … neither is reached by it"* (**⟨code⟩** `lifecycle_vocabulary.py:63-65`). `mining.py:57-58` calls a `:Batch` *"operational metadata … not ONTOLOGY"* (**⟨code⟩**). | n/a — nothing to exclude, because nothing is priced. | n/a. |
 
@@ -104,19 +105,30 @@ evidence *hydrated* with the same filter a Point's is?
 
 ## 3. The doc sentences that contradict the table
 
-Line numbers are `docs/ONTOLOGY.md` at this branch's base. Verdicts are one clause; **"fix the code"**
-means the model is right and the engine does not meet it — not that the sentence should be reworded to
-describe old behaviour.
+Line numbers are `docs/ONTOLOGY.md` **at this head**. The measurements were taken at `340d500491`; between
+that base and this head the engine moved only in `tortoise/sdk.py` (whose cited symbols are re-anchored
+here) and `tortoise/mining.py` (whose cited lines did not move), so a `file:line` below still lands on
+the text it describes instead of on the line that text used to occupy. Verdicts are one clause; **"fix
+the code"** means the model is right and the engine does not meet it — not that the sentence should be
+reworded to describe old behaviour.
 
-### C1 — §10.5, L1505-1508: the terminal-exclusion sentence names one axis of two
+⚠️ **Two items were absorbed by `main` while this PR was open** — **C4** and **C5**. Both say so in
+place, with the head's line numbers, so a reader does not go and fix a sentence that is already fixed;
+they are kept as the recorded reason the change was made, not as outstanding work to do.
+
+### C1 — §10.5, L1511-1513: the terminal-exclusion sentence names one axis of two
 
 > `_review_prune`, why, analyze) excludes terminal claims via the shared`
 > `live.py predicate (status ∈ {retracted, superseded, outdated, archived,`
 > `deprecated} OR `outdated=true`).`
 
-- **The five words are exactly right** — `TERMINAL_EXCLUDED_STATUSES =
-  TERMINAL_STATUS_VALUES | {"deprecated"}` = `{retracted, superseded, outdated, archived, deprecated}`
-  (**⟨code⟩** `live.py:97`, `:108`, `:114`). Nothing to fix in the vocabulary.
+- **The five words are exactly right — and at this head the doc says why they survive.**
+  `TERMINAL_EXCLUDED_STATUSES = TERMINAL_STATUS_VALUES | {"deprecated"}` =
+  `{retracted, superseded, outdated, archived, deprecated}` (**⟨code⟩** `live.py:97`, `:108`, `:114`).
+  The §4.1 row has since been re-cut to a **four-word** lifecycle (`draft`/`live`/`deprecated`/
+  `superseded`) with the other three declared **read-side legacy** over stored rows
+  (**⟨code⟩** `docs/ONTOLOGY.md:403`, #12855) — which is exactly *why* the currency predicate must keep
+  honouring them, and it settles the vocabulary half. The **axis** half below is unaffected.
 - **The predicate is one axis short.** It reads the lifecycle word **and the position axis** —
   `isClosed`, or a stage in the `terminal` slot (**⟨code⟩** `live.py:212-214`, `:372`, `:588`).
 - **Verdict: the doc is stale — the code is ahead.** The Cypher legs already read both axes; the
@@ -133,7 +145,7 @@ describe old behaviour.
 - **Both reads exist, and the sentence denies one.** The derived read is real (`ranking.py:838`); the
   **stored** read is also real — EP writes `confidence` / `posterior_alpha` / `posterior_beta` onto the
   entity (**⟨code⟩** `ep.py:632`, `:822`; **⟨measured⟩** an Object target took all three).
-- **The citation is dead.** §11 (L1532-1548) describes `compute_reputation` only; it says nothing about
+- **The citation is dead.** §11 (L1537-1553) describes `compute_reputation` only; it says nothing about
   an Object's state confidence.
 - **Verdict: the doc is stale — the code is right.** The model requires the stored belief (#7813 /
   #7853 rule that confidence propagates across all four labels; an entity that holds no belief cannot
@@ -158,35 +170,50 @@ describe old behaviour.
   and only the owner can say which. This is the one item in this audit that is an owner ruling rather
   than a measurement — see §6.1.
 
-### C4 — the `guideline` word at three sites (L417, L457, L1057): a vocabulary that was removed
+### C4 — the `guideline` word at three sites (L417, L457, L1056-1057 at the measured base): a vocabulary that was removed
 
+> At the measured base:
+>
 > `(met, active, blocked, unmet, superseded, abandoned, guideline)` — §4.1 L417 and §4.3 L457
 > `> superseded, abandoned, and guideline (directional, no pass/fail — the` — §5 L1057
 
-- `GOAL_STATE_VALUES` is **six** words and does **not** contain `guideline` (**⟨code⟩** `sdk.py:378`).
+- `GOAL_STATE_VALUES` is **six** words and does **not** contain `guideline` (**⟨code⟩** `sdk.py:379`).
   `guideline` was **REMOVED by owner ruling** on 2026-11-16 under #13035 (**⟨code⟩** the comment at
-  `sdk.py:370-371`), because *"whether a goal is directional is a question about PRIORITY, not about
+  `sdk.py:371-372`), because *"whether a goal is directional is a question about PRIORITY, not about
   outcome"*.
-- **Verdict: the doc is stale — the code is ahead.** Three sites, one vocabulary.
-- ⚠️ The L1057 span also carries a **pointer to where a decision lives** (*"the owner's #6792 form
+- **Verdict at the measured base: the doc was stale — the code was ahead.** Three sites, one
+  vocabulary.
+- ✅ **Absorbed by `main` while this PR was open — measured at this head.** v3.36 (#13404,
+  owner-approved) removed `guideline` from both `goalState` rows — L417/L457 now read *"`guideline` is
+  **not** an achievement: whether a goal is directional is a question about **priority**, and it is
+  unassigned (#11824)"* — and replaced the §5 list at L1056-1057 with the six-word vocabulary plus a
+  status note at **L1059-1068** that keeps the #6792 form ruling *and* says where it went. That is
+  exactly the pointer-preserving reversal the warning below asks for, so **no further edit to
+  `docs/ONTOLOGY.md` is needed for this item**; it is recorded here as the reason the change was made.
+- ⚠️ The base L1057 span also carried a **pointer to where a decision lives** (*"the owner's #6792 form
   ruling"*). This is a **reversal of a recorded ruling**, so deleting the word silently would erase the
   pointer and leave the next reader unable to tell a ruling from an accident. The reversal belongs in
-  `ONTOLOGY-CHANGELOG.md`.
+  `ONTOLOGY-CHANGELOG.md` — and at this head it landed with one.
 
 ### C5 — "achievement is a SEPARATE axis" (L1051, and the "Separate from `status`" clause at L417 / L457)
 
 - True, but **incomplete in a way that changes behaviour.** Two of the six words are the **lifecycle's
   endings spelled on the achievement axis** — `GOAL_ENDING_STATES = {abandoned, superseded}`
-  (**⟨code⟩** `sdk.py:392`; `abandoned` *is* `deprecated` for a goal) — and the write boundary
+  (**⟨code⟩** `sdk.py:393`; `abandoned` *is* `deprecated` for a goal) — and the write boundary
   **refuses** a goal that ends on one axis while leaving the other running, in either direction
-  (**⟨code⟩** `_refuse_inconsistent_goal_ending`, `sdk.py:6367`).
+  (**⟨code⟩** `_refuse_inconsistent_goal_ending`, `sdk.py:6384`).
 - As written ("separate", "orthogonal"), the doc reads as *either axis can express an ending*. It
   cannot: `status` ends the record, `goalState` never does (**⟨code⟩** `live.py:159` reads
   status/outdated/isClosed/slot and nothing else).
 - **Verdict: the doc is incomplete — the code is right** on the write boundary; the doc must say which
   axis ends a record, and why the two are held in agreement.
+- ✅ **Absorbed by `main` while this PR was open — measured at this head.** Both `goalState` rows now
+  carry *"The two endings are the lifecycle's endings on this axis — `abandoned` is `deprecated` for a
+  goal, `superseded` is `superseded` — and a write whose ending disagrees with `status` is refused"*
+  (L417/L457), which is what the verdict above asks the doc to say; **no further doc edit is needed for
+  this item**.
 
-### C6 — "`goalState` is never `draft`/`live`" (L1060-1061) vs. `derived_invalidation` reading `goalState` as an ending
+### C6 — "`goalState` is never `draft`/`live`" (L1065-1066) vs. `derived_invalidation` reading `goalState` as an ending
 
 - `RETIRED_GOAL_STATES = {"superseded", "abandoned"}` (**⟨code⟩** `derived_invalidation.py:181`) and its
   reason arm at `:421` retire a goal's derived caches **on the `goalState` word** — a surface that *does*
@@ -199,7 +226,7 @@ describe old behaviour.
   *"this arm and the readers that ask `status` now answer about the same goals"*, which is false for a
   legacy row that the write boundary can no longer create but must still read.
 
-### C7 — §10.5's decay claim (L1496-1504): "every terminalizing write … decays to VACUITY"
+### C7 — §10.5's decay claim (L1501-1509): "every terminalizing write … decays to VACUITY"
 
 > `**Terminal posterior vacuity decay (#2490):** every terminalizing write`
 > `(retract/supersede/invalidate/assess_source + the rebuild folds) decays the`
@@ -225,7 +252,7 @@ Listed so the owner can see what was examined rather than assumed:
 | §8 Reification rule, L1297-1298 | "The operator node itself is always a `:Point {is_operator:true}`; its children/targets may carry any of the four labels" | **correct** — **⟨measured⟩** every operator minted over an Object/Event/Subject endpoint is `['Point'], is_operator=true` |
 | §8 operator-less propagation, L1324-1326 | a direct `IMPL`/`NAND` between any two plain epistemic nodes propagates | **correct, in the strong sense** — the direct-edge leg reads **both** currency axes: **⟨measured⟩** it dropped an `isClosed` and a `terminal`-slot endpoint |
 | §8 `OVERRIDES`, L1301-1304 | pre-#7813 "write-only" rule is reversed; an Event target is epistemic and propagates | **correct** — **⟨measured⟩** an Event source *and* an Event target both received a posterior |
-| §11, L1532-1548 | reputation is `Subject -[:performs]-> Event -[:IMPL]-> Point`, derived not stored, Point-only | **correct** — **⟨code⟩** `sdk.py:59110`, `MATCH (e)-[:IMPL]->(p:Point)` |
+| §11, L1537-1553 | reputation is `Subject -[:performs]-> Event -[:IMPL]-> Point`, derived not stored, Point-only | **correct** — **⟨code⟩** `sdk.py:59698`, `MATCH (e)-[:IMPL]->(p:Point)` |
 | §10, L1462-1474 | recency modulation of inherited priors; no blunt time decay | **no contradiction found** with the table |
 
 ---
@@ -283,11 +310,11 @@ already exist for exactly this caller (`live.py:372`).
 
 ### F2 — the write doors do not read the position axis (one has no guard at all)
 
-- **`create_operator` (`sdk.py:28326`) has no terminal-endpoint guard whatsoever.** **⟨measured⟩** it
+- **`create_operator` (`sdk.py:28417`) has no terminal-endpoint guard whatsoever.** **⟨measured⟩** it
   **wrote** an operator over a `status='superseded'` source, an `isClosed=true` source, and a
   `pipelineSlot='terminal'` source. The endpoint probe reads only `id` and `claimClass`
-  (**⟨code⟩** `sdk.py:28893-28896`).
-- **`create_direct_edge`'s guard reads two of four conditions**: `sdk.py:35948` is
+  (**⟨code⟩** `sdk.py:28984-28987`).
+- **`create_direct_edge`'s guard reads two of four conditions**: `sdk.py:36039` is
   `if status in TERMINAL_EXCLUDED_STATUSES or outdated:` — so it refuses a superseded endpoint but not
   a closed one.
 
@@ -309,7 +336,7 @@ F1, a closed node keeps both its full-strength posterior and its vote.
 `goalState ∈ {superseded, abandoned}`; **⟨code⟩** `live.py:159` never reads `goalState`;
 **⟨measured⟩** EP still counts a `goalState='abandoned'`, `status='live'` goal. So the same record is
 *ended* to its derived caches and *live* to belief. The write boundary now refuses to create that shape
-(`sdk.py:6367`), but stored rows predate it and the reader rule is what must be coherent.
+(`sdk.py:6384`), but stored rows predate it and the reader rule is what must be coherent.
 
 ---
 
@@ -329,7 +356,7 @@ F1, a closed node keeps both its full-strength posterior and its vote.
    `{superseded, deprecated, archived, retracted}`). Whether a completed work item should stop being
    evidence is a model decision; I did not take it.
 4. **Declared priors for entities.** Their absence is **deliberate**, not an oversight: the refusal at
-   `sdk.py:41066-41070` names **#9063** as *"the open belief-model decision"*. Owner-owned.
+   `sdk.py:41157-41161` names **#9063** as *"the open belief-model decision"*. Owner-owned.
 5. **`:Batch`'s intended role.** It is not epistemic today and I found no writer that gives it an EP
    role; `mining.py:57-58` classifies it as operational metadata, not ONTOLOGY. I cannot say what it
    *should* be, so the table says only "no EP role".
