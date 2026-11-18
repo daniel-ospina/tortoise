@@ -909,7 +909,7 @@ class EmbeddingModel:
         return env_flag("TORTOISE_EMBEDDING_MODEL_REQUIRED", False)
 
     @classmethod
-    def _unavailable(cls, *, context: str) -> None:
+    def _unavailable(cls, *, context: str, kind: str | None = None) -> None:
         """The single exit for "no model": ``None``, or raise when REQUIRED.
 
         #4861 — every ``None`` exit in :meth:`get` returns through here, so its
@@ -924,11 +924,18 @@ class EmbeddingModel:
         broke). A REQUIRED process does not accept ``not_installed`` as an
         excuse: "designed absence" is only designed for a process that did not
         ask for the embedder.
+
+        ``kind`` (#13528) lets a caller that has ALREADY resolved the cause —
+        :meth:`await_read_ready_reason`, whose decline is its own reason
+        because the load it declined to wait for is still IN FLIGHT and has
+        therefore recorded no failure — say it on the refusal, instead of the
+        refusal re-deriving a cause from ``_last_failure_kind``. ``None`` keeps
+        the historical read of that field, so every existing exit is unchanged.
         """
         if not cls._embedder_required():
             return None
         raise EmbedderUnavailableError(
-            failure_kind=cls._last_failure_kind or "model_unavailable",
+            failure_kind=kind or cls._last_failure_kind or "model_unavailable",
             model=EMBEDDING_MODEL,
             revision=EMBEDDING_MODEL_REVISION,
             last_error=cls._last_error,
@@ -1269,6 +1276,112 @@ class EmbeddingModel:
             if cls._warm_up_thread is not None and cls._warm_up_thread.is_alive():
                 return
             cls._warm_up_started = False
+
+    @classmethod
+    def await_read_ready_reason(cls, budget: float) -> str | None:
+        """``None`` when the model is loaded — else WHY the read declines it (#13528).
+
+        The READ-side twin of :meth:`await_write_ready_reason`, and the same
+        answer shape for the same reason (#13229 review F2): the caller needs a
+        CAUSE, not a boolean, because the four states need opposite operator
+        responses (install the extra / repair a load / retry later / wait
+        longer). The one difference is the return vocabulary: a read publishes
+        its decline on the LEG TRACE next to the terms that already live there,
+        so this returns a leg-trace reason (``absent_reason``'s terms, plus
+        ``load_timeout`` for the state that has recorded no failure yet) rather
+        than the write path's private decline tokens.
+
+        ⛔ THE DEFECT THIS EXISTS TO REMOVE (#13528). ``get()`` blocks its caller
+        for the WHOLE one-time load, and when the load is already in flight it
+        blocks on ``cls._lock`` — which the loading thread holds ACROSS
+        ``__init__`` — so the caller's own ``load_timeout`` cannot bound it (the
+        time is spent waiting for a lock, not in its own join). Measured on the
+        hosted box: ``GET /v1/search`` and ``POST /v1/context`` answered 504 with
+        ``stage=embed_get`` at t=11.52 s against an 8 s bound.
+
+        ⛔ AND IT IS NOT ONE REQUEST'S LATENCY, IT IS THE LANE. The read runs on
+        8 daemon workers (``monitoring.CONTROL_PLANE_READ_WORKERS``, reached
+        through ``hosted_api._read_offload``). A blocking ``get()`` parks each of
+        them in that lock for the whole load, so the reads QUEUED behind them pay
+        the wait a second time before their first stage mark — which is what the
+        ``pre_handler: 9295.0`` in the measurement was, and why an 8-worker lane
+        failed reads that had not started yet.
+
+        So the answer is a BOUNDED WAIT, not a removal (the identical trade
+        #13224 made for writes): a read kicks the load (``start_warm_up``,
+        idempotent — a no-op while the lifespan pre-warm is already running),
+        waits ``budget`` for it, and then reads WITHOUT the dense leg rather than
+        stalling. The degradation is already a declared one every consumer of the
+        vector leg handles — the leg trace records ``ran=False`` with this reason
+        and ``search_engine.declared_degraded_read`` marks the read — so nothing
+        new is traded: what IS traded is that reads inside the cold window are
+        keyword-only, in exchange for a read that cannot be parked behind setup
+        it did not trigger.
+
+        ⛔ ``TORTOISE_EMBEDDER_WARMUP=0`` (the declared test/dev opt-out) keeps
+        the PRE-#13528 behaviour EXACTLY: with no background lane to kick there is
+        nothing to bound, so this returns ``None`` and the caller's ``get()``
+        loads synchronously as it always did. ``tests/conftest.py`` pins that flag
+        off for the whole suite, so every existing retrieval test keeps its
+        synchronous path and cannot be raced by a background load — and a lane
+        that opts out of the warm-up does not silently stop producing vectors.
+
+        This does NOT re-open #4055. That ruling is about the wait bound not
+        CHARGING process initialization to a request, and it is untouched (and
+        unaffected): with the acquire bounded, a read never creates a
+        request-owned load, so there is no cold setup of its own to exempt — the
+        exemption is preserved in ``hosted_api._read_offload`` for the seams that
+        still can create one. Declining setup is the same principle applied one
+        step earlier: neither charged, and now not waited for either.
+        """
+        inst = cls._instance
+        if inst is not None and inst._model is not None:
+            return None
+        # ⛔ THE OPT-OUT IS DECIDED FIRST, exactly as #13224 decided it on the
+        # write side: "no background lane ⇒ nothing to bound" is a statement
+        # about the CONFIGURATION, so it must not depend on WHY the model is not
+        # warm — otherwise the opt-out would only hold in some states and the
+        # pre-#13528 synchronous contract would silently not apply in the
+        # others.
+        if not _embedder_warmup_enabled():
+            return None
+        # A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
+        # `embeddings` extra absent the model can never load, so neither waiting
+        # nor retrying can help — answering instantly is what keeps the budget
+        # from costing 0.25 s on every read of the DOCUMENTED DEFAULT install.
+        if cls._last_failure_kind == "not_installed":
+            return cls.absent_reason()
+        now = time.monotonic()
+        if cls._last_failed_at is not None and \
+                (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+            return cls.absent_reason()
+        # Idempotent: a no-op while the lifespan pre-warm is already running, and
+        # the thing that starts one when a read is first past the post.
+        if cls.start_warm_up() is None:
+            # Nothing is in flight and the once-per-process attempt is spent
+            # (``start_warm_up`` latches). Re-arm ONE background attempt — the
+            # same arm the write path takes — so a load that failed for a
+            # transient reason is retried without every read paying this budget
+            # forever, and decline without waiting: nothing can make progress
+            # inside the budget.
+            cls._rearm_warm_up()
+            return cls.absent_reason()
+        deadline = now + max(0.0, budget)
+        while True:
+            inst = cls._instance
+            if inst is not None and inst._model is not None:
+                return None
+            now = time.monotonic()
+            # A load that FAILED inside the budget has a recorded cause, and
+            # reporting the recorded one beats reporting the wait: the operator
+            # needs "the load broke", not "I waited and gave up".
+            if cls._last_failed_at is not None and \
+                    (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+                return cls.absent_reason()
+            remaining = deadline - now
+            if remaining <= 0:
+                return _READ_DECLINE_LOAD_TIMEOUT
+            time.sleep(min(_WRITE_READY_POLL_S, remaining))
 
     @classmethod
     def loaded(cls) -> bool:
@@ -1724,6 +1837,37 @@ _WRITE_DECLINE_BUDGET_EXPIRED = "budget_expired"
 #: Poll interval for the bounded wait above — small enough that a model that
 #: becomes ready mid-budget is used, coarse enough not to spin (<= 25 wakeups).
 _WRITE_READY_POLL_S = 0.01
+
+#: #13528: how long a READ will wait for a COLD embedder before answering
+#: without its dense leg. The read-side twin of ``WRITE_EMBED_BUDGET_S``, and
+#: deliberately the same number for the same reason: a warm ``get()`` is the
+#: fast path (no load, no lock) and a warm encode is 25-43 ms, while the load it
+#: would otherwise wait for is 13.5 s on a warm model cache and ~57 s cold
+#: (#13224/#1349) — two orders of magnitude above this, so the steady state is
+#: untouched and the budget is a ceiling on a WAIT, never on the vector.
+#:
+#: ⛔ What it protects is not one request's latency but the READ LANE. The read
+#: runs on 8 daemon workers (``monitoring.CONTROL_PLANE_READ_WORKERS``); the
+#: blocking ``get()`` parks every one of them in ``EmbeddingModel._lock`` for the
+#: whole load, so the reads behind them queue — which is what the 7.2-9.3 s
+#: ``pre_handler`` in the #13528 measurement actually was. It sits far below the
+#: lane's own 8 s wait bound (``CONTROL_PLANE_READ_TIMEOUT_S``) because a budget
+#: near that would just move the stall behind a different number.
+READ_EMBED_BUDGET_S = 0.25
+
+#: #13528 — the reason a READ declines the embedder with when the load it would
+#: have waited for does not land inside ``READ_EMBED_BUDGET_S``. It is the
+#: LEG-TRACE vocabulary (``EmbeddingModel.absent_reason``), not a second one: the
+#: read publishes it on the vector entry, where the pre-existing terms already
+#: live, so no consumer learns a new word.
+#:
+#: ⛔ ``load_timeout`` is the one case the other arms cannot express: the load is
+#: still IN FLIGHT, so nothing has FAILED and ``_last_failure_kind`` is empty —
+#: and answering ``no_embedder`` there would state the designed absence ("the
+#: extra was never installed") for an embedder that is merely loading, which is
+#: the conflation #5275/#1542 exist to forbid. Every other decline arm reuses
+#: ``absent_reason()`` unchanged.
+_READ_DECLINE_LOAD_TIMEOUT = "load_timeout"
 
 def _in_replay_scope() -> bool:
     """True when this fold is a journal REPLAY, not a live door (#13224).

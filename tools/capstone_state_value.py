@@ -128,7 +128,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import traceback
@@ -744,6 +743,25 @@ class LocalTarget:
                     read_status_out=status,
                     _truncation_out=trunc,
                     leg_trace=trace,
+                    # #12297's census requires every `tools/` caller of this read
+                    # to either opt out or be named in its intentional-keep list.
+                    # This door opts out, as a RECORDED-BASELINE instrument:
+                    # `docs/evidence/13038-capstone/README.md` commits
+                    # `verdicts-baseline.json` so "a later run can be compared
+                    # against" it, and what this read RETURNS is the page the
+                    # lever moves — which rows survive `limit`, and whether a
+                    # retired id appears among them. `sdk.py`'s
+                    # `_rerank_candidates` docstring names this class and records
+                    # that pinning the rerank ALONE is its norm.
+                    # ⚠️ Unlike the `tools/` harnesses in that class this read
+                    # does NOT pin `_valid_time_rerank` — it runs the shipped
+                    # valid-time ordering and pins only the fused rerank, the
+                    # `docs/`-half shape the same docstring describes. So with the
+                    # gate armed the trace reports `reason=order_owned_downstream`
+                    # for a caller that owns no downstream order; noted here so the
+                    # recorded `legs` are not later read as a decision this door
+                    # never made.
+                    _rerank_candidates=False,
                     **extra,
                 )
                 or []

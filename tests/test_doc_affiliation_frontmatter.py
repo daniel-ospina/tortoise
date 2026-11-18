@@ -166,10 +166,16 @@ def _values(fm: list[str]) -> list[tuple[str, str, object]]:
                             value parses to its first line only). Folding cannot
                             be verified without becoming a YAML implementation,
                             so this arm REFUSES the style and asks for quotes.
-                            A QUOTED value is closed, so an indented comment
-                            line after it is not a continuation; a PLAIN value
-                            can continue, and a continuation line opening with
-                            `#` becomes a comment — so that shape is refused.
+                            A QUOTED value that CLOSES on its line is not
+                            continued by an indented COMMENT line — the comment
+                            is just a comment. ⚠️ That is NOT the same as "a
+                            quoted value is always closed on its line": a quoted
+                            scalar may legally continue onto the next line, which
+                            this arm still refuses (see the multi-line residual in
+                            the plan doc §9) — the narrower claim is the true one.
+                            A PLAIN value can continue, and a continuation line
+                            opening with `#` becomes a comment — so that shape is
+                            refused.
     ``sequence``            ``key:`` then ``- item`` lines (which may sit at
                             column 0, as several files in this population do).
                             A `- #11395` item is a whole-value comment and parses
@@ -201,8 +207,12 @@ def _values(fm: list[str]) -> list[tuple[str, str, object]]:
                 i += 1
                 continue
             nxt = fm[i + 1] if i + 1 < len(fm) else ""
-            # A QUOTED scalar is CLOSED: a following indented line cannot be part
-            # of it, so an indented comment is just a comment. A PLAIN scalar can
+            # A QUOTED scalar that closes ON THIS LINE is closed: a following
+            # indented line cannot be part of it, so an indented COMMENT is just a
+            # comment. (A quoted scalar can legally continue onto the next line;
+            # that shape is refused elsewhere, see the plan doc §9 residual — this
+            # branch must not be read as claiming every quoted value is closed
+            # here.) A PLAIN scalar can
             # continue — and a continuation line opening with `#` becomes a
             # comment, which is the truncation this arm refuses. Getting this
             # backwards was measured both ways: treating every indented `#` line
@@ -242,6 +252,34 @@ def _values(fm: list[str]) -> list[tuple[str, str, object]]:
     return out
 
 
+def _closing_quote(raw: str) -> int:
+    """Index of ``raw``'s closing quote, or ``-1`` when the scalar never closes.
+
+    Scanned by PARITY, not searched for a ``q`` at the end of the text before a
+    `` #``: a single-quoted body ending in the ``''`` escape leaves a quote right
+    before such a `` #``, and the old
+    ``raw[:i].rstrip().endswith(q)`` test read that escape as the close (found in
+    review, measured: ``'the ''KEEP'' #11395 ruling'`` parses INTACT to
+    ``the 'KEEP' #11395 ruling``, yet the arm red it as an unbalanced quote and
+    told the author to *remove the inner quote* — advice to delete a legal
+    escape). A double-quoted body is scanned with backslash escapes skipped.
+    """
+    q = raw[0]
+    i = 1
+    while i < len(raw):
+        ch = raw[i]
+        if q == '"' and ch == "\\":
+            i += 2
+            continue
+        if ch == q:
+            if q == "'" and raw[i : i + 2] == "''":
+                i += 2  # YAML's only single-quote escape: two quotes are one
+                continue
+            return i
+        i += 1
+    return -1
+
+
 def _split_comment(raw: str) -> str:
     """A QUOTED value's text with a trailing `` <space>#…`` comment removed.
 
@@ -252,11 +290,34 @@ def _split_comment(raw: str) -> str:
     matching a value that was shortened the same way. (An earlier draft DID split
     plain values here, which made the survival comparison tautological and let it
     report coverage it did not have — found in review.)
+
+    The close is located by ``_closing_quote``, so only a ` #` that sits AFTER
+    the true closing quote is treated as a comment. A split at any earlier ` #`
+    is refused, which keeps (C)'s truncation case red: `"a, "#1" KEEP"` has no
+    ` #` after its close, so the raw text survives to (C) and still reports the
+    unescaped inner quote.
     """
-    q = raw[0]
+    close = _closing_quote(raw)
+    if close == -1:
+        # ⛔ THE `-1` CASE **IS REACHED** — any never-closing quoted value (`"abc`,
+        # `"a\"`) returns through this branch. Said plainly because an earlier
+        # version called it "UNREACHABLE in practice", which is false in the one
+        # way that matters: a reader acting on it would delete a line that RUNS.
+        # What is unreachable is a different **outcome**. `raw[0]` is a quote and
+        # every ` #` sits at `i >= 1`, so `len(raw[:i].rstrip()) - 1` can never be
+        # `-1`: the loop below cannot match and falls through to the same
+        # `return raw`. So this branch is BEHAVIOURALLY REDUNDANT, not dead code —
+        # deleting it leaves the file at `2 failed, 16 passed` (re-measured at
+        # `dad7aea959`: the 2 pre-existing absence reds and nothing else), which is
+        # why no test CAN pin it, not because the line never executes. The caller
+        # is unaffected either way — `_quoted_style` re-runs the same parity scan
+        # and reports `malformed` for a value with no close, rather than trusting
+        # `endswith`, since a body whose last character is an ESCAPED quote ends in
+        # the quote char anyway.
+        return raw
     i = raw.find(" #")
     while i != -1:
-        if raw[:i].rstrip().endswith(q):
+        if len(raw[:i].rstrip()) - 1 == close:
             return raw[:i].rstrip()
         i = raw.find(" #", i + 1)
     return raw
@@ -275,23 +336,77 @@ def _has_unescaped_dq(body: str) -> bool:
     return False
 
 
+def _unkeepable_quoted(subject: str, style: str) -> str:
+    """The diagnosis for a quoted value this arm does not compare, BY VERDICT.
+
+    ``broken`` and ``malformed`` have DIFFERENT causes, so they need different
+    remedies — and one shared sentence gave both the truncation remedy, *"the
+    value is TERMINATED there. Remove the inner quote"*. That is true of
+    ``broken`` (YAML really does stop at an inner quote) and FALSE of
+    ``malformed``, whose members split into two groups the shared sentence damaged
+    in DIFFERENT ways (lumping them was itself a small false claim — a member of
+    this family is a parse error, so "YAML keeps every member whole" is not true):
+
+    * YAML KEEPS THESE WHOLE — `"x"# note` (a trailing comment with no space
+      before it) and a MULTI-LINE quoted scalar. Here *"remove the inner quote"*
+      asks the author to delete a character the value needs: the same
+      false-remedy class as the `''`-escape finding this PR exists to remove.
+    * A scalar that never closes is a PARSE ERROR (`ScannerError`), so YAML keeps
+      NONE of it. The shared sentence was merely INAPPLICABLE there — there is no
+      inner quote to remove — so this member needs the new remedy for a different
+      reason, not because the old one would have destroyed something.
+
+    No verdict changes: both arms still refuse the file.
+    """
+    if style == "broken":
+        return (
+            f"{subject} is broken — a quoted value YAML cannot keep whole is "
+            "TERMINATED at an inner quote. Remove the inner quote, or use a "
+            "block scalar."
+        )
+    return (
+        f"{subject} is malformed — this arm will not compare it. Either the quoted "
+        "scalar never closes (a value continued onto the next line is refused here "
+        "too), or its closing quote is not the last thing in the value: a comment "
+        "with no space before the `#` (put one space before the `#`) or other text "
+        "after the close. Keep the whole value on one line inside its quotes, or "
+        "use a block scalar."
+    )
+
+
 def _quoted_style(raw: str) -> tuple[str, str | None]:
     """``(style, body)`` for a quoted value; ``("plain", None)`` when unquoted.
 
-    ``broken`` is the truncation check (C) exists for: an UNESCAPED inner `"`, an
-    unbalanced `'`, or no closing quote — YAML ends the scalar there (measured:
-    `"a, "#1" KEEP"` parses to `'a, '`). The unescaped-quote test runs BEFORE the
-    escape branch, because an escaped body can still carry an unescaped quote and
-    an earlier order let that truncation through green (found in review).
+    ``broken`` is the TRUNCATION check (C) exists for: the scalar closes at an
+    inner quote, so YAML ends the value there — an UNESCAPED inner `"`, or an
+    unbalanced `'` (measured: `"a, "#1" KEEP"` parses to `'a, '`). The
+    unescaped-quote test runs BEFORE the escape branch, because an escaped body can
+    still carry an unescaped quote and an earlier order let that truncation through
+    green (found in review).
+
+    ``malformed`` is the no-WHOLE-scalar check, a different shape, and it has TWO
+    conjuncts that are neither interchangeable nor redundant: no quote in the value
+    terminates the scalar (``_closing_quote`` returns ``-1``), **or** the close it
+    finds is not at the END of the splittable text. `"x"# note` has its close at
+    index 2, so only the end-of-text conjunct fires there and YAML keeps the value
+    (`x`); `"a\\"` closes nowhere, so only the parity scan fires and YAML keeps
+    none of it. Deciding wholeness by ``endswith`` ALONE is the historical defect —
+    a body whose last character is an ESCAPED quote ends in the quote char yet
+    never closes, and that sent it to ``escaped``, where the comparison is declined
+    (found in review: the shape escaped measurement entirely).
 
     ``escaped`` declines the value comparison (hand de-quoting cannot reproduce
-    `\\t`, `\\uXXXX`) but has already been checked for ``broken``.
+    `\\t`, `\\uXXXX`) but has already been checked for ``broken`` and
+    ``malformed``.
     """
     if raw[:1] not in ('"', "'"):
         return "plain", None
     q = raw[0]
     value = _split_comment(raw)
-    if len(value) < 2 or not value.endswith(q):
+    # Wholeness is decided by the SAME parity scan that locates the close. A
+    # truncation shape still closes at an inner quote, so `_closing_quote` finds
+    # it (`"a, "#1" KEEP"` -> 4) and it keeps reaching `broken` below.
+    if _closing_quote(value) == -1 or not value.endswith(q):
         return "malformed", None
     body = value[1:-1]
     if q == '"':
@@ -466,8 +581,15 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     space-preceded `#` ends at that `#` (YAML admits `#` in a plain scalar only
     with a non-space lookbehind), so
     `aboutObjects: A, #11395 reopen, #13220` parses to `A,` — key present, block
-    parseable, seven references gone. Measured on main: 68 blocks, 8 truncated,
-    every one an `aboutObjects`; the merged dossier's landed at 57 of 141 chars.
+    parseable, seven references gone. On `main` **before `#13476` landed** —
+    `035ed183fc`, which is `a5f1e7db46^` — that probe measured 68 blocks, 8
+    truncated, every one an `aboutObjects`; the merged dossier's landed at 57 of
+    141 chars. ⛔ The figure is TIED to that head on purpose: `#13476` is on
+    `main` now, so the same probe over the same glob at this head reports
+    **0** truncated values (`files: 103 blocks: 68 broken(truncated): 0`,
+    re-measured at `10a3d694`). Stating `8` as a present-tense `main` measurement
+    would be the exact defect this module exists to prevent — the same scoping
+    the plan doc §1 already carries, which this docstring did not.
     Presence, and even parseability, is not survival.
 
     Both are read through the SAME consumer the index pipeline uses, so this
@@ -525,8 +647,15 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     measured: set[tuple[str, str]] = set()
     compared = 0
     for path in paths:
-        # No frontmatter block at all is the OTHER arms' business; this arm is
-        # about blocks that exist and do not parse / do not survive.
+        # No block at all is OUTSIDE this arm's declared scope — and, unlike the
+        # architecture/ops/evidence populations above, NOTHING else asserts
+        # PRESENCE for docs/research/**: 35 of its 103 files carry no block and
+        # stay green across this whole module (measured at this commit). An
+        # earlier version of this comment said presence was "the OTHER arms'
+        # business"; there is no such arm, so that was a false coverage claim and
+        # is corrected rather than carried.
+        #
+        # This arm is about blocks that EXIST and do not parse / do not survive.
         fm = _frontmatter(path)
         if not fm:
             continue
@@ -647,12 +776,12 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
-                # `strict=True`: the guard directly above already rejected a
-                # length divergence with its own single diagnosis, so an unequal
-                # pair here is unreachable — and if that guard is ever weakened,
-                # this must RAISE rather than silently compare a prefix (the
-                # fail-open this arm exists to close). ruff B905 (#13492 merge,
-                # inherited red on `main`).
+                # `strict=True` on both sides of the merge (this branch and
+                # `origin/main` added it independently, for the same reason): the
+                # length equality above already `continue`s when the lists differ,
+                # so a mismatch here would mean the guard itself was bypassed —
+                # the parameter asserts nothing new and gives B905 its explicit
+                # argument. Kept as ONE line with both sides' intent, not two.
                 for raw_item, got_item in zip(texts, got_list, strict=True):
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from
@@ -661,9 +790,7 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                     style, expected = _quoted_style(raw_item)
                     if style in ("broken", "malformed"):
                         bad.append(
-                            f"`{key}` item {raw_item!r} is {style} — a quoted item "
-                            "YAML cannot keep whole is TERMINATED at that quote. "
-                            "Remove the inner quote, or use a block scalar."
+                            _unkeepable_quoted(f"`{key}` item {raw_item!r}", style)
                         )
                         break
                     if style == "escaped":
@@ -691,12 +818,7 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
             # affiliation carries is the one this issue is about.
             style, expected = _quoted_style(texts[0])
             if style in ("broken", "malformed"):
-                bad.append(
-                    f"`{key}` is a quoted value YAML cannot keep whole "
-                    f"({style}: an unescaped inner quote, an unbalanced quote, or "
-                    "no closing quote) — the value is TERMINATED there. Remove "
-                    "the inner quote, or use a block scalar."
-                )
+                bad.append(_unkeepable_quoted(f"`{key}`", style))
                 continue
             if key not in AFFILIATION_KEYS:
                 continue
@@ -911,6 +1033,298 @@ def test_a_wholly_commented_value_gets_ONE_TRUE_diagnosis(
     assert "Quote the value." in msg, msg
 
 
+def test_a_single_quoted_escape_before_a_hash_is_measured_not_broken(tmp_path) -> None:
+    """YAML's only single-quote escape is ``''``; it is NOT an unbalanced quote.
+
+    ``'the ''KEEP'' #11395 ruling'`` is legal, intact YAML — ``parse_frontmatter``
+    returns ``the 'KEEP' #11395 ruling`` — but the ``''`` escape leaves a quote
+    immediately before the `` #``, so a close located by
+    ``raw[:i].rstrip().endswith(q)`` fires at the WRONG `` #`` and (C) reports
+    *an unbalanced quote … remove the inner quote*: advice to delete a legal
+    escape. Nothing can ship on this — the arm is fail-closed — but a false
+    remedy is the same defect rounds 3 and 4 fixed in (D) and the sequence
+    branch, so it is fixed where it lives and pinned here.
+
+    Non-vacuity: on the pre-fix helper ``_quoted_style`` returns
+    ``('broken', None)`` for this value, so the ``style`` assertion below fails
+    (the ``classified`` assertion before it passes: this branch edited
+    ``_values``' TEXT only — two prose blocks, a DOCSTRING hunk and a ``#``-comment
+    hunk, with behaviour identical and the classification path untouched, so that
+    assertion does not depend on the fix. ⛔ It read "``_values`` is unchanged by
+    this fix" until review round 5, which the diff refutes; round 6 then caught the
+    first repair calling BOTH hunks "comments" when ``@@ -166`` is inside the
+    docstring that opens at ``:158`` — so the claim is about the PATH, and the two
+    hunks are text, not both comments).
+
+    This value pins the close-POSITION half of the fix. The parity half — the
+    ``''`` skip in ``_closing_quote`` — is NOT exercised by it: here the escape
+    sits immediately before the `` #``, so the position test alone refuses the
+    wrong split. It has its own pin in
+    ``test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured``
+    (found in review: deleting the parity skip left this test green).
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    value = "'the ''KEEP'' #11395 ruling'"
+    doc = tmp_path / "dossier.md"
+    doc.write_text(
+        f"---\ntitle: x\naboutObjects: {value}\n---\n\nbody\n", encoding="utf-8"
+    )
+    classified = {(key, kind): payload for key, kind, payload in _values(_frontmatter(doc))}
+    assert ("aboutObjects", "scalar") in classified, (
+        "`_values` no longer classifies this as a scalar — re-point this guard: "
+        f"{classified!r}"
+    )
+    style, expected = _quoted_style(classified[("aboutObjects", "scalar")])
+    assert style == "single-quoted", (
+        f"a `''` escape before a ` #` is legal YAML, but this arm reports "
+        f"{style!r} — the remedy it prints must not ask for a legal escape to "
+        f"be deleted"
+    )
+    assert expected == "the 'KEEP' #11395 ruling", expected
+    # …and the measured expectation is the value the real consumer parses, so
+    # the arm is not merely self-consistent.
+    assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == expected
+
+
+def test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured(
+    tmp_path,
+) -> None:
+    """The ``''`` PARITY skip, pinned separately from the close-position test.
+
+    ``'it''s' # comment`` is legal YAML (``parse_frontmatter`` returns ``it's``)
+    and the ``''`` sits MID-body, so the close-POSITION test (``len(raw[:i]
+    .rstrip()) - 1 == close``) cannot decide it — only ``_closing_quote``'s skip
+    of a doubled quote can say where the scalar really ends. Without that skip
+    the close is found INSIDE the body (index 3, not 6), so NO `` #`` in this
+    value can satisfy the split predicate: ``_split_comment`` returns the raw
+    text unstripped, and because that text no longer ends in a quote the arm
+    reports ``('malformed', None)`` — the same *delete a legal escape* class of
+    false remedy this whole change removes. The mechanism is worth stating
+    exactly, because it is NOT the pre-fix helper's: there the split FIRED at a
+    wrong `` #``, here it does not fire at all, which is also why the
+    close-position test alone stays green under this mutant (found in review:
+    the earlier wording claimed the split landed on the wrong `` #``, and the
+    measurement above refutes it).
+
+    Why it needs its own test: measured with the skip deleted, the sibling
+    single-quote test stays GREEN (its escape sits immediately before the
+    `` #``), so the parity half shipped unpinned. ⛔ NOT *"would reintroduce the
+    false block with green CI"* — an earlier version of this paragraph said that,
+    and it is falsified by measurement: with the skip deleted the file is
+    `5 failed, 13 passed` at `dad7aea959`, i.e. this pin AND
+    `test_a_never_closing_quoted_scalar_is_malformed_not_escaped` AND
+    `test_no_GREEN_quoted_verdict_survives_a_parser_refusal` all red (the other 2
+    are the pre-existing absence rows). A future simplification therefore CANNOT
+    land green. This test is the FIRST custodian of the parity skip, not its only
+    one — the same correction the backslash-skip docstring below already carries.
+
+    Non-vacuity: with the ``''`` skip removed, ``_quoted_style`` returns
+    ``('malformed', None)`` here and the ``style`` assertion below fails.
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    value = "'it''s' # comment"
+    doc = tmp_path / "dossier.md"
+    doc.write_text(
+        f"---\ntitle: x\naboutObjects: {value}\n---\n\nbody\n", encoding="utf-8"
+    )
+    classified = {(key, kind): payload for key, kind, payload in _values(_frontmatter(doc))}
+    assert ("aboutObjects", "scalar") in classified, (
+        "`_values` no longer classifies this as a scalar — re-point this guard: "
+        f"{classified!r}"
+    )
+    style, expected = _quoted_style(classified[("aboutObjects", "scalar")])
+    assert style == "single-quoted", (
+        "a `''` escape MID-body is legal YAML, but this arm reports "
+        f"{style!r} — the parity scan lost the close and the printed remedy "
+        "would ask for a legal escape to be deleted"
+    )
+    assert expected == "it's", expected
+    assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == expected
+
+
+def test_a_double_quoted_backslash_escape_before_a_comment_is_measured(
+    tmp_path,
+) -> None:
+    """The ``"`` BACKSLASH skip, pinned separately from the ``''`` parity skip.
+
+    ``"a\"" # c`` is legal YAML — ``parse_frontmatter`` returns ``a"`` — and the close
+    sits immediately before the `` #`` (the escaped quote is at index 3, the true
+    close at 4). Without the skip the close is found ON that escaped quote (index
+    3), so NO `` #`` satisfies the split predicate: ``_split_comment`` returns the
+    raw text unstripped, that text no longer ends in a quote, and the arm reports
+    ``('malformed', None)`` — the *remove the inner quote* class of false remedy
+    this whole change removes. The mechanism is stated exactly because it is NOT
+    a mis-landed split: no split fires at all (measured; the same distinction the
+    sibling parity test records).
+
+    This is the one arm the PRE-fix helper already got right (it never scanned
+    for a close at all — it cut at the `` #`` whose left side ended in the quote
+    char, which this shape satisfies), so the skip is old behaviour preserved by
+    a NEW branch. When it goes, this test is NOT the only one that reds:
+    ``test_a_never_closing_quoted_scalar_is_malformed_not_escaped`` also asserts
+    ``_closing_quote('"a\\"') == -1``, and that is exactly what the same skip
+    produces, so it reds alongside this one (re-measured at ``1c956076``:
+    ``4 failed, 12 passed`` — the 2 pre-existing absence reds plus those 2).
+
+    Non-vacuity: deleting the two-line backslash skip in ``_closing_quote``
+    makes ``_quoted_style`` return ``('malformed', None)`` here, so the ``style``
+    assertion below is the FIRST of two things that notice, not the only one —
+    ``test_a_never_closing_quoted_scalar_is_malformed_not_escaped`` reds
+    alongside it, which the paragraph above already measures. (The PAIR count
+    above is tied to the head that measured it; §7 item 2 carries the file-wide
+    baseline, and any count printed here goes stale the moment another test is
+    appended to this file — which has already happened twice.)
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    value = '"a\\"" # c'
+    doc = tmp_path / "dossier.md"
+    doc.write_text(
+        f"---\ntitle: x\naboutObjects: {value}\n---\n\nbody\n", encoding="utf-8"
+    )
+    classified = {(key, kind): payload for key, kind, payload in _values(_frontmatter(doc))}
+    assert ("aboutObjects", "scalar") in classified, (
+        "`_values` no longer classifies this as a scalar — re-point this guard: "
+        f"{classified!r}"
+    )
+    style, expected = _quoted_style(classified[("aboutObjects", "scalar")])
+    assert style == "escaped", (
+        "a backslash-escaped quote before a trailing comment is legal YAML, but "
+        f"this arm reports {style!r} — the close scan skipped no escape and the "
+        "printed remedy would ask for a legal escape to be deleted"
+    )
+    assert expected is None, (
+        "an `escaped` body declines the value comparison by design (hand "
+        f"de-quoting cannot reproduce `\\t`/`\\uXXXX`) — got {expected!r}"
+    )
+    # …and the consumer agrees the value is whole, which is what `malformed` denies.
+    assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == 'a"'
+
+
+def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
+    """(C) runs BEFORE the escape branch — and that ORDER was the only thing pinning it.
+
+    ``_quoted_style`` returns ``broken`` for an UNESCAPED inner ``"`` and only then
+    considers ``escaped``. That order is load-bearing, not cosmetic: an escaped body
+    can still carry an unescaped quote, and when the escape branch ran first the
+    truncation went through GREEN (found in review of #13476; the module docstring at
+    ``_quoted_style`` records it).
+
+    ⛔ This is the one branch of this helper whose loss is a FAIL-OPEN, not a false
+    remedy. Measured, with ``if _has_unescaped_dq(body):`` mutated to ``if False:``,
+    THREE pins red: THIS one, ``test_a_malformed_value_names_a_true_remedy`` (its
+    case (c) asserts ``"broken" in msg`` for a shape whose verdict this order
+    decides) and ``test_no_GREEN_quoted_verdict_survives_a_parser_refusal`` (its
+    ``refused_but_green`` assertion fires on the same mutant — measured, NOT its
+    ``mismatched`` one: with the ordering gone, a shape the parser REFUSES comes
+    back with a COMPARING verdict, which is that pin's first direction) —
+    ``5 failed, 13 passed`` of
+    18 collected at ``fcf5d9cd72``, the other 2 being the pre-existing absence rows
+    that red identically on ``origin/main``. Named as well as totalled because an
+    earlier revision of this paragraph claimed "one other pin" and a
+    ``4 failed, 13 passed`` total, which is arithmetically impossible for an
+    18-item file and omitted the third pin. These two values, both TRUNCATED by the
+    consumer, stop being reported:
+
+        `"a, "#1" KEEP"`            yaml -> `'a, '`        head `('broken', None)` -> `('double-quoted', …)`
+        `"a\\tb\\" "#1" KEEP"`      yaml -> `'a\\tb" '`     head `('broken', None)` -> `('escaped', None)`
+
+    ⛔ Only the SECOND of those is a fail-open, and the difference has to be stated
+    because the first shape still reds — with a different message. Under the mutant
+    `"a, "#1" KEEP"` is measured as `('double-quoted', 'a, "#1" KEEP')`, so the scalar
+    branch still COMPARES it and still reports *does not SURVIVE the parse* (`len 12 →
+    3`) where it used to say TERMINATED: the verdict changes, the comparison does not
+    disappear. The second shape carries a legal backslash escape, so it reaches
+    `('escaped', None)` and the `escaped` branch `continue`s BEFORE any comparison —
+    THAT is the value which escapes measurement, and end-to-end a `docs/research`
+    dossier carrying that value passes the arm under the mutant and reds it at this
+    head, which is exactly the #13452 defect this guard exists to prevent. At the
+    head this was written the two assertions below were the ONLY thing that noticed;
+    they no longer are — `test_a_malformed_value_names_a_true_remedy` and
+    `test_no_GREEN_quoted_verdict_survives_a_parser_refusal` also red under that
+    mutant now (re-measured at `fcf5d9cd72`: `5 failed, 13 passed`,
+    `test_a_malformed_value_names_a_true_remedy`'s case (c) asserting
+    `"broken" in msg`), so this test is the first custodian of the
+    ordering, not the sole one.
+
+    Before this pin existed the same mutant left the WHOLE FILE green apart from the two
+    pre-existing absence rows — measured at ``3b8de63b8a``, when the file held one test
+    fewer — which is exactly why this test exists. That measurement is quoted WITH its
+    head, and so is every count in this docstring: a count without one has gone stale
+    twice already, because it moves whenever another test is appended.
+    """
+    # An unescaped inner quote, with no escape anywhere in the body.
+    assert _quoted_style('"a, "#1" KEEP"') == ("broken", None), (
+        "an unescaped inner quote TERMINATES the scalar (YAML reads `a, `), so this "
+        "must be `broken` — not measured as a whole double-quoted value"
+    )
+    # …and the SAME shape once a legal escape is also present: the escape branch must
+    # not be reached first, or `escaped` declines the comparison and the truncation
+    # goes unreported.
+    assert _quoted_style('"a\\tb\\" "#1" KEEP"') == ("broken", None), (
+        "a body with BOTH an escape and an unescaped quote is still TERMINATED at "
+        "that quote (YAML reads `a\\tb\" `) — `escaped` would skip the comparison "
+        "and let the truncation through"
+    )
+
+
+def test_a_never_closing_quoted_scalar_is_malformed_not_escaped() -> None:
+    """A quote the parity scan never closes is `malformed` — never `escaped`.
+
+    Wholeness used to be decided by ``value.endswith(q)`` alone, and that test is
+    FOOLED by a double-quoted body whose last character is an ESCAPED quote: the
+    value ends in the quote char, so it passed the wholeness test, reached the
+    escape branch and was reported ``('escaped', None)`` — a style that DECLINES the
+    value comparison. A scalar YAML cannot close therefore escaped measurement
+    while (D) still counted it as measured (found in review; the false statement
+    this falsified was `_split_comment`'s `-1` arm, which claimed the caller
+    refused these shapes and did not).
+
+    YAML agrees the shape is unparseable, not merely uncomparable: a quoted scalar
+    requires a MATCHING closing quote, and PyYAML raises *while scanning a quoted
+    scalar, found unexpected end of stream*. So the verdict is `malformed` — the
+    same one the helper already gave the plainly truncated shape.
+
+    Non-vacuity: replaying the WHOLE pre-fix helper — ``value.endswith(q)``
+    alone, *and* ``_split_comment``'s ``raw[:i].rstrip().endswith(q)`` predicate
+    in place of the ``_closing_quote`` gate — the FIRST entry below fails:
+    ``_quoted_style`` returned ``('escaped', None)`` for it, while the other two
+    returned ``('broken', None)`` and ``('malformed', None)``. TWO other pins red
+    on that replay, and both are named because this file must not claim otherwise:
+    ``test_a_single_quoted_escape_before_a_hash_is_measured_not_broken``
+    (``('broken', None)``; its own docstring owns that measurement) and
+    ``test_no_GREEN_quoted_verdict_survives_a_parser_refusal`` — ``5 failed, 13
+    passed`` of 18 at ``fcf5d9cd72``, the other 2 being the pre-existing absence
+    reds. An earlier revision said "exactly ONE other pin" and quoted the
+    ``4 failed, 12 passed`` measured at ``1c956076``: true there, stale here,
+    because the class pin below landed AFTER that head.
+    The truncation pins stay GREEN under it: those shapes DO close at an inner
+    quote, so ``_closing_quote`` finds the close and the wholeness test never
+    changes their verdict.
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    # `_closing_quote` returns -1 for every one of these; the FIRST is the escape
+    # from measurement, because it is the only one that still ENDS in the quote
+    # char while having no terminating quote.
+    for raw in ('"a\\"', "'''", '"abc\\'):
+        assert _closing_quote(raw) == -1, (
+            f"{raw!r} is expected to have NO closing quote — re-point this guard"
+        )
+        assert _quoted_style(raw) == ("malformed", None), (
+            f"{raw!r} never closes, so YAML keeps none of it — `escaped` would "
+            f"decline the comparison and let it through; got {_quoted_style(raw)!r}"
+        )
+
+    # …and the consumer agrees, which is what makes this classification safe to
+    # tighten: the PARSE arm (`parse_frontmatter` degrading to `{}`) is the check
+    # that reds such a file, so narrowing `escaped` invents no red the pipeline
+    # lacks.
+    assert parse_frontmatter('---\ntitle: x\naboutObjects: "a\\"\n---\n') == {}
+
+
 def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
     """#9110 review P2: the evidence bundle landed with no frontmatter at all.
 
@@ -928,4 +1342,277 @@ def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
     assert not missing, (
         f"docs/evidence/7949-capstone/E1-E2.md must declare {missing} — the "
         "AGENTS.md doc-filing rule and the convention of the bundle it copies."
+    )
+
+
+def test_a_malformed_value_names_a_true_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`malformed` and `broken` no longer share a remedy — one of them was false.
+
+    Both verdicts refuse the file, which is correct: nothing can ship on either.
+    What was wrong was the PRINTED REMEDY, which was the truncation sentence for
+    both — *"the value is TERMINATED there. Remove the inner quote"*. For
+    `broken` that is true (YAML stops at the unescaped inner quote). For
+    `malformed` it is false for the members YAML KEEPS WHOLE — a space-less
+    trailing comment and a continued quoted scalar — where the sentence tells the
+    author to delete a character the value needs: the same false-remedy class as
+    the `''`-escape finding this PR exists to remove. The third member (a scalar
+    that never closes) is a PARSE ERROR, so the sentence was merely inapplicable
+    there; it gets the same new remedy for a different reason.
+
+    The whole family is recorded in the plan doc §9 as *recorded, not fixed*,
+    with one reason: clearing the VERDICT means a lexer widening (accepting a
+    trailing comment that is not space-separated). The remedy is a different
+    fix and needs no lexer change: name the cause the author can act on. That is
+    what this test pins, and it pins the `broken` sentence too, so a future
+    simplification cannot flatten the two back into one.
+
+    Non-vacuity: on the pre-fix arm every ``"Remove the inner quote" not in msg``
+    assertion below fails, because both verdicts carried that sentence.
+    """
+
+    def red(body: str) -> str:
+        """Run the arm over a one-case tmp docs tree and return its failure text."""
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        (root / "docs" / "research").mkdir(parents=True, exist_ok=True)
+        (root / "docs" / "research" / "control.md").write_text(
+            _FM_HEAD + "aboutObjects: tortoise-platform, tortoise-hosted\n---\n\n# c\n",
+            encoding="utf-8",
+        )
+        (root / "docs" / "research" / "case.md").write_text(
+            _FM_HEAD + body + "---\n\n# case\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "ROOT", root)
+        with pytest.raises(AssertionError) as excinfo:
+            test_research_doc_frontmatter_parses_as_yaml()
+        # The rewritten-assert explanation repeats the failures dict, so take the
+        # arm's own single-line message.
+        return str(excinfo.value).split("\n", 1)[0]
+
+    from tortoise.file_indexer import parse_frontmatter
+
+    # (a) LEGAL YAML refused as `malformed`: a trailing comment with no space
+    # before it. YAML keeps `x`, so "remove the inner quote" is advice to delete
+    # a character the value needs; the remedy that clears it is the SPACE.
+    assert parse_frontmatter(
+        '---\ntitle: x\naboutObjects: "x"# note\n---\n'
+    )["aboutObjects"] == "x", "control: `\"x\"# note` must load whole"
+    msg = red('aboutObjects: "x"# note\n')
+    assert "malformed" in msg, msg
+    assert "Remove the inner quote" not in msg, msg
+    assert "put one space before the `#`" in msg, msg
+    # The OPENING clause must not contradict the case it is printing for. This
+    # shape HAS a closing quote — measured just below, not assumed — and the arm
+    # FINDS it, so BOTH "no closing quote on that line" and its replacement "this
+    # arm cannot read where the value closes" were false in the very sentence that
+    # went on to name the space fix. The second one survived a round that fixed the
+    # first, which is why it is pinned by ABSENCE: a corrected clause is not a
+    # corrected claim, and the "Remove the inner quote" / "put one space"
+    # assertions above are both satisfied by a message whose first clause lies.
+    assert _closing_quote(_split_comment('"x"# note')) == 2, (
+        "re-point this pin: the close is located at index 2, and that measurement "
+        "is what makes the two clauses below false"
+    )
+    assert "no closing quote on that line" not in msg, msg
+    assert "cannot read where the value closes" not in msg, msg
+    # …and the TRUE cause is named: the close is located, but it is not the last
+    # thing in the value, so the arm refuses to compare it.
+    assert "not the last thing in the value" in msg, msg
+
+    # (b) LEGAL YAML refused as `malformed`: a quoted scalar continued on the
+    # next line. The remedy names the one-line form / block scalar.
+    assert parse_frontmatter(
+        '---\ntitle: x\naboutObjects: "a\n  b"\n---\n'
+    )["aboutObjects"] == "a b", "control: a continued quoted scalar loads whole"
+    msg = red('aboutObjects: "a\n  b"\n')
+    assert "malformed" in msg, msg
+    assert "Remove the inner quote" not in msg, msg
+    assert "one line inside its quotes" in msg, msg
+
+    # (c) the truncation verdict is UNCHANGED and keeps its own sentence: here
+    # YAML really does stop at the inner quote, so the deletion advice is right.
+    msg = red('aboutObjects: "a, "#1" KEEP"\n')
+    assert "broken" in msg, msg
+    assert "TERMINATED at an inner quote" in msg, msg
+    assert "Remove the inner quote" in msg, msg
+    assert "put one space before the `#`" not in msg, msg
+
+
+def test_an_unlexable_key_is_what_makes_the_fail_open_a_RED(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(D)'s ONE fail-open, pinned — the branch was recorded and left untested.
+
+    The plan doc §9 calls this line *"a FAIL-OPEN in check (D) … the exact
+    #13452 defect the guard exists to close, reachable with a one-keystroke
+    typo"* and then records it as fixed with no pin. It was the only fix in this
+    PR whose revert left the whole file GREEN.
+
+    ``declared`` is the authoritative list of keys the guard owes a measurement
+    for. ``_values`` can only lex ``key:``, so a legal-but-unlexable key
+    spelling (a space before the colon, a quoted key, an indented block) is
+    invisible to it; unioning in the PARSED block is what makes that pair FAIL
+    instead of vanish. Without it the pair is in neither `declared` nor
+    `measured`, (D) has nothing to complain about, and a value YAML truncates
+    from 14 characters to 2 sails through green.
+
+    Non-vacuity, measured at `38df4e93a4`: deleting
+    ``declared |= {(rel, k) for k in AFFILIATION_KEYS if k in parsed}`` takes the
+    file from `2 failed, 15 passed` to ``3 failed, 14 passed`` — the two
+    pre-existing absence reds AND this pin, while the arm goes GREEN on the case
+    below. That is why the pin exists rather than a comment. (Before this pin
+    existed, the same deletion left the file at `2 failed, 14 passed` — "the
+    absence reds and NOTHING else". That figure is superseded by this test's own
+    arrival: quoting it here would say the deletion is unnoticed by a pin added
+    precisely to notice it.)
+    """
+
+    def red(body: str) -> str:
+        """Run the arm over a one-case tmp docs tree and return its failure text."""
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        (root / "docs" / "research").mkdir(parents=True, exist_ok=True)
+        (root / "docs" / "research" / "control.md").write_text(
+            _FM_HEAD + "aboutObjects: tortoise-platform, tortoise-hosted\n---\n\n# c\n",
+            encoding="utf-8",
+        )
+        (root / "docs" / "research" / "case.md").write_text(
+            _FM_HEAD + body + "---\n\n# case\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "ROOT", root)
+        with pytest.raises(AssertionError) as excinfo:
+            test_research_doc_frontmatter_parses_as_yaml()
+        return str(excinfo.value).split("\n", 1)[0]
+
+    from tortoise.file_indexer import parse_frontmatter
+
+    # (a) SPACE before the colon. The shape is a REAL truncation — YAML ends the
+    # plain scalar at the ` #` — so a green arm here is a shipped defect, not a
+    # false block. Control first, so the test cannot pass by refusing a value
+    # that was never broken.
+    assert parse_frontmatter(
+        "---\ntitle: x\naboutObjects : a, #11395 KEEP\n---\n"
+    )["aboutObjects"] == "a,", "control: ` #` truncates this plain scalar"
+    msg = red("aboutObjects : a, #11395 KEEP\n")
+    assert "has a SPACE before its colon" in msg, msg
+    assert "quote the value" not in msg.split("Respell")[0], msg
+
+    # (b) a QUOTED key: also legal YAML, also invisible to `_values`, and it
+    # needs its OWN remedy — "quote the value" cannot clear it.
+    assert parse_frontmatter(
+        "---\ntitle: x\n\"aboutObjects\": a, #11395 KEEP\n---\n"
+    )["aboutObjects"] == "a,", "control: ` #` truncates this plain scalar too"
+    msg = red('"aboutObjects": a, #11395 KEEP\n')
+    assert "QUOTED key" in msg, msg
+
+
+#: The alphabet every quoting arm in this file turns on. The sweep below is
+#: EXHAUSTIVE over it, so the pin is a CLASS rather than one more hand-picked
+#: shape — this change has cleared one shape per review round, and each round the
+#: NEXT shape was what red.
+_SHAPE_ALPHABET = ("'", '"', "\\", "#", " ", "a")
+#: Length bound, stated rather than discovered. At 6 the sweep starts finding FIVE
+#: PRE-EXISTING discrepancies this change neither causes nor clears — all five
+#: reproduce IDENTICALLY through `origin/main`'s `_split_comment` + `_quoted_style`
+#: (measured shape by shape). ⛔ That pairing is named precisely: `_closing_quote`
+#: does NOT exist on `main` — it is introduced by THIS branch — so a reader who
+#: greps main for it finds nothing and concludes the replay was fabricated. What
+#: is replayed is main's SCALAR VERDICT path, which is where these five are
+#: decided. The exclusion is about ownership, not severity.
+#: ⛔ They are NOT all the same kind, and naming only the harmless one would tell a
+#: lane that raises this bound that 5→6 is safe for a reason it is not:
+#:
+#: * ONE is a mis-slice — `''''#'` is loadable YAML (`'`) and the arm's body is
+#:   `''#`, because `body = value[1:-1]` is not sliced at the close the parity scan
+#:   already located. False red → it fails CLOSED. It is fixable (`body = value[1:close]`
+#:   clears it and adds 0 wrong bodies on YAML-accepted input) but it cannot land ALONE:
+#:   measured, it turns 122 further parser-REFUSED shapes at bound 5 into comparing
+#:   verdicts (`277 → 422`), which REDS this very pin. §9 carries the measurement.
+#: * FOUR are the pin's FIRST and most severe direction — REFUSED-BUT-GREEN, i.e.
+#:   a comparing verdict on input a real parser REJECTS — and all four are of the
+#:   `''''X'` form: `''''"'`, `''''\'`, `'''' '`, `''''a'`.
+#:
+#: None of the four is an END-TO-END fail-open, which is why this pin's bound is the
+#: right place to exclude them rather than the lexer: `parse_frontmatter` returns
+#: `{}` for every one of them, so the PARSE arm refuses the file before a comparing
+#: verdict is ever consumed (measured).
+_SHAPE_MAX_LEN = 5
+
+
+def test_no_GREEN_quoted_verdict_survives_a_parser_refusal() -> None:
+    """Differential: a real YAML parser is the oracle, ``_quoted_style`` the subject.
+
+    Every quoting defect this branch fixed was found ONE SHAPE AT A TIME, and each
+    round produced the next shape. This sweeps EVERY string over the alphabet the
+    arms turn on, up to five characters (3110 quoted values), and asserts the two
+    directions in which a bad value gets THROUGH:
+
+    * a shape a real parser REFUSES must not come back green (``single-quoted`` /
+      ``double-quoted``) — a green verdict is the one the caller COMPARES, so a
+      refusal reported green can pass; and
+    * a green verdict's ``body`` must equal what that parser returns, or the
+      comparison is made against the wrong text.
+
+    Measured at this head: 3110 shapes, 277 green, **0** refusals reported green,
+    0 body mismatches. Non-vacuity: the same sweep driven through ``main``'s SCALAR
+    VERDICT path — ``_split_comment`` + ``_quoted_style``, which is where the
+    compared verdict is decided — finds **1**: `'''''` (five quotes), which YAML
+    refuses as an unterminated scalar and ``main`` reports as ``single-quoted`` with
+    body ``''`` — so this pin reds on the PRE-fix helper and is green only because
+    the parity scan refuses to close an unterminated scalar. ⛔ ``_closing_quote``
+    does NOT exist on ``main`` (this branch introduces it), so an earlier revision of
+    THIS paragraph replayed a function a reader cannot find there; the pairing above
+    is the one that was measured, and re-measuring it still finds exactly one shape.
+
+    The two counters are constant-derived (alphabet x bound), never tree-derived,
+    so they cannot red on a sparse tree: they exist so that an edit to those two
+    constants cannot leave a sweep that checks nothing.
+    """
+    shapes = green = 0
+    refused_but_green: list[tuple[str, str, object]] = []
+    mismatched: list[tuple[str, str, object, object]] = []
+    # Local imports, like the sibling pins' `parse_frontmatter`: a module-level
+    # import here would shift EVERY line number below it, and the plan doc cites
+    # lines in this file (the shift that cost a whole round already).
+    import itertools
+
+    import yaml
+
+    for length in range(1, _SHAPE_MAX_LEN + 1):
+        for chars in itertools.product(_SHAPE_ALPHABET, repeat=length):
+            raw = "".join(chars)
+            if raw[:1] not in ('"', "'"):
+                continue
+            shapes += 1
+            try:
+                parsed = yaml.safe_load(f"aboutObjects: {raw}\n")
+                if not isinstance(parsed, dict):
+                    raise yaml.YAMLError("a quoted scalar must still parse to a mapping")
+                value, refused = parsed.get("aboutObjects"), False
+            except yaml.YAMLError:
+                value, refused = None, True
+            style, body = _quoted_style(raw)
+            if style not in ("single-quoted", "double-quoted"):
+                continue
+            green += 1
+            if refused:
+                refused_but_green.append((raw, style, body))
+            elif body != value:
+                mismatched.append((raw, style, body, value))
+    assert shapes > 3000, (
+        "the sweep shrank — `_SHAPE_ALPHABET` / `_SHAPE_MAX_LEN` no longer generate "
+        f"the population this pin is calibrated on ({shapes} quoted shapes)"
+    )
+    assert green > 200, (
+        f"only {green} of {shapes} shapes reach a COMPARING verdict, so the two "
+        "assertions below would pass vacuously — re-point this pin"
+    )
+    assert not refused_but_green, (
+        "a quoted shape YAML REFUSES was reported with a COMPARING verdict, so a "
+        "truncated or unterminated value can pass the survival check: "
+        f"{refused_but_green!r}"
+    )
+    assert not mismatched, (
+        "a green verdict's body is not the text YAML reads, so the value is "
+        f"compared against the wrong text: {mismatched!r}"
     )
