@@ -2546,6 +2546,9 @@ def test_every_pp_and_every_scientific_p_the_brief_prints_is_a_recorded_one():
         for block in art["arms"].values():
             for cell in block["per_k"].values():
                 allowed_pp.add(round((cell["on_hits"] - cell["off_hits"]) / n * 100, 2))
+                # a CI bound is a pp figure too, and it IS recorded
+                for bound in cell["bootstrap"]["ci95"]:
+                    allowed_pp.add(round(bound * 100, 2))
                 for cell_key in ("mde_paired", "mde_independent"):
                     value = cell.get(cell_key)
                     if value is not None and value == value:  # not NaN
@@ -3088,3 +3091,44 @@ def test_the_tool_really_has_the_omission_flag_its_docstring_promises():
     p.add_argument("--include-per-item", action=argparse.BooleanOptionalAction,
                    default=True)
     assert p.parse_args(["--no-include-per-item"]).include_per_item is False
+
+
+def test_a_ci_that_excludes_zero_where_the_exact_test_does_not_is_CALLED_OUT():
+    """F1 — a published interval contradicted the test printed in the same row.
+
+    `#13267` review 10 F1: the k = 3 row prints `McNemar exact p 0.0625` and
+    95 % CI `[+0.33, +3.33]` side by side, and §4.1 said "neither side can be
+    separated from noise" about a cell whose recorded CI excludes zero. The cause
+    is real and mechanical: with 5 of 300 discordant and c = 0, the percentile
+    bootstrap's 2.5th percentile is ONE discordant item, so `(1 - 5/300)**300`
+    of resamples are cut off below it — the interval is anti-conservative exactly
+    where the exact test is conservative. By duality both statements cannot hold,
+    and the brief never reconciled them. Nine rounds of figure re-derivation could
+    not see this because the interval IS pinned to the artifact's own value.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    clashes = []
+    for name in ("paired-point-300.json", "paired-point-300-short-query.json"):
+        art = _artifact(name)
+        for k, cell in art["arms"]["point"]["per_k"].items():
+            lo = cell["bootstrap"]["ci95"][0]
+            p_value = cell["mcnemar_exact_p"]
+            if lo > 0 and p_value > 0.05:
+                clashes.append((name, k, round(lo * 100, 2), p_value))
+    assert clashes, (
+        "this reproduction still expects the small-k rows to disagree; if they no "
+        "longer do, the caveat below can be removed rather than left as folklore")
+    assert "ANTI-CONSERVATIVE" in brief, (
+        "the brief prints an interval that excludes zero beside an exact p > 0.05 "
+        f"({clashes}) and does not say the interval is anti-conservative")
+    # the caveat must name the mechanism, not merely assert a vibe
+    assert "one discordant item" in brief, (
+        "the caveat must name WHY: the percentile lower bound is one discordant item")
+    assert "the exact test governs" in brief, (
+        "the caveat must say which statement governs")
+    # and the harm-side sentence must defer to the exact test rather than to noise
+    assert "neither side is separated from the null at" in brief, (
+        "§4.1 must name the exact test as the thing that fails to separate the "
+        "sides; 'cannot be separated from noise' contradicted its own recorded CI")
+    assert "neither side can be separated from noise" not in brief, (
+        "the retracted phrasing is back")

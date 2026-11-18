@@ -202,6 +202,17 @@ so a re-run measures the read, not the target's presence.
 | 10 | 0/300 | 13/300 | 13 | 0 | **0.00024** | +4.33 pp | [+2.33, +6.67] | 3.35 pp |
 | **15** | 0/300 | **17/300** | 17 | 0 | **0.00002** | **+5.67 pp** | [+3.33, +8.33] | 3.84 pp |
 
+⛔ **The three smallest-`k` rows' bootstrap intervals are ANTI-CONSERVATIVE, and the exact test governs
+(`#13267` review 10 F1).** At k = 3, 5 and 10 every discordant item is a miss→hit (`c = 0`), so the
+percentile bootstrap's 2.5th percentile is **one** discordant item — 1/300 = 0.33 pp — and the interval
+excludes zero **by that discreteness, not by evidence**: `P(a 300-item resample contains zero discordant
+items) = (1 − 5/300)³⁰⁰ = 0.0065`, so the resamples that DO show no gain are cut off below 2.5 %. By
+duality an interval that excludes 0 and a two-sided exact p of 0.0625 cannot both be right about the same
+test, and the exact test is the one §2 chose *because* the discordant totals here are 5–17. So: **k = 3 and
+k = 5 are NOT separated from the null by the exact test, and their intervals must not be read as
+separating them.** The headline is unaffected — k = 10 and k = 15 clear both their interval AND their exact
+test — and that agreement is the reason the win is claimed there and nowhere else.
+
 **Reading it.**
 
 - **On its own target class the expansion helps, and the pairing detects it.** At k = 15 it recovers 17 of
@@ -271,8 +282,11 @@ significant) and the harm becomes visible: **5 of 300 items (1.7 %) had their ow
 of the k-window, 2 demoted but kept** — which is the **same order** as the 1.67 pp gained. ⚠️ "out of the
 k-window" is `seed_lost_from_window`'s own definition (`off_rank < k` and `on_rank` null or `>= k`), not
 "gone from the read": a seed that fell to rank 20 of the 60-wide read is counted. On this arm **the lever's cost
-and its benefit are indistinguishable in size**, and **neither side can be separated from noise at
-n = 300** — the gain's exact McNemar p is 0.0625, and the 3 seeds lost are a bare count (1 % of items)
+and its benefit are indistinguishable in size**, and **neither side is separated from the null at
+n = 300 by the exact test** — the gain's exact McNemar p is 0.0625 (its bootstrap interval excludes zero,
+and ⛔ that interval is the anti-conservative one described at the §3 table: with 6 of 300 discordant and every one of them
+miss→hit, the percentile lower bound is one discordant item; the exact test governs, so this arm's gain is
+**not** established), and the 3 seeds lost are a bare count (1 % of items)
 with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3 **plus**
 `seed_demoted_but_kept` 2, and "best match" is shorthand: the artifact records the seed as never rank 1
 (`seed_at_top1` 0 → 0), so it is its own *best recorded* match, not a proven top-1.
