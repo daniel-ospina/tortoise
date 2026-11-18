@@ -2562,7 +2562,19 @@ def test_every_pp_and_every_scientific_p_the_brief_prints_is_a_recorded_one():
     allowed_pp |= {round(quoted["after3"] - quoted["before3"], 2),
                    round(quoted["after15"] - quoted["before15"], 2)}
     allowed_pp.add(round(P.independent_effect(300, 0.865) * 100, 2))
-    quoted_se = {2.8}          # `#13118`'s own published SE, quoted in §0
+    # ⛔ §0's standard errors are quoted from `#13118`, not produced by this run, so
+    # they are admitted ONLY where they re-derive as delta / z in the SAME sentence
+    # — `z = 0.37` beside a single "SE 2.8" was arithmetic that cannot add up, and
+    # an invented SE cannot ride in on an allow-list entry (`#13267` review 9 F5).
+    quoted_se = set()
+    for delta_q, se_q, z_q in re.findall(
+            r"delta (?:is )?(\d+\.\d+) pp at SE (\d+\.\d+) pp\s*\(\*\*z = "
+            r"(\d+\.\d+)\*\*\)", brief, flags=re.S):
+        assert abs(float(delta_q) / float(se_q) - float(z_q)) < 0.02, (
+            f"§0 prints z = {z_q} for delta {delta_q} at SE {se_q}: the arithmetic "
+            f"gives {float(delta_q) / float(se_q):.2f}")
+        quoted_se.add(float(se_q))
+    assert quoted_se, "§0 quotes at least one standard error with its delta and z"
 
     shown_pp = {round(float(v), 2)
                 for v in re.findall(r"[+]?(\d+\.\d+)\s*pp\b", brief)}
@@ -2880,3 +2892,199 @@ def test_the_tool_does_not_declare_point_only_figures_on_the_object_arm():
                     f"the object arm emits `{field}` NOWHERE (cells: "
                     f"{sorted(emitted)}), so declaring it is a claim about a field "
                     "a reader will not find")
+
+
+def test_every_artifacts_recorded_load_delta_is_its_own_end_minus_start():
+    """F2 — the "arithmetic that cannot add up" was still reachable.
+
+    `#13267` review 9 F2: the site-scoped pin compares the PRINTED delta to the
+    RECORDED delta, but nothing compared the recorded delta to `load_end - start`,
+    so `-0.54 -> -0.44` in the artifact plus both brief sites stayed GREEN and the
+    brief printed `load 13.09 -> 12.55 (Δ -0.44)`. The identity is the one the
+    tool is built on (`round(end - start, 2)`), so a delta that cannot add up
+    becomes unreachable rather than merely unreprinted.
+    """
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        env = art["environment"]
+        for window in ("load_1m", "load_5m", "load_15m"):
+            recorded = env.get(f"{window}_delta_1m" if window == "load_1m"
+                               else f"{window}_delta")
+            if recorded is None:
+                continue
+            start = env["load_start"][window]
+            end = env["load_end"][window]
+            assert round(end - start, 2) == round(recorded, 2), (
+                f"{name}: {window} {start} -> {end} is "
+                f"{round(end - start, 2)}, recorded as {recorded}")
+
+
+def test_every_artifacts_self_describing_counts_equal_the_rows_they_count():
+    """F3 — `sampled`, `total_bytes` and `items_read_per_arm` were free parameters.
+
+    `#13267` review 9 F3: `sampled 300 -> 250`, `total_bytes 78,571,361 -> …362`
+    (in all three artifacts) and `items_read_per_arm.point 300 -> 30` were each
+    GREEN. Each must equal another field in the SAME artifact, so the relation is
+    the pin.
+    """
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        items = art["items"]
+        drawn = items["with_item"] + sum(items["dropped"].values())
+        assert items["sampled"] == drawn, (
+            f"{name}: `sampled` {items['sampled']} but with_item "
+            f"{items['with_item']} + dropped {sum(items['dropped'].values())}")
+        assert items["sampled"] == art["population"]["sample"], (
+            f"{name}: `sampled` disagrees with the population triple it was drawn from")
+        snap = art["snapshot"]
+        assert snap["total_bytes"] == sum(f["bytes"] for f in snap["files"]), (
+            f"{name}: `total_bytes` is not the sum of its own file list")
+        assert snap["total_lines"] == sum(f["lines"] for f in snap["files"]), (
+            f"{name}: `total_lines` is not the sum of its own file list")
+        assert snap["file_count"] == len(snap["files"])
+        for arm, count in art["pairing"]["items_read_per_arm"].items():
+            for side in ("off", "on"):
+                assert art["arms"][arm]["reads"][side] == count, (
+                    f"{name}/{arm}: `pairing.items_read_per_arm` says {count}, "
+                    f"the {side} arm read {art['arms'][arm]['reads'][side]}")
+
+
+def test_each_brief_figure_is_bound_to_the_k_cell_it_belongs_to():
+    """F1 — the winner-rule and harm figures were an unordered allow-list.
+
+    `#13267` review 9 F1: `allowed_pp`/`pairs` are built over EVERY k of EVERY
+    artifact, so each figure could be swapped for ANOTHER RECORDED figure. Five
+    mutants were GREEN at this head: `+1.67 pp` -> `+4.33 pp` at the k=3 rule
+    sentence; the k=3/k=5 `(delta < MDE)` pairs swapped; §4.1's `p is 0.0625` ->
+    `0.00002` (three lines under "neither side can be separated from noise");
+    `(+1.67 < 2.08)` -> `(+4.33 < 2.08)`; and a swapped k-attribution in §5.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    head = _artifact("paired-point-300.json")["arms"]["point"]["per_k"]
+    short = _artifact("paired-point-300-short-query.json")["arms"]["point"]["per_k"]
+
+    def cell(block, k, key):
+        return block[f"k={k}"][key]
+
+    def pp(block, k):
+        return f"{(cell(block, k, 'on_hits') - cell(block, k, 'off_hits')) / 300 * 100:.2f}"
+
+    def mde(block, k):
+        # the artifact records the MDE as a FRACTION; the brief prints pp
+        return f"{cell(block, k, 'mde_paired') * 100:.2f}"
+
+    # §4's rule: the k=3 sentence must carry k=3's OWN pair, in that order
+    assert f"+{pp(head, 3)} pp against a {mde(head, 3)} pp minimum detectable effect" \
+        in brief, "the k=3 rule sentence must carry k=3's own (delta, MDE)"
+    # §5's winner row: every (delta, MDE) pair, bound to its own k
+    for k in (10, 15):
+        assert f"k = {k} ({pp(head, k)} > {mde(head, k)})" in brief, (
+            f"k = {k} clears its own MDE; the row must print that pair")
+    for k in (3, 5):
+        assert f"k = {k} ({pp(head, k)} < {mde(head, k)}" in brief, (
+            f"k = {k} does NOT clear its own MDE; the row must print that pair")
+    # §4's "cannot at k = 10 or k = 15" sentence carries those MDEs only
+    assert f"MDE {mde(head, 10)} / {mde(head, 15)} pp" in brief
+    # §4.1's harm p is the SHORT arm's own k=15 cell, not any recorded p
+    assert f"exact McNemar p is {cell(short, 15, 'mcnemar_exact_p'):g}" in brief, (
+        "§4.1's harm-side p belongs to the short arm's k=15 cell")
+
+
+def test_section_zero_quotes_are_pinned_and_its_z_scores_re_derive():
+    """F5 — §0's `#13118` statistics were pinned as four recalls only.
+
+    `#13267` review 9 F5: `| absent at any k | 28 | 25 |` -> `| 38 | 27 |` and
+    `z = 1.08` -> `1.88` / `0.37` -> `1.88` were GREEN, and `z = 1.88` beside
+    "Neither is distinguishable from noise" is a materially different claim.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    absent = re.search(r"\| absent at any k \| (\d+) \| (\d+) \|", brief)
+    assert absent, "§0 prints the absent-at-any-k row"
+    assert absent.group(1) == "28" and absent.group(2) == "25", (
+        f"the published absent counts are 28 / 25, the brief prints "
+        f"{absent.group(1)} / {absent.group(2)}")
+    # z = delta / SE, and BOTH the delta and the SE are printed in the same
+    # sentence — so a z that does not re-derive is the defect
+    # ⛔ each z must divide by ITS OWN printed SE: the sentence used to print one
+    # SE for two z-scores computed at different k, so `z = 0.37` beside
+    # "SE 2.8" was arithmetic that cannot add up (`#13267` review 9 F5, found by
+    # this pin: 1.3 / 2.8 = 0.46).
+    triples = re.findall(
+        r"delta (?:is )?(\d+\.\d+) pp at SE (\d+\.\d+) pp\s*\(\*\*z = (\d+\.\d+)\*\*\)",
+        brief, flags=re.S)
+    assert len(triples) >= 2, (
+        f"§0 states the @15 and @3 moves with their OWN SE each; found {triples}")
+    for delta, se_pp, printed in triples:
+        want = float(delta) / float(se_pp)
+        assert abs(float(printed) - want) < 0.02, (
+            f"§0 prints z = {printed} for a delta of {delta} pp at SE {se_pp} pp; "
+            f"the arithmetic gives {want:.2f}")
+
+
+def test_every_z_score_the_brief_prints_divides_its_own_delta_by_its_own_se():
+    """F5 — `z` was read by no parser at all.
+
+    `#13267` review 9 F5: `z = 1.08` -> `1.88` was GREEN, and `z` beside
+    "Neither is distinguishable from noise" is a materially different claim
+    (1.88 is ~p 0.06). §0 printed ONE SE for TWO z-scores computed at different k,
+    so `z = 0.37` divided 1.3 by 2.8 = 0.46 — arithmetic that cannot add up, which
+    this pin found while being written.
+    """
+    brief = (_DOCS / "research-brief.md").read_text()
+    triples = re.findall(
+        r"delta (?:is )?(\d+\.\d+) pp at SE (\d+\.\d+) pp\s*\(\*\*z = "
+        r"(\d+\.\d+)\*\*\)", brief, flags=re.S)
+    assert len(triples) >= 2, (
+        f"§0 states the @15 AND @3 moves, each with its own SE; found {triples}")
+    for delta, se_pp, z in triples:
+        assert abs(float(delta) / float(se_pp) - float(z)) < 0.02, (
+            f"z = {z} does not equal {delta} / {se_pp}")
+
+
+def test_a_read_limit_below_every_k_is_REFUSED_not_silently_empty():
+    """F4 — a run that measured nothing exited 0 and recorded no refusal.
+
+    `#13267` review 9 F4: `--read-limit 2` produced `per_k: []`, `refusals: []`
+    and exit 0 — the artifact's machine-readable "clean" verdict — while the tool
+    advertises exit 3 for "a measurement the tool will not take". No opt-out
+    excuses this class, so `--allow-mixed-modes` cannot un-refuse it either.
+    """
+    names = [f"item-{n:06d}" for n in range(6)]
+    ids = {i: [f"{i}-a"] for i in names}
+    on = {i: [f"{i}-a", f"{i}-b"] for i in names}
+    for limit, refused in ((2, True), (min(P.KS), False), (60, False)):
+        art, _ = _build_fake_artifact(
+            point_off=ids, point_on=on, object_off=ids, object_on=ids,
+            args=_fake_args(read_limit=limit))
+        assert art["refusal_kinds"] == ([P.NO_K_REFUSAL] if refused else []), (
+            f"--read-limit {limit}: refused={refused}, kinds="
+            f"{art['refusal_kinds']}")
+        assert (art["arms"]["point"]["per_k"] == {}) is refused, (
+            f"--read-limit {limit}: an empty `per_k` must be the REFUSED case")
+        code = P._exit_code(list(zip(art["refusal_kinds"], art["refusals"],
+                                     strict=True)), allow_mixed_modes=True)
+        assert (code == 3) is refused, (
+            f"--read-limit {limit}: exit {code}; --allow-mixed-modes must not "
+            "excuse a run with no statistic in it")
+
+
+def test_the_tool_really_has_the_omission_flag_its_docstring_promises():
+    """F6 — the docstring promised `--no-include-per-item`; argparse had no such flag.
+
+    `#13267` review 9 F6: `--include-per-item` was `store_true, default=True`, so
+    it was always True, the `} if args.include_per_item else None` branch was
+    unreachable, and the `has_per_item` gate could never be False.
+    """
+    import argparse
+    p = argparse.ArgumentParser()
+    src = (Path(P.__file__)).read_text()
+    decl = next(ln for ln in src.splitlines()
+                if 'add_argument("--include-per-item"' in ln)
+    assert "BooleanOptionalAction" in decl or "store_false" in decl, (
+        f"`--include-per-item` is declared {decl.strip()} — a `store_true` with "
+        "`default=True` makes the omission flag its docstring promises "
+        "nonexistent and its `else None` branch unreachable")
+    # and the real parser accepts both spellings
+    p.add_argument("--include-per-item", action=argparse.BooleanOptionalAction,
+                   default=True)
+    assert p.parse_args(["--no-include-per-item"]).include_per_item is False

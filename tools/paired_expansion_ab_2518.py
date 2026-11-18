@@ -125,6 +125,7 @@ ARTIFACT_SCHEMA = "paired-expansion-ab-2518.artifact.v1"
 MODE_REFUSAL = "window_modes"
 STRUCTURAL_REFUSAL = "structurally_blind"
 INERT_REFUSAL = "inert_harvest"
+NO_K_REFUSAL = "no_k_under_read_limit"
 
 #: What the determinism check compares. `ranked_list_digest` compares the READ
 #: this run's repeat performed against the OFF read; the retired basis compared
@@ -1141,6 +1142,17 @@ def _build_artifact(args, manifest, pop_body, items, dropped, seeded, arms,
     # (class, message) — the class is what an opt-out is scoped to, the message is
     # what the artifact publishes.
     refusals: list[tuple[str, str]] = []
+    if not ks:
+        # ⛔ `--read-limit` had no floor: below `min(KS)` every k was filtered
+        # out, `per_k` came back EMPTY, no refusal was recorded and the tool
+        # exited 0 — a run that measured nothing publishing as clean
+        # (`#13267` review 9 F4). The artifact is still written so the evidence
+        # survives; the exit code is the verdict, and no opt-out excuses it.
+        refusals.append((NO_K_REFUSAL,
+                         "`--read-limit " + str(args.read_limit) + "` is below "
+                         "EVERY k in " + str(sorted(KS)) + ", so no k was "
+                         "measured at all — `per_k` is empty and there is no "
+                         "statistic to publish"))
     for arm, blocks in arms.items():
         off, on = blocks["off"], blocks["on"]
         per_k: dict = {}
@@ -1560,7 +1572,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--distractors", type=int, default=500,
                    help="real corpus records seeded as competition for the window")
     p.add_argument("--read-limit", type=int, default=60,
-                   help="ONE read per item per arm; every k is a prefix of it")
+                   help="ONE read per item per arm; every k is a prefix of it; "
+                        "a value below every k is REFUSED, not silently empty")
     p.add_argument("--query-chars", type=int, default=500)
     p.add_argument("--key-tokens", type=int, default=4)
     p.add_argument("--min-query-tokens", type=int, default=3)
@@ -1573,7 +1586,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--namespace", default="paired2518")
     p.add_argument("--graph", default=None)
     p.add_argument("--out", default=None)
-    p.add_argument("--include-per-item", action="store_true", default=True)
+    # ⛔ `action="store_true", default=True` made `--no-include-per-item` a flag
+    # the docstring promised and argparse never had, and left the `else None`
+    # branch below unreachable (`#13267` review 9 F6). BooleanOptionalAction gives
+    # the real switch.
+    p.add_argument("--include-per-item", action=argparse.BooleanOptionalAction,
+                   default=True)
     p.add_argument("--allow-mixed-modes", action="store_true")
     args = p.parse_args(argv)
     args.arms = [a.strip() for a in args.arms.split(",") if a.strip()]

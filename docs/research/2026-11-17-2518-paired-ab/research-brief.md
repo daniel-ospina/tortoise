@@ -33,7 +33,9 @@ in it"*:
 | recall @15 | 88.0 % | **85.0 %** |
 | absent at any k | 28 | 25 |
 
-At 300 per arm the @15 delta is 3.0 pp at SE 2.8 pp (**z = 1.08**), the @3 delta 1.3 pp (**z = 0.37**).
+At 300 per arm the @15 delta is 3.0 pp at SE 2.8 pp (**z = 1.08**), and the @3 delta 1.3 pp at SE 3.5 pp
+(**z = 0.37**) — a WIDER standard error, which is why the @3 move is the less resolvable of the two (the two SEs
+differ because they are computed at different k, not because one is a typo).
 Neither is distinguishable from noise, and the tool now **reproduces the sample sizes those figures
 implied** from the formula rather than trusting them: with p̄ ≈ 0.865 and n = 300 an independent design
 resolves **7.82 pp**; 5 pp needs **~733 per arm** and 3 pp **~2,037 per arm** (an earlier estimate of
