@@ -11565,7 +11565,8 @@ carve_out:
 # and run NOTHING on a docker leg).
 - test_13224_cold_embedder_write_bound.py
 # #13528: the READ bound — a read must not wait for a COLD embedder; the vector leg is
-# declined inside `READ_EMBED_BUDGET_S` and the reason (`load_timeout`) is recorded on
+# declined inside `READ_EMBED_BUDGET_S` and the reason (`load_in_flight`, not
+# `load_timeout` — that term names a load that actually BROKE) is recorded on
 # the leg trace. Embedded-lane by design: every case builds a `TortoiseSDK(<tmp_path>)`
 # path store and the cold-window assertions compare against the simulated load, so a
 # URI-set lane would redirect the construction and grade the server's already-warm

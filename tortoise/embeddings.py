@@ -27,7 +27,7 @@ import numpy as np
 
 from . import embed_gate  # #5008: the S5 EMBED gate (which rows earn a vector)
 from .env_truthy import env_flag  # #4097: the declared truthy contract
-from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
+from .exceptions import FAILURE_KINDS, EmbedderUnavailableError  # #4861: the REQUIRED contract
 from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
     import_sentence_transformer,
     import_tfidf_vectorizer,
@@ -925,10 +925,11 @@ class EmbeddingModel:
         excuse: "designed absence" is only designed for a process that did not
         ask for the embedder.
 
-        ``kind`` (#13528) lets a caller that has ALREADY resolved the cause —
-        :meth:`await_read_ready_reason` — say it on the refusal, instead of the
-        refusal re-deriving a cause from ``_last_failure_kind``. ``None`` keeps
-        the historical read of that field, so every existing exit is unchanged.
+        ``kind`` (#13528) is the LEG-TRACE reason the caller resolved —
+        :meth:`await_read_ready_reason`'s answer — and it is TRANSLATED here by
+        :meth:`_as_failure_kind` into the refusal's vocabulary; it is never
+        published verbatim as the cause. ``None`` keeps the historical read of
+        ``_last_failure_kind``, so every existing exit is unchanged.
 
         ⛔ ``kind`` IS A LEG-TRACE TERM, NOT A ``failure_kind`` (#13528 review
         P1-1), and the two fields have different vocabularies because they
@@ -967,15 +968,22 @@ class EmbeddingModel:
         still IN FLIGHT, which is the read's own decline) has no cause to
         report, and the contract's documented fallback is the honest answer.
 
-        A reason already IN the vocabulary is returned unchanged, so every
-        existing ``get()`` exit keeps its exact ``failure_kind``.
+        A reason already IN the vocabulary is returned unchanged (no translation
+        needed). The ``get()`` exits are preserved by a different mechanism:
+        each passes ``kind=None``, so this function never runs on them — which
+        is why the historical ``failure_kind`` values cannot drift here.
         """
-        if reason in _FAILURE_KINDS:
+        if reason in FAILURE_KINDS:
             return reason
-        if reason == "no_embedder":
-            recorded = cls._last_failure_kind
-            return recorded if recorded in _FAILURE_KINDS else "model_unavailable"
-        return "model_unavailable"
+        # A reason outside the vocabulary — ``no_embedder`` (the designed absence)
+        # or ``load_in_flight`` (nothing has failed) — is not itself a cause, so the
+        # answer is the kind that WAS recorded: ``not_installed`` in the
+        # missing-extra state ``no_embedder`` is published for, and the operator's
+        # real answer if a load failed between the decline and this raise. Only
+        # when nothing is recorded is the contract's ``model_unavailable`` fallback
+        # the honest one.
+        recorded = cls._last_failure_kind
+        return recorded if recorded in FAILURE_KINDS else "model_unavailable"
 
     @classmethod
     def absent_reason(cls) -> str:
@@ -1908,10 +1916,11 @@ READ_EMBED_BUDGET_S = 0.25
 
 #: #13528 — the reason a READ declines the embedder with when the load it would
 #: have waited for does not land inside ``READ_EMBED_BUDGET_S``, or when a read
-#: has just re-armed an attempt that is therefore not yet in flight. It is the
-#: LEG-TRACE vocabulary (``EmbeddingModel.absent_reason``), not a second one: the
-#: read publishes it on the vector entry, where the pre-existing terms already
-#: live, so no consumer learns a new word.
+#: has just re-armed an attempt that is therefore not yet in flight. It is a NEW
+#: term alongside the ones ``EmbeddingModel.absent_reason`` publishes, deliberately
+#: NOT one of them: the read publishes it on the vector entry where the
+#: pre-existing terms live, and a consumer that enumerates trace reasons DOES
+#: learn this word (``absent_reason`` never returns it).
 #:
 #: ⛔ NOT ``load_timeout`` (#13528 review P2-1). That term is already published
 #: by ``absent_reason`` for a load that actually TIMED OUT — a recorded FAILURE
@@ -1921,12 +1930,10 @@ READ_EMBED_BUDGET_S = 0.25
 #: now between two *failures* instead of between a failure and an absence.
 _READ_DECLINE_LOAD_IN_FLIGHT = "load_in_flight"
 
-#: The whole ``EmbedderUnavailableError.failure_kind`` vocabulary
-#: (``exceptions.py``). A leg-trace reason outside this set is translated by
-#: ``EmbeddingModel._as_failure_kind`` before it can reach a refusal — the trace
-#: word and the cause are different fields (#13528 review P1-1).
-_FAILURE_KINDS = frozenset(
-    {"not_installed", "load_failed", "load_timeout", "model_unavailable"})
+#: The ``EmbedderUnavailableError.failure_kind`` vocabulary is declared by its
+#: owner (``exceptions.FAILURE_KINDS``) and imported above — never re-typed here,
+#: or this module becomes the second hand copy of a vocabulary it translates into
+#: (the drift class ``MEMORY.md`` records under ``[vocab]``).
 
 def _in_replay_scope() -> bool:
     """True when this fold is a journal REPLAY, not a live door (#13224).
