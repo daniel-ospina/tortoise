@@ -195,7 +195,7 @@ rationale drift, or the 2 pre-existing absence reds.
 |---|---|---|---|
 | `tortoise.file_indexer.parse_frontmatter` | python consumer | `tests/test_file_indexer.py` (unchanged) | the read path this fix depends on; **not modified** |
 | `tortoise/docs_miner.py:352` | importer | `tests/test_file_indexer.py` | consumes the same parse; unaffected by quoting data |
-| `tests/test_doc_affiliation_frontmatter.py` (`test_research_doc_frontmatter_parses_as_yaml`) | the arm itself | `config/ci-surfaces.yml`: the `core:` row at `:3728` + the `tier1:` row carrying the `#8738 review P2` marker at **`:10690`** (`:10678` before the `origin/main` merge) | dual-registered, so it runs for a docs-only diff AND for the full suite. ⛔ The two SURFACE labels here were inverted until review round 4: the line NUMBERS had been corrected while the labels carried forward from the pre-correction citations. Verified by enclosing key, not by eye — `:3728` sits in the `core:` sub-block (2632 ≤ 3728 < `ep:` at 8976) and `:10690` sits in the top-level `tier1:` list (10656 ≤ 10690 < `slow_files:` at 11248), which is the direction the line's own comment states: *"a docs-only diff runs `tier1` only; dual-registered with `core`"*. ⛔ **`:10678` → `:10690` is the `origin/main` merge's own doing** (`#13486` inserted 12 lines above it in this file; `grep -n '^- test_doc_affiliation_frontmatter.py' config/ci-surfaces.yml` re-derives it), which is why the row now also names the marker — a bare line number here had already been "corrected" twice and rot is the reason |
+| `tests/test_doc_affiliation_frontmatter.py` (`test_research_doc_frontmatter_parses_as_yaml`) | the arm itself | `config/ci-surfaces.yml`: the `core:` row at `:3728` + the `tier1:` row carrying the `#8738 review P2` marker at **`:10690`** (`:10678` before the `origin/main` merge) | dual-registered, so it runs for a docs-only diff AND for the full suite. ⛔ The two SURFACE labels here were inverted until review round 4: the line NUMBERS had been corrected while the labels carried forward from the pre-correction citations. Verified by enclosing key, not by eye — `:3728` sits inside the `core:` sub-block (which ends where the next `ep:` key begins) and `:10690` sits inside the top-level `tier1:` list (which ends where `slow_files:` begins), which is the direction the line's own comment states: *"a docs-only diff runs `tier1` only; dual-registered with `core`"*. ⛔ **`:10678` → `:10690` is the `origin/main` merge's own doing** (`#13486` inserted 12 lines above it in this file; `grep -n -- '- test_doc_affiliation_frontmatter.py' config/ci-surfaces.yml` re-derives it), which is why the row now also names the marker — a bare line number here had already been "corrected" twice and rot is the reason. ⛔ **The BOUNDS of that check were transcribed NUMBERS until review round 7** — 2632 ≤ 3728 < the `ep:` key, and 10656 ≤ 10690 < `slow_files:` — and the same `+12` insertion moved every key below it: `ep:` 8976 → **8988**, `tier1:` 10656 → **10668**, `slow_files:` 11248 → **11260**. So the row repaired the number it was about and left the three that certified it stale, in the one clause whose whole point is "not by eye". It now names the KEYS it compares instead of transcribing them; re-derive all four with `grep -n -E '^(  )?[a-z0-9_]+:' config/ci-surfaces.yml`. |
 | `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at this head) | data | the arm's `docs/research/**/*.md` glob | the population the assertion iterates |
 | `scripts/check-doc-affiliation.cjs` | commit-time advisory | not CI-wired | **not touched**; deferred per §2 alternative E |
 
@@ -408,8 +408,10 @@ listed in §9. #13484's own attestation is minted at its own final head, after t
   evidence bundles `docs/evidence/13038-capstone/README.md` +
   `docs/evidence/13436-write-path-costs/README.md`, the latter landed by `#13436` after this plan) —
   separate defect, explicitly excluded by the issue. **Fixed upstream while this PR was in review**
-  (`#13471`/`#13486`, integrated by the `origin/main` merge at `130e20fdaf`), so the red is gone at
-  the merge head; the exclusion still holds — this PR did not fix it, `main` did;
+  — the frontmatter is `#13486`'s, landed alongside `#13471` and integrated by the `origin/main`
+  merge at `130e20fdaf` (§7 item 2 carries the `--numstat` split; `#13471`'s 7 lines there are a
+  prose note, no frontmatter) — so the red is gone at the merge head; the exclusion still holds —
+  this PR did not fix it, `main` did;
 - `config/ci-surfaces.yml` timing-cost rationale for `test_doc_affiliation_frontmatter.py` (cited by
   its key: line `:13167` at head `b0940c7a4ffc`, moved by `ci_timing.py --refresh-durations`) —
   rationale drift (category B, no behavioural consequence);
@@ -808,7 +810,8 @@ because this section's last word on the subject was "the defect is `main`'s" —
 resolved upstream since, and a reader at the merge head must not go hunting for a red that is gone.
 
 ⛔ **One correction to that same merge commit's MESSAGE (`9f12429a528`), which cannot be amended
-because it is already pushed.** Its closing paragraph says *"`config/ci-surfaces.yml` is unchanged …
+because it is already pushed.** Its PENULTIMATE paragraph says *"`config/ci-surfaces.yml` is
+unchanged …
 already dual-registered at `:3728` (`core`) and `:10678` (`tier1`)"*, and both halves are wrong at the
 head it certifies: the merge itself brought `#13486`'s **12 lines** into that file
 (`git diff --stat 65523b28f3a0..9f12429a528 -- config/ci-surfaces.yml`), and that insertion moved the
