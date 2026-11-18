@@ -53,7 +53,7 @@ from tortoise.embeddings import (
     EMBEDDING_MODEL_REVISION,
     EmbeddingModel,
 )
-from tortoise.exceptions import EmbedderUnavailableError
+from tortoise.exceptions import FAILURE_KINDS, EmbedderUnavailableError
 
 REQUIRED_ENV = "TORTOISE_EMBEDDING_MODEL_REQUIRED"
 
@@ -177,6 +177,48 @@ def test_error_defaults_kind_when_none_recorded(monkeypatch):
     with pytest.raises(EmbedderUnavailableError) as ei:
         EmbeddingModel.get()
     assert ei.value.failure_kind == "model_unavailable"
+
+
+def test_every_recorded_failure_kind_is_in_the_declared_vocabulary():
+    """The producers' literals and :data:`FAILURE_KINDS` cannot drift apart.
+
+    ``FAILURE_KINDS`` (``exceptions.py``) is the ONE declaration of the
+    ``failure_kind`` vocabulary. ``EmbeddingModel._as_failure_kind`` answers the
+    documented ``model_unavailable`` fallback for anything outside it — the same
+    value it answers when nothing was recorded — so a producer that starts
+    recording a NEW literal would silently downgrade an ARMED refusal to
+    "nothing was recorded" without any error. That is the #5275 mis-attribution
+    class one level down (#13534 review round 2, B).
+
+    ⛔ DERIVED, not re-typed. The producers are found by PARSING
+    ``tortoise/embeddings.py`` for ``<x>._last_failure_kind = "<literal>"``
+    assignments, so adding a fifth kind at a producer reds here rather than
+    needing this test to have been remembered — the drift class ``MEMORY.md``
+    records under ``[vocab]`` (two hand copies never catch their SHARED drift).
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent / "tortoise" / "embeddings.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    def _records_kind(target: ast.expr) -> bool:
+        return isinstance(target, ast.Attribute) and target.attr == "_last_failure_kind"
+
+    recorded = {
+        node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+        and any(_records_kind(t) for t in node.targets)
+    }
+    assert recorded, (
+        "the AST scan found no recorded kind literals — the producer pattern "
+        "moved, so this pin is no longer measuring anything")
+    assert recorded <= FAILURE_KINDS, (
+        f"a producer records a kind outside the declared vocabulary: "
+        f"{sorted(recorded - FAILURE_KINDS)!r}; an armed refusal would report "
+        f"``model_unavailable`` for it, indistinguishable from nothing recorded")
 
 
 # --------------------------------------------------------------------------

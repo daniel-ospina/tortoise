@@ -927,8 +927,10 @@ class EmbeddingModel:
 
         ``kind`` (#13528) is the LEG-TRACE reason the caller resolved —
         :meth:`await_read_ready_reason`'s answer — and it is TRANSLATED here by
-        :meth:`_as_failure_kind` into the refusal's vocabulary; it is never
-        published verbatim as the cause. ``None`` keeps the historical read of
+        :meth:`_as_failure_kind` into the refusal's vocabulary. A reason that is
+        already IN that vocabulary (``load_failed`` / ``load_timeout`` from
+        ``absent_reason``) IS the cause and passes unchanged; a leg-trace-only
+        word is translated. ``None`` keeps the historical read of
         ``_last_failure_kind``, so every existing exit is unchanged.
 
         ⛔ ``kind`` IS A LEG-TRACE TERM, NOT A ``failure_kind`` (#13528 review
@@ -979,12 +981,13 @@ class EmbeddingModel:
         if reason in FAILURE_KINDS:
             return reason
         # A reason outside the vocabulary — ``no_embedder`` (the designed absence)
-        # or ``load_in_flight`` (nothing has failed) — is not itself a cause, so the
-        # answer is the kind that WAS recorded: ``not_installed`` in the
-        # missing-extra state ``no_embedder`` is published for, and the operator's
-        # real answer if a load failed between the decline and this raise. Only
-        # when nothing is recorded is the contract's ``model_unavailable`` fallback
-        # the honest one.
+        # or ``load_in_flight`` (no failure inside the cooldown window) — is not
+        # itself a cause, so the answer is the kind that WAS recorded:
+        # ``not_installed`` in the missing-extra state ``no_embedder`` is published
+        # for, and the operator's real answer if a load failed while this read was
+        # waiting (a failure older than the cooldown leaves ``load_in_flight`` on
+        # the trace, and the recorded kind still wins here). Only when nothing is
+        # recorded is the contract's ``model_unavailable`` fallback the honest one.
         recorded = cls._last_failure_kind
         return recorded if recorded in FAILURE_KINDS else "model_unavailable"
 

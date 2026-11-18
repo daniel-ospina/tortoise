@@ -45740,9 +45740,13 @@ class TortoiseSDK:
                 # designed-absence term).
                 # ⛔ ``kind`` is a LEG-TRACE reason, and ``_unavailable``
                 # translates it into the refusal's ``failure_kind`` vocabulary
-                # (#13528 review P1-1): the trace says ``no_embedder`` /
-                # ``load_in_flight``, an ARMED refusal says ``not_installed`` /
-                # ``model_unavailable``. Never publish the trace word as a cause.
+                # (#13528 review P1-1). The rule, not a fixed pair: a reason
+                # already in that vocabulary (``load_failed`` / ``load_timeout``)
+                # IS the cause and passes unchanged; ``no_embedder`` /
+                # ``load_in_flight`` are trace-only words and are translated to
+                # the RECORDED kind, else ``model_unavailable``. So a recorded
+                # kind outranks the in-flight term — reconcile a refusal against
+                # ``_last_failure_kind``, never against a trace-word mapping.
                 EmbeddingModel._unavailable(
                     context="read: embedder not warm within the read's budget",
                     kind=_read_decline)
