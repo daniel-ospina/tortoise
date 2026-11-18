@@ -2567,7 +2567,9 @@ def test_every_pp_and_every_scientific_p_the_brief_prints_is_a_recorded_one():
     allowed_pp |= {round(quoted["after3"] - quoted["before3"], 2),
                    round(quoted["after15"] - quoted["before15"], 2)}
     allowed_pp.add(round(P.independent_effect(300, 0.865) * 100, 2))
-    # ⛔ §0's standard errors are DERIVED (independent design, n = 300, p̄ ≈ 0.865),
+    # ⛔ §0's standard errors are DERIVED (independent design, n = 300; p̄ ≈ 0.865 at
+    # @15 — the 88.0/85.0 recalls — and ≈ 0.757 at @3 — 75.0/76.3; the same formula
+    # at a single p̄ would print one SE twice, which is the misreading §0 pre-empts),
     # not quoted from any PR, so
     # they are admitted ONLY where they re-derive as delta / z in the SAME sentence
     # — `z = 0.37` beside a single "SE 2.8" was arithmetic that cannot add up, and
