@@ -703,7 +703,7 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
     Two arms, because the defect was two-sided:
 
     * CONTENT — each of the eight carries, **on this branch's tree** (the tree this test reads),
-      the fragment the document quotes for it. `_PINS` reaches five of them; `:2464`, `:2521` and
+      the fragment the document quotes for it. `_PINS` reaches five of them; `:2485`, `:2542` and
       `projection/entities.py:5666` were in NO pin before this one. ⛔ The earlier form of this
       bullet justified the same rows as "at `main` (the working tree: this branch is docs-only, so
       `main`'s `.py` files are this tree's)" — that was true when it was written and is FALSE for
