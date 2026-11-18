@@ -18,7 +18,14 @@ from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 SFX = uuid.uuid4().hex[:8]
 GRAPH = f"ep_audit_{SFX}"
-os.environ["TORTOISE_DB_URI"] = f"docker://:@127.0.0.1:16416/{GRAPH}"
+# The lane's OWN container port. Derive it rather than hard-code it — a baked
+# port silently points at whatever lane happens to hold it (a stale container,
+# or a peer lane's):
+#
+#     uv run python tools/test_lane.py status    # prints ``uri=…:PORT/…``
+#     EP_AUDIT_DB_PORT=<that PORT> uv run python <this file>
+PORT = os.environ.get("EP_AUDIT_DB_PORT", "16416")
+os.environ["TORTOISE_DB_URI"] = f"docker://:@127.0.0.1:{PORT}/{GRAPH}"
 
 sdk = TortoiseSDK(db_path=None, namespace=None)
 sdk._db_uri = os.environ["TORTOISE_DB_URI"]

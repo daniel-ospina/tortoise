@@ -1,6 +1,10 @@
 """Measurement fixtures for the EP-across-entity-kinds audit (#11824) — part 2.
 
 door-driven endings, the direct-edge position axis, per-label participation.
+
+See ../README.md §1 for how to run this. The port is NOT baked in: derive it
+(``uv run python tools/test_lane.py status`` prints ``uri=…:PORT/…``) and pass
+it as ``EP_AUDIT_DB_PORT``.
 """
 from __future__ import annotations
 
@@ -14,7 +18,8 @@ sys.path.insert(0, ROOT)
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 SFX = uuid.uuid4().hex[:8]
-os.environ["TORTOISE_DB_URI"] = f"docker://:@127.0.0.1:16416/ep_audit2_{SFX}"
+PORT = os.environ.get("EP_AUDIT_DB_PORT", "16416")
+os.environ["TORTOISE_DB_URI"] = f"docker://:@127.0.0.1:{PORT}/ep_audit2_{SFX}"
 sdk = TortoiseSDK(db_path=None, namespace=None)
 sdk._db_uri = os.environ["TORTOISE_DB_URI"]
 sdk._proj = None
