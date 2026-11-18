@@ -132,6 +132,17 @@ def warm_window(monkeypatch):
     return fake
 
 
+def _published_declines() -> dict[str, int]:
+    """The counter as ``monitoring.metrics()`` PUBLISHES it — the served surface.
+
+    Distinct from `_no_vector_counts()` on purpose: these tests assert that the
+    number reaches `metrics()`, and reading the accessor instead would leave the
+    publication seam untested.
+    """
+    published = monitoring.metrics().get("derived_embed_declines")
+    return dict(published) if isinstance(published, dict) else {}
+
+
 def _no_vector_counts() -> dict[str, int]:
     return monitoring.derived_embed_decline_counts()
 
@@ -371,15 +382,22 @@ def test_metrics_publishes_the_count(cold_window):
     the claim the docstring makes ("it lands on the surface the fleet serves"):
     the number has to travel from `record_derived_embed_decline` to `metrics()`.
     """
+    before = _published_declines()
     assert encode_for_row("published count probe", _DIM, bounded=True) is None
-    published = monitoring.metrics().get("derived_embed_declines")
+    published = _published_declines()
     assert isinstance(published, dict), (
         "monitoring.metrics() must publish derived_embed_declines — §17.2 "
         f"requires the divergence be checkable, got {published!r}"
     )
-    assert published.get(f"{_GRAPH}:budget_expired", 0) >= 1, (
-        "the recorded decline must be VISIBLE in metrics(), not just a dict of "
-        f"the right type — got {published!r}")
+    # ⛔ A DELTA, not `>= 1`: the counters are process-global running totals, so
+    # in a whole-module run the key is already non-zero before this test starts,
+    # and `>= 1` would be satisfied with this test's own recording deleted. It
+    # would also be satisfied by a HARDCODED constant dict — measured, that
+    # mutant passed the `>= 1` form. The delta pins that THIS decline travelled
+    # from `record_derived_embed_decline` to `metrics()`.
+    assert _delta(before, published) == {f"{_GRAPH}:budget_expired": 1}, (
+        "the decline recorded by this test must appear in metrics() and only "
+        f"that one — got {_delta(before, published)} (all: {published!r})")
 
 
 # ── 2. the loop: cold write → count → backfill → repaired ──────────────────

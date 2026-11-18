@@ -838,9 +838,12 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #:   a **STALE** vector, describing text the node no longer holds. That is not a
 #:   missing vector and not a counted hole above: the null-only repair cannot
 #:   collect it, and `_residual_missing` / `--dry-run` therefore read CLEAN over
-#:   it. Measured 2026-11-18; only `--force-re-embed` repairs it, and the
-#:   fold-level fix is #13451. Read the repair's reading as exact for
-#:   `embedding IS NULL`, never as "no divergence here".
+#:   it. Measured 2026-11-18. Of the repair tool's two modes only
+#:   `--force-re-embed` collects it — the null-only default cannot — while a
+#:   later WARM re-write of the same row re-derives the vector and self-heals it
+#:   (measured), so the staleness lasts until either happens; the fold-level fix
+#:   is #13451. Read the repair's reading as exact for `embedding IS NULL`,
+#:   never as "no divergence here".
 #: * **ONE live create can decline once per LEG.** There are TWO bounded call
 #:   sites, not one: the four graph folds (`projection/entities.py`) and the
 #:   RECORD's own derivation (`record_writer.derived_embedding_columns`, #13220),
@@ -896,8 +899,10 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
     "DERIVED-entity embedding writes that produced no vector because the write "
     "bound skipped a cold embedder (#13417). Unit = a declined WRITE: "
     "graph_fold is an UPPER BOUND on rows the dense leg lost (an ON MATCH "
-    "re-write preserves a stored vector), and one live create can decline once "
-    "per leg.",
+    "re-write preserves a stored vector, and for Event/Document a changed-text "
+    "re-write leaves a STALE one that the null-only repair reports clean, "
+    "#13451), record_derivation has no operator repair CLI yet, and one live "
+    "create can decline once per leg.",
     ["decline"],
 )
 
