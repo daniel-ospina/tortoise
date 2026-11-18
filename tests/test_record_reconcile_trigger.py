@@ -428,12 +428,14 @@ def test_the_UNDECLARED_second_writer_population_is_reported_never_a_mismatch():
     (measured; the census in ``record_reconcile``'s module docstring states both,
     and the pin name says only what is true of both: bucketed, never compared).
 
-    Three omission classes are DECLARED (§17.5's cache-owned scalars, the
-    §9.1/D1 declined pair, the NOT-PROJECTABLE columns); a property a SECOND
+    Four omission classes are DECLARED (§17.5's cache-owned scalars, the
+    §9.1/D1 declined pair, the NOT-PROJECTABLE columns, and `#13447`'s
+    record-held vector column — whose ROW legitimately holds ``NULL`` because the
+    vector is DERIVED, so its repair is none); a property a SECOND
     WRITER put on a node — either shape — is named by nothing, which is why the
-    census is FOUR populations. The module docstring's own wording is "THREE DECLARED
+    census is FIVE populations. The module docstring's own wording is "FOUR DECLARED
     classes arrive here — (b) is declared by nothing", and ``graph_only_total``'s
-    is "THREE DECLARED omission classes plus one undeclared population" — each
+    is "FOUR DECLARED omission classes plus one undeclared population" — each
     quoted from its own home rather than paraphrased into one attributed to the
     header, because a quote is only checkable where it actually is.
 

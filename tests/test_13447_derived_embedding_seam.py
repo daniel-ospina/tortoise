@@ -26,6 +26,10 @@ code:
 6. **The rulings are not spent**: the `props`-tail refusal still stands, the graph
    copy is still written (nothing here stops it), and no label outside
    `ROW_TEXT_PARTS` gains a vector it never had.
+7. **The state this seam CREATES reconciles CLEAN** — after a restore derives a
+   vector for a row that holds none, `record-reconcile` still reads the cache
+   faithful (the name is CACHE-HELD, not a `field_mismatch`), while a row that
+   DOES hold a different vector is still compared and still reads divergent.
 
 DB-FREE: no connection, no graph, no model — `compute_embedding` is a lambda. So
 this rides `TORTOISE_TEST_CARVE_OUT=1`.
@@ -434,3 +438,75 @@ def test_both_labels_are_SERVED_so_the_vector_is_readable():
 def test_the_record_side_table_is_the_seams_ONE_copy():
     """No second text rule: the name the docs cite IS the seam's dict."""
     assert rw._RECORD_EMBEDDING_TEXT is de.TEXT_PARTS_BY_RECORD_TYPE
+
+
+# ══════════════════════════════════════════════════════════════
+# 4. The state the restore CREATES reconciles clean
+# ══════════════════════════════════════════════════════════════
+
+
+def test_the_state_the_restore_CREATES_is_not_reported_divergent():
+    """The restore's own output must not read as divergence (#13447 cycle 9, P2).
+
+    `RECORD_HELD_VECTOR_COLUMNS` makes the column door PROJECT `embedding` for
+    `object`/`subject`, so the cache legitimately holds a vector for a row whose
+    ROW holds none — that row's vector is DERIVED from the text, and `NULL` there
+    is a correct state (a row written before the column existed, or one this
+    PR's restore derived for). `record_reconcile` builds its placement marks from
+    `projected_properties`, which `#13447` widened, so left alone the name became
+    a COMPARED field: measured at this head, the faithful pair read
+    `divergent` (1 `field_mismatch`) where the pre-change map read `clean` with
+    `graph_only=('embedding', 1)` — i.e. `record-reconcile` told operators to
+    repair the very state this seam creates, the "permanently divergent" class
+    `#9196`'s review graded P1 (`record_reconcile`'s own docstring).
+
+    Non-vacuity, both directions, MEASURED: restore `embedding` to the placement
+    map and the `graph_only`/`clean` assertions red at the placement assert above
+    (`1 failed`); drop the record side's own properties from
+    `_partition_cache_owned`'s keep-set and the CONTROL reds on its `graph_only`
+    assertion — the stale vector is then BUCKETED (`(('embedding', 1),)`) instead
+    of compared, and a bare `field_mismatches == 1` would NOT catch it, because
+    the record-only name reds the count by itself.
+    """
+    from tortoise import record_reconcile as rr
+
+    class _Result:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    class _Graph:
+        """The minimum `scan_cache_view` needs: one MATCH returning properties."""
+
+        def __init__(self, rows):
+            self._rows = rows
+
+        def query(self, cypher, timeout=None):  # signature parity with the driver
+            return _Result(self._rows)
+
+    vector = [0.5] * _DIM
+    scan = rr.scan_cache_view(
+        _Graph([({"id": "o1", "name": "Acme Corp", "embedding": vector},)]),
+        labels=["Object"])
+    key = "Object:o1"
+    assert key in scan.placed, scan.placed
+    assert "embedding" not in scan.placed[key], (
+        "the reconciler treats a DERIVED vector as a placed-and-compared field — "
+        "`projected_properties` widened at #13447 and `record_reconcile` must "
+        "subtract RECORD_HELD_VECTOR_COLUMNS back out of the placement half")
+
+    # The row this PR's restore derives for: it holds NO vector, the cache does.
+    record_side = {key: {"id": "o1", "name": "Acme Corp"}}
+    faithful = rr.reconcile_record_and_cache(
+        record_side, scan.view, placed=scan.placed)
+    assert faithful.graph_only == (("embedding", 1),), faithful.graph_only
+    assert faithful.report.field_mismatches == 0, faithful.report.render()
+    assert faithful.verdict() == rr.VERDICT_CLEAN, faithful.report.render()
+
+    # CONTROL — the vector is only partitioned out because the RECORD does not
+    # hold one. A record row that DOES hold a different vector is still compared.
+    stale = {key: {"id": "o1", "name": "Acme Corp", "embedding": [0.9] * _DIM}}
+    divergent = rr.reconcile_record_and_cache(
+        stale, scan.view, placed=scan.placed)
+    assert divergent.graph_only == (), divergent.graph_only
+    assert divergent.report.field_mismatches == 1, divergent.report.render()
+    assert divergent.verdict() == rr.VERDICT_DIVERGENT, divergent.report.render()
