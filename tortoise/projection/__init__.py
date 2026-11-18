@@ -4647,18 +4647,23 @@ def note_live_write_target(proj) -> None:
     * the structural-edge mint (`edges._record_structural_edges`) — once per
       mint that created a row;
     * the three declared live gateways that issue their own statements —
-      `onboarding.state._run`, `webhook_delivery._run`, `why_snapshot._run`;
+      `onboarding.state._run`, `webhook_delivery._run`, `why_snapshot._run` —
+      and the two hosted session-delete sweeps
+      (`hosted_api._capture_session_impl`, `hosted_api.delete_session`), which
+      are raw multi-statement lanes that CHOOSE their graph;
     * and ``replay_window_open()`` excludes every one of them, because a rebuild
       writes the same target on purpose and counting it would let a repair make
       the live picture look healthier than the traffic it repaired. (The fold and
       the mint check the window at their own seam, before this helper.)
 
     ⛔ RESIDUAL, stated: a raw statement issued at ``proj.g`` inside a live scope
-    from anywhere ELSE — the capture provenance stamps (`_CAPTURE_PROVENANCE_LANE`)
-    are the standing example — is not recorded. That is accepted because such a
-    writer does not CHOOSE its graph (it stamps nodes by id in the graph the SDK is
-    already bound to), so it cannot hide this class; closing it belongs at the
-    write handle, where §17.1's per-statement census already lives.
+    from a lane that does NOT choose its graph — the capture provenance stamps
+    (`_CAPTURE_PROVENANCE_LANE`) are the standing example — is not recorded. That
+    is accepted because such a writer can only write the graph the SDK is already
+    bound to (it stamps nodes by id), so it cannot hide this class. A lane that
+    CHOOSES a graph calls this helper directly (the two hosted session-delete
+    sweeps are that shape); closing the rest belongs at the write handle, where
+    §17.1's per-statement census already lives.
 
     ⛔ TOTAL (#5148's rule): observability must never break a write that already
     landed, so every step — endpoint resolution included — is inside the guard.
