@@ -51,8 +51,9 @@ the same glob at this head reports **0** truncated values (`broken` count re-mea
 Stating `8` as a present-tense `main` measurement would be the exact defect this section
 exists to prevent — a number that no longer reproduces against the tree it names.
 
-`tests/test_doc_affiliation_frontmatter.py:643` cannot see any of them:
-`missing = [key for key in REQUIRED_KEYS if key not in parsed]` asks whether four keys are
+`test_research_doc_frontmatter_parses_as_yaml`'s presence check (`REQUIRED_KEYS` membership) cannot
+see any of them — named rather than line-numbered, because this PR's own insertions above it moved
+the line: `missing = [key for key in REQUIRED_KEYS if key not in parsed]` asks whether four keys are
 **present**, and `REQUIRED_KEYS` does not even contain the two fields that carry the affiliation
 to other entities.
 
@@ -502,10 +503,11 @@ prevent — behind green CI, and it is the only branch of this helper whose loss
 than a mis-worded remedy; the two pins above are the other class. `test_an_unescaped_quote_is_broken_even_beside_a_legal_escape` now
 pins both shapes (unit-level on `_quoted_style`, which is where the ordering decides). At the head
 this was measured (`23cfffc260`) it red alone under that mutant — `3 failed, 12 passed`, the 2
-pre-existing reds plus this one. It no longer does: at this head the mutant reds this test **and**
-`test_a_malformed_value_names_a_true_remedy` (`4 failed, 13 passed`), because that later pin asserts
-`"broken" in msg` for a shape whose verdict the ordering decides. The exclusivity claim is dropped,
-not re-dated — it is now one of two pins, which is the stronger fact.
+pre-existing reds plus this one. It no longer does: at `6cea462fd4` the mutant reds this test,
+`test_a_malformed_value_names_a_true_remedy` **and**
+`test_no_GREEN_quoted_verdict_survives_a_parser_refusal` (`5 failed, 13 passed` of 18), because those
+later pins assert a verdict the ordering decides. The exclusivity claim is dropped, not re-dated —
+it is now one of three pins, which is the stronger fact.
 
 **Already fixed — the sequence branch's false diagnosis.** `- 13452` (int) once reported "a
 sequence item has no legal transform, so this is a truncation" while the scalar branch said
@@ -652,13 +654,22 @@ exist on `main` — so the exclusion is about ownership, not severity.
   (`body = value[1:close]`) is not blocked by `'a'x'` going GREEN, since
   `parse_frontmatter("aboutObjects: 'a'x'")` returns `{}` (measured: the same PARSE-arm refusal this
   document relies on above for the four `''''X'` rows), so no comparing verdict is consumed
-  end-to-end. What the fix would leave is a HELPER-LEVEL comparing verdict on parser-refused input —
-  the latent class those four rows already carry — not a fail-open.
+  end-to-end. For THAT shape (`'a'x'`) alone, what the fix would leave is a HELPER-LEVEL comparing
+  verdict on parser-refused input — the latent class those four rows already carry — not a fail-open.
+  ⛔ That does NOT generalise, and an earlier revision of this bullet stated it as though it did: on
+  the canonical truncation shape `"a, "#1" KEEP"`, which YAML ACCEPTS (reading `a, `), the slice
+  moves `('broken', None)` → `('double-quoted', 'a, ')` — a COMPARING verdict whose body equals what
+  PyYAML reads — so the PARSE arm never refuses it and the arm goes GREEN end-to-end (measured at
+  `6cea462fd4`: driving `test_research_doc_frontmatter_parses_as_yaml` over a tmp tree holding that
+  value, HEAD reds and the slice PASSES). On that shape the slice IS an end-to-end fail-open.
 - ⛔ It is NOT free either, and the review's own measurement covers only two of the three directions.
   Applied to this head, the slice turns the class pin's FIRST direction from **0 to 122**
   refused-but-green shapes at bound 5 (comparing verdicts `277 → 422`) and reds
-  `test_no_GREEN_quoted_verdict_survives_a_parser_refusal` outright, plus
-  `test_a_malformed_value_names_a_true_remedy`; at bound 6 it is `1430 → 2527`. The mechanism is the
+  `test_no_GREEN_quoted_verdict_survives_a_parser_refusal`,
+  `test_a_malformed_value_names_a_true_remedy` **and**
+  `test_an_unescaped_quote_is_broken_even_beside_a_legal_escape` — the last because the YAML-accepted
+  `"a, "#1" KEEP"` comes back `('double-quoted', 'a, ')` and PASSES the arm end-to-end; at bound 6
+  it is `1430 → 2527`. The mechanism is the
   same one that makes the mis-slice harmless: `'' '` closes at index 1, so `value[1:close]` is the
   empty string and the text AFTER the close is silently dropped instead of refused
   (`('broken', None)` here). So the fix does clear `''''#'` (`''#` → `'`, the correct body) and adds
