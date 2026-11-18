@@ -353,6 +353,13 @@ def write(event: Mapping[str, Any], *,
     # ── 3. THE CACHE, last — derived never leads truth. ────────────────────
     folded = False
     if fold and projection is not None:
+        # ⚠️ OUTSIDE THE `try` ABOVE, DELIBERATELY (#13345 review, note). Same SHAPE
+        # as the record seam's import, opposite RULE: a RECORD fault reports and
+        # continues (the journal line is committed and the record is a derived
+        # store), while a FOLD fault propagates — `projection.apply` already
+        # propagates, and swallowing ITS import failure would leave the caller
+        # believing a fold it asked for happened. Do not "close" this arm by
+        # catching it without first deciding what `folded` then means.
         from .projection import _live_write_scope
 
         with _live_write_scope(scope_label):
