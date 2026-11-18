@@ -888,8 +888,16 @@ def _alias_credit_rank(name: str) -> int:
 #: builders and two ungated calls share a rank, so a bare `>` left the credited NAME dependent on
 #: source order (measured: `encode_for_store`+`compute_session_embedding` on one local name credit
 #: a different one per order). This tuple makes the tie deterministic and independent of the walk.
+#: ⛔ IT MUST CONTAIN EVERY `_ALIASABLE_CALL_NAMES` MEMBER — `_alias_preference` reads it by
+#: `.index()` and its `except ValueError` arm is marked `# pragma: no cover` on exactly that
+#: premise. `SEAM_MODULE` was enrolled as aliasable at `#13447` review cycle 7 without being added
+#: here, so that premise was false and live code sat behind a "no cover" pragma; pinned by
+#: `tests/test_dod_5090_probe.py::test_every_aliasable_name_has_a_canonical_order_entry`.
+#: ⛔ `SEAM_MODULE` is LAST on purpose: both it and `SEAM_CALL` are rank 0 (both credit `gated`), so
+#: an APPEND keeps the ordering that was measured before the enrolment and no published `callee`
+#: moves. Reordering it ahead of `SEAM_CALL` would silently republish those names (`#11444`).
 _ALIAS_CANONICAL_ORDER: tuple[str, ...] = (
-    *WRITE_CLAUSE_BUILDERS, *UNGATED_CALLS, SEAM_CALL)
+    *WRITE_CLAUSE_BUILDERS, *UNGATED_CALLS, SEAM_CALL, SEAM_MODULE)
 
 
 def _alias_preference(name: str) -> tuple[int, int]:

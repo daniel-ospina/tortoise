@@ -11156,7 +11156,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `279 + 1` and `278 + 2` at THIS tree, both equal to the `280` the pin re-derives
+    count: `280 + 1` and `279 + 2` at THIS tree, both equal to the `281` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as lane-bound: a carve-out run must not
     "correct" the docker lane's figure.
@@ -14235,3 +14235,43 @@ def test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach(shape, tmp_path)
         "writer owes no declaration while never reaching the gate (the fail-open direction)")
     assert writers["tortoise.shadow::_w"]["callee"] != probe.SEAM_CALL, (
         "the shadowed receiver was credited to the seam anyway — the binding was not consulted")
+
+
+def test_every_aliasable_name_has_a_canonical_order_entry() -> None:
+    """`#13447` review cycle 7, P3 — `_alias_preference`'s premise, pinned instead of assumed.
+
+    `_ALIAS_CANONICAL_ORDER`'s readers are `.index()` lookups inside `_alias_preference`, and the
+    `except ValueError` arm there is marked `# pragma: no cover - every aliasable name is in the
+    tuple`. `SEAM_MODULE` was enrolled in `_ALIASABLE_CALL_NAMES` (the binding fix above) WITHOUT
+    being added here, so that sentence was FALSE and live code sat behind a "no cover" pragma — the
+    resolution still happened to be deterministic (the fallback returns a lower key than every real
+    entry, so `SEAM_CALL` wins a collision and both are rank 0 anyway), but by an accident nothing
+    declared.
+
+    Non-vacuity: measured at `f2f48bae33` (the commit that enrolled `SEAM_MODULE`), `missing` is
+    `['derived_embedding']` and the second loop raises `ValueError` out of `order.index` — so both
+    rows red there and green at the fix.
+
+    ⛔ The ORDER is pinned too, not merely membership: `SEAM_MODULE` is last so the ordering that was
+    measured before the enrolment is unchanged, which is what keeps a published `callee` from moving
+    (`#11444`). A lane that reorders this tuple is republishing census output.
+    """
+    order = probe._ALIAS_CANONICAL_ORDER
+    missing = sorted(set(probe._ALIASABLE_CALL_NAMES) - set(order))
+    assert not missing, (
+        f"{missing} can be credited by `_import_aliases` but has no `_ALIAS_CANONICAL_ORDER` entry, "
+        "so `_alias_preference` resolves it through its `except ValueError` arm — which is marked "
+        "`# pragma: no cover` on the premise this assertion is checking")
+    assert len(order) == len(set(order)), (
+        f"`_ALIAS_CANONICAL_ORDER` carries a duplicate ({order}) — the tie-break is then not a "
+        "total order and `#12182`'s source-order independence no longer holds")
+    # …and the fallback arm stays unreachable, which is exactly what its pragma claims.
+    for name in probe._ALIASABLE_CALL_NAMES:
+        assert probe._alias_preference(name)[1] == -order.index(name), (
+            f"{name!r} took `_alias_preference`'s ValueError fallback, so its tie-break key is "
+            "not the canonical position — the `# pragma: no cover` on that arm is a lie and a "
+            "reordering of this tuple would no longer be detectable")
+    assert order[-1] == probe.SEAM_MODULE, (
+        "`SEAM_MODULE` is no longer LAST — both it and `SEAM_CALL` are rank 0, so moving it ahead "
+        "silently changes which `callee` name the census PUBLISHES (no obligation moves, but "
+        "`recognised_producer` route claims are re-derived from that name — `#11444`)")
