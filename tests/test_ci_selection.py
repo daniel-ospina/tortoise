@@ -161,17 +161,6 @@ def test_docs_scanning_gates_stay_in_tier1():
         "stays internally consistent while the pin sleeps on the exact edit it "
         "exists to catch (#4309/#8474 class, the hole #10244 closed)"
     )
-    assert "test_11810_platform_seams_doc_pin.py" in tier1, (
-        "#11810 review r7 (P2): the platform-seams doc↔message pin guards "
-        "docs/research/2026-09-01-gbrain-learnings/platform-seams.md, which is "
-        "in NON_PYTHON_PREFIXES and matches no SOURCE_PATTERNS entry, so a "
-        "docs-only edit selects NO surface and runs tier1 ONLY. It shipped in "
-        "test_capture_install.py (`api` + `core`, not tier1) and therefore ran "
-        "ZERO times on the exact diff that restores the unscoped quote. The "
-        "`api` row and the `durations` row survive a dropped tier1 row, so "
-        "nothing would red: the pin would sleep again (#4309/#8474/#10244 "
-        "class)"
-    )
     assert "test_fly_secret_drift.py" in tier1, (
         "#8614: the runbook's secret-drift guards read docs/infra-runbook.md "
         "(`docs/` is in NON_PYTHON_PREFIXES and the runbook matches no "
@@ -435,73 +424,6 @@ def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
     )
 
 
-def test_11810_platform_seams_doc_pin_runs_on_a_docs_only_diff_and_on_the_message_diff():
-    """#11810 review r7 (P2): pin the SELECTION of the doc↔message pin, both arms.
-
-    `tests/test_11810_platform_seams_doc_pin.py` binds
-    `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` §3 to the
-    shipped `tortoise install cursor` message. The pin originally lived in
-    `tests/test_capture_install.py` (`api` + `core`), so on a docs-only edit of
-    the record — the direction the r6 review actually measured — it ran zero
-    times: `docs/` is in NON_PYTHON_PREFIXES, the record matches no
-    SOURCE_PATTERNS entry, `changed` empties and `select()` takes the tier1-only
-    early return. Measured at the r7 head before the fix:
-    `_sel([<the doc>])['surfaces'] == []`, 85 tier1 files, pin absent.
-
-    The second arm is the `__main__.py` diff the message half guards. It is
-    registered `api` too, and that path does resolve to `['api']` ALONE
-    (measured; it replaces the `core` fallback) — but ⚠️ review r10 (P3)
-    measured that the `api` row is NOT what carries either arm: `select()`
-    unions `tier1` into every PR selection, so the `tier1` row alone selects the
-    pin on BOTH diffs and the `api`/`core` rows add no coverage (they are kept
-    belt-and-braces, and as the durable home if a `tier1` edit drops it — that
-    is the state this test's `tier1` sibling exists to catch).
-
-    The manifest assertion in :func:`test_docs_scanning_gates_stay_in_tier1`
-    catches a DELETED row; this catches a row that is present but no longer
-    reaches the file (#9778 review P2 made the same point)."""
-    doc = "docs/research/2026-09-01-gbrain-learnings/platform-seams.md"
-    r = _sel([doc])
-    assert r["full"] is False
-    assert r["surfaces"] == [], r["surfaces"]
-    assert "test_11810_platform_seams_doc_pin.py" in r["test_files"], (
-        "a docs-only edit of §3 must select the pin that binds the record's "
-        "quote to the shipped message — otherwise the unscoped quote can be "
-        "restored and merge green (#11810 r7 P2, #4309 class)"
-    )
-
-    m = _sel(["tortoise/__main__.py"])
-    assert m["surfaces"] == ["api"], m["surfaces"]
-    assert "test_11810_platform_seams_doc_pin.py" in m["test_files"], (
-        "a `__main__.py` diff must run the message arm of the pin — without "
-        "ANY row that reaches it, dropping `hosted` from the shipped message "
-        "would merge green"
-    )
-
-    # #11810 review r10 (P3): MEASURE the claim the three manifest comments and
-    # the pin's own docstring make, instead of asserting it in prose. `select()`
-    # unions `tier1` into every PR selection, so the pin is selected on both arms
-    # with BOTH surface rows removed — `tier1` is what carries them, and the
-    # `api`/`core` rows are the durable belt-and-braces. Before this was measured
-    # the comments said the opposite ("without this row the pin would sleep on
-    # the only diff that can break it"), which stayed green because nothing read
-    # the selection that way.
-    pin = "test_11810_platform_seams_doc_pin.py"
-    no_surface_rows = copy.deepcopy(load_manifest())
-    for surface in ("api", "core"):
-        no_surface_rows["surfaces"][surface] = [
-            t for t in no_surface_rows["surfaces"][surface] if t != pin]
-    assert pin not in no_surface_rows["surfaces"]["api"]
-    assert pin in select([doc], "pull_request", no_surface_rows)["test_files"], (
-        "the `tier1` row is what selects the pin on a docs-only diff"
-    )
-    assert pin in select(["tortoise/__main__.py"], "pull_request",
-                         no_surface_rows)["test_files"], (
-        "`tier1` is unioned into every PR selection, so it also carries the "
-        "`__main__.py` arm — the `api` row is not what selects it"
-    )
-
-
 def test_substrate_map_guard_runs_on_the_diffs_it_guards():
     """#5086 review (P1-2): pin the SELECTION on all four arms, not the string.
 
@@ -672,6 +594,28 @@ def test_the_shifted_cite_pin_runs_on_a_docs_only_diff():
     assert "test_12184_shifted_cites.py" in r["test_files"], (
         "a docs-only edit of a document this pin guards must select the pin — "
         "otherwise a cite can be re-pointed and merge green (#12184, #4309 class)"
+    )
+
+
+def test_the_cache_projection_cite_pin_runs_on_a_docs_only_diff():
+    """#13439 review P3: the cited-legs arm must run on the diff that adds a cite.
+
+    `tests/test_10000_cache_projection_cite_pin.py` is the ONE arm of the retired
+    `test_10000_cache_projection_doc_pin.py` that `#13439`'s own rule keeps —
+    invariant-protecting, "a cited symbol still exists" — and it is the only thing
+    that can see the epic artifact's `### The pin` section cite a test name no
+    longer defined. A docs-only diff selects NO surface and runs `tier1` ONLY, so
+    the `core` row alone would leave the arm asleep on exactly the edit class that
+    adds a citation. Dropping the `tier1` row re-opens that hole (#4309
+    silent-drop class).
+    """
+    r = _sel(["docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == [], r["surfaces"]
+    assert "test_10000_cache_projection_cite_pin.py" in r["test_files"], (
+        "a docs-only edit of the artifact whose `### The pin` section this arm "
+        "guards must select the arm — otherwise a dangling cite can merge green "
+        "(#13439 review P3, #4309 class)"
     )
 
 
