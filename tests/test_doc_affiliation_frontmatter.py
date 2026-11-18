@@ -357,20 +357,30 @@ def _unkeepable_quoted(subject: str, style: str) -> str:
       reason, not because the old one would have destroyed something.
 
     No verdict changes: both arms still refuse the file.
+
+    ⛔ NEITHER message offers "use a block scalar", and the reason is this module's
+    own invariant rather than a preference: ``_values`` classifies `|`/`>` as
+    `kind == "other"`, and (D) records ``measured`` only for ``kind != "other"``
+    (the `if kind != "other" and key in AFFILIATION_KEYS` guard in
+    `test_research_doc_frontmatter_parses_as_yaml` — cited by NAME, because
+    appending a test moves that line number), so an affiliation value written as
+    a block scalar reaches NO check and reds as *"NOT measured by ANY check —
+    quote the value (plain or simply-quoted is measured)"*. Recommending it
+    swaps this red for a second one whose own remedy is to quote — the exact
+    false-remedy class this guard exists to remove. Both messages below name
+    only edits that CLEAR the red.
     """
     if style == "broken":
         return (
             f"{subject} is broken — a quoted value YAML cannot keep whole is "
-            "TERMINATED at an inner quote. Remove the inner quote, or use a "
-            "block scalar."
+            "TERMINATED at an inner quote. Remove the inner quote."
         )
     return (
         f"{subject} is malformed — this arm will not compare it. Either the quoted "
         "scalar never closes (a value continued onto the next line is refused here "
         "too), or its closing quote is not the last thing in the value: a comment "
         "with no space before the `#` (put one space before the `#`) or other text "
-        "after the close. Keep the whole value on one line inside its quotes, or "
-        "use a block scalar."
+        "after the close. Keep the whole value on one line inside its quotes."
     )
 
 
@@ -1423,7 +1433,9 @@ def test_a_malformed_value_names_a_true_remedy(
     assert "not the last thing in the value" in msg, msg
 
     # (b) LEGAL YAML refused as `malformed`: a quoted scalar continued on the
-    # next line. The remedy names the one-line form / block scalar.
+    # next line. The remedy names the one-line form and NOTHING that cannot clear
+    # the red: a block scalar reaches no check (`_values`' `other` kind), so it
+    # would swap this red for (D)'s "not measured" red — pinned below.
     assert parse_frontmatter(
         '---\ntitle: x\naboutObjects: "a\n  b"\n---\n'
     )["aboutObjects"] == "a b", "control: a continued quoted scalar loads whole"
@@ -1431,6 +1443,10 @@ def test_a_malformed_value_names_a_true_remedy(
     assert "malformed" in msg, msg
     assert "Remove the inner quote" not in msg, msg
     assert "one line inside its quotes" in msg, msg
+    # A remedy that cannot clear the red is the defect class this guard removes, so
+    # both arms are pinned against the one that LOOKS right: a block scalar escapes
+    # (C)/(B) but reaches no check, and (D) then asks for a quoted value.
+    assert "block scalar" not in msg, msg
 
     # (c) the truncation verdict is UNCHANGED and keeps its own sentence: here
     # YAML really does stop at the inner quote, so the deletion advice is right.
@@ -1439,6 +1455,7 @@ def test_a_malformed_value_names_a_true_remedy(
     assert "TERMINATED at an inner quote" in msg, msg
     assert "Remove the inner quote" in msg, msg
     assert "put one space before the `#`" not in msg, msg
+    assert "block scalar" not in msg, msg  # cannot clear: see (b)'s note above
 
 
 def test_an_unlexable_key_is_what_makes_the_fail_open_a_RED(

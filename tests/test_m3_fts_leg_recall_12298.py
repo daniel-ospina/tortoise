@@ -1380,19 +1380,24 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
      "`:3098-3107`"),
     ("tortoise/search_engine.py", 2728, "def recency_tie_clause(",
      "`search_engine.py:2728`"),
-    # ⛔ RE-DERIVED at the `#13422` merge (`origin/main` `501270a4bfd3`): `main`'s
-    # row read 4904 on ITS tree, and the dense-leg change above it in this branch
-    # moves the rank loop by +15 — measured, not nudged. The brief's §1 cell
-    # carries the same number and moves with it.
+    # ⛔ RE-DERIVED at every `#13422` merge (`origin/main` `130e20fdaf`, then
+    # `501270a4bfd3`, then `895d4dde3d`): each main-move puts this loop somewhere
+    # else on ITS tree, and this branch's own change moves it again — measured on
+    # the merged tree each time, never nudged. The brief's §1 cell carries the
+    # same number and moves with it.
     ("tortoise/search_engine.py", 4919,
      "for rank, (pid, _score) in enumerate(ranked):",
      "`tortoise/search_engine.py:4919`"),
-    ("tortoise/projection/__init__.py", 20822, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20822`"),
-    ("tortoise/projection/__init__.py", 21265, "def _create_fulltext_index(",
-     "`:21265`"),
-    ("tortoise/projection/__init__.py", 21715,
-     "self._create_fulltext_index(label, fields)", "`:21715`"),
+    # The three `projection/__init__.py` rows were stale on `main` too (both the
+    # brief and this pin still named the pre-#13290 lines), and this branch's own
+    # seam work moves them a further +23. Re-derived against the live file, so
+    # the pin and §1 of the brief name the same lines as the code.
+    ("tortoise/projection/__init__.py", 20845, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20845`"),
+    ("tortoise/projection/__init__.py", 21288, "def _create_fulltext_index(",
+     "`:21288`"),
+    ("tortoise/projection/__init__.py", 21738,
+     "self._create_fulltext_index(label, fields)", "`:21738`"),
 )
 
 

@@ -213,9 +213,10 @@ WHAT THIS MODULE DELIBERATELY IS NOT
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -241,6 +242,8 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 #: `read_record_view` / `record_serve.read_node` both do `SELECT *` — so EVERY
 #: record row read would raise on the first row after the migration applied.
 _GENERATED_COLUMNS = _rp.GENERATED_COLUMNS
+
+_logger = logging.getLogger(__name__)
 #: The same object under its public name, so a caller outside this module reads
 #: the ONE declaration rather than a copy (`tests/test_cache_projection.py`'s
 #: unclassified-column pin reads it, and `__all__` re-exports it).
@@ -1878,6 +1881,31 @@ def canonical_property(table: str, column: str) -> str:
     )
 
 
+#: Record columns the row HOLDS as a DERIVED vector and the projection MUST put
+#: back — `{table: frozenset(columns)}` (#13447, the RESTORE half of #13220).
+#:
+#: ⛔ WHY THIS IS A DECLARATION AND NOT A WIDENED `refused`: `_refused` comes from
+#: the schema's own `props`-tail CHECK (`chk_object_props_no_derived` and its
+#: subject twin list `embedding`), and it means *"the record must not store this
+#: name in the OPEN PROPERTY TAIL"* — a payload still cannot smuggle a vector there
+#: and this map does not relax that. What #13220 changed is that the two labels now
+#: have a real COLUMN for the same name
+#: (`supabase/migrations/20261117000001_record_object_subject_embedding.sql`), so
+#: on the way BACK the projection was dropping a value the record legitimately
+#: holds — `node_from_row(Object, {…, "embedding": [...]})` returned no
+#: `embedding`, which is why `python -m tortoise record-restore` landed
+#: `:Object`/`:Subject` SILENTLY VECTORLESS (the migration header states the split:
+#: the column closed the INDEXABILITY half, not the RESTORE half).
+#:
+#: ⚠️ The two doors stay distinct, which is the whole point: the COLUMN door reads
+#: this map and lets the value through, while the TAIL door keeps reading the raw
+#: `_refused` set. Collapsing them would let a payload write the record's authority.
+RECORD_HELD_VECTOR_COLUMNS: dict[str, frozenset[str]] = {
+    "object": frozenset({"embedding"}),
+    "subject": frozenset({"embedding"}),
+}
+
+
 @lru_cache(maxsize=32)
 def projected_columns(table: str) -> frozenset[str]:
     """The record columns that carry AUTHORITY — i.e. that get projected.
@@ -1906,7 +1934,10 @@ def projected_columns(table: str) -> frozenset[str]:
     from .record_projection import table_columns
 
     columns = table_columns().get(table, frozenset())
-    refused = _refused(table)
+    # #13447: a column the record HOLDS as a derived vector (#13220) is
+    # projected — see RECORD_HELD_VECTOR_COLUMNS for why this is not a
+    # relaxation of the schema's `props`-tail refusal.
+    refused = _refused(table) - RECORD_HELD_VECTOR_COLUMNS.get(table, frozenset())
     forbidden = cache_forbidden_columns(table)
     placed = placement_columns().get(table, {})
     extra = ADDITIONAL_PRIMARY_COLUMNS.get(table, {})
@@ -2627,7 +2658,16 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
     * anything else → :class:`UnknownRecordColumn`, loudly.
     """
     placed = placement_columns().get(table, {})
+    # ⛔ TWO SETS, ON PURPOSE (#13447) — the tail door and the column door answer
+    # DIFFERENT questions about the same name. `refused` is the schema's `props`-tail
+    # refusal and is used AS IS for the tail below (a payload still cannot smuggle
+    # `embedding` into `public.object.props`); `column_refused` additionally lets
+    # through a column the record HOLDS as a derived vector (#13220), which is what
+    # makes a restored `:Object`/`:Subject` carry the vector its row has. Using the
+    # reduced set at the tail would re-open the smuggling door the migration
+    # explicitly keeps shut.
     refused = _refused(table)
+    column_refused = refused - RECORD_HELD_VECTOR_COLUMNS.get(table, frozenset())
     forbidden = cache_forbidden_columns(table)
     projected = projected_columns(table)
     # The tail is decoded ONCE: it feeds the identity read below AND the verbatim
@@ -2779,9 +2819,12 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             # the column's name (#10965). See `_EPISODIC_SOURCE_PROSE_COLUMNS` for
             # the rule, its pre-existing-capture cost, and its bound.
             continue
-        if column in refused:
+        if column in column_refused:
             # The EP carve-out and the projection-owned caches. Dropped BY NAME
             # rather than by the CHECK's later refusal (S3's contract clause).
+            # ⛔ `column_refused`, not `refused` (#13447): a column the record holds
+            # as a DERIVED vector is not dropped here — see
+            # RECORD_HELD_VECTOR_COLUMNS.
             continue
         if column in forbidden:
             # Authoritative in the RECORD, forbidden in the CACHE (§9.1/D1: text
@@ -4048,6 +4091,94 @@ class ProjectionPlan:
             key = relationship_target(rel.rel_type)
             counts[key] = counts.get(key, 0) + len(stmt.dropped_vectors)
         return counts
+
+
+def fill_missing_row_vectors(
+    nodes: Iterable[RecordNode], *, width: int | None = None,
+) -> tuple[RecordNode, ...]:
+    """Give every node whose RECORD ROW carries a derived vector its vector (#13447).
+
+    The rebuild half of the seam. `record-restore` materialises a node from a
+    record ROW, and for `:Object`/`:Subject` the vector is DERIVED — the row's
+    `embedding` column when the live write filled it (#13220), and otherwise
+    nothing, because `_props_from_row` used to drop the name outright. Two
+    consequences are fixed here, and they are the same consequence seen from two
+    sides:
+
+    * a row that HOLDS a vector already projects it (the `RECORD_HELD_VECTOR_COLUMNS`
+      door), so this function leaves it alone — a restore must PUT BACK the value
+      the record has, never re-derive a different one;
+    * a row that holds NONE is DERIVED here through
+      :func:`tortoise.derived_embedding.derive_row` — the LIVE write's seam, not a
+      second encoder. That keeps the two rebuild routes equal: journal replay
+      re-derives the vector in the fold from the payload text (#7845), so a
+      `record-restore` that skipped it would land a graph a `rebuild_all` of the
+      same journal would not produce — the §2.0 divergence the rebuild engines
+      exist to rule out.
+
+    ⛔ `bounded` is never passed as True here: a rebuild may not decline
+    (`embeddings.encode_for_row`'s note; #5004 is unaffected either way because
+    these are DERIVED rows, never a `Point`'s record-TRUTH vector).
+
+    ⛔ A DERIVATION THAT RAISES IS SKIPPED, NOT PROPAGATED (#13447 review cycle 3,
+    issue 4). This is the ONE encode call site in the seam that used to be unguarded,
+    and nothing in the chain declines quietly when the embedder is ARMED BUT
+    UNAVAILABLE: `EmbeddingModel.get()` raises `EmbedderUnavailableError` whenever
+    `TORTOISE_EMBEDDING_MODEL_REQUIRED` is truthy and the model cannot load, and it
+    raises from `compute_embeddings`, outside any `try`. Unguarded, that made
+    `rebuild_from_record` — and therefore `python -m tortoise record-restore` — FAIL
+    in exactly the state the flag exists to make loud, where pre-fix the same path
+    performed no encode at all, succeeded, and landed these two labels vectorless.
+    That is an availability regression on a shipped REPAIR path, so this arm mirrors
+    its siblings (`record_writer.derived_embedding_columns` → `skipped=…`; the four
+    folds → `except Exception: pass`): the row keeps no vector, and the run completes.
+
+    ⚠️ The skip is LOGGED rather than silent — a restore that leaves a row
+    vectorless is exactly the state `#11747` says must be reported, and a caller
+    reading `dropped_vectors` would not see it (this is an un-put-back, not a drop).
+    The log names the label, the key and the exception class so an operator can tell
+    an armed-but-unloaded embedder from a genuine encode fault.
+
+    ⚠️ SCOPED to the labels in :data:`derived_embedding.ROW_TEXT_PARTS` —
+    `Object`/`Subject` — the two whose vector the restore could not put back at
+    all. `event`/`source` already PROJECT their `embedding` column, so a row that
+    holds one restores it with no help from here; a row that holds none is the
+    document-text divergence `#13412` owns. Widening this to those labels would be
+    a different change with its own evidence, and it is named rather than
+    smuggled in.
+    """
+    from . import derived_embedding
+
+    out: list[RecordNode] = []
+    for node in nodes:
+        props = dict(node.props)
+        if (node.label in derived_embedding.ROW_TEXT_PARTS
+                and props.get("embedding") is None
+                and node.dropped_vectors.get("embedding") is None):
+            # `props` carries the same `name` the ROW does — it is a PRIMARY
+            # column, projected under its own name — so the row-shaped text rule
+            # reads this map directly.
+            #
+            # ⛔ GUARDED: this is the one encode call site in the seam that used to
+            # propagate, and an armed-but-unavailable embedder raises
+            # `EmbedderUnavailableError` straight out of `EmbeddingModel.get()`. Above
+            # `rebuild_from_record`'s guards that aborted a shipped repair path
+            # (`record-restore`) which pre-fix completed without encoding at all.
+            # Skipping mirrors `record_writer.derived_embedding_columns` and the four
+            # folds; the cost is a vectorless node, which is the pre-fix state, and it
+            # is LOGGED rather than silent (see the docstring).
+            try:
+                vector = derived_embedding.derive_row(node.label, props, width=width)
+            except Exception as exc:  # noqa: BLE001, RUF100 — the siblings' contract
+                _logger.warning(
+                    "rebuild: could not derive the vector for :%s %r (width=%r) — "
+                    "the node lands VECTORLESS and this is not a record drop: %s: %s",
+                    node.label, node.key, width, type(exc).__name__, exc)
+                vector = None
+            if vector:
+                props["embedding"] = list(vector)
+        out.append(node if props == dict(node.props) else replace(node, props=props))
+    return tuple(out)
 
 
 def record_plan(nodes: Iterable[RecordNode],
