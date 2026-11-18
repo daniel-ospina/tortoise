@@ -42,13 +42,19 @@ WHAT IS MEASURED, IN ONE TOOL
    digest (``MANIFEST.json``). Every arm reads the snapshot; nothing reads the
    live directory. When the snapshot already exists its digests are VERIFIED, not
    re-copied — a corpus that moved under a finished run is refused, not renamed.
-   This is the single change that makes two runs comparable (`#13118`'s own brief
-   names it: the live corpus drifted ~11 % between a run and its re-run).
+   This is the single change that makes two runs comparable (`#11901` measured a
+   re-harvest returning **−10.8 % to −11.0 %** fewer distinct names ~2 h later;
+   `#13118`'s own brief measures the drift between ITS runs at 2 corpus lines /
+   20 harvested names and 130 names across five harvests — ~0.1 % — and names the
+   frozen snapshot as the control it did NOT run, which is the gap this file
+   closes).
 2. **One sample, evaluated twice.** The population is drawn ONCE and written to
    ``--population-file``; both arms read that file. A re-run reuses it, and any
-   snapshot/population mismatch is REFUSED. `#13118` recorded that pairing was
-   impossible because "pairing needs the sampled population written out
-   (--population-file), which this harness does not do" — that is this file's job.
+   snapshot/population mismatch is REFUSED. `#13118` recorded the population
+   digest differing in all five of its runs ("a count identity is not a member
+   identity"), and **`#11901`** recorded why a paired re-run was impossible:
+   "pairing needs the sampled population written out (--population-file), which
+   this harness does not do" — that is this file's job.
 3. **Per-item outcomes.** One read per item per arm at ``--read-limit``, so every
    k is a PREFIX of the same ranked list and the arms cannot differ by read width.
    For the point arm the item is the class the mechanism targets: a same-subject
