@@ -45746,8 +45746,9 @@ class TortoiseSDK:
                 # (#4861/#5275) keeps failing LOUD rather than degrading
                 # silently, and the refusal names the cause this read actually
                 # resolved — which ``_last_failure_kind`` ALONE cannot supply: it
-                # is unset while a load is merely in flight (and would answer the
-                # designed-absence term), and on the re-arm arm it can hold an
+                # is unset while a load is merely in flight (handed nothing, the
+                # refusal answers the contract's ``model_unavailable`` fallback
+                # instead of naming a cause), and on the re-arm arm it can hold an
                 # OLDER recorded failure that the trace term does not name.
                 # ⛔ ``kind`` is a LEG-TRACE reason, and ``_unavailable``
                 # translates it into the refusal's ``failure_kind`` vocabulary
