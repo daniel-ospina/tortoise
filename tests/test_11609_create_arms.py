@@ -275,3 +275,22 @@ class TestTheRetiredNamesStillAnswer:
             assert kind in arms, (
                 f"{name} is pointed at {pointer!r} but `create_entity` does not "
                 f"dispatch type={kind!r} (arms {sorted(arms)})")
+
+    def test_the_point_arm_still_carries_the_goal_state_field(self, sdk_factory):
+        """#13110 gave the point DOOR a `goalState` PARAMETER; the arm must keep it.
+
+        The retirement removes a schema field an agent could see, so the one thing
+        that must not change is that the value still REACHES the write: the
+        container takes `goalState` at the top level and relays it into `props`,
+        and the point arm forwards `props` to `create_point`, which stores it (with
+        the #13110 "a create never DELETES" guard, which is why the value is read
+        back from the graph rather than off the reply).
+        """
+        sdk = sdk_factory()
+        node = sdk.create_entity(
+            "point", "the ship date holds",
+            props={"pointKind": "goal", "goalState": "unmet"})["node"]
+        assert sdk.get_point(node["id"])["goalState"] == "unmet", (
+            "`goalState` did not survive the container: `tortoise_create_point` "
+            "declared it as a parameter (#13110), so a migrating caller's goal "
+            "state would be silently dropped by the arm")

@@ -51352,13 +51352,15 @@ class TortoiseSDK:
                                    journal_armed=bool(self._event_log_path))
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
-        # ``create_entity("Point", …)`` raises `unknown type`
-        # (``_ENTITY_ITEM_LABELS``) — so a ``pointKind`` riding it is a stray
-        # property on a label the calibration gate never reads
-        # (``_CALIBRATION_GATED_LABELS = ("Point",)``), and refusing it failed an
-        # unrelated write (measured: ``create_object(..., props={'point_kind':
-        # padded})``) over a name this gate has no business with. The Point doors
-        # are where it belongs.
+        # this funnel never receives a `:Point` write — since #11609 the
+        # `type="point"`/`"diary"` arms RELAY to `create_point` and never reach
+        # here at all, which is the same shape as before (they did not exist, and
+        # ``create_entity("Point", …)`` was an `unknown type`) — so a
+        # ``pointKind`` riding it is a stray property on a label the calibration
+        # gate never reads (``_CALIBRATION_GATED_LABELS = ("Point",)``), and
+        # refusing it failed an unrelated write (measured: ``create_object(...,
+        # props={'point_kind': padded})``) over a name this gate has no business
+        # with. The Point doors are where it belongs.
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the

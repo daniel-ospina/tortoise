@@ -2369,7 +2369,13 @@ class FastMCPAdapter:
 #
 # | REST endpoint            | SDK-backed? | Registry entry      | RestSpec            |
 # |--------------------------|-------------|---------------------|---------------------|
-# | POST /v1/points          | YES         | tortoise_create_point | populated above    |
+# | POST /v1/points          | YES         | tortoise_create_entity | populated above   |
+#   ⛔ #11609 lane P1: this row named `tortoise_create_point` until the door retired.
+#   The spec MOVED with the door's absorption (`create_entity`'s `type="point"` arm
+#   answers the capability), the same move `POST /v1/dream` made from
+#   `tortoise_dream` to `tortoise_refresh_confidence`. The route the SERVERS serve is
+#   hand-written and unchanged (`hosted_api.py`'s `@app.post("/v1/points")`,
+#   `selfhost_api.py`'s router).
 # | GET  /v1/points          | RAW CYPHER  | (no SDK method)     | — extract list_points |
 # | GET  /v1/points/{id}     | RAW CYPHER  | (differs from sdk.get_point) | — extract |
 # | POST /v1/dream           | YES         | tortoise_dream      | populated above    |
