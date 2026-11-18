@@ -273,6 +273,17 @@ def _ontology_status_section() -> str:
     return tail if end is None else tail[: end.start()]
 
 
+def _unwrap(text: str) -> str:
+    """A blockquote paragraph as COMPARABLE text: `>` markers off, whitespace flat.
+
+    Joining the raw lines made a cosmetic rewrap a RED pin (see the docstring below),
+    so the anchor search and every word assertion read this form. Markdown line
+    wrapping carries no meaning; the sentence does.
+    """
+    lines = [re.sub(r"^\s*(?:>\s?)+", "", line) for line in text.splitlines()]
+    return " ".join(" ".join(lines).split())
+
+
 def _read_side_legacy_note(section: str | None = None) -> str:
     """§5's read-side legacy note: the ONE blockquote PARAGRAPH that says it.
 
@@ -289,7 +300,12 @@ def _read_side_legacy_note(section: str | None = None) -> str:
     were the disclosure. A bare `>` is therefore the break.
 
     Reads the paragraph's `>` continuation lines with it: a rewrap changes nothing
-    semantic and must not redden a content pin.
+    semantic and must not redden a content pin — ⛔ WHICH IS WHY THE ANCHOR AND THE
+    WORDS ARE MATCHED UNWRAPPED. The comparison text is the paragraph with its `>`
+    markers stripped and its whitespace collapsed (`_unwrap`), so a rewrap that
+    splits `read-side legacy` (or `` `archived` ``) across two lines still matches;
+    matching the RAW lines made the promise above false and reddened with a message
+    claiming the disclosure was missing (v3.37 review, rounds 2 and 3).
 
     ⛔ AND TWO NOTES ARE REFUSED, NOT JOINED. The paragraph break above replaced a
     blank-line split whose uniqueness assert (``§5 has 2 blockquote paragraph(s)
@@ -318,7 +334,7 @@ def _read_side_legacy_note(section: str | None = None) -> str:
     if current:
         paragraphs.append(current)
     matches = [
-        paragraph for paragraph in ("\n".join(p) for p in paragraphs)
+        paragraph for paragraph in (_unwrap("\n".join(p)) for p in paragraphs)
         if "read-side legacy" in paragraph
     ]
     if not matches:  # the CALLER fails, and says which words went missing

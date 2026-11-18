@@ -6657,15 +6657,17 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     # (`test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal`):
                     # the pre-fix text raised `update_entity refused the status
                     # transition 'live' -> 'archived'` from the call it
-                    # prescribed. `retracted` is a declared transition from
-                    # every live state on BOTH carriers, so it is named first on
-                    # the one carrier where `archived` is not reachable.
+                    # prescribed. `deprecated` is the DECLARED transition from a
+                    # live state on both carriers — `_ALLOWED_TRANSITIONS['live']`
+                    # is `{deprecated, superseded}` — so it is named first, and
+                    # `retracted`/`archived` are disclosed as the spellings that
+                    # normalise to it. ⛔ `archived` was called "RESERVED on Points"
+                    # here until v3.37 deleted that §5 row (review round 3).
                     "status='archived' on an Object/Subject goal, or "
-                    "status='retracted' on a :Point goal (whose declared "
-                    "transitions from a live state are exactly "
-                    "{retracted, superseded}, so 'archived' is REFUSED there as "
-                    "reserved); the legacy 'deprecated' spelling is accepted on "
-                    "goals whose door carries it")
+                    "status='deprecated' on a :Point goal (the transitions "
+                    "declared from a live state are {deprecated, superseded}; "
+                    "'retracted' and 'archived' are the spellings that normalise "
+                    "to it)")
                 + f";\n"
                 f"  2. drop the ending from `goalState` — pass a word that "
                 f"describes a live commitment {sorted(GOAL_LIVE_STATES)} (or "
@@ -6822,12 +6824,15 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             f"over it: the node keeps the ending it had.\n"
             f"Two ways to fix it, either is accepted:\n"
             # ⛔ ROUND 22, findings 1 and 2: the same two defects the arms above
-            # fixed, in the family's LAST refusal. `archived` is not reachable
-            # on a `:Point` (ONTOLOGY §5), and `supersededBy` holds a NAME.
+            # fixed, in the family's LAST refusal. `supersededBy` holds a NAME, and
+            # the Point route is the canonical `deprecated` — the "`archived` is
+            # reserved on a Point" clause this carried was false from v3.37
+            # (review round 3: `_ALLOWED_TRANSITIONS['live']` is `{deprecated,
+            # superseded}` and `archived` normalises to `deprecated`).
             f"  1. keep the ending — pass status='archived' with "
             f"goalState='abandoned' on an Object/Subject goal, or "
-            f"status='retracted' with goalState='abandoned' on a :Point goal "
-            f"(whose 'archived' ending is REFUSED there as reserved); or "
+            f"status='deprecated' with goalState='abandoned' on a :Point goal "
+            f"('retracted'/'archived' are the spellings that normalise to it); or "
             f"status='superseded' plus supersededBy=<successor name> (the column "
             f"holds the successor's name, not its id);\n"
             f"  2. if this is genuinely a NEW goal, give it its own id "

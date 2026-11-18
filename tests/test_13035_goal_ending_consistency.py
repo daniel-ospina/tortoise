@@ -1857,10 +1857,12 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
         sdk.update_knowledge(goal["id"], goalState="abandoned")
     msg = str(exc.value)
     assert "REFUSED" in msg, msg
-    # the message names the :Point route, the way the sibling arm does
-    assert "status='retracted'" in msg, msg
-    # ...and it says why `archived` is the wrong half on this carrier
-    assert "'archived' is REFUSED there as reserved" in msg, msg
+    # the message names the :Point route — the CANONICAL word, the one
+    # `_ALLOWED_TRANSITIONS['live']` declares (measured: `{deprecated, superseded}`)
+    assert "status='deprecated'" in msg, msg
+    # ...and it discloses that the retired spellings normalise to it, instead of
+    # repeating the "`archived` is reserved on Points" §5 row v3.37 deleted
+    assert "normalise" in msg, msg
     # ⛔ the pre-fix prescription, PERFORMED, is refused — this is the circle
     with pytest.raises(ValueError) as refused:
         sdk.update_knowledge(goal["id"], status="archived")
@@ -1894,7 +1896,9 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
                          id=ended["id"], goalState="met", status="live")
     msg = str(exc.value)
     assert "ALREADY ENDED" in msg, msg
-    assert "status='retracted'" in msg, msg
+    # the :Point route this message names is the CANONICAL ending word — v3.37's
+    # `deprecated`; `retracted` is its declared synonym and normalises to it
+    assert "status='deprecated'" in msg, msg
     assert "supersededBy=<successor name>" in msg, msg
     # the ending survived the refused write
     after = sdk.get_point(ended["id"])
