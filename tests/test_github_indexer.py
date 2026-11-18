@@ -1110,10 +1110,12 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     projection refuses to move the row.
 
     ⛔ Only the LATCHED word is covered here. The WIDER terms (`status='outdated'`,
-    the legacy `outdated=true` flag) are NOT frozen by the fold and answer the
-    POSITION axis instead — round-4 finding 2 found that answering `None` for them
-    silently dropped a reopen the projection WOULD apply. That asymmetry, both
-    directions of it, is `test_an_outdated_row_answers_the_position_axis` below.
+    the legacy `outdated=true` flag) are NOT frozen by the fold and take their answer
+    per DIRECTION — the POSITION where the row HAS one, the WORD where it has none,
+    enumerated once on `_object_state_to_issue_state`'s docstring. Round-4 finding 2
+    found that answering `None` for them silently dropped a reopen the projection
+    WOULD apply. That asymmetry, both directions of it, is
+    `test_an_outdated_row_answers_the_position_axis` below.
     """
     oid = "github-issue-acme/repo1-1"
     frozen = {
@@ -1188,12 +1190,15 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
       bypasses the live-holder requirement for a single registered incarnation — so it
       IS dispatched, and it APPLIES, because the latch is that narrower set.
 
-    So the answer is the POSITION axis: `None` while the position is live (nothing
-    could ever close it), the position-derived state once it is ended (so the reopen
-    the projection WOULD apply is actually minted). Answering `None` for both — the
-    round-3 shape — made every assertion about the closed direction pass while
-    silently DROPPING that reopen: measured `[0, 0]` and the row left at
-    `done`/`terminal`/`isClosed=true`.
+    So the answer is the POSITION axis where the row HAS one: `None` while the
+    position is live (nothing could ever close it), the position-derived state once
+    it is ended (so the reopen the projection WOULD apply is actually minted). A
+    POSITION-LESS row is the same asymmetry one dimension down — the WORD where
+    there is no position — and is the subject of
+    `test_a_POSITIONLESS_wide_term_row_answers_one_direction_only`. Answering
+    `None` for both — the round-3 shape — made every assertion about the closed
+    direction pass while silently DROPPING that reopen: measured `[0, 0]` and the
+    row left at `done`/`terminal`/`isClosed=true`.
     """
     oid = "github-issue-acme/repo1-1"
 
