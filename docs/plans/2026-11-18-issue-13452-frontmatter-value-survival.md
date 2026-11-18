@@ -173,24 +173,27 @@ rationale drift, or the 2 pre-existing absence reds.
 |---|---|---|---|
 | `tortoise.file_indexer.parse_frontmatter` | python consumer | `tests/test_file_indexer.py` (unchanged) | the read path this fix depends on; **not modified** |
 | `tortoise/docs_miner.py:352` | importer | `tests/test_file_indexer.py` | consumes the same parse; unaffected by quoting data |
-| `tests/test_doc_affiliation_frontmatter.py:220` | the arm itself | `config/ci-surfaces.yml:3719` (`tier1`) + `:10652` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
-| `docs/research/**/*.md` (68 blocks) | data | the arm's glob `:241` | the population the assertion iterates |
+| `tests/test_doc_affiliation_frontmatter.py:492` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
+| `docs/research/**/*.md` (68 blocks) | data | the arm's glob `:557` | the population the assertion iterates |
 | `scripts/check-doc-affiliation.cjs` | commit-time advisory | not CI-wired | **not touched**; deferred per §2 alternative E |
 
 ## 7. Verification plan — measured (PROVE evidence)
 
 Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_affiliation_frontmatter.py -q`
 
-1. **Unfixed tree** (this test file against `origin/main` content): `3 failed, 6 passed` — the research
+1. **Unfixed tree** (this test file against `origin/main` content): `3 failed, 6 passed` — measured at
+   `268737ae6cd9` (this branch's first commit) against `main`'s then-content, and **not reproducible
+   from this head**: the file has since grown to 14 tests and `main`'s docs have moved. The research
    arm reds on **exactly the 8** `aboutObjects` values, each carrying the **RAW-vs-parsed length pair**
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
    failure output, not asserted.**
-2. **Fixed tree:** `2 failed, 11 passed` **at this head** — the same 2 failures throughout, and each
+2. **Fixed tree:** `2 failed, 12 passed` **at this head** — the same 2 failures throughout, and each
    count is tied to the head that produced it, because tests are appended to this file every round:
    `8 passed` pre-rebase, `9 passed` at the rebased `36700a89b7` (the extra pass is `#13485`'s own new
-   test, which main added under ours), `10 passed` once the `''`-parity pin landed, and `11 passed`
-   once the `"`-backslash pin landed. The 2 are the pre-existing absence reds
+   test, which main added under ours), `10 passed` once the `''`-parity pin landed, `11 passed` once
+   the `"`-backslash pin landed, and `12 passed` once the (C)-ordering pin landed. The 2 are the
+   pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the evidence bundles
    `docs/evidence/13038-capstone/README.md` **+** `docs/evidence/13436-write-path-costs/README.md` —
    the second bundle landed on `main` in `#13436` AFTER this plan was written, so the red now names
@@ -411,6 +414,22 @@ reds alone under `-k double_quoted_backslash`: `1 failed, 12 deselected`). Same 
 half above, and the same reason it is worth its own test: `_closing_quote` added branches, and a
 branch nothing asserts is a branch a later simplification is free to drop.
 
+**Fixed at this head — the (C) ordering had no committed pin, and it is the ONE fail-open here.**
+
+§8's M16 measures that an unescaped inner `"` is reported `broken` even when the body also carries a
+legal `\`, i.e. that `_quoted_style` tests `_has_unescaped_dq` BEFORE the escape branch. That order
+was pinned only by `/tmp/matrix_13452.sh` — a scratch script that no longer exists — never by a
+committed assertion. Measured with `if _has_unescaped_dq(body):` mutated to `if False:`: the whole
+file stays GREEN (`2 failed, 11 passed` at `3b8de63b8a`, the same two pre-existing reds) while two
+values the consumer TRUNCATES stop being reported — `"a, "#1" KEEP"` (YAML reads `'a, '`) goes
+`('broken', None)` → `('double-quoted', …)`, and `"a\tb\" "#1" KEEP"` (YAML reads `'a\tb" '`) goes
+`('broken', None)` → `('escaped', None)`, where `escaped` declines the comparison entirely. That is a
+value escaping measurement — the #13452 defect this guard exists to prevent — behind green CI, and it
+is the only branch of this helper whose loss is a fail-open rather than a mis-worded remedy; the two
+pins above are the other class. `test_an_unescaped_quote_is_broken_even_beside_a_legal_escape` now
+pins both shapes (unit-level on `_quoted_style`, which is where the ordering decides) and reds alone
+under that mutant (`3 failed, 11 passed`; the 2 pre-existing reds plus this one).
+
 **Already fixed — the sequence branch's false diagnosis.** `- 13452` (int) once reported "a
 sequence item has no legal transform, so this is a truncation" while the scalar branch said
 "implicit typing". Both non-string members now share `_type_mismatch`, which decides from the RAW
@@ -505,8 +524,8 @@ Measured at the post-rebase head:
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
   truncation case still `broken`;
 - `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; this head measures
-  `2 failed, 11 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
-  and this PR's own two pins (the `''` parity half and the `"` backslash half);
+  `2 failed, 12 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
+  and this PR's own three pins (`''` parity, `"` backslash, and the (C) ordering);
 - `test_docs_lint_baseline` + `test_docs_lint_gate` + `test_docs_citation_refs` → **106 passed**.
 
 One correction this rebase forced: the pre-existing absence red on the evidence bundles now names

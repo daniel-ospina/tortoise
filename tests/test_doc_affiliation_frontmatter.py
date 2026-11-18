@@ -1088,6 +1088,44 @@ def test_a_double_quoted_backslash_escape_before_a_comment_is_measured(
     assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == 'a"'
 
 
+def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
+    """(C) runs BEFORE the escape branch — and that ORDER was the only thing pinning it.
+
+    ``_quoted_style`` returns ``broken`` for an UNESCAPED inner ``"`` and only then
+    considers ``escaped``. That order is load-bearing, not cosmetic: an escaped body
+    can still carry an unescaped quote, and when the escape branch ran first the
+    truncation went through GREEN (found in review of #13476; the module docstring at
+    ``_quoted_style`` records it).
+
+    ⛔ This is the one branch of this helper whose loss is a FAIL-OPEN, not a false
+    remedy. Measured, with ``if _has_unescaped_dq(body):`` mutated to ``if False:``:
+    the WHOLE FILE stays green (``2 failed, 11 passed``, the same two pre-existing
+    absence reds) while these two values — both TRUNCATED by the consumer — stop being
+    reported:
+
+        `"a, "#1" KEEP"`            yaml -> `'a, '`        head `('broken', None)` -> `('double-quoted', …)`
+        `"a\\tb\\" "#1" KEEP"`      yaml -> `'a\\tb" '`     head `('broken', None)` -> `('escaped', None)`
+
+    i.e. a value is silently NOT compared, which is exactly the #13452 defect this
+    guard exists to prevent, shipping behind green CI. The two assertions below are
+    the only thing that notices; end-to-end, a `docs/research` dossier carrying either
+    value passes the arm under that mutant and reds it at this head.
+    """
+    # An unescaped inner quote, with no escape anywhere in the body.
+    assert _quoted_style('"a, "#1" KEEP"') == ("broken", None), (
+        "an unescaped inner quote TERMINATES the scalar (YAML reads `a, `), so this "
+        "must be `broken` — not measured as a whole double-quoted value"
+    )
+    # …and the SAME shape once a legal escape is also present: the escape branch must
+    # not be reached first, or `escaped` declines the comparison and the truncation
+    # goes unreported.
+    assert _quoted_style('"a\\tb\\" "#1" KEEP"') == ("broken", None), (
+        "a body with BOTH an escape and an unescaped quote is still TERMINATED at "
+        "that quote (YAML reads `a\\tb\" `) — `escaped` would skip the comparison "
+        "and let the truncation through"
+    )
+
+
 def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
     """#9110 review P2: the evidence bundle landed with no frontmatter at all.
 
