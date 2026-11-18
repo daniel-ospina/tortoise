@@ -21,8 +21,10 @@ Every door that can carry a caller- or model-supplied ``pointKind`` is gated:
 ``create_point`` (positional kind AND the props passthrough, which WINS over the
 positional), ``update_point``, and ``_update_entity`` (the OTHER documented
 update door onto a ``:Point`` — it stored a padded value at the first head,
-#9591 review cycle 1; its CREATE sibling cannot reach a ``:Point`` at all, so it
-is deliberately not gated — cycle 3),
+#9591 review cycle 1; its CREATE sibling could not reach a ``:Point`` at all in
+cycle 3, so it was deliberately left ungated THEN — #11609 lane P1 then gave that
+funnel the POINT and DIARY arms, and it reaches the same gate by RELAY: see
+``TestUpdateEntityRefuses::test_the_entity_CREATE_funnel_reaches_a_Point_so_the_gate_must_be_IN_it``),
 and the journal-first seam ``EventAPI.add_point`` → ``_emit`` (cycle 1, P1:
 ``extractor.py`` feeds it UNTRUSTED model output). The v1 extractor's parser
 canonicalises a model-produced kind before the seam sees it, because the door's
@@ -255,21 +257,42 @@ class TestUpdateEntityRefuses:
         finally:
             sdk.close()
 
-    def test_the_entity_CREATE_funnel_is_not_gated_and_that_is_deliberate(
+    def test_the_entity_CREATE_funnel_reaches_a_Point_so_the_gate_must_be_IN_it(
             self, sdk):
-        """#9591 review cycle 3: `_create_entity` cannot create a `:Point`.
+        """#9591 cycle 3's pin FLIPS: #11609 lane P1 made the arm, so the gate is IN it.
 
-        ``create_entity("Point", …)`` raises `unknown type` — the funnel only
-        makes Subject/Object/Event/Document/Source — so a ``pointKind`` riding
-        it is a stray property on a label the calibration gate never reads
-        (``_CALIBRATION_GATED_LABELS == ("Point",)``). Gating it there refused an
-        unrelated write (measured: ``create_object(..., props={'point_kind':
-        padded})``), so the arm was dropped and this test pins that decision —
-        if a Point label ever becomes reachable through that funnel, this reds
-        and the gate must come back.
+        Cycle 3 got here the other way round — ``create_entity`` could not create a
+        ``:Point`` at any ``type=`` value, so gating the funnel would have refused an
+        unrelated write (measured then: ``create_object(..., props={'point_kind':
+        padded})``) and the arm was dropped. The pin it left behind said what to do when
+        that changed: *"if a Point label ever becomes reachable through that funnel, this
+        reds and the gate must come back"*. #11609 lane P1 is that change —
+        ``tortoise_create_point`` and ``tortoise_diary_write`` retired FORWARD into
+        ``create_entity``, which now dispatches ``type="point"`` and ``type="diary"``.
+
+        ⛔ THE GATE IS REACHED, NOT MERELY PRESENT. Both arms RELAY to ``create_point``
+        (they do not re-implement it), so the positional-kind gate this file opens with is
+        the one a funnel write meets — a padded kind cannot slip in by arriving at a door
+        that never gated. The closed ``type=``
+        set is still closed, and the unrelated ``point_kind`` PROP a caller may put on an
+        Object stays accepted: that false refusal is why the gate left in cycle 3.
         """
+        assert sdk._uncalibrated_ep_participants(None) == []
+        # 1. The funnel's closed set is intact — a `type=` that is no arm is refused.
         with pytest.raises(ValueError, match="unknown type"):
-            sdk.create_entity("Point", "Not a Point door")
+            sdk.create_entity("NotAKind", "Not an entity")
+        # 2. The invisible-kind gate fires THROUGH the funnel, naming the code point.
+        for spelling in ("\u2003statement\u2003", "statement\u200b"):
+            with pytest.raises(ValueError,
+                               match="pointKind must be an identifier"):
+                sdk.create_entity(
+                    "point", "Padded through the funnel",
+                    props={"pointKind": spelling})
+        # 3. Nothing those refusals touched was minted — the fail-open detector the
+        #    module docstring opens with still answers `[]`.
+        assert sdk._uncalibrated_ep_participants(None) == []
+        # 4. The write cycle 3 dropped the gate FOR still lands: a `point_kind` prop on
+        #    a label the calibration gate never reads is not a Point write.
         obj = sdk.create_object(
             "Thing", props={"point_kind": "statement\u200b"})
         assert obj["id"]
