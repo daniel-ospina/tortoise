@@ -1,0 +1,254 @@
+{
+  "schema": "capstone-state-value-narrative/v1",
+  "issue": 13038,
+  "parent": 11824,
+  "frozen": "2026-11-16",
+  "why": [
+    "This file is the KEY of the value assessment. It is written before any run and is not edited after one:",
+    "the six questions below are asked of the product, and the answers are judged against THIS narrative, not",
+    "against internal fields. Editing this file after a scored run re-baselines the assessment and must be a",
+    "reviewed change with the reason recorded in the PR.",
+    "Every shape the state model exists for is here on purpose (see `shapes`): a plan that never became an",
+    "occurrence, a superseded commitment with a named successor, a retirement with nothing replacing it, a",
+    "plan that reached a terminal stage without happening, a goal whose state must come from its reading,",
+    "and a claim that was withdrawn."
+  ],
+
+  "story": [
+    "We are a six-person SaaS company. On 2 November we locked in our launch: the event will be hosted",
+    "on 12 December at the beach club. Nothing has happened yet — it is a plan, not a past event.",
+    "On 5 November we set Q3 pricing: our entry tier is $29 per seat. On 9 November we replaced it — Q4",
+    "pricing makes the entry tier $39 per seat. Q3 is now history, and Q4 is what we sell at.",
+    "In October we retired the old onboarding flow. There is no new onboarding flow; we simply stopped",
+    "offering it, and the replacement is 'nothing'.",
+    "Our Thursday partner call was scheduled for 6 November. It was cancelled and never took place.",
+    "We committed to an uptime target of 99.9% for the quarter. Our October reading was 99.95%; our",
+    "November reading was 99.72% — below the target.",
+    "Early on, someone recorded that the beach club had confirmed our 12 December booking. That claim was",
+    "later withdrawn: the confirmation never happened."
+  ],
+
+  "shapes": [
+    {"id": "plan", "means": "a plan, not an event: a thing that has not happened yet is not a dated fact"},
+    {"id": "superseded", "means": "a replaced commitment that names its successor"},
+    {"id": "deprecated", "means": "an ending with no successor"},
+    {"id": "terminal_without_occurrence", "means": "a plan that reached a terminal stage and never became an occurrence"},
+    {"id": "goal_target", "means": "an achievement decided by a measurement against a declared target, never by a status"},
+    {"id": "withdrawn", "means": "evidence a reader must stop counting"}
+  ],
+
+  "ingest": {
+    "note": [
+      "The ops below are executed in order by tools/capstone_state_value.py against the named target,",
+      "through the product's own write doors (Objects / Points / Events / the pipeline stage writer /",
+      "the goal judgement writer). `ref` names are scenario-local handles, never product ids."
+    ],
+    "ops": [
+      {
+        "op": "declare_pipeline",
+        "pipeline": "core:plan",
+        "why": "S7 declares a plan kind with a pipeline; until it lands, a plan's position has to be declared by the tenant (pipeline.seed_pipeline is the shipped graph-override door).",
+        "stages": [
+          {"id": "scheduled", "label": "Scheduled", "order": 1, "slot": "entry"},
+          {"id": "held", "label": "Held", "order": 2, "slot": "terminal", "outcome": "completed"},
+          {"id": "missed", "label": "Missed", "order": 3, "slot": "terminal", "outcome": "lost"},
+          {"id": "cancelled", "label": "Cancelled", "order": 4, "slot": "terminal", "outcome": "withdrawn"}
+        ]
+      },
+      {
+        "op": "object",
+        "ref": "launch_plan",
+        "name": "Launch event — 12 December at the beach club",
+        "kind": "core:plan",
+        "requires": ["objects", "pipeline_stages"],
+        "cites_turn": "the event will be hosted on 12 December at the beach club"
+      },
+      {
+        "op": "advance_stage",
+        "ref": "launch_plan",
+        "pipeline": "core:plan",
+        "stage": "scheduled",
+        "requires": ["pipeline_stages"]
+      },
+      {
+        "op": "point",
+        "ref": "q3_pricing",
+        "kind": "decision",
+        "content": "Q3 pricing: the entry tier is $29 per seat.",
+        "requires": ["points"]
+      },
+      {
+        "op": "point",
+        "ref": "q4_pricing",
+        "kind": "decision",
+        "content": "Q4 pricing: the entry tier becomes $39 per seat, replacing the Q3 decision.",
+        "requires": ["points"]
+      },
+      {
+        "op": "supersede_point",
+        "old": "q3_pricing",
+        "new": "q4_pricing",
+        "why": "the changed commitment names its successor",
+        "requires": ["points", "supersede"]
+      },
+      {
+        "op": "object",
+        "ref": "old_onboarding",
+        "name": "Old onboarding flow",
+        "kind": "process",
+        "requires": ["objects"]
+      },
+      {
+        "op": "deprecate_object",
+        "ref": "old_onboarding",
+        "why": "ended, nothing replaced it — `deprecated`, not `superseded`, and not `archived`",
+        "requires": ["objects", "lifecycle_word"]
+      },
+      {
+        "op": "object",
+        "ref": "partner_call",
+        "name": "Thursday partner call — 6 November",
+        "kind": "core:plan",
+        "requires": ["objects", "pipeline_stages"]
+      },
+      {
+        "op": "advance_stage",
+        "ref": "partner_call",
+        "pipeline": "core:plan",
+        "stage": "cancelled",
+        "why": "a terminal stage with no occurrence: the plan ended, nothing happened",
+        "requires": ["pipeline_stages"]
+      },
+      {
+        "op": "object",
+        "ref": "uptime_goal",
+        "name": "Q4 uptime",
+        "kind": "core:goal",
+        "props": {"goalState": "active", "status": "live"},
+        "requires": ["objects", "goal_state"]
+      },
+      {
+        "op": "object",
+        "ref": "uptime_target",
+        "name": "Uptime target — 99.9% or better",
+        "kind": "core:target",
+        "props": {"comparator": ">=", "threshold": 99.9, "dwell": 1},
+        "requires": ["objects", "target"]
+      },
+      {
+        "op": "reading",
+        "ref": "uptime_oct",
+        "indicator": "uptime_goal",
+        "name": "Uptime reading 2026-10",
+        "value": 99.95,
+        "unit": "percent",
+        "asOf": "2026-10-31T23:59:00+00:00",
+        "requires": ["events"]
+      },
+      {
+        "op": "reading",
+        "ref": "uptime_nov",
+        "indicator": "uptime_goal",
+        "name": "Uptime reading 2026-11",
+        "value": 99.72,
+        "unit": "percent",
+        "asOf": "2026-11-15T23:59:00+00:00",
+        "requires": ["events"]
+      },
+      {
+        "op": "judge_goal",
+        "goal": "uptime_goal",
+        "indicator": "uptime_goal",
+        "target": "uptime_target",
+        "why": "the achievement is judged from the reading against the target, never from a status",
+        "requires": ["events", "judgement"]
+      },
+      {
+        "op": "point",
+        "ref": "beach_club_claim",
+        "kind": "statement",
+        "content": "The beach club confirmed our 12 December booking.",
+        "requires": ["points"]
+      },
+      {
+        "op": "retract_point",
+        "ref": "beach_club_claim",
+        "why": "evidence a reader must stop counting",
+        "requires": ["points", "retract"]
+      }
+    ]
+  },
+
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "What are we currently committed to?",
+      "wrong_means": "If the replaced Q3 pricing decision or the retired onboarding flow appears, the product serves retired things as current — the trust failure this model exists to remove.",
+      "recipe": "current_commitments",
+      "key": "The current commitments are: Q4 pricing (entry tier $39/seat), the 12 December launch plan (not yet held), the Q4 uptime target of 99.9%, and nothing else. Q3 pricing ($29/seat) was replaced and must NOT appear as current. The retired onboarding flow must NOT appear as current.",
+      "must_not_appear": ["q3_pricing", "old_onboarding"],
+      "must_appear": ["q4_pricing"],
+      "blocked_by": []
+    },
+    {
+      "id": "Q2",
+      "question": "Did we ever plan a launch event, and did it happen?",
+      "wrong_means": "If 'planned' and 'happened' cannot be told apart, plans are being stored as facts — the answer would let an agent claim an event occurred.",
+      "recipe": "plan_vs_occurrence",
+      "key": "Yes, we planned a launch event: 12 December at the beach club. It has NOT happened — it is scheduled, and no occurrence exists. An answer that reports it as a fact or as having happened is wrong.",
+      "must_appear": ["launch_plan"],
+      "must_not_appear": [],
+      "blocked_by": []
+    },
+    {
+      "id": "Q3",
+      "question": "Why did the pricing decision change, and what replaced it?",
+      "wrong_means": "If the successor cannot be named, change is illegible — the agent cannot explain a change to a human.",
+      "recipe": "why_changed",
+      "key": "The Q3 pricing decision ($29/seat) was replaced by the Q4 pricing decision ($39/seat). The successor is the Q4 decision. The narrative records no reason beyond the replacement itself, so an answer that invents a rationale (e.g. 'rising costs') is wrong; one that says Q4 replaced Q3 and names Q4 satisfies the question.",
+      "must_appear": ["q4_pricing"],
+      "must_not_appear": [],
+      "blocked_by": []
+    },
+    {
+      "id": "Q4",
+      "question": "Is the uptime goal met, and on what basis?",
+      "wrong_means": "If the answer cites a status rather than the reading, achievement is being declared instead of measured.",
+      "recipe": "goal_met",
+      "key": "Not met. The target is 99.9% or better; the latest reading is 99.72% (November), which is below it. The basis must be the reading compared against the target, not a status word. (An answer of 'met' is wrong; an answer of 'unmet' that cites no reading or target is incomplete.)",
+      "must_appear": ["uptime_goal"],
+      "must_not_appear": [],
+      "blocked_by": []
+    },
+    {
+      "id": "Q5",
+      "question": "What was planned and never happened?",
+      "wrong_means": "If the cancelled partner call cannot be found, the product cannot answer the one question a mutable-event model loses.",
+      "recipe": "planned_never_happened",
+      "key": "The Thursday partner call (6 November) was scheduled and cancelled — it never took place. The 12 December launch is still pending, not 'never happened'. An answer that finds neither, or that reports the cancelled call as current/upcoming, is wrong.",
+      "must_appear": ["partner_call"],
+      "must_not_appear": [],
+      "blocked_by": []
+    },
+    {
+      "id": "Q6",
+      "question": "Has anything we relied on been withdrawn?",
+      "wrong_means": "If the withdrawn claim still counts, belief is contaminated by retired evidence — the agent will act on something we retracted.",
+      "recipe": "withdrawn",
+      "key": "Yes: the claim that the beach club confirmed the 12 December booking was withdrawn (the confirmation never happened). The product must both stop counting it and be able to say that it was withdrawn.",
+      "must_appear": ["beach_club_claim"],
+      "must_not_appear": [],
+      "blocked_by": []
+    }
+  ],
+
+  "rubric": [
+    "Judge each answer against the narrative and the question's `key` — not against internal fields, and not by whether a substring appeared.",
+    "right: a customer asking this question would be satisfied — the answer is correct AND it says how it knows (a reading, a successor, an ending) where the question asks for a basis.",
+    "wrong: the answer is incorrect about the narrative, or it is correct only by accident while the product's own evidence contradicts it (e.g. a retired claim served as current).",
+    "blocked: the question could not be ASKED — the read errored or timed out with no rows, the shape could not be written, or the product offers no surface that can answer the question at all. A blocked answer is never scored as wrong: 'we could not ask' is not 'we answered badly'.",
+    "A DEGRADED read is NOT blocked. When a search reports degraded but still serves rows, the customer receives those rows, so they are judged: unrelated rows served to a question are a wrong answer, and an empty result where the narrative says something exists is a wrong answer. Degradation is recorded as evidence (the scoreboard carries it per call), never used to excuse an answer the product actually delivered.",
+    "unjudged: no fresh reader verdict was obtained (no judge ran). Never invent a verdict to fill the row.",
+    "When a row is wrong or blocked, name the cause in one line: which open slice (#13034 currency predicate, #13035 goalState, S0/S7 vocabulary and plans) or which target limitation produced it."
+  ]
+}
