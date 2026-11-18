@@ -1725,10 +1725,13 @@ def _assert_labels_are_ADDRESSABLE(labels, state):
 
     What addressability actually means: the branch that yields the bare value
     the record's `node_key` carries EXISTS, so a value the cache resolved can
-    address the record row. That still reds on both real defects — `KEY_PROPERTY`
-    drift, and a served label losing its contract-key branch — the two failures
-    the old `KEY_PROPERTY == "id"` literal could not see, because it reddened on
-    CORRECT states (`Event`, `Source`) instead.
+    address the record row. That still reds on both real defects — a served label
+    losing its contract-key branch, and drift BETWEEN `KEY_PROPERTY` and the
+    resolver — while the old `KEY_PROPERTY == "id"` literal caught neither: the
+    branch loss was invisible to it (it only compared the contract key to the
+    literal), and drift away from `id` was caught by accident of the literal being
+    `"id"`, which is also why the same spelling reddened on CORRECT states
+    (`Event`, `Source`) instead.
 
     ⛔ AND NOTHING HERE IS SAID ABOUT A *SECOND* BRANCH, DELIBERATELY. Whether an
     extra branch is addressed by the record is `ENTITY_UNION_ADDRESS_RESIDUALS`'

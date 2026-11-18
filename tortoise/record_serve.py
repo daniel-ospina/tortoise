@@ -346,9 +346,12 @@ READ_ENTITY_UNION_BY_ID = "entity-union-by-id"
 #: Subject / Object by ``id``, Source by ``id`` and by ``url``, Event by
 #: ``eventId``), and a union that answers `{}` for a node one of its labels
 #: holds is the "cannot see it" / "does not exist" conflation #7952 forbids.
-#: So a label is served only where a record row reproduces the cache answer,
-#: and everywhere else the door ABSTAINS (`residency: "not-hot"`) instead of
-#: claiming an absence it cannot see. The verdict itself is
+#: So a label is served only where a record row reproduces the cache answer.
+#: ⛔ AND THE ABSTENTION IS NOT ITS MIRROR: while coverage is incomplete the door
+#: abstains (`residency: "not-hot"`) for EVERY absent NAMED id — including a miss
+#: on a label it DOES serve — because :func:`entity_coverage_complete` takes no
+#: label. Reading "unserved labels abstain, served labels answer" as a partition
+#: is the exact error this file corrects in four other places. The verdict itself is
 #: :func:`entity_absent_wire` — one home for the coverage rule.
 #:
 #: WHY EACH MEMBER IS HERE — the parity evidence, per label:
