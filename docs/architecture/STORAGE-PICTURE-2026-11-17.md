@@ -1,3 +1,15 @@
+---
+title: "The storage picture — where the layer is going, and where it hurts (#13232)"
+type: architecture
+domain: platform
+doc_status: draft
+created: 2026-11-17
+issue: "#13232"
+subjects.team: epistemic-team
+aboutSubjects: storage layer, Postgres record, FalkorDB cache, vector placement, write-path latency, search
+aboutObjects: "STORAGE-ARCHITECTURE.md, #13232, #13224, #7879, #13220, #4051"
+---
+
 # The storage picture — where the layer is going, and where it hurts
 
 **Issue:** `#13232` · **Written:** 2026-11-17 · **Read at:** `d1bfef778f` (branch `research/13232-storage-picture`)
