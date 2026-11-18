@@ -946,7 +946,7 @@ class EmbeddingModel:
             return None
         failure_kind = None
         if kind is not None:
-            # ⛔ A MISS FAILS CLOSED (#13528 review P2-2). ``.get(kind, kind)``
+            # ⛔ A MISS FAILS CLOSED (#13544 review). ``.get(kind, kind)``
             # handed an UNMAPPED leg-trace term straight into ``failure_kind``
             # and re-opened, one line below the sentence above it, the
             # closed-set hole this mapping exists to close. The fallback is the
@@ -1907,7 +1907,7 @@ _READ_DECLINE_LOAD_IN_FLIGHT = "load_in_flight"
 
 #: The kind reported for a leg-trace term this mapping does not know: the
 #: class's own documented fallback (``EmbedderUnavailableError``: "the fallback
-#: when no kind was recorded"). A MISS FAILS CLOSED to it (#13528 review P2-2) —
+#: when no kind was recorded"). A MISS FAILS CLOSED to it (#13544 review) —
 #: an unmapped term is never published as ``failure_kind``, because
 #: ``failure_kind`` is a closed set and a term that is not in it is precisely the
 #: conflation this mapping exists to prevent. Named as a constant so the test that
@@ -1917,7 +1917,9 @@ _FAILURE_KIND_FALLBACK = "model_unavailable"
 #: Leg-trace reason → ``EmbedderUnavailableError.failure_kind`` (#13528 review
 #: P1-1). Two vocabularies, one translation, at the ONE seam that writes both:
 #: ``no_embedder`` is the trace's name for a DESIGNED ABSENCE, whose failure kind
-#: is ``not_installed``; every other trace term already equals its kind. A term
+#: is ``not_installed``; ``load_in_flight`` is the ONE other term whose kind is
+#: not its own name (it becomes ``model_unavailable``, below), and
+#: every remaining trace term already equals its kind. A term
 #: with no entry (an ``encode_failed``, say) is reported as
 #: ``_FAILURE_KIND_FALLBACK`` rather than passed through — see above.
 _READ_DECLINE_FAILURE_KIND: dict[str, str] = {

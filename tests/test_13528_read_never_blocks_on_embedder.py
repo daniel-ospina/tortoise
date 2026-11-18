@@ -181,7 +181,7 @@ def sdk(tmp_path):
         # simulated load has not started. `get` is patched to the absent answer so
         # priming cannot trigger a REAL load into the window either.
         #
-        # ⛔ `await_read_ready_reason` IS NOT PATCHED (#13528 review P2-3). A
+        # ⛔ `await_read_ready_reason` IS NOT PATCHED (#13544 review). A
         # second mock here was dead weight: `tests/conftest.py` pins
         # `TORTOISE_EMBEDDER_WARMUP=0` process-wide, and the predicate returns at
         # its FIRST check ("warm-up disabled") before it can spawn anything — so
@@ -283,8 +283,12 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     still be able to say which half it died in), and on the cold path NEITHER
     may hold the load: the read declines instead of waiting, so ``embed_get``
     is a fast decision rather than a stall, and ``embed_encode`` never opens at
-    all. ``pre_handler`` must stay small too — the 7.2–9.3 s it published in
-    production was reads QUEUED behind workers parked in the load.
+    all. ``pre_handler`` is reported here too, but this SINGLE-THREADED row
+    cannot make it large — the defect lands in ``embed_get`` above — so the
+    bound below is a UNIT PIN (it stops that frame's number drifting off the
+    unit) and it does NOT assert the production ``pre_handler`` property, reads
+    QUEUED behind workers parked in the load, which needs more than one
+    concurrent read.
     """
     timeline = begin()
     with request_stages(timeline):
@@ -305,16 +309,17 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     # lines down says is the wrong number, and a flake door on the contended
     # 4-worker carve-out lane (#13528 review F2, pre-existing).
     #
-    # ⛔ A PIN, NOT A DISCRIMINATOR (#13528 review P2-2). On THIS single-threaded
+    # ⛔ A PIN, NOT A DISCRIMINATOR (#13544 review). On THIS single-threaded
     # row ``pre_handler`` stays ~0.1 ms even with the defect restored — the whole
-    # load lands in ``embed_get`` above, which is the frame that reddens — so the
-    # queueing property stated below is BOUNDED here, not proven. It is kept to
-    # stop the number drifting with the unit; measuring the queue itself needs
-    # more than one concurrent read.
+    # load lands in ``embed_get`` above, which is the frame that reddens — so
+    # nothing here proves the queueing property, and neither this comment nor
+    # the message below may claim it. It is kept to stop the number drifting with
+    # the unit; measuring the queue itself needs more than one concurrent read.
+    # The row is not the disposition's owner: #13540 keeps it reachable.
     assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
         f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms of a "
-        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a read must not "
-        f"queue behind workers parked in the embedder load")
+        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a MILLISECOND bar for this "
+        f"frame's accrued time (it tracks the unit; it does not measure a queue)")
 
 
 # ── the counter-tests: the fix may not become "stop embedding" ────────────
@@ -427,13 +432,13 @@ def test_a_designed_absence_is_refused_with_not_installed(sdk, monkeypatch):
 #: The ``failure_kind`` vocabulary ``EmbedderUnavailableError`` documents
 #: (``tortoise/exceptions.py``). Spelled here so a published kind is checked
 #: against the CLOSED SET itself, not only against the constant the seam reads —
-#: a constant compared with itself agrees with itself (#13528 review P2).
+#: a constant compared with itself agrees with itself (#13544 review).
 _DOCUMENTED_FAILURE_KINDS = frozenset(
     {"not_installed", "load_failed", "load_timeout", "model_unavailable"})
 
 
 def test_an_unmapped_decline_term_fails_closed_on_the_refusal(monkeypatch):
-    """⛔ A MISS FAILS CLOSED — the mapping's own hole, pinned (#13528 review P2-2).
+    """⛔ A MISS FAILS CLOSED — the mapping's own hole, pinned (#13544 review).
 
     ``_READ_DECLINE_FAILURE_KIND.get(kind, kind)`` published ANY unmapped
     leg-trace term as ``failure_kind``, re-opening one line below the sentence
@@ -446,8 +451,8 @@ def test_an_unmapped_decline_term_fails_closed_on_the_refusal(monkeypatch):
     ``encode_failed`` is the example the seam's own comment names: a real trace
     term this mapping deliberately has no entry for.
 
-    ⛔ THE ROW PINS THE POLICY'S **VALUE**, NOT ONLY ITS IDENTITY (#13528 review
-    P2, cycle 2). The first version of this row compared the published kind
+    ⛔ THE ROW PINS THE POLICY'S **VALUE**, NOT ONLY ITS IDENTITY (#13544 review,
+    cycle 2). The first version of this row compared the published kind
     against ``_FAILURE_KIND_FALLBACK`` — the same constant the seam reads — so
     setting that constant to ``"encode_failed"`` or to a wrong-but-in-set
     ``"load_failed"`` left it GREEN. A constant that agrees with itself proves
