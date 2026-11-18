@@ -979,7 +979,7 @@ def test_a_live_door_refuses_an_unapproved_pack_and_moves_nothing(
     sdk = dev_only_sdk
 
     with pytest.raises(UnapprovedKindNamespace):
-        sdk.create_point("marketing:contentPerformance", "probe content")
+        sdk._create_point("marketing:contentPerformance", "probe content")
 
     assert _approved(sdk) == frozenset({"dev"}), (
         "the refusal must land before the write: the approved set is unmoved")
@@ -1079,7 +1079,7 @@ def test_the_data_leg_keeps_existing_vocabulary_writable(
         "CREATE (n:Object {id:'o-existing', name:'ExistingProbe', "
         "objectKind:'marketing:product'})")
 
-    created = sdk.create_object("WritableProbe", objectKind="marketing:product")
+    created = sdk._create_object("WritableProbe", objectKind="marketing:product")
 
     assert created and created.get("id"), (
         "the data leg must keep the graph able to write the vocabulary its own "

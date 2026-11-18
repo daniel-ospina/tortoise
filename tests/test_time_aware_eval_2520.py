@@ -136,15 +136,15 @@ def seeded_sdk(monkeypatch):
     monkeypatch.delenv("TORTOISE_LME_TIME_AWARE_QE", raising=False)
     sdk = TortoiseSDK()
     try:
-        sdk.create_point(
+        sdk._create_point(
             "statement", "i live in madrid",
             id=STALE_ID, session_id=STALE_SESSION, lme_session_index=0,
             search_keys="home city residence address", status="draft")
-        sdk.create_point(
+        sdk._create_point(
             "statement", "i live in lisbon",
             id=LIVE_ID, session_id=LIVE_SESSION, lme_session_index=1,
             search_keys="home city residence address", status="draft")
-        sdk.supersede_point(STALE_ID, LIVE_ID, valid_from="2026-01-01")
+        sdk._supersede_point(STALE_ID, LIVE_ID, valid_from="2026-01-01")
         yield sdk
     finally:
         sdk.close()

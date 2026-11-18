@@ -776,7 +776,7 @@ class TestWritePath:
             event_log_path=log_path,
         )
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 content="error ERR-4032 on deploy", kind="statement")["id"]
 
             def keys_of(graph):
@@ -857,9 +857,9 @@ class TestWritePath:
             event_log_path=log_path,
         )
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 content="release notes", kind="statement")["id"]
-            sdk.update_point(pid, content="error ERR-4032 on deploy")
+            sdk._update_point(pid, content="error ERR-4032 on deploy")
 
             def keys_of(graph):
                 rows = graph.query(
@@ -916,9 +916,9 @@ class TestWritePath:
             event_log_path=log_path,
         )
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 content="release notes", kind="statement")["id"]
-            sdk.update_point(pid, content="tick second",
+            sdk._update_point(pid, content="tick second",
                              search_keys=["customkey"])
             revised = [e for e in EventLog(log_path).read_all()
                        if e.get("type") == "PointRevised"]
@@ -960,7 +960,7 @@ class TestWritePath:
             event_log_path=log_path,
         )
         try:
-            pid = sdk.create_point(content="error ERR-4032 on deploy",
+            pid = sdk._create_point(content="error ERR-4032 on deploy",
                                    kind="statement",
                                    search_keys=["release", "deploy"])["id"]
 
@@ -971,7 +971,7 @@ class TestWritePath:
                 return rows[0][0] if rows else None
 
             assert keys() == "release deploy err4032", keys()  # PRECONDITION
-            sdk.update_point(pid, content="deploy is clean again",
+            sdk._update_point(pid, content="deploy is clean again",
                              search_keys=None)
             assert keys() is None, (
                 "the caller's explicit clear was overwritten by the derived "
@@ -1166,7 +1166,7 @@ class TestWritePathLive:
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(db_path=os.path.join(str(tmp_path), "t.db"))
-        pid = sdk.create_point(content="release notes", kind="statement",
+        pid = sdk._create_point(content="release notes", kind="statement",
                                search_keys=["release", "deploy"])["id"]
 
         def keys():
@@ -1175,11 +1175,11 @@ class TestWritePathLive:
             ).result_set
             return rows[0][0] if rows else None
 
-        sdk.update_point(pid, content="error ERR-4032 on deploy")
+        sdk._update_point(pid, content="error ERR-4032 on deploy")
         assert keys() == "release deploy err4032", keys()
-        sdk.update_point(pid, content="deploy is clean again")
+        sdk._update_point(pid, content="deploy is clean again")
         assert keys() == "release deploy", keys()
-        sdk.update_point(pid, content="another ERR-4031 here")
+        sdk._update_point(pid, content="another ERR-4031 here")
         assert keys() == "release deploy err4031", keys()
 
 

@@ -393,7 +393,7 @@ def run(args: argparse.Namespace) -> int:
             return 3
         # One cache-warming read, so the first measured query is not paying the
         # full-scan cold cost (§14.3 V3: the label is unindexed).
-        sdk.tortoise_fts_query("warm", entity_type="point", limit=1)
+        sdk._tortoise_fts_query("warm", entity_type="point", limit=1)
 
         # ⛔ ONE resolver, used by BOTH the load and the report. ``args.model`` is
         # None on an ordinary run, and the SCORING call resolves its own default
@@ -428,7 +428,7 @@ def run(args: argparse.Namespace) -> int:
                 # The pool the WIRED path scores: the fused order at the pool
                 # width. `limit` and `pool_size` are the shipped knobs (#12297
                 # changes neither default).
-                pool_rows = sdk.tortoise_fts_query(
+                pool_rows = sdk._tortoise_fts_query(
                     query, entity_type="point", limit=args.limit,
                     pool_size=args.pool_size)
                 ids = [r.get("id") for r in pool_rows]

@@ -57,16 +57,16 @@ def _build_rule_graph(sdk: TortoiseSDK) -> dict:
     via unidirectional IMPL operators + explicit baselines (the argument
     tree). Returns the created point ids."""
     rationales = [
-        sdk.create_point("rationale", text, status="live")
+        sdk._create_point("rationale", text, status="live")
         for text in RATIONALE_TEXTS
     ]
-    rule = sdk.create_point("statement", RULE_TEXT, status="live")
+    rule = sdk._create_point("statement", RULE_TEXT, status="live")
     for r in rationales:
-        sdk.create_operator("IMPL", r["id"], [rule["id"]],
+        sdk._create_operator("IMPL", r["id"], [rule["id"]],
                             direction="unidirectional")
         # strong evidence-side priors — the EP factors have work to do
-        sdk.set_point_baseline(r["id"], 20.0, 2.0)
-    sdk.set_point_baseline(rule["id"], 2.0, 6.0)
+        sdk._set_point_baseline(r["id"], 20.0, 2.0)
+    sdk._set_point_baseline(rule["id"], 2.0, 6.0)
     return {"rationales": rationales, "rule": rule}
 
 
@@ -86,7 +86,7 @@ class TestSupersedeEPCascade:
         unmeasured prior."""
         built = _build_rule_graph(sdk)
         rule, rationales = built["rule"], built["rationales"]
-        pre = sdk.dream(dirty_only=True, max_hops=2,
+        pre = sdk._dream(dirty_only=True, max_hops=2,
                         require_calibration=False)
         assert pre["converged"] is True
         assert len(pre.get("affected_claims", [])) >= 4
@@ -94,8 +94,8 @@ class TestSupersedeEPCascade:
         assert rule_conf_before is not None
 
         # the agent rewrites the rule: new rule Point → supersede old → new
-        new_rule = sdk.create_point("statement", NEW_RULE_TEXT, status="live")
-        res = sdk.supersede_point(rule["id"], new_rule["id"])
+        new_rule = sdk._create_point("statement", NEW_RULE_TEXT, status="live")
+        res = sdk._supersede_point(rule["id"], new_rule["id"])
         assert res["invalidated"] is True
         assert res["id"] == rule["id"]
         assert res["corrected_by"] == new_rule["id"]
@@ -129,7 +129,7 @@ class TestSupersedeEPCascade:
 
         # EP cascade: the dream after supersede re-propagates — the new
         # rule's confidence moves off its unmeasured prior (0.5 uniform)
-        post = sdk.dream(dirty_only=True, max_hops=2,
+        post = sdk._dream(dirty_only=True, max_hops=2,
                          require_calibration=False)
         assert post["converged"] is True
         assert new_rule["id"] in post.get("affected_claims", []), post
@@ -147,10 +147,10 @@ class TestSupersedeEPCascade:
         a successful dream the new rule is no longer contested."""
         built = _build_rule_graph(sdk)
         rule = built["rule"]
-        sdk.dream(dirty_only=True, max_hops=2, require_calibration=False)
+        sdk._dream(dirty_only=True, max_hops=2, require_calibration=False)
 
-        new_rule = sdk.create_point("statement", NEW_RULE_TEXT, status="live")
-        res = sdk.supersede_point(rule["id"], new_rule["id"])
+        new_rule = sdk._create_point("statement", NEW_RULE_TEXT, status="live")
+        res = sdk._supersede_point(rule["id"], new_rule["id"])
         assert res["invalidated"] is True
 
         # the re-propagation fails — the graph is unreachable (dream raises)
@@ -159,7 +159,7 @@ class TestSupersedeEPCascade:
 
         monkeypatch.setattr(sdk, "dream", _boom)
         with pytest.raises(ConnectionError):
-            sdk.dream(dirty_only=True, max_hops=2,
+            sdk._dream(dirty_only=True, max_hops=2,
                       require_calibration=False)
 
         # contested-claim detection: the NEW rule (unmeasured — Beta(1,1)
@@ -176,7 +176,7 @@ class TestSupersedeEPCascade:
         # control: the re-propagation recovers — after a successful dream the
         # new rule's variance drops below the contested threshold
         monkeypatch.undo()
-        ok = sdk.dream(dirty_only=True, max_hops=2,
+        ok = sdk._dream(dirty_only=True, max_hops=2,
                        require_calibration=False)
         assert ok["converged"] is True
         post = {c["id"]: c for c in ep.get_contested_claims()}

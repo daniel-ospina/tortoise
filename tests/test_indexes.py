@@ -256,13 +256,13 @@ def test_resolve_entity_branches(proj):
 
 def test_get_entity_parity_all_types(sdk):
     """Each canonical entity type resolves via its key (issue #327)."""
-    sdk.create_point("statement", "hello world")
-    sdk.create_subject("parity-subj", "role")
-    sdk.create_event("parity-ev", "meeting")
+    sdk._create_point("statement", "hello world")
+    sdk._create_subject("parity-subj", "role")
+    sdk._create_event("parity-ev", "meeting")
     proj = sdk._get_proj()
     proj.g.query("CREATE (src:Source {url:'http://parity', id:'http://parity'})")
     # Point by id
-    pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
+    pid = [p["id"] for p in sdk._query(kind="statement")  # noqa: RUF015
            if p["content"] == "hello world"][0]
     ent = sdk.get_entity(pid)
     assert ent and ent.get("pointKind") == "statement"
@@ -312,12 +312,12 @@ def test_get_entity_stub_source_by_url(sdk):
 
 
 def test_update_delete_entity_parity(sdk):
-    sdk.create_point("statement", "upd del test")
-    pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
+    sdk._create_point("statement", "upd del test")
+    pid = [p["id"] for p in sdk._query(kind="statement")  # noqa: RUF015
            if p["content"] == "upd del test"][0]
     e = sdk.update_knowledge(pid, note="hi")
     assert e.get("note") == "hi"
-    assert sdk.delete_entity(pid) is True
+    assert sdk._delete_entity__svc(pid) is True
     assert sdk.get_entity(pid) == {}
 
 
@@ -330,10 +330,10 @@ def test_get_entity_session_excluded(sdk):
 # ── Task 4: edges parity ─────────────────────────────────────────────────
 
 def test_create_edge_hetero(sdk):
-    sdk.create_point("statement", "edge test")
-    sdk.create_subject("carol", "role")
+    sdk._create_point("statement", "edge test")
+    sdk._create_subject("carol", "role")
     proj = sdk._get_proj()
-    pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
+    pid = [p["id"] for p in sdk._query(kind="statement")  # noqa: RUF015
            if p["content"] == "edge test"][0]
     sid = proj.g.query("MATCH (s:Subject {name:'carol'}) RETURN s.id").result_set[0][0]
     assert proj.create_edge(pid, sid, "authoredBy") is True
@@ -356,18 +356,18 @@ def test_create_edge_url_stub_target_returns_false(sdk):
 
 
 def test_create_about_edge_parity(sdk):
-    sdk.create_point("statement", "about alice")
-    sdk.create_subject("alice", "person")
+    sdk._create_point("statement", "about alice")
+    sdk._create_subject("alice", "person")
     proj = sdk._get_proj()
-    pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
+    pid = [p["id"] for p in sdk._query(kind="statement")  # noqa: RUF015
            if p["content"] == "about alice"][0]
     sid = proj.g.query("MATCH (s:Subject {name:'alice'}) RETURN s.id").result_set[0][0]
     assert proj.create_about_edge(pid, sid, "aboutSubject") is True
 
 
 def test_create_owned_by_cycle_still_raises(sdk):
-    sdk.create_subject("orgA", "organization")
-    sdk.create_subject("orgB", "organization")
+    sdk._create_subject("orgA", "organization")
+    sdk._create_subject("orgB", "organization")
     proj = sdk._get_proj()
     a = proj.g.query("MATCH (s:Subject {name:'orgA'}) RETURN s.id").result_set[0][0]
     b = proj.g.query("MATCH (s:Subject {name:'orgB'}) RETURN s.id").result_set[0][0]
@@ -489,9 +489,9 @@ def test_embedded_reopen_false_equality_correct():
     sdk2 = None
     try:
         sdk = TortoiseSDK(db_path)
-        a = sdk.create_point("statement", "bool-a")
-        b = sdk.create_point("statement", "bool-b")
-        sdk.create_operator("IMPL", a["id"], [b["id"]], label="op1")
+        a = sdk._create_point("statement", "bool-a")
+        b = sdk._create_point("statement", "bool-b")
+        sdk._create_operator("IMPL", a["id"], [b["id"]], label="op1")
         # Simulate the pre-fix state: a prior embedded build persisted the
         # is_operator RANGE index. It must be dropped by _ensure_indexes on
         # the next open, or `= false` silently returns 0 after reopen.

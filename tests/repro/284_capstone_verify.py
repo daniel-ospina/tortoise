@@ -67,12 +67,12 @@ def main() -> int:
         )
 
         # ── Seed a small graph (feature -(addresses)-> customerSegment) ──
-        feature = sdk.create_point("product-strategy:feature", "Automated monthly reporting")
-        cust_seg = sdk.create_point("product-strategy:customerSegment", "Enterprise data teams")
-        op = sdk.create_operator("IMPL", feature["id"], [cust_seg["id"]])
-        sdk.update_point(op["id"], label="addresses")
+        feature = sdk._create_point("product-strategy:feature", "Automated monthly reporting")
+        cust_seg = sdk._create_point("product-strategy:customerSegment", "Enterprise data teams")
+        op = sdk._create_operator("IMPL", feature["id"], [cust_seg["id"]])
+        sdk._update_point(op["id"], label="addresses")
         # A core-kind point (no pack prefix)
-        core_point = sdk.create_point("decision", "We will adopt staged rollout")
+        core_point = sdk._create_point("decision", "We will adopt staged rollout")
 
         # ── Tier 1b: entity_type + kind filter (kind tier) ──
         # #12297: every read below is an ACCEPTANCE or MEMBERSHIP probe on a
@@ -80,18 +80,18 @@ def main() -> int:
         # rerank would re-pick the page and turn a healthy graph into a false
         # FAIL. The census in ``tests/test_rerank_pool.py`` pins this file.
         print("\n== Tier 1b: entity_type + kind filter ==")
-        res = sdk.tortoise_fts_query(None, kind="product-strategy:feature", limit=10,
+        res = sdk._tortoise_fts_query(None, kind="product-strategy:feature", limit=10,
                                      _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check("kind filter product-strategy:feature returns feature", feature["id"] in ids, f"{ids}")
 
-        res = sdk.tortoise_fts_query(
+        res = sdk._tortoise_fts_query(
             None, kind="product-strategy:customerSegment", limit=10,
             _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check("kind filter product-strategy:customerSegment", cust_seg["id"] in ids, f"{ids}")
 
-        res = sdk.tortoise_fts_query(None, kind="decision", limit=10,
+        res = sdk._tortoise_fts_query(None, kind="decision", limit=10,
                                      _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check("core kind filter 'decision' returns core point", core_point["id"] in ids, f"{ids}")
@@ -99,7 +99,7 @@ def main() -> int:
         # #12297: a MEMBERSHIP probe (limit=10, far inside the pool width), so an
         # armed rerank would re-pick which rows are in the page and turn this into
         # a false FAIL on a healthy graph.
-        res = sdk.tortoise_fts_query("reporting", kind="product-strategy:feature",
+        res = sdk._tortoise_fts_query("reporting", kind="product-strategy:feature",
                                      limit=10, _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check(
@@ -112,7 +112,7 @@ def main() -> int:
         print("\n== Tier 2: cross-entity entity_type search (abstract) ==")
         for et in ("point", "event", "subject", "document", "object", "operator", "source"):
             try:
-                r = sdk.tortoise_fts_query(
+                r = sdk._tortoise_fts_query(
                     "test", entity_type=et, limit=5,
                     _rerank_candidates=False)
                 ok = isinstance(r, list)
@@ -122,7 +122,7 @@ def main() -> int:
 
         # `action` is DEAD in v3.2 (Action dissolved in v3.0) — must reject
         try:
-            sdk.tortoise_fts_query("test", entity_type="action", limit=5,
+            sdk._tortoise_fts_query("test", entity_type="action", limit=5,
                                    _rerank_candidates=False)
             check("entity_type='action' REJECTED (dead type)", False, "accepted — action is dead per v3.2")
         except ValueError as e:
@@ -168,7 +168,7 @@ def main() -> int:
         )
 
         # relationship_filter (predicate:target_id)
-        res = sdk.tortoise_fts_query(
+        res = sdk._tortoise_fts_query(
             None, kind="product-strategy:feature",
             relationship_filter=f"addresses:{cust_seg['id']}", limit=10,
             _rerank_candidates=False,
@@ -177,7 +177,7 @@ def main() -> int:
         check("relationship_filter addresses:seg returns feature", feature["id"] in ids, f"{ids}")
 
         # traversal_path resolves via pack registry
-        res = sdk.tortoise_fts_query("reporting", traversal_path="Feature→CustomerSegment",
+        res = sdk._tortoise_fts_query("reporting", traversal_path="Feature→CustomerSegment",
                                      limit=10, _rerank_candidates=False)
         ids = {r["id"] for r in res}
         check("traversal_path Feature→CustomerSegment returns feature", feature["id"] in ids, f"{ids}")

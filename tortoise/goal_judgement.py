@@ -1595,7 +1595,7 @@ def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
     ).result_set
     if rows:
         return rows[0][0]
-    operator = sdk.create_operator("IMPL", point_id, [goal_id], direction="->")
+    operator = sdk._create_operator("IMPL", point_id, [goal_id], direction="->")
     return (operator or {}).get("id")
 
 
@@ -2021,7 +2021,7 @@ def record_judgement(
     if judgement.window_from:
         props["readingWindowFrom"] = judgement.window_from
 
-    point = sdk.create_point(
+    point = sdk._create_point(
         "statement", text, claim_class="derived", status="live", **props
     )
     point_id = point["id"]
@@ -2033,7 +2033,7 @@ def record_judgement(
     # nothing has been superseded at this step, so the deletion cannot orphan a
     # state.
     try:
-        sdk.set_point_baseline(
+        sdk._set_point_baseline(
             point_id, alpha, beta, source=JUDGEMENT_BASELINE_SOURCE,
         )
     except Exception as exc:
@@ -2042,7 +2042,7 @@ def record_judgement(
         # delete failure must not replace the reason the baseline was refused
         # (it is chained instead, so both are visible).
         try:
-            sdk.delete_point(point_id)
+            sdk._delete_point(point_id)
         except Exception as cleanup_exc:  # pragma: no cover - infra failure
             raise exc from cleanup_exc
         raise
@@ -2126,7 +2126,7 @@ def record_judgement(
                 )
                 raise
             try:
-                sdk.delete_point(point_id)
+                sdk._delete_point(point_id)
             except Exception as cleanup_exc:
                 raise exc from cleanup_exc
             raise

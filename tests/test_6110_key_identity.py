@@ -83,8 +83,8 @@ class TestKeyIsAnIdentity:
     def test_same_key_different_content_yields_one_point(self, sdk):
         """The filed reproduction — must be ONE point, not two."""
         k = "PROBE-key-identity"
-        a = sdk.create_point("hypothesis", "AAAA", key=k, dedup=True)
-        b = sdk.create_point("hypothesis", "BBBB", key=k, dedup=True)
+        a = sdk._create_point("hypothesis", "AAAA", key=k, dedup=True)
+        b = sdk._create_point("hypothesis", "BBBB", key=k, dedup=True)
         assert a["id"] == b["id"], (
             "#6110: a differing content under an existing key minted a sibling"
         )
@@ -97,9 +97,9 @@ class TestKeyIsAnIdentity:
         """(b) of the fix: the fold is never silent — the caller is told the
         incoming content was not stored."""
         k = "#6110 audible collision"
-        sdk.create_point("hypothesis", "FIRST", key=k, dedup=True)
+        sdk._create_point("hypothesis", "FIRST", key=k, dedup=True)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            sdk.create_point("hypothesis", "SECOND", key=k, dedup=True)
+            sdk._create_point("hypothesis", "SECOND", key=k, dedup=True)
         assert any("DIFFERENT content" in r.getMessage()
                    for r in caplog.records), [r.getMessage() for r in caplog.records]
 
@@ -107,16 +107,16 @@ class TestKeyIsAnIdentity:
         """The healthy idempotent re-run must not warn — a warning on the
         normal path is how a warning stops being read."""
         k = "#6110 quiet idempotent rerun"
-        sdk.create_point("hypothesis", "SAME", key=k, dedup=True)
+        sdk._create_point("hypothesis", "SAME", key=k, dedup=True)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            sdk.create_point("hypothesis", "SAME", key=k, dedup=True)
+            sdk._create_point("hypothesis", "SAME", key=k, dedup=True)
         assert not [r for r in caplog.records
                     if "DIFFERENT content" in r.getMessage()]
 
     def test_three_writes_one_key_one_point(self, sdk):
         """A crash-resume/retry loop under one key stays exactly-once."""
         k = "#6110 retry loop"
-        ids = {sdk.create_point("hypothesis", c, key=k, dedup=True)["id"]
+        ids = {sdk._create_point("hypothesis", c, key=k, dedup=True)["id"]
                for c in ("A", "B", "C")}
         assert len(ids) == 1
         assert len(_points_with_key(sdk, k, "hypothesis")) == 1
@@ -124,7 +124,7 @@ class TestKeyIsAnIdentity:
     def test_identical_content_retry_is_idempotent(self, sdk):
         """The timeout-retry shape: N byte-identical writes → one point."""
         k = "#6110 byte-identical retry"
-        ids = [sdk.create_point("hypothesis", "SAME", key=k, dedup=True)["id"]
+        ids = [sdk._create_point("hypothesis", "SAME", key=k, dedup=True)["id"]
                for _ in range(4)]
         assert len(set(ids)) == 1
         assert len(_points_with_key(sdk, k, "hypothesis")) == 1
@@ -132,9 +132,9 @@ class TestKeyIsAnIdentity:
     def test_query_by_key_returns_the_single_point(self, sdk):
         """The documented lookup idiom resolves the one point for the key."""
         k = "#6110 query by key"
-        sdk.create_point("hypothesis", "ONE", key=k, dedup=True)
-        sdk.create_point("hypothesis", "TWO", key=k, dedup=True)
-        hits = sdk.query(kind="hypothesis", key=k)
+        sdk._create_point("hypothesis", "ONE", key=k, dedup=True)
+        sdk._create_point("hypothesis", "TWO", key=k, dedup=True)
+        hits = sdk._query(kind="hypothesis", key=k)
         assert [h["id"] for h in hits] == _points_with_key(sdk, k, "hypothesis")
         assert len(hits) == 1
 
@@ -143,8 +143,8 @@ class TestKeyIsAnIdentity:
         same scope as the content identity), so the same string may name a
         distinct point in a different kind."""
         k = "#6110 per-kind scope"
-        h = sdk.create_point("hypothesis", "H", key=k, dedup=True)
-        d = sdk.create_point("decision", "D", key=k, dedup=True)
+        h = sdk._create_point("hypothesis", "H", key=k, dedup=True)
+        d = sdk._create_point("decision", "D", key=k, dedup=True)
         assert h["id"] != d["id"]
         assert len(_points_with_key(sdk, k)) == 2
         assert len(_points_with_key(sdk, k, "hypothesis")) == 1
@@ -154,8 +154,8 @@ class TestKeyIsAnIdentity:
         """The key identity is a DEDUP rule, not a unique constraint: an
         explicit dedup=False still creates (the documented escape hatch)."""
         k = "#6110 explicit bypass"
-        a = sdk.create_point("hypothesis", "A", key=k, dedup=False)
-        b = sdk.create_point("hypothesis", "B", key=k, dedup=False)
+        a = sdk._create_point("hypothesis", "A", key=k, dedup=False)
+        b = sdk._create_point("hypothesis", "B", key=k, dedup=False)
         assert a["id"] != b["id"]
         assert len(_points_with_key(sdk, k, "hypothesis")) == 2
 
@@ -167,8 +167,8 @@ class TestKeyIsNeverSilentlyReassigned:
 
     def test_same_content_different_key_keeps_the_first_key(self, sdk):
         k1, k2 = "#6110-owner", "#6110-thief"
-        a = sdk.create_point("statement", "SHARED CONTENT", key=k1, dedup=True)
-        b = sdk.create_point("statement", "SHARED CONTENT", key=k2, dedup=True)
+        a = sdk._create_point("statement", "SHARED CONTENT", key=k1, dedup=True)
+        b = sdk._create_point("statement", "SHARED CONTENT", key=k2, dedup=True)
         assert a["id"] == b["id"], "content dedup still folds"
         assert b["key"] == k1, (
             "#6110: a content-dedup hit overwrote the existing key"
@@ -177,9 +177,9 @@ class TestKeyIsNeverSilentlyReassigned:
 
     def test_key_reassignment_is_audible(self, sdk, caplog):
         k1, k2 = "#6110-keep", "#6110-drop"
-        sdk.create_point("statement", "SAME", key=k1, dedup=True)
+        sdk._create_point("statement", "SAME", key=k1, dedup=True)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            sdk.create_point("statement", "SAME", key=k2, dedup=True)
+            sdk._create_point("statement", "SAME", key=k2, dedup=True)
         assert any("not applied" in r.getMessage() for r in caplog.records), [
             r.getMessage() for r in caplog.records]
 
@@ -187,9 +187,9 @@ class TestKeyIsNeverSilentlyReassigned:
         """Adoption is an ADD, not an overwrite — an unkeyed point gains the
         supplied key (so the caller's handle exists)."""
         k = "#6110 adopted"
-        p = sdk.create_point("statement", "ADOPT ME", dedup=True)
+        p = sdk._create_point("statement", "ADOPT ME", dedup=True)
         assert not p.get("key")
-        p2 = sdk.create_point("statement", "ADOPT ME", key=k, dedup=True)
+        p2 = sdk._create_point("statement", "ADOPT ME", key=k, dedup=True)
         assert p2["id"] == p["id"]
         assert p2["key"] == k
         assert _points_with_key(sdk, k, "statement") == [p["id"]]
@@ -201,11 +201,11 @@ class TestPreexistingDuplicateKey:
 
     def test_preexisting_duplicate_key_is_warned_and_folds(self, sdk, caplog):
         k = "#6110 preexisting dup"
-        p1 = sdk.create_point("hypothesis", "ONE", key=k, dedup=False)
-        p2 = sdk.create_point("hypothesis", "TWO", key=k, dedup=False)
+        p1 = sdk._create_point("hypothesis", "ONE", key=k, dedup=False)
+        p2 = sdk._create_point("hypothesis", "TWO", key=k, dedup=False)
         assert len(_points_with_key(sdk, k, "hypothesis")) == 2
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            p3 = sdk.create_point("hypothesis", "THREE", key=k, dedup=True)
+            p3 = sdk._create_point("hypothesis", "THREE", key=k, dedup=True)
         assert any("already share key" in r.getMessage()
                    for r in caplog.records), [r.getMessage() for r in caplog.records]
         # No THIRD point minted — the write folded onto one of the existing two.
@@ -216,9 +216,9 @@ class TestPreexistingDuplicateKey:
         """The normal idempotent re-run must stay quiet — a warning on the
         healthy path is how a warning stops being read."""
         k = "#6110 clean key"
-        sdk.create_point("hypothesis", "A", key=k, dedup=True)
+        sdk._create_point("hypothesis", "A", key=k, dedup=True)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            sdk.create_point("hypothesis", "B", key=k, dedup=True)
+            sdk._create_point("hypothesis", "B", key=k, dedup=True)
         assert not [r for r in caplog.records if "share key" in r.getMessage()]
 
 
@@ -228,18 +228,18 @@ class TestBlankKeyIsAbsent:
 
     @pytest.mark.parametrize("blank", ["", "   ", None])
     def test_blank_key_uses_content_dedup(self, sdk, blank):
-        a = sdk.create_point("statement", "BLANK KEY CONTENT", key=blank, dedup=True)
-        b = sdk.create_point("statement", "BLANK KEY CONTENT", key=blank, dedup=True)
+        a = sdk._create_point("statement", "BLANK KEY CONTENT", key=blank, dedup=True)
+        b = sdk._create_point("statement", "BLANK KEY CONTENT", key=blank, dedup=True)
         assert a["id"] == b["id"]
 
     def test_keyless_content_dedup_unchanged(self, sdk):
         """The pre-existing contract (#49/#80) is untouched: without a key,
         dedup is content_hash + pointKind."""
-        a = sdk.create_point("statement", "NO KEY", dedup=True)
-        b = sdk.create_point("statement", "NO KEY", dedup=True)
+        a = sdk._create_point("statement", "NO KEY", dedup=True)
+        b = sdk._create_point("statement", "NO KEY", dedup=True)
         assert a["id"] == b["id"]
         # and a DIFFERENT kind does not suppress
-        c = sdk.create_point("hypothesis", "NO KEY", dedup=True)
+        c = sdk._create_point("hypothesis", "NO KEY", dedup=True)
         assert c["id"] != a["id"]
 
 
@@ -249,10 +249,10 @@ class TestIngestCounterParity:
 
     def test_ingest_key_bearing_item_dedups_against_a_key_hit(self, sdk):
         k = "#6110 ingest parity"
-        first = sdk.create_point("statement", "ORIGINAL", key=k, dedup=True)
+        first = sdk._create_point("statement", "ORIGINAL", key=k, dedup=True)
         # DIFFERENT content, same key: the writer folds by key, so the counter
         # must count a duplicate, not a creation.
-        res = sdk.ingest({"points": [
+        res = sdk._ingest({"points": [
             {"ref": "p1", "kind": "statement", "content": "RESTATED", "key": k},
         ]})
         assert res["created"]["points"] == 0, (
@@ -266,8 +266,8 @@ class TestIngestCounterParity:
         """Same parity through the nested `props` form (flattened by
         `_coerce_props` on the writer, mirrored by the counter)."""
         k = "#6110 ingest nested parity"
-        first = sdk.create_point("statement", "ORIGINAL", key=k, dedup=True)
-        res = sdk.ingest({"points": [
+        first = sdk._create_point("statement", "ORIGINAL", key=k, dedup=True)
+        res = sdk._ingest({"points": [
             {"ref": "p1", "kind": "statement", "content": "RESTATED",
              "props": {"key": k}},
         ]})
@@ -281,8 +281,8 @@ class TestIngestCounterParity:
         ``props["key"]``, so the writer mints a new point. The counter must
         not consult the shadowed nested key and report a fold for a create."""
         k = "#8400 shadowed nested key"
-        first = sdk.create_point("statement", "ORIGINAL", key=k, dedup=True)["id"]
-        res = sdk.ingest({"points": [
+        first = sdk._create_point("statement", "ORIGINAL", key=k, dedup=True)["id"]
+        res = sdk._ingest({"points": [
             {"ref": "p1", "kind": "statement", "content": "RESTATED",
              "key": None, "props": {"key": k}},
         ]})
@@ -294,10 +294,10 @@ class TestIngestCounterParity:
 
     def test_ingest_keyless_content_dedup_unchanged(self, sdk):
         """Without a key the counter is exactly the old content path."""
-        first = sdk.ingest({"points": [
+        first = sdk._ingest({"points": [
             {"ref": "p1", "kind": "statement", "content": "SAME"},
         ]})
-        second = sdk.ingest({"points": [
+        second = sdk._ingest({"points": [
             {"ref": "p1", "kind": "statement", "content": "SAME"},
         ]})
         assert first["created"]["points"] == 1
@@ -313,21 +313,21 @@ class TestPhase1GuardSeesTheKeyIdentity:
 
     def test_key_held_by_terminal_point_is_a_phase1_violation(self, sdk):
         k = "#8400 terminal key holder"
-        terminal = sdk.create_point("statement", "ORIGINAL", key=k,
+        terminal = sdk._create_point("statement", "ORIGINAL", key=k,
                                     dedup=True)["id"]
-        sdk.retract_point(terminal)
-        other = sdk.create_point("statement", "LIVE")["id"]
-        before = sdk.get_point(terminal)
+        sdk._retract_point(terminal)
+        other = sdk._create_point("statement", "LIVE")["id"]
+        before = sdk._get_point(terminal)
 
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest({
+            sdk._ingest({
                 "points": [{"ref": "p1", "kind": "statement",
                             "content": "CHANGED", "key": k}],
                 "connections": [{"from": "p1", "to": other,
                                  "operator": "IMPL"}],
             })
 
-        after = sdk.get_point(terminal)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None, (
             "Phase-1 must reject BEFORE any write — the terminal point was "
             "mutated by the Phase-2 path (#8400)"
@@ -348,16 +348,16 @@ class TestPhase1GuardSeesTheKeyIdentity:
         fold resolves it again — superseding is not an escape.
         """
         k = "#9819-terminal-key-retired"
-        terminal = sdk.create_point("statement", "KEY-ORIGINAL", key=k,
+        terminal = sdk._create_point("statement", "KEY-ORIGINAL", key=k,
                                     dedup=True)["id"]
-        successor = sdk.create_point("statement", "KEY-SUCCESSOR")["id"]
-        sdk.supersede_point(terminal, successor)
-        assert sdk.get_point(terminal).get("key") == k, (
+        successor = sdk._create_point("statement", "KEY-SUCCESSOR")["id"]
+        sdk._supersede_point(terminal, successor)
+        assert sdk._get_point(terminal).get("key") == k, (
             "supersede_point must not move the key off the retired row")
-        before = sdk.get_point(terminal)
+        before = sdk._get_point(terminal)
 
         with pytest.raises(BundleValidationError) as excinfo:
-            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+            sdk._ingest({"points": [{"ref": "p1", "kind": "statement",
                                      "content": "KEY-CHANGED", "key": k}]})
 
         message = str(excinfo.value)
@@ -368,7 +368,7 @@ class TestPhase1GuardSeesTheKeyIdentity:
         assert "FRESH key" in message, (
             "the refusal must still name the remedy that DOES work")
 
-        after = sdk.get_point(terminal)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None
         assert after.get("updatedAt") == before.get("updatedAt")
 
@@ -383,16 +383,16 @@ class TestPhase1GuardSeesTheKeyIdentity:
         cannot tell the unconditional guard from the dead one.
         """
         k = "#8400 terminal key holder, no connection"
-        terminal = sdk.create_point("statement", "ORIGINAL-NOCONN", key=k,
+        terminal = sdk._create_point("statement", "ORIGINAL-NOCONN", key=k,
                                     dedup=True)["id"]
-        sdk.retract_point(terminal)
-        before = sdk.get_point(terminal)
+        sdk._retract_point(terminal)
+        before = sdk._get_point(terminal)
 
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+            sdk._ingest({"points": [{"ref": "p1", "kind": "statement",
                                      "content": "CHANGED-NOCONN", "key": k}]})
 
-        after = sdk.get_point(terminal)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None, (
             "the fold stamped the retracted point with no connection in the "
             "bundle — the guard is still connection-scoped (#8400)"
@@ -403,10 +403,10 @@ class TestPhase1GuardSeesTheKeyIdentity:
         """The guard must NOT over-reject: a key holder that is still live is
         a legal dedup hit — the writer folds onto it and the edge is wired."""
         k = "#8400 live key holder"
-        holder = sdk.create_point("statement", "ORIGINAL", key=k,
+        holder = sdk._create_point("statement", "ORIGINAL", key=k,
                                   dedup=True)["id"]
-        other = sdk.create_point("statement", "OTHER")["id"]
-        res = sdk.ingest({
+        other = sdk._create_point("statement", "OTHER")["id"]
+        res = sdk._ingest({
             "points": [{"ref": "p1", "kind": "statement",
                         "content": "CHANGED", "key": k}],
             "connections": [{"from": "p1", "to": other,
@@ -433,7 +433,7 @@ class TestPhase1GuardSeesTheKeyIdentity:
         """
         k = "#8400 intra-bundle terminal key"
         with pytest.raises(BundleValidationError, match="FRESH key"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p1", "kind": "statement", "content": "A",
                      "key": k, "status": "retracted"},
@@ -457,7 +457,7 @@ class TestPhase1GuardSeesTheKeyIdentity:
         """
         k1 = "#8400 intra-bundle terminal key, distinct 1"
         k2 = "#8400 intra-bundle terminal key, distinct 2"
-        res = sdk.ingest(
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "content": "A",
                  "key": k1, "status": "retracted"},
@@ -469,7 +469,7 @@ class TestPhase1GuardSeesTheKeyIdentity:
         assert res["created"]["points"] == 2
         assert len(_points_with_key(sdk, k1)) == 1
         assert len(_points_with_key(sdk, k2)) == 1
-        assert sdk.get_point(res["ids"]["points"][0]).get("status") == "deprecated", (
+        assert sdk._get_point(res["ids"]["points"][0]).get("status") == "deprecated", (
             # ⛔ #11824 S0: `retracted` is a DECLARED SYNONYM of `deprecated` and
             # is stored canonically, so the row reads `deprecated`. The claim
             # here is the IDENTITY resolution (one carrier per key, the guard
@@ -489,15 +489,15 @@ class TestPhase1GuardSeesTheContentIdentity:
     """
 
     def test_content_matching_a_terminal_point_is_a_phase1_violation(self, sdk):
-        terminal = sdk.create_point("statement", "ORIGINAL-CONTENT")["id"]
-        sdk.retract_point(terminal)
-        before = sdk.get_point(terminal)
+        terminal = sdk._create_point("statement", "ORIGINAL-CONTENT")["id"]
+        sdk._retract_point(terminal)
+        before = sdk._get_point(terminal)
 
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+            sdk._ingest({"points": [{"ref": "p1", "kind": "statement",
                                      "content": "ORIGINAL-CONTENT"}]})
 
-        after = sdk.get_point(terminal)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None, (
             "the content fold stamped the retracted point (#9819)")
         assert after.get("updatedAt") == before.get("updatedAt")
@@ -507,24 +507,24 @@ class TestPhase1GuardSeesTheContentIdentity:
         """A fresh key does NOT avoid the content fold: the writer's key-first
         resolution MISSES the fresh key and falls through to content (#6110),
         so the fold still lands on the terminal point."""
-        terminal = sdk.create_point("statement", "ORIGINAL-FRESHKEY")["id"]
-        sdk.retract_point(terminal)
-        before = sdk.get_point(terminal)
+        terminal = sdk._create_point("statement", "ORIGINAL-FRESHKEY")["id"]
+        sdk._retract_point(terminal)
+        before = sdk._get_point(terminal)
 
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+            sdk._ingest({"points": [{"ref": "p1", "kind": "statement",
                                      "content": "ORIGINAL-FRESHKEY",
                                      "key": "brand-new-key-9819"}]})
 
-        after = sdk.get_point(terminal)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None
         assert after.get("updatedAt") == before.get("updatedAt")
 
     def test_content_matching_a_live_point_folds(self, sdk):
         """The guard must NOT over-reject: content matching a LIVE point is a
         legal dedup hit — the writer folds onto it and the bundle commits."""
-        live = sdk.create_point("statement", "LIVE-CONTENT-9819")["id"]
-        res = sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+        live = sdk._create_point("statement", "LIVE-CONTENT-9819")["id"]
+        res = sdk._ingest({"points": [{"ref": "p1", "kind": "statement",
                                        "content": "LIVE-CONTENT-9819"}]})
         assert res["deduped"]["points"] == 1
         assert res["created"]["points"] == 0
@@ -539,7 +539,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         exclusion. Refused by ``minted_terminal_content`` (bundle-order, not a
         graph read)."""
         with pytest.raises(BundleValidationError, match="reuses content"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p1", "kind": "statement", "content": "A",
                      "status": "retracted"},
@@ -578,7 +578,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         """
         k = "#9819 key-first phantom mint"
         with pytest.raises(BundleValidationError, match="reuses content"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p0", "kind": "statement", "content": "PH-A",
                      "key": k},
@@ -617,7 +617,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         carrier of the key.
         """
         k = "#9819 key-first phantom terminal"
-        res = sdk.ingest(
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p0", "kind": "statement", "content": "PT-A",
                  "key": k},
@@ -659,11 +659,11 @@ class TestPhase1GuardSeesTheContentIdentity:
         Discriminating: pre-fix this raises ``BundleValidationError`` matching
         "dedup hit" and nothing is written.
         """
-        terminal = sdk.create_point(
+        terminal = sdk._create_point(
             "statement", "KF-TERM", dedup=False)["id"]
-        sdk.retract_point(terminal)
-        before = sdk.get_point(terminal)
-        res = sdk.ingest(
+        sdk._retract_point(terminal)
+        before = sdk._get_point(terminal)
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p0", "kind": "statement", "content": "KF-FRESH",
                  "key": "KF-K"},
@@ -684,7 +684,7 @@ class TestPhase1GuardSeesTheContentIdentity:
             "the item's content was never written — the key hit returns before "
             "the content leg, so the ONLY carrier of 'KF-TERM' is the standing "
             f"terminal point (got {holders})")
-        after = sdk.get_point(terminal)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None, (
             "the terminal point this item would never touch must stay "
             "UNSTAMPED (#9819)")
@@ -695,7 +695,7 @@ class TestPhase1GuardSeesTheContentIdentity:
     def test_intra_bundle_content_guard_does_not_over_reject(self, sdk):
         """A terminal item followed by an item with DIFFERENT content is the
         writer's legal path and must commit."""
-        res = sdk.ingest(
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "content": "A-DISTINCT",
                  "status": "retracted"},
@@ -725,21 +725,21 @@ class TestPhase1GuardSeesTheContentIdentity:
         WHICH twin a fold lands on is not decidable from the bundle. Pinning it
         here means a later narrowing is a decision, not a silent drift.
         """
-        live = sdk.create_point("statement", "TWIN-CONTENT")["id"]
-        terminal = sdk.create_point("statement", "TWIN-CONTENT")["id"]
+        live = sdk._create_point("statement", "TWIN-CONTENT")["id"]
+        terminal = sdk._create_point("statement", "TWIN-CONTENT")["id"]
         assert live != terminal
-        sdk.retract_point(terminal)
-        before_terminal = sdk.get_point(terminal)
-        before_live = sdk.get_point(live)
+        sdk._retract_point(terminal)
+        before_terminal = sdk._get_point(terminal)
+        before_live = sdk._get_point(live)
 
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+            sdk._ingest({"points": [{"ref": "p1", "kind": "statement",
                                      "content": "TWIN-CONTENT"}]})
 
-        after_terminal = sdk.get_point(terminal)
+        after_terminal = sdk._get_point(terminal)
         assert after_terminal.get("batch_id") is None
         assert after_terminal.get("updatedAt") == before_terminal.get("updatedAt")
-        assert sdk.get_point(live).get("batch_id") is None, (
+        assert sdk._get_point(live).get("batch_id") is None, (
             "Phase-1 must reject before ANY write — neither twin was touched "
             f"(live point was {before_live.get('batch_id')!r})")
 
@@ -760,15 +760,15 @@ class TestPhase1GuardSeesTheContentIdentity:
         Discriminating: pre-fix the ``pytest.raises`` fails (the ingest is
         ACCEPTED and the assertions below see a stamped ``batch_id``).
         """
-        terminal = sdk.create_point("statement", "")["id"]
-        sdk.retract_point(terminal)
-        before = sdk.get_point(terminal)
+        terminal = sdk._create_point("statement", "")["id"]
+        sdk._retract_point(terminal)
+        before = sdk._get_point(terminal)
 
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+            sdk._ingest({"points": [{"ref": "p1", "kind": "statement",
                                      "content": ""}]})
 
-        after = sdk.get_point(terminal)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None, (
             "the content fold stamped the retracted empty-content point "
             "(#9819 P1 — the leg gated on truthiness)")
@@ -798,11 +798,11 @@ class TestPhase1GuardSeesTheContentIdentity:
         ``or supersede-transfer it first``).
         """
         content = "RETIRED-BUT-STILL-THE-HOLDER-9819"
-        terminal = sdk.create_point("statement", content)["id"]
-        successor = sdk.create_point("statement",
+        terminal = sdk._create_point("statement", content)["id"]
+        successor = sdk._create_point("statement",
                                      "SUCCESSOR-OF-THE-RETIRED-9819")["id"]
-        sdk.supersede_point(terminal, successor)
-        before = sdk.get_point(terminal)
+        sdk._supersede_point(terminal, successor)
+        before = sdk._get_point(terminal)
 
         # The premise of the finding, asserted rather than assumed: the
         # supersede did NOT move the content identity off the retired row.
@@ -811,7 +811,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert before.get("content_hash") == _content_hash(content)
 
         with pytest.raises(BundleValidationError) as excinfo:
-            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+            sdk._ingest({"points": [{"ref": "p1", "kind": "statement",
                                      "content": content}]})
 
         message = str(excinfo.value)
@@ -823,7 +823,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert "DIFFERENT content" in message, (
             "the refusal must still name the remedy that DOES work")
 
-        after = sdk.get_point(terminal)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None, (
             "Phase-1 must reject before ANY write — the post-supersede fold "
             "stamped the retired point (#9819)")
@@ -844,7 +844,7 @@ class TestPhase1GuardSeesTheContentIdentity:
 
         Discriminating: pre-fix the bundle is REFUSED with `reuses content`.
         """
-        res = sdk.ingest(
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "content": "DW-STATUS",
                  "props": {"props": {"status": "retracted"}}},
@@ -890,7 +890,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         # mint the writer never performs.
         assert _item_effective_status(item, 2) == "retracted"
         # The door's own answer, on the ingest loop's own call shape.
-        minted = sdk.create_point(dedup=True, **item)
+        minted = sdk._create_point(dedup=True, **item)
         assert minted["status"] == "live", (
             "the double-wrapped status is NOT stored: **props puts the item's "
             "props value one level deeper than the item, so one fold reaches "
@@ -899,7 +899,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         # #11824 S0: the stored word is canonical, so `retracted` reads back as
         # `deprecated`. The claim (the status IS stored, not dropped by the
         # fold depth) is unchanged.
-        assert sdk.create_point(
+        assert sdk._create_point(
             "statement", "MINT-DEPTH-PIN-1",
             props={"status": "retracted"})["status"] == "deprecated"
         assert _item_effective_status(
@@ -939,7 +939,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         # ── CONTENT arm: the sibling pin lives in
         # ``test_double_wrapped_status_is_not_recorded_as_a_terminal_mint``;
         # asserted again here so the pair reads as one settling of one report.
-        content_res = sdk.ingest(
+        content_res = sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "content": "P1-DW-C",
                  "props": {"props": {"status": "retracted"}}},
@@ -951,7 +951,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert content_res["deduped"]["points"] == 1
         assert len(set(content_res["ids"]["points"])) == 1
         # ── KEY arm: the regression the finding claimed against origin/main.
-        key_res = sdk.ingest(
+        key_res = sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "content": "P1-DW-K",
                  "key": "P1-DW-KEY",
@@ -997,13 +997,13 @@ class TestPhase1GuardSeesTheContentIdentity:
         """
         item = {"kind": "statement", "content": "MINT-KIND-DEPTH-PIN",
                 "props": {"props": {"pointKind": "decision"}}}
-        stored = sdk.create_point(dedup=True, **item)
+        stored = sdk._create_point(dedup=True, **item)
         assert stored["pointKind"] == "statement", (
             f"the double-wrapped kind is not stored (got {stored['pointKind']!r})")
         assert _item_stored_point_kind(item) == stored["pointKind"], (
             "the record's kind must be the kind the door STORED")
         # …and the single-wrapped spelling, one fold deep, really does win.
-        single = sdk.create_point("statement", "MINT-KIND-DEPTH-PIN-1",
+        single = sdk._create_point("statement", "MINT-KIND-DEPTH-PIN-1",
                                   props={"pointKind": "decision"})
         assert single["pointKind"] == "decision"
         assert _item_stored_point_kind(
@@ -1021,7 +1021,7 @@ class TestPhase1GuardSeesTheContentIdentity:
                                    {"status": "retracted"})):
             content = f"ONE-FOLD-{j}"
             with pytest.raises(BundleValidationError, match="mints with status"):
-                sdk.ingest(
+                sdk._ingest(
                     {"points": [
                         {"ref": "p1", "kind": "statement",
                          "content": content, **extra},
@@ -1056,7 +1056,7 @@ class TestPhase1GuardSeesTheContentIdentity:
         ``test_intra_bundle_content_fold_onto_a_self_minted_terminal_point``
         and ``test_a_real_one_fold_terminal_mint_is_still_recorded`` above.
         """
-        res = sdk.ingest(
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "content": "SEQ-LIVE"},
                 {"ref": "p2", "kind": "statement", "content": "SEQ-LIVE",
@@ -1125,11 +1125,11 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         ``batch_id`` stamped / ``confidence`` written (the #8400/#9819
         mutation, over a node this same bundle minted).
         """
-        live_id = sdk.create_point(
+        live_id = sdk._create_point(
             "statement", "FK-C0", key="FK-OTHER")["id"]
-        before = sdk.get_point(live_id)
+        before = sdk._get_point(live_id)
         with pytest.raises(BundleValidationError, match="reuses key"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p0", "kind": "statement", "content": "FK-C0",
                      "key": "FK-K"},
@@ -1147,7 +1147,7 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         assert rows == [], (
             "Phase-1 must reject BEFORE any write — the phantom key record "
             f"certified a fold onto a terminal node (got {rows})")
-        assert sdk.get_point(live_id) == before, (
+        assert sdk._get_point(live_id) == before, (
             "the standing point must be untouched as well")
 
     def test_the_content_identical_form_of_the_same_bundle_is_refused(self, sdk):
@@ -1160,9 +1160,9 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         Discriminating: pre-fix the bundle COMMITS and the retracted node comes
         back with ``batch_id`` stamped.
         """
-        sdk.create_point("statement", "FKC-C0", key="FKC-OTHER")
+        sdk._create_point("statement", "FKC-C0", key="FKC-OTHER")
         with pytest.raises(BundleValidationError, match="reuses content"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p0", "kind": "statement", "content": "FKC-C0",
                      "key": "FKC-K"},
@@ -1196,8 +1196,8 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         FAILS on that shortcut, which is the half of the pair the reviewer's
         "the two arms have to be settled together" warns about.
         """
-        holder = sdk.create_point("statement", "UK-C0")["id"]
-        res = sdk.ingest(
+        holder = sdk._create_point("statement", "UK-C0")["id"]
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p0", "kind": "statement", "content": "UK-C0",
                  "key": "UK-K"},
@@ -1234,7 +1234,7 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         not discriminating against the head — it is discriminating against the
         incomplete fix, which is what it is here for.
         """
-        res = sdk.ingest(
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p0", "kind": "statement", "content": "IK-C0"},
                 {"ref": "p1", "kind": "statement", "content": "IK-C0",
@@ -1266,7 +1266,7 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         node comes back with ``batch_id`` stamped.
         """
         with pytest.raises(BundleValidationError, match="reuses key"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p0", "kind": "statement", "content": "BK-C0",
                      "key": "BK-FIRST"},
@@ -1299,13 +1299,13 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         COMMITS (the phantom record), so the two directions are distinguishable
         right here.
         """
-        sdk.create_point("statement", "DUP-C0")
-        twin = sdk.create_point("statement", "DUP-C0", dedup=False)["id"]
+        sdk._create_point("statement", "DUP-C0")
+        twin = sdk._create_point("statement", "DUP-C0", dedup=False)["id"]
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.key = 'DUP-OTHER'",
             params={"id": twin})
         with pytest.raises(BundleValidationError, match="reuses key"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p0", "kind": "statement", "content": "DUP-C0",
                      "key": "DUP-K"},
@@ -1340,9 +1340,9 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         reads `_fold_keys` once without tracking the key an in-bundle fold
         writes.
         """
-        sdk.create_point("statement", "SG-C0")
+        sdk._create_point("statement", "SG-C0")
         with pytest.raises(BundleValidationError, match="reuses key"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p0", "kind": "statement", "content": "SG-C0",
                      "key": "SG-K1"},
@@ -1371,14 +1371,14 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         Also pins that the WRITER's arm decides it: a hash-present candidate
         suppresses the A10 arm, so the hash-less row's key must not be read.
         """
-        sdk.create_point("statement", "RK-HELD", key="RK-KEY")
-        sdk.create_point("statement", "RK-FREE")
+        sdk._create_point("statement", "RK-HELD", key="RK-KEY")
+        sdk._create_point("statement", "RK-FREE")
         # a hash-less terminal twin under a content that ALSO has a hashed row
-        hashed = sdk.create_point("statement", "RK-SHADOW")["id"]
+        hashed = sdk._create_point("statement", "RK-SHADOW")["id"]
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.content_hash = NULL, "
             "n.key = 'RK-SHADOW-KEY'", params={"id": hashed})
-        sdk.create_point("statement", "RK-SHADOW")
+        sdk._create_point("statement", "RK-SHADOW")
         sdk._get_proj().g.query(
             "MATCH (n:Point) WHERE n.content = 'RK-SHADOW' "
             "AND n.content_hash IS NOT NULL SET n.key = 'RK-HASH-KEY'")
@@ -1425,7 +1425,7 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         ``confidence`` written by points[3]'s fold.
         """
         with pytest.raises(BundleValidationError, match="reuses key"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p0", "kind": "statement", "content": "WS-C1",
                      "key": "  "},
@@ -1456,8 +1456,8 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
         truthiness test must be revisited WITH it (that change would collapse
         the two questions into one, and this test would be the tripwire).
         """
-        pid = sdk.create_point("statement", "WS-STORED", key="  ")["id"]
-        assert sdk.get_point(pid).get("key") == "  "
+        pid = sdk._create_point("statement", "WS-STORED", key="  ")["id"]
+        assert sdk._get_point(pid).get("key") == "  "
 
     def test_the_stored_key_and_the_resolver_key_answer_different_questions(
             self, sdk):
@@ -1526,7 +1526,7 @@ class TestTheMintRecordIsKeyedByTheSTOREDKind:
         ``BundleValidationError``) and the point is written.
         """
         with pytest.raises(BundleValidationError, match="reuses content"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p1", "kind": "statement",
                      "content": "PROPS-KIND-CONTENT-9819",
@@ -1559,7 +1559,7 @@ class TestTheMintRecordIsKeyedByTheSTOREDKind:
         Discriminating: pre-fix this raises ``BundleValidationError`` matching
         "reuses content" and no point is written at all.
         """
-        res = sdk.ingest(
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement",
                  "content": "PROPS-KIND-MIRROR-9819",
@@ -1600,7 +1600,7 @@ class TestTheMintRecordIsKeyedByTheSTOREDKind:
         comes back with ``batch_id`` stamped.
         """
         with pytest.raises(BundleValidationError, match="reuses key"):
-            sdk.ingest(
+            sdk._ingest(
                 {"points": [
                     {"ref": "p1", "kind": "statement", "key": "K-PROPS-9819",
                      "content": "KEY-PROPS-CONTENT-A",
@@ -1627,7 +1627,7 @@ class TestTheMintRecordIsKeyedByTheSTOREDKind:
         Discriminating: pre-fix this raises ``BundleValidationError`` matching
         "reuses key" and nothing is written.
         """
-        res = sdk.ingest(
+        res = sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "key": "K-MIRROR-9819",
                  "content": "KEY-MIRROR-CONTENT-A", "status": "retracted",
@@ -1858,7 +1858,7 @@ class TestTheBatchedReadPlansAsASeek:
         below is that the ONE statement issued is the HASH arm, not the
         fallback.
         """
-        sdk.create_point("statement", "PLAN-HIT-9819")
+        sdk._create_point("statement", "PLAN-HIT-9819")
         stmts = self._content_identity_statements(
             sdk, {"points": [{"ref": "p1", "kind": "statement",
                               "content": "PLAN-HIT-9819"}]})
@@ -1901,7 +1901,7 @@ class TestNoInBundleDedupEscape:
         ``BundleValidationError`` Phase 1 contract), after the source item
         already committed."""
         with pytest.raises(BundleValidationError, match="not a bundle item field"):
-            sdk.ingest({
+            sdk._ingest({
                 "sources": [{"ref": "s1", "url": "https://example.test/s",
                              "sourceKind": "web"}],
                 "points": [{"ref": "p1", "kind": "statement",
@@ -1991,18 +1991,18 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
     def _states(self, sdk) -> list[tuple[str, str]]:
         """One point per tier/leg shape, then the pairs to compare."""
         # tier 1 — terminal + hash present, in both terminal vocabularies.
-        sdk.create_point("statement", "T1-retracted", status="retracted")
-        sdk.create_point("statement", "T1-superseded", status="superseded")
-        flagged = sdk.create_point("statement", "T1-invalidated")["id"]
+        sdk._create_point("statement", "T1-retracted", status="retracted")
+        sdk._create_point("statement", "T1-superseded", status="superseded")
+        flagged = sdk._create_point("statement", "T1-invalidated")["id"]
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true", params={"id": flagged})
         # tier 2 — a LIVE hash-present point: no hit, and it must also SUPPRESS
         # the hash-less scan for the same content (#2971's gate).
-        sdk.create_point("statement", "T2-live")
+        sdk._create_point("statement", "T2-live")
         # tier 2 shadowing tier 3: a live hashed point AND a terminal hash-less
         # twin — the writer resolves the hashed one, so NO hit.
-        sdk.create_point("statement", "T2-shadows-T3")
-        hashless_twin = sdk.create_point("statement", "T2-shadows-T3")["id"]
+        sdk._create_point("statement", "T2-shadows-T3")
+        hashless_twin = sdk._create_point("statement", "T2-shadows-T3")["id"]
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.status = 'retracted', "
             "n.content_hash = NULL", params={"id": hashless_twin})
@@ -2010,12 +2010,12 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
         # LIVE one that must stay a miss.
         for content, status in (("T3-hashless-retracted", "retracted"),
                                 ("T3-hashless-live", "live")):
-            pid = sdk.create_point("statement", content)["id"]
+            pid = sdk._create_point("statement", content)["id"]
             sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) SET n.status = $st, "
                 "n.content_hash = NULL", params={"id": pid, "st": status})
         # kind scoping — same content, terminal point in ANOTHER kind.
-        sdk.create_point("decision", "KIND-scoped", status="retracted")
+        sdk._create_point("decision", "KIND-scoped", status="retracted")
         # an operator is not a point-dedup candidate.
         sdk._get_proj().g.query(
             "CREATE (n:Point {id:'op-9819-cand', content:'OP-scoped', "
@@ -2097,7 +2097,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
         ``_terminal_content_candidates``, before it can assert anything.
         """
         content = "ARRAY-KIND-9819"
-        pid = sdk.create_point("statement", content)["id"]
+        pid = sdk._create_point("statement", content)["id"]
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.pointKind = ['x']",
             params={"id": pid})
@@ -2145,7 +2145,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
         # … and a STRING-kind, TERMINAL twin of the SAME content, which is a
         # real hit (`create_point` cannot fold onto the array-kind node — its
         # dedup query scopes by the string kind — so this is a second node).
-        live_id = sdk.create_point("statement", "ARRAY-AND-STRING-9819")["id"]
+        live_id = sdk._create_point("statement", "ARRAY-AND-STRING-9819")["id"]
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.status = 'retracted'",
             params={"id": live_id})
@@ -2159,7 +2159,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
             f"must not blind the read (got {hit!r})")
         assert mints is False
         with pytest.raises(BundleValidationError) as ei:
-            sdk.ingest({"points": [{"content": "ARRAY-AND-STRING-9819"}]})
+            sdk._ingest({"points": [{"content": "ARRAY-AND-STRING-9819"}]})
         assert "content matches terminal point" in str(ei.value)
 
         # A bundle whose content's ONLY holder is the array-kind row is legal
@@ -2171,7 +2171,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
             "content_hash:$ch, pointKind:['x'], status:'retracted'})",
             params={"c": only, "ch": _content_hash(only)})
         assert sdk._validate_bundle({"points": [{"content": only}]}) == []
-        out = sdk.ingest({"points": [{"content": only}]})
+        out = sdk._ingest({"points": [{"content": only}]})
         assert out, "the ingest must commit, not raise"
 
 
@@ -2200,7 +2200,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
 def test_a_padded_key_is_found_by_its_OWN_spelling(sdk):
     """The recorded defect, writer half: the seek answers the spelling it was
     given, so the second padded write folds instead of minting a carrier."""
-    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    a = sdk._create_point("statement", "PAD-A", key="  PK  ", dedup=True)
     assert sdk._find_points_by_key("  PK  ", pointKind="statement") == [a["id"]]
     # …and the trimmed spelling still resolves the same node (it always did).
     assert sdk._find_points_by_key("PK", pointKind="statement") == [a["id"]]
@@ -2210,15 +2210,15 @@ def test_a_padded_key_is_visible_to_the_Phase_1_GUARD(sdk):
     """The recorded defect, guard half: `_key_holder_state` is what
     `_check_endpoints` asks before certifying a key-bearing write, and it asked
     the same unfindable seek."""
-    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    a = sdk._create_point("statement", "PAD-A", key="  PK  ", dedup=True)
     holders, _terminal = sdk._key_holder_state("statement", "  PK  ")
     assert holders == [a["id"]], "the Phase-1 key-identity guard cannot see the holder"
 
 
 def test_two_padded_writes_of_ONE_key_mint_ONE_node(sdk):
     """The #6110 duplicate this issue measured: two carriers, one key."""
-    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
-    b = sdk.create_point("statement", "PAD-B", key="  PK  ", dedup=True)
+    a = sdk._create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    b = sdk._create_point("statement", "PAD-B", key="  PK  ", dedup=True)
     assert a["id"] == b["id"], "dedup=True minted a second carrier of one key"
     rows = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.key ENDS WITH 'PK  ' RETURN n.id").result_set
@@ -2229,7 +2229,7 @@ def test_a_padded_key_is_still_STORED_VERBATIM(sdk):
     """BACKWARD COMPATIBILITY, asserted rather than promised: the fix normalises
     the SEARCH TERM only. The stored value is the value the caller passed —
     #9553's recorded position is untouched, and no migration is implied."""
-    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    a = sdk._create_point("statement", "PAD-A", key="  PK  ", dedup=True)
     stored = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
         params={"id": a["id"]}).result_set
@@ -2270,11 +2270,11 @@ def test_a_NON_ASCII_pad_is_seekable_by_its_OWN_spelling(sdk):
     """
     nb = "\u00a0"
     key = f"{nb}PK3{nb}"
-    a = sdk.create_point("statement", "NBSP-A", key=key, dedup=True)
+    a = sdk._create_point("statement", "NBSP-A", key=key, dedup=True)
     assert sdk._find_points_by_key(key, pointKind="statement") == [a["id"]], (
         "an NBSP-padded key lost the findability it had before the fix")
     # …and it still FOLDS, so the guard cannot certify a duplicate.
-    b = sdk.create_point("statement", "NBSP-B", key=key, dedup=True)
+    b = sdk._create_point("statement", "NBSP-B", key=key, dedup=True)
     assert b["id"] == a["id"], "an NBSP-padded re-run minted a second carrier"
     holders, _terminal = sdk._key_holder_state("statement", key)
     assert holders == [a["id"]], "the Phase-1 guard cannot see the NBSP holder"
@@ -2304,9 +2304,9 @@ def test_a_padded_key_never_REASSIGNS_the_stored_spelling(sdk):
     fix was absent (a surviving mutant, per the file's own discrimination
     posture). With the fold asserted, reverting the seek reddens this test.
     """
-    a = sdk.create_point("statement", "SPELL-A", key="PK", dedup=True)
-    before = sdk.get_point(a["id"]).get("updatedAt")
-    folds = [sdk.create_point("statement", "SPELL-B", key="  PK  ", dedup=True)
+    a = sdk._create_point("statement", "SPELL-A", key="PK", dedup=True)
+    before = sdk._get_point(a["id"]).get("updatedAt")
+    folds = [sdk._create_point("statement", "SPELL-B", key="  PK  ", dedup=True)
              for _ in range(3)]
     assert [f["id"] for f in folds] == [a["id"]] * 3, (
         "a padded re-run did not fold onto the trimmed holder: "
@@ -2340,9 +2340,9 @@ def test_a_TRIMMED_key_never_REASSIGNS_a_PADDED_stored_spelling(sdk):
     would read as consistent with it and silently restore the overwrite with
     the suite green.
     """
-    a = sdk.create_point("statement", "MIRROR-A", key="  PK  ", dedup=True)
-    before = sdk.get_point(a["id"]).get("updatedAt")
-    folds = [sdk.create_point("statement", "MIRROR-B", key="PK", dedup=True)
+    a = sdk._create_point("statement", "MIRROR-A", key="  PK  ", dedup=True)
+    before = sdk._get_point(a["id"]).get("updatedAt")
+    folds = [sdk._create_point("statement", "MIRROR-B", key="PK", dedup=True)
              for _ in range(3)]
     assert [f["id"] for f in folds] == [a["id"]] * 3, (
         "a trimmed re-run did not fold onto the padded holder: "
@@ -2371,7 +2371,7 @@ def test_a_bundle_naming_ONE_key_by_TWO_paddings_is_the_SAME_identity(sdk):
     assert _item_dedup_key({"key": "  PK  "}) == "PK"
     assert _item_dedup_key({"key": "PK"}) == "PK"
     with pytest.raises(BundleValidationError, match="FRESH key"):
-        sdk.ingest(
+        sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "content": "PAD-A",
                  "key": "PK", "status": "retracted"},
@@ -2391,7 +2391,7 @@ def test_the_bundle_key_identity_holds_in_the_OTHER_padding_direction(sdk):
     asserted so a future edit cannot break one while the suite stays green
     (#10481 review, coverage finding)."""
     with pytest.raises(BundleValidationError, match="FRESH key"):
-        sdk.ingest(
+        sdk._ingest(
             {"points": [
                 {"ref": "p1", "kind": "statement", "content": "PAD-C",
                  "key": "  PK2  ", "status": "retracted"},
@@ -2438,7 +2438,7 @@ def test_every_ENGINE_trimmed_pad_is_found_by_its_OWN_spelling(sdk):
     )
     for i, pad in enumerate(_ENGINE_TRIMMED_PADS):
         key = f"{pad}PKT{i}{pad}"
-        a = sdk.create_point("statement", f"TRIMPAD-{i}", key=key, dedup=True)
+        a = sdk._create_point("statement", f"TRIMPAD-{i}", key=key, dedup=True)
         assert sdk._find_points_by_key(key, pointKind="statement") == [a["id"]], (
             f"the engine trims {pad!r} in the key index, so a key padded with it "
             f"must be findable by its OWN spelling — sending the raw term missed "
@@ -2508,10 +2508,10 @@ def test_the_seek_holds_when_the_key_INDEX_is_ABSENT(sdk):
     duplicate, in the one engine state where the trimmed-only seek was right
     before. Post-fix the raw disjunct keeps it findable.
     """
-    a = sdk.create_point("statement", "SCAN-A", key="  PK  ", dedup=True)
+    a = sdk._create_point("statement", "SCAN-A", key="  PK  ", dedup=True)
     # A DIFFERENT key, same kind — the identity-safety half: the raw disjunct
     # must never reach outside the caller's own trimmed identity class.
-    other = sdk.create_point("statement", "SCAN-OTHER", key="  QK  ",
+    other = sdk._create_point("statement", "SCAN-OTHER", key="  QK  ",
                              dedup=True)
     plan = _drop_key_index(sdk)
     assert "Node By Label Scan" in plan, (
@@ -2545,7 +2545,7 @@ def test_the_seek_holds_when_the_key_INDEX_is_ABSENT(sdk):
     assert other["id"] not in sdk._find_points_by_key("  PK  ",
                                                      pointKind="statement")
 
-    b = sdk.create_point("statement", "SCAN-B", key="  PK  ", dedup=True)
+    b = sdk._create_point("statement", "SCAN-B", key="  PK  ", dedup=True)
     assert b["id"] == a["id"], (
         "dedup=True minted a second carrier of one key in the label-scan form")
     rows = sdk._get_proj().g.query(
@@ -2604,10 +2604,10 @@ def test_a_padded_spelling_that_was_NOT_applied_is_AUDIBLE(sdk, caplog):
     (silent pop) this FAILS — the fold happened, the stored key stayed ``"PK"``
     and the caller was told nothing.
     """
-    a = sdk.create_point("statement", "AUDIBLE-A", key="PK", dedup=True)
+    a = sdk._create_point("statement", "AUDIBLE-A", key="PK", dedup=True)
     with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
         caplog.clear()
-        b = sdk.create_point("statement", "AUDIBLE-A", key="  PK  ", dedup=True)
+        b = sdk._create_point("statement", "AUDIBLE-A", key="  PK  ", dedup=True)
     assert b["id"] == a["id"], "the padded re-run did not fold"
     stored = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
@@ -2622,7 +2622,7 @@ def test_a_padded_spelling_that_was_NOT_applied_is_AUDIBLE(sdk, caplog):
     # about every dedup hit (#490 churn is the reason the pop exists at all).
     with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
         caplog.clear()
-        sdk.create_point("statement", "AUDIBLE-A", key="PK", dedup=True)
+        sdk._create_point("statement", "AUDIBLE-A", key="PK", dedup=True)
     assert not [r for r in caplog.records if "not applied" in r.getMessage()], (
         "an exact-spelling dedup hit warned that a key was not applied")
 
@@ -2657,12 +2657,12 @@ def test_a_blank_to_PYTHON_key_agrees_across_the_simulation_and_the_writer(sdk):
         "must have moved with it")
     assert _item_stored_key({"key": nb}) == nb
     # …and the writer agrees with BOTH halves of that same answer.
-    a = sdk.create_point("statement", "BLANKISH-A", key=nb, dedup=True)
+    a = sdk._create_point("statement", "BLANKISH-A", key=nb, dedup=True)
     stored = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
         params={"id": a["id"]}).result_set
     assert stored and stored[0][0] == nb, stored
-    b = sdk.create_point("statement", "BLANKISH-B", key=nb, dedup=True)
+    b = sdk._create_point("statement", "BLANKISH-B", key=nb, dedup=True)
     assert b["id"] != a["id"], (
         "this FOLDED, so the presence gate became engine-aware — that is "
         "#11044's decision to make, and `_item_dedup_key({'key': NBSP})` must "

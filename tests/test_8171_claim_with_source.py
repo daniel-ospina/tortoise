@@ -69,7 +69,7 @@ def _ep(sdk, point_id):
     resolve to — not the registry key that fed it.
     """
     sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-    return sdk.get_point(point_id)
+    return sdk._get_point(point_id)
 
 
 def _source_count(proj, url):
@@ -155,7 +155,7 @@ def test_a_claim_door_still_materializes_its_session_source(tmp_path):
     proj = sdk._get_proj()
     url = "session:8171-claim-door"
 
-    p = sdk.create_point("statement", "a claim sourced from its own session",
+    p = sdk._create_point("statement", "a claim sourced from its own session",
                          extractedFrom=url)
 
     assert _source_count(proj, url) == 1
@@ -515,7 +515,7 @@ def test_create_document_refuses_a_bad_ref_instead_of_swallowing_it(
 
     for bad in (123, {"url": "corpus://forged"}, ["corpus://ok", 5]):
         with pytest.raises(ValueError):
-            sdk.create_document("Bad ref doc", "note", extractedFrom=bad)
+            sdk._create_document("Bad ref doc", "note", extractedFrom=bad)
 
     assert _scalar(proj, "MATCH (n) RETURN count(n)") == before, (
         "the refusal must precede the write — a rejected ref must leave no "
@@ -567,7 +567,7 @@ def test_create_document_delivers_the_advisory_too(tmp_path):
     line from `create_document` — no `advisories` key is returned.
     """
     sdk = _sdk(tmp_path)
-    res = sdk.create_document("Unsourced alias doc", "note")
+    res = sdk._create_document("Unsourced alias doc", "note")
     advisories = res.get("advisories") or []
     assert advisories, (
         "create_document must deliver the same advisory as create_entity")
@@ -582,7 +582,7 @@ def test_create_document_with_a_source_is_not_advised(tmp_path):
     advisory into noise.
     """
     sdk = _sdk(tmp_path)
-    res = sdk.create_document("Sourced alias doc", "note",
+    res = sdk._create_document("Sourced alias doc", "note",
                               extractedFrom="corpus://notes/8171-alias")
     assert not (res.get("advisories") or [])
 
@@ -607,9 +607,9 @@ def test_alias_doors_deliver_the_advisory(tmp_path):
     """
     sdk = _sdk(tmp_path)
     cases = (
-        (sdk.create_subject, ("Alias subject", "person")),
-        (sdk.create_object, ("Alias object", "product")),
-        (sdk.create_event, ("Alias event", "meeting")),
+        (sdk._create_subject, ("Alias subject", "person")),
+        (sdk._create_object, ("Alias object", "product")),
+        (sdk._create_event, ("Alias event", "meeting")),
     )
     for create, args in cases:
         res = create(*args, extractedFrom="session:alias-advised")
@@ -654,7 +654,7 @@ def test_an_unsourced_claim_is_advised_and_still_lands(tmp_path):
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
 
-    res = sdk.create_point("statement", "a claim nobody sourced")
+    res = sdk._create_point("statement", "a claim nobody sourced")
 
     # 1. The write HAPPENED, and it really is unsourced in the graph.
     node_id = res["id"]
@@ -691,7 +691,7 @@ def test_a_sourced_claim_carries_no_advisory(tmp_path):
     proj = sdk._get_proj()
     url = "session:8171-sourced-claim"
 
-    res = sdk.create_point("statement", "a claim that declared its session",
+    res = sdk._create_point("statement", "a claim that declared its session",
                            extractedFrom=url)
 
     assert not (res.get("advisories") or []), (
@@ -714,7 +714,7 @@ def test_a_session_id_inferred_source_silences_the_advisory(tmp_path):
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
 
-    res = sdk.create_point("statement", "an assertion from a live session",
+    res = sdk._create_point("statement", "an assertion from a live session",
                            session_id="8171-claim-session")
 
     assert not (res.get("advisories") or [])
@@ -735,7 +735,7 @@ def test_an_authored_word_is_a_source_not_a_provenance_gap(tmp_path):
     the advisory is keyed on "no `extractedFrom`" instead of "no source".
     """
     sdk = _sdk(tmp_path)
-    res = sdk.create_point("statement", "a claim with a declared word",
+    res = sdk._create_point("statement", "a claim with a declared word",
                            credibility="medium")
     assert not (res.get("advisories") or [])
 
@@ -770,7 +770,7 @@ def test_an_originating_session_resolves_to_the_WEAK_weight(tmp_path):
     assert session_support_pc(carries_attached_source=True) == 0.0
 
     sdk = _sdk(tmp_path)
-    originating = sdk.create_point(
+    originating = sdk._create_point(
         "statement", "an assertion the agent itself originates",
         extractedFrom="session:8171-weight")
     pt = _ep(sdk, originating["id"])
@@ -782,7 +782,7 @@ def test_an_originating_session_resolves_to_the_WEAK_weight(tmp_path):
     assert mean == pytest.approx(1.1 / 2.1)  # 0.5238 — above ignorance
 
     # CONTROL: a neutral source is recorded and contributes nothing.
-    neutral = sdk.create_point(
+    neutral = sdk._create_point(
         "statement", "a claim backed only by an untiered document",
         extractedFrom="corpus://notes/8171-neutral")
     assert _ep(sdk, neutral["id"]).get("ep_alpha") is None, (

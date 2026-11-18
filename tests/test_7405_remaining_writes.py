@@ -546,7 +546,7 @@ def test_a_rebuild_abort_on_the_operator_id_provenance_stamp_is_retried(
     sdk = _sdk(tmp_path, "opidstamp")
     try:
         for point in payload["points"]:
-            sdk.create_point("statement", point["content"],
+            sdk._create_point("statement", point["content"],
                              _server_id=point["id"])
         _mock_v2(monkeypatch, payload)
         proxy, result = _capture_with_abort(
@@ -607,7 +607,7 @@ def test_a_rebuild_abort_on_the_entity_link_counter_stamp_is_retried(
     import tortoise.extractor_v2 as ev2
     sdk = _sdk(tmp_path, "linkstamp")
     try:
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
+        sdk._create_object("test/repo#42", objectKind="pm:issue")
         _mock_v2(monkeypatch, _v2_payload(
             [_pt(ev2._content_id("pt", "a claim about the release"),
                  "a claim about the release")], []))
@@ -748,7 +748,7 @@ def test_a_rebuild_abort_on_the_dirty_persist_set_is_retried(tmp_path):
     """
     sdk = _sdk(tmp_path, "dirtypersist")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "statement", "a claim that must be marked dirty")["id"]
         proj, proxy = _abort_once(sdk, _MARK_DIRTY_PERSIST_NEEDLE)
         try:
@@ -778,7 +778,7 @@ def test_a_rebuild_abort_on_the_dirty_clear_set_is_retried(tmp_path):
     """
     sdk = _sdk(tmp_path, "dirtyclear")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "statement", "a claim that will go terminal")["id"]
         proj = sdk._get_proj()
         # Terminal AND flagged, so the persist WHERE excludes it and the CLEAR
@@ -815,7 +815,7 @@ def test_a_deleted_graph_abort_on_the_dirty_persist_set_stays_loud(tmp_path):
     """
     sdk = _sdk(tmp_path, "dirtydeleted")
     try:
-        pid = sdk.create_point("statement", "a claim never marked")["id"]
+        pid = sdk._create_point("statement", "a claim never marked")["id"]
         proj, proxy = _abort_once(
             sdk, _MARK_DIRTY_PERSIST_NEEDLE, present=False)
         try:
@@ -846,10 +846,10 @@ def test_a_rebuild_abort_on_delete_point_is_retried(tmp_path):
     """
     sdk = _sdk(tmp_path, "deletept")
     try:
-        pid = sdk.create_point("statement", "a claim to be deleted")["id"]
+        pid = sdk._create_point("statement", "a claim to be deleted")["id"]
         proj, proxy = _abort_once(sdk, _DELETE_POINT_NEEDLE)
         try:
-            found = sdk.delete_point(pid)
+            found = sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
         assert found is True, "the delete must report the point as found"
@@ -874,7 +874,7 @@ def test_a_rebuild_abort_on_the_orphan_tag_gc_is_retried(tmp_path):
     """
     sdk = _sdk(tmp_path, "taggc")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "statement", "a tagged claim", tags=["alpha"])["id"]
         proj = sdk._get_proj()
         before = proj.g.query(
@@ -884,7 +884,7 @@ def test_a_rebuild_abort_on_the_orphan_tag_gc_is_retried(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _TAG_GC_NEEDLE, present=True)
         proj.g = proxy
         try:
-            found = sdk.delete_point(pid)
+            found = sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
         assert found is True
@@ -911,13 +911,13 @@ def test_a_deterministic_error_on_delete_point_is_not_retried(tmp_path):
     """
     sdk = _sdk(tmp_path, "deletewrong")
     try:
-        pid = sdk.create_point("statement", "a claim with a wrongtype")["id"]
+        pid = sdk._create_point("statement", "a claim with a wrongtype")["id"]
         proj = sdk._get_proj()
         proxy = _DeterministicGraph(proj.g, _DELETE_POINT_NEEDLE)
         proj.g = proxy
         try:
             with pytest.raises(redis_exc.ResponseError, match="WRONGTYPE"):
-                sdk.delete_point(pid)
+                sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
         assert proxy.matching == 1, (
@@ -1088,13 +1088,13 @@ def test_a_non_landed_detach_delete_converges_to_absence_on_replay(tmp_path):
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "delexempt")
     try:
-        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        pid = sdk._create_point("statement", "a claim deleted mid-rebuild")["id"]
         proj = sdk._get_proj()
         proxy = _AbortThenUnreplayDelete(
             proj.g, _DELETE_POINT_NEEDLE, victim=pid, log_dir=log_dir)
         proj.g = proxy
         try:
-            found = sdk.delete_point(pid)
+            found = sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
 
@@ -1123,7 +1123,7 @@ def test_a_non_landed_detach_delete_converges_to_absence_on_replay(tmp_path):
         # Point, and the op=delete fold then removes it — with a cache statement
         # that matched no rows.
         proj.rebuild_all(str(log_dir), confirm_destructive=True)
-        assert sdk.get_point(pid) == {}, (
+        assert sdk._get_point(pid) == {}, (
             "a DETACH DELETE that matched nothing must still end ABSENT: the "
             "committed record is the destruction (test 2 shows the dependency)")
         assert proj.g.query(
@@ -1152,12 +1152,12 @@ def test_the_delete_exemption_rests_on_the_committed_record(tmp_path):
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "deltamper")
     try:
-        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        pid = sdk._create_point("statement", "a claim deleted mid-rebuild")["id"]
         proj = sdk._get_proj()
         proxy = _AbortThenUnreplayDelete(proj.g, _DELETE_POINT_NEEDLE, victim=pid)
         proj.g = proxy
         try:
-            assert sdk.delete_point(pid) is True
+            assert sdk._delete_point(pid) is True
         finally:
             proj.g = proxy._real
 
@@ -1171,7 +1171,7 @@ def test_the_delete_exemption_rests_on_the_committed_record(tmp_path):
         path.write_text("\n".join(kept) + "\n")
 
         proj.rebuild_all(str(log_dir), confirm_destructive=True)
-        back = sdk.get_point(pid)
+        back = sdk._get_point(pid)
         assert back, (
             "without the destruction record the replay re-creates the Point — "
             "so the record, not the row count, is what makes the delete durable")
@@ -1214,7 +1214,7 @@ def test_a_delete_whose_record_cannot_be_committed_is_refused_loudly(
         event_log_path=str(log_dir / "events.jsonl"),
     )
     try:
-        pid = sdk.create_point("statement", "a claim with a refusing journal")["id"]
+        pid = sdk._create_point("statement", "a claim with a refusing journal")["id"]
         # Break the journal under the SDK's feet: the directory becomes a file.
         shutil.rmtree(log_dir)
         log_dir.write_text("not a directory")
@@ -1223,7 +1223,7 @@ def test_a_delete_whose_record_cannot_be_committed_is_refused_loudly(
         proj.g = proxy
         try:
             with pytest.raises(WriteNotLandedError) as excinfo:
-                sdk.delete_point(pid)
+                sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
         err = excinfo.value
@@ -1304,14 +1304,14 @@ def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "delprobetoday")
     try:
-        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        pid = sdk._create_point("statement", "a claim deleted mid-rebuild")["id"]
         proj = sdk._get_proj()
         # The replacement's wipe: the graph holds nothing, the journal still
         # holds this Point's PointAdded, and the replay has not run.
         proj.g.query("MATCH (n) DETACH DELETE n")
 
         # The residual, in one line: the door is told the Point is absent.
-        assert sdk.delete_point(pid) is False, (
+        assert sdk._delete_point(pid) is False, (
             "today the existence probe answers 'absent' during a rebuild "
             "window, so the delete is reported as not-found — if this ever "
             "answers True the residual is closed and both the xfail below and "
@@ -1333,7 +1333,7 @@ def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
         # so a rebuild that raised — or wiped without folding — reds in a plain
         # test instead of reading as "the known residual".
         proj.rebuild_all(str(log_dir), confirm_destructive=True)
-        restored = sdk.get_point(pid)
+        restored = sdk._get_point(pid)
         assert restored and restored.get("status") == "live", (
             "today the skipped delete is UNDONE by the replay and the Point "
             "comes back LIVE — if this fails, the modelling in this file is "
@@ -1363,16 +1363,16 @@ def test_a_rebuild_window_must_not_lose_a_delete_at_the_existence_probe(tmp_path
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "delprobe")
     try:
-        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        pid = sdk._create_point("statement", "a claim deleted mid-rebuild")["id"]
         proj = sdk._get_proj()
         # The replacement's wipe: the graph holds nothing, the journal still
         # holds this Point's PointAdded, and the replay has not run.
         proj.g.query("MATCH (n) DETACH DELETE n")
 
-        sdk.delete_point(pid)          # today: False, and nothing is recorded
+        sdk._delete_point(pid)          # today: False, and nothing is recorded
         proj.rebuild_all(str(log_dir), confirm_destructive=True)
 
-        assert sdk.get_point(pid) == {}, (
+        assert sdk._get_point(pid) == {}, (
             "a delete issued during a rebuild window must not be silently "
             "skipped: the Point the caller asked to destroy is LIVE again")
     finally:
@@ -1410,7 +1410,7 @@ def _journal_less_delete_scenario(tmp_path, tag: str):
         db_path, namespace=namespace,
         event_log_path=str(log_dir / "events.jsonl"))
     try:
-        pid = creator.create_point(
+        pid = creator._create_point(
             "statement", "a claim deleted mid-rebuild")["id"]
     finally:
         with contextlib.suppress(Exception):
@@ -1421,10 +1421,10 @@ def _journal_less_delete_scenario(tmp_path, tag: str):
         # the creator wrote to (the #432 same-path close/reopen this scenario
         # leans on). Evaluated BEFORE the delete, so it measures the door's
         # view rather than an already-emptied graph.
-        assert deleter.get_point(pid) != {}, (
+        assert deleter._get_point(pid) != {}, (
             "the journal-less door cannot see the creator's graph, so nothing "
             "below measures the residual")
-        deleted = deleter.delete_point(pid)
+        deleted = deleter._delete_point(pid)
     except BaseException:
         # The callers' `finally` only starts once this returns; without this the
         # opened door would leak on the precondition or on a raised write.
@@ -1455,7 +1455,7 @@ def test_a_journal_less_delete_is_undone_by_the_creators_journal_today(tmp_path)
             "today the journal-less destruction LANDS and is reported as "
             "landed — if this ever answers False the residual has changed "
             "shape and both pins must be revisited")
-        assert deleter.get_point(pid) == {}, (
+        assert deleter._get_point(pid) == {}, (
             "the landed delete must remove the Point from the live graph")
 
         assert not any(r.get("type") == "EntityMutated"
@@ -1466,7 +1466,7 @@ def test_a_journal_less_delete_is_undone_by_the_creators_journal_today(tmp_path)
 
         # The loss, end to end and OUTSIDE the xfail.
         deleter._get_proj().rebuild_all(str(log_dir), confirm_destructive=True)
-        restored = deleter.get_point(pid)
+        restored = deleter._get_point(pid)
         assert restored and restored.get("status") == "live", (
             "today's loss, pinned plainly: replaying the creator's journal "
             "restores the Point the journal-less door genuinely destroyed, and "
@@ -1499,7 +1499,7 @@ def test_a_journal_less_delete_must_survive_a_replay_of_the_creators_journal(tmp
     try:
         assert deleted is True, "the journal-less delete must LAND for this pin"
         deleter._get_proj().rebuild_all(str(log_dir), confirm_destructive=True)
-        assert deleter.get_point(pid) == {}, (
+        assert deleter._get_point(pid) == {}, (
             "a destruction the door cannot record must not be reported as "
             "durable: replaying the creator's journal resurrects the Point")
     finally:
@@ -1521,11 +1521,11 @@ def test_a_rebuild_abort_on_the_promote_cas_is_retried(tmp_path):
     """
     sdk = _sdk(tmp_path, "promote")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "statement", "a draft claim awaiting review", status="draft")["id"]
         proj, proxy = _abort_once(sdk, _PROMOTE_CAS_NEEDLE)
         try:
-            result = sdk.promote_point(pid)
+            result = sdk._promote_point(pid)
         finally:
             proj.g = proxy._real
         assert result.get("promoted") is True, result
@@ -1544,8 +1544,8 @@ def test_a_rebuild_abort_on_the_promote_cas_is_retried(tmp_path):
 
 
 def _two_points(sdk, tag: str) -> tuple[str, str]:
-    a = sdk.create_point("statement", f"{tag} source claim")["id"]
-    b = sdk.create_point("statement", f"{tag} target claim")["id"]
+    a = sdk._create_point("statement", f"{tag} source claim")["id"]
+    b = sdk._create_point("statement", f"{tag} target claim")["id"]
     return a, b
 
 
@@ -1563,7 +1563,7 @@ def test_a_rebuild_abort_on_the_operator_create_is_retried(tmp_path):
         a, b = _two_points(sdk, "opcreate")
         proj, proxy = _abort_once(sdk, _OPERATOR_CREATE_NEEDLE)
         try:
-            result = sdk.create_operator("IMPL", a, [b])
+            result = sdk._create_operator("IMPL", a, [b])
         finally:
             proj.g = proxy._real
         op_id = result.get("id")
@@ -1597,7 +1597,7 @@ def test_a_rebuild_abort_on_the_operator_edges_is_retried(tmp_path):
         a, b = _two_points(sdk, "opedge")
         proj, proxy = _abort_once(sdk, _OPERATOR_EDGE_NEEDLE)
         try:
-            result = sdk.create_operator("IMPL", a, [b])
+            result = sdk._create_operator("IMPL", a, [b])
         finally:
             proj.g = proxy._real
         op_id = result.get("id")
@@ -1645,7 +1645,7 @@ def test_a_rebuild_abort_on_the_operator_source_promote_is_retried(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _OPERATOR_PROMOTE_NEEDLE, present=True)
         proj.g = proxy
         try:
-            sdk.create_operator("IMPL", a, [b])
+            sdk._create_operator("IMPL", a, [b])
         finally:
             proj.g = proxy._real
         assert proxy.matching >= 2, (
@@ -1666,7 +1666,7 @@ def test_a_rebuild_abort_on_the_operator_source_promote_is_retried(tmp_path):
 
 def _operator(sdk, tag: str) -> str:
     a, b = _two_points(sdk, tag)
-    return sdk.create_operator("IMPL", a, [b])["id"]
+    return sdk._create_operator("IMPL", a, [b])["id"]
 
 
 def test_a_rebuild_abort_on_the_mitigation_create_is_retried(tmp_path):
@@ -1683,7 +1683,7 @@ def test_a_rebuild_abort_on_the_mitigation_create_is_retried(tmp_path):
         op_id = _operator(sdk, "mitcreate")
         proj, proxy = _abort_once(sdk, _MITIGATION_CREATE_NEEDLE)
         try:
-            result = sdk.mitigate_operator(op_id, "weak evidence", strength=0.3)
+            result = sdk._mitigate_operator(op_id, "weak evidence", strength=0.3)
         finally:
             proj.g = proxy._real
         mid = result.get("id")
@@ -1715,7 +1715,7 @@ def test_a_rebuild_abort_on_the_mitigation_edges_is_retried(tmp_path):
         op_id = _operator(sdk, "mitedge")
         proj, proxy = _abort_once(sdk, _MITIGATION_EDGE_NEEDLE)
         try:
-            result = sdk.mitigate_operator(op_id, "weak evidence", strength=0.3)
+            result = sdk._mitigate_operator(op_id, "weak evidence", strength=0.3)
         finally:
             proj.g = proxy._real
         mid = result.get("id")
@@ -1782,7 +1782,7 @@ def test_a_rebuild_abort_on_the_create_document_link_source_is_retried(tmp_path)
     try:
         proj, proxy = _abort_once(sdk, _LINK_SOURCE_NEEDLE)
         try:
-            result = sdk.create_document(
+            result = sdk._create_document(
                 "A Document", "report", extractedFrom="doc://document")
         finally:
             proj.g = proxy._real
@@ -1958,12 +1958,12 @@ def test_an_exhausted_swap_surfaces_the_legible_diagnosis_with_the_same_type(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "legible")
     try:
-        pid = sdk.create_point("evidence", "a claim to delete")["id"]
+        pid = sdk._create_point("evidence", "a claim to delete")["id"]
         proj, proxy = _abort_once(sdk, _DELETE_POINT_NEEDLE)
         proxy._aborts = 99  # never heals — the exhaustion arm
         try:
             with pytest.raises(redis_exc.ResponseError) as caught:
-                sdk.delete_point(pid)
+                sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
         text = str(caught.value)
@@ -2052,14 +2052,14 @@ def test_an_absent_key_at_exhaustion_still_gets_the_diagnosis(
     monkeypatch.setattr(retry_mod, "call_with_predicate", _watched_retry)
     sdk = _sdk(tmp_path, "legiblegone")
     try:
-        pid = sdk.create_point("evidence", "a claim to delete")["id"]
+        pid = sdk._create_point("evidence", "a claim to delete")["id"]
         proj = sdk._get_proj()
         proxy = _PresentThenGone(
             proj.g, _DELETE_POINT_NEEDLE, retrying=lambda: retrying["on"])
         proj.g = proxy
         try:
             with pytest.raises(redis_exc.ResponseError) as caught:
-                sdk.delete_point(pid)
+                sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
         text = str(caught.value)
@@ -2091,11 +2091,11 @@ def test_a_deletion_abort_is_never_given_the_retry_safety_note(tmp_path):
     """
     sdk = _sdk(tmp_path, "legibledeleted")
     try:
-        pid = sdk.create_point("evidence", "a claim to delete")["id"]
+        pid = sdk._create_point("evidence", "a claim to delete")["id"]
         proj, proxy = _abort_once(sdk, _DELETE_POINT_NEEDLE, present=False)
         try:
             with pytest.raises(redis_exc.ResponseError) as caught:
-                sdk.delete_point(pid)
+                sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
         assert str(caught.value) == _DELETED_OR_REPLACED, (
@@ -2189,14 +2189,14 @@ def test_a_write_slot_exhaustion_pays_no_graph_presence_probe(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "slotexhaust")
     try:
-        pid = sdk.create_point("evidence", "a claim to delete")["id"]
+        pid = sdk._create_point("evidence", "a claim to delete")["id"]
         proj = sdk._get_proj()
         proxy = _SlotAbortGraph(proj.g, _DELETE_POINT_NEEDLE)
         proj.g = proxy
         try:
             with (caplog.at_level(logging.WARNING),
                   pytest.raises(redis_exc.ResponseError) as caught):
-                sdk.delete_point(pid)
+                sdk._delete_point(pid)
         finally:
             proj.g = proxy._real
         assert proxy.matching >= 3, (

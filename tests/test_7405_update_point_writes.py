@@ -171,7 +171,7 @@ def _sdk(tmp_path, tag: str):
 
 
 def _pid(sdk) -> str:
-    return sdk.create_point("evidence", f"claim for {uuid.uuid4().hex}")["id"]
+    return sdk._create_point("evidence", f"claim for {uuid.uuid4().hex}")["id"]
 
 
 # ── 1. the plain property arm (the per-key ``SET`` loop) ─────────────────
@@ -193,14 +193,14 @@ def test_a_rebuild_abort_on_the_property_set_is_retried_and_applies_once(
         proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, confidence=0.42)
+        sdk._update_point(pid, confidence=0.42)
 
         assert proxy.matching >= 2, "the aborted SET was never re-issued"
         assert proxy.applied == 1, (
             "exactly one application — a re-issued absolute SET must not "
             "double-increment")
         proj.g = proxy._real
-        assert sdk.get_point(pid)["confidence"] == pytest.approx(0.42), (
+        assert sdk._get_point(pid)["confidence"] == pytest.approx(0.42), (
             "the revision must be readable after the retry")
     finally:
         with contextlib.suppress(Exception):
@@ -219,18 +219,18 @@ def test_a_rebuild_abort_on_the_promote_set_is_retried(tmp_path):
     """
     sdk = _sdk(tmp_path, "promote")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft claim {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortOnceGraph(proj.g, _POINT_PROMOTE_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
 
         assert proxy.matching >= 2, "the aborted promote SET was never re-issued"
         assert proxy.applied == 1, "exactly one application"
         proj.g = proxy._real
-        assert sdk.get_point(pid)["status"] == "live"
+        assert sdk._get_point(pid)["status"] == "live"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -255,12 +255,12 @@ def test_a_rebuild_abort_on_the_object_arm_set_is_retried(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _OBJECT_PROP_SET_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, confidence=0.31)
+        sdk._update_point(pid, confidence=0.31)
 
         assert proxy.matching >= 2, "the aborted :Object SET was never re-issued"
         assert proxy.applied == 1, "exactly one application"
         proj.g = proxy._real
-        assert sdk.get_point(pid)["confidence"] == pytest.approx(0.31)
+        assert sdk._get_point(pid)["confidence"] == pytest.approx(0.31)
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -324,7 +324,7 @@ def test_a_half_landed_tag_sync_is_not_a_success(tmp_path, monkeypatch):
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, tags=["7405alpha", "7405partial"])
+            sdk._update_point(pid, tags=["7405alpha", "7405partial"])
 
         assert proxy.matching >= 3, (
             "fixture precondition: the aborted MERGE must have been re-issued")
@@ -368,7 +368,7 @@ def test_the_orphan_sweep_is_a_retry_only_cost(tmp_path):
         # about the first-attempt saving (caught while writing this test).
         first = _CountSweeps(proj.g, _TAGGED_NEEDLE, aborts=0)
         proj.g = first
-        sdk.update_point(pid, tags=["7405sweepone"])
+        sdk._update_point(pid, tags=["7405sweepone"])
         proj.g = first._real
         assert first.sweeps == 0, (
             "a first attempt that removed no edge paid the graph-wide :Tag "
@@ -377,7 +377,7 @@ def test_the_orphan_sweep_is_a_retry_only_cost(tmp_path):
         pid2 = _pid(sdk)
         retried = _CountSweeps(proj.g, _TAGGED_NEEDLE)
         proj.g = retried
-        sdk.update_point(pid2, tags=["7405sweeptwo"])
+        sdk._update_point(pid2, tags=["7405sweeptwo"])
         proj.g = retried._real
         assert retried.matching >= 2, (
             "fixture precondition: the abort must have forced a retry")
@@ -388,14 +388,14 @@ def test_the_orphan_sweep_is_a_retry_only_cost(tmp_path):
 
         # ── the documented LIMIT of the saving, both ways ───────────────────
         pid3 = _pid(sdk)
-        sdk.update_point(pid3, tags=["7405held"])
+        sdk._update_point(pid3, tags=["7405held"])
         # An orphan left by some EARLIER interrupted call: a :Tag with no
         # incoming TAGGED edge.
         proj.g.query("CREATE (:Tag {name: '7405orphan'})")
 
         plain = _CountSweeps(proj.g, _TAGGED_NEEDLE, aborts=0)
         proj.g = plain
-        sdk.update_point(pid3, tags=["7405held"])  # already held: no edge removed
+        sdk._update_point(pid3, tags=["7405held"])  # already held: no edge removed
         proj.g = plain._real
         assert plain.sweeps == 0, (
             "a plain tagged update that removed no edge paid the graph-wide "
@@ -408,7 +408,7 @@ def test_the_orphan_sweep_is_a_retry_only_cost(tmp_path):
             f"survives a plain tagged update, but it was collected: {survived}")
 
         # ...and a call that DOES remove an edge collects it.
-        sdk.update_point(pid3, tags=[])
+        sdk._update_point(pid3, tags=[])
         collected = proj.g.query(
             "MATCH (t:Tag {name: '7405orphan'}) RETURN count(t)",
         ).result_set[0][0]
@@ -436,7 +436,7 @@ def test_a_rebuild_abort_on_the_tag_sync_is_retried(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _TAGGED_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, tags=["7405alpha", "7405beta"])
+        sdk._update_point(pid, tags=["7405alpha", "7405beta"])
 
         assert proxy.matching >= 3, (
             "the aborted TAGGED MERGE was never re-issued")
@@ -469,18 +469,18 @@ def test_a_rebuild_abort_during_annotate_operator_is_retried(tmp_path):
     try:
         src = _pid(sdk)
         tgt = _pid(sdk)
-        op = sdk.create_operator("IMPL", src, [tgt])["id"]
+        op = sdk._create_operator("IMPL", src, [tgt])["id"]
         proj = sdk._get_proj()
         proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.annotate_operator(op, bias=0.2, precision=0.8,
+        sdk._annotate_operator(op, bias=0.2, precision=0.8,
                               consistency=0.7, directness=0.9)
 
         assert proxy.matching >= 2, (
             "the aborted annotation SET was never re-issued")
         proj.g = proxy._real
-        point = sdk.get_point(op)
+        point = sdk._get_point(op)
         assert point["annotator_precision"] == pytest.approx(0.8)
         assert point["annotator_bias"] == pytest.approx(0.2)
     finally:
@@ -506,12 +506,12 @@ def test_a_rebuild_abort_on_the_invalidate_stamp_is_retried(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _INVALIDATE_STAMP_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.invalidate_point(pid, corrector)
+        sdk._invalidate_point(pid, corrector)
 
         assert proxy.matching >= 2, "the aborted stamp SET was never re-issued"
         assert proxy.applied == 1, "exactly one application"
         proj.g = proxy._real
-        assert sdk.get_point(pid)["outdated"] is True
+        assert sdk._get_point(pid)["outdated"] is True
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -531,7 +531,7 @@ def test_a_rebuild_abort_on_the_corrects_edge_is_retried(tmp_path):
             proj.g, _INVALIDATE_CORRECTS_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.invalidate_point(pid, corrector)
+        sdk._invalidate_point(pid, corrector)
 
         assert proxy.matching >= 2, "the aborted MERGE was never re-issued"
         assert proxy.applied == 1, (
@@ -567,13 +567,13 @@ def test_a_rebuild_abort_on_the_retract_cas_set_is_retried(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _RETRACT_CAS_NEEDLE, present=True)
         proj.g = proxy
 
-        retracted = sdk.retract_point(pid)
+        retracted = sdk._retract_point(pid)
 
         assert proxy.matching >= 2, "the aborted CAS SET was never re-issued"
         assert proxy.applied == 1, "exactly one application"
         proj.g = proxy._real
         assert retracted["status"] == "retracted"
-        assert sdk.get_point(pid)["status"] == "retracted"
+        assert sdk._get_point(pid)["status"] == "retracted"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -597,7 +597,7 @@ def test_a_rebuild_abort_on_the_object_promote_set_is_retried(tmp_path):
     """
     sdk = _sdk(tmp_path, "objpromote")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft object {uuid.uuid4().hex}",
             status="draft")["id"]
         proj = sdk._get_proj()
@@ -606,13 +606,13 @@ def test_a_rebuild_abort_on_the_object_promote_set_is_retried(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _OBJECT_PROMOTE_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
 
         assert proxy.matching >= 2, (
             "the aborted :Object promote SET was never re-issued")
         assert proxy.applied == 1, "exactly one application"
         proj.g = proxy._real
-        point = sdk.get_point(pid)
+        point = sdk._get_point(pid)
         assert point["status"] == "live"
         assert point["version"] == 1, (
             "one promotion, one version bump — a re-issued relative increment "
@@ -643,7 +643,7 @@ def test_a_rebuild_abort_on_the_derived_embedding_set_is_retried(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _EMBEDDING_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, content=revised)
+        sdk._update_point(pid, content=revised)
 
         assert proxy.matching >= 2, (
             "the aborted embedding clear+set was never re-issued")
@@ -651,7 +651,7 @@ def test_a_rebuild_abort_on_the_derived_embedding_set_is_retried(tmp_path):
             "exactly one application — a re-issued absolute clear+set "
             "converges")
         proj.g = proxy._real
-        assert sdk.get_point(pid)["content"] == revised
+        assert sdk._get_point(pid)["content"] == revised
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -679,12 +679,12 @@ def test_a_retried_tag_sync_still_sweeps_the_orphaned_tag(tmp_path):
         pid = _pid(sdk)
         keep = f"7405keep{uuid.uuid4().hex[:8]}"
         drop = f"7405drop{uuid.uuid4().hex[:8]}"
-        sdk.update_point(pid, tags=[keep, drop])
+        sdk._update_point(pid, tags=[keep, drop])
         proj = sdk._get_proj()
         proxy = _AbortOnceGraph(proj.g, _TAG_GC_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, tags=[keep])
+        sdk._update_point(pid, tags=[keep])
 
         assert proxy.matching >= 2, (
             "the aborted orphan sweep was never re-issued")
@@ -720,7 +720,7 @@ def test_the_per_key_loop_shares_one_retry_budget(tmp_path):
     try:
         src = _pid(sdk)
         tgt = _pid(sdk)
-        op = sdk.create_operator("IMPL", src, [tgt])["id"]
+        op = sdk._create_operator("IMPL", src, [tgt])["id"]
         proj = sdk._get_proj()
         # Abort the 4th per-key statement — i.e. NOT the first one, so only a
         # whole-loop re-issue makes the 1st key's statement count as twice.
@@ -728,7 +728,7 @@ def test_the_per_key_loop_shares_one_retry_budget(tmp_path):
             proj.g, _POINT_PROP_SET_NEEDLE, present=True, skip=3, aborts=1)
         proj.g = proxy
 
-        sdk.annotate_operator(op, bias=0.2, precision=0.8,
+        sdk._annotate_operator(op, bias=0.2, precision=0.8,
                               consistency=0.7, directness=0.9)
 
         assert proxy.matching == 8, (
@@ -737,7 +737,7 @@ def test_the_per_key_loop_shares_one_retry_budget(tmp_path):
         assert proxy.applied == 7, (
             "all four keys land, exactly one re-issue apiece")
         proj.g = proxy._real
-        point = sdk.get_point(op)
+        point = sdk._get_point(op)
         assert point["annotator_consistency"] == pytest.approx(0.7)
         assert point["annotator_directness"] == pytest.approx(0.9)
     finally:
@@ -778,7 +778,7 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
     try:
         src = _pid(sdk)
         tgt = _pid(sdk)
-        op = sdk.create_operator("IMPL", src, [tgt])["id"]
+        op = sdk._create_operator("IMPL", src, [tgt])["id"]
         seen: list[str] = []
         original = sdk._graph_write_with_retry
 
@@ -791,17 +791,17 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
         _ADVANCE = "_advance_ep_version MERGE(:EpMeta)"
         _DIRTY = "_mark_dirty ep_dirty persist SET"
 
-        sdk.update_point(src, confidence=0.5)
+        sdk._update_point(src, confidence=0.5)
         assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY], seen
 
         seen.clear()
-        sdk.update_point(src, tags=["a"])
+        sdk._update_point(src, tags=["a"])
         assert seen == ["update_point SET (per-key)",
                         "update_point TAGGED edges",
                         _ADVANCE, _DIRTY], seen
 
         seen.clear()
-        sdk.update_point(src, content="revised claim", tags=["a"])
+        sdk._update_point(src, content="revised claim", tags=["a"])
         assert seen == ["update_point SET (per-key)",
                         "update_point SET (embedding)",
                         "update_point TAGGED edges",
@@ -809,7 +809,7 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
         assert len(seen) == 5, "a LIVE content+tags update is FIVE windows"
 
         seen.clear()
-        sdk.annotate_operator(op, bias=0.2, precision=0.8,
+        sdk._annotate_operator(op, bias=0.2, precision=0.8,
                               consistency=0.7, directness=0.9)
         assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY], seen
 
@@ -825,18 +825,18 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
             "MATCH (n:Point {id:$id}) SET n:Object", params={"id": obj})
 
         seen.clear()
-        sdk.update_point(obj, confidence=0.5)
+        sdk._update_point(obj, confidence=0.5)
         assert seen == ["update_point SET (Object)", _ADVANCE, _DIRTY], seen
         assert len(seen) == 3, "an :Object plain update is THREE windows"
 
         seen.clear()
-        sdk.update_point(obj, tags=["a"])
+        sdk._update_point(obj, tags=["a"])
         assert seen == ["update_point SET (Object)",
                         "update_point TAGGED edges", _ADVANCE, _DIRTY], seen
         assert len(seen) == 4, "an :Object tagged update is FOUR windows"
 
         seen.clear()
-        sdk.update_point(obj, content="object revision", tags=["a"])
+        sdk._update_point(obj, content="object revision", tags=["a"])
         assert seen == ["update_point SET (Object)",
                         "update_point TAGGED edges", _ADVANCE, _DIRTY], seen
         assert len(seen) == 4, (
@@ -845,15 +845,15 @@ def test_the_documented_per_verb_retry_bound_matches_the_call_sites(
 
         # A TERMINAL point reaches `_mark_dirty`'s extra clear SET, so the
         # bound is a RANGE, not a number (#8854 review round 3 P2).
-        sdk.retract_point(src)
+        sdk._retract_point(src)
         seen.clear()
-        sdk.update_point(src, confidence=0.3)
+        sdk._update_point(src, confidence=0.3)
         assert seen == ["update_point SET (per-key)", _ADVANCE, _DIRTY,
                         "_mark_dirty terminal ep_dirty clear SET"], seen
 
         # The documented UPPER bound: a TERMINAL point with content AND tags.
         seen.clear()
-        sdk.update_point(src, content="terminal revision", tags=["b"])
+        sdk._update_point(src, content="terminal revision", tags=["b"])
         assert seen == ["update_point SET (per-key)",
                         "update_point SET (embedding)",
                         "update_point TAGGED edges",
@@ -935,7 +935,7 @@ def test_a_reissue_that_matches_nothing_is_NOT_reported_as_success(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, confidence=0.9)
+            sdk._update_point(pid, confidence=0.9)
 
         assert proxy.matching >= 2, "the aborted statement was never re-issued"
         assert proxy.matched_rows == 0, (
@@ -959,7 +959,7 @@ def test_an_invalidate_that_matches_nothing_does_not_report_invalidated(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.invalidate_point(old, new)
+            sdk._invalidate_point(old, new)
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -983,7 +983,7 @@ def test_retract_does_not_claim_already_terminal_after_a_retry(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.retract_point(pid)
+            sdk._retract_point(pid)
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -1079,7 +1079,7 @@ def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
             proj.g, _POINT_PROP_SET_NEEDLE)
         proj.g = proxy
 
-        assert sdk.update_point(pid, confidence=0.5) == {}
+        assert sdk._update_point(pid, confidence=0.5) == {}
         assert proxy.matching == 1, (
             "a target present at the guard read must still take its write "
             f"({proxy.matching} statements)")
@@ -1139,7 +1139,7 @@ def test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract(
         # surface ``_WRITE_SLOT`` here after the retry budget, and the
         # graph-replaced family would append its rebuild diagnosis — neither is
         # what a vanished target under contention may produce.
-        assert sdk.update_point(pid, confidence=0.5) == {}
+        assert sdk._update_point(pid, confidence=0.5) == {}
         assert proxy.matching >= 2, (
             "the aborted statement must be RE-ISSUED — otherwise the witness "
             "was never reachable and this test proves nothing")
@@ -1172,7 +1172,7 @@ def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE)
         proj.g = proxy
 
-        assert sdk.update_point(missing, confidence=0.5) == {}
+        assert sdk._update_point(missing, confidence=0.5) == {}
         assert proxy.matching == 0, (
             "an ABSENT id issued a write statement (#10119: the guard read "
             "must precede the append and every write)")
@@ -1246,14 +1246,14 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
         # The rebuild window: the projection has not (re)applied the record yet.
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": pid})
-        assert not sdk.get_point(pid), (
+        assert not sdk._get_point(pid), (
             "the live graph must NOT hold the point for this shape "
-            f"(get_point answered {sdk.get_point(pid)!r})")
+            f"(get_point answered {sdk._get_point(pid)!r})")
 
         before = monitoring.silent_revision_loss_counts().get("journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(pid, confidence=0.9) == {}
+            assert sdk._update_point(pid, confidence=0.9) == {}
         after = monitoring.silent_revision_loss_counts().get("journal_known", 0)
 
         assert after == before + 1, (
@@ -1267,7 +1267,7 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
         typo_before = monitoring.silent_revision_loss_counts()
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+            assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts() == typo_before, (
             "an id absent from BOTH the graph and the journal is a typo and "
             "must add to no counter")
@@ -1282,11 +1282,11 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
         # that fires there can never be alerted on. Presence is folded
         # last-record-wins, so a deleted point is NOT known.
         gone = _pid(sdk)
-        sdk.delete_point(gone)
+        sdk._delete_point(gone)
         deleted_before = monitoring.silent_revision_loss_counts()
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(gone, confidence=0.9) == {}
+            assert sdk._update_point(gone, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts() == deleted_before, (
             "a deliberately DELETED point must not be counted as a lost "
             "revision — the counter has to stay alertable on a healthy lane")
@@ -1304,12 +1304,12 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
         sdk._get_proj().g.query(
             "MATCH (n:Point) WHERE n.id IN $ids DETACH DELETE n",
             {"ids": [p1, p2]})
-        assert not sdk.get_point(p1) and not sdk.get_point(p2)
+        assert not sdk._get_point(p1) and not sdk._get_point(p2)
         two_before = monitoring.silent_revision_loss_counts().get(
             "journal_known", 0)
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(p1, confidence=0.9) == {}
-            assert sdk.update_point(p2, confidence=0.9) == {}
+            assert sdk._update_point(p1, confidence=0.9) == {}
+            assert sdk._update_point(p2, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts().get(
             "journal_known", 0) == two_before + 2, (
             "two journal-known points in ONE journal state must BOTH be "
@@ -1329,11 +1329,11 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
             {"type": "PointsMerged", "keep_id": keep, "merge_ids": [loser]})
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": loser})
-        assert not sdk.get_point(loser)
+        assert not sdk._get_point(loser)
         merged_before = monitoring.silent_revision_loss_counts()
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(loser, confidence=0.9) == {}
+            assert sdk._update_point(loser, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts() == merged_before, (
             "a point the lane deliberately MERGED AWAY must not be counted as "
             "a lost revision")
@@ -1353,11 +1353,11 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
              "point": {"keep_id": keep2, "merge_ids": [loser2]}})
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": loser2})
-        assert not sdk.get_point(loser2)
+        assert not sdk._get_point(loser2)
         nested_before = monitoring.silent_revision_loss_counts()
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(loser2, confidence=0.9) == {}
+            assert sdk._update_point(loser2, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts() == nested_before, (
             "a NESTED PointsMerged record must fold exactly as the flat one — a "
             "bare top-level read reports a deliberate merge as a lost revision")
@@ -1381,7 +1381,7 @@ def test_a_typo_on_a_journal_less_sdk_stays_silent(tmp_path):
     sdk = _sdk(tmp_path, "nojournal")
     try:
         before = monitoring.silent_revision_loss_counts()
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts() == before, (
             "a journal-less SDK cannot judge a loss, so a typo must add nothing "
             "to any reason")
@@ -1406,14 +1406,14 @@ def test_an_unconfirmable_graph_reports_the_loss_with_its_own_reason(tmp_path):
         pid = _pid(sdk)
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": pid})
-        assert not sdk.get_point(pid)
+        assert not sdk._get_point(pid)
         proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE, aborts=0,
                                 present=False)
         proj.g = proxy
 
         before = monitoring.silent_revision_loss_counts().get(
             "graph_unavailable", 0)
-        assert sdk.update_point(pid, confidence=0.9) == {}
+        assert sdk._update_point(pid, confidence=0.9) == {}
         after = monitoring.silent_revision_loss_counts().get(
             "graph_unavailable", 0)
         assert after == before + 1, (
@@ -1451,7 +1451,7 @@ def test_a_journal_removed_mid_flight_is_unreadable_not_a_typo(tmp_path, caplog)
         early_before = monitoring.silent_revision_loss_counts()
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+            assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts() == early_before, (
             "a configured journal path nothing has written yet is the ordinary "
             "early-life typo path — it must add to NO reason")
@@ -1474,7 +1474,7 @@ def test_a_journal_removed_mid_flight_is_unreadable_not_a_typo(tmp_path, caplog)
             "journal_unreadable", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+            assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         after = monitoring.silent_revision_loss_counts().get(
             "journal_unreadable", 0)
         assert after == before + 1, (
@@ -1523,7 +1523,7 @@ def test_a_non_point_record_naming_the_id_is_not_journal_presence(tmp_path, capl
         before = monitoring.silent_revision_loss_counts()
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(typo, confidence=0.9) == {}
+            assert sdk._update_point(typo, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts() == before, (
             "an Object/Entity record naming the id does NOT put a POINT in the "
             "journal — counting it turns every typo into a lost revision on a "
@@ -1538,7 +1538,7 @@ def test_a_non_point_record_naming_the_id_is_not_journal_presence(tmp_path, capl
             "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(typo, confidence=0.9) == {}
+            assert sdk._update_point(typo, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts().get(
             "journal_known", 0) == after_before + 1, (
             "the kind gate must not silence a REAL point record — a journal "
@@ -1580,7 +1580,7 @@ def test_the_presence_memo_resumes_and_answers_a_never_seen_id(
         old = _pid(sdk)
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": old})
-        assert not sdk.get_point(old)
+        assert not sdk._get_point(old)
         log = sdk._get_event_log()
         for i in range(200):
             log.append({"type": "PointAdded", "point": {"id": f"bulk-{i:04d}"}})
@@ -1595,7 +1595,7 @@ def test_the_presence_memo_resumes_and_answers_a_never_seen_id(
         monkeypatch.setattr(EventLog, "mention_lines", spy)
 
         # ── the first absent write builds the map: one pass from byte 0 ──
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert scans == [(None, 0)], (
             f"the first absent id pays one full pass, saw {scans}")
         first_resume = sdk._journal_presence_memo['folded_to']
@@ -1604,7 +1604,7 @@ def test_the_presence_memo_resumes_and_answers_a_never_seen_id(
 
         # ── one append later: the next absent id resumes from that offset ──
         log.append({"type": "PointAdded", "point": {"id": "after-the-scan"}})
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert len(scans) == 2, f"one pass per absent write, saw {scans}"
         assert scans[1][1] == first_resume, (
             "the second absent id must RESUME at the offset the first pass "
@@ -1618,7 +1618,7 @@ def test_the_presence_memo_resumes_and_answers_a_never_seen_id(
             "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(old, confidence=0.9) == {}
+            assert sdk._update_point(old, confidence=0.9) == {}
         assert len(scans) == 2, (
             "an id the retained map already covers must cost NO journal read — "
             f"a resuming memo that re-reads is the defect it exists to remove: {scans}")
@@ -1675,7 +1675,7 @@ def test_an_append_landing_during_a_fold_does_not_discard_the_presence_map(
 
         monkeypatch.setattr(EventLog, "mention_lines", spy)
 
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert len(scans) == 1, f"one pass for the first absent id, saw {scans}"
         folded_to = sdk._journal_presence_memo['folded_to']
         assert folded_to == os.path.getsize(journal), (
@@ -1687,7 +1687,7 @@ def test_an_append_landing_during_a_fold_does_not_discard_the_presence_map(
         # `test_the_presence_memo_resumes_and_answers_a_never_seen_id` is that the
         # journal's last bytes arrived mid-fold, so the memo's mtime has to be the
         # POST-fold one or the pair reads as a same-size rewrite
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         # The pre-fix memo is discarded here and this write re-folds from byte 0.
         # A retained map either answers it outright (no read: it already covers
         # every byte) or resumes at `folded_to`; both are fine, byte 0 is not.
@@ -1737,7 +1737,7 @@ def test_a_same_size_rewrite_after_a_quiet_fold_still_drops_the_map(
 
         monkeypatch.setattr(EventLog, "mention_lines", spy)
 
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert len(scans) == 1, scans
         assert sdk._journal_presence_memo['stable'] is True, (
             "the first fold raced nothing, so its mtime anchors its offset")
@@ -1752,7 +1752,7 @@ def test_a_same_size_rewrite_after_a_quiet_fold_still_drops_the_map(
         os.utime(journal_path, ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
         assert os.path.getsize(journal_path) == folded_to, "a SAME-SIZE rewrite"
 
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert len(scans) == 2, scans
         assert scans[1][1] == 0, (
             "a same-size rewrite in a later tick must re-fold from byte 0, not "
@@ -1848,7 +1848,7 @@ def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch,
             "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point("new-0100", confidence=0.9) == {}
+            assert sdk._update_point("new-0100", confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts().get(
             "journal_known", 0) == known_before + 1, (
             "the call that DETECTS the replacement must answer from the new "
@@ -1923,11 +1923,11 @@ def test_a_map_present_id_is_unjudged_when_the_fold_loses_the_file(
         log = sdk._get_event_log()
         pid = "held-0007"
         log.append({"type": "PointAdded", "point": {"id": pid}})
-        assert not sdk.get_point(pid), (
+        assert not sdk._get_point(pid), (
             "the live graph must NOT hold the point — the journal alone does")
 
         # a first absent write folds the journal and RETAINS the map from it
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         memo = sdk._journal_presence_memo
         assert memo is not None, "the fixture needs a RETAINED map to test"
         assert memo['known'].get(pid) is True, (
@@ -1955,7 +1955,7 @@ def test_a_map_present_id_is_unjudged_when_the_fold_loses_the_file(
             "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(pid, confidence=0.9) == {}
+            assert sdk._update_point(pid, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts().get(
             "journal_unreadable", 0) == before + 1, (
             "a journal whose file went away under the fold cannot be judged, "
@@ -2005,11 +2005,11 @@ def test_a_map_present_id_outlives_an_unlink_after_the_fold(
         log = sdk._get_event_log()
         pid = "kept-0011"
         log.append({"type": "PointAdded", "point": {"id": pid}})
-        assert not sdk.get_point(pid), (
+        assert not sdk._get_point(pid), (
             "the live graph must NOT hold the point — the journal alone does")
 
         # a first absent write folds the journal and RETAINS the map from it
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         memo = sdk._journal_presence_memo
         assert memo is not None, "the fixture needs a RETAINED map to test"
         assert memo['known'].get(pid) is True, (
@@ -2044,7 +2044,7 @@ def test_a_map_present_id_outlives_an_unlink_after_the_fold(
             "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(pid, confidence=0.9) == {}
+            assert sdk._update_point(pid, confidence=0.9) == {}
         assert calls['n'] == 2, (
             "the fixture must reach the POST-FOLD stat (the resume path), not "
             f"the fold's own FileNotFoundError arm: {calls['n']} stat calls")
@@ -2113,11 +2113,11 @@ def test_a_truncation_under_the_fold_keeps_the_map_as_witness(
         log = sdk._get_event_log()
         pid = "trunc-0021"
         log.append({"type": "PointAdded", "point": {"id": pid}})
-        assert not sdk.get_point(pid), (
+        assert not sdk._get_point(pid), (
             "the live graph must NOT hold the point — the journal alone does")
 
         # a first absent write folds the journal and RETAINS the map from it
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         memo = sdk._journal_presence_memo
         assert memo is not None, "the fixture needs a RETAINED map to test"
         assert memo['known'].get(pid) is True, (
@@ -2152,7 +2152,7 @@ def test_a_truncation_under_the_fold_keeps_the_map_as_witness(
             "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(pid, confidence=0.9) == {}
+            assert sdk._update_point(pid, confidence=0.9) == {}
         assert calls['n'] == 2, (
             "the fixture must reach the POST-FOLD stat (the resume path), not "
             f"the fold's own FileNotFoundError arm: {calls['n']} stat calls")
@@ -2206,10 +2206,10 @@ def test_a_map_present_id_is_unjudged_when_the_path_is_recreated(
         log = sdk._get_event_log()
         pid = "kept-0022"
         log.append({"type": "PointAdded", "point": {"id": pid}})
-        assert not sdk.get_point(pid), (
+        assert not sdk._get_point(pid), (
             "the live graph must NOT hold the point — the journal alone does")
 
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         memo = sdk._journal_presence_memo
         assert memo is not None and memo['known'].get(pid) is True, (
             f"the fixture needs the id PRESENT in a retained map: {memo}")
@@ -2245,7 +2245,7 @@ def test_a_map_present_id_is_unjudged_when_the_path_is_recreated(
             "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(pid, confidence=0.9) == {}
+            assert sdk._update_point(pid, confidence=0.9) == {}
         assert calls['n'] == 2, (
             "the fixture must reach the POST-FOLD stat: "
             f"{calls['n']} stat calls")
@@ -2305,11 +2305,11 @@ def test_a_delete_in_the_recreated_path_is_answered_not_escalated(
         log = sdk._get_event_log()
         pid = "deleted-0023"
         log.append({"type": "PointAdded", "point": {"id": pid}})
-        assert not sdk.get_point(pid), (
+        assert not sdk._get_point(pid), (
             "the live graph must NOT hold the point — the journal alone does")
 
         # a first absent write folds the journal and RETAINS the map from it
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         memo = sdk._journal_presence_memo
         assert memo is not None and memo['known'].get(pid) is True, (
             f"the fixture needs the id PRESENT in a retained map: {memo}")
@@ -2343,7 +2343,7 @@ def test_a_delete_in_the_recreated_path_is_answered_not_escalated(
         before = monitoring.silent_revision_loss_counts()
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(pid, confidence=0.9) == {}
+            assert sdk._update_point(pid, confidence=0.9) == {}
         assert calls['n'] == 2, (
             "the fixture must reach the POST-FOLD stat: "
             f"{calls['n']} stat calls")
@@ -2417,9 +2417,9 @@ def test_a_replacement_reports_a_map_present_id_as_unjudged_not_a_typo(
         log = sdk._get_event_log()
         pid = "old-0055"
         log.append({"type": "PointAdded", "point": {"id": pid}})
-        assert not sdk.get_point(pid)
+        assert not sdk._get_point(pid)
 
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         memo = sdk._journal_presence_memo
         assert memo is not None and memo['known'].get(pid) is True
         old_stat = os.stat(journal)
@@ -2463,7 +2463,7 @@ def test_a_replacement_reports_a_map_present_id_as_unjudged_not_a_typo(
             "journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(pid, confidence=0.9) == {}
+            assert sdk._update_point(pid, confidence=0.9) == {}
         new_stat = os.stat(journal)
         assert (new_stat.st_dev, new_stat.st_ino) != (
             old_stat.st_dev, old_stat.st_ino), (
@@ -2559,7 +2559,7 @@ def test_a_journal_truncated_and_regrown_in_place_drops_the_stale_map(
                     "label": "Point", "op": "delete"})
 
         # ── build the map: one absent read folds every record above ──
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         memo = sdk._journal_presence_memo
         assert memo is not None and memo["folded_to"] == os.path.getsize(journal), (
             "the map must be complete for the whole journal, or this is not the "
@@ -2585,7 +2585,7 @@ def test_a_journal_truncated_and_regrown_in_place_drops_the_stale_map(
 
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(point_id, confidence=0.9) == {}
+            assert sdk._update_point(point_id, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts().get(
             "journal_known", 0) == before + 1, (
             "the regrown journal re-adds the id as a POINT, so the absent live "
@@ -2601,7 +2601,7 @@ def test_a_journal_truncated_and_regrown_in_place_drops_the_stale_map(
         after = monitoring.silent_revision_loss_counts().get("journal_known", 0)
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+            assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts().get(
             "journal_known", 0) == after, (
             "re-folding must leave the id-absent-from-BOTH silence intact")
@@ -2664,7 +2664,7 @@ def test_a_map_past_its_bound_latches_the_needle_pass_instead_of_refolding(
         monkeypatch.setattr(sdk_mod, "_journal_presence_state", state_spy)
 
         # ── the crossing pass: 12 ids against a bound of 3 ──
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert max(widths) <= 4, (
             "the fold must STOP at the bound (limit + 1) rather than build a dict "
             f"proportional to the journal's distinct-id count: widths={widths}")
@@ -2679,7 +2679,7 @@ def test_a_map_past_its_bound_latches_the_needle_pass_instead_of_refolding(
             f"exactly ONE full fold, and it stopped at the bound: {scans}")
 
         # ── the NEXT absent write must take the needle pass, not re-fold ──
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         assert len(scans) == 3, f"one pass per absent write, saw {scans}"
         assert scans[2][0] is not None, (
             "past the bound the needle-filtered pass is the STEADY STATE — a "
@@ -2729,7 +2729,7 @@ def test_a_seam_that_cannot_be_read_drops_the_map_instead_of_trusting_it(
         os.symlink(target, journal)
 
         # ── build the map: the seam read on this path CANNOT answer ──
-        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert sdk._update_point(str(uuid.uuid4()), confidence=0.9) == {}
         memo = sdk._journal_presence_memo
         assert memo is not None and memo["folded_to"] == os.path.getsize(journal), (
             "the map must be complete for the whole journal, or this is not the "
@@ -2752,7 +2752,7 @@ def test_a_seam_that_cannot_be_read_drops_the_map_instead_of_trusting_it(
 
         caplog.clear()
         with caplog.at_level("WARNING"):
-            assert sdk.update_point(point_id, confidence=0.9) == {}
+            assert sdk._update_point(point_id, confidence=0.9) == {}
         assert monitoring.silent_revision_loss_counts().get(
             "journal_known", 0) == before + 1, (
             "a seam read that cannot ANSWER must be read as a MISMATCH and drop "
@@ -2995,7 +2995,7 @@ def test_an_absent_id_is_not_embedded_at_all(tmp_path, monkeypatch):
         monkeypatch.setattr(embeddings, "encode_for_row", _spy)
 
         missing = str(uuid.uuid4())
-        assert sdk.update_point(
+        assert sdk._update_point(
             missing, content="a revision that cannot land") == {}
         assert calls == [], (
             "an ABSENT id paid for an embedding the early return then threw "
@@ -3004,7 +3004,7 @@ def test_an_absent_id_is_not_embedded_at_all(tmp_path, monkeypatch):
         # POSITIVE CONTROL: a real point's content edit must still derive.
         pid = _pid(sdk)
         calls.clear()
-        sdk.update_point(pid, content="a revision that lands")
+        sdk._update_point(pid, content="a revision that lands")
         assert calls == ["a revision that lands"], (
             "the derived-embedding arm no longer re-encodes a content edit "
             f"(#4208): {calls}")
@@ -3072,7 +3072,7 @@ def test_a_later_write_slot_abort_does_not_disarm_the_witness(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, confidence=0.9)
+            sdk._update_point(pid, confidence=0.9)
 
         assert proxy.matching >= 3, "the sequence never reached the re-issue"
         assert proxy.matched_rows == 0, "nothing landed, so nothing may report it"
@@ -3169,7 +3169,7 @@ def test_retract_of_an_OUTDATED_node_still_raises_already_terminal(
         proj.g = proxy
 
         with pytest.raises(ValueError, match="already terminal"):
-            sdk.retract_point(pid)
+            sdk._retract_point(pid)
 
         assert proxy.matching >= 2, "the aborted CAS was never re-issued"
         proj.g = proxy._real
@@ -3203,7 +3203,7 @@ def test_retract_that_lost_the_race_still_raises_already_terminal(
         proj.g = proxy
 
         with pytest.raises(ValueError, match="already terminal"):
-            sdk.retract_point(pid)
+            sdk._retract_point(pid)
         assert proxy.matching >= 2, "the aborted CAS was never re-issued"
     finally:
         with contextlib.suppress(Exception):
@@ -3239,7 +3239,7 @@ def test_a_promote_refused_by_a_terminal_status_keeps_its_illegal_transition(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "promoterace")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortOnceThenSetStatus(
@@ -3247,7 +3247,7 @@ def test_a_promote_refused_by_a_terminal_status_keeps_its_illegal_transition(
         proj.g = proxy
 
         with pytest.raises(ValueError, match="Illegal status transition"):
-            sdk.update_point(pid, status="live")
+            sdk._update_point(pid, status="live")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -3265,14 +3265,14 @@ def test_a_promote_on_an_absent_node_still_surfaces_the_abort(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "promoteabsent")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortOnceThenEmptyGraph(proj.g, _POINT_PROMOTE_NEEDLE)
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, status="live")
+            sdk._update_point(pid, status="live")
         assert proxy.matching >= 3, (
             "an absent node must keep retrying, not raise after one re-issue")
     finally:
@@ -3322,7 +3322,7 @@ def test_retract_mid_skew_does_not_claim_already_terminal(
         proxy = _AbortThenEmptyThenPass(proj.g, _RETRACT_CAS_NEEDLE)
         proj.g = proxy
 
-        out = sdk.retract_point(pid)
+        out = sdk._retract_point(pid)
         assert out["status"] == "retracted"
         assert proxy.matching >= 3, "the CAS was never re-issued after the skew"
     finally:
@@ -3343,13 +3343,13 @@ def test_a_promote_on_a_draft_node_re_lands_after_a_transient_empty(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "draftskew")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortThenEmptyThenPass(proj.g, _POINT_PROMOTE_NEEDLE)
         proj.g = proxy
 
-        out = sdk.update_point(pid, status="live")
+        out = sdk._update_point(pid, status="live")
 
         assert out["status"] == "live"
         assert proxy.matching >= 3, "the promote was not re-issued after the skew"
@@ -3369,14 +3369,14 @@ def test_a_status_only_promote_on_an_already_live_node_is_idempotent(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "liveskew")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortOnceThenSetStatus(
             proj.g, _POINT_PROMOTE_NEEDLE, status="live")
         proj.g = proxy
 
-        out = sdk.update_point(pid, status="live")
+        out = sdk._update_point(pid, status="live")
 
         assert out["status"] == "live"
     finally:
@@ -3405,7 +3405,7 @@ def test_the_tag_witness_counts_NAMES_not_edges(tmp_path, monkeypatch):
         proxy = _AbortOnceGraph(proj.g, _TAGGED_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, tags=["dup-tag"])
+        sdk._update_point(pid, tags=["dup-tag"])
 
         assert proxy.applied >= 1, "the tag sync never landed"
         tags = {r[0] for r in proj.g.query(
@@ -3470,7 +3470,7 @@ def test_a_per_key_attempt_with_no_result_row_is_a_non_landing(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, confidence=0.42)
+            sdk._update_point(pid, confidence=0.42)
         assert proxy.matching >= 2, "the per-key SET was never re-issued"
     finally:
         with contextlib.suppress(Exception):
@@ -3531,7 +3531,7 @@ def test_a_deleted_graph_is_not_issued_into_after_a_mixed_abort(
         # `last_abort` would tell the caller to "retry the query" against a
         # graph that is gone (#8854 r7 P2). The latched GRAPH abort is raised.
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, confidence=0.9)
+            sdk._update_point(pid, confidence=0.9)
 
         assert proxy.applied == 0, (
             "a deleted graph must never be issued into, even after a "
@@ -3558,7 +3558,7 @@ def test_a_deleted_graph_abort_on_the_property_set_stays_loud(tmp_path):
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, confidence=0.9)
+            sdk._update_point(pid, confidence=0.9)
 
         assert proxy.applied == 0, (
             "a deleted graph must not be re-issued into — nothing may be "
@@ -3641,7 +3641,7 @@ def test_a_retried_tag_sync_that_lands_nothing_does_not_report_success(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, tags=["7405ghost", "7405spectre"])
+            sdk._update_point(pid, tags=["7405ghost", "7405spectre"])
 
         assert sleeps, (
             "the retry budget was never exhausted — the witness must refuse "
@@ -3676,7 +3676,7 @@ def test_clearing_tags_is_never_reported_as_a_non_landing(tmp_path):
     sdk = _sdk(tmp_path, "tagclear")
     try:
         pid = _pid(sdk)
-        sdk.update_point(pid, tags=["7405gone"])
+        sdk._update_point(pid, tags=["7405gone"])
         proj = sdk._get_proj()
         # Abort the stale-edge DELETE, so the retry re-issues the whole
         # reconciler with the latch armed — the state in which the witness is
@@ -3684,7 +3684,7 @@ def test_clearing_tags_is_never_reported_as_a_non_landing(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _TAG_DELETE_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, tags=[])  # returns; must NOT raise
+        sdk._update_point(pid, tags=[])  # returns; must NOT raise
 
         assert proxy.matching >= 2, (
             "the aborted stale DELETE was never re-issued — the witness was "
@@ -3733,7 +3733,7 @@ def test_a_tagged_update_that_never_retries_pays_no_read_back(tmp_path):
         counter = _QueryCounter(proj.g)
         proj.g = counter
 
-        sdk.update_point(pid, tags=["7405lazy"])
+        sdk._update_point(pid, tags=["7405lazy"])
 
         read_backs = [s for s in counter.statements
                       if "count(DISTINCT t.name)" in s]
@@ -3791,14 +3791,14 @@ def test_a_promote_witness_reads_an_empty_status_row_as_absent(
     try:
         # The promote arm engages only on a DRAFT point (`WHERE n.status = 'draft'`),
         # so a live `_pid` never issues the statement under test.
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortPromoteThenEmptyPresence(proj.g, _POINT_PROMOTE_NEEDLE)
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, status="live")
+            sdk._update_point(pid, status="live")
 
         assert proxy.presence_reads >= 1, (
             "the witness was never consulted — this test would prove nothing")
@@ -3832,7 +3832,7 @@ def test_a_non_string_tag_list_is_still_witnessed(tmp_path, monkeypatch):
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, tags=[1, 2])
+            sdk._update_point(pid, tags=[1, 2])
 
         assert sleeps, (
             "the retry budget was never exhausted — the witness must refuse "
@@ -3884,14 +3884,14 @@ def test_a_live_node_with_unwritten_props_is_not_a_silent_success(tmp_path):
     """
     sdk = _sdk(tmp_path, "promoterace")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
         proj.g = proxy
 
         with pytest.raises(ValueError, match="already live"):
-            sdk.update_point(pid, status="live", confidence=0.42)
+            sdk._update_point(pid, status="live", confidence=0.42)
 
         assert proxy.flipped, "fixture precondition: the node must have gone live"
         proj.g = proxy._real
@@ -3925,13 +3925,13 @@ def test_a_status_only_promote_on_a_live_node_stays_an_idempotent_noop(
     """
     sdk = _sdk(tmp_path, "promoteidem")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
         proj.g = proxy
 
-        out = sdk.update_point(pid, status="live")  # must NOT raise
+        out = sdk._update_point(pid, status="live")  # must NOT raise
 
         assert out["status"] == "live"
         assert proxy.flipped, "fixture precondition: the node must have gone live"
@@ -3966,7 +3966,7 @@ def test_a_live_status_only_promote_writes_through_no_other_slot(
     """
     sdk = _sdk(tmp_path, "promotedirty")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
@@ -3980,7 +3980,7 @@ def test_a_live_status_only_promote_writes_through_no_other_slot(
 
         monkeypatch.setattr(sdk, "_graph_write_with_retry", counting)
 
-        out = sdk.update_point(pid, status="live")  # must NOT raise
+        out = sdk._update_point(pid, status="live")  # must NOT raise
 
         assert proxy.flipped, "fixture precondition: the node must have gone live"
         assert seen == ["update_point SET (promote)"], (
@@ -4038,14 +4038,14 @@ def test_a_retried_live_promote_with_other_props_raises_the_documented_refusal(
                         types.SimpleNamespace(sleep=sleeps.append))
     sdk = _sdk(tmp_path, "promoteretrylive")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortThenLive(proj.g, _POINT_PROMOTE_NEEDLE, victim=pid)
         proj.g = proxy
 
         with pytest.raises(ValueError, match="already live"):
-            sdk.update_point(pid, status="live", confidence=0.42)
+            sdk._update_point(pid, status="live", confidence=0.42)
 
         assert proxy.aborted, (
             "fixture precondition: the promote must have aborted once, or the "
@@ -4101,9 +4101,9 @@ def test_a_live_status_only_promote_emits_no_point_revised(
     # POSITIVE CONTROL: an ordinary promote that lands DOES emit.
     sdk = _sdk(tmp_path, "emitctl")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
         assert len(revised(sdk)) == 1, (
             "reader precondition: a LANDED promote must emit a PointRevised, "
             "or the assertion below proves nothing")
@@ -4114,13 +4114,13 @@ def test_a_live_status_only_promote_emits_no_point_revised(
     # THE GATE: the live race applies nothing, so it must emit nothing.
     sdk = _sdk(tmp_path, "emitgate")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _PromoteLosesTheRace(proj.g, _POINT_PROMOTE_NEEDLE, pid)
         proj.g = proxy
 
-        sdk.update_point(pid, status="live")  # must not raise
+        sdk._update_point(pid, status="live")  # must not raise
 
         proj.g = proxy._real
         assert proxy.flipped, "fixture precondition: the node must have gone live"
@@ -4171,14 +4171,14 @@ def test_the_promote_diagnostic_reads_an_empty_count_as_absent(tmp_path):
     """
     sdk = _sdk(tmp_path, "diagcount")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _PromoteThenEmptyCount(proj.g, _POINT_PROMOTE_NEEDLE)
         proj.g = proxy
 
         with pytest.raises(ValueError, match="No point"):
-            sdk.update_point(pid, status="live")
+            sdk._update_point(pid, status="live")
 
         assert proxy.count_reads >= 1, (
             "the diagnostic's presence read was never consulted — this test "
@@ -4246,14 +4246,14 @@ def test_the_terminal_diagnostic_does_not_claim_no_point_after_its_own_read(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "promotevanish")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _VanishAfterTheStatusRead(proj.g, _POINT_PROMOTE_NEEDLE, pid)
         proj.g = proxy
 
         with pytest.raises(ValueError, match="Illegal status transition"):
-            sdk.update_point(pid, status="live")
+            sdk._update_point(pid, status="live")
         assert proxy.vanished, (
             "the node never vanished after the status read — this test would "
             "prove nothing")
@@ -4292,7 +4292,7 @@ def test_the_object_arm_refuses_a_reissue_that_lands_nothing(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, confidence=0.31)
+            sdk._update_point(pid, confidence=0.31)
 
         assert proxy.vanished, "fixture precondition: the Point must be gone"
         assert proxy.matching >= 2, (
@@ -4318,14 +4318,14 @@ def test_a_promote_point_cas_that_lands_nothing_is_not_a_not_draft_verdict(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "promotepointlanding")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortThenUnreplay(proj.g, _PROMOTE_POINT_CAS_NEEDLE, victim=pid)
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.promote_point(pid)
+            sdk._promote_point(pid)
 
         assert proxy.vanished, "fixture precondition: the Point must be gone"
         assert proxy.matching >= 2, (
@@ -4412,14 +4412,14 @@ def test_a_promote_point_reissue_that_matches_nothing_keeps_retrying(
                         types.SimpleNamespace(sleep=sleeps.append))
     sdk = _sdk(tmp_path, "promotepointdraftretry")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _PromotePointCasReturnsEmpty(proj.g, _PROMOTE_POINT_CAS_NEEDLE)
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.promote_point(pid)
+            sdk._promote_point(pid)
 
         assert proxy.matching >= 3, (
             "a draft node does not explain a zero row — the CAS must be "
@@ -4443,13 +4443,13 @@ def test_a_promote_point_that_races_a_concurrent_promote_reports_already_live(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "promotepointrace")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _AbortThenLive(proj.g, _PROMOTE_POINT_CAS_NEEDLE, victim=pid)
         proj.g = proxy
 
-        out = sdk.promote_point(pid)
+        out = sdk._promote_point(pid)
 
         assert proxy.aborted, "fixture precondition: the CAS must have aborted"
         assert out["reason"] == "already_live", (
@@ -4521,14 +4521,14 @@ def test_a_promote_point_that_refuses_the_cas_is_not_reported_as_a_graph_abort(
                         types.SimpleNamespace(sleep=sleeps.append))
     sdk = _sdk(tmp_path, f"promotepointrefuse{new_status}")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _PromotePointCasSetsTheStatus(
             proj.g, _PROMOTE_POINT_CAS_NEEDLE, pid, new_status)
         proj.g = proxy
 
-        out = sdk.promote_point(pid)  # must NOT raise
+        out = sdk._promote_point(pid)  # must NOT raise
 
         assert proxy.moved, "fixture precondition: the status must have moved"
         assert out["blocked"] is True
@@ -4559,7 +4559,7 @@ def test_a_promote_point_whose_node_vanishes_at_the_re_read_is_not_not_draft(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "promotepointvanish")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proxy = _PromotePointVanishesAtTheReRead(
@@ -4567,7 +4567,7 @@ def test_a_promote_point_whose_node_vanishes_at_the_re_read_is_not_not_draft(
         proj.g = proxy
 
         with pytest.raises(ValueError, match="No point"):
-            sdk.promote_point(pid)
+            sdk._promote_point(pid)
 
         assert proxy.vanished, "fixture precondition: the node must have vanished"
     finally:
@@ -4591,7 +4591,7 @@ def test_the_object_promote_arm_refuses_a_reissue_that_lands_nothing(
                         types.SimpleNamespace(sleep=lambda _s: None))
     sdk = _sdk(tmp_path, "objpromotelanding")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
@@ -4600,7 +4600,7 @@ def test_the_object_promote_arm_refuses_a_reissue_that_lands_nothing(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, status="live")
+            sdk._update_point(pid, status="live")
 
         assert proxy.vanished, "fixture precondition: the Point must be gone"
         assert proxy.matching >= 2, (
@@ -4623,7 +4623,7 @@ def test_a_live_status_only_OBJECT_promote_writes_through_no_other_slot(
     """
     sdk = _sdk(tmp_path, "objpromotedirty")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
@@ -4638,7 +4638,7 @@ def test_a_live_status_only_OBJECT_promote_writes_through_no_other_slot(
 
         monkeypatch.setattr(sdk, "_graph_write_with_retry", counting)
 
-        out = sdk.update_point(pid, status="live")  # must NOT raise
+        out = sdk._update_point(pid, status="live")  # must NOT raise
 
         assert proxy.flipped, "fixture precondition: the node must have gone live"
         assert seen == ["update_point SET (Object promote)"], (
@@ -4653,13 +4653,13 @@ def test_a_live_status_only_OBJECT_promote_writes_through_no_other_slot(
         # tail — and with it the #1240 / DE2E-4 dirty-root re-entry that keeps
         # a promoted claim in dreaming — is skipped for every real promote.
         proj.g = proxy._real
-        pid2 = sdk.create_point(
+        pid2 = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid2})
         seen.clear()
         sdk._dirty_roots.clear()
 
-        landed = sdk.update_point(pid2, status="live")
+        landed = sdk._update_point(pid2, status="live")
 
         assert landed["status"] == "live"
         assert seen == [
@@ -4698,7 +4698,7 @@ def test_the_derived_embedding_arm_refuses_a_reissue_that_lands_nothing(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, content=f"revised {uuid.uuid4().hex}")
+            sdk._update_point(pid, content=f"revised {uuid.uuid4().hex}")
 
         assert proxy.vanished, "fixture precondition: the Point must be gone"
         assert proxy.matching >= 2, (
@@ -4728,7 +4728,7 @@ def test_the_corrects_edge_refuses_a_reissue_that_lands_nothing(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.invalidate_point(old, new)
+            sdk._invalidate_point(old, new)
 
         assert proxy.vanished, "fixture precondition: the old Point must be gone"
         assert proxy.matching >= 2, (
@@ -4759,7 +4759,7 @@ def test_duplicate_tag_names_do_not_read_as_a_half_landed_sync(
         proxy = _AbortOnceGraph(proj.g, _TAGGED_NEEDLE, present=True)
         proj.g = proxy
 
-        sdk.update_point(pid, tags=["7405dup", "7405dup"])  # must NOT raise
+        sdk._update_point(pid, tags=["7405dup", "7405dup"])  # must NOT raise
 
         assert proxy.applied >= 1, "the retried tag sync never landed"
         proj.g = proxy._real
@@ -4785,7 +4785,7 @@ def test_an_unhashable_tag_value_keeps_the_engine_error_family(tmp_path):
     try:
         pid = _pid(sdk)
         with pytest.raises(redis_exc.ResponseError):
-            sdk.update_point(pid, tags=[{"name": "a"}])
+            sdk._update_point(pid, tags=[{"name": "a"}])
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -4867,7 +4867,7 @@ def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
 
     sdk = _sdk(tmp_path, "promotejournal")
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
         if arm == "object":
@@ -4887,7 +4887,7 @@ def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.update_point(pid, status="live", tags=["7405late"])
+            sdk._update_point(pid, status="live", tags=["7405late"])
 
         assert proxy.matching >= 2, (
             "the tag arm was never re-issued — the witness was never consulted, "
@@ -5039,7 +5039,7 @@ def test_a_target_that_vanishes_at_the_write_strands_no_dirty_root(
     """
     sdk = _sdk(tmp_path, f"vanishroot{as_object}")
     try:
-        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+        pid = sdk._create_point("evidence", f"claim {uuid.uuid4().hex}",
                                dedup=False, status="live")["id"]
         proj = sdk._get_proj()
         if as_object:
@@ -5052,7 +5052,7 @@ def test_a_target_that_vanishes_at_the_write_strands_no_dirty_root(
 
         proxy = _VanishOnFirstWrite(proj.g, needle)
         proj.g = proxy
-        reply = sdk.update_point(pid, confidence=0.5)
+        reply = sdk._update_point(pid, confidence=0.5)
         proj.g = proxy._real
 
         assert proxy.vanished == [pid], (
@@ -5103,7 +5103,7 @@ def test_the_vanish_shape_keeps_the_JOURNAL_record_that_carries_the_revision(
     """
     sdk, journal = _sdk_journaled(tmp_path, "vanishjournal")
     try:
-        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+        pid = sdk._create_point("evidence", f"claim {uuid.uuid4().hex}",
                                dedup=False, status="live")["id"]
         proj = sdk._get_proj()
         # Model a converged sweep: the CREATE's own root is not the subject, so
@@ -5113,7 +5113,7 @@ def test_the_vanish_shape_keeps_the_JOURNAL_record_that_carries_the_revision(
         proxy = _VanishOnFirstWrite(proj.g, _POINT_PROP_SET_NEEDLE)
         proj.g = proxy
 
-        reply = sdk.update_point(pid, confidence=0.5)  # must NOT raise
+        reply = sdk._update_point(pid, confidence=0.5)  # must NOT raise
         proj.g = proxy._real
 
         assert reply == {}
@@ -5151,13 +5151,13 @@ def test_a_vanished_tagged_target_issues_no_tag_sync(tmp_path):
     """
     sdk = _sdk(tmp_path, "vanishtags")
     try:
-        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+        pid = sdk._create_point("evidence", f"claim {uuid.uuid4().hex}",
                                dedup=False, status="live")["id"]
         tag = f"10473-{uuid.uuid4().hex[:8]}"
         proj = sdk._get_proj()
         proxy = _VanishOnFirstWrite(proj.g, _POINT_PROP_SET_NEEDLE)
         proj.g = proxy
-        sdk.update_point(pid, tags=[tag])
+        sdk._update_point(pid, tags=[tag])
         proj.g = proxy._real
 
         assert proxy.rows_matched == 0, "fixture precondition"
@@ -5186,12 +5186,12 @@ def test_a_LANDED_update_still_runs_the_ep_side_effects(tmp_path):
     """
     sdk = _sdk(tmp_path, "vanishcontrol")
     try:
-        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+        pid = sdk._create_point("evidence", f"claim {uuid.uuid4().hex}",
                                dedup=False, status="live")["id"]
         sdk._dirty_roots.clear()
         before_ep = _ep_version(sdk)
 
-        out = sdk.update_point(pid, confidence=0.42)
+        out = sdk._update_point(pid, confidence=0.42)
 
         assert out.get("confidence") == 0.42, (
             f"the write must land on a present target, saw {out.get('confidence')!r}")

@@ -113,7 +113,7 @@ async def test_quota_rejection_is_recorded_as_a_failure(events, stdio):
     schema-legal, so nothing downstream marks it, and pre-fix it read ``ok``.
     """
     def quota_tool() -> dict:
-        return ms._safe(_QuotaSDK().query, "statement")
+        return ms._safe(_QuotaSDK()._query, "statement")
 
     result = await _call("_8135_quota", quota_tool)
 
@@ -131,7 +131,7 @@ async def test_quota_rejection_is_recorded_as_a_failure(events, stdio):
 async def test_bundle_validation_failure_is_recorded_as_a_failure(events, stdio):
     """``ERR_BUNDLE_INVALID`` — the code and its ``violations`` ride through."""
     def bundle_tool() -> dict:
-        return ms._safe(_BundleSDK().create_point, "statement", "x")
+        return ms._safe(_BundleSDK()._create_point, "statement", "x")
 
     result = await _call("_8135_bundle", bundle_tool)
 
@@ -257,7 +257,7 @@ async def test_a_plain_dict_payload_is_still_recorded_ok_at_the_seam(
 async def test_generic_sdk_exception_is_recorded_as_a_failure(events, stdio):
     """A bare SDK exception: pre-fix, the whole exception class vanished."""
     def generic_tool() -> dict:
-        return ms._safe(_GenericSDK().query, "statement")
+        return ms._safe(_GenericSDK()._query, "statement")
 
     await _call("_8135_generic", generic_tool)
 
@@ -285,7 +285,7 @@ async def test_a_union_envelope_tool_is_classified_through_the_envelope(
     prove the read-through fires (see the agreement check below).
     """
     def union_tool(query: str = "q") -> list[dict] | dict:
-        return ms._safe(_QuotaSDK().query, query)
+        return ms._safe(_QuotaSDK()._query, query)
 
     result = await _call("_8135_union", union_tool, {"query": "q"})
 
@@ -365,7 +365,7 @@ async def test_an_array_envelope_tool_agrees_with_the_repair(events, stdio):
     other not) is visible.
     """
     def search_tool(query: str = "q") -> list[dict]:
-        return ms._safe(_QuotaSDK().query, query)
+        return ms._safe(_QuotaSDK()._query, query)
 
     await _call("_8135_search", search_tool, {"query": "q"})
 
@@ -415,7 +415,7 @@ async def test_a_dispatch_that_recovered_from_a_secondary_failure_stays_ok(
 
     def recovering_tool(query: str = "q") -> list[dict]:
         try:
-            results = ms._safe(_RecoveredSDK().tortoise_fts_query, query)
+            results = ms._safe(_RecoveredSDK()._tortoise_fts_query, query)
             if isinstance(results, list) and results:
                 return results
         except Exception:  # pragma: no cover - mirrors the real tool
@@ -444,7 +444,7 @@ async def test_the_type_is_gone_at_the_seam(events, stdio):
     informative, not a regression.
     """
     def quota_tool() -> dict:
-        return ms._safe(_QuotaSDK().query, "statement")
+        return ms._safe(_QuotaSDK()._query, "statement")
 
     result = await _call("_8135_type", quota_tool)
 
@@ -468,7 +468,7 @@ async def test_the_payload_is_unchanged_by_the_classification(events, stdio):
     change this asserted ``False``) and the analytics row says ``exec_error``.
     """
     def quota_tool() -> dict:
-        return ms._safe(_QuotaSDK().query, "statement")
+        return ms._safe(_QuotaSDK()._query, "statement")
 
     result = await _call("_8135_wire", quota_tool)
 
@@ -490,7 +490,7 @@ def test_safe_outside_a_dispatch_is_unchanged():
     try:
         assert ms._dispatch_safe_failures.get() is None, (
             "a holder leaked out of a previous dispatch")
-        result = ms._safe(_QuotaSDK().query, "statement")
+        result = ms._safe(_QuotaSDK()._query, "statement")
     finally:
         ms._transport_mode.reset(token)
 

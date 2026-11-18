@@ -73,7 +73,7 @@ class _StubSDK:
         self.calls = []
         self.rows = [{"id": f"p{i}", "kind": "statement"} for i in range(population)]
 
-    def tortoise_fts_query(self, query=None, kind=None, *, entity_type="point",
+    def _tortoise_fts_query(self, query=None, kind=None, *, entity_type="point",
                            structural_kind=None, structural_hops=0,
                            min_confidence=0.0, order_by="relevance",
                            graph_ranker=None, limit=10, threshold=0.0,
@@ -99,17 +99,17 @@ class _StubSDK:
         }))
         return self.rows
 
-    def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
+    def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
         self.calls.append(("paginated_query", kind, skip, limit, kwargs))
         total = len(self.rows)
         return {"results": self.rows[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
-    def query(self, kind=None, **kwargs):
+    def _query(self, kind=None, **kwargs):
         self.calls.append(("query", kind, kwargs))
         return self.rows
 
-    def query_points_by_tag(self, tag, *, _record_reads=True):
+    def _query_points_by_tag(self, tag, *, _record_reads=True):
         self.calls.append(("query_points_by_tag", tag, _record_reads))
         return self.rows
 
@@ -556,8 +556,8 @@ def test_the_stub_declares_no_var_keyword_and_only_real_knobs() -> None:
     """
     from tortoise.sdk import TortoiseSDK
 
-    real = set(inspect.signature(TortoiseSDK.tortoise_fts_query).parameters)
-    stub = inspect.signature(_StubSDK.tortoise_fts_query).parameters
+    real = set(inspect.signature(TortoiseSDK._tortoise_fts_query).parameters)
+    stub = inspect.signature(_StubSDK._tortoise_fts_query).parameters
     wildcard = [p.name for p in stub.values()
                 if p.kind is inspect.Parameter.VAR_KEYWORD]
     assert wildcard == [], (

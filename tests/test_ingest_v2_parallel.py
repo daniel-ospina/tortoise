@@ -79,7 +79,7 @@ class _FakeSDK:
     def _get_proj(self):
         return self._proj
 
-    def create_point(self, kind, content, *, is_episodic=None, **props):
+    def _create_point(self, kind, content, *, is_episodic=None, **props):
         self._point_writes += 1
         if self._graph.fail_first_point_write and self._point_writes == 1:
             self._graph.fail_first_point_write = False
@@ -89,13 +89,13 @@ class _FakeSDK:
     def create_entity(self, *a, **k):
         return None
 
-    def create_event(self, *a, **k):
+    def _create_event(self, *a, **k):
         return None
 
-    def create_operator(self, *a, **k):
+    def _create_operator(self, *a, **k):
         return None
 
-    def retract_point(self, pid):
+    def _retract_point(self, pid):
         return None
 
 

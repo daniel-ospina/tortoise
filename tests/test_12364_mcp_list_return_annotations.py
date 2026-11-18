@@ -473,21 +473,21 @@ def test_the_passthrough_recogniser_sees_both_idiomatic_shapes():
     pinned OUT, because over-recognising would flag the legitimate reshaping
     tools (`tortoise_recall`) and force a rewrite of working code."""
     def one_statement(topic):
-        return ms._safe(ms._get_org_sdk().belief_timeline, topic)  # pragma: no cover
+        return ms._safe(ms._get_org_sdk()._belief_timeline, topic)  # pragma: no cover
 
     def bound_then_return(topic):
-        rows = ms._safe(ms._get_org_sdk().belief_timeline, topic)  # pragma: no cover
+        rows = ms._safe(ms._get_org_sdk()._belief_timeline, topic)  # pragma: no cover
         return rows  # pragma: no cover
 
     def enveloped(topic):
-        rows = ms._safe(ms._get_org_sdk().belief_timeline, topic)  # pragma: no cover
+        rows = ms._safe(ms._get_org_sdk()._belief_timeline, topic)  # pragma: no cover
         if isinstance(rows, dict):
             return rows  # pragma: no cover
         return {"result": rows}  # pragma: no cover
 
     def reshaped(topic):
         return {"mode": "state", "rows": ms._safe(  # pragma: no cover
-            ms._get_org_sdk().belief_timeline, topic)}
+            ms._get_org_sdk()._belief_timeline, topic)}
 
     assert _passthrough_of(one_statement) == "belief_timeline"
     assert _passthrough_of(bound_then_return) == "belief_timeline"

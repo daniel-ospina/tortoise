@@ -107,7 +107,7 @@ def test_captured_session_source_findable_via_fts(sdk) -> None:
         [{"role": "user", "content": CAPTURE_UTTERANCE}])
 
     trace: list[dict] = []
-    res = sdk.tortoise_fts_query(
+    res = sdk._tortoise_fts_query(
         QUERY_TERM, entity_type="source",
         _elevated_timeout_ms=5000, leg_trace=trace)
 
@@ -193,6 +193,6 @@ def test_capture_and_indexer_source_field_parity(sdk) -> None:
     # …and both are actually findable through the read path.
     for term, url in (("QUOKKA", "session:sess-parity"),
                       ("PARITYPHRASE", "corpus://parity/s1.md")):
-        res = sdk.tortoise_fts_query(
+        res = sdk._tortoise_fts_query(
             term, entity_type="source", _elevated_timeout_ms=5000)
         assert url in [r["id"] for r in res], (term, res)

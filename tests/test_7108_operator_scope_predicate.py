@@ -89,7 +89,7 @@ def sdk():
 
 
 def _mk_point(sdk, kind: str, content: str) -> str:
-    p = sdk.create_point(kind, content)
+    p = sdk._create_point(kind, content)
     return p["id"] if isinstance(p, dict) else p
 
 
@@ -125,7 +125,7 @@ def test_a_point_without_the_is_operator_property_is_not_dropped(sdk):
         f"MATCH (n:Point {{id:'{legacy}'}}) WHERE n.is_operator = false RETURN count(n)",
     )[0][0] == 0, "precondition: the bare form must drop this node"
 
-    returned = {r.get("id") for r in sdk.query(kind="evidence")}
+    returned = {r.get("id") for r in sdk._query(kind="evidence")}
     assert legacy in returned, (
         "a Point with no is_operator property was dropped by the read path — the bare "
         "`n.is_operator = false` form is back (#2205)"
@@ -152,7 +152,7 @@ def test_an_explicit_operator_kind_is_not_answered_with_a_guaranteed_empty(sdk):
     assert _raw(
         sdk, f"MATCH (n:Point {{id:'{probe}'}}) RETURN n.is_operator = false")[0][0] is False
 
-    returned = {r.get("id") for r in sdk.query(kind="operator")}
+    returned = {r.get("id") for r in sdk._query(kind="operator")}
     assert probe in returned, (
         "query(kind='operator') returned a wrong-empty: an unconditional "
         "is_operator=false clause makes the kind filter unreachable (#7108)"
@@ -167,8 +167,8 @@ def test_paginated_query_agrees_with_query_on_an_operator_kind(sdk):
             "op_type:'IMPL', content:$c, status:'live'})",
             params={"id": f"probe-{i}-{uuid.uuid4().hex[:8]}", "c": f"op {i}"},
         )
-    n = len(sdk.query(kind="operator"))
-    page = sdk.paginated_query(kind="operator", limit=2)
+    n = len(sdk._query(kind="operator"))
+    page = sdk._paginated_query(kind="operator", limit=2)
     assert n > 0, "query(kind='operator') is still a guaranteed empty"
     assert page["total"] == n, (
         f"paginated_query total ({page['total']}) disagrees with query() ({n}) — "
@@ -191,15 +191,15 @@ def test_operators_stay_out_of_default_and_non_operator_queries(sdk):
     """
     a = _mk_point(sdk, "evidence", "src")
     b = _mk_point(sdk, "evidence", "tgt")
-    sdk.create_operator("IMPL", a, [b], label="supports")
+    sdk._create_operator("IMPL", a, [b], label="supports")
 
     op_ids = {r[0] for r in _raw(
         sdk, "MATCH (n:Point) WHERE n.is_operator = true RETURN n.id")}
     assert op_ids, "create_operator produced no operator node"
 
     for label, rows in (
-        ("query()", sdk.query()),
-        ("query(kind='evidence')", sdk.query(kind="evidence")),
+        ("query()", sdk._query()),
+        ("query(kind='evidence')", sdk._query(kind="evidence")),
     ):
         returned = {r.get("id") for r in rows}
         leaked = sorted(returned & op_ids)

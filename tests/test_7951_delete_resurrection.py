@@ -469,7 +469,7 @@ class TestPostDeleteWriteReMaterialisesSource:
         # Live re-mint: the write names the deleted session, so the #3263
         # inferred ref mints `session:<SID>` again and journals the PointAdded
         # that carries it.
-        sdk.create_point("fact", "written after the delete", session_id=SID)
+        sdk._create_point("fact", "written after the delete", session_id=SID)
         assert _source_count(proj, SID) == 1, "live re-mint did not happen"
 
         # Engine 1: the apply()-based engine folds SessionDeleted INLINE, so
@@ -498,9 +498,9 @@ class TestPostDeleteWriteReMaterialisesSource:
         tc, sdk = hosted
         proj = sdk._get_proj()
         _capture(tc, SID)
-        sdk.create_point("fact", "pre-delete", session_id=SID)
+        sdk._create_point("fact", "pre-delete", session_id=SID)
         _delete(tc, SID)
-        sdk.create_point("fact", "post-delete", session_id=SID)
+        sdk._create_point("fact", "post-delete", session_id=SID)
 
         live_sn = _session_nodes_edges(proj, SID)
 
@@ -616,7 +616,7 @@ class TestPostDeleteEventReMaterialisesSource:
 
         # Live re-mint through the Event fold's connector-source gate: an
         # explicit `sourceUrl` naming the deleted session's Source.
-        sdk.create_event(
+        sdk._create_event(
             "evt-src-7951", "github.issue.open",
             sourceUrl=f"session:{SID}", sourceKind="github_issue")
         assert _source_count(proj, SID) == 1, "live re-mint did not happen"
@@ -655,11 +655,11 @@ class TestPreDeleteEdgesDoNotSurviveRebuild:
         # A point the delete does NOT remove (not a CONTAINS turn point), but
         # whose `extractedFrom` edge to the agentSession Source the delete's
         # DETACH DELETE DOES sever.
-        sdk.create_point("fact", "pre-delete", session_id=SID)
+        sdk._create_point("fact", "pre-delete", session_id=SID)
         _delete(tc, SID)
         # Re-mint the Source, so the deferred re-apply KEEPS it and pass 2's
         # re-derived pre-delete edge is not swept away with the node.
-        sdk.create_point("fact", "post-delete", session_id=SID)
+        sdk._create_point("fact", "post-delete", session_id=SID)
 
         live_sn = _session_nodes_edges(proj, SID)
         live_edges = live_sn[1]

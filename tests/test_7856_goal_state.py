@@ -57,7 +57,7 @@ def test_goal_state_valid_value_accepted_and_persisted(sdk, state):
     #13035 requires them to arrive with the `status` ending they spell (see
     `tests/test_13035_goal_ending_consistency.py`; this file's subject is the
     vocabulary, not the pairing rule)."""
-    goal = sdk.create_object("REVENUE", objectKind="goal", goalState=state)
+    goal = sdk._create_object("REVENUE", objectKind="goal", goalState=state)
     assert goal["goalState"] == state
     # Persisted (not just echoed on the create return).
     assert sdk.get_entity(goal["id"])["goalState"] == state
@@ -65,11 +65,11 @@ def test_goal_state_valid_value_accepted_and_persisted(sdk, state):
 
 def test_goal_state_invalid_value_refused_on_create_object(sdk):
     with pytest.raises(ValueError, match="goalState"):
-        sdk.create_object("REVENUE", objectKind="goal", goalState="green")
+        sdk._create_object("REVENUE", objectKind="goal", goalState="green")
 
 
 def test_goal_state_invalid_value_refused_on_update_entity(sdk):
-    goal = sdk.create_object("REVENUE", objectKind="goal", goalState="active")
+    goal = sdk._create_object("REVENUE", objectKind="goal", goalState="active")
     with pytest.raises(ValueError, match="goalState"):
         sdk.update_knowledge(goal["id"], goalState="in-flight")
     # The refused write did not land.
@@ -80,18 +80,18 @@ def test_goal_state_invalid_value_refused_on_create_point(sdk):
     """The legacy Point leg (where the objective map's goals actually live)
     validates through the same boundary."""
     with pytest.raises(ValueError, match="goalState"):
-        sdk.create_point("goal", "GOAL - REVENUE", goalState="nope")
+        sdk._create_point("goal", "GOAL - REVENUE", goalState="nope")
 
 
 def test_goal_state_invalid_value_refused_on_update_point(sdk):
-    p = sdk.create_point("goal", "GOAL - REVENUE")
+    p = sdk._create_point("goal", "GOAL - REVENUE")
     with pytest.raises(ValueError, match="goalState"):
-        sdk.update_point(p["id"], goalState="halfway")
-    assert sdk.get_point(p["id"]).get("goalState") is None
+        sdk._update_point(p["id"], goalState="halfway")
+    assert sdk._get_point(p["id"]).get("goalState") is None
 
 
 def test_goal_state_none_clears_without_error(sdk):
-    goal = sdk.create_object("REVENUE", objectKind="goal", goalState="met")
+    goal = sdk._create_object("REVENUE", objectKind="goal", goalState="met")
     sdk.update_knowledge(goal["id"], goalState=None)
     assert sdk.get_entity(goal["id"]).get("goalState") is None
 
@@ -100,7 +100,7 @@ def test_goal_state_does_not_leak_into_status(sdk):
     """The whole point of the fix is the two-axis split: `goalState` is
     achievement, `status` is the draft/live lifetime. Setting one must not
     move the other."""
-    goal = sdk.create_object("REVENUE", objectKind="goal", goalState="met")
+    goal = sdk._create_object("REVENUE", objectKind="goal", goalState="met")
     # #9974 R1: the birth status is DERIVED-OR-ABSENT — the entity fold seeds
     # `status=$st` and the create door no longer fabricates `'live'`, so a
     # status-less birth stores NO `status` and an ABSENT status READS live
@@ -111,7 +111,7 @@ def test_goal_state_does_not_leak_into_status(sdk):
     assert goal.get("status") is None
     assert goal.get("status") != "met"
     assert goal["goalState"] == "met"
-    p = sdk.create_point("goal", "GOAL - REVENUE", status="draft",
+    p = sdk._create_point("goal", "GOAL - REVENUE", status="draft",
                          goalState="unmet")
     assert p["status"] == "draft"
     assert p["goalState"] == "unmet"
@@ -122,7 +122,7 @@ def test_goal_state_does_not_leak_into_status(sdk):
 def test_goal_point_is_born_live_not_draft(sdk):
     """A goal created through the legacy Point leg defaulted to `draft` — and
     a draft that is only ever a TARGET never promotes. It must be born live."""
-    p = sdk.create_point("goal", "GOAL - REVENUE")
+    p = sdk._create_point("goal", "GOAL - REVENUE")
     assert p["status"] == "live", (
         "a goal-kind Point must not be born draft — a target-only draft goal "
         "is EP-inert and silently reported as converged (#7856)"
@@ -132,7 +132,7 @@ def test_goal_point_is_born_live_not_draft(sdk):
 def test_goal_point_explicit_draft_is_still_honoured(sdk):
     """The extraction path posts `status='draft'` explicitly; an explicit
     status always wins, so extraction semantics are unchanged."""
-    p = sdk.create_point("goal", "extracted goal", status="draft")
+    p = sdk._create_point("goal", "extracted goal", status="draft")
     assert p["status"] == "draft"
 
 
@@ -140,15 +140,15 @@ def test_objective_map_top_node_survives_being_only_a_target(sdk):
     """The measured failure: REVENUE sits at the TOP of the cascade and is
     only ever a TARGET. Build that shape and assert the top node is reachable
     (live), not silently inert."""
-    top = sdk.create_point("goal", "GOAL - REVENUE")
-    mid = sdk.create_point("goal", "GOAL - PILOTS")
-    leaf = sdk.create_point("goal", "GOAL - PRIVATE-ALPHA")
-    sdk.create_operator("IMPL", mid["id"], [top["id"]])    # top is TARGET
-    sdk.create_operator("IMPL", leaf["id"], [mid["id"]])
+    top = sdk._create_point("goal", "GOAL - REVENUE")
+    mid = sdk._create_point("goal", "GOAL - PILOTS")
+    leaf = sdk._create_point("goal", "GOAL - PRIVATE-ALPHA")
+    sdk._create_operator("IMPL", mid["id"], [top["id"]])    # top is TARGET
+    sdk._create_operator("IMPL", leaf["id"], [mid["id"]])
 
-    assert sdk.get_point(top["id"])["status"] == "live"
-    assert sdk.get_point(mid["id"])["status"] == "live"
-    assert sdk.get_point(leaf["id"])["status"] == "live"
+    assert sdk._get_point(top["id"])["status"] == "live"
+    assert sdk._get_point(mid["id"])["status"] == "live"
+    assert sdk._get_point(leaf["id"])["status"] == "live"
 
 
 def test_gated_ingest_keeps_a_goal_item_draft(sdk):
@@ -157,14 +157,14 @@ def test_gated_ingest_keeps_a_goal_item_draft(sdk):
     draft. `_check_gated_status` only inspects an EXPLICIT status, so without
     an explicit draft on the write the born-live default would silently
     bypass the gate and land the goal live."""
-    gated = sdk.ingest({"points": [{"kind": "goal",
+    gated = sdk._ingest({"points": [{"kind": "goal",
                                      "content": "become profitable"}]},
                        promotion_policy="gated")
-    assert sdk.get_point(gated["ids"]["points"][0])["status"] == "draft"
+    assert sdk._get_point(gated["ids"]["points"][0])["status"] == "draft"
     # `auto` is the sanctioned route to a live goal.
-    auto = sdk.ingest({"points": [{"kind": "goal", "content": "grow revenue"}]},
+    auto = sdk._ingest({"points": [{"kind": "goal", "content": "grow revenue"}]},
                       promotion_policy="auto")
-    assert sdk.get_point(auto["ids"]["points"][0])["status"] == "live"
+    assert sdk._get_point(auto["ids"]["points"][0])["status"] == "live"
 
 
 def test_gated_ingest_does_not_echo_a_synthetic_status(sdk):
@@ -172,7 +172,7 @@ def test_gated_ingest_does_not_echo_a_synthetic_status(sdk):
     granular `results[].item` must stay empty for a bare statement point
     (docs/INGEST_CONTRACT.md), so the injection must not mutate the echoed
     item."""
-    r = sdk.ingest({"points": [{"kind": "statement",
+    r = sdk._ingest({"points": [{"kind": "statement",
                                  "content": "A implies B"}]},
                    granularity="granular", promotion_policy="gated")
     assert r["results"][0]["item"] == {}
@@ -186,9 +186,9 @@ def test_non_goal_points_born_live_by_default(sdk):
 
     (This replaces `test_non_goal_points_still_born_draft`, which asserted
     the superseded scoping of born-live to `goal`.)"""
-    p = sdk.create_point("statement", "an ordinary claim")
+    p = sdk._create_point("statement", "an ordinary claim")
     assert p["status"] == "live"
-    d = sdk.create_point("statement", "an ordinary claim, held back",
+    d = sdk._create_point("statement", "an ordinary claim, held back",
                          status="draft")
     assert d["status"] == "draft"
 
@@ -215,11 +215,11 @@ def test_goal_state_survives_rebuild(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "t.db"),
                       event_log_path=str(events / "events.jsonl"))
     try:
-        goal = sdk.create_object("REVENUE", objectKind="goal", goalState="met")
-        pt = sdk.create_point("goal", "GOAL - REVENUE", goalState="active")
+        goal = sdk._create_object("REVENUE", objectKind="goal", goalState="met")
+        pt = sdk._create_point("goal", "GOAL - REVENUE", goalState="active")
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert sdk.get_entity(goal["id"])["goalState"] == "met"
-        assert sdk.get_point(pt["id"])["goalState"] == "active"
-        assert sdk.get_point(pt["id"])["status"] == "live"
+        assert sdk._get_point(pt["id"])["goalState"] == "active"
+        assert sdk._get_point(pt["id"])["status"] == "live"
     finally:
         sdk.close()

@@ -590,13 +590,13 @@ def test_a_live_graph_and_its_rebuild_share_a_digest(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "live.db"), event_log_path=log_path)
     try:
         proj = sdk._get_proj()
-        src = sdk.create_point("statement", "strong source", status="live")["id"]
+        src = sdk._create_point("statement", "strong source", status="live")["id"]
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.ep_alpha=12.0, n.ep_beta=1.0, "
             "n.baseline_set=true", params={"id": src})
         event = sdk.create_entity("event", "a live event",
                                   eventKind="test")["node"]["id"]
-        sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+        sdk._create_operator("IMPL", src, [event], direction="bidirectional")
         sdk._get_ep().run([src, event], max_hops=2, evidence={src: (12.0, 1.0)})
         live = _verdict(log_path, proj, record_state=True)
         assert live["ok"] is True, live

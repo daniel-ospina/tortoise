@@ -297,18 +297,18 @@ def _build_golden_graph(sdk):
     (variance 0.05 → contested). Evidence sources use pointKind="evidence"
     so the kind="statement" full-scan retrieves ONLY the three claims
     (equally relevant). Returns dict of {role: point_id}."""
-    ev = [sdk.create_point("evidence", f"golden evidence source {i}") for i in range(3)]
-    well = sdk.create_point("statement", "zephyr launch date is q3 2026")
-    low = sdk.create_point("statement", "zephyr launch delayed by supply chain")
-    cont = sdk.create_point("statement", "zephyr launch cancelled outright")
+    ev = [sdk._create_point("evidence", f"golden evidence source {i}") for i in range(3)]
+    well = sdk._create_point("statement", "zephyr launch date is q3 2026")
+    low = sdk._create_point("statement", "zephyr launch delayed by supply chain")
+    cont = sdk._create_point("statement", "zephyr launch cancelled outright")
     # well-supported: two supporting IMPL operators.
-    sdk.create_operator("IMPL", ev[0]["id"], [well["id"]])
-    sdk.create_operator("IMPL", ev[1]["id"], [well["id"]])
+    sdk._create_operator("IMPL", ev[0]["id"], [well["id"]])
+    sdk._create_operator("IMPL", ev[1]["id"], [well["id"]])
     # low-support: one IMPL operator.
-    sdk.create_operator("IMPL", ev[2]["id"], [low["id"]])
+    sdk._create_operator("IMPL", ev[2]["id"], [low["id"]])
     # contradicted: one IMPL (support) + one NAND (contradiction).
-    sdk.create_operator("IMPL", ev[0]["id"], [cont["id"]])
-    sdk.create_operator("NAND", ev[1]["id"], [cont["id"]])
+    sdk._create_operator("IMPL", ev[0]["id"], [cont["id"]])
+    sdk._create_operator("NAND", ev[1]["id"], [cont["id"]])
     _set_posterior(sdk, well["id"], 12.0, 1.0)
     _set_posterior(sdk, low["id"], 3.0, 1.0)
     _set_posterior(sdk, cont["id"], 2.0, 2.0)
@@ -322,7 +322,7 @@ def test_golden_set_integration():
     sdk = _fresh_sdk()
     try:
         g = _build_golden_graph(sdk)
-        results = sdk.recall_state(kind="statement", limit=10)
+        results = sdk._recall_state(kind="statement", limit=10)
         ids = [r["id"] for r in results]
         assert g["well"] in ids and g["low"] in ids and g["cont"] in ids
         assert ids[0] == g["well"]
@@ -354,10 +354,10 @@ def test_draft_recalled_after_live_uncomputed_end_to_end():
     is the highest of the three."""
     sdk = _fresh_sdk()
     try:
-        live_low = sdk.create_point("statement", "zephyr launch window alpha")
-        draft = sdk.create_point("statement", "zephyr launch window beta",
+        live_low = sdk._create_point("statement", "zephyr launch window alpha")
+        draft = sdk._create_point("statement", "zephyr launch window beta",
                                  status="draft")
-        live_high = sdk.create_point("statement", "zephyr launch window gamma")
+        live_high = sdk._create_point("statement", "zephyr launch window gamma")
         # live_low is measured BELOW the draft's fabricated neutral 0.5; both
         # live claims are MEASURED while the draft is EP-inert. The 10x
         # confidence gap keeps the "not score-driven" assertion below robust to
@@ -365,7 +365,7 @@ def test_draft_recalled_after_live_uncomputed_end_to_end():
         _set_posterior(sdk, live_low["id"], 1.0, 19.0)   # 0.05
         _set_posterior(sdk, live_high["id"], 14.0, 1.0)  # 0.933
 
-        results = sdk.recall_state("zephyr launch window", kind="statement",
+        results = sdk._recall_state("zephyr launch window", kind="statement",
                                    limit=10)
         ids = [r["id"] for r in results]
         by_id = {r["id"]: r for r in results}
@@ -396,9 +396,9 @@ def test_draft_recalled_after_live_uncomputed_end_to_end():
         # The min_confidence floor: a POSITIVE floor cannot be met by a row with
         # no measured belief, so the draft drops (and so does the 0.40 live
         # claim); the default 0.0 floor is "no floor" and keeps it recallable.
-        assert len(sdk.recall_state("zephyr launch window", kind="statement",
+        assert len(sdk._recall_state("zephyr launch window", kind="statement",
                                     limit=10, min_confidence=0.0)) == 3
-        floored = sdk.recall_state("zephyr launch window", kind="statement",
+        floored = sdk._recall_state("zephyr launch window", kind="statement",
                                   limit=10, min_confidence=0.5)
         assert [r["id"] for r in floored] == [live_high["id"]]
     finally:
@@ -412,7 +412,7 @@ def test_contested_surfaces_with_counter_evidence():
     sdk = _fresh_sdk()
     try:
         g = _build_golden_graph(sdk)
-        results = sdk.recall_state(kind="statement", limit=10)
+        results = sdk._recall_state(kind="statement", limit=10)
         by_id = {r["id"]: r for r in results}
         cont = by_id[g["cont"]]
         assert cont["contested"] is True
@@ -434,10 +434,10 @@ def test_state_filter_excludes_superseded_deprecated():
     excluded either way (#689)."""
     sdk = _fresh_sdk()
     try:
-        live = sdk.create_point("statement", "nova engine coolant spec is q3 target")
-        superseded = sdk.create_point("statement", "nova engine coolant spec superseded old")
-        deprecated = sdk.create_point("statement", "nova engine coolant deprecated old")
-        retracted = sdk.create_point("statement", "nova engine coolant retracted old")
+        live = sdk._create_point("statement", "nova engine coolant spec is q3 target")
+        superseded = sdk._create_point("statement", "nova engine coolant spec superseded old")
+        deprecated = sdk._create_point("statement", "nova engine coolant deprecated old")
+        retracted = sdk._create_point("statement", "nova engine coolant retracted old")
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point {id:$id}) SET n.status = 'superseded'",
                      params={"id": superseded["id"]})
@@ -446,13 +446,13 @@ def test_state_filter_excludes_superseded_deprecated():
         proj.g.query("MATCH (n:Point {id:$id}) SET n.status = 'retracted'",
                      params={"id": retracted["id"]})
 
-        default_ids = {r["id"] for r in sdk.recall_state(kind="statement", limit=10)}
+        default_ids = {r["id"] for r in sdk._recall_state(kind="statement", limit=10)}
         assert live["id"] in default_ids
         assert superseded["id"] not in default_ids
         assert deprecated["id"] not in default_ids
         assert retracted["id"] not in default_ids
 
-        include_ids = {r["id"] for r in sdk.recall_state(kind="statement", limit=10,
+        include_ids = {r["id"] for r in sdk._recall_state(kind="statement", limit=10,
                                                          include_superseded=True)}
         assert superseded["id"] in include_ids
         assert deprecated["id"] in include_ids
@@ -471,14 +471,14 @@ def test_state_filter_does_not_shrink_pool_behind_superseded():
         # 30 superseded high-relevance claims + 5 live claims, same kind.
         superseded_ids = []
         for i in range(30):
-            p = sdk.create_point("statement", f"nova engine coolant spec revision {i} old")
+            p = sdk._create_point("statement", f"nova engine coolant spec revision {i} old")
             proj.g.query("MATCH (n:Point {id:$id}) SET n.status = 'superseded'",
                          params={"id": p["id"]})
             superseded_ids.append(p["id"])
-        live = [sdk.create_point(
+        live = [sdk._create_point(
             "statement", f"nova engine coolant spec current target {i}")["id"]
             for i in range(5)]
-        results = sdk.recall_state(kind="statement", limit=10)
+        results = sdk._recall_state(kind="statement", limit=10)
         ids = [r["id"] for r in results]
         # Pool not shrunk by the status filter: ALL 5 live claims surface even
         # though 30 superseded claims dominated the candidate pool.
@@ -486,7 +486,7 @@ def test_state_filter_does_not_shrink_pool_behind_superseded():
         assert all(pid in ids for pid in live)
         assert not (set(superseded_ids) & set(ids))
         # include_superseded → superseded claims flow back into the pool.
-        inc = sdk.recall_state(kind="statement", limit=10, include_superseded=True)
+        inc = sdk._recall_state(kind="statement", limit=10, include_superseded=True)
         assert len(inc) == 10
         assert any(pid in superseded_ids for r in inc for pid in [r["id"]])
     finally:
@@ -508,9 +508,9 @@ def test_mitigation_on_nand_operator_surfaced():
         ).result_set
         assert rows, "golden graph must have a NAND operator on the contradicted claim"
         nand_op_id = rows[0][0]
-        sdk.mitigate_operator(nand_op_id, "source credibility disputed", strength=0.3)
+        sdk._mitigate_operator(nand_op_id, "source credibility disputed", strength=0.3)
 
-        results = sdk.recall_state(kind="statement", limit=10)
+        results = sdk._recall_state(kind="statement", limit=10)
         cont = next(r for r in results if r["id"] == g["cont"])
         mit = cont.get("mitigations", [])
         assert mit, "mitigation on the NAND operator must be surfaced"
@@ -527,20 +527,20 @@ def test_mixed_pool_points_and_objects_ranked_together():
     cally (same pattern as test_suggest_entry_points_with_graph_ranker)."""
     sdk = _fresh_sdk()
     try:
-        obj = sdk.create_object("atlas launcher", "product")
-        claim = sdk.create_point("statement", "atlas launcher reuses vega avionics")
+        obj = sdk._create_object("atlas launcher", "product")
+        claim = sdk._create_point("statement", "atlas launcher reuses vega avionics")
         _set_posterior(sdk, claim["id"], 8.0, 1.0)  # ≈0.889
         proj = sdk._get_proj()
         proj.create_about_edge(claim["id"], obj["id"], "aboutObject")
 
-        sdk.tortoise_fts_query = lambda q, **kw: (
+        sdk._tortoise_fts_query = lambda q, **kw: (
             [{"id": claim["id"], "content": "atlas launcher reuses vega avionics",
               "point_kind": "statement", "scores": {"rrf": 0.05}}]
             if kw.get("entity_type") == "point"
             else [{"id": obj["id"], "content": "atlas launcher",
                    "point_kind": "product", "scores": {"rrf": 0.05}}]
         )
-        results = sdk.recall_state("atlas launcher", limit=10, object_centric=True)
+        results = sdk._recall_state("atlas launcher", limit=10, object_centric=True)
         types = [r.get("entity_type") for r in results]
         assert "object" in types and "point" in types
         obj_res = next(r for r in results if r.get("entity_type") == "object")
@@ -564,7 +564,7 @@ def test_min_confidence_floor_applies():
     sdk = _fresh_sdk()
     try:
         g = _build_golden_graph(sdk)
-        results = sdk.recall_state(kind="statement", limit=10, min_confidence=0.6)
+        results = sdk._recall_state(kind="statement", limit=10, min_confidence=0.6)
         ids = [r["id"] for r in results]
         assert g["well"] in ids and g["low"] in ids  # 0.923, 0.75 ≥ 0.6
         assert g["cont"] not in ids  # 0.5 < 0.6 — dropped
@@ -577,16 +577,16 @@ def test_object_centric_ranking():
     confidence is the mean EP posterior of its about-Points."""
     sdk = _fresh_sdk()
     try:
-        obj = sdk.create_object("zephyr", "product")
-        p_hi = sdk.create_point("statement", "zephyr supports orbital refueling")
-        p_lo = sdk.create_point("statement", "zephyr supports crew rotation")
+        obj = sdk._create_object("zephyr", "product")
+        p_hi = sdk._create_point("statement", "zephyr supports orbital refueling")
+        p_lo = sdk._create_point("statement", "zephyr supports crew rotation")
         _set_posterior(sdk, p_hi["id"], 10.0, 1.0)  # ≈0.909
         _set_posterior(sdk, p_lo["id"], 1.0, 1.0)   # 0.5 neutral-ish
         proj = sdk._get_proj()
         proj.create_about_edge(p_hi["id"], obj["id"], "aboutObject")
         proj.create_about_edge(p_lo["id"], obj["id"], "aboutObject")
 
-        results = sdk.recall_state(kind="product", limit=10, object_centric=True)
+        results = sdk._recall_state(kind="product", limit=10, object_centric=True)
         obj_ids = [r["id"] for r in results if r.get("entity_type") == "object"]
         assert obj["id"] in obj_ids
         obj_res = next(r for r in results if r["id"] == obj["id"])
@@ -598,7 +598,7 @@ def test_object_centric_ranking():
         rp = {p["id"]: p for p in obj_res.get("related_points", [])}
         assert p_hi["id"] in rp and p_lo["id"] in rp
         # object_centric=False → no objects in the pool.
-        no_obj = sdk.recall_state(kind="product", limit=10, object_centric=False)
+        no_obj = sdk._recall_state(kind="product", limit=10, object_centric=False)
         assert not any(r.get("entity_type") == "object" for r in no_obj)
     finally:
         sdk.close()
@@ -622,17 +622,17 @@ def test_recall_state_default_rrf_and_graph_paths_untouched(monkeypatch):
     ))
     sdk = _fresh_sdk()
     try:
-        p1 = sdk.create_point("statement", "orca echolocation frequency range unique analysis")
-        p2 = sdk.create_point("statement", "orca echolocation unique frequency analysis range")
+        p1 = sdk._create_point("statement", "orca echolocation frequency range unique analysis")
+        p2 = sdk._create_point("statement", "orca echolocation unique frequency analysis range")
         _set_posterior(sdk, p1["id"], 9.0, 1.0)
         _set_posterior(sdk, p2["id"], 1.0, 9.0)
         # Default path unchanged: no recall_ranking key, plain RRF order.
-        plain = sdk.tortoise_fts_query("orca echolocation", limit=10)
+        plain = sdk._tortoise_fts_query("orca echolocation", limit=10)
         assert plain, "seeded points must be retrievable by the default path"
         assert "recall_ranking" not in plain[0]
         assert "graph_ranking" not in plain[0]
         # Graph path unchanged: still annotates graph_ranking and ranks by EP.
-        graph = sdk.tortoise_fts_query("orca echolocation", limit=10, order_by="graph")
+        graph = sdk._tortoise_fts_query("orca echolocation", limit=10, order_by="graph")
         assert "graph_ranking" in graph[0]
         by_id = {r["id"]: r for r in graph}
         assert by_id[p1["id"]]["graph_ranking"]["final_score"] > \

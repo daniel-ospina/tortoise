@@ -381,20 +381,20 @@ def _seed_graph(sdk, *, n_a: int = 6, n_turns: int = 2,
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
             params={"sid": sid})
     for i in range(n_a):
-        sdk.create_point("event", TURN_PREFIX + MATCH_CONTENT,
+        sdk._create_point("event", TURN_PREFIX + MATCH_CONTENT,
                          id=f"srAp{i}", session_id=SR_A, speaker="user",
                          is_episodic=True, status="draft")
-    sdk.create_point("event", TURN_PREFIX + MATCH_CONTENT, id="srBp0",
+    sdk._create_point("event", TURN_PREFIX + MATCH_CONTENT, id="srBp0",
                      session_id=SR_B, speaker="user",
                      is_episodic=True, status="draft")
     # the session's OWN other turns — off-pool, so the fetch has
     # genuinely-new TURN material to inject at the product's default grain
     for i in range(n_turns):
-        sdk.create_point("event", TURN_PREFIX + OFF_POOL_TURN_CONTENT,
+        sdk._create_point("event", TURN_PREFIX + OFF_POOL_TURN_CONTENT,
                          id=f"srAq{i}", session_id=SR_A, speaker="user",
                          is_episodic=True, status="draft")
     for i in range(n_chunks):
-        sdk.create_point("session-transcript", CHUNK_CONTENT,
+        sdk._create_point("session-transcript", CHUNK_CONTENT,
                          id=f"srAc{i}", session_id=SR_A, status="draft")
     _link_sessions(sdk)
     # POST-CONDITION: membership is PER SESSION (exactly one CONTAINS edge
@@ -936,7 +936,7 @@ def test_c5_per_session_chunk_cap_holds_on_the_reinjected_pool(
     from tools.longmem_eval.retrieve import retrieve_for_question
     _pin_chunk_grain(monkeypatch)
     for i in range(2, 6):
-        seeded_sdk.create_point("session-transcript", CHUNK_CONTENT,
+        seeded_sdk._create_point("session-transcript", CHUNK_CONTENT,
                                 id=f"srAc{i}", session_id=SR_A,
                                 status="draft")
     _link_sessions(seeded_sdk)
@@ -1124,7 +1124,7 @@ def test_guard_off_still_recaps(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
     _pin_chunk_grain(monkeypatch)
     for i in range(2, 8):
-        seeded_sdk.create_point("session-transcript", CHUNK_CONTENT,
+        seeded_sdk._create_point("session-transcript", CHUNK_CONTENT,
                                 id=f"srAc{i}", session_id=SR_A,
                                 status="draft")
     _link_sessions(seeded_sdk)
@@ -1311,7 +1311,7 @@ def deep_seeded_sdk(seeded_sdk):
     count what the reader received?" has two different answers.
     """
     for i in range(2, 12):
-        seeded_sdk.create_point("event", TURN_PREFIX + OFF_POOL_TURN_CONTENT,
+        seeded_sdk._create_point("event", TURN_PREFIX + OFF_POOL_TURN_CONTENT,
                                 id=f"srAq{i}", session_id=SR_A,
                                 speaker="user", is_episodic=True,
                                 status="draft")

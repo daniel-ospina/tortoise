@@ -86,7 +86,7 @@ def test_currency_is_derived_not_stored():
             "contentHash:'h1', ingestedAt:'2024-01-01'})"
         )
         proj.g.query("CREATE (d:Source {url:'doc-1', title:'Doc'})")
-        sdk.link_source_to_entity("c.txt", "doc-1", "Document")
+        sdk._link_source_to_entity("c.txt", "doc-1", "Document")
         rows = proj.g.query(
             "MATCH (:Source {url:'c.txt'})-[r:references]->(:Source {url:'doc-1'}) "
             "RETURN keys(r)"

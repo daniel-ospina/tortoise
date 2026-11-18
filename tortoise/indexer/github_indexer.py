@@ -1698,7 +1698,7 @@ class GitHubIndexer:
                 # Unchanged — zero writes (no updatedAt churn, no EP churn).
                 return out
             # Content edit → mint the next version + bi-temporal supersede.
-            sdk.create_point(kind="statement", id=rec["id"], dedup=False,
+            sdk._create_point(kind="statement", id=rec["id"], dedup=False,
                              content=rec["content"], **rec["props"],
                              **({"validFrom": valid_from}
                                 if valid_from else {}))
@@ -1711,7 +1711,7 @@ class GitHubIndexer:
             return out
 
         # Phase B — genuine create (probe missed): write props on create.
-        sdk.create_point(kind="statement", id=rec["id"], dedup=False,
+        sdk._create_point(kind="statement", id=rec["id"], dedup=False,
                          content=rec["content"], **rec["props"],
                          **({"validFrom": valid_from} if valid_from else {}))
         self._link_about_object(proj, rec["id"], repo, n["number"])

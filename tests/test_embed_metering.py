@@ -65,7 +65,7 @@ def reg_org(monkeypatch, tmp_path):
     db = str(tmp_path / "embed.db")
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     sdk = TortoiseSDK(db, namespace="registry")
-    team = sdk.org_create(name="embed-test")
+    team = sdk._org_create(name="embed-test")
     yield sdk, team["id"]
     sdk.close()
 

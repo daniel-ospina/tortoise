@@ -20,12 +20,12 @@ EDGES: list[tuple[str, str, str]] = []
 
 def edge(relation: str, from_id: str, to_id: str, fallback: str = "related") -> None:
     try:
-        r = sdk.create_edge(relation, from_id, to_id)
+        r = sdk._create_edge(relation, from_id, to_id)
         EDGES.append((relation, from_id, to_id))
         print(f"edge {relation}: {from_id} -> {to_id} created={r.get('created')}")
     except Exception as exc:  # fall back to the neutral structural relation
         print(f"edge {relation} refused ({type(exc).__name__}: {str(exc)[:160]}) -> {fallback}")
-        r = sdk.create_edge(fallback, from_id, to_id)
+        r = sdk._create_edge(fallback, from_id, to_id)
         EDGES.append((fallback, from_id, to_id))
         print(f"edge {fallback}: {from_id} -> {to_id} created={r.get('created')}")
 
@@ -45,15 +45,15 @@ MADE["Source"].append(SRC)
 print("source:", SRC)
 
 # ---------------------------------------------------------------------- subjects
-northwind = sdk.create_subject(
+northwind = sdk._create_subject(
     "Northwind Logistics", "company",
     role="portfolio company", sector="logistics",
 )
-solstice = sdk.create_subject(
+solstice = sdk._create_subject(
     "Solstice Robotics", "company",
     role="portfolio company", sector="robotics",
 )
-acme = sdk.create_subject(
+acme = sdk._create_subject(
     "Acme Capital", "investor",
     role="co-investor / funding counterparty",
 )
@@ -62,13 +62,13 @@ MADE["Subject"] += [NW, SOL, ACME]
 print("subjects:", NW, SOL, ACME)
 
 # ----------------------------------------------------------------------- objects
-seat = sdk.create_object(
+seat = sdk._create_object(
     "Northwind Logistics board seat", "governanceSeat",
     company="Northwind Logistics",
     heldBy="our fund",
     seatCount=1,
 )
-tranche2 = sdk.create_object(
+tranche2 = sdk._create_object(
     "Acme Capital tranche 2 to Solstice Robotics", "tranche",
     trancheNumber=2,
     investor="Acme Capital",
@@ -79,7 +79,7 @@ MADE["Object"] += [SEAT, TRANCH2]
 print("objects:", SEAT, TRANCH2)
 
 # ------------------------------------------------------------------------ events
-series_b = sdk.create_event(
+series_b = sdk._create_event(
     "Northwind Logistics closed a Series B round", "milestone",
     occurredOn="2026-07-30",
     round="Series B",
@@ -90,7 +90,7 @@ series_b = sdk.create_event(
 E_SERIESB = series_b["node"]["id"] if "node" in series_b else series_b["id"]
 MADE["Event"].append(E_SERIESB)
 
-tranche_release = sdk.create_event(
+tranche_release = sdk._create_event(
     "Acme Capital released tranche 2 to Solstice Robotics", "disbursement",
     occurredOn="2026-09-02",
     investor="Acme Capital",
@@ -103,7 +103,7 @@ tranche_release = sdk.create_event(
 E_TRANCHE = tranche_release["node"]["id"] if "node" in tranche_release else tranche_release["id"]
 MADE["Event"].append(E_TRANCHE)
 
-audit = sdk.create_event(
+audit = sdk._create_event(
     "Solstice Robotics safety audit passed", "conditionMet",
     company="Solstice Robotics",
     passedBefore="2026-09-02",
@@ -116,7 +116,7 @@ MADE["Event"].append(E_AUDIT)
 print("events:", E_SERIESB, E_TRANCHE, E_AUDIT)
 
 # ------------------------------------------------------------------------ points
-p_arr = sdk.create_point(
+p_arr = sdk._create_point(
     "observation",
     "Northwind Logistics ARR is $8.4M as of 2026-08, up from $5.1M at our entry.",
     extractedFrom=SRC, credibility="medium",
@@ -125,7 +125,7 @@ p_arr = sdk.create_point(
 P_ARR = p_arr["id"]
 MADE["Point"].append(P_ARR)
 
-p_seat = sdk.create_point(
+p_seat = sdk._create_point(
     "observation",
     "The board seat our fund holds at Northwind Logistics is unchanged as of the 2026-08 update.",
     extractedFrom=SRC, credibility="medium",
@@ -134,7 +134,7 @@ p_seat = sdk.create_point(
 P_SEAT = p_seat["id"]
 MADE["Point"].append(P_SEAT)
 
-p_head = sdk.create_point(
+p_head = sdk._create_point(
     "observation",
     "Solstice Robotics headcount is 74 people as of 2026-09-30, up from 61 in Q1 2026.",
     extractedFrom=SRC, credibility="medium",
@@ -143,7 +143,7 @@ p_head = sdk.create_point(
 P_HEAD = p_head["id"]
 MADE["Point"].append(P_HEAD)
 
-p_nodew = sdk.create_point(
+p_nodew = sdk._create_point(
     "decision",
     "We are not adding new portfolio names this quarter (2026-08 update).",
     extractedFrom=SRC,
@@ -152,7 +152,7 @@ p_nodew = sdk.create_point(
 P_NODEC = p_nodew["id"]
 MADE["Point"].append(P_NODEC)
 
-p_gate = sdk.create_point(
+p_gate = sdk._create_point(
     "observation",
     "Acme Capital's tranche 2 release to Solstice Robotics was gated on the safety audit passing; the audit passed and the tranche released 2026-09-02.",
     extractedFrom=SRC, credibility="medium",
@@ -182,7 +182,7 @@ edge("related", SRC, NW)
 edge("related", SRC, SOL)
 
 # the gate: audit passing IMPLies the tranche release (one-way, no belief damping)
-gate = sdk.create_direct_edge(
+gate = sdk._create_direct_edge(
     "IMPL", E_AUDIT, E_TRANCHE,
     direction="->", label="gatedBy", weight=0.9,
 )

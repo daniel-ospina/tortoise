@@ -52,7 +52,7 @@ def sdk():
     yield sdk
     # Cleanup: delete all test Points (safe — test-prefixed graph)
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point) DETACH DELETE n")
     except Exception:
@@ -70,7 +70,7 @@ class TestAnnotateEpBatchIssue94:
         ep_state is "absent", never the neutral 0.5 (which the old #2206 note
         used to justify) and never the pre-#2206 edge-ratio 0.0."""
         # Create an isolated point (no operators)
-        point = sdk.create_point("statement", "Isolated claim with no evidence")
+        point = sdk._create_point("statement", "Isolated claim with no evidence")
         pid = point["id"]
 
         proj = sdk._get_proj()
@@ -95,14 +95,14 @@ class TestAnnotateEpBatchIssue94:
         NO belief (edges alone never set one — #753, #2206; #11702 makes the
         absence a null rather than a 0.5)."""
         # Create a claim and two contradictory NAND sources
-        claim = sdk.create_point("statement", "A claim that gets contradicted")
+        claim = sdk._create_point("statement", "A claim that gets contradicted")
         claim_id = claim["id"]
 
-        nand1 = sdk.create_point("statement", "NAND source 1: this is wrong")
-        nand2 = sdk.create_point("statement", "NAND source 2: also wrong")
+        nand1 = sdk._create_point("statement", "NAND source 1: this is wrong")
+        nand2 = sdk._create_point("statement", "NAND source 2: also wrong")
 
-        sdk.create_operator("NAND", nand1["id"], [claim_id])
-        sdk.create_operator("NAND", nand2["id"], [claim_id])
+        sdk._create_operator("NAND", nand1["id"], [claim_id])
+        sdk._create_operator("NAND", nand2["id"], [claim_id])
 
         proj = sdk._get_proj()
         graph = proj.g
@@ -130,14 +130,14 @@ class TestAnnotateEpBatchIssue94:
     def test_mixed_edges_measured_only_after_ep(self, sdk):
         """Point with both IMPL and NAND edges but no persisted EP → absent
         (#11702); contention keeps the 0.5 edge ratio (distinct quantity)."""
-        claim = sdk.create_point("statement", "A disputed claim")
+        claim = sdk._create_point("statement", "A disputed claim")
         claim_id = claim["id"]
 
-        supporter = sdk.create_point("statement", "IMPL support")
-        attacker = sdk.create_point("statement", "NAND attack")
+        supporter = sdk._create_point("statement", "IMPL support")
+        attacker = sdk._create_point("statement", "NAND attack")
 
-        sdk.create_operator("IMPL", supporter["id"], [claim_id])
-        sdk.create_operator("NAND", attacker["id"], [claim_id])
+        sdk._create_operator("IMPL", supporter["id"], [claim_id])
+        sdk._create_operator("NAND", attacker["id"], [claim_id])
 
         proj = sdk._get_proj()
         graph = proj.g
@@ -161,13 +161,13 @@ class TestAnnotateEpBatchIssue94:
 
     def test_batch_mixed_isolated_and_nanded(self, sdk):
         """Batch call: isolated point + NANDed point in same query."""
-        isolated = sdk.create_point("statement", "Isolated point in batch")
+        isolated = sdk._create_point("statement", "Isolated point in batch")
         isolated_id = isolated["id"]
 
-        claim = sdk.create_point("statement", "Claim in batch")
+        claim = sdk._create_point("statement", "Claim in batch")
         claim_id = claim["id"]
-        attacker = sdk.create_point("statement", "Batch attacker")
-        sdk.create_operator("NAND", attacker["id"], [claim_id])
+        attacker = sdk._create_point("statement", "Batch attacker")
+        sdk._create_operator("NAND", attacker["id"], [claim_id])
 
         proj = sdk._get_proj()
         graph = proj.g
@@ -192,11 +192,11 @@ class TestAnnotateEpBatchIssue94:
         is NOT EP measurement (#3276): pre-EP it reads has_ep=False /
         measured=False / baseline=True, while confidence_mean stays the prior
         mean — the same number sdk.get_confidence returns pre-EP."""
-        claim = sdk.create_point("statement", "A baseline-backed claim")
+        claim = sdk._create_point("statement", "A baseline-backed claim")
         claim_id = claim["id"]
 
         # Strong 18:2 baseline → prior mean 0.9.
-        sdk.set_point_baseline(claim_id, 18.0, 2.0)
+        sdk._set_point_baseline(claim_id, 18.0, 2.0)
 
         proj = sdk._get_proj()
         graph = proj.g
@@ -220,7 +220,7 @@ class TestAnnotateEpBatchIssue94:
         """#2206 reproduce: a point whose EP posterior converged at 0.88 but
         has NO incoming IMPL edges must read confidence_mean 0.88 (the old
         edge-ratio impl/(impl+nand) read 0.0 for exactly this point)."""
-        claim = sdk.create_point("statement", "Converged claim with no IMPL edges")
+        claim = sdk._create_point("statement", "Converged claim with no IMPL edges")
         claim_id = claim["id"]
 
         proj = sdk._get_proj()

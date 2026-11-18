@@ -83,7 +83,7 @@ class TestPointsCRUD:
 
         sdk = _sha._sdk()
         try:
-            return dict(sdk.get_point(pid) or {})
+            return dict(sdk._get_point(pid) or {})
         finally:
             sdk.close()
 

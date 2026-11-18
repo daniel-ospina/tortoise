@@ -458,7 +458,7 @@ def test_d9_cross_lens_calibration(leg, tmp_path):
     try:
         proj = sdk._get_proj()
         _seed_cross_lens_graph(proj.g)
-        res = sdk.get_cross_lens_candidates(threshold=0.7, top_k=10)
+        res = sdk._get_cross_lens_candidates(threshold=0.7, top_k=10)
         by = {(c["src"], c["dst"]): c for c in res["candidates"]}
         assert ("p1", "p2") in by, \
             f"cross-vocab in-band pair p1-p2 must surface on {leg}: {res}"
@@ -499,7 +499,7 @@ def test_d10_retrieval_pool_floor_flag(leg, tmp_path):
             "parity', pointKind:'statement', is_operator:false, "
             "embedding: vecf32($v)})",
             params={"v": vec})
-        res = sdk.tortoise_fts_query("vector search divergence parity",
+        res = sdk._tortoise_fts_query("vector search divergence parity",
                                      limit=5, pool_size=10)
         assert any(r.get("id") == "dp1" for r in res), \
             f"retrieval must surface the point on {leg}: {res}"
@@ -538,8 +538,8 @@ def test_d11_busy_error_embedded_only(leg, tmp_path):
     sdk1 = TortoiseSDK(namespace=ns)
     sdk2 = TortoiseSDK(namespace=ns)
     try:
-        sdk1.create_point("statement", "d11-a")
-        sdk2.create_point("statement", "d11-b")
+        sdk1._create_point("statement", "d11-a")
+        sdk2._create_point("statement", "d11-b")
         rows = sdk1._get_proj().g.query(
             "MATCH (n:Point) RETURN count(n)").result_set
         assert rows[0][0] == 2, \
@@ -565,8 +565,8 @@ def test_d12_concurrency_semantics(leg, tmp_path):
         sdk1 = TortoiseSDK(db_path)
         sdk2 = TortoiseSDK(db_path)  # same-process threads reuse the daemon
         try:
-            sdk1.create_point("statement", "d12-a")
-            sdk2.create_point("statement", "d12-b")
+            sdk1._create_point("statement", "d12-a")
+            sdk2._create_point("statement", "d12-b")
             rows = sdk1._get_proj().g.query(
                 "MATCH (n:Point) RETURN count(n)").result_set
             assert rows[0][0] == 2, \
@@ -579,8 +579,8 @@ def test_d12_concurrency_semantics(leg, tmp_path):
     sdk1 = TortoiseSDK(namespace=ns)
     sdk2 = TortoiseSDK(namespace=ns)
     try:
-        sdk1.create_point("statement", "d12-a")
-        sdk2.create_point("statement", "d12-b")
+        sdk1._create_point("statement", "d12-a")
+        sdk2._create_point("statement", "d12-b")
         rows = sdk1._get_proj().g.query(
             "MATCH (n:Point) RETURN count(n)").result_set
         assert rows[0][0] == 2, \

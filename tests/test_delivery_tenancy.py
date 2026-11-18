@@ -65,7 +65,7 @@ def _spine_env(tmp_path):
     sdk._graph_create(tid, "default", kind="default")
     g = sdk._graph_create(tid, "deliv-g", kind="custom")
     default_sdk = ha_mod._make_sdk(namespace=tid)
-    def_pt = default_sdk.create_point(
+    def_pt = default_sdk._create_point(
         "default-secret", content="default-secret")
     default_sdk.close()
     tc = verdict_client(ha_mod.app)
@@ -850,7 +850,7 @@ def test_patch_rename_session_owner_ok_member_403(spine_env):
     # Registry lane: seed Membership nodes so the session face resolves.
     reg = sdk._get_registry()
     for uid, role in (("owner-1", "owner"), ("member-1", "member")):
-        reg.query(
+        reg._query(
             "CREATE (m:Membership {user_id:$u, org_id:$tid,"
             " status:'active', role:$r})",
             params={"u": uid, "tid": tid, "r": role},

@@ -637,7 +637,7 @@ def test_parse_error_never_retried(tmp_path, monkeypatch):
     NOT retried — exactly one attempt, the exception propagates unchanged
     (never a WriteStageRetriesExhausted sentinel), and the writes that
     completed before the failure persist."""
-    real_create = TortoiseSDK.create_point
+    real_create = TortoiseSDK._create_point
     calls = {"n": 0}
     fail_id = "lme:retry_q_001:s0:t1"
 

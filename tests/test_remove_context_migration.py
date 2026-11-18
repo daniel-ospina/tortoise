@@ -301,7 +301,7 @@ class TestGuard99:
             proj = sdk._get_proj()
             # Create a point, then set context directly (bypassing create_point
             # which no longer accepts it) — simulate a legacy node.
-            p = sdk.create_point("statement", "guard-remove-test")
+            p = sdk._create_point("statement", "guard-remove-test")
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.context='legacy'",
                 params={"id": p["id"]},
@@ -311,7 +311,7 @@ class TestGuard99:
                 "MATCH (n:Point {id:$id}) REMOVE n.context",
                 params={"id": p["id"]},
             )
-            node = sdk.get_point(p["id"])
+            node = sdk._get_point(p["id"])
             assert "context" not in node or node.get("context") is None, \
                 "REMOVE did not remove the context property"
         finally:

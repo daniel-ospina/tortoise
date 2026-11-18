@@ -154,7 +154,7 @@ def _as_user(user_id: str, email: str):
 
 
 def _seed_team(reg, org_id: str, tier: str = "team"):
-    reg.query(
+    reg._query(
         "CREATE (t:Team {id:$id, name:$id, tier:$tier})",
         params={"id": org_id, "tier": tier},
     )
@@ -162,7 +162,7 @@ def _seed_team(reg, org_id: str, tier: str = "team"):
 
 def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
-    reg.query(
+    reg._query(
         "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
         params={"uid": user_id, "tid": org_id, "role": role, "status": status},
@@ -170,7 +170,7 @@ def _seed_membership(reg, org_id: str, user_id: str, role: str,
 
 
 def _active_roles(reg, org_id: str) -> dict:
-    rows = reg.query(
+    rows = reg._query(
         "MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' "
         "RETURN m.user_id, m.role",
         params={"tid": org_id},
@@ -240,7 +240,7 @@ class TestInviteCreate:
                          json={"org_id": "team-pro3", "email": "bob@example.com"})
         assert r1.status_code == 200, r1.text
         iid = r1.json()["invite_id"]
-        reg.query(
+        reg._query(
             "MATCH (i:Invitation {id:$id}) SET i.expires_at = '2020-01-01T00:00:00+00:00'",
             params={"id": iid},
         )
@@ -275,13 +275,13 @@ class TestInviteCreate:
         assert "member limit" in body["detail"].lower()
         # exactly one Invitation node was minted — pending + active == 2
         # (owner + 1 invite), never 3.
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (i:Invitation {org_id:'team-pro-race'}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
             "RETURN count(i)",
         ).result_set[0][0]
         assert rows == 1, f"expected 1 minted invite, got {rows}"
-        active = reg.query(
+        active = reg._query(
             "MATCH (m:Membership {org_id:'team-pro-race', status:'active'}) RETURN count(m)",
         ).result_set[0][0]
         assert active + rows <= 2
@@ -308,7 +308,7 @@ class TestInviteCreate:
         assert body["token"]
         assert body["expires_at"]
         # Registry: Invitation node holds the hash (verify, never plaintext)
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (i:Invitation {org_id:'team-t'}) RETURN i.email, i.role, "
             "i.token_hash, i.status",
         ).result_set
@@ -387,7 +387,7 @@ class TestInviteCreate:
         r = client.post("/v1/invites",
                         json={"org_id": "team-t", "email": "Bob@Example.COM"})
         assert r.status_code == 200, r.text
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (i:Invitation {org_id:'team-t'}) RETURN i.email",
         ).result_set
         assert rows[0][0] == "bob@example.com"
@@ -467,7 +467,7 @@ class TestInviteAccept:
 
         _seed_team_with_owner(reg, "team-t")
         token = "expired-token-123"
-        reg.query(
+        reg._query(
             "CREATE (i:Invitation {id:'inv-exp', org_id:'team-t', "
             "email:'bob@example.com', role:'member', token_hash:$th, "
             "created_by:'user-1', created_at:$ca, "
@@ -499,11 +499,11 @@ class TestInviteAccept:
 
         from tortoise.auth import hash_api_key
 
-        reg.query(
+        reg._query(
             "CREATE (t:Team {id:'team-race-accept', name:'team-race-accept', "
             "tier:'pro', max_users:2})",
         )
-        reg.query(
+        reg._query(
             "CREATE (m:Membership {user_id:$uid, org_id:'team-race-accept', "
             "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
             params={"uid": _U1},
@@ -514,7 +514,7 @@ class TestInviteAccept:
             ("inv-race-a", "bob@example.com", "bob-token-race"),
             ("inv-race-b", "carol@example.com", "carol-token-race"),
         ):
-            reg.query(
+            reg._query(
                 "CREATE (i:Invitation {id:$id, org_id:'team-race-accept', "
                 "email:$email, role:'member', token_hash:$th, "
                 "created_by:'user-1', created_at:$ca, expires_at:$exp, "
@@ -558,17 +558,17 @@ class TestInviteAccept:
                        else "carol-token-race")
 
         # exactly 2 active members (owner + winner) — never 3
-        active = reg.query(
+        active = reg._query(
             "MATCH (m:Membership {org_id:'team-race-accept', status:'active'}) RETURN count(m)",
         ).result_set[0][0]
         assert active == 2
         # the losing accept did NOT consume its invite (accepted_at NULL)
-        loser_row = reg.query(
+        loser_row = reg._query(
             "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at, i.accepted_by",
             params={"id": loser_id},
         ).result_set[0]
         assert loser_row[0] is None, f"loser invite consumed: {loser_row}"
-        winner_row = reg.query(
+        winner_row = reg._query(
             "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at",
             params={"id": winner_id},
         ).result_set[0]
@@ -578,7 +578,7 @@ class TestInviteAccept:
         # non-consuming ⇒ retryable: free a seat (drop the winner's
         # membership) and the loser's invite accepts cleanly.
         winner_uid = _U_CAROL if loser_uid == _U_BOB else _U_BOB
-        reg.query(
+        reg._query(
             "MATCH (m:Membership {org_id:'team-race-accept', user_id:$uid, "
             "status:'active'}) DELETE m",
             params={"uid": winner_uid},
@@ -798,11 +798,11 @@ class TestMembersRbac:
         first → consumed-with-402 (non-retryable) and the ghost row had to
         be force-deleted (#1880)."""
         # team with room for 2: mint the invite while capacity exists
-        reg.query(
+        reg._query(
             "CREATE (t:Team {id:'team-full', name:'team-full', tier:'team', "
             "max_users:2})",
         )
-        reg.query(
+        reg._query(
             "CREATE (m:Membership {user_id:$uid, org_id:'team-full', "
             "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
             params={"uid": _U1},
@@ -819,7 +819,7 @@ class TestMembersRbac:
         assert r.status_code == 402  # max_users gate at accept
         # non-consuming: the invite is NOT burned (accepted_at NULL) and no
         # membership was minted — the pending placeholder row is legitimate.
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (i:Invitation {org_id:'team-full', email:'bob@example.com'}) "
             "RETURN i.accepted_at, i.status",
         ).result_set
@@ -831,7 +831,7 @@ class TestMembersRbac:
             "pending placeholder row must survive a NON-consuming 402"
         # retryable: free a seat (remove the extra member) → the SAME invite
         # accepts cleanly and the ghost row is cleaned (#1880).
-        reg.query(
+        reg._query(
             "MATCH (m:Membership {org_id:'team-full', user_id:$uid, "
             "status:'active'}) DELETE m",
             params={"uid": _U2},
@@ -849,11 +849,11 @@ class TestMembersRbac:
         capacity semantics as the token branch — an accept past the seat
         cap 402s before the accepted_at write; the invite stays pending
         (retryable) and the pending placeholder row survives."""
-        reg.query(
+        reg._query(
             "CREATE (t:Team {id:'team-byid-full', name:'team-byid-full', "
             "tier:'pro', max_users:2})",
         )
-        reg.query(
+        reg._query(
             "CREATE (m:Membership {user_id:$uid, org_id:'team-byid-full', "
             "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
             params={"uid": _U1},
@@ -867,14 +867,14 @@ class TestMembersRbac:
         _as_user(_U_BOB, "bob@example.com")
         r = client.post(f"/v1/invites/pending/{iid}/accept")
         assert r.status_code == 402
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at",
             params={"id": iid},
         ).result_set
         assert rows and rows[0][0] is None, "by-id loser invite consumed on 402"
         assert _U_BOB not in _active_roles(reg, "team-byid-full")
         # retryable after a seat frees
-        reg.query(
+        reg._query(
             "MATCH (m:Membership {org_id:'team-byid-full', user_id:$uid, "
             "status:'active'}) DELETE m",
             params={"uid": _U2},
@@ -998,7 +998,7 @@ class TestPendingInvites:
 
     def test_pending_list_excludes_expired(self, client, reg):
         self._invite(client, reg, org_id="team-t", email="bob@example.com")
-        reg.query(
+        reg._query(
             "MATCH (i:Invitation {email:'bob@example.com'}) "
             "SET i.expires_at = '2020-01-01T00:00:00+00:00'")
         _as_user(_U_BOB, "bob@example.com")
@@ -1069,7 +1069,7 @@ class TestPendingInvites:
                         json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         token = r.json()["token"]
-        reg.query("MATCH (t:Team {id:'team-t'}) SET t.tier='free'")
+        reg._query("MATCH (t:Team {id:'team-t'}) SET t.tier='free'")
         _as_user(_U_BOB, "bob@example.com")
         r2 = client.post("/v1/invites/accept", json={"token": token})
         assert r2.status_code == 402
@@ -1098,7 +1098,7 @@ class TestAcceptFreeCap:
         iid = r.json()["invite_id"]
         # ...then the team downgrades to free before the invitee accepts
         # (the reviewer's downgrade window — the join-side free-cap fires).
-        reg.query("MATCH (t:Team {id:'team-t'}) SET t.tier='free'")
+        reg._query("MATCH (t:Team {id:'team-t'}) SET t.tier='free'")
         _as_user(_U_BOB, "bob@example.com")
         r = client.post(f"/v1/invites/pending/{iid}/accept")
         assert r.status_code == 402
@@ -1141,7 +1141,7 @@ class TestExpiredInviteGhostCleanup:
         return r.json()
 
     def _expire(self, reg, iid):
-        reg.query(
+        reg._query(
             "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
             params={"id": iid, "exp": "2020-01-01T00:00:00+00:00"},
         )
@@ -1181,7 +1181,7 @@ class TestExpiredInviteGhostCleanup:
         path — the ghost is permanent without the backfill sweep).
         inv_props are extra Invitation properties (e.g. accepted_at/status)."""
         props = ", ".join(f"{k}:'{v}'" for k, v in inv_props.items())
-        reg.query(
+        reg._query(
             f"CREATE (i:Invitation {{id:'{iid}', org_id:'team-t', "
             f"email:'{email}', role:'member', "
             f"expires_at:'2099-01-01T00:00:00+00:00'"
@@ -1202,7 +1202,7 @@ class TestExpiredInviteGhostCleanup:
         self._seed_pre_1880_ghost(
             reg, "inv-consumed", "a@example.com", accepted_at="2020-01-01T00:00:00+00:00")
         # expired (expires_at past, still pending)
-        reg.query(
+        reg._query(
             "CREATE (i:Invitation {id:'inv-expired', org_id:'team-t', "
             "email:'b@example.com', role:'member', accepted_at:null, "
             "status:'pending', expires_at:'2020-01-01T00:00:00+00:00'})",
@@ -1278,7 +1278,7 @@ class TestExpiredInviteReMint:
     def _expire(self, reg, iid):
         """Advance expires_at into the past, leaving ``status`` untouched —
         exactly what production does (nothing flips the status live)."""
-        reg.query(
+        reg._query(
             "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
             params={"id": iid, "exp": "2020-01-01T00:00:00+00:00"},
         )
@@ -1287,7 +1287,7 @@ class TestExpiredInviteReMint:
         """Pre-#1880 shape: a fake placeholder row + a backing Invitation
         node with no live cleanup path."""
         props = ", ".join(f"{k}:'{v}'" for k, v in inv_props.items())
-        reg.query(
+        reg._query(
             f"CREATE (i:Invitation {{id:'{iid}', org_id:'team-t', "
             f"email:'{email}', role:'member', "
             f"expires_at:'2099-01-01T00:00:00+00:00'"
@@ -1343,7 +1343,7 @@ class TestExpiredInviteReMint:
         email is re-invited — accepted, revoked and expired alike."""
         _seed_team_with_owner(reg, "team-t")
         # the email's OWN expired invite (the one being re-minted)
-        reg.query(
+        reg._query(
             "CREATE (i:Invitation {id:'inv-exp', org_id:'team-t', "
             "email:'bob@example.com', role:'member', accepted_at:null, "
             "status:'pending', expires_at:'2020-01-01T00:00:00+00:00'})",

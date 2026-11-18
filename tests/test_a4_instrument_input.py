@@ -264,7 +264,7 @@ def _skip_if_no_fts(sdk) -> None:
 
 def _arms(sdk, question: str, limit: int = 20) -> tuple[list[str], list[str]]:
     def ids(prf: bool) -> list[str]:
-        hits = sdk.tortoise_fts_query(
+        hits = sdk._tortoise_fts_query(
             question, limit=limit, pool_size=limit, include_terminal=True,
             keep_numeric=True, search_keys_prf=prf)
         return [str(h.get("id") or "") for h in hits]

@@ -164,7 +164,7 @@ def _tag_hits(sdk, tag: str) -> list[str]:
     ``tortoise_query(tag=...)`` surface — the retrieval a user performs, not a
     property read.
     """
-    return sorted(str(row.get("id")) for row in sdk.query_points_by_tag(tag))
+    return sorted(str(row.get("id")) for row in sdk._query_points_by_tag(tag))
 
 
 def _tag_nodes(sdk) -> set[str]:
@@ -182,7 +182,7 @@ def test_the_journal_carries_the_tag(env):
     required to restore tags for pre-existing journals.
     """
     sdk, events = env
-    point = sdk.create_point("statement", "the sky is blue",
+    point = sdk._create_point("statement", "the sky is blue",
                              tags=["alpha", "beta"])
     pid = point["id"]
 
@@ -194,7 +194,7 @@ def test_the_journal_carries_the_tag(env):
 
     # A tag EDIT rides PointRevised (top level, not under `point`) — so the
     # removal half of a tag change is journaled too (AC3's premise).
-    sdk.update_point(pid, tags=["alpha"])
+    sdk._update_point(pid, tags=["alpha"])
     revised = [e for e in _journal(events) if e.get("type") == "PointRevised"]
     assert revised and revised[-1].get("tags") == ["alpha"], (
         "a tag edit must be recorded, carrying the NEW list")
@@ -210,7 +210,7 @@ def test_the_same_query_returns_the_point_before_the_rebuild(env):
     The identical resolved query runs pre-rebuild and must HIT.
     """
     sdk, _events = env
-    pid = sdk.create_point("statement", "findable before rebuild",
+    pid = sdk._create_point("statement", "findable before rebuild",
                            tags=["alpha"])["id"]
     assert _tag_hits(sdk, "alpha") == [pid], (
         "the live path must make the point retrievable by tag")
@@ -226,7 +226,7 @@ def test_a_tag_survives_a_rebuild(env):
     The fix restores BOTH halves, so the concern does not apply.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "the sky is blue",
+    pid = sdk._create_point("statement", "the sky is blue",
                            tags=["alpha"])["id"]
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _tag_hits(sdk, "alpha") == [pid], (
@@ -248,7 +248,7 @@ def test_the_tag_survives_on_every_replay_arm(env):
     divergence class #2897 is about.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "the sky is blue", tags=["alpha"])["id"]
+    pid = sdk._create_point("statement", "the sky is blue", tags=["alpha"])["id"]
     proj = sdk._get_proj()
 
     def _apply_arm() -> list:
@@ -289,7 +289,7 @@ def test_a_tag_that_is_not_in_the_journal_is_not_invented(env):
     """
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "no tags in the journal")["id"]
+    pid = sdk._create_point("statement", "no tags in the journal")["id"]
     proj.g.query("MATCH (p:Point {id:$id}) SET p.tags=['gamma']",
                  params={"id": pid})
     proj.g.query(
@@ -354,9 +354,9 @@ def test_a_removed_tag_is_not_resurrected(env):
     PointAdded payload.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "tag churn",
+    pid = sdk._create_point("statement", "tag churn",
                            tags=["keep", "drop"])["id"]
-    sdk.update_point(pid, tags=["keep"])
+    sdk._update_point(pid, tags=["keep"])
     assert _tag_hits(sdk, "keep") == [pid]
     assert _tag_hits(sdk, "drop") == []
     revised = [e for e in _journal(events) if e.get("type") == "PointRevised"]
@@ -397,9 +397,9 @@ def test_a_cleared_tag_is_not_resurrected(env, clear_value):
     than removed, so both forms are asserted.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "clear me",
+    pid = sdk._create_point("statement", "clear me",
                            tags=["alpha", "beta"])["id"]
-    sdk.update_point(pid, tags=clear_value)
+    sdk._update_point(pid, tags=clear_value)
     assert _tag_hits(sdk, "alpha") == [] and _tag_hits(sdk, "beta") == [], (
         "precondition: the live clear must remove the tag, or this measures "
         "the wrong thing")
@@ -437,9 +437,9 @@ def test_a_non_list_tag_value_is_restored_verbatim(env):
     there (#8317 review P1, reproduced).
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "scalar tags",
+    pid = sdk._create_point("statement", "scalar tags",
                            tags="scalar")["id"]
-    assert sdk.get_point(pid).get("tags") == "scalar", (
+    assert sdk._get_point(pid).get("tags") == "scalar", (
         "precondition: the live writer stores a non-list value verbatim")
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -482,8 +482,8 @@ def test_a_non_persistable_tag_edit_removes_the_property_like_live(env):
     pinned here, so a change to either is visible.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "dict tags", tags=["alpha"])["id"]
-    sdk.update_point(pid, tags={"d": 1})
+    pid = sdk._create_point("statement", "dict tags", tags=["alpha"])["id"]
+    sdk._update_point(pid, tags={"d": 1})
     assert _tag_hits(sdk, "alpha") == [pid], (
         "precondition: the live writer LEAVES the existing edge for a "
         "non-list value (the `_sync_tags` bound) — if this changes, the "
@@ -534,7 +534,7 @@ def test_a_tuple_tag_value_syncs_edges_on_both_arms(env):
         live path must move the membership, not leave the creation edges stale.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "tuple tags",
+    pid = sdk._create_point("statement", "tuple tags",
                            tags=("alpha", "beta"))["id"]
     assert _tag_hits(sdk, "alpha") == [pid], (
         "precondition: a tuple is an array to the engine, so the live path "
@@ -549,7 +549,7 @@ def test_a_tuple_tag_value_syncs_edges_on_both_arms(env):
         "held it — the replay must not invent membership live never wrote")
     assert _tag_hits(sdk, "beta") == [pid]
 
-    sdk.update_point(pid, tags=("gamma",))
+    sdk._update_point(pid, tags=("gamma",))
     assert _tag_hits(sdk, "gamma") == [pid], (
         "a tuple EDIT is an array edit: the live path must sync it, not "
         "leave the creation edges stale")

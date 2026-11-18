@@ -126,7 +126,7 @@ def _seed(sdk) -> dict:
     ids = {}
     for name, word in (("old-1", "outdated"), ("old-2", "outdated"),
                        ("gone-1", "retracted"), ("live-1", None)):
-        oid = sdk.create_object(name, objectKind="test:widget")["id"]
+        oid = sdk._create_object(name, objectKind="test:widget")["id"]
         if word is not None:
             _mint_legacy(sdk, oid, word)
         ids[name] = oid
@@ -242,9 +242,9 @@ def test_a_fanout_that_clears_before_the_write_is_written_not_refused(env):
     `main` at exit 1 on a clean run — the sequencing step depends on that 0).
     """
     sdk, _events = env
-    oid = sdk.create_object("cleared", objectKind="test:widget")["id"]
+    oid = sdk._create_object("cleared", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
-    sdk.create_point("stmt", "temporary sibling", id=oid)
+    sdk._create_point("stmt", "temporary sibling", id=oid)
 
     preview = tool.run(sdk, execute=False)
     assert [r["id"] for r in preview.fanout] == [oid], preview.fanout
@@ -286,7 +286,7 @@ def test_a_failed_run_leaves_a_marker_that_stops_the_zero_rows_conclusion(env):
     that impossible (and covers a SIGTERM, which writes nothing at all).
     """
     sdk, events = env
-    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    oid = sdk._create_object("unrecorded", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
     real_append = EventLog.append
@@ -322,8 +322,8 @@ def test_a_peer_record_for_another_row_does_not_certify_ours(env, monkeypatch):
     lands exactly that decoy while our append fails.
     """
     sdk, events = env
-    oid = sdk.create_object("ours", objectKind="test:widget")["id"]
-    other = sdk.create_object("theirs", objectKind="test:widget")["id"]
+    oid = sdk._create_object("ours", objectKind="test:widget")["id"]
+    other = sdk._create_object("theirs", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
     real_append = EventLog.append
@@ -381,7 +381,7 @@ def test_a_second_execute_cannot_erase_a_previous_failure_marker(env):
     the ids are discharged by an actual rewrite.
     """
     sdk, _events = env
-    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    oid = sdk._create_object("unrecorded", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
     real_append = EventLog.append
@@ -419,7 +419,7 @@ def test_a_permanently_refused_row_does_not_hold_the_durability_marker(env):
     LIVE-ONLY.
     """
     sdk, _events = env
-    oid = sdk.create_object("dual", objectKind="test:widget")["id"]
+    oid = sdk._create_object("dual", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) SET n:Point", params={"id": oid})
@@ -450,8 +450,8 @@ def test_a_row_written_before_a_KILL_is_discharged_by_the_next_run(env, monkeypa
     arm was covered, this one was not.)
     """
     sdk, events = env
-    first = sdk.create_object("kill-1", objectKind="test:widget")["id"]
-    second = sdk.create_object("kill-2", objectKind="test:widget")["id"]
+    first = sdk._create_object("kill-1", objectKind="test:widget")["id"]
+    second = sdk._create_object("kill-2", objectKind="test:widget")["id"]
     for rid in (first, second):
         _mint_legacy(sdk, rid, "outdated")
 
@@ -504,8 +504,8 @@ def test_a_TORN_marker_write_keeps_the_previous_marker_intact(env, monkeypatch):
     """
     sdk, events = env
     journal = str(events / "events.jsonl")
-    keep = sdk.create_object("keep", objectKind="test:widget")["id"]
-    nxt = sdk.create_object("next", objectKind="test:widget")["id"]
+    keep = sdk._create_object("keep", objectKind="test:widget")["id"]
+    nxt = sdk._create_object("next", objectKind="test:widget")["id"]
     assert tool._write_pending(journal, [keep]) is True
     marker = tool._pending_path(journal)
 
@@ -541,7 +541,7 @@ def test_a_PREVIEW_discharges_a_durable_only_marker(env, monkeypatch):
     a healthy graph. The preview applies the same read-only test.
     """
     sdk, events = env
-    oid = sdk.create_object("durable", objectKind="test:widget")["id"]
+    oid = sdk._create_object("durable", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
     real_write = tool._write_pending
@@ -554,7 +554,7 @@ def test_a_PREVIEW_discharges_a_durable_only_marker(env, monkeypatch):
         return real_write(journal, ids)
 
     monkeypatch.setattr(tool, "_write_pending", die_after_the_first_row)
-    extra = sdk.create_object("also", objectKind="test:widget")["id"]
+    extra = sdk._create_object("also", objectKind="test:widget")["id"]
     _mint_legacy(sdk, extra, "outdated")
     with pytest.raises(KeyboardInterrupt):
         tool.run(sdk, execute=True)
@@ -736,7 +736,7 @@ def test_a_STALE_deprecated_record_does_not_discharge_a_live_only_row(env):
     state is, in fact, only live — the false PASS the marker exists to prevent.
     """
     sdk, _events = env
-    oid = sdk.create_object("stale", objectKind="test:widget")["id"]
+    oid = sdk._create_object("stale", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     tool.run(sdk, execute=True)                    # a real, durable deprecated
     assert _status(sdk, oid) == tool.REWRITE_TO
@@ -779,7 +779,7 @@ def test_a_discharged_id_is_REMOVED_from_the_marker(env):
     three runs, the id stuck on disk, `0 rows` withheld permanently.
     """
     sdk, events = env
-    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    oid = sdk._create_object("unrecorded", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
     real_append = EventLog.append
@@ -908,7 +908,7 @@ def test_an_UNWRITABLE_marker_refuses_that_row_before_its_write(env, monkeypatch
     to make impossible.
     """
     sdk, _events = env
-    oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+    oid = sdk._create_object("unrecorded", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
     real_write = tool._write_pending
@@ -955,7 +955,7 @@ def test_a_raw_set_is_reverted_by_the_same_rebuild(env):
     _all` has stopped discriminating between the two mechanisms.
     """
     sdk, events = env
-    oid = sdk.create_object("raw-set-victim", objectKind="test:widget")["id"]
+    oid = sdk._create_object("raw-set-victim", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) SET n.status = 'deprecated'",
@@ -1013,7 +1013,7 @@ def test_a_failed_journal_append_is_a_failure_and_exits_1(tmp_path, monkeypatch)
         events.mkdir()
         journal = events / "events.jsonl"
         sdk = TortoiseSDK(str(db), event_log_path=str(journal))
-        oid = sdk.create_object("unrecorded", objectKind="test:widget")["id"]
+        oid = sdk._create_object("unrecorded", objectKind="test:widget")["id"]
         _mint_legacy(sdk, oid, "outdated")
         sdk.close()
         return db, journal, oid
@@ -1064,14 +1064,14 @@ def test_a_sibling_created_after_the_read_is_refused_at_write_time(env):
     undo. Measured precondition: this exact sequence restamped the Point.
     """
     sdk, _events = env
-    oid = sdk.create_object("late-sibling", objectKind="test:widget")["id"]
+    oid = sdk._create_object("late-sibling", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
 
     preview = tool.run(sdk, execute=False)
     assert preview.fanout == [], "precondition: the snapshot shows no fan-out"
 
     # …the sibling appears AFTER the read, BEFORE the write.
-    sdk.create_point("stmt", "late sibling claim", id=oid)
+    sdk._create_point("stmt", "late sibling claim", id=oid)
 
     rep = tool.run(sdk, execute=True, report=preview)
 
@@ -1095,10 +1095,10 @@ def test_a_sibling_deleted_after_the_read_stops_being_reported_as_refused(env):
     2026-11-17), so without this test the block is deletable in silence.
     """
     sdk, _events = env
-    oid = sdk.create_object("late-gone", objectKind="test:widget")["id"]
+    oid = sdk._create_object("late-gone", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     # …a sibling present AT THE READ, so the snapshot really does refuse the row.
-    sdk.create_point("stmt", "sibling claim", id=oid)
+    sdk._create_point("stmt", "sibling claim", id=oid)
 
     preview = tool.run(sdk, execute=False)
     assert [r.get("id") for r in preview.fanout] == [oid], (
@@ -1126,7 +1126,7 @@ def test_a_url_only_source_stub_sharing_the_id_is_refused(env):
     misses it, writes the Source, and still exits 0 (measured).
     """
     sdk, _events = env
-    oid = sdk.create_object("with-stub", objectKind="test:widget")["id"]
+    oid = sdk._create_object("with-stub", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     sdk._get_proj().g.query(
         "CREATE (s:Source {url:$url, title:'url-only stub'})",
@@ -1154,9 +1154,9 @@ def test_a_point_sharing_the_id_is_refused_and_never_written(env):
     rewrite. The id must be resolved, and the row refused.
     """
     sdk, _events = env
-    oid = sdk.create_object("shared-id", objectKind="test:widget")["id"]
+    oid = sdk._create_object("shared-id", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
-    sdk.create_point("stmt", "sibling claim", id=oid)
+    sdk._create_point("stmt", "sibling claim", id=oid)
 
     preview = tool.run(sdk, execute=False)
     assert [r["id"] for r in preview.fanout] == [oid], preview.fanout
@@ -1231,7 +1231,7 @@ def test_an_id_whose_row_was_DELETED_is_discharged_not_kept_forever(env):
     live-only: there is nothing for a replay to restore.
     """
     sdk, _events = env
-    oid = sdk.create_object("doomed", objectKind="test:widget")["id"]
+    oid = sdk._create_object("doomed", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     journal = str(sdk._get_event_log().path)
     tool._set_pending(journal, [oid])          # exactly what a killed run leaves
@@ -1266,7 +1266,7 @@ def test_a_truncated_preview_exits_nonzero(tmp_path, monkeypatch):
     events.mkdir()
     journal = events / "events.jsonl"
     sdk = TortoiseSDK(str(db), event_log_path=str(journal))
-    oid = sdk.create_object("trunc", objectKind="test:widget")["id"]
+    oid = sdk._create_object("trunc", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     sdk.close()
 
@@ -1315,7 +1315,7 @@ def test_a_row_carrying_a_supersession_carrier_is_reported(env):
     preview ever taken (review finding, 2026-11-17).
     """
     sdk, _events = env
-    oid = sdk.create_object("carried", objectKind="test:widget")["id"]
+    oid = sdk._create_object("carried", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) SET n.supersededBy = 'succ-1' "
@@ -1348,7 +1348,7 @@ def test_the_legacy_outdated_FLAG_is_reported_and_not_rewritten(env):
     rewrote (review finding, 2026-11-17).
     """
     sdk, _events = env
-    oid = sdk.create_object("flagged", objectKind="test:widget")["id"]
+    oid = sdk._create_object("flagged", objectKind="test:widget")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) SET n.outdated = true", params={"id": oid})
     _mint_legacy(sdk, oid, "outdated")
@@ -1391,7 +1391,7 @@ def test_a_dual_labelled_point_row_is_reported_not_silently_skipped(env):
     status check is the second guard; either way the id is reported.
     """
     sdk, _events = env
-    oid = sdk.create_object("dual", objectKind="test:widget")["id"]
+    oid = sdk._create_object("dual", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "retracted")
     sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) SET n:Point", params={"id": oid})
@@ -1422,7 +1422,7 @@ def test_a_missing_journal_refuses_before_any_write(tmp_path, monkeypatch):
     monkeypatch.delenv("TORTOISE_EVENT_LOG_BASE_DIR", raising=False)
     db = tmp_path / "journal-less.db"
     sdk = TortoiseSDK(str(db))
-    oid = sdk.create_object("unjournaled", objectKind="test:widget")["id"]
+    oid = sdk._create_object("unjournaled", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     sdk.close()
 
@@ -1451,7 +1451,7 @@ def test_rewrite_refuses_a_journal_less_target_instead_of_writing_live_only(
     db = tmp_path / "no-journal-writer.db"
     sdk = TortoiseSDK(str(db))
     try:
-        oid = sdk.create_object("unjournaled", objectKind="test:widget")["id"]
+        oid = sdk._create_object("unjournaled", objectKind="test:widget")["id"]
         _mint_legacy(sdk, oid, "outdated")
         assert sdk._get_event_log() is None, "precondition: no journal on this target"
         rep = tool.collect(sdk._get_proj())
@@ -1649,7 +1649,7 @@ def test_a_dual_arm_row_needs_a_record_that_names_the_OBJECT(env, monkeypatch):
     onto it. The gate must demand the row's OWN record, by label and id.
     """
     sdk, _events = env
-    oid = sdk.create_object("dual-arm", objectKind="test:widget")["id"]
+    oid = sdk._create_object("dual-arm", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     sdk._get_proj().g.query(
         "MATCH (n:Object {id:$id}) SET n:Source", params={"id": oid})
@@ -1685,7 +1685,7 @@ def test_the_pending_report_HEDGES_and_never_accuses_a_row(env, monkeypatch):
     unpinned, so reverting it left every row green).
     """
     sdk, events = env
-    oid = sdk.create_object("marked", objectKind="test:widget")["id"]
+    oid = sdk._create_object("marked", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     journal = str(events / "events.jsonl")
 
@@ -1805,7 +1805,7 @@ def test_rewrite_refuses_a_CALLER_BUILT_report_whose_marker_state_is_UNKNOWN(env
     assertion reaches. (Review finding 2.2, 2026-11-17.)
     """
     sdk, events = env
-    oid = sdk.create_object("direct", objectKind="test:widget")["id"]
+    oid = sdk._create_object("direct", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     journal = str(events / "events.jsonl")
 
@@ -1843,7 +1843,7 @@ def test_the_pending_DETAIL_arm_scopes_its_remedy_like_the_summary(env, monkeypa
     (Review findings 4 and the cycle-12 P3, 2026-11-17.)
     """
     sdk, events = env
-    oid = sdk.create_object("scoped", objectKind="test:widget")["id"]
+    oid = sdk._create_object("scoped", objectKind="test:widget")["id"]
     _mint_legacy(sdk, oid, "outdated")
     journal = str(events / "events.jsonl")
 

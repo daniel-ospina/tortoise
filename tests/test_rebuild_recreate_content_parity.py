@@ -151,14 +151,14 @@ def _oracle(tmp_path, name: str, records: list[dict], pid: str) -> dict:
     try:
         for r in records:
             oracle._get_proj().apply(r)
-        return oracle.get_point(pid) or {}
+        return oracle._get_point(pid) or {}
     finally:
         oracle.close()
 
 
 def _mutated(sdk: TortoiseSDK, *, type_: str, **fields) -> dict:
     return {
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:00+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:00+00:00",
         "type": type_, "initiated_by": "raw-producer",
         "projection_version": 2, **fields,
     }
@@ -209,7 +209,7 @@ def _assert_parity(post: dict, applied: dict) -> None:
 def test_issue_repro_delete_recreate_content_parity(sup, tmp_path):
     """The issue's exact repro — all three legs (fold / apply / rebuild)."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="CHANGED"),
@@ -224,7 +224,7 @@ def test_issue_repro_delete_recreate_content_parity(sup, tmp_path):
     assert applied["content"] == "RECREATED"
 
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post["content"] == "RECREATED", (
         "rebuild_all leaked the pre-recreation revision's content onto the "
         f"re-created incarnation (got {post['content']!r})")
@@ -234,9 +234,9 @@ def test_issue_repro_delete_recreate_content_parity(sup, tmp_path):
 def test_operator_id_delete_recreate_parity(sup, tmp_path):
     """Same leak for an OPERATOR id (``OperatorAdded`` is hoisted too)."""
     events, sdk = sup
-    a = sdk.create_point("statement", "src", status="live")["id"]
-    b = sdk.create_point("statement", "tgt", status="live")["id"]
-    op = sdk.create_operator("IMPL", a, [b])["id"]
+    a = sdk._create_point("statement", "src", status="live")["id"]
+    b = sdk._create_point("statement", "tgt", status="live")["id"]
+    op = sdk._create_operator("IMPL", a, [b])["id"]
     records = _journal(events)
     snap = next(r["point"] for r in records
                 if r.get("type") == "OperatorAdded"
@@ -252,14 +252,14 @@ def test_operator_id_delete_recreate_parity(sup, tmp_path):
 
     applied = _oracle(tmp_path, "oracle_op", records, op)
     _rebuild(sdk, events)
-    _assert_parity(sdk.get_point(op), applied)
+    _assert_parity(sdk._get_point(op), applied)
 
 
 def test_recreate_with_falsy_content_clears_derived(sup, tmp_path):
     """A recreate whose snapshot writes no derived is a FRESH node live — the
     pre-delete incarnation's embedding/content_hash must not survive."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="REVISED"),
@@ -272,7 +272,7 @@ def test_recreate_with_falsy_content_clears_derived(sup, tmp_path):
     assert applied["content"] == ""
     assert applied.get("embedding") is None
     _rebuild(sdk, events)
-    _assert_parity(sdk.get_point(pid), applied)
+    _assert_parity(sdk._get_point(pid), applied)
 
 
 def test_dead_incarnations_tags_do_not_leak_onto_the_recreation(sup, tmp_path):
@@ -296,7 +296,7 @@ def test_dead_incarnations_tags_do_not_leak_onto_the_recreation(sup, tmp_path):
     re-created incarnation owns.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live",
+    pid = sdk._create_point("statement", "ORIG", status="live",
                            tags=["alpha"])["id"]
     records = _journal(events)
     records.extend([
@@ -311,11 +311,11 @@ def test_dead_incarnations_tags_do_not_leak_onto_the_recreation(sup, tmp_path):
         "re-creation states none, so this is what the rebuild must match")
 
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post.get("tags") in (None, []), (
         "the dead incarnation's tag leaked onto the re-created node "
         f"(got {post.get('tags')!r})")
-    assert sdk.query_points_by_tag("alpha") == [], (
+    assert sdk._query_points_by_tag("alpha") == [], (
         "the dead incarnation's TAGGED edge was rebuilt — the recreate wipe "
         "must clear the property the edge half derives from")
 
@@ -324,7 +324,7 @@ def test_two_delete_recreate_generations(sup, tmp_path):
     """Two generations: every revision preceding the FINAL re-creation is
     superseded; only revisions after it survive."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="DEAD1"),
@@ -339,7 +339,7 @@ def test_two_delete_recreate_generations(sup, tmp_path):
     applied = _oracle(tmp_path, "oracle_gen2", records, pid)
     assert applied["content"] == "GEN2"
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post["content"] == "GEN2"
     _assert_parity(post, applied)
 
@@ -348,7 +348,7 @@ def test_bare_reemit_supersedes_revision(sup, tmp_path):
     """A bare same-id re-emit (no delete) is ALSO a content boundary:
     ``n.content`` is written unconditionally live, so the re-emit wins."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="CHANGED"),
@@ -359,7 +359,7 @@ def test_bare_reemit_supersedes_revision(sup, tmp_path):
     applied = _oracle(tmp_path, "oracle_reemit", records, pid)
     assert applied["content"] == "REEMITTED"
     _rebuild(sdk, events)
-    _assert_parity(sdk.get_point(pid), applied)
+    _assert_parity(sdk._get_point(pid), applied)
 
 
 def test_falsy_bare_reemit_keeps_revision_derived(sup, tmp_path):
@@ -368,7 +368,7 @@ def test_falsy_bare_reemit_keeps_revision_derived(sup, tmp_path):
     only ``content`` is superseded. This is the RED discriminator for the
     per-field derived boundary."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="REVISED"),
@@ -381,7 +381,7 @@ def test_falsy_bare_reemit_keeps_revision_derived(sup, tmp_path):
     assert applied.get("content_hash") == content_hash("REVISED")
 
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     _assert_parity(post, applied)
     assert post.get("content_hash") == content_hash("REVISED"), (
         "the falsy re-emit wrote no hash, so the revision's hash is "
@@ -393,7 +393,7 @@ def test_intermediate_derived_write_wins(sup, tmp_path):
     """Derived are keyed on the last same-file WRITER, not the last creation:
     ``ORIG → revise → R1(truthy) → ""`` — live keeps R1's derived."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="CHANGED"),
@@ -407,7 +407,7 @@ def test_intermediate_derived_write_wins(sup, tmp_path):
     assert applied.get("content_hash") == content_hash("R1")
 
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     _assert_parity(post, applied)
     assert post.get("content_hash") == content_hash("R1"), (
         "the revision's hash leaked back over R1's — the derived boundary "
@@ -420,7 +420,7 @@ def test_hash_flag_is_independent_of_embedding(sup, tmp_path):
     so the revision's hash must be suppressed even though its embedding is
     not. Collapsing the two flags reds this."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="REVISED"),
@@ -433,7 +433,7 @@ def test_hash_flag_is_independent_of_embedding(sup, tmp_path):
         applied = _oracle(tmp_path, "oracle_noemb", records, pid)
         assert applied.get("content_hash") == content_hash("REEMITTED")
         _rebuild(sdk, events)
-        post = sdk.get_point(pid)
+        post = sdk._get_point(pid)
     _assert_parity(post, applied)
     assert post.get("content_hash") == content_hash("REEMITTED"), (
         "the re-emit wrote the hash even though the embedder was "
@@ -445,7 +445,7 @@ def test_props_only_superseded_revision_is_noop(sup, tmp_path):
     SET clause at all — it must be a no-op, not an empty ``SET`` (which
     FalkorDB rejects) on the recovery path."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, context="ignored"),
@@ -455,7 +455,7 @@ def test_props_only_superseded_revision_is_noop(sup, tmp_path):
 
     applied = _oracle(tmp_path, "oracle_propsonly", records, pid)
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post["content"] == "REEMITTED"
     _assert_parity(post, applied)
 
@@ -464,7 +464,7 @@ def test_post_recreation_revision_still_applies(sup, tmp_path):
     """CONTROL — no over-suppression: a revision AFTER the revision's
     superseding creation is live-truth and must still fold."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="CHANGED"),
@@ -477,7 +477,7 @@ def test_post_recreation_revision_still_applies(sup, tmp_path):
     applied = _oracle(tmp_path, "oracle_after", records, pid)
     assert applied["content"] == "AFTER"
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post["content"] == "AFTER"
     _assert_parity(post, applied)
 
@@ -490,7 +490,7 @@ def test_cross_file_revision_before_creation_still_folds(sup, tmp_path):
     """#21 — a revision in an alphabetically-EARLIER file must still fold onto
     a creation in a LATER file (file order is not chronology)."""
     events, sdk = sup
-    pid = sdk.ulid()
+    pid = sdk._ulid()
     revise = _revised(sdk, pid, new_content="CHANGED")
     create = _added(sdk, pid, "ORIG")
     _write_files(events, {"a.jsonl": [revise], "b.jsonl": [create]})
@@ -499,7 +499,7 @@ def test_cross_file_revision_before_creation_still_folds(sup, tmp_path):
     applied = _oracle(tmp_path, "oracle_21", [create, revise], pid)
     assert applied["content"] == "CHANGED"
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post["content"] == "CHANGED", (
         "the same-source boundary over-suppressed the #21 cross-file hoist")
     _assert_parity(post, applied)
@@ -510,7 +510,7 @@ def test_cross_file_delete_recreate_shape_unchanged(sup, tmp_path):
     revision first: it is NOT chronology, and the same-source boundary must
     leave rebuild's existing (correct-for-this-shape) result untouched."""
     events, sdk = sup
-    pid = sdk.ulid()
+    pid = sdk._ulid()
     revise = _revised(sdk, pid, new_content="C3")
     files = {"a.jsonl": [revise],
              "b.jsonl": [_added(sdk, pid, "C1"), _deleted(sdk, pid),
@@ -523,7 +523,7 @@ def test_cross_file_delete_recreate_shape_unchanged(sup, tmp_path):
                        files["b.jsonl"][2], revise], pid)
     assert applied["content"] == "C3"
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post["content"] == "C3", (
         "the cross-file delete→recreate shape changed (an earlier-sorted-file "
         "revision must not be suppressed)")
@@ -539,7 +539,7 @@ def test_bare_reemit_still_folds_annotator_dim(sup, tmp_path):
     record. A bare re-emit never clears ``annotator_*`` live, so a
     pre-reemit ``PointRevised`` carrying a dim stays live-valid."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="CHANGED", annotator_bias=0.4),
@@ -551,7 +551,7 @@ def test_bare_reemit_still_folds_annotator_dim(sup, tmp_path):
     assert applied["content"] == "REEMITTED"
     assert applied["annotator_bias"] == 0.4
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     _assert_parity(post, applied)
     assert post["annotator_bias"] == 0.4, (
         "the #3689 annotator gate regressed: a live-valid dim was dropped")
@@ -561,7 +561,7 @@ def test_delete_recreate_still_drops_annotator_dim(sup, tmp_path):
     """Pins the #3689 P1 behavior in the new file too: on a real hard-delete
     boundary the dead incarnation's dim must not leak."""
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="CHANGED", annotator_bias=0.4),
@@ -572,7 +572,7 @@ def test_delete_recreate_still_drops_annotator_dim(sup, tmp_path):
 
     applied = _oracle(tmp_path, "oracle_dim_drop", records, pid)
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post.get("annotator_bias") == applied.get("annotator_bias") is None
     _assert_parity(post, applied)
 
@@ -588,7 +588,7 @@ def test_pre_first_creation_derived_half_open(sup, tmp_path):
     """Pins a KNOWN-OPEN residual (#4260), the content/derived sibling of
     #4253. The content half is fixed (#4042); the derived half is not."""
     events, sdk = sup
-    pid = sdk.ulid()
+    pid = sdk._ulid()
     revise = _revised(sdk, pid, new_content="b")
     create = _added(sdk, pid, "")
     _write_files(events, {"events.jsonl": [revise, create]})
@@ -597,7 +597,7 @@ def test_pre_first_creation_derived_half_open(sup, tmp_path):
     assert applied["content"] == ""
     assert applied.get("content_hash") is None
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     assert post["content"] == ""
     _assert_parity(post, applied)
 
@@ -682,7 +682,7 @@ def test_parity_verdict_never_reads_the_ambient_embedder(sup, tmp_path,
                         classmethod(lambda cls, *a, **k: flipping))
 
     events, sdk = sup
-    pid = sdk.create_point("statement", "ORIG", status="live")["id"]
+    pid = sdk._create_point("statement", "ORIG", status="live")["id"]
     records = _journal(events)
     records.extend([
         _revised(sdk, pid, new_content="CHANGED"),
@@ -692,7 +692,7 @@ def test_parity_verdict_never_reads_the_ambient_embedder(sup, tmp_path,
 
     applied = _oracle(tmp_path, "oracle_flip", records, pid)
     _rebuild(sdk, events)
-    post = sdk.get_point(pid)
+    post = sdk._get_point(pid)
     _assert_parity(post, applied)
     assert flipping.calls == 0, (
         "the parity verdict read the ambient embedder — the #4512 verdict is "

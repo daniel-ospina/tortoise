@@ -23,13 +23,13 @@ def test_structural_kind_activates_kind_scan_without_post_filter():
     the top-level kind filter must NOT fire (R1 union design)."""
     sdk = _sdk()
     try:
-        sdk.create_point("statement", "personal best 5K time is 27:12",
+        sdk._create_point("statement", "personal best 5K time is 27:12",
                          id="stmt-1", session_id="s1", is_episodic=True)
-        sdk.create_point("event", "[user] my morning run felt strong today",
+        sdk._create_point("event", "[user] my morning run felt strong today",
                          id="turn-1", session_id="s1", is_episodic=True)
         # query matches ONLY the turn point; structural_kind must add the
         # statement point without dropping the turn hit
-        hits = sdk.tortoise_fts_query(
+        hits = sdk._tortoise_fts_query(
             "morning run felt strong", entity_type="point", limit=10,
             structural_kind="statement", structural_hops=0)
         ids = {h["id"] for h in hits}
@@ -45,15 +45,15 @@ def test_structural_hops_expansion_surfaces_connected_peer():
     1-2 hop expansion from the text hit."""
     sdk = _sdk()
     try:
-        sdk.create_point("statement", "personal best 5K time is 27:12",
+        sdk._create_point("statement", "personal best 5K time is 27:12",
                          id="stmt-1", session_id="s1", is_episodic=True)
-        sdk.create_point("event", "[user] my morning run felt strong today",
+        sdk._create_point("event", "[user] my morning run felt strong today",
                          id="turn-1", session_id="s1", is_episodic=True)
         # turn -[:IMPL]-> op -[:IMPL]-> statement (operator-mediated,
         # mirrors ingest_v2's create_operator shape)
-        sdk.create_operator("IMPL", "turn-1", ["stmt-1"],
+        sdk._create_operator("IMPL", "turn-1", ["stmt-1"],
                             direction="unidirectional", promote_source=False)
-        hits = sdk.tortoise_fts_query(
+        hits = sdk._tortoise_fts_query(
             "morning run felt strong", entity_type="point", limit=10,
             structural_kind="statement", structural_hops=2)
         ids = {h["id"] for h in hits}
@@ -68,15 +68,15 @@ def test_default_hops_zero_preserves_existing_behavior():
     to the pre-R4 call with the same args."""
     sdk = _sdk()
     try:
-        sdk.create_point("statement", "personal best 5K time is 27:12",
+        sdk._create_point("statement", "personal best 5K time is 27:12",
                          id="stmt-1", session_id="s1", is_episodic=True)
-        sdk.create_point("event", "[user] my morning run felt strong today",
+        sdk._create_point("event", "[user] my morning run felt strong today",
                          id="turn-1", session_id="s1", is_episodic=True)
-        sdk.create_operator("IMPL", "turn-1", ["stmt-1"],
+        sdk._create_operator("IMPL", "turn-1", ["stmt-1"],
                             direction="unidirectional", promote_source=False)
-        baseline = sdk.tortoise_fts_query(
+        baseline = sdk._tortoise_fts_query(
             "morning run felt strong", entity_type="point", limit=10)
-        default = sdk.tortoise_fts_query(
+        default = sdk._tortoise_fts_query(
             "morning run felt strong", entity_type="point", limit=10,
             structural_hops=0)  # explicit default — same as baseline
         assert [h["id"] for h in default] == [h["id"] for h in baseline]

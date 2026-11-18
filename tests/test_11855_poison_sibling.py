@@ -145,8 +145,8 @@ def _seed(sdk, operand, *, symmetric: bool = False,
     operator-anchored neighbour populates), so an edge-less batch cannot red
     for the property that test pins.
     """
-    poison = sdk.create_point("statement", "the poison sibling")["id"]
-    healthy = sdk.create_point("statement", "the healthy sibling")["id"]
+    poison = sdk._create_point("statement", "the poison sibling")["id"]
+    healthy = sdk._create_point("statement", "the healthy sibling")["id"]
     g = sdk._get_proj().g
     g.query(
         "MATCH (n:Point {id: $id}) SET n.posterior_alpha = $a, "
@@ -169,7 +169,7 @@ def _seed(sdk, operand, *, symmetric: bool = False,
                     "c": HEALTHY_MIRROR},
         )
     if operator_on_poison:
-        sdk.create_operator("IMPL", healthy, [poison])
+        sdk._create_operator("IMPL", healthy, [poison])
     return poison, healthy
 
 

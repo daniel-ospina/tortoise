@@ -761,7 +761,7 @@ def reg():
 
 
 def _seed_team(reg, org_id: str, tier: str = "free"):
-    reg.query(
+    reg._query(
         "CREATE (t:Team {id:$id, name:$name, tier:$tier})",
         params={"id": org_id, "name": org_id, "tier": tier},
     )
@@ -769,7 +769,7 @@ def _seed_team(reg, org_id: str, tier: str = "free"):
 
 def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
-    reg.query(
+    reg._query(
         "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
         params={"uid": user_id, "tid": org_id, "role": role,
@@ -779,7 +779,7 @@ def _seed_membership(reg, org_id: str, user_id: str, role: str,
 
 def _seed_key(reg, org_id: str, key_id: str, *, created_by, created_via,
               expires_at: str | None, revoked_at: str | None = None):
-    reg.query(
+    reg._query(
         "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', key_prefix:'tt_x', "
         "created_by:$cb, created_at:'2026-01-01T00:00:00+00:00', revoked_at:$ra, "
         "expires_at:$exp, created_via:$cv})",
@@ -789,7 +789,7 @@ def _seed_key(reg, org_id: str, key_id: str, *, created_by, created_via,
 
 
 def _reg_rows(reg, org_id: str, user_id: str) -> list[dict]:
-    rows = reg.query(
+    rows = reg._query(
         "MATCH (k:APIKey {org_id:$tid, created_via:'bootstrap', created_by:$uid}) "
         "RETURN k.id, k.revoked_at, k.expires_at",
         params={"tid": org_id, "uid": user_id},

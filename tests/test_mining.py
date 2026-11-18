@@ -382,12 +382,12 @@ def mining_sdk():
 class TestQuarantineBatch:
     def test_quarantine_marks_batch_and_blocks_promotion(self, mining_sdk):
         sdk = mining_sdk
-        p = sdk.create_point("decision", "claim", status="draft", batch_id="b1")
+        p = sdk._create_point("decision", "claim", status="draft", batch_id="b1")
         res = quarantine_batch(sdk._get_proj(), "b1", reason="EP drift (W-3)")
         assert res == {"batch_id": "b1", "blocked": True,
                        "reason": "EP drift (W-3)", "status": "quarantined"}
         assert batch_status(sdk._get_proj(), "b1")["status"] == "quarantined"
-        blocked = sdk.promote_point(p["id"])
+        blocked = sdk._promote_point(p["id"])
         assert blocked["blocked"] is True
         assert blocked["reason"] == "batch_quarantined"
         assert blocked["batch_id"] == "b1"
@@ -395,14 +395,14 @@ class TestQuarantineBatch:
     def test_list_quarantined_only_returns_quarantined(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p = sdk.create_point("decision", "a", status="draft", batch_id="qb1")
-        ok = sdk.create_point("decision", "b", status="draft", batch_id="ok1")
+        p = sdk._create_point("decision", "a", status="draft", batch_id="qb1")
+        ok = sdk._create_point("decision", "b", status="draft", batch_id="ok1")
         quarantine_batch(proj, "qb1", reason="drift")
         # #779 integration: supply an unchanged grounding snapshot.
         EpSafeCommit(proj, "ok1").run([ok["id"]],
                                       grounding_before=0.5,
                                       grounding_after=0.5)
-        assert sdk.get_point(p["id"])["status"] == "draft"
+        assert sdk._get_point(p["id"])["status"] == "draft"
         assert [b["batch_id"] for b in list_quarantined(proj)] == ["qb1"]
 
     def test_quarantine_is_idempotent_and_requires_reason(self, mining_sdk):
@@ -426,8 +426,8 @@ class TestEpSafeCommit:
     def test_clean_draft_batch_commits(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "d1", status="draft", batch_id="c1")
-        p2 = sdk.create_point("decision", "d2", status="draft", batch_id="c1")
+        p1 = sdk._create_point("decision", "d1", status="draft", batch_id="c1")
+        p2 = sdk._create_point("decision", "d2", status="draft", batch_id="c1")
         res = EpSafeCommit(proj, "c1", grounding_fn=lambda: 0.5).run(
             [p1["id"], p2["id"]], grounding_before=0.5, grounding_after=0.51)
         assert res["ok"] is True and res["committed"] is True
@@ -440,17 +440,17 @@ class TestEpSafeCommit:
     def test_live_point_in_batch_quarantines(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "x", status="draft", batch_id="q1")
-        p2 = sdk.create_point("decision", "y", status="live", batch_id="q1")
+        p1 = sdk._create_point("decision", "x", status="draft", batch_id="q1")
+        p2 = sdk._create_point("decision", "y", status="live", batch_id="q1")
         res = EpSafeCommit(proj, "q1").run([p1["id"], p2["id"]])
         assert res["ok"] is False and res["quarantined"] is True
         assert res["checks"]["non_draft_points"][0]["id"] == p2["id"]
         assert batch_status(proj, "q1")["status"] == BATCH_STATUS_QUARANTINED
-        assert sdk.promote_point(p1["id"])["reason"] == "batch_quarantined"
+        assert sdk._promote_point(p1["id"])["reason"] == "batch_quarantined"
 
     def test_missing_point_fails_closed(self, mining_sdk):
         sdk = mining_sdk
-        p = sdk.create_point("decision", "a", status="draft", batch_id="m1")
+        p = sdk._create_point("decision", "a", status="draft", batch_id="m1")
         res = EpSafeCommit(sdk._get_proj(), "m1").run([p["id"], "no-such-point"])
         assert res["ok"] is False
         assert res["checks"]["non_draft_points"][0] == {
@@ -461,9 +461,9 @@ class TestEpSafeCommit:
         proj = sdk._get_proj()
         # draft-to-draft NAND with a LIVE operator node = event-path default
         # leak on main (projection coalesce -> 'live'); #780 fixes this.
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="w1")
-        p2 = sdk.create_point("decision", "b", status="draft", batch_id="w1")
-        op = sdk.create_operator("NAND", p1["id"], [p2["id"]])
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="w1")
+        p2 = sdk._create_point("decision", "b", status="draft", batch_id="w1")
+        op = sdk._create_operator("NAND", p1["id"], [p2["id"]])
         _set_status(sdk, p1["id"], "draft")
         _set_status(sdk, p2["id"], "draft")
         _set_status(sdk, op["id"], "live")  # event-path leak simulation
@@ -474,9 +474,9 @@ class TestEpSafeCommit:
     def test_auto_wire_live_endpoint_quarantines(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="w2")
-        live = sdk.create_point("decision", "prior", status="live")
-        op = sdk.create_operator("IMPL", p1["id"], [live["id"]])
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="w2")
+        live = sdk._create_point("decision", "prior", status="live")
+        op = sdk._create_operator("IMPL", p1["id"], [live["id"]])
         _set_status(sdk, p1["id"], "draft")
         _set_status(sdk, op["id"], "draft")
         res = EpSafeCommit(proj, "w2").run([p1["id"]])
@@ -486,9 +486,9 @@ class TestEpSafeCommit:
     def test_draft_operator_draft_endpoints_is_clean(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="c2")
-        p2 = sdk.create_point("decision", "b", status="draft", batch_id="c2")
-        op = sdk.create_operator("NAND", p1["id"], [p2["id"]])
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="c2")
+        p2 = sdk._create_point("decision", "b", status="draft", batch_id="c2")
+        op = sdk._create_operator("NAND", p1["id"], [p2["id"]])
         _set_status(sdk, p1["id"], "draft")
         _set_status(sdk, p2["id"], "draft")
         _set_status(sdk, op["id"], "draft")
@@ -503,8 +503,8 @@ class TestEpSafeCommit:
     def test_grounding_drift_over_2pct_quarantines(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="g1")
-        p2 = sdk.create_point("decision", "b", status="draft", batch_id="g1")
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="g1")
+        p2 = sdk._create_point("decision", "b", status="draft", batch_id="g1")
         res = EpSafeCommit(proj, "g1", grounding_fn=lambda: 0.55).run(
             [p1["id"], p2["id"]], grounding_before=0.5, grounding_after=0.55)
         assert res["ok"] is False
@@ -529,7 +529,7 @@ class TestEpSafeCommit:
         the gate is active and fails closed without a pre-snapshot."""
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p = sdk.create_point("decision", "a", status="draft", batch_id="s2")
+        p = sdk._create_point("decision", "a", status="draft", batch_id="s2")
         res = EpSafeCommit(proj, "s2").run([p["id"]])
         assert res["ok"] is False
         assert res["checks"]["grounding"]["status"] == "fail"
@@ -543,13 +543,13 @@ class TestEpSafeCommit:
     def test_recovery_rerun_pass_unquarantines(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="r1")
-        p2 = sdk.create_point("decision", "b", status="draft", batch_id="r1")
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="r1")
+        p2 = sdk._create_point("decision", "b", status="draft", batch_id="r1")
         # First run fails W-3 (grounding drift) -> quarantined
         bad = EpSafeCommit(proj, "r1", grounding_fn=lambda: 0.9).run(
             [p1["id"], p2["id"]], grounding_before=0.5, grounding_after=0.9)
         assert bad["quarantined"] is True
-        assert sdk.promote_point(p1["id"])["reason"] == "batch_quarantined"
+        assert sdk._promote_point(p1["id"])["reason"] == "batch_quarantined"
         # Fix the cause (drift resolved) + re-run -> un-quarantined
         good = EpSafeCommit(proj, "r1", grounding_fn=lambda: 0.51).run(
             [p1["id"], p2["id"]], grounding_before=0.5, grounding_after=0.51)
@@ -557,17 +557,17 @@ class TestEpSafeCommit:
         assert batch_status(proj, "r1")["status"] == BATCH_STATUS_COMMITTED
         assert list_quarantined(proj) == []
         # Points remain draft until promotion; promotion now allowed
-        assert sdk.get_point(p1["id"])["status"] == "draft"
-        res = sdk.promote_point(p1["id"])
+        assert sdk._get_point(p1["id"])["status"] == "draft"
+        res = sdk._promote_point(p1["id"])
         assert res["promoted"] is True
 
     def test_batch_state_defaults_to_active(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        sdk.create_point("decision", "a", status="draft", batch_id="a1")
-        p = sdk.create_point("decision", "b", status="draft", batch_id="a1")
+        sdk._create_point("decision", "a", status="draft", batch_id="a1")
+        p = sdk._create_point("decision", "b", status="draft", batch_id="a1")
         assert batch_status(proj, "a1") is None  # no state until W-3 runs
-        assert sdk.promote_point(p["id"])["promoted"] is True  # unregistered batch is not blocked
+        assert sdk._promote_point(p["id"])["promoted"] is True  # unregistered batch is not blocked
 
 
 if __name__ == "__main__":
@@ -598,16 +598,16 @@ class TestEpSafeCommitReviewFixes:
         """
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="w2")
-        p2 = sdk.create_point("decision", "b", status="draft", batch_id="w2")
-        op = sdk.create_operator("NAND", p1["id"], [p2["id"]])
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="w2")
+        p2 = sdk._create_point("decision", "b", status="draft", batch_id="w2")
+        op = sdk._create_operator("NAND", p1["id"], [p2["id"]])
         _set_status(sdk, p1["id"], "draft")
         _set_status(sdk, p2["id"], "draft")
         # #5089: build the legacy leak shape explicitly — the door no longer
         # writes it, but the W-3 gate must still refuse it.
         proj.g.query("MATCH (o:Point {id:$id}) REMOVE o.status",
                      params={"id": op["id"]})
-        assert sdk.get_point(op["id"]).get("status") is None
+        assert sdk._get_point(op["id"]).get("status") is None
         res = EpSafeCommit(proj, "w2").run([p1["id"], p2["id"]])
         assert res["ok"] is False
         assert res["checks"]["auto_wired"][0]["reason"] == "operator_node_live"
@@ -626,7 +626,7 @@ class TestEpSafeCommitReviewFixes:
         sdk = mining_sdk
         proj = sdk._get_proj()
         from tortoise.mining import batch_status, quarantine_batch
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="rec1")
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="rec1")
         quarantine_batch(proj, "rec1", reason="EP drift (W-3)")
         q = batch_status(proj, "rec1")
         assert q["status"] == "quarantined"
@@ -647,7 +647,7 @@ class TestEpSafeCommitReviewFixes:
     def test_grounding_error_fails_closed(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="g1")
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="g1")
 
         def boom():
             raise RuntimeError("graph query failed")
@@ -660,7 +660,7 @@ class TestEpSafeCommitReviewFixes:
     def test_grounding_before_required_when_fn_available(self, mining_sdk):
         sdk = mining_sdk
         proj = sdk._get_proj()
-        p1 = sdk.create_point("decision", "a", status="draft", batch_id="g2")
+        p1 = sdk._create_point("decision", "a", status="draft", batch_id="g2")
 
         def identity():
             return 0.5
@@ -753,7 +753,7 @@ class TestW3PipelineWiring:
             params={"bid": batch_id},
         ).result_set
         assert rows, "Point.batch_id must be restored after rebuild"
-        blocked = sdk.promote_point(rows[0][0])
+        blocked = sdk._promote_point(rows[0][0])
         assert blocked["blocked"] is True
         assert blocked["reason"] == "batch_quarantined", blocked
 

@@ -92,7 +92,7 @@ class TestDe2e9StalenessError:
             sdk = f.sdk
             # Mutate region R's evidence (r1's baseline — R's claims are
             # null-stamped → stalest-ranked → drained FIRST by stale-first).
-            sdk.set_point_baseline(f.ids["r1"], 1.0, 8.0)
+            sdk._set_point_baseline(f.ids["r1"], 1.0, 8.0)
             # POST-mutation ground truth (sandboxed clone with the mutation).
             truth = _post_mutation_oracle(f.ids)
 
@@ -140,7 +140,7 @@ class TestDe2e9StalenessError:
             coverages = []
             for _ in range(6):
                 random.seed(FIXED_SEED)
-                r = sdk.dream(mode="stale-first", budget=budget,
+                r = sdk._dream(mode="stale-first", budget=budget,
                                require_calibration=False)
                 assert r["converged_all"] is True
                 conf = _conf_by_key(sdk, f.ids)
@@ -172,7 +172,7 @@ class TestDe2e9StalenessError:
         try:
             assert _coverage(f.sdk, f.ids) == 0.0
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="stale-first", budget=2,
+            r = f.sdk._dream(mode="stale-first", budget=2,
                             require_calibration=False)
             assert r["converged_all"] is True
             assert _coverage(f.sdk, f.ids) > 0.0

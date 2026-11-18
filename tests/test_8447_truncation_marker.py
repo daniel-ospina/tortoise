@@ -173,7 +173,7 @@ def sdk(tmp_path, monkeypatch):
 
 def _seed(sdk, n):
     for i in range(n):
-        sdk.create_point(kind="statement",
+        sdk._create_point(kind="statement",
                          content=f"zebra migration claim number {i:02d}",
                          entity_type="point")
 
@@ -192,7 +192,7 @@ class TestEndToEndTruncation:
         assert truth == 20
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
 
         # the returned rows are a STRICT SUBSET ...
         assert len(rows) == 5 < truth
@@ -208,7 +208,7 @@ class TestEndToEndTruncation:
         assert truth == 3
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
 
         assert len(rows) == truth
         assert truncation_field(sink)[TRUNCATED_FIELD] is False
@@ -218,7 +218,7 @@ class TestEndToEndTruncation:
         """Boundary: limit == match count is COMPLETE, not truncated."""
         _seed(sdk, 4)
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=4, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=4, _truncation_out=sink)
         assert len(rows) == 4
         assert truncation_field(sink)[TRUNCATED_FIELD] is False
 
@@ -228,7 +228,7 @@ class TestEndToEndTruncation:
         sink: dict = {}
         # pool_size=2 -> str_limit is 2, so 20 candidates saturate the window
         # and `total_available` may not be published as if it were exact.
-        rows = sdk.tortoise_fts_query("zebra", limit=1, pool_size=2,
+        rows = sdk._tortoise_fts_query("zebra", limit=1, pool_size=2,
                                       _truncation_out=sink)
         assert len(rows) == 1
         marker = truncation_field(sink)
@@ -238,7 +238,7 @@ class TestEndToEndTruncation:
     def test_the_marker_is_off_for_a_caller_that_does_not_ask(self, sdk):
         """Additive: no sink, no behaviour change, no new row keys."""
         _seed(sdk, 5)
-        rows = sdk.tortoise_fts_query("zebra", limit=2)
+        rows = sdk._tortoise_fts_query("zebra", limit=2)
         assert len(rows) == 2
         assert TRUNCATED_FIELD not in rows[0]
 
@@ -249,7 +249,7 @@ class TestPaginationIsNotTruncation:
     def test_the_paginated_path_reports_its_own_completeness_and_is_never_marked(
             self, sdk):
         _seed(sdk, 5)
-        first = sdk.paginated_query(limit=2, skip=0)
+        first = sdk._paginated_query(limit=2, skip=0)
         # it carries the explicit pagination contract instead of a marker ...
         assert set(first) == {"results", "total", "hasMore"}
         assert first["total"] == 5
@@ -257,9 +257,9 @@ class TestPaginationIsNotTruncation:
         assert TRUNCATED_FIELD not in first
 
         # ... and page 2 of 2 is reachable, so nothing is lost.
-        second = sdk.paginated_query(limit=2, skip=2)
+        second = sdk._paginated_query(limit=2, skip=2)
         assert second["hasMore"] is True
-        third = sdk.paginated_query(limit=2, skip=4)
+        third = sdk._paginated_query(limit=2, skip=4)
         assert third["hasMore"] is False
         ids = [r["id"] for p in (first, second, third) for r in p["results"]]
         assert len(ids) == len(set(ids)) == 5
@@ -326,7 +326,7 @@ class TestTheIncompleteThirdState:
         sink: dict = {}
         # str_limit = max(limit*2, floor) = 4 here, so the window is saturated;
         # excluding the statuses of most Points then shrinks the visible set.
-        sdk.tortoise_fts_query("zebra", limit=10, pool_size=4,
+        sdk._tortoise_fts_query("zebra", limit=10, pool_size=4,
                                exclude_status=["statement"], _truncation_out=sink)
         marker = truncation_field(sink)
         assert marker[TRUNCATED_FIELD] is True, (
@@ -368,7 +368,7 @@ class TestUnreadStoreIsNeverComplete:
         # Both sinks, exactly as the hosted route wires them: the store-failure
         # arm abstains (rather than raising) only when a status sink asked for
         # the abstention, so a marker-only caller still sees the exception.
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
+        rows = sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
                                       read_status_out={})
         assert rows == []
         assert truncation_field(sink)[TRUNCATED_FIELD] is True
@@ -384,11 +384,11 @@ class TestThePaginationControlIsLive:
 
     def test_paged_walk_is_unmarked_and_the_same_shape_cut_IS_marked(self, sdk):
         _seed(sdk, 5)
-        paged = sdk.paginated_query(limit=2, skip=0)
+        paged = sdk._paginated_query(limit=2, skip=0)
         assert TRUNCATED_FIELD not in paged        # reachable -> never marked
 
         sink: dict = {}
-        sdk.tortoise_fts_query("zebra", limit=2, _truncation_out=sink)
+        sdk._tortoise_fts_query("zebra", limit=2, _truncation_out=sink)
         assert truncation_field(sink)[TRUNCATED_FIELD] is True   # cut -> marked
 
 
@@ -415,7 +415,7 @@ class TestADownstreamDropIsNotComplete:
         # then drops every row at delivery time — the reviewer's construction
         # ("a 3-match store, limit=10, one hit's entity fetch failing").
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, min_confidence=1.0,
+        rows = sdk._tortoise_fts_query("zebra", limit=10, min_confidence=1.0,
                                       _truncation_out=sink)
         assert rows == []
         marker = truncation_field(sink)
@@ -430,7 +430,7 @@ class TestADownstreamDropIsNotComplete:
         """Control: the same store, nothing dropped, is positively COMPLETE."""
         _seed(sdk, 5)
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
         assert len(rows) == 5
         assert truncation_field(sink) == {TRUNCATED_FIELD: False}
 
@@ -478,17 +478,17 @@ class TestAScoreFloorIsNotProofOfCompleteness:
         # inversion of the band is possible — it reds loudly below (the five
         # scores are printed) rather than silently weakening the pin.
         for i in range(3):
-            sdk.create_point(kind="statement",
+            sdk._create_point(kind="statement",
                              content=f"zebra migration claim number {i:02d}",
                              entity_type="point")
         for i in range(2):
-            sdk.create_point(kind="statement",
+            sdk._create_point(kind="statement",
                              content=f"zebra sighting report number {i:02d}",
                              entity_type="point")
         # Derive the floor from the scores this store ACTUALLY produces, so the
         # test drops a provable strict subset instead of hard-coding a magic
         # number that a fusion tweak would silently turn vacuous.
-        probe = sdk.tortoise_fts_query("zebra migration", limit=10)
+        probe = sdk._tortoise_fts_query("zebra migration", limit=10)
         rrf = sorted((r["scores"]["rrf"] for r in probe), reverse=True)
         assert len(rrf) == 5
         assert rrf[2] > rrf[3], (
@@ -503,7 +503,7 @@ class TestAScoreFloorIsNotProofOfCompleteness:
             "embedded, so the scale cannot come from the other backend)")
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra migration", limit=2, threshold=floor,
+        rows = sdk._tortoise_fts_query("zebra migration", limit=2, threshold=floor,
                                       _truncation_out=sink)
         assert len(rows) == 2              # the cap cuts one of the 3 survivors
         marker = truncation_field(sink)
@@ -517,7 +517,7 @@ class TestAScoreFloorIsNotProofOfCompleteness:
         """Control: the proof is withheld because of the FLOOR, not by default."""
         _seed(sdk, 5)
         sink: dict = {}
-        sdk.tortoise_fts_query("zebra", limit=2, _truncation_out=sink)
+        sdk._tortoise_fts_query("zebra", limit=2, _truncation_out=sink)
         marker = truncation_field(sink)
         assert marker[TRUNCATED_FIELD] is True
         assert marker[TOTAL_AVAILABLE_FIELD] == 5
@@ -575,7 +575,7 @@ class TestALegThatNeverAnsweredIsNotComplete:
                           "reason": "timeout", "count": 0}))
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
 
         assert len(rows) == 5
         marker = truncation_field(sink)
@@ -601,7 +601,7 @@ class TestALegThatNeverAnsweredIsNotComplete:
                           "reason": "empty_results", "count": 0}))
 
         sink: dict = {}
-        sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+        sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
 
         marker = truncation_field(sink)
         assert marker[TRUNCATED_FIELD] is True          # 10 candidates, 5 shipped
@@ -621,7 +621,7 @@ class TestAWindowThatFilledItselfIsIncomplete:
         # pool_size=2 -> str_limit=2 -> every leg is asked for 2 rows and each
         # leg's window saturates, so the handful of delivered rows are a handful
         # of the 20 that matched — and the union stays far below `limit`.
-        rows = sdk.tortoise_fts_query("zebra", limit=10, pool_size=2,
+        rows = sdk._tortoise_fts_query("zebra", limit=10, pool_size=2,
                                       _truncation_out=sink)
 
         assert 0 < len(rows) < 10
@@ -649,7 +649,7 @@ class TestTheDegradedArmsMarkACut:
         self._all_legs_failed(monkeypatch)
         _seed(sdk, 20)
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
 
         assert len(rows) == 5
         marker = truncation_field(sink)
@@ -663,7 +663,7 @@ class TestTheDegradedArmsMarkACut:
         self._all_legs_failed(monkeypatch)
         _seed(sdk, 20)
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=50, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=50, _truncation_out=sink)
 
         assert len(rows) == 20
         assert truncation_field(sink) == {TRUNCATED_FIELD: False}
@@ -771,7 +771,7 @@ class TestAMissingLexicalIndexPublishesNoTotal:
                        "reason": "index_missing", "count": 0}))
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
 
         assert len(rows) == 3
         marker = truncation_field(sink)
@@ -794,7 +794,7 @@ class TestAMissingLexicalIndexPublishesNoTotal:
                        "reason": "ok", "count": len(hits)}))
 
         sink: dict = {}
-        sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+        sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
 
         marker = truncation_field(sink)
         assert marker[TRUNCATED_FIELD] is True
@@ -823,7 +823,7 @@ class TestTheLexicalArmsOwnFailureIsNotTheShippedLegs:
             lambda name: False if name == "bm25" else _real_allow(name))
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
 
         assert len(rows) == 3, "the shipped lexical leg's rows must survive"
         assert truncation_field(sink) == {TRUNCATED_FIELD: False}, (
@@ -840,7 +840,7 @@ class TestTheLexicalArmsOwnFailureIsNotTheShippedLegs:
         monkeypatch.setattr("tortoise.bm25.bm25_rank", _boom)
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
 
         assert len(rows) == 3
         assert truncation_field(sink) == {TRUNCATED_FIELD: False}
@@ -864,7 +864,7 @@ class TestTheLexicalArmsOwnFailureIsNotTheShippedLegs:
                        "reason": "query_failed", "count": 0}))
 
         sink: dict = {}
-        sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        sdk._tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
 
         marker = truncation_field(sink)
         assert marker[TRUNCATED_FIELD] is True, (
@@ -901,7 +901,7 @@ class TestAnEarlyReturnStillConsultsTheFold:
         monkeypatch.setattr("tortoise.search_engine.degradation_chain", _fake)
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        rows = sdk._tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
 
         assert rows == []
         assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
@@ -919,7 +919,7 @@ class TestAnEarlyReturnStillConsultsTheFold:
                        "reason": "breaker_open", "count": 0}))
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=10, entity_type="document",
+        rows = sdk._tortoise_fts_query("zebra", limit=10, entity_type="document",
                                       _truncation_out=sink)
 
         assert rows == []
@@ -986,7 +986,7 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
 
         trace: list[dict] = []
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
+        rows = sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
                                       leg_trace=trace)
 
         assert len(rows) == 3
@@ -1007,7 +1007,7 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
         self._no_fulltext_index(monkeypatch)
 
         sink: dict = {}
-        sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+        sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
 
         assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
             "with the arm off, nothing read the lexical half — the rows are "
@@ -1037,7 +1037,7 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
 
         trace: list[dict] = []
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
+        rows = sdk._tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
                                      leg_trace=trace)
 
         # The TIER is asserted, not assumed: the snapshot tier satisfies both
@@ -1073,7 +1073,7 @@ class TestThePaginationControlBoundaries:
     def test_exactly_at_limit_is_one_page_and_not_more(self, sdk):
         """Boundary 1 — limit == total: one page, `hasMore` False, unmarked."""
         _seed(sdk, 4)
-        page = sdk.paginated_query(limit=4, skip=0)
+        page = sdk._paginated_query(limit=4, skip=0)
         assert len(page["results"]) == 4
         assert page["total"] == 4
         assert page["hasMore"] is False
@@ -1082,18 +1082,18 @@ class TestThePaginationControlBoundaries:
     def test_limit_plus_one_needs_a_second_page(self, sdk):
         """Boundary 2 — limit+1: the extra row is a page 2, not a loss."""
         _seed(sdk, 5)
-        first = sdk.paginated_query(limit=4, skip=0)
+        first = sdk._paginated_query(limit=4, skip=0)
         assert len(first["results"]) == 4
         assert first["hasMore"] is True
-        second = sdk.paginated_query(limit=4, skip=4)
+        second = sdk._paginated_query(limit=4, skip=4)
         assert len(second["results"]) == 1
         assert second["hasMore"] is False
 
     def test_page_two_of_two_is_disjoint_and_the_walk_is_complete(self, sdk):
         """Boundary 3 — page 2 of 2: reachable, disjoint, and the walk ends."""
         _seed(sdk, 5)
-        first = sdk.paginated_query(limit=4, skip=0)
-        second = sdk.paginated_query(limit=4, skip=4)
+        first = sdk._paginated_query(limit=4, skip=0)
+        second = sdk._paginated_query(limit=4, skip=4)
         ids = [r["id"] for r in first["results"] + second["results"]]
         assert len(ids) == len(set(ids)) == 5
         assert second["hasMore"] is False
@@ -1106,7 +1106,7 @@ class TestThePaginationControlBoundaries:
         cursor from a truncated one, which is the whole contract.
         """
         _seed(sdk, 2)
-        page = sdk.paginated_query(limit=2, skip=2)
+        page = sdk._paginated_query(limit=2, skip=2)
         assert page["results"] == []
         assert page["hasMore"] is False
         assert page["total"] == 2

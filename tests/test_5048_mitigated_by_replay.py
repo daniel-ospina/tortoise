@@ -148,11 +148,11 @@ def _fresh_sdk(tmp_path):
 
 def _impl_chain(sdk):
     """T0 source -[IMPL]-> downstream claim. Returns (source, claim, op_id)."""
-    src = sdk.create_point("statement", "T0 source", status="live",
+    src = sdk._create_point("statement", "T0 source", status="live",
                            dedup=False)["id"]
-    claim = sdk.create_point("statement", "downstream claim", status="live",
+    claim = sdk._create_point("statement", "downstream claim", status="live",
                              dedup=False)["id"]
-    op_id = sdk.create_operator("IMPL", src, [claim])["id"]
+    op_id = sdk._create_operator("IMPL", src, [claim])["id"]
     return src, claim, op_id
 
 
@@ -207,7 +207,7 @@ def _oracle_strength(tmp_path, records: list[dict], mid: str):
     try:
         for r in records:
             oracle._get_proj().apply(r)
-        return oracle.get_point(mid).get("mitigation_strength")
+        return oracle._get_point(mid).get("mitigation_strength")
     finally:
         oracle.close()
 
@@ -226,7 +226,7 @@ class TestMitigatedBySurvivesRebuild:
         sdk, events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            sdk.mitigate_operator(op_id, f"mitigation at {strength}", strength)
+            sdk._mitigate_operator(op_id, f"mitigation at {strength}", strength)
 
             before = compute_operator_weight(sdk._get_proj(), op_id)
             assert before == pytest.approx(
@@ -261,7 +261,7 @@ class TestMitigatedBySurvivesRebuild:
         sdk, events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            sdk.mitigate_operator(op_id, "identity parity", 0.50)
+            sdk._mitigate_operator(op_id, "identity parity", 0.50)
 
             live = _mitigation_row(sdk)
             assert live is not None, "no mitigation Point found"
@@ -288,8 +288,8 @@ class TestMitigatedBySurvivesRebuild:
         sdk, events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            sdk.mitigate_operator(op_id, "first", 0.10)
-            sdk.mitigate_operator(op_id, "first", 0.50)  # idempotent update path
+            sdk._mitigate_operator(op_id, "first", 0.10)
+            sdk._mitigate_operator(op_id, "first", 0.50)  # idempotent update path
 
             before = compute_operator_weight(sdk._get_proj(), op_id)
             assert before == pytest.approx(
@@ -323,7 +323,7 @@ class TestMitigatedBySurvivesRebuild:
         sdk, events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            sdk.mitigate_operator(op_id, "gate parity", 0.50)
+            sdk._mitigate_operator(op_id, "gate parity", 0.50)
             sdk._get_proj().rebuild_all(events, confirm_destructive=True)
 
             result = check_consistency(str(events / "events.jsonl"),
@@ -350,11 +350,11 @@ class TestMitigatedBySurvivesRebuild:
         sdk, events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            mid = sdk.mitigate_operator(op_id, "gate parity", 0.10)["id"]
-            sdk.mitigate_operator(op_id, "gate parity", 0.50)  # PointRevised
+            mid = sdk._mitigate_operator(op_id, "gate parity", 0.10)["id"]
+            sdk._mitigate_operator(op_id, "gate parity", 0.50)  # PointRevised
             sdk._get_proj().rebuild_all(events, confirm_destructive=True)
 
-            rebuilt = sdk.get_point(mid).get("mitigation_strength")
+            rebuilt = sdk._get_point(mid).get("mitigation_strength")
             assert rebuilt == pytest.approx(0.50), (
                 f"the revision half of the fixture did not land: {rebuilt!r}"
             )
@@ -383,15 +383,15 @@ class TestMitigatedBySurvivesRebuild:
         sdk, events = _fresh_sdk(tmp_path)
         try:
             src, _claim, op_id = _impl_chain(sdk)
-            mid = sdk.mitigate_operator(op_id, "revise me", 0.10)["id"]
-            sdk.mitigate_operator(op_id, "revise me", 0.50)  # PointRevised
+            mid = sdk._mitigate_operator(op_id, "revise me", 0.10)["id"]
+            sdk._mitigate_operator(op_id, "revise me", 0.50)  # PointRevised
 
             # A LATER same-file creation for the same id that does NOT carry
             # ``mitigation_strength`` — a bare re-emit shape no SDK producer
             # emits, and exactly the case that tells the two anchors apart.
             records = _journal(events)
             records.append({
-                "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:00+00:00",
+                "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:00+00:00",
                 "type": "PointAdded", "initiated_by": "raw-producer",
                 "projection_version": 2,
                 "point": {"id": mid, "content": "[MITIGATION] revise me",
@@ -410,7 +410,7 @@ class TestMitigatedBySurvivesRebuild:
 
             sdk._get_proj().rebuild_all(events, confirm_destructive=True)
 
-            rebuilt = sdk.get_point(mid).get("mitigation_strength")
+            rebuilt = sdk._get_point(mid).get("mitigation_strength")
             assert rebuilt == pytest.approx(applied), (
                 "a superseding creation that never wrote mitigation_strength "
                 f"must not suppress the revision: live={applied!r}, "
@@ -470,7 +470,7 @@ class TestMitigatedBySurvivesRebuild:
         sdk, _events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            victim = sdk.create_point("statement", "annotated rel",
+            victim = sdk._create_point("statement", "annotated rel",
                                       status="live", dedup=False)["id"]
             before = compute_operator_weight(sdk._get_proj(), op_id)
             assert before == pytest.approx(BASE_WEIGHT)
@@ -522,9 +522,9 @@ class TestMitigatedBySurvivesRebuild:
         sdk, _events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            mitigation = sdk.create_point("statement", "the mitigation",
+            mitigation = sdk._create_point("statement", "the mitigation",
                                           status="live", dedup=False)["id"]
-            bystander = sdk.create_point("statement", "not an operator",
+            bystander = sdk._create_point("statement", "not an operator",
                                          status="live", dedup=False)["id"]
             assert _point_identity(sdk, bystander) == (False, None), (
                 "the fixture must name a NON-operator as the origin"
@@ -557,7 +557,7 @@ class TestMitigatedBySurvivesRebuild:
         sdk, _events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            mitigation = sdk.create_point("statement", "the mitigation",
+            mitigation = sdk._create_point("statement", "the mitigation",
                                           status="live", dedup=False)["id"]
             assert _point_identity(sdk, op_id) == (True, "IMPL"), (
                 "the fixture's origin must be an operator"
@@ -598,8 +598,8 @@ class TestMitigatedBySurvivesRebuild:
         sdk, events = _fresh_sdk(tmp_path)
         try:
             src, _claim, op_id = _impl_chain(sdk)
-            mid = sdk.mitigate_operator(op_id, "revise me", 0.10)["id"]
-            sdk.mitigate_operator(op_id, "revise me", 0.50)  # PointRevised
+            mid = sdk._mitigate_operator(op_id, "revise me", 0.10)["id"]
+            sdk._mitigate_operator(op_id, "revise me", 0.50)  # PointRevised
             records = _journal(events)
             # A LATER same-file creation that NAMES the prop in a form the
             # writer drops. ``superseded`` is true for the revision because a
@@ -607,7 +607,7 @@ class TestMitigatedBySurvivesRebuild:
             # still folds — and only the writer's outcome knows that this
             # creation wrote nothing.
             records.append({
-                "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:00+00:00",
+                "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:00+00:00",
                 "type": "PointAdded", "initiated_by": "raw-producer",
                 "projection_version": 2,
                 "point": {"id": mid, "content": "[MITIGATION] revise me",
@@ -626,7 +626,7 @@ class TestMitigatedBySurvivesRebuild:
 
             sdk._get_proj().rebuild_all(events, confirm_destructive=True)
 
-            rebuilt = sdk.get_point(mid).get("mitigation_strength")
+            rebuilt = sdk._get_point(mid).get("mitigation_strength")
             assert rebuilt == pytest.approx(applied), (
                 "a creation whose strength the writer DROPPED must not anchor "
                 f"the skip: live={applied!r}, rebuilt={rebuilt!r}"
@@ -648,7 +648,7 @@ class TestMitigatedBySurvivesRebuild:
         sdk, events = _fresh_sdk(tmp_path)
         try:
             _src, _claim, op_id = _impl_chain(sdk)
-            sdk.mitigate_operator(op_id, f"bool {strength}", strength)
+            sdk._mitigate_operator(op_id, f"bool {strength}", strength)
 
             before = compute_operator_weight(sdk._get_proj(), op_id)
             assert before != pytest.approx(BASE_WEIGHT), (

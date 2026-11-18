@@ -117,8 +117,8 @@ def retracted(tmp_path):
     events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "retract5048.db"),
                       event_log_path=str(events / "events.jsonl"))
-    pid = sdk.create_point("statement", "a claim worth retracting")["id"]
-    sdk.retract_point(pid)
+    pid = sdk._create_point("statement", "a claim worth retracting")["id"]
+    sdk._retract_point(pid)
     yield events, sdk, pid
     sdk.close()
 
@@ -328,8 +328,8 @@ def test_a_malformed_instant_does_not_abort_the_rebuild(tmp_path):
     journal = events / "events.jsonl"
     db = str(tmp_path / "bad5048.db")
     sdk = TortoiseSDK(db, event_log_path=str(journal))
-    pid = sdk.create_point("statement", "a claim")["id"]
-    sdk.retract_point(pid)
+    pid = sdk._create_point("statement", "a claim")["id"]
+    sdk._retract_point(pid)
     sdk.close()
 
     # Re-write the retraction record with a `ts` the driver cannot take.
@@ -379,8 +379,8 @@ def test_an_empty_string_instant_writes_no_stamp_in_the_graph(tmp_path):
     journal = events / "events.jsonl"
     db = str(tmp_path / "empty5048.db")
     sdk = TortoiseSDK(db, event_log_path=str(journal))
-    pid = sdk.create_point("statement", "a claim")["id"]
-    sdk.retract_point(pid)
+    pid = sdk._create_point("statement", "a claim")["id"]
+    sdk._retract_point(pid)
     sdk.close()
 
     recs = [json.loads(line) for line in journal.read_text().splitlines()

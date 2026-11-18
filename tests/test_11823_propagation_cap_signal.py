@@ -46,15 +46,15 @@ def sdk():
 
 
 def _claim(sdk, content):
-    return sdk.create_point("statement", content, dedup=False, status="live")["id"]
+    return sdk._create_point("statement", content, dedup=False, status="live")["id"]
 
 
 def _chain(sdk, n=3):
     """n claims in an IMPL chain + a baseline, so EP has real factors."""
     ids = [_claim(sdk, f"chain {i}") for i in range(n)]
     for i in range(1, n):
-        sdk.create_operator("IMPL", ids[i], [ids[i - 1]])
-    sdk.set_point_baseline(ids[-1], 8.0, 2.0)
+        sdk._create_operator("IMPL", ids[i], [ids[i - 1]])
+    sdk._set_point_baseline(ids[-1], 8.0, 2.0)
     return ids
 
 
@@ -63,7 +63,7 @@ def _islands(sdk, n=2):
 
 
 def _prop(sdk):
-    return sdk.dream_health_check()["propagation"]
+    return sdk._dream_health_check()["propagation"]
 
 
 # ── the denominator and the numerator are the SAME population ───────────────
@@ -96,14 +96,14 @@ def test_counts_match_an_independent_query(sdk):
     _chain(sdk, 3)
     _islands(sdk, 4)
     unclassified = _claim(sdk, "direct edge to a draft")
-    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+    draft = sdk._create_point("statement", "draft neighbour", dedup=False,
                              status="draft")["id"]
-    sdk.create_direct_edge("IMPL", unclassified, draft)
+    sdk._create_direct_edge("IMPL", unclassified, draft)
     # a far endpoint that is NOT a `:Point`: reachable only because `:Subject`
     # is in the epistemic set, so the spelled-out membership is live.
     to_subject = _claim(sdk, "edged to a subject")
-    subject = sdk.create_subject("doctrine", "a live subject", dedup=False)["id"]
-    sdk.create_direct_edge("IMPL", to_subject, subject)
+    subject = sdk._create_subject("doctrine", "a live subject", dedup=False)["id"]
+    sdk._create_direct_edge("IMPL", to_subject, subject)
     p = _prop(sdk)
     g = sdk._get_proj().g
     live = int(g.query(
@@ -173,9 +173,9 @@ def test_no_belief_stays_inside_its_invariants(sdk):
     # trivial-stamp population because it has an edge. So the fixture adds one
     # belief-less claim INSIDE the denominator rather than beside it.
     live = _claim(sdk, "edged only to a draft")
-    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+    draft = sdk._create_point("statement", "draft neighbour", dedup=False,
                              status="draft")["id"]
-    sdk.create_operator("IMPL", live, [draft])
+    sdk._create_operator("IMPL", live, [draft])
     p = _prop(sdk)
     assert 0 <= p["no_belief"] <= p["ep_reachable_claims"]
     assert 0.0 <= p["belief_coverage_pct"] <= 1.0
@@ -208,8 +208,8 @@ def test_a_stamped_claim_with_no_belief_is_reported(sdk):
     """
     _chain(sdk, 3)
     _islands(sdk, 4)
-    sdk.dream(mode="full", require_calibration=False)
-    health = sdk.dream_health_check()
+    sdk._dream(mode="full", require_calibration=False)
+    health = sdk._dream_health_check()
     assert health["coverage_pct"] == 1.0        # stamps: all 7
     assert health["propagation"]["stamped"] == 7
     # …yet the 4 operator-less claims have no belief and are reported beside
@@ -224,7 +224,7 @@ def test_a_zero_pair_is_not_a_belief(sdk):
     not a belief. A private `posterior_alpha IS NOT NULL` would count it.
     """
     ids = _chain(sdk, 2)
-    sdk.dream(mode="full", require_calibration=False)
+    sdk._dream(mode="full", require_calibration=False)
     sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id = $id "
         "SET n.posterior_alpha = 0.0, n.posterior_beta = 0.0, n.ep_alpha = 0.0, "
@@ -240,7 +240,7 @@ def test_a_baseline_prior_is_a_belief(sdk):
     """…and a declared #2199 baseline IS one (same predicate)."""
     ids = _chain(sdk, 2)
     assert _prop(sdk)["belief_present"] == 1   # only the chain head has one
-    sdk.set_point_baseline(ids[0], 7.0, 3.0)
+    sdk._set_point_baseline(ids[0], 7.0, 3.0)
     p = _prop(sdk)
     assert p["belief_present"] == 2
     assert p["no_belief"] == 0
@@ -252,7 +252,7 @@ def test_the_denominator_is_the_graph_not_the_last_pass(sdk):
     _chain(sdk, 3)
     _islands(sdk, 2)
     before = _prop(sdk)["ep_reachable_claims"]
-    sdk.dream(mode="local", max_hops=1, require_calibration=False)
+    sdk._dream(mode="local", max_hops=1, require_calibration=False)
     after = _prop(sdk)["ep_reachable_claims"]
     assert before == after == 3
 
@@ -328,7 +328,7 @@ def test_unreadable_propagation_is_reported_not_zeroed(sdk, monkeypatch):
         raise RuntimeError("graph went away")
 
     monkeypatch.setattr(sdk, "_propagation_counts", boom)
-    p = sdk.dream_health_check()["propagation"]
+    p = sdk._dream_health_check()["propagation"]
     assert p["unavailable"] and "graph went away" in p["unavailable"]
     assert p["no_belief"] is None      # NOT 0
     assert p["belief_coverage_pct"] is None
@@ -351,7 +351,7 @@ def test_no_pass_observed_by_this_sdk_is_null_not_zero(sdk):
 
 def test_last_pass_names_the_cap(sdk):
     _chain(sdk, 3)
-    sdk.dream(mode="local", max_hops=2, require_calibration=False)
+    sdk._dream(mode="local", max_hops=2, require_calibration=False)
     last = _prop(sdk)["last_pass"]
     assert last["mode"] == "local" and last["max_hops"] == 2
 
@@ -367,9 +367,9 @@ def test_last_pass_never_subtracts_across_populations(sdk):
     is read from the graph AFTER the pass and IS the uncovered count.
     """
     ids = _chain(sdk, 6)
-    sdk.dream(mode="full", require_calibration=False)
+    sdk._dream(mode="full", require_calibration=False)
     sdk._dirty_roots = {ids[0]}
-    sdk.dream(mode="local", max_hops=1, require_calibration=False)
+    sdk._dream(mode="local", max_hops=1, require_calibration=False)
     p = _prop(sdk)
     last = p["last_pass"]
     assert last["graph_ep_reachable"] == p["ep_reachable_claims"]
@@ -395,7 +395,7 @@ def test_an_operator_less_pass_does_not_report_full_coverage(sdk):
     ids = _chain(sdk, 3)                      # 3 EP-reachable claims
     islands = [_claim(sdk, f"island {i}") for i in range(5)]
     sdk._dirty_roots = set(islands)            # ONLY operator-less claims
-    sdk.dream(mode="local", max_hops=1, require_calibration=False)
+    sdk._dream(mode="local", max_hops=1, require_calibration=False)
     p = _prop(sdk)
     last = p["last_pass"]
     assert last["affected"] >= 1               # the pass really ran over them
@@ -458,7 +458,7 @@ def test_the_census_bound_cannot_be_disabled_by_a_junk_value(sdk, monkeypatch):
 
 def test_a_budget_zero_pass_is_recorded_not_absent(sdk):
     _chain(sdk, 2)
-    sdk.dream(mode="local", budget=0, require_calibration=False)
+    sdk._dream(mode="local", budget=0, require_calibration=False)
     p = _prop(sdk)
     assert p["last_pass"] is not None
     assert p["last_pass_reason"] is None
@@ -467,8 +467,8 @@ def test_a_budget_zero_pass_is_recorded_not_absent(sdk):
 
 def test_a_no_dirty_roots_pass_is_recorded_not_absent(sdk):
     _chain(sdk, 2)
-    sdk.dream(mode="full", require_calibration=False)   # drains the backlog
-    sdk.dream(mode="local", require_calibration=False)  # nothing left to do
+    sdk._dream(mode="full", require_calibration=False)   # drains the backlog
+    sdk._dream(mode="local", require_calibration=False)  # nothing left to do
     p = _prop(sdk)
     assert p["last_pass"] is not None
     assert p["last_pass"]["affected"] == 0
@@ -494,7 +494,7 @@ def test_a_silent_no_op_pass_records_its_reach(sdk, monkeypatch):
 
     monkeypatch.setattr(dreamer, "dream", wrapped)
     with pytest.raises(DreamNoOpError):
-        sdk.dream(mode="local", require_calibration=False)
+        sdk._dream(mode="local", require_calibration=False)
     p = _prop(sdk)
     assert p["last_pass"] is not None
     assert p["last_pass_reason"] is None
@@ -525,7 +525,7 @@ def test_the_pass_reach_is_recorded_without_a_graph_read(sdk, monkeypatch):
 
     monkeypatch.setattr(sdk, "_window_closure", counting_closure)
     monkeypatch.setattr(sdk, "_propagation_counts", counted)
-    sdk.dream(mode="local", require_calibration=False)
+    sdk._dream(mode="local", require_calibration=False)
     assert calls["propagation"] == 0
     assert calls["closure"] == 1
     assert sdk._dream_metrics["last_pass_reach"]["affected"] >= 1
@@ -543,7 +543,7 @@ def test_stale_first_computes_the_closure_once(sdk, monkeypatch):
         return real_closure(window, max_hops)
 
     monkeypatch.setattr(sdk, "_window_closure", counting_closure)
-    sdk.dream(mode="stale-first", require_calibration=False)
+    sdk._dream(mode="stale-first", require_calibration=False)
     assert calls["closure"] == 1
 
 
@@ -565,7 +565,7 @@ def test_the_full_pass_computes_the_closure_once(sdk, monkeypatch):
         return real_closure(window, max_hops)
 
     monkeypatch.setattr(sdk, "_window_closure", counting_closure)
-    sdk.dream(mode="full", require_calibration=False)
+    sdk._dream(mode="full", require_calibration=False)
     assert calls["closure"] == 1
 
 
@@ -574,7 +574,7 @@ def test_the_stamp_ratio_and_the_block_share_one_query(sdk, monkeypatch):
     come from ONE query (`_stamp_counts`), so they cannot drift apart."""
     _chain(sdk, 3)
     _islands(sdk, 2)
-    h = sdk.dream_health_check()
+    h = sdk._dream_health_check()
     prop = h["propagation"]
     assert h["coverage_pct"] == pytest.approx(
         prop["stamped"] / prop["graph_live_claims"])
@@ -634,7 +634,7 @@ def test_the_health_read_computes_the_stamp_pair_once(sdk, monkeypatch):
             self.g = _G(p.g)
 
     monkeypatch.setattr(sdk, "_get_proj", lambda: _P(inner))
-    h = sdk.dream_health_check()
+    h = sdk._dream_health_check()
     # The stamp-pair aggregate is the one whose SUM keys on `lastDreamedAt` (the
     # reach query also carries a `sum(CASE … has_belief …)`, so `sum(` alone
     # would match both and could not discriminate).
@@ -663,7 +663,7 @@ def test_a_failed_stamp_read_is_replayed_not_retried(sdk, monkeypatch):
         raise RuntimeError("graph went away")
 
     monkeypatch.setattr(sdk, "_stamp_counts", boom)
-    h = sdk.dream_health_check()
+    h = sdk._dream_health_check()
     assert calls["n"] == 1          # one attempt, reported twice
     assert h["coverage_pct"] == 0.0
     p = h["propagation"]
@@ -680,9 +680,9 @@ def test_an_edged_but_unreachable_claim_is_not_invisible(sdk):
     could never get one — an under-report its own docstring forbids.
     """
     live = _claim(sdk, "edged only to a draft")
-    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+    draft = sdk._create_point("statement", "draft neighbour", dedup=False,
                              status="draft")["id"]
-    sdk.create_direct_edge("IMPL", live, draft)
+    sdk._create_direct_edge("IMPL", live, draft)
     p = _prop(sdk)
     assert p["graph_live_claims"] == 1
     assert p["ep_reachable_claims"] == 0
@@ -703,9 +703,9 @@ def test_the_three_counts_partition_the_live_points(sdk):
     _chain(sdk, 3)
     _islands(sdk, 2)
     live = _claim(sdk, "edged only to a draft")
-    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+    draft = sdk._create_point("statement", "draft neighbour", dedup=False,
                              status="draft")["id"]
-    sdk.create_direct_edge("IMPL", live, draft)
+    sdk._create_direct_edge("IMPL", live, draft)
     p = _prop(sdk)
     g = sdk._get_proj().g
     edged = int(g.query(
@@ -770,9 +770,9 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     _chain(sdk, 3)
     _islands(sdk, 2)
     live = _claim(sdk, "edged only to a draft")
-    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+    draft = sdk._create_point("statement", "draft neighbour", dedup=False,
                              status="draft")["id"]
-    sdk.create_operator("IMPL", live, [draft])
+    sdk._create_operator("IMPL", live, [draft])
     # The STATUS observable: a draft with NO edge, so only the status conjunct
     # can keep it out of the constant's population. ⛔ RE-SPELLING the excluded
     # status counts it and reddens the equality below (measured: `<> 'draft'` →
@@ -780,12 +780,12 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     # status this fixture CARRIES (measured: also excluding `'live'` gives 2 vs
     # 0) and is INVISIBLE for one it does not (`'archived'` leaves the count at
     # 2 and this test GREEN) — see `dream.py`'s residual note.
-    sdk.create_point("statement", "un-edged draft", dedup=False,
+    sdk._create_point("statement", "un-edged draft", dedup=False,
                      status="draft")
     # The NAND observable: a claim whose only `IMPL|NAND` edge is a NAND one, so
     # narrowing the constant's edge alternation to `IMPL` counts it and reddens.
     a, b = _islands(sdk, 2)
-    sdk.create_operator("NAND", a, [b])
+    sdk._create_operator("NAND", a, [b])
     prop = _prop(sdk)
     # The query is built from the CONSTANT, so a drift that moves this
     # population changes this count and reddens the assertion below.
@@ -807,7 +807,7 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
 def test_dream_key_set_is_unchanged_by_this_change(sdk):
     """I1: the local key-set is pinned exactly (`tests/test_epic903_modes.py`)."""
     _chain(sdk, 2)
-    r = sdk.dream(mode="local", require_calibration=False)
+    r = sdk._dream(mode="local", require_calibration=False)
     assert set(r.keys()) == {"mode", "iterations", "converged",
                              "affected_claims", "budget_used", "coverage"}
 
@@ -816,10 +816,10 @@ def test_stamp_coverage_keeps_its_value(sdk):
     """`coverage_pct` = stamped / live, EXACTLY (the alarm's input)."""
     _chain(sdk, 3)
     _islands(sdk, 1)
-    sdk.dream(mode="full", require_calibration=False)
-    assert sdk.dream_health_check()["coverage_pct"] == 1.0
-    sdk.create_point("statement", "fresh island", dedup=False, status="live")
-    assert sdk.dream_health_check()["coverage_pct"] == pytest.approx(4 / 5)
+    sdk._dream(mode="full", require_calibration=False)
+    assert sdk._dream_health_check()["coverage_pct"] == 1.0
+    sdk._create_point("statement", "fresh island", dedup=False, status="live")
+    assert sdk._dream_health_check()["coverage_pct"] == pytest.approx(4 / 5)
 
 
 def test_stamp_coverage_and_belief_coverage_can_disagree(sdk):
@@ -827,13 +827,13 @@ def test_stamp_coverage_and_belief_coverage_can_disagree(sdk):
     issue's "coverage=1.0" could not answer its own question."""
     _chain(sdk, 3)
     _islands(sdk, 4)
-    sdk.dream(mode="full", require_calibration=False)
-    h = sdk.dream_health_check()
+    sdk._dream(mode="full", require_calibration=False)
+    h = sdk._dream_health_check()
     assert h["coverage_pct"] == 1.0
     assert h["propagation"]["belief_coverage_pct"] == 1.0
     # …and now break the agreement: an unstamped, belief-less live claim.
-    sdk.create_point("statement", "brand new", dedup=False, status="live")
-    h2 = sdk.dream_health_check()
+    sdk._create_point("statement", "brand new", dedup=False, status="live")
+    h2 = sdk._dream_health_check()
     assert h2["coverage_pct"] < 1.0
     assert h2["propagation"]["belief_coverage_pct"] == 1.0  # reachable set covered
 
@@ -843,7 +843,7 @@ def test_the_alarm_verdict_is_unchanged_by_the_new_fields(sdk):
     stays calm, and a backlog with real output stays calm (the #3139
     positive-control rule)."""
     _chain(sdk, 3)
-    sdk.dream(mode="full", require_calibration=False)
-    h = sdk.dream_health_check()
+    sdk._dream(mode="full", require_calibration=False)
+    h = sdk._dream_health_check()
     assert h["alarm_verdict"] is False
     assert h["propagation"]["no_belief"] == 0

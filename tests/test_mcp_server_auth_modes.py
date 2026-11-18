@@ -109,7 +109,7 @@ class TestTenantModeDefault:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create("tk-mcp-team")
+        team = reg._org_create("tk-mcp-team")
         # Mint a tk_ key via the C2 prefix kwarg (the provisioning lane's
         # credential class).
         key = reg._apikey_create(team["id"], "t", prefix="tk_")["api_key"]
@@ -141,7 +141,7 @@ class TestTenantModeDefault:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create("tk-mcp-deleg-team")
+        team = reg._org_create("tk-mcp-deleg-team")
         # deleg=0 minted per-graph key (the provisioning lane's credential
         # class — C2 _mint_graph_key stamps delegation_depth 0).
         key = reg._apikey_create(team["id"], "t", prefix="tk_",

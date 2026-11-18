@@ -64,13 +64,13 @@ def env(tmp_path):
 
 
 def _live(sdk, text="claim") -> str:
-    return sdk.create_point("statement", text, dedup=False)["id"]
+    return sdk._create_point("statement", text, dedup=False)["id"]
 
 
 def _superseded(sdk, text="old claim") -> tuple[str, str]:
     old = _live(sdk, text)
     new = _live(sdk, f"successor of {text}")
-    sdk.supersede_point(old, new)
+    sdk._supersede_point(old, new)
     return old, new
 
 
@@ -536,12 +536,12 @@ def test_a_lying_eq_cannot_disarm_the_entailed_exemption(env, monkeypatch):
     # live-row phase asserted nothing (#12907 cycle 4, P3, measured).
     monkeypatch.undo()
     pid3 = _live(sdk, "a claim that echoes its own word through a subclass")
-    sdk.retract_point(pid3)
+    sdk._retract_point(pid3)
     sdk.update_knowledge(pid3, status=_LieEq("retracted"), content="echoed, rewritten")
     assert _row(sdk, pid3)["status"] == "retracted", (
         "the entailed echo must land and must not disturb the terminal word: "
         + repr(_row(sdk, pid3)))
-    assert sdk.get_point(pid3)["content"] == "echoed, rewritten", (
+    assert sdk._get_point(pid3)["content"] == "echoed, rewritten", (
         "the entailed path must still write the content it carried")
 
     for _pid in (pid, pid2):
@@ -609,7 +609,7 @@ def test_probe_2_a_terminal_points_temporal_record_is_refused(env, prop, value):
 def test_probe_2_a_retracted_point_refuses_the_window_too(env):
     sdk, _ = env
     pid = _live(sdk)
-    sdk.retract_point(pid)
+    sdk._retract_point(pid)
     before = _row(sdk, pid)
 
     with pytest.raises(ValueError, match="terminal"):
@@ -687,7 +687,7 @@ def test_the_refusal_carries_the_three_parts(env):
     # ...and the assertion above is not vacuous: superseding the dead id really
     # does raise, which is WHY the old prescription was wrong.
     with pytest.raises(ValueError, match="already terminal"):
-        sdk.supersede_point(old, new)
+        sdk._supersede_point(old, new)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -702,7 +702,7 @@ def test_a_content_revision_of_a_terminal_point_stays_legal(env):
     old, _new = _superseded(sdk)
 
     sdk.update_knowledge(old, content="a corrected reading of the dead claim")
-    assert sdk.get_point(old)["content"] == \
+    assert sdk._get_point(old)["content"] == \
         "a corrected reading of the dead claim"
     assert _row(sdk, old)["status"] == "superseded", (
         "the revision must not disturb the terminal status")
@@ -724,7 +724,7 @@ def test_a_draft_point_still_promotes_through_this_door(env):
     """``draft → live`` is a DECLARED transition (ONTOLOGY §5) and the ruling
     that ``draft`` is an explicit, honoured mode depends on it working."""
     sdk, _ = env
-    pid = sdk.create_point("statement", "d", dedup=False, status="draft")["id"]
+    pid = sdk._create_point("statement", "d", dedup=False, status="draft")["id"]
     sdk.update_knowledge(pid, status="live")
     assert _row(sdk, pid)["status"] == "live"
 
@@ -803,7 +803,7 @@ def test_restating_the_same_status_is_a_no_op_not_a_refusal(env):
     pid = _live(sdk)
     sdk.update_knowledge(pid, status="live", content="same status, new content")
     assert _row(sdk, pid)["status"] == "live"
-    assert sdk.get_point(pid)["content"] == "same status, new content"
+    assert sdk._get_point(pid)["content"] == "same status, new content"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -846,7 +846,7 @@ def test_the_generic_door_still_serves_the_other_labels(env):
     a Point guard that raises ``No point …`` for a non-Point id would break
     every one of them (``missing_ok`` exists for exactly this)."""
     sdk, _ = env
-    obj = sdk.create_object("Widget", kind="core:entity")["id"]
+    obj = sdk._create_object("Widget", kind="core:entity")["id"]
     # ⛔ #11824 S0: `archived` is a declared SYNONYM of `deprecated`, so the
     # write lands and the store holds the canonical word — the whole point of
     # moving the pack words onto the position axis is that ONE four-word
@@ -854,7 +854,7 @@ def test_the_generic_door_still_serves_the_other_labels(env):
     sdk.update_knowledge(obj, status="archived")
     assert sdk.get_entity(obj)["status"] == "deprecated"
 
-    subj = sdk.create_subject("team-x")["id"]
+    subj = sdk._create_subject("team-x")["id"]
     # ⛔ #12592: the bare word is refused on every label now (§4.3), so the
     # non-Point control names its successor. The point of THIS test is unchanged:
     # the door serves the other labels rather than raising `No point`.
@@ -932,9 +932,9 @@ def test_one_row_is_not_the_fan_out_for_the_transition_check(env):
     refuse (a draft is inert for EP).
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "fan one", dedup=False,
+    pid = sdk._create_point("statement", "fan one", dedup=False,
                            status="draft")["id"]
-    sdk.create_point("statement", "fan two", dedup=False,
+    sdk._create_point("statement", "fan two", dedup=False,
                      status="live", id=pid)
     assert sorted(r[0] for r in _fan(sdk, pid)) == ["draft", "live"]
 
@@ -989,7 +989,7 @@ def test_a_points_provenance_event_id_does_not_guard_an_event_write(env):
     never addressed (AX rule 2) and blocking a healthy write.
     """
     sdk, _ = env
-    provenance = sdk.create_point(
+    provenance = sdk._create_point(
         "statement", "carries provenance", dedup=False,
         status="retracted", eventId="ev-9649-prov")["id"]
     # The status this Point is BORN with, read back rather than hard-coded: since
@@ -1087,7 +1087,7 @@ def test_a_hybrid_point_status_write_is_validated_and_journals_the_POINT(env):
     assert _row(sdk, pid)["status"] == "live", (
         "a refused hybrid status write must not touch the row")
 
-    draft_pid = sdk.create_point(
+    draft_pid = sdk._create_point(
         "statement", "draft hybrid", dedup=False, status="draft")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Source, n.url=$u",
@@ -1172,12 +1172,12 @@ def test_a_read_modify_write_of_the_unchanged_status_still_lands(env):
     """
     sdk, _ = env
     pid = _live(sdk, "rmw")
-    sdk.retract_point(pid)
-    stored = sdk.get_point(pid)["status"]
+    sdk._retract_point(pid)
+    stored = sdk._get_point(pid)["status"]
     assert stored == "retracted"
 
     sdk.update_knowledge(pid, status=stored, content="read-modify-write revision")
-    assert sdk.get_point(pid)["content"] == "read-modify-write revision"
+    assert sdk._get_point(pid)["content"] == "read-modify-write revision"
     assert _row(sdk, pid)["status"] == "retracted", (
         "the revision must not disturb the terminal status")
 
@@ -1197,7 +1197,7 @@ def test_the_entailed_status_exemption_is_narrow(env):
 
     # (a) an entailed status PLUS a temporal field is still a window write.
     t = _live(sdk, "entailed+temporal")
-    sdk.retract_point(t)
+    sdk._retract_point(t)
     with pytest.raises(ValueError, match="terminal"):
         sdk.update_knowledge(t, status="retracted", validTo="2030-01-01T00:00:00Z")
     assert _row(sdk, t)["validTo"] != "2030-01-01T00:00:00Z", (
@@ -1208,7 +1208,7 @@ def test_the_entailed_status_exemption_is_narrow(env):
     #     NULL-status row is already refused by the `()` != (status,) clause, so
     #     only the fan-out shape exercises `not _bound_null_statuses`.)
     f2 = _live(sdk, "fan with legacy null")
-    sdk.retract_point(f2)
+    sdk._retract_point(f2)
     sdk._get_proj().g.query(
         "CREATE (n:Point {id:$id, content:'legacy null row'})",
         params={"id": f2})
@@ -1217,8 +1217,8 @@ def test_the_entailed_status_exemption_is_narrow(env):
 
     # (c) EVERY bound row must hold it — "any" resurrects a terminal sibling.
     f = _live(sdk, "fan terminal")
-    sdk.retract_point(f)
-    sdk.create_point("statement", "fan live twin", dedup=False,
+    sdk._retract_point(f)
+    sdk._create_point("statement", "fan live twin", dedup=False,
                      status="live", id=f)
     with pytest.raises(ValueError, match="terminal"):
         sdk.update_knowledge(f, status="retracted")
@@ -1314,14 +1314,14 @@ def test_operator_points_keep_their_documented_lifecycle(env):
     sdk, _ = env
     a = _live(sdk, "op src")
     b = _live(sdk, "op tgt")
-    live_op = sdk.create_operator("IMPL", a, [b])["id"]
+    live_op = sdk._create_operator("IMPL", a, [b])["id"]
     # ⛔ `retracted` is a declared SYNONYM of `deprecated` since #11824 S0, so
     # the write LANDS and the store holds the canonical word (a one-way read
     # delta: nothing may be minted as `retracted`).
     sdk.update_knowledge(live_op, status="retracted")
     assert _row(sdk, live_op)["status"] == "deprecated"
 
-    dead_op = sdk.create_operator("NAND", a, [b])["id"]
+    dead_op = sdk._create_operator("NAND", a, [b])["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status='superseded'",
         params={"id": dead_op})
@@ -1405,7 +1405,7 @@ def test_two_address_arms_resolving_one_id_ask_the_guard_once(env, monkeypatch):
     runs twice.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "one node, two arms", dedup=False)["id"]
+    pid = sdk._create_point("statement", "one node, two arms", dedup=False)["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Event, n.eventId=$id",
         params={"id": pid})
@@ -1505,7 +1505,7 @@ def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(e
         params={"id": pid}).result_set[0][0] == 0, (
         "#12403: a successor-named `superseded` through this door mints no "
         "CORRECTS edge — the verb does, and that is the residual")
-    assert sdk.query("claim that will be retired") in ([], None), (
+    assert sdk._query("claim that will be retired") in ([], None), (
         "the dead claim must leave belief — that is WHY a missing successor "
         "matters (#2498)")
     assert after["validTo"] == before["validTo"], after
@@ -1517,7 +1517,7 @@ def test_a_declared_terminalizing_transition_carries_none_of_the_verbs_effects(e
     # half — the missing successor — had no verb-side demonstration at all.
     other = _live(sdk, "claim retired through the verb")
     succ = _live(sdk, "its successor")
-    sdk.supersede_point(other, succ)
+    sdk._supersede_point(other, succ)
     assert _row(sdk, other)["status"] == "superseded"
     assert _row(sdk, other)["validTo"] is not None, (
         "the verb closes the superseded claim's window")
@@ -1552,7 +1552,7 @@ def test_the_refusal_also_names_the_route_for_a_read_modify_write(env):
     """
     sdk, _ = env
     old, _new = _superseded(sdk)
-    stored = sdk.get_point(old)
+    stored = sdk._get_point(old)
 
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(old, validTo=stored["validTo"],
@@ -1565,7 +1565,7 @@ def test_the_refusal_also_names_the_route_for_a_read_modify_write(env):
 
     # ...and the route it names really works (non-vacuity: this half must pass).
     sdk.update_knowledge(old, content="a re-sent, corrected reading")
-    assert sdk.get_point(old)["content"] == "a re-sent, corrected reading"
+    assert sdk._get_point(old)["content"] == "a re-sent, corrected reading"
     assert _row(sdk, old)["validTo"] == stored["validTo"], (
         "the revision must not disturb the window the supersession closed")
 
@@ -1612,7 +1612,7 @@ def test_the_transition_refusal_names_the_RESOLVED_id_not_the_typed_address(env)
     # an assertion that the message contains an id proves nothing about whether
     # that id can be handed to the verb — review round 13, P3).
     fresh = _live(sdk, "the successor the message tells me to mint")
-    sdk.supersede_point(pid, fresh)
+    sdk._supersede_point(pid, fresh)
     assert _row(sdk, pid)["status"] == "superseded", (
         "the route the refusal names must be performable exactly as written, "
         "with the resolved id it interpolates")
@@ -1882,7 +1882,7 @@ def test_an_echo_of_a_legacy_terminal_word_is_an_entailed_write(env, retire):
     sdk, _ = env
     if retire == "retracted":
         pid = _live(sdk, "a claim retired by the shipped verb")
-        sdk.retract_point(pid)              # the CAS writes 'retracted'
+        sdk._retract_point(pid)              # the CAS writes 'retracted'
     else:
         pid = _live(sdk, "a claim a pre-fix writer archived")
         _force_status(sdk, pid, "archived")
@@ -1893,7 +1893,7 @@ def test_an_echo_of_a_legacy_terminal_word_is_an_entailed_write(env, retire):
     after = _row(sdk, pid)
     assert after["status"] == retire, (
         "an entailed echo must not rewrite the stored word: " + repr(after))
-    assert sdk.get_point(pid)["content"] == "echoed, rewritten", (
+    assert sdk._get_point(pid)["content"] == "echoed, rewritten", (
         "the entailed path must still write the content it carried")
 
     # …and the point is still DEAD: the echo is not a resurrection.

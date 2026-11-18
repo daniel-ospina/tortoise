@@ -3174,7 +3174,7 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
         sdk, journal_path = capture_sdk()
         before = dict(monitoring.record_write_failure_counts())
         with use_record_tenant(*tenant):
-            created = sdk.create_subject("Acme Corp",
+            created = sdk._create_subject("Acme Corp",
                                          subjectKind="organization")
         lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
                 - before.get("write_failed", 0))

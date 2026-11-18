@@ -49,14 +49,14 @@ def posterior_mean(sdk: TortoiseSDK, pid: str) -> float:
 def build_chain(sdk: TortoiseSDK) -> dict[str, str]:
     """A (baseline 10,1) --IMPL(op)--> B --IMPL(op)--> C. C inherits A's
     strength through the chain — the ghost-voting canary."""
-    a = sdk.create_point("statement", "strong source", status="live")["id"]
-    b = sdk.create_point("statement", "middle claim", status="live")["id"]
-    c = sdk.create_point("statement", "leaf claim", status="live")["id"]
-    sdk.set_point_baseline(a, 10.0, 1.0)
-    sdk.set_point_baseline(b, 1.0, 1.0)
-    sdk.set_point_baseline(c, 1.0, 1.0)
-    op1 = sdk.create_operator("IMPL", a, [b])["id"]
-    op2 = sdk.create_operator("IMPL", b, [c])["id"]
+    a = sdk._create_point("statement", "strong source", status="live")["id"]
+    b = sdk._create_point("statement", "middle claim", status="live")["id"]
+    c = sdk._create_point("statement", "leaf claim", status="live")["id"]
+    sdk._set_point_baseline(a, 10.0, 1.0)
+    sdk._set_point_baseline(b, 1.0, 1.0)
+    sdk._set_point_baseline(c, 1.0, 1.0)
+    op1 = sdk._create_operator("IMPL", a, [b])["id"]
+    op2 = sdk._create_operator("IMPL", b, [c])["id"]
     return {"a": a, "b": b, "c": c, "op1": op1, "op2": op2}
 
 
@@ -94,7 +94,7 @@ def test_retracted_claim_does_not_vote(sdk, tmp_path):
     run_ep(ctrl, [ctrl_ids["op1"], ctrl_ids["op2"]])
     deletion_ref = posterior_mean(ctrl, ctrl_ids["c"])
 
-    sdk.retract_point(ids["a"])
+    sdk._retract_point(ids["a"])
     # Retraction must have marked the neighborhood dirty (recompute scheduled).
     dirty = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true RETURN n.id",
@@ -134,9 +134,9 @@ def test_invalidated_claim_does_not_vote(sdk, tmp_path):
     deletion_ref = posterior_mean(ctrl, ctrl_ids["c"])
 
     # successor point for invalidate (CORRECTS edge target must exist)
-    succ = sdk.create_point("statement", "corrected source", status="live")["id"]
-    sdk.invalidate_point(ids["a"], succ)
-    assert sdk.get_point(ids["a"])["outdated"] is True, (
+    succ = sdk._create_point("statement", "corrected source", status="live")["id"]
+    sdk._invalidate_point(ids["a"], succ)
+    assert sdk._get_point(ids["a"])["outdated"] is True, (
         "invalidate_point sets outdated=true flag"
     )
     run_ep(sdk, [ids["op1"], ids["op2"]])
@@ -160,8 +160,8 @@ def test_superseded_claim_does_not_vote(sdk, tmp_path):
     run_ep(sdk, [ids["op1"], ids["op2"]])
 
     # Supersede A into a fresh successor — the old point goes terminal.
-    succ = sdk.create_point("statement", "successor source", status="live")["id"]
-    sdk.supersede_point(ids["a"], succ)
+    succ = sdk._create_point("statement", "successor source", status="live")["id"]
+    sdk._supersede_point(ids["a"], succ)
     run_ep(sdk, [ids["op1"], ids["op2"]])
     # A is terminal: its factor must not feed the run. The successor is fresh
     # (no baseline) so C's strength must drop below the live baseline level —
@@ -179,10 +179,10 @@ def test_superseded_claim_does_not_vote(sdk, tmp_path):
 def test_terminal_seed_runs_nothing(sdk):
     """A retracted claim used as a plain-point seed must contribute nothing
     (mirrors the draft-seed contract #780, extended to terminal #2422)."""
-    a = sdk.create_point("statement", "a", status="live")["id"]
-    b = sdk.create_point("statement", "b", status="live")["id"]
-    sdk.create_operator("IMPL", a, [b])
-    sdk.retract_point(a)
+    a = sdk._create_point("statement", "a", status="live")["id"]
+    b = sdk._create_point("statement", "b", status="live")["id"]
+    sdk._create_operator("IMPL", a, [b])
+    sdk._retract_point(a)
     ep = sdk._get_ep()
     affected = ep._affected_claims([a], include_draft=False)
     assert a not in affected, "terminal seed must not run itself"
@@ -195,12 +195,12 @@ def test_terminal_seed_runs_nothing(sdk):
 def test_terminal_claim_not_in_affected_factors(sdk):
     """A retracted claim never appears in the factor input set (its operator
     edge is not a voting factor)."""
-    a = sdk.create_point("statement", "a", status="live")["id"]
-    b = sdk.create_point("statement", "b", status="live")["id"]
-    sdk.set_point_baseline(a, 5.0, 1.0)
-    sdk.set_point_baseline(b, 1.0, 1.0)
-    op = sdk.create_operator("IMPL", a, [b])["id"]
-    sdk.retract_point(a)
+    a = sdk._create_point("statement", "a", status="live")["id"]
+    b = sdk._create_point("statement", "b", status="live")["id"]
+    sdk._set_point_baseline(a, 5.0, 1.0)
+    sdk._set_point_baseline(b, 1.0, 1.0)
+    op = sdk._create_operator("IMPL", a, [b])["id"]
+    sdk._retract_point(a)
     ep = sdk._get_ep()
     affected = ep._affected_claims([b], include_draft=False)
     factors = ep._affected_factors(affected, include_draft=False)
@@ -216,10 +216,10 @@ def test_ep_clean_after_rebuild_retained_status(sdk, tmp_path):
     retracted-claim graph (the recompute itself must not crash when the only
     seed is a terminal claim's neighborhood)."""
     ids = build_chain(sdk)
-    sdk.retract_point(ids["a"])
+    sdk._retract_point(ids["a"])
     # The dirty-marked neighborhood must be dreamable without error and the
     # terminal seed excluded from the run set.
-    result = sdk.dream(dirty_only=True)
+    result = sdk._dream(dirty_only=True)
     assert result is not None
 
 
@@ -235,7 +235,7 @@ def test_include_draft_hatch_does_not_resurrect_terminal_ghost(sdk, tmp_path):
     run_ep(sdk, [ids["op1"], ids["op2"]])
     live_mean = posterior_mean(sdk, ids["c"])
 
-    sdk.retract_point(ids["a"])
+    sdk._retract_point(ids["a"])
     ep = sdk._get_ep()
     ep.run([ids["op1"], ids["op2"]], max_hops=2, include_draft=True)
     c_mean = posterior_mean(sdk, ids["c"])
@@ -259,10 +259,10 @@ def test_supersede_into_draft_successor_no_ghost(sdk, tmp_path):
 
     # Supersede A into a draft (never-promoted) successor. Draft is explicit
     # since #1088 — a no-status create_point is LIVE.
-    succ = sdk.create_point("statement", "draft successor",
+    succ = sdk._create_point("statement", "draft successor",
                             status="draft")["id"]  # draft
-    assert sdk.get_point(succ)["status"] == "draft"
-    sdk.supersede_point(ids["a"], succ)
+    assert sdk._get_point(succ)["status"] == "draft"
+    sdk._supersede_point(ids["a"], succ)
     run_ep(sdk, [ids["op1"], ids["op2"]])
     c_mean = posterior_mean(sdk, ids["c"])
     assert c_mean <= 0.505, (
@@ -287,7 +287,7 @@ def test_deprecated_status_claim_excluded_from_factors(sdk, tmp_path):
         "MATCH (n:Point {id:$id}) SET n.status = 'deprecated'",
         params={"id": ids["a"]},
     )
-    assert sdk.get_point(ids["a"])["status"] == "deprecated"
+    assert sdk._get_point(ids["a"])["status"] == "deprecated"
     ep = sdk._get_ep()
     affected = ep._affected_claims([ids["b"]], include_draft=False)
     factors = ep._affected_factors(affected, include_draft=False)
@@ -319,7 +319,7 @@ def test_retract_does_not_strand_terminal_dirty_root(sdk, tmp_path):
     'local', accumulates dirty flags). _mark_dirty must exclude terminal
     points from the persisted dirty set."""
     ids = build_chain(sdk)
-    sdk.retract_point(ids["a"])
+    sdk._retract_point(ids["a"])
     dirty = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.ep_dirty = true AND n.id = $id RETURN count(n)",
         params={"id": ids["a"]},
@@ -349,7 +349,7 @@ def test_svbp_factors_exclude_retracted_input(sdk, tmp_path):
     wide SVBP path) independently had the retracted/outdated leak pre-fix.
     Assert it now excludes a retracted claim's operator."""
     ids = build_chain(sdk)
-    sdk.retract_point(ids["a"])
+    sdk._retract_point(ids["a"])
     proj = sdk._get_proj()
     factors = proj.extract_svbp_factors()
     for f in factors:
@@ -365,7 +365,7 @@ def test_stale_first_claims_exclude_terminal(sdk, tmp_path):
     claims (its stale-first dirty window feeds dreaming). Assert a retracted
     claim is not returned."""
     ids = build_chain(sdk)
-    sdk.retract_point(ids["a"])
+    sdk._retract_point(ids["a"])
     from tortoise.analyze import _stale_first_claims
     stale = _stale_first_claims(sdk._get_proj())
     assert ids["a"] not in stale, (
@@ -389,14 +389,14 @@ def test_assess_source_superseded_assessment_no_strand(sdk, tmp_path):
     first = sdk.manage_source_trust(url=url, assessor="agent-a", score=0.9, rationale="first assessment")
     old_id = first["assessment_point_id"]
     # Wire the assessment into an EP neighborhood (assessment → claim).
-    claim = sdk.create_point("statement", "assessed claim", status="live")["id"]
-    sdk.create_operator("IMPL", old_id, [claim])
+    claim = sdk._create_point("statement", "assessed claim", status="live")["id"]
+    sdk._create_operator("IMPL", old_id, [claim])
     sdk._dirty_roots.clear()
 
     # Second assessment from the same assessor supersedes the first.
     second = sdk.manage_source_trust(url=url, assessor="agent-a", score=0.1, rationale="revised assessment")
     assert second["assessment_point_id"] != old_id
-    assert sdk.get_point(old_id)["outdated"] is True
+    assert sdk._get_point(old_id)["outdated"] is True
 
     # The superseded (outdated=true) assessment must not strand in the
     # dirty set (terminal never swept); its neighborhood IS recomputed.
@@ -464,11 +464,11 @@ def plant_highvar_terminal(sdk: TortoiseSDK, pid: str) -> None:
 def build_measured(sdk: TortoiseSDK) -> dict[str, str]:
     """Single measured claim A (baseline 10,1) wired to a neutral claim B via
     an IMPL operator — A gets a real EP posterior flush (~0.909 mean)."""
-    a = sdk.create_point("statement", "measured source claim", status="live")["id"]
-    b = sdk.create_point("statement", "neutral follow-on claim", status="live")["id"]
-    sdk.set_point_baseline(a, 10.0, 1.0)
-    sdk.set_point_baseline(b, 1.0, 1.0)
-    op = sdk.create_operator("IMPL", a, [b])["id"]
+    a = sdk._create_point("statement", "measured source claim", status="live")["id"]
+    b = sdk._create_point("statement", "neutral follow-on claim", status="live")["id"]
+    sdk._set_point_baseline(a, 10.0, 1.0)
+    sdk._set_point_baseline(b, 1.0, 1.0)
+    op = sdk._create_operator("IMPL", a, [b])["id"]
     run_ep(sdk, [op])
     return {"a": a, "b": b, "op": op}
 
@@ -495,7 +495,7 @@ def test_retract_decays_terminal_posterior(sdk):
     ids = build_measured(sdk)
     a = ids["a"]
     assert posterior_mean(sdk, a) > 0.6, "A must be measured pre-retraction"
-    sdk.retract_point(a)
+    sdk._retract_point(a)
     assert_vacuous(sdk, a, terminal_status="retracted", outdated=False)
     # Post-dream stability: another EP run (terminal excluded as a factor)
     # must leave the decayed read untouched.
@@ -508,8 +508,8 @@ def test_supersede_decays_terminal_posterior(sdk):
     ids = build_measured(sdk)
     a = ids["a"]
     assert posterior_mean(sdk, a) > 0.6
-    succ = sdk.create_point("statement", "successor claim", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    succ = sdk._create_point("statement", "successor claim", status="live")["id"]
+    sdk._supersede_point(a, succ)
     assert_vacuous(sdk, a, terminal_status="superseded", outdated=True)
     run_ep(sdk, [ids["op"]])
     assert_vacuous(sdk, a, terminal_status="superseded", outdated=True)
@@ -521,8 +521,8 @@ def test_invalidate_decays_terminal_posterior(sdk):
     ids = build_measured(sdk)
     a = ids["a"]
     assert posterior_mean(sdk, a) > 0.6
-    succ = sdk.create_point("statement", "correcting claim", status="live")["id"]
-    sdk.invalidate_point(a, succ)
+    succ = sdk._create_point("statement", "correcting claim", status="live")["id"]
+    sdk._invalidate_point(a, succ)
     assert_vacuous(sdk, a, terminal_status="live", outdated=True)
     run_ep(sdk, [ids["op"]])
     assert_vacuous(sdk, a, terminal_status="live", outdated=True)
@@ -534,9 +534,9 @@ def test_assess_source_decays_superseded_assessment(sdk):
     url = "https://example.com/src-2490-decay"
     first = sdk.manage_source_trust(url=url, assessor="agent-a", score=0.9, rationale="first assessment")
     old_id = first["assessment_point_id"]
-    claim = sdk.create_point("statement", "assessed claim", status="live")["id"]
-    op = sdk.create_operator("IMPL", old_id, [claim])["id"]
-    sdk.set_point_baseline(old_id, 10.0, 1.0)
+    claim = sdk._create_point("statement", "assessed claim", status="live")["id"]
+    op = sdk._create_operator("IMPL", old_id, [claim])["id"]
+    sdk._set_point_baseline(old_id, 10.0, 1.0)
     run_ep(sdk, [op])
     assert posterior_mean(sdk, old_id) > 0.6, "assessment must be measured"
     # Second assessment from the same assessor supersedes (flags) the first.
@@ -570,14 +570,14 @@ def test_superseded_rebuild_decay_parity(sup_2490):
     ep_alpha-coalesced 0.909 (10,1) a journal replay would otherwise
     resurrect — the PointSuperseded fold decays the re-stamped node."""
     _, events, sdk = sup_2490
-    a = sdk.create_point(
+    a = sdk._create_point(
         "statement", "measured old A", status="live")["id"]
     # #6151 review round 6 P1: the belief quartet is server-managed and refused
     # through `create_point(**props)`. An explicit measured prior is set through
     # the dedicated writer, exactly as a caller must.
-    sdk.set_point_baseline(a, 10.0, 1.0)
-    succ = sdk.create_point("statement", "successor A'", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    sdk._set_point_baseline(a, 10.0, 1.0)
+    succ = sdk._create_point("statement", "successor A'", status="live")["id"]
+    sdk._supersede_point(a, succ)
     pre = ep_store(sdk, a)
     assert pre["posterior_alpha"] == 1.0 and pre["confidence"] == 0.5
     _rebuild_2490(sdk, events)
@@ -598,10 +598,10 @@ def test_retracted_rebuild_decay_parity(sup_2490):
     """retract → rebuild → 0.5: the PointRetracted fold decay ships in the
     rebuild replay (retract fold-decay must not go untested)."""
     _, events, sdk = sup_2490
-    a = sdk.create_point(
+    a = sdk._create_point(
         "statement", "measured retract A", status="live")["id"]
-    sdk.set_point_baseline(a, 10.0, 1.0)  # dedicated writer (#6151 round 6 P1)
-    sdk.retract_point(a)
+    sdk._set_point_baseline(a, 10.0, 1.0)  # dedicated writer (#6151 round 6 P1)
+    sdk._retract_point(a)
     pre = ep_store(sdk, a)
     assert pre["posterior_alpha"] == 1.0 and pre["confidence"] == 0.5
     _rebuild_2490(sdk, events)
@@ -618,11 +618,11 @@ def _terminal_chain(sdk: TortoiseSDK) -> dict[str, str]:
     """Measured A terminalized via supersede + a LIVE measured claim X (both
     ~0.909 measured) for include/exclude contrast on the same graph."""
     ids = build_measured(sdk)  # A strong → supersede below
-    succ = sdk.create_point("statement", "successor claim", status="live")["id"]
-    sdk.supersede_point(ids["a"], succ)
-    x = sdk.create_point("statement", "live measured contrast", status="live")["id"]
-    sdk.set_point_baseline(x, 10.0, 1.0)
-    opx = sdk.create_operator("IMPL", x, [ids["b"]])["id"]
+    succ = sdk._create_point("statement", "successor claim", status="live")["id"]
+    sdk._supersede_point(ids["a"], succ)
+    x = sdk._create_point("statement", "live measured contrast", status="live")["id"]
+    sdk._set_point_baseline(x, 10.0, 1.0)
+    opx = sdk._create_operator("IMPL", x, [ids["b"]])["id"]
     run_ep(sdk, [ids["op"], opx])
     ids.update({"succ": succ, "x": x, "opx": opx})
     return ids
@@ -668,10 +668,10 @@ def test_get_contested_claims_excludes_terminal_keeps_live_unmeasured(sdk):
     pre-terminalization stored Beta(2,2) (variance 0.05 > 0.04) — un-gated
     old code ranks it contested by stored variance."""
     ids = build_measured(sdk)
-    succ = sdk.create_point("statement", "successor claim", status="live")["id"]
+    succ = sdk._create_point("statement", "successor claim", status="live")["id"]
     plant_highvar_terminal(sdk, ids["a"])
-    sdk.supersede_point(ids["a"], succ)
-    unmeasured = sdk.create_point("statement", "live unmeasured claim",
+    sdk._supersede_point(ids["a"], succ)
+    unmeasured = sdk._create_point("statement", "live unmeasured claim",
                                   status="live")["id"]
     ep = sdk._get_ep()
     by_id = {c["id"]: c for c in ep.get_contested_claims()}
@@ -690,8 +690,8 @@ def test_review_prune_variance_scan_excludes_terminal(sdk):
     un-gated code flags it contested by stored variance."""
     ids = build_measured(sdk)
     plant_highvar_terminal(sdk, ids["a"])
-    sdk.retract_point(ids["a"])
-    out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
+    sdk._retract_point(ids["a"])
+    out = sdk._review_connections(mode="prune", scope=None, prune_limit=50)
     pruned = out["prune"]
     stale = [e for e in pruned if e["issue"] == "stale"]
     contested = [e for e in pruned if e["issue"] == "contested"]
@@ -709,14 +709,14 @@ def test_review_prune_nand_challenged_excludes_flag_outdated(sdk):
     'live') and the terminal read contested AND stale — the carve rested on
     the false premise that status='live' implies live.  The LIVE counter
     claim (outdated null) stays legitimately contested."""
-    x = sdk.create_point("statement", "X challenged claim", status="live")["id"]
-    y = sdk.create_point("statement", "Y live counter claim", status="live")["id"]
-    sdk.create_operator("NAND", x, [y])
+    x = sdk._create_point("statement", "X challenged claim", status="live")["id"]
+    y = sdk._create_point("statement", "Y live counter claim", status="live")["id"]
+    sdk._create_operator("NAND", x, [y])
     # Legacy invalidate: flag-only terminalization (status untouched).
-    corr = sdk.create_point("statement", "X corrected replacement",
+    corr = sdk._create_point("statement", "X corrected replacement",
                             status="live")["id"]
-    sdk.invalidate_point(x, corr)
-    out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
+    sdk._invalidate_point(x, corr)
+    out = sdk._review_connections(mode="prune", scope=None, prune_limit=50)
     pruned = out["prune"]
     stale = [e for e in pruned if e["issue"] == "stale"]
     contested = [e for e in pruned if e["issue"] == "contested"]
@@ -751,18 +751,18 @@ def test_analyze_most_uncertain_and_trends_exclude_terminal(sdk):
     decayed terminal (variance 1/12 > 0.04 would top the ranking)."""
     from tortoise.analyze import analyze
     phrase = "how the strategy over time?"  # exact entity classify() extracts
-    a = sdk.create_point("statement", phrase + " measured claim TERM-A",
+    a = sdk._create_point("statement", phrase + " measured claim TERM-A",
                          status="live")["id"]
-    x = sdk.create_point("statement", phrase + " measured claim LIVE-X",
+    x = sdk._create_point("statement", phrase + " measured claim LIVE-X",
                          status="live")["id"]
-    b = sdk.create_point("statement", "neutral follower", status="live")["id"]
-    sdk.set_point_baseline(a, 10.0, 1.0)
-    sdk.set_point_baseline(x, 10.0, 1.0)
-    sdk.set_point_baseline(b, 1.0, 1.0)
-    op_a = sdk.create_operator("IMPL", a, [b])["id"]
-    op_x = sdk.create_operator("IMPL", x, [b])["id"]
+    b = sdk._create_point("statement", "neutral follower", status="live")["id"]
+    sdk._set_point_baseline(a, 10.0, 1.0)
+    sdk._set_point_baseline(x, 10.0, 1.0)
+    sdk._set_point_baseline(b, 1.0, 1.0)
+    op_a = sdk._create_operator("IMPL", a, [b])["id"]
+    op_x = sdk._create_operator("IMPL", x, [b])["id"]
     run_ep(sdk, [op_a, op_x])
-    sdk.retract_point(a)
+    sdk._retract_point(a)
     proj = sdk._get_proj()
 
     res = analyze("what are we most uncertain about?", proj)
@@ -785,7 +785,7 @@ def test_w4_boost_never_fires_on_terminal(sdk, monkeypatch):
     from tortoise.ranking import StateRanker
     ids = build_measured(sdk)
     plant_highvar_terminal(sdk, ids["a"])
-    sdk.retract_point(ids["a"])
+    sdk._retract_point(ids["a"])
     monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
     ranker = StateRanker(projection=sdk._get_proj())
     results = [{"id": ids["a"], "entity_type": "point",
@@ -805,11 +805,11 @@ def test_outdated_prop_rejected_on_all_write_surfaces(sdk, tmp_path):
     dedup-forward path, AND _update_entity's label-loop, which all sanitize)
     plus the MCP _SERVER_MANAGED_PROPS boundary.
     """
-    a = sdk.create_point("statement", "live claim")["id"]
+    a = sdk._create_point("statement", "live claim")["id"]
 
     # update_point: reject + pre-write (flag unset, status unchanged)
     with pytest.raises(ValueError, match="outdated"):
-        sdk.update_point(a, props={"outdated": True})
+        sdk._update_point(a, props={"outdated": True})
     rows = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.outdated, n.status",
         params={"id": a},
@@ -819,7 +819,7 @@ def test_outdated_prop_rejected_on_all_write_surfaces(sdk, tmp_path):
 
     # create_point: reject on the new-node path
     with pytest.raises(ValueError, match="outdated"):
-        sdk.create_point("statement", "another", props={"outdated": True})
+        sdk._create_point("statement", "another", props={"outdated": True})
 
     # _update_entity surface (routes through _sanitize_props label-loop)
     with pytest.raises(ValueError, match="outdated"):

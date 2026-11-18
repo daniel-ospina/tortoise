@@ -815,7 +815,7 @@ def _promote_operator_row(sdk, g, oid, promoted_ops, on_input) -> bool:
     if not flipped:
         return False  # lost a race — a concurrent writer already flipped it
     promoted_ops.add(oid)
-    sdk._emit_event("OperatorPromoted", id=oid, point=sdk.get_point(oid))
+    sdk._emit_event("OperatorPromoted", id=oid, point=sdk._get_point(oid))
     for eid, _st, rel, labs in endpoints:
         # Only IMPL/NAND :Point endpoints are factor inputs to dirty-mark. A
         # hasPart / mitigated_by endpoint gated the promotion but is not
@@ -934,7 +934,7 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
         # Snapshot AFTER the SET so the event carries the live state — the
         # projection's PointPromoted replay upserts the full snapshot (#548).
         for pid in chunk:
-            sdk._emit_event("PointPromoted", point=sdk.get_point(pid))
+            sdk._emit_event("PointPromoted", point=sdk._get_point(pid))
         points_promoted += len(chunk)
 
     # ── 1b. Promote draft operators whose endpoints are all live ──────
@@ -1104,7 +1104,7 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     ep_error: str | None = None
     dream_result = None
     try:
-        dream_result = sdk.dream(
+        dream_result = sdk._dream(
             mode="full", require_calibration=False, warm_start=False)
         ep_ran = True
     except Exception as exc:  # noqa: BLE001, RUF100

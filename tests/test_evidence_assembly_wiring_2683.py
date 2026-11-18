@@ -223,22 +223,22 @@ def seeded_sdk(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     sdk = TortoiseSDK()
     try:
-        sdk.create_point(
+        sdk._create_point(
             "statement", QUOTE, id=POINT_ID, session_id=SESSION_1,
             lme_session_index=0, status="draft",
             quote=QUOTE, source_turn_id=2)
         # The windowed verbatim transcript that turn lives in — it holds the
         # quote verbatim, which is the containment leg ``_is_own_source`` reads.
-        sdk.create_point(
+        sdk._create_point(
             "session-transcript", f"user: {QUOTE}\nthe buyer paid cash.",
             id=CHUNK_ID, session_id=SESSION_1, lme_session_index=0,
             status="draft")
         # The same fact distilled again in a LATER session (the cross-item
         # near-dupe the window must not pay two slots for).
-        sdk.create_point(
+        sdk._create_point(
             "statement", QUOTE, id=DUP_ID, session_id=SESSION_2,
             lme_session_index=1, status="draft")
-        sdk.create_point(
+        sdk._create_point(
             "statement", "i live in lisbon", id=OTHER_ID,
             session_id=SESSION_1, lme_session_index=0, status="draft")
         yield sdk

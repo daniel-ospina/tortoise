@@ -102,7 +102,7 @@ def test_planted_inverted_window_is_reported(sdk):
     """
     kind = _kind()
     pid = _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01")
-    report = sdk.audit(point_kinds=[kind])
+    report = sdk._audit__svc(point_kinds=[kind])
     ch = _check(report, "inverted_validity_window")
     assert ch is not None, report
     assert ch["count"] == 1
@@ -127,7 +127,7 @@ def test_absent_bounds_are_not_reported(sdk):
     kind = _kind()
     _plant(sdk, kind, valid_from="2026-01-01")   # open END
     _plant(sdk, kind, valid_to="2026-01-01")     # open START
-    report = sdk.audit(point_kinds=[kind])
+    report = sdk._audit__svc(point_kinds=[kind])
     ch = _check(report, "inverted_validity_window")
     assert ch is None or ch["count"] == 0, ch
 
@@ -149,7 +149,7 @@ def test_unparseable_bound_is_not_reported(sdk):
     kind = _kind()
     _plant(sdk, kind, valid_from="zzz", valid_to="2026-01-01")
     _plant(sdk, kind, valid_from="2026-01-01", valid_to="1zzz")
-    report = sdk.audit(point_kinds=[kind])
+    report = sdk._audit__svc(point_kinds=[kind])
     ch = _check(report, "inverted_validity_window")
     assert ch is None or ch["count"] == 0, ch
 
@@ -163,7 +163,7 @@ def test_zero_length_window_is_not_reported(sdk):
     """
     kind = _kind()
     _plant(sdk, kind, valid_from="2026-06-15", valid_to="2026-06-15")
-    report = sdk.audit(point_kinds=[kind])
+    report = sdk._audit__svc(point_kinds=[kind])
     ch = _check(report, "inverted_validity_window")
     assert ch is None or ch["count"] == 0, ch
 
@@ -177,7 +177,7 @@ def test_forward_window_is_not_reported(sdk):
     """
     kind = _kind()
     _plant(sdk, kind, valid_from="2020-06-01", valid_to="2030-06-01")
-    report = sdk.audit(point_kinds=[kind])
+    report = sdk._audit__svc(point_kinds=[kind])
     ch = _check(report, "inverted_validity_window")
     assert ch is None or ch["count"] == 0, ch
 
@@ -196,7 +196,7 @@ def test_count_is_uncapped_while_samples_are_capped(sdk):
     kind = _kind()
     pids = [_plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01")
             for _ in range(60)]
-    report = sdk.audit(point_kinds=[kind])
+    report = sdk._audit__svc(point_kinds=[kind])
     ch = _check(report, "inverted_validity_window")
     assert ch is not None
     assert ch["count"] == 60
@@ -216,7 +216,7 @@ def test_point_kinds_scope_applies(sdk):
     ka, kb = _kind(), _kind()
     pa = _plant(sdk, ka, valid_from="2030-06-01", valid_to="2020-06-01")
     _plant(sdk, kb, valid_from="2030-06-01", valid_to="2020-06-01")
-    report = sdk.audit(point_kinds=[ka])
+    report = sdk._audit__svc(point_kinds=[ka])
     ch = _check(report, "inverted_validity_window")
     assert ch is not None and ch["count"] == 1
     assert ch["samples"][0]["node_id"] == pa
@@ -243,14 +243,14 @@ def test_documented_fix_repairs_the_window(sdk):
     """
     kind = _kind()
     pid = _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01")
-    ch = _check(sdk.audit(point_kinds=[kind]), "inverted_validity_window")
+    ch = _check(sdk._audit__svc(point_kinds=[kind]), "inverted_validity_window")
     assert ch is not None and ch["count"] == 1, ch
     advertised = ch["samples"][0]["fix"]
     assert "tortoise_update_point" in advertised, advertised
     assert pid in advertised, advertised
 
-    sdk.update_point(pid, validTo="2031-06-01")
-    ch = _check(sdk.audit(point_kinds=[kind]), "inverted_validity_window")
+    sdk._update_point(pid, validTo="2031-06-01")
+    ch = _check(sdk._audit__svc(point_kinds=[kind]), "inverted_validity_window")
     assert ch is None or ch["count"] == 0, ch
 
 
@@ -293,7 +293,7 @@ def test_documented_fix_does_not_prescribe_a_refused_call(sdk):
        params={"id": flag_pid})
     pids.append(flag_pid)
 
-    ch = _check(sdk.audit(point_kinds=[kind]), "inverted_validity_window")
+    ch = _check(sdk._audit__svc(point_kinds=[kind]), "inverted_validity_window")
     assert ch is not None and ch["count"] == 3, ch
     advertised = {s["node_id"]: s["fix"] for s in ch["samples"]}
     for pid in pids:
@@ -316,12 +316,12 @@ def test_documented_fix_does_not_prescribe_a_refused_call(sdk):
             f"{fix!r}")
     # ...and the call it no longer advertises really is refused.
     with pytest.raises(ValueError, match="already terminal"):
-        sdk.update_point(pids[0], validTo="2031-06-01")
+        sdk._update_point(pids[0], validTo="2031-06-01")
     # ...and the sibling door is closed too (#9649), which is what makes the
     # SDK-wide claim in the advertised text true rather than an over-statement.
     with pytest.raises(ValueError, match="terminal"):
         sdk.update_knowledge(pids[0], validTo="2031-06-01")
-    assert sdk.get_point(pids[0])["validTo"] == "2020-06-01", (
+    assert sdk._get_point(pids[0])["validTo"] == "2020-06-01", (
         "#9649: the refused call must leave the planted window untouched")
 
 
@@ -339,7 +339,7 @@ def test_terminal_and_live_rows_get_their_own_repair(sdk):
     live_pid = _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01")
     dead_pid = _plant(sdk, kind, valid_from="2030-06-01", valid_to="2020-06-01",
                       status="retracted")
-    ch = _check(sdk.audit(point_kinds=[kind]), "inverted_validity_window")
+    ch = _check(sdk._audit__svc(point_kinds=[kind]), "inverted_validity_window")
     assert ch is not None and ch["count"] == 2, ch
     by_id = {s["node_id"]: s["fix"] for s in ch["samples"]}
     assert "tortoise_update_point" in by_id[live_pid], by_id[live_pid]
@@ -387,7 +387,7 @@ def test_paged_scan_counts_every_row_exactly_once(sdk, monkeypatch):
     # A well-formed row lands in the same pages and must not be counted.
     _plant(sdk, kind, valid_from="2020-06-01", valid_to="2030-06-01")
 
-    report = sdk.audit(point_kinds=[kind])
+    report = sdk._audit__svc(point_kinds=[kind])
     ch = _check(report, "inverted_validity_window")
     assert ch is not None, report
     assert ch["count"] == 5, ch
@@ -431,7 +431,7 @@ def test_paged_scan_survives_colliding_ids(sdk, monkeypatch):
             },
         )
 
-    report = sdk.audit(point_kinds=[kind])
+    report = sdk._audit__svc(point_kinds=[kind])
     ch = _check(report, "inverted_validity_window")
     assert ch is not None, report
     assert ch["count"] == _planted, ch

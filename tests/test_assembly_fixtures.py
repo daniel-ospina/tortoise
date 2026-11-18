@@ -65,10 +65,10 @@ try:
         # the module's ask-calibrations depend on the FULLTEXT surface (embedded
         # returns [] silently), so the availability gate must prove an FTS
         # round-trip, not just a bare ping: write a point, query it back.
-        _probe.create_point(
+        _probe._create_point(
             "statement", "probe zzqfulltext roundtrip token 7f3a9c", id="pProbe",
             session_id="sess-probe", is_episodic=True, status="draft")
-        _hits = _probe.tortoise_fts_query(
+        _hits = _probe._tortoise_fts_query(
             "zzqfulltext roundtrip token", entity_type="point", limit=3)
         if _hits and _hits[0].get("id") == "pProbe":
             FALKORDB_AVAILABLE = True
@@ -409,7 +409,7 @@ def test_deep_rank_geometry_calibration(sdk, monkeypatch):
         "discriminator is gone.")
     # widened reach: a 120-deep FTS fetch must return BOTH golds (Task 7's
     # widened arm admits both ONLY if both are retrievable at that depth)
-    hits = sdk.tortoise_fts_query(d["question"], entity_type="point",
+    hits = sdk._tortoise_fts_query(d["question"], entity_type="point",
                                   limit=120)
     hit_ids = {h.get("id") for h in hits}
     assert {d["gold_a"], d["gold_b"]} <= hit_ids, (

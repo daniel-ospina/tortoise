@@ -30,7 +30,7 @@ print("source:", sow.get("id"))
 out["sow"] = sow
 
 # --- 3. Subject: Marta Reyes, the new CFO.
-marta = sdk.create_subject(
+marta = sdk._create_subject(
     "Marta Reyes",
     subjectKind="person",
     role="CFO",
@@ -42,7 +42,7 @@ print("subject:", marta.get("id"))
 out["marta"] = marta
 
 # --- 4. Event: the 2026-10-04 confirmation.
-event = sdk.create_event(
+event = sdk._create_event(
     "Northwind Logistics confirmed January renewal (2026-10-04)",
     "customerCommitment",
     startedAt="2026-10-04",
@@ -55,7 +55,7 @@ print("event:", event.get("id"))
 out["event"] = event
 
 # --- 5. Points (the retrievable claims).
-renewal = sdk.create_point(
+renewal = sdk._create_point(
     "statement",
     "Northwind Logistics confirmed on 2026-10-04 that it will renew in January 2027.",
     confirmedOn="2026-10-04",
@@ -66,7 +66,7 @@ renewal = sdk.create_point(
 )
 print("renewal:", renewal.get("id"))
 
-alias = sdk.create_point(
+alias = sdk._create_point(
     "statement",
     "Northwind Logistics is also written 'Northwind Logistics Ltd' in the signed SOW; the two names denote the same entity.",
     aliasOf="Northwind Logistics Ltd",
@@ -75,7 +75,7 @@ alias = sdk.create_point(
 )
 print("alias:", alias.get("id"))
 
-cfo = sdk.create_point(
+cfo = sdk._create_point(
     "statement",
     "Marta Reyes is the new CFO of Northwind Logistics (as of 2026-10-04).",
     effectiveFrom="2026",
@@ -89,7 +89,7 @@ out.update(renewal=renewal, alias=alias, cfo=cfo)
 # --- 6. Structural edges (reification rules: structural stays plain).
 def edge(rel, frm, to):
     try:
-        r = sdk.create_edge(rel, frm, to)
+        r = sdk._create_edge(rel, frm, to)
         print("edge", rel, "->", r)
         return r
     except Exception as e:

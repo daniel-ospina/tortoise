@@ -547,8 +547,8 @@ def test_the_sdk_door_writes_both_stores(door, monkeypatch, tmp_path):
     sdk = hosted_api._make_sdk(graph_name=cache_graph)
     try:
         sdk._bind_record_tenant(org, graph_id)
-        sdk.create_object("alpha", objectKind="goal")
-        sdk.create_object("beta", objectKind="goal")
+        sdk._create_object("alpha", objectKind="goal")
+        sdk._create_object("beta", objectKind="goal")
     finally:
         sdk.close()
     record = _count_record(owner, org, graph_id)
@@ -868,7 +868,7 @@ def test_a_live_fold_records_the_target_it_landed_in():
     cache_graph = f"org_orgA_g_{uuid.uuid4().hex[:8]}"
     sdk = hosted_api._make_sdk(graph_name=cache_graph)
     try:
-        sdk.create_object("target-alpha", objectKind="goal")
+        sdk._create_object("target-alpha", objectKind="goal")
     finally:
         sdk.close()
     targets = cache_write_targets()
@@ -976,7 +976,7 @@ def test_a_SKIPPED_fold_is_not_recorded_as_a_landed_write(monkeypatch, tmp_path)
         assert cache_write_targets() == {}, (
             "a skipped fold must not be counted as a landed write — got "
             f"{cache_write_targets()!r}")
-        sdk.create_object("landed-after-skip", objectKind="goal")
+        sdk._create_object("landed-after-skip", objectKind="goal")
         assert sum(cache_write_targets().values()) == 1, cache_write_targets()
     finally:
         sdk.close()
@@ -996,8 +996,8 @@ def test_the_structural_edge_lane_records_its_target_too(monkeypatch, tmp_path):
     reset_cache_write_targets()
     sdk = _embedded_sdk(tmp_path)
     try:
-        a = sdk.create_object("edge-source", objectKind="goal")
-        b = sdk.create_object("edge-target", objectKind="goal")
+        a = sdk._create_object("edge-source", objectKind="goal")
+        b = sdk._create_object("edge-target", objectKind="goal")
         reset_cache_write_targets()      # only the EDGE is under test
         created = sdk._get_proj().create_edge(a["id"], b["id"], "related")
         assert created is True
@@ -1242,7 +1242,7 @@ def test_the_0_row_capable_arms_STILL_count_a_fold_that_LANDED(
     sdk = _embedded_sdk(tmp_path)
     try:
         proj = sdk._get_proj()
-        point = sdk.create_point("fact", "a landed fold")
+        point = sdk._create_point("fact", "a landed fold")
         # Every arm below MATCHes an existing target, so each must count 1.
         for event in (
             {"type": "OperatorAnnotated", "id": point["id"], "bias": 0.4},

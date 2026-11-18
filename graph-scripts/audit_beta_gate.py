@@ -107,8 +107,8 @@ def run_check(sdk, proj) -> dict:
     ]
 
     # ── chain structure (tortoise_check_structure surface) ────────────
-    out["check_structure"] = sdk.check_structure()
-    out["summarize_structure"] = sdk.summarize_structure()
+    out["check_structure"] = sdk._check_structure()
+    out["summarize_structure"] = sdk._summarize_structure()
 
     # ── tortoise/audit.py ─────────────────────────────────────────────
     from tortoise.audit import audit_graph

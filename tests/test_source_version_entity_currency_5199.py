@@ -121,7 +121,7 @@ def test_a_revised_source_stales_the_derived_event():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         _set_hash(proj, "h2")
 
         verdict = entity_currency(proj.g, "ev-1")
@@ -145,7 +145,7 @@ def test_unchanged_source_reads_current():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         assert entity_currency(proj.g, "ev-1")["status"] == "current"
     finally:
@@ -167,7 +167,7 @@ def test_stale_entity_survives_the_read():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         _set_hash(proj, "h2")
         before_nodes = (_count(proj, "Event"), _count(proj, "Source"))
         before_note = _note_and_hash(proj)
@@ -195,7 +195,7 @@ def test_object_link_is_unknown_not_current():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "obj-1", "Object")
+        sdk._link_source_to_entity("src.txt", "obj-1", "Object")
         _set_hash(proj, "h2")
 
         verdict = entity_currency(proj.g, "obj-1")
@@ -241,7 +241,7 @@ def test_any_stale_link_outranks_an_unknown_sibling():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         proj.g.query(
             "CREATE (s:Source {url:'other.txt', sourceKind:'document', "
             "title:'other.txt', contentHash:'z1', ingestedAt:'2024-01-01'})"
@@ -272,8 +272,8 @@ def test_the_batch_read_addresses_several_entities_at_once():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
-        sdk.link_source_to_entity("src.txt", "obj-1", "Object")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "obj-1", "Object")
         _set_hash(proj, "h2")
 
         batch = read_reference_currency_links(proj.g, ["ev-1", "obj-1", "nope"])
@@ -354,13 +354,13 @@ def test_a_document_derivation_target_is_addressed_by_url():
             "content_hash": "d1",
             "suppress_embedding": True,
         })
-        sdk.link_source_to_entity("src.txt", "doc.md", "Document")
+        sdk._link_source_to_entity("src.txt", "doc.md", "Document")
         # (b) the stub-minted shape: `link_source_to_entity` auto-creates only
         # the SOURCE side, so the document node is minted by the writer that
         # actually owns that shape — `_mint_source_stub` (the Point provenance
         # path's create path) writes url with NO id.
         _mint_source_stub(proj.g, "stub.md")
-        sdk.link_source_to_entity("src.txt", "stub.md", "Document")
+        sdk._link_source_to_entity("src.txt", "stub.md", "Document")
 
         rows = proj.g.query(
             "MATCH (:Source {url:'src.txt'})-[r:references]->(d:Source) "
@@ -407,7 +407,7 @@ def test_an_ambiguous_address_reads_unknown_not_a_folded_verdict():
         # Both links come from the SAME source, recorded at different moments:
         # the Event's note matches the source's current hash, the document's
         # note predates it.
-        sdk.link_source_to_entity("src.txt", "shared", "Event")
+        sdk._link_source_to_entity("src.txt", "shared", "Event")
         proj.g.query(
             "MATCH (s:Source {url:'src.txt'}), (d:Source {url:'shared'}) "
             "CREATE (s)-[r:references]->(d) SET r.sourceVersion='z1'"
@@ -449,7 +449,7 @@ def test_the_entity_fyi_names_the_entity_it_is_about():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         _set_hash(proj, "h2")
 
         payload = _build_payload(entity_currency(proj.g, "ev-1"),
@@ -505,7 +505,7 @@ def test_the_cli_entity_door_reports_a_verdict():
     assert db, "the SDK must expose the store path for the CLI door"
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         _set_hash(proj, "h2")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -524,7 +524,7 @@ def test_the_cli_entity_door_reports_a_verdict():
         proj2.g.query(
             "CREATE (d2:Source {url:'both', sourceKind:'document', "
             "title:'both', contentHash:'d1', ingestedAt:'2024-01-01'})")
-        sdk.link_source_to_entity("src.txt", "both", "Event")
+        sdk._link_source_to_entity("src.txt", "both", "Event")
         proj2.g.query(
             "MATCH (a:Source {url:'src.txt'}), (d:Source {url:'both'}) "
             "CREATE (a)-[r:references]->(d) SET r.sourceVersion='z1'")

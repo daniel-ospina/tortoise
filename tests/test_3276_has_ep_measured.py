@@ -98,7 +98,7 @@ def _raw(sdk, pid):
 def _system_default_decision(sdk, content):
     """The exact #3276 repro: a decide part with NO explicit status is born
     live with the #2199 kind-derived system-default baseline."""
-    return sdk.create_point(kind="decision", content=content)["id"]
+    return sdk._create_point(kind="decision", content=content)["id"]
 
 
 class TestMeasurementStateHelper:
@@ -157,7 +157,7 @@ class TestUnmeasuredBaselineDecision:
         prior either, and that is what the three state flags below pin."""
         sdk = _fresh_sdk()
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "observation", "Quokka patrol unmeasured observation zzqx",
                 status="live")["id"]
             ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
@@ -173,12 +173,12 @@ class TestUnmeasuredBaselineDecision:
         decision, it reads measured with the REAL posterior (not 0.75)."""
         sdk = _fresh_sdk()
         try:
-            src = sdk.create_point(
+            src = sdk._create_point(
                 "statement", "Quokka patrol source zzqx", status="live")["id"]
-            sdk.set_point_baseline(src, 10.0, 1.0)
+            sdk._set_point_baseline(src, 10.0, 1.0)
             pid = _system_default_decision(
                 sdk, "Quokka patrol approved decision zzqx")
-            sdk.create_operator("IMPL", src, [pid], direction="unidirectional")
+            sdk._create_operator("IMPL", src, [pid], direction="unidirectional")
 
             g = sdk._get_proj().g
             before = annotate_ep_batch(g, [pid])[pid]
@@ -188,7 +188,7 @@ class TestUnmeasuredBaselineDecision:
             # separate fail-closed posture; this test targets measurement
             # state (sibling tests on the shared graph may leave an
             # uncalibrated observation behind — #176).
-            result = sdk.compute_confidence(require_calibration=False)
+            result = sdk._compute_confidence(require_calibration=False)
             assert result["converged"] is True, result
 
             after = annotate_ep_batch(g, [pid])[pid]
@@ -198,7 +198,7 @@ class TestUnmeasuredBaselineDecision:
             # The real posterior, NOT the 0.75 kind-default.
             assert after.confidence_mean != pytest.approx(0.75, abs=1e-4), after
             assert after.confidence_mean == pytest.approx(
-                sdk.get_confidence(pid, require_calibration=False)["mean"],
+                sdk._get_confidence(pid, require_calibration=False)["mean"],
                 abs=1e-3)
             # Posterior persisted (the column only a real EP run writes).
             assert _raw(sdk, pid)[4] is not None
@@ -217,7 +217,7 @@ class TestGateReadsRealGraph:
                 sdk, "Quokka patrol unmeasured decision zzqx")
             # One shared token with the query ("unmeasured") → below the
             # 2-token floor, so ONLY the EP branch can clear the gate.
-            hits = sdk.tortoise_fts_query(
+            hits = sdk._tortoise_fts_query(
                 "unmeasured quagga", entity_type="point", limit=50,
                 w4_enrich=False)
             hit = next((h for h in hits if h.get("id") == pid), None)
@@ -232,15 +232,15 @@ class TestGateReadsRealGraph:
     def test_measured_decision_clears_ep_gate(self):
         sdk = _fresh_sdk()
         try:
-            src = sdk.create_point(
+            src = sdk._create_point(
                 "statement", "Quokka patrol source zzqx", status="live")["id"]
-            sdk.set_point_baseline(src, 10.0, 1.0)
+            sdk._set_point_baseline(src, 10.0, 1.0)
             pid = _system_default_decision(
                 sdk, "Quokka patrol approved decision zzqx")
-            sdk.create_operator("IMPL", src, [pid], direction="unidirectional")
-            assert sdk.compute_confidence(require_calibration=False)["converged"] is True
+            sdk._create_operator("IMPL", src, [pid], direction="unidirectional")
+            assert sdk._compute_confidence(require_calibration=False)["converged"] is True
 
-            hits = sdk.tortoise_fts_query(
+            hits = sdk._tortoise_fts_query(
                 "approved quagga", entity_type="point", limit=50,
                 w4_enrich=False)
             hit = next((h for h in hits if h.get("id") == pid), None)
@@ -300,12 +300,12 @@ class TestCrossSurfaceHonesty:
         prior-only decision (unmeasured, set-by-author baseline)."""
         sdk = _fresh_sdk()
         try:
-            src = sdk.create_point(
+            src = sdk._create_point(
                 "statement", "Quokka prune source zzqx", status="live")["id"]
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "decision", "Quokka prioronly lowcred zzqx",
                 credibility="low", status="live")["id"]
-            sdk.create_operator("IMPL", src, [pid], direction="unidirectional")
+            sdk._create_operator("IMPL", src, [pid], direction="unidirectional")
 
             ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
             assert ep.measured is False and ep.baseline is True, ep
@@ -314,7 +314,7 @@ class TestCrossSurfaceHonesty:
             # #2199 default ⇒ the weak body alone, Beta(1.1,1), var 0.08046.)
             assert ep.variance > 0.04 and ep.contested is False, ep
 
-            out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
+            out = sdk._review_connections(mode="prune", scope=None, prune_limit=50)
             contested = [e for e in out["prune"] if e["issue"] == "contested"]
             assert not any(
                 e["detail"].get("contested_endpoint") == pid for e in contested
@@ -325,16 +325,16 @@ class TestCrossSurfaceHonesty:
 
 def _supersede_measured_decision(sdk):
     """A measured decision (EP posterior) that is then terminalized."""
-    src = sdk.create_point(
+    src = sdk._create_point(
         "statement", "Quokka terminal source zzqx", status="live")["id"]
-    sdk.set_point_baseline(src, 10.0, 1.0)
+    sdk._set_point_baseline(src, 10.0, 1.0)
     pid = _system_default_decision(
         sdk, "Quokka measured terminal decision zzqx")
-    sdk.create_operator("IMPL", src, [pid], direction="unidirectional")
-    assert sdk.compute_confidence(require_calibration=False)["converged"] is True
-    succ = sdk.create_point(
+    sdk._create_operator("IMPL", src, [pid], direction="unidirectional")
+    assert sdk._compute_confidence(require_calibration=False)["converged"] is True
+    succ = sdk._create_point(
         "statement", "Quokka successor zzqx", status="live")["id"]
-    sdk.supersede_point(pid, succ)
+    sdk._supersede_point(pid, succ)
     return pid
 
 
@@ -375,7 +375,7 @@ class TestPriorOnlyCypherMatchesPythonTwin:
         sdk = _fresh_sdk()
         try:
             g = sdk._get_proj().g
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "statement", "Quokka twin probe zzqx", status="live")["id"]
             predicate = ep_prior_only_cypher("n")
             for posterior_alpha in (None, 22.0):
@@ -420,7 +420,7 @@ class TestContestedClaimsMeasurementState:
     def test_prior_only_low_credibility_baseline_not_listed(self):
         sdk = _fresh_sdk()
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "decision", "Quokka prioronly lowcred contested zzqx",
                 credibility="low")["id"]
             # #6151 (now an ancestor via main): the authored word is ONE weak
@@ -431,7 +431,7 @@ class TestContestedClaimsMeasurementState:
             # Beta(2,1) v=0.0556 (> 0.04) so the exclusion under test is the
             # #3415 prior-only gate, not the variance bar (pre-#3415 this
             # listed as contested).
-            sdk.set_point_baseline(pid, 2, 1)
+            sdk._set_point_baseline(pid, 2, 1)
             ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
             assert ep.measured is False and ep.baseline is True, ep
             # The discriminating shape: the DECLARED prior's variance clears
@@ -468,7 +468,7 @@ class TestContestedClaimsMeasurementState:
         variance 1/12 > 0.04, and MUST list."""
         sdk = _fresh_sdk()
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "statement", "Quokka unmeasured still contested zzqx",
                 status="live")["id"]
             ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
@@ -486,7 +486,7 @@ class TestContestedClaimsMeasurementState:
         measurement (#3276 back-compat) and keeps listing."""
         sdk = _fresh_sdk()
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "statement", "Quokka legacy measured contested zzqx",
                 status="live")["id"]
             sdk._get_proj().g.query(

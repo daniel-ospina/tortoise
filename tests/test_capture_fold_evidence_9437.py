@@ -132,7 +132,7 @@ def test_a_fold_carries_the_duplicates_attachments_span_and_provenance(
     duplicate's `aboutObject` edge dies with the node (`_about_targets` is
     empty) and the canonical stores no span at all.
     """
-    sdk.create_object("Acme")          # so the cascade resolves an :Object
+    sdk._create_object("Acme")          # so the cascade resolves an :Object
     extracted, meta = _extract(
         sdk, monkeypatch,
         evidence={"aboutEntities": ["Acme"], "quote": "the duplicate's words",
@@ -204,7 +204,7 @@ def test_a_pre_existing_link_is_reported_present_but_not_written(sdk, monkeypatc
     short-circuits it and `created` is 0 while `carried` is 1 — the only shape
     that prints the clause.
     """
-    sdk.create_object("Acme")
+    sdk._create_object("Acme")
     extracted, meta = _extract(
         sdk, monkeypatch,
         canon_evidence={"aboutEntities": ["Acme"]},
@@ -271,7 +271,7 @@ def test_a_fold_that_cannot_carry_a_source_reference_is_refused(
     RED before #9437 — the fold deleted the duplicate and its reference with
     it: one node, `rephrase_linked`, and the second source unreachable.
     """
-    sdk.create_object("Acme")
+    sdk._create_object("Acme")
     extracted, meta = _extract(
         sdk, monkeypatch,
         evidence={"aboutEntities": ["Acme"]},
@@ -820,7 +820,7 @@ def test_an_inbound_link_refuses_the_fold(sdk):
     proj = sdk._get_proj()
     for pid, content in (("pt_in_dup", "the duplicate claim"),
                          ("pt_in_canon", "the canonical claim")):
-        sdk.create_point("statement", content, id=pid, dedup=False)
+        sdk._create_point("statement", content, id=pid, dedup=False)
     proj.g.query(
         "MATCH (p:Point {id:'pt_in_dup'}) "
         "CREATE (e:Event {id:'ev_inbound_9437', name:'Release'}) "
@@ -843,7 +843,7 @@ def test_a_duplicate_id_on_two_nodes_refuses_the_fold(sdk):
     over a delete that removes both rows.
     """
     proj = sdk._get_proj()
-    sdk.create_point("statement", "canon", id="pt_fan_canon", dedup=False)
+    sdk._create_point("statement", "canon", id="pt_fan_canon", dedup=False)
     proj.g.query(
         "CREATE (:Point {id:'pt_fan_dup', content:'copy one'}), "
         "(:Point {id:'pt_fan_dup', content:'copy two'})")
@@ -862,8 +862,8 @@ def test_a_new_graded_link_carries_its_grading(sdk):
     """
     proj = sdk._get_proj()
     for pid in ("pt_dup_graded", "pt_canon_ungraded"):
-        sdk.create_point("statement", f"claim for {pid}", id=pid, dedup=False)
-    sdk.create_object("GradedCo")
+        sdk._create_point("statement", f"claim for {pid}", id=pid, dedup=False)
+    sdk._create_object("GradedCo")
     proj.g.query(
         "MATCH (p:Point {id:'pt_dup_graded'}), (o:Object {name:'GradedCo'}) "
         "MERGE (p)-[r:aboutObject]->(o) SET r.confidence=0.7")
@@ -1042,7 +1042,7 @@ def test_a_point_the_real_write_door_mints_reports_no_undeclared_props(sdk):
     read as a REF; the rest are bookkeeping. This is the arm that reds when
     either fact drifts.
     """
-    sdk.create_point("statement", "a claim", dedup=False)
+    sdk._create_point("statement", "a claim", dedup=False)
     props = sdk._get_proj().g.query(
         "MATCH (p:Point) WHERE p.is_operator <> true RETURN properties(p)"
     ).result_set[0][0]
@@ -1061,7 +1061,7 @@ def test_a_clean_capture_point_reports_no_undeclared_props(sdk, monkeypatch):
     "dropped field(s)" clause — which is the loud direction — and this arm is
     what makes that drift visible instead of merely loud.
     """
-    sdk.create_object("Acme")
+    sdk._create_object("Acme")
     extracted, meta = _extract(
         sdk, monkeypatch, evidence={"aboutEntities": ["Acme"]})
     assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
@@ -1470,7 +1470,7 @@ def test_a_real_source_link_refuses_as_link_not_carried(sdk):
     proj = sdk._get_proj()
     for pid, content in (("pt_src_dup", "the duplicate claim with a source"),
                          ("pt_src_canon", "the canonical claim")):
-        sdk.create_point("statement", content, id=pid, dedup=False)
+        sdk._create_point("statement", content, id=pid, dedup=False)
     proj.g.query(
         "MATCH (p:Point {id:'pt_src_dup'}) "
         "CREATE (p)-[:aboutSource]->(:Source {url:'doc:policy-9437'})")
@@ -2169,7 +2169,7 @@ def test_the_declared_bounds_are_named_on_the_arm_that_CARRIED_something(
     `not carried and not copied` — exactly the state where nothing was carried —
     so the ORDINARY fold (one link carried) destroyed those classes with no
     clause naming them. This is that fold."""
-    sdk.create_object("Acme")
+    sdk._create_object("Acme")
     _extracted, meta = _extract(
         sdk, monkeypatch, evidence={"aboutEntities": ["Acme"]})
     said = next(w for w in meta["warnings"] if "folded into canonical" in w)
@@ -2190,7 +2190,7 @@ def test_a_date_that_LANDED_but_a_LINK_that_refused_does_not_claim_a_deletion(
     proj = sdk._get_proj()
     for pid, content in (("pt_dd_dup", "the dual dated claim"),
                          ("pt_dd_canon", "the canonical claim")):
-        sdk.create_point("statement", content, id=pid, dedup=False)
+        sdk._create_point("statement", content, id=pid, dedup=False)
     proj.g.query(
         "MATCH (p:Point {id:'pt_dd_dup'}) "
         "SET p.when = '2026-08-01', p.validFrom = '2026-08-02' "

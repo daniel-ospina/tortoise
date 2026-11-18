@@ -120,9 +120,9 @@ def _set_posterior(sdk, pid: str, alpha: float, beta: float):
 def _plant_claim(sdk, topic: str, *, alpha: float = 12.0,
                  beta: float = 2.0) -> dict:
     """One MEASURED claim with an IMPL support (persisted α/β, not propagated)."""
-    ev = sdk.create_point("evidence", f"{topic} supporting record alpha")
-    claim = sdk.create_point("statement", f"{topic} belief statement beta")
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", f"{topic} supporting record alpha")
+    claim = sdk._create_point("statement", f"{topic} belief statement beta")
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     _set_posterior(sdk, claim["id"], alpha, beta)
     _set_posterior(sdk, ev["id"], 12.0, 1.0)
     return {"claim": claim["id"], "support": ev["id"]}
@@ -131,8 +131,8 @@ def _plant_claim(sdk, topic: str, *, alpha: float = 12.0,
 def _plant_contested(sdk, topic: str) -> dict:
     """A contested-but-believed claim (variance > threshold) + a NAND counter."""
     planted = _plant_claim(sdk, topic, alpha=2.0, beta=0.7)
-    counter = sdk.create_point("statement", f"{topic} counterargument gamma")
-    sdk.create_operator("NAND", counter["id"], [planted["claim"]])
+    counter = sdk._create_point("statement", f"{topic} counterargument gamma")
+    sdk._create_operator("NAND", counter["id"], [planted["claim"]])
     _set_posterior(sdk, counter["id"], 10.0, 1.0)
     return {**planted, "counter": counter["id"]}
 
@@ -201,7 +201,7 @@ def test_pushed_why_equals_the_context_endpoint_why():
                                     "review?"},
         {"role": "user", "content": "Has it shipped?"},
     ]
-    pulled = sdk.volunteer_context(window, session_id="sess_ws8099", why=True)
+    pulled = sdk._volunteer_context(window, session_id="sess_ws8099", why=True)
     assert pulled["degraded_reason"] is None
     pulled_entries = {w["point_id"]: w for w in pulled["why"]}
     assert planted["claim"] in pulled_entries, pulled["pointers"]
@@ -372,7 +372,7 @@ def test_deleted_point_snapshot_is_dropped_so_a_retraction_carries_no_why():
     ws.precompute(proj, [pid])
     assert _snapshot_count(sdk) == 1
 
-    sdk.delete_point(pid)
+    sdk._delete_point(pid)
     # The next dream pass asks for the same id and finds no block → drop.
     summary = ws.precompute(proj, [pid])
     assert summary["dropped"] == 1
@@ -403,7 +403,7 @@ def test_a_non_point_id_is_never_written_so_the_pass_pays_no_churn():
     planted = _plant_claim(sdk, "Rollout gating decided by the CI reading")
     proj = sdk._get_proj()
     _subscribe(sdk)
-    goal = sdk.create_object("CI is fast", objectKind="goal", goalState="active")
+    goal = sdk._create_object("CI is fast", objectKind="goal", goalState="active")
 
     summary = ws.precompute(proj, [planted["claim"], goal["id"]])
     assert summary["written"] == 1, (
@@ -893,7 +893,7 @@ def test_a_deleted_points_snapshot_is_never_served_before_any_drop():
     ws.precompute(proj, [planted["claim"]])
     assert ws.read_blocks(proj, [planted["claim"]]), "precondition: it is served"
 
-    sdk.delete_point(planted["claim"])
+    sdk._delete_point(planted["claim"])
     # NO precompute here — the drop is hygiene, not the guarantee.
     assert ws.read_blocks(proj, [planted["claim"]]) == {}, (
         "a snapshot for a DELETED point was served — a retraction's push would "
@@ -924,7 +924,7 @@ def test_a_retracted_points_snapshot_is_never_served():
     ws.precompute(proj, [planted["claim"]])
     assert ws.read_blocks(proj, [planted["claim"]]), "precondition: it is served"
 
-    sdk.retract_point(planted["claim"])
+    sdk._retract_point(planted["claim"])
     # The node is still there — only the validity filter can refuse it.
     rows = proj.g.query("MATCH (n:Point {id:$id}) RETURN n.status",
                         params={"id": planted["claim"]}).result_set

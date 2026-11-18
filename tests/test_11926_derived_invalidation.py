@@ -61,19 +61,19 @@ def sdk(sdk_factory):
 
 def _world(sdk, *, tag, comparator="<=", threshold=10.0, dwell=1):
     """A measured thing, a target and a goal. ``tag`` keeps two worlds apart."""
-    indicator = sdk.create_object(f"CI pipeline duration [{tag}]",
+    indicator = sdk._create_object(f"CI pipeline duration [{tag}]",
                                  objectKind="workflow")
-    target = sdk.create_object(
+    target = sdk._create_object(
         f"CI <= {threshold:g}m [{tag}]", objectKind="target",
         comparator=comparator, threshold=threshold, dwell=dwell,
     )
-    goal = sdk.create_object(f"CI is fast [{tag}]", objectKind="goal",
+    goal = sdk._create_object(f"CI is fast [{tag}]", objectKind="goal",
                              goalState="active")
     return indicator, target, goal
 
 
 def _reading(sdk, indicator, value, *, at, unit="minutes"):
-    return sdk.create_event(
+    return sdk._create_event(
         f"CI run {at}", "measurement", value=value, unit=unit, startedAt=at,
         aboutObject=indicator["id"],
     )
@@ -244,7 +244,7 @@ def test_a_removed_threshold_is_a_revision_not_a_crash(sdk):
 def test_a_superseded_target_retires_the_state_it_judged(sdk):
     i, t, g = _world(sdk, tag="target-superseded")
     made = _judge(sdk, i, t, g)
-    successor = sdk.create_object("CI <= 8m [target-superseded]",
+    successor = sdk._create_object("CI <= 8m [target-superseded]",
                                   objectKind="target", comparator="<=",
                                   threshold=8.0)
     sdk.update_knowledge(t["id"], status="superseded", supersededBy=successor["id"])
@@ -258,7 +258,7 @@ def test_a_superseded_target_retires_the_state_it_judged(sdk):
 def test_a_target_that_no_longer_exists_is_retired_state(sdk):
     i, t, g = _world(sdk, tag="target-gone")
     made = _judge(sdk, i, t, g)
-    sdk.delete_entity(t["id"])
+    sdk._delete_entity__svc(t["id"])
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == "target-retired"
     assert "no longer exists" in v.invalidation.detail
@@ -733,7 +733,7 @@ def test_the_PRECEDENCE_holds_in_the_POST_EXCEPTION_arm(sdk, monkeypatch):
     # dispatches to `update_point`, which REFUSES a lifecycle transition
     # ("only promotes draft->live"), so the peer would never reach the terminal
     # state this arm exists to re-read. `retract_point` is the SDK write for it.
-    real_retract = sdk.retract_point
+    real_retract = sdk._retract_point
 
     def retired_by_a_PEER(point_id, **kwargs):
         real_retract(point_id, **kwargs)
@@ -786,7 +786,7 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
             params={"id": claim_id},
         )
     elif shape == "post-exception":
-        real_retract = sdk.retract_point
+        real_retract = sdk._retract_point
 
         def retired_by_a_PEER(point_id, **kwargs):
             # ⛔ The peer retires it the way production does (#12915 review F3):
@@ -800,7 +800,7 @@ def test_a_claim_that_NAMES_NO_goal_falls_back_to_the_CALLERs(sdk, monkeypatch,
         sdk.update_knowledge(t["id"], threshold=8.0)  # live, and stale
 
         def vanish_during_retract(point_id, **_kwargs):
-            sdk.delete_entity(point_id)
+            sdk._delete_entity__svc(point_id)
             raise ValueError("no such point")
         monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
 
@@ -824,7 +824,7 @@ def test_the_PRECEDENCE_holds_when_the_claim_VANISHES(sdk, monkeypatch):
     sdk.update_knowledge(t["id"], threshold=8.0)  # live, and stale
 
     def vanish_during_retract(point_id, **_kwargs):
-        sdk.delete_entity(point_id)
+        sdk._delete_entity__svc(point_id)
         raise ValueError("no such point")
 
     monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
@@ -975,7 +975,7 @@ def test_a_GOAL_that_no_longer_EXISTS_is_reported_gone_not_cleared(sdk):
     i, t, g = _world(sdk, tag="goal-gone-cache")
     made = _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"])["goalState"] == "met"
-    sdk.delete_entity(g["id"])
+    sdk._delete_entity__svc(g["id"])
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["counts"]["retired"] == 1
     assert report["counts"]["failed"] == 0
@@ -1326,7 +1326,7 @@ def test_a_window_with_an_UNDATED_reading_is_UNDECIDABLE_not_narrower(sdk):
     i, t, g = _world(sdk, tag="undated-window", dwell=2)
     _reading(sdk, i, 9.0, at="2026-11-11T10:00:00Z")
     # an undated reading, still a real measurement
-    sdk.create_event("CI run undated", "measurement", value=9.1, unit="minutes",
+    sdk._create_event("CI run undated", "measurement", value=9.1, unit="minutes",
                      aboutObject=i["id"])
     made = judge_and_record(sdk, goal_id=g["id"], indicator_id=i["id"],
                             target=Target.from_node(t))
@@ -1548,7 +1548,7 @@ def test_the_VANISH_BETWEEN_READ_AND_RETIREMENT_reconciles_the_CLAIMS_goal(sdk, 
     sdk.update_knowledge(t["id"], threshold=8.0)  # live, and stale
 
     def vanish_during_retract(point_id, **_kwargs):
-        sdk.delete_entity(point_id)  # gone between the read and the write
+        sdk._delete_entity__svc(point_id)  # gone between the read and the write
         raise ValueError("no such point")
 
     monkeypatch.setattr(sdk, "retract_point", vanish_during_retract)
@@ -1585,7 +1585,7 @@ def test_a_claim_that_VANISHES_mid_sweep_lands_in_a_counts_bucket(sdk, monkeypat
     real_invalidate = di.invalidate
 
     def vanishing(sdk_, invalidation, **kwargs):
-        sdk_.delete_entity(invalidation.judgement_id)
+        sdk_._delete_entity__svc(invalidation.judgement_id)
         return real_invalidate(sdk_, invalidation, **kwargs)
 
     monkeypatch.setattr(di, "invalidate", vanishing)
@@ -1657,7 +1657,7 @@ def test_an_ALREADY_TERMINAL_claim_also_reconciles_the_goal_word(sdk):
     i, t, g = _world(sdk, tag="terminal-reconciles")
     made = _judge(sdk, i, t, g)
     assert sdk.get_entity(g["id"]).get("goalState") == "met"
-    sdk.retract_point(made["point_id"])  # out of band (a Point lifecycle write)
+    sdk._retract_point(made["point_id"])  # out of band (a Point lifecycle write)
 
     report = invalidate(sdk, Invalidation(judgement_id=made["point_id"],
                                           goal_id=g["id"],
@@ -1686,8 +1686,8 @@ def test_an_absent_claim_whose_GOAL_is_gone_lands_in_GONE_too(sdk, monkeypatch):
     real_invalidate = di.invalidate
 
     def vanishing(sdk_, invalidation, **kwargs):
-        sdk_.delete_entity(invalidation.judgement_id)
-        sdk_.delete_entity(g["id"])
+        sdk_._delete_entity__svc(invalidation.judgement_id)
+        sdk_._delete_entity__svc(g["id"])
         return real_invalidate(sdk_, invalidation, **kwargs)
 
     monkeypatch.setattr(di, "invalidate", vanishing)
@@ -1719,7 +1719,7 @@ def test_the_POST_EXCEPTION_terminal_arm_reconciles_too(sdk, monkeypatch):
     # dispatches to `update_point`, which REFUSES a lifecycle transition
     # ("only promotes draft->live"), so the peer would never reach the terminal
     # state this arm exists to re-read. `retract_point` is the SDK write for it.
-    real_retract = sdk.retract_point
+    real_retract = sdk._retract_point
 
     def retired_by_a_PEER(point_id, **kwargs):
         real_retract(point_id, **kwargs)
@@ -1769,7 +1769,7 @@ def test_a_claim_that_vanishes_BEFORE_the_retirement_lands_is_alreadyRetired(
     assert sdk.get_entity(g["id"]).get("goalState") == "met"
 
     def purged_by_a_PEER(point_id, **_kwargs):
-        sdk.delete_entity(point_id)          # the peer's cleanup, then its refusal
+        sdk._delete_entity__svc(point_id)          # the peer's cleanup, then its refusal
         raise ValueError(f"no such point {point_id}")
 
     monkeypatch.setattr(sdk, "retract_point", purged_by_a_PEER)
@@ -1835,7 +1835,7 @@ def test_a_reconcile_that_RAISES_is_reported_not_raised(sdk, monkeypatch):
     # dispatches to `update_point`, which REFUSES a lifecycle transition
     # ("only promotes draft->live"), so the peer would never reach the terminal
     # state this arm exists to re-read. `retract_point` is the SDK write for it.
-    real_retract = sdk.retract_point
+    real_retract = sdk._retract_point
 
     def retired_by_a_PEER(point_id, **kwargs):
         real_retract(point_id, **kwargs)
@@ -1873,12 +1873,12 @@ def test_the_derived_state_stops_feeding_the_goal(sdk):
     """
     i, t, g = _world(sdk, tag="belief")
     made = _judge(sdk, i, t, g)
-    before = sdk.compute_confidence()
+    before = sdk._compute_confidence()
     assert before["confidences"][g["id"]]["mean"] > 0.5
     assert before["confidences"][made["point_id"]]["mean"] > 0.5
     sdk.update_knowledge(t["id"], threshold=8.0)
     invalidate_stale(sdk, goal_id=g["id"])
-    after = sdk.compute_confidence()
+    after = sdk._compute_confidence()
     assert g["id"] not in after["confidences"], (
         "the goal is still receiving belief from a retired derived state: "
         f"{after['confidences'].get(g['id'])}"
@@ -2187,7 +2187,7 @@ def test_the_claim_survives_with_a_SECOND_live_judgement_taking_over_the_cache(s
     """Two targets on one goal (D4's 0..n) both produce a judgement. Retiring one
     must leave the goal reading the SURVIVING state, not a cleared cache."""
     i, t, g = _world(sdk, tag="two-targets")
-    other = sdk.create_object("CI p95 <= 12m [two-targets]", objectKind="target",
+    other = sdk._create_object("CI p95 <= 12m [two-targets]", objectKind="target",
                               comparator="<=", threshold=12.0)
     first = _judge(sdk, i, t, g, value=11.0, at="2026-11-11T10:00:00Z")
     second = _judge(sdk, i, other, g, value=11.0, at="2026-11-11T11:00:00Z")
@@ -2215,7 +2215,7 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
     which a single-claim world makes look true.
     """
     i, t, g = _world(sdk, tag="auto-repair")
-    other = sdk.create_object("CI p95 <= 12m [auto-repair]", objectKind="target",
+    other = sdk._create_object("CI p95 <= 12m [auto-repair]", objectKind="target",
                               comparator="<=", threshold=12.0)
     first = _judge(sdk, i, t, g, value=11.0, at="2026-11-11T10:00:00Z")
     second = _judge(sdk, i, other, g, value=11.0, at="2026-11-11T11:00:00Z")
@@ -2223,7 +2223,7 @@ def test_ANOTHER_claims_stale_finding_clears_the_word_an_out_of_band_retirement_
 
     # OUT OF BAND: a direct status write retires the NEWEST claim, so no door runs
     # and no reconcile happens — the word still names the claim that just left.
-    sdk.retract_point(second["point_id"])
+    sdk._retract_point(second["point_id"])
     assert sdk.get_entity(g["id"])["goalState"] == "met"
 
     # Now the FIRST claim's own justification goes (its target's bar moved). The
@@ -2505,7 +2505,7 @@ def test_ROUTE_A_a_claim_DELETED_outright_is_invisible_to_the_sweep(sdk):
     i, t, g = _world(sdk, tag="route-a")
     made = _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["scanned"] == 0, (
         "the sweep enumerates live claims; a deleted claim is not one")
@@ -2522,7 +2522,7 @@ def test_ROUTE_B_a_claim_retired_OUT_OF_BAND_is_invisible_to_the_sweep(sdk):
     i, t, g = _world(sdk, tag="route-b")
     made = _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
-    sdk.retract_point(made["point_id"])
+    sdk._retract_point(made["point_id"])
     report = invalidate_stale(sdk, goal_id=g["id"])
     assert report["scanned"] == 0, report
     assert latest_judgement(sdk, goal_id=g["id"]) is None
@@ -2535,7 +2535,7 @@ def test_the_repair_sweep_clears_a_word_whose_claim_was_DELETED(sdk):
     i, t, g = _world(sdk, tag="sweep-route-a")
     made = _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
     report = reconcile_goal_states(sdk)
     assert report["truncated"] is False, report
     assert report["counts"]["repaired"] == 1, report
@@ -2553,7 +2553,7 @@ def test_the_repair_sweep_clears_a_word_whose_claim_was_RETIRED_OUT_OF_BAND(sdk)
     i, t, g = _world(sdk, tag="sweep-route-b")
     made = _judge(sdk, i, t, g)
     _derived_word_standing(sdk, g)
-    sdk.retract_point(made["point_id"])  # out of band
+    sdk._retract_point(made["point_id"])  # out of band
     report = reconcile_goal_states(sdk)
     assert report["counts"]["repaired"] == 1, report
     assert sdk.get_entity(g["id"]).get("goalState") is None
@@ -2661,7 +2661,7 @@ def test_a_LEGACY_goal_POINT_is_NOT_swept_COUNTED_and_the_reason_is_pinned(sdk):
     Point arm of the durability test — that is the property the sweep actually
     needs, and it is asserted there for the labels that have it.
     """
-    point = sdk.create_point("goal", "legacy goal [sweep-point]",
+    point = sdk._create_point("goal", "legacy goal [sweep-point]",
                              goalState="met")
     assert sdk.get_entity(point["id"])["goalState"] == "met", (
         "precondition: a legacy goal Point can hold the word")
@@ -2703,7 +2703,7 @@ def test_the_OBJECT_repair_is_JOURNALLED_so_a_rebuild_cannot_revert_it(tmp_path)
     try:
         i, t, g = _world(durable, tag="sweep-durable")
         made = _judge(durable, i, t, g)
-        durable.delete_entity(made["point_id"])
+        durable._delete_entity__svc(made["point_id"])
         assert durable.get_entity(g["id"])["goalState"] == "met"
         before = _records(events)
         report = reconcile_goal_states(durable)
@@ -2757,7 +2757,7 @@ def test_the_NON_OBJECT_repair_is_JOURNALLED_too(tmp_path):
     durable = TortoiseSDK(str(tmp_path / "durable-subject.db"),
                           namespace=namespace, event_log_path=log)
     try:
-        subject = durable.create_subject("team probe [sweep-durable-subject]")
+        subject = durable._create_subject("team probe [sweep-durable-subject]")
         durable.update_knowledge(subject["id"], goalState="met")
         before = _records(events)
         report = reconcile_goal_states(durable)
@@ -2783,7 +2783,7 @@ def test_a_second_sweep_is_a_NO_OP(sdk):
     reports nothing to do instead of re-clearing or re-journalling it."""
     i, t, g = _world(sdk, tag="sweep-idempotent")
     made = _judge(sdk, i, t, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
     assert reconcile_goal_states(sdk)["counts"]["cleared"] == 1
     second = reconcile_goal_states(sdk)
     assert second["counts"]["scanned"] == 0, second
@@ -2809,7 +2809,7 @@ def test_a_goal_on_a_NON_OBJECT_label_is_swept_too(sdk):
     refuses. The entity door routes a `subject` kind to `:Subject` by itself, so
     this shape is reachable without anyone typing a label.
     """
-    subject = sdk.create_subject("team probe [sweep-subject]")
+    subject = sdk._create_subject("team probe [sweep-subject]")
     sdk.update_knowledge(subject["id"], goalState="met")
     assert sdk.get_entity(subject["id"])["goalState"] == "met"
     report = reconcile_goal_states(sdk)
@@ -2953,7 +2953,7 @@ def test_a_CAPPED_window_with_a_dropped_row_still_reports_TRUNCATED(sdk):
     for n in range(2):
         i, t, g = _world(sdk, tag=f"sweep-cap-{n}")
         made = _judge(sdk, i, t, g)
-        sdk.delete_entity(made["point_id"])
+        sdk._delete_entity__svc(made["point_id"])
     report = reconcile_goal_states(sdk, limit=2)
     assert report["counts"]["scanned"] == 2, report
     assert report["truncated"] is True, (
@@ -2964,7 +2964,7 @@ def test_a_CAPPED_window_with_a_dropped_row_still_reports_TRUNCATED(sdk):
 def test_the_repair_sweep_dry_run_writes_nothing_and_names_what_it_would_clear(sdk):
     i, t, g = _world(sdk, tag="sweep-dry-run")
     made = _judge(sdk, i, t, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
     report = reconcile_goal_states(sdk, dry_run=True)
     assert report["dryRun"] is True, report
     assert report["counts"]["repaired"] == 0, report
@@ -2982,7 +2982,7 @@ def test_the_repair_sweep_discloses_its_own_BOUND(sdk):
     for n in range(2):
         i, t, g = _world(sdk, tag=f"sweep-bound-{n}")
         made = _judge(sdk, i, t, g)
-        sdk.delete_entity(made["point_id"])
+        sdk._delete_entity__svc(made["point_id"])
     report = reconcile_goal_states(sdk, limit=1)
     assert report["counts"]["scanned"] == 1, report
     assert report["truncated"] is True, (
@@ -2998,7 +2998,7 @@ def test_a_failed_reconcile_is_REPORTED_and_the_rest_of_the_sweep_survives(sdk):
     for n in range(2):
         i, t, g = _world(sdk, tag=f"sweep-fail-{n}")
         made = _judge(sdk, i, t, g)
-        sdk.delete_entity(made["point_id"])
+        sdk._delete_entity__svc(made["point_id"])
         worlds.append(g)
     doomed = worlds[0]["id"]
     real_update = sdk.update_knowledge
@@ -3035,7 +3035,7 @@ def test_a_word_a_HUMAN_sets_mid_sweep_is_PRESERVED_and_reported(sdk):
     touch."""
     i, t, g = _world(sdk, tag="sweep-human-race")
     made = _judge(sdk, i, t, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
     real_get = sdk.get_entity
 
     def racing(node_id, *args, **kwargs):
@@ -3106,7 +3106,7 @@ def test_a_probe_that_cannot_run_is_REPORTED_on_its_goal_and_the_sweep_survives(
     # a second, perfectly repairable goal that must still be reconciled
     i, t, g = _world(sdk, tag="sweep-probe-raise")
     made = _judge(sdk, i, t, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
 
     real_get_proj = sdk._get_proj
     real_update = sdk.update_knowledge
@@ -3206,7 +3206,7 @@ def test_a_goal_DELETED_mid_sweep_is_reported_GONE_not_repaired(sdk):
     """
     i, t, g = _world(sdk, tag="sweep-gone-race")
     made = _judge(sdk, i, t, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
     real_get = sdk.get_entity
 
     def vanishing(node_id, *args, **kwargs):
@@ -3276,7 +3276,7 @@ def test_a_DOOR_reported_reconcile_error_is_a_FAILED_goal_not_a_clean_one(sdk):
     """
     i, t, g = _world(sdk, tag="sweep-door-error")
     made = _judge(sdk, i, t, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
     real_get = sdk.get_entity
 
     def failing(node_id, *args, **kwargs):
@@ -3311,7 +3311,7 @@ def test_a_FAILED_standing_claim_read_is_a_FAILED_goal_and_the_sweep_carries_on(
     for n in range(2):
         i, t, g = _world(sdk, tag=f"sweep-read-fail-{n}")
         made = _judge(sdk, i, t, g)
-        sdk.delete_entity(made["point_id"])
+        sdk._delete_entity__svc(made["point_id"])
         worlds.append(g)
     doomed = worlds[0]["id"]
     original = _mod.latest_judgement
@@ -3349,7 +3349,7 @@ def test_a_reconcile_that_NEVER_RAN_is_a_FAILED_goal_never_a_repair(sdk):
 
     i, t, g = _world(sdk, tag="sweep-never-ran")
     made = _judge(sdk, i, t, g)
-    sdk.delete_entity(made["point_id"])
+    sdk._delete_entity__svc(made["point_id"])
     original = _mod.reconcile_goal_state_cache
 
     def not_run(sdk_, goal_id):

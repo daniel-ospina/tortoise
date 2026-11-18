@@ -4582,7 +4582,7 @@ def test_s3_real_backend_search(tmp_path):
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(namespace="test_extractor_v2_s3")
     try:
-        sdk.create_point("statement", "single flash granularity working path",
+        sdk._create_point("statement", "single flash granularity working path",
                          status="live")
         embed = {"entities": [], "events": [], "points": [
             {"content": "single flash granularity working path",

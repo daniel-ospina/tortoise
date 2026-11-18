@@ -88,9 +88,9 @@ def test_the_sources_idx0_edge_is_the_factors_source_slot(sdk):
     becomes the target: the factor then flows INTO the source and leaves the
     target at its prior. The assertion catches that inversion.
     """
-    src = sdk.create_point("evidence", "S: strong source", status="live")["id"]
-    tgt = sdk.create_point("hypothesis", "T: weak target", status="live")["id"]
-    op = sdk.create_operator("IMPL", src, [tgt], direction="unidirectional")
+    src = sdk._create_point("evidence", "S: strong source", status="live")["id"]
+    tgt = sdk._create_point("hypothesis", "T: weak target", status="live")["id"]
+    op = sdk._create_operator("IMPL", src, [tgt], direction="unidirectional")
 
     # The fixture reaches the state the assertion is about: one typed edge per
     # input, idx 0 = the source, idx 1 = the target.
@@ -104,7 +104,7 @@ def test_the_sources_idx0_edge_is_the_factors_source_slot(sdk):
         "input_ids by idx and treats input_ids[0] as the factor's source"
     )
 
-    sdk.compute_confidence(evidence={src: (9.0, 1.0), tgt: (1.0, 4.0)},
+    sdk._compute_confidence(evidence={src: (9.0, 1.0), tgt: (1.0, 4.0)},
                            factors=[op["id"]], require_calibration=False)
 
     assert _mean(sdk, src) == pytest.approx(0.9, abs=1e-6), (
@@ -126,13 +126,13 @@ def test_canonical_evidence_read_never_reports_a_point_as_its_own_supporter(sdk)
     reaches the falsifying state, so the exclusion asserted afterwards is a real
     exclusion and not an empty-set artifact.
     """
-    src = sdk.create_point("evidence", "E1: supports the claim",
+    src = sdk._create_point("evidence", "E1: supports the claim",
                            status="live")["id"]
-    sib = sdk.create_point("hypothesis", "X: a sibling", status="live")["id"]
-    claim = sdk.create_point("hypothesis", "H: the claim", status="live")["id"]
+    sib = sdk._create_point("hypothesis", "X: a sibling", status="live")["id"]
+    claim = sdk._create_point("hypothesis", "H: the claim", status="live")["id"]
     # Fan-out: the multi-input shape that made the census see several "inputs"
     # on one hypothesis.
-    op = sdk.create_operator("IMPL", src, [claim, sib])
+    op = sdk._create_operator("IMPL", src, [claim, sib])
 
     # (a) the fatal state, read as a claim set: H is among H's own inputs.
     raw = _g(sdk).query(
@@ -175,9 +175,9 @@ def test_analyze_support_reads_are_idx_role_guarded(sdk):
     """
     from tortoise.analyze import TEMPLATES
 
-    src = sdk.create_point("evidence", "SOURCEMARKER", status="live")["id"]
-    hyp = sdk.create_point("hypothesis", "HYPOMARKER", status="live")["id"]
-    sdk.create_operator("IMPL", src, [hyp])
+    src = sdk._create_point("evidence", "SOURCEMARKER", status="live")["id"]
+    hyp = sdk._create_point("hypothesis", "HYPOMARKER", status="live")["id"]
+    sdk._create_operator("IMPL", src, [hyp])
     proj = sdk._get_proj()
 
     def _run(name: str, entity: str) -> list[str]:
@@ -206,9 +206,9 @@ def test_annotate_ep_batch_does_not_count_the_sources_own_edge(sdk):
     """
     from tortoise.search_engine import annotate_ep_batch
 
-    src = sdk.create_point("evidence", "S: the source", status="live")["id"]
-    hyp = sdk.create_point("hypothesis", "H: the target", status="live")["id"]
-    sdk.create_operator("IMPL", src, [hyp])
+    src = sdk._create_point("evidence", "S: the source", status="live")["id"]
+    hyp = sdk._create_point("hypothesis", "H: the target", status="live")["id"]
+    sdk._create_operator("IMPL", src, [hyp])
 
     out = annotate_ep_batch(sdk._get_proj().g, [src, hyp])
     assert out[src].evidence.impl_count == 0, (
@@ -231,12 +231,12 @@ def test_annotate_ep_batch_still_counts_operator_less_direct_edges(sdk):
     """
     from tortoise.search_engine import annotate_ep_batch
 
-    sup = sdk.create_point("evidence", "S: direct support", status="live")["id"]
-    atk = sdk.create_point("hypothesis", "A: direct attack", status="live")["id"]
-    hyp = sdk.create_point("hypothesis", "H: supported directly",
+    sup = sdk._create_point("evidence", "S: direct support", status="live")["id"]
+    atk = sdk._create_point("hypothesis", "A: direct attack", status="live")["id"]
+    hyp = sdk._create_point("hypothesis", "H: supported directly",
                            status="live")["id"]
-    sdk.create_direct_edge("IMPL", sup, hyp)
-    sdk.create_direct_edge("NAND", atk, hyp)
+    sdk._create_direct_edge("IMPL", sup, hyp)
+    sdk._create_direct_edge("NAND", atk, hyp)
 
     out = annotate_ep_batch(sdk._get_proj().g, [hyp])
     assert out[hyp].evidence.impl_count == 1, (
@@ -260,9 +260,9 @@ def test_annotate_ep_batch_excludes_the_source_edge_on_a_legacy_operator(sdk):
     """
     from tortoise.search_engine import annotate_ep_batch
 
-    src = sdk.create_point("evidence", "S: legacy source", status="live")["id"]
-    hyp = sdk.create_point("hypothesis", "H: legacy target", status="live")["id"]
-    sdk.create_operator("IMPL", src, [hyp])
+    src = sdk._create_point("evidence", "S: legacy source", status="live")["id"]
+    hyp = sdk._create_point("hypothesis", "H: legacy target", status="live")["id"]
+    sdk._create_operator("IMPL", src, [hyp])
 
     proj = sdk._get_proj()
     op_rows = proj.g.query(

@@ -947,7 +947,7 @@ class TestKindsAreMintable:
             "the portfolio domain must register at least one graph-surface "
             "validator, or `validate_domain` is a green light over nothing")
 
-        position = sdk.create_object("Alpha Holdings (seed position)",
+        position = sdk._create_object("Alpha Holdings (seed position)",
                                      objectKind="venture:investment")
         # 1. an out-of-vocabulary status on a state-owning kind.
         # ⛔ #11824 S0: written OUT OF BAND on purpose. The write door refuses a
@@ -955,7 +955,7 @@ class TestKindsAreMintable:
         # MINTED — but it is exactly what every pre-S0 graph holds (no
         # backfill, #11824 §1), and the rule exists to find it. `garbage` is
         # outside both axes: not a lifecycle word and not a mandate stage.
-        sdk.create_object("Mandate M-9", objectKind=f"{NS}:mandate")
+        sdk._create_object("Mandate M-9", objectKind=f"{NS}:mandate")
         sdk._get_proj().g.query(
             "MATCH (o:Object {name:'Mandate M-9'}) SET o.status = 'garbage'")
         # 2. a mark with no position behind it
@@ -995,7 +995,7 @@ class TestKindsAreMintable:
                           aboutObject=position["id"])
         vm2 = sdk.create_entity("event", "VM-2",
                                 eventKind=f"{NS}:valuationMark")
-        sdk.create_operator("IMPL", vm2["node"]["id"], [position["id"]],
+        sdk._create_operator("IMPL", vm2["node"]["id"], [position["id"]],
                             label="marks", semantics="related")
         assert sdk.graph_overview("validate_domain", domain=NS)["ok"] is True
 
@@ -1056,7 +1056,7 @@ class TestKindsAreMintable:
         # (a) an IMPL operator with the WRONG label
         wrong_rel = sdk.create_entity("event", "VM wrong-relation",
                                       eventKind=f"{NS}:valuationMark")
-        sdk.create_operator("IMPL", wrong_rel["node"]["id"],
+        sdk._create_operator("IMPL", wrong_rel["node"]["id"],
                             [sdk._get_proj().g.query(
                                 "MATCH (o:Object {name:'Mandate M-7'}) "
                                 "RETURN o.id").result_set[0][0]],
@@ -1065,7 +1065,7 @@ class TestKindsAreMintable:
         # (b) the RIGHT label on the WRONG kind of target
         wrong_target = sdk.create_entity("event", "VM wrong-target",
                                           eventKind=f"{NS}:valuationMark")
-        sdk.create_operator("IMPL", wrong_target["node"]["id"],
+        sdk._create_operator("IMPL", wrong_target["node"]["id"],
                             [sdk._get_proj().g.query(
                                 "MATCH (o:Object {name:'Mandate M-7'}) "
                                 "RETURN o.id").result_set[0][0]],
@@ -1136,13 +1136,13 @@ class TestKindsAreMintable:
         # `test_validate_domain_has_teeth` — the door refuses the word, and the
         # row is the pre-S0 population this rule grades. `garbage` is declared
         # by NEITHER axis (`active` is a mandate STAGE, so it is legal now).
-        sdk.create_object("Mandate M-11 (bare kind)", objectKind="mandate")
+        sdk._create_object("Mandate M-11 (bare kind)", objectKind="mandate")
         sdk._get_proj().g.query(
             "MATCH (o:Object {name:'Mandate M-11 (bare kind)'}) "
             "SET o.status = 'garbage'")
         # (b) namespaced spelling stored verbatim with a capital, out-of-
         #     vocabulary status → REPORTED
-        sdk.create_object("Allocation Target AT-2",
+        sdk._create_object("Allocation Target AT-2",
                           objectKind=f"{NS}:allocationTarget")
         sdk._get_proj().g.query(
             "MATCH (o:Object {name:'Allocation Target AT-2'}) "
@@ -1195,7 +1195,7 @@ class TestKindsAreMintable:
                           eventKind="valuationMark")
         # (b) a mark wired to a BARE-spelled position → CLEAN (the false-
         #     violation half).
-        bare_position = sdk.create_object("Beta Holdings (bare position kind)",
+        bare_position = sdk._create_object("Beta Holdings (bare position kind)",
                                           objectKind="investment")
         sdk.create_entity("event", "VM-4 (bare position)",
                           eventKind="valuationMark",
@@ -1320,7 +1320,7 @@ class TestKindsAreMintable:
                 f"{NS}:allocationTarget", "proposed"),
         }
         for name, (kind, _stage) in cases.items():
-            sdk.create_object(name, objectKind=kind, status="live")
+            sdk._create_object(name, objectKind=kind, status="live")
         for name, (kind, stage) in cases.items():
             decl = RAW["ontology"]["kindDefs"][kind.partition(":")[2]]["pipeline"]
             move = P.advance_stage(sdk, name, kind, stage, declared=decl)
@@ -1336,7 +1336,7 @@ class TestKindsAreMintable:
 
     @requires_db
     def test_the_valuation_mark_mints_as_an_event_about_the_position(self, sdk):
-        position = sdk.create_object("Alpha Holdings (seed position)",
+        position = sdk._create_object("Alpha Holdings (seed position)",
                                      objectKind="venture:investment",
                                      status="live")
         mark = sdk.create_entity(
@@ -1367,7 +1367,7 @@ class TestKindsAreMintable:
 
         ensure_tenant_packs(sdk, starter=["venture", NS])
         for kind in sorted(EXPECTED_OBJECT_KINDS):
-            sdk.create_object(f"{kind} 1", objectKind=f"{NS}:{kind}")
+            sdk._create_object(f"{kind} 1", objectKind=f"{NS}:{kind}")
         for kind in sorted(EXPECTED_EVENT_KINDS):
             sdk.create_entity("event", f"{kind} 1", eventKind=f"{NS}:{kind}")
 
@@ -1384,9 +1384,9 @@ class TestKindsAreMintable:
         "is this within mandate?" has exactly one current answer."""
         from tortoise.commit_ops import apply_supersessions
 
-        sdk.create_object("Mandate M-1 — draft", objectKind=f"{NS}:mandate",
+        sdk._create_object("Mandate M-1 — draft", objectKind=f"{NS}:mandate",
                           status="draft")
-        sdk.create_object("Mandate M-1 — adopted", objectKind=f"{NS}:mandate",
+        sdk._create_object("Mandate M-1 — adopted", objectKind=f"{NS}:mandate",
                           status="live")
         applied = apply_supersessions(
             sdk._get_proj(), sdk,

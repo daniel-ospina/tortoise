@@ -199,7 +199,7 @@ def _seed_team(reg, org_id: str, tier: str = "free",
     props = {"id": org_id, "name": org_id, "tier": tier}
     if suspended_at is not None:
         props["suspended_at"] = suspended_at
-    reg.query(
+    reg._query(
         "CREATE (t:Team {id:$id, name:$name, tier:$tier"
         + (", suspended_at:$suspended_at" if suspended_at is not None else "")
         + "})",
@@ -209,7 +209,7 @@ def _seed_team(reg, org_id: str, tier: str = "free",
 
 def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
-    reg.query(
+    reg._query(
         "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
         params={"uid": user_id, "tid": org_id, "role": role, "status": status},
@@ -223,7 +223,7 @@ def _seed_api_key(reg, org_id: str, key_id: str, *, created_by: str | None,
     minted pre-created_by — the #2380 grandfathered set); pass
     include_created_by=False via the raw _seed_legacy_key for a node that
     LACKS the property entirely."""
-    reg.query(
+    reg._query(
         "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', key_prefix:'tt_x', "
         "created_by:$cb, created_at:$ca, revoked_at:$ra, expires_at:null, "
         "created_via:$cv})",
@@ -233,7 +233,7 @@ def _seed_api_key(reg, org_id: str, key_id: str, *, created_by: str | None,
 
 
 def _count_active_keys(reg, org_id: str) -> int:
-    rows = reg.query(
+    rows = reg._query(
         "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
         params={"tid": org_id},
     ).result_set
@@ -431,7 +431,7 @@ class TestRecoveryGateRegistry:
         as_user(_U1)
         r = tc.post("/v1/session/key", json={"purpose": "recovery"})
         _assert_role_403(r)
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-old','own-new'] "
             "RETURN k.id, k.revoked_at",
         ).result_set
@@ -499,7 +499,7 @@ class TestCreatedByOnKeysList:
         _seed_api_key(reg, "team-r", "k-modern", created_by=_U2,
                       created_via="recovery", created_at="2026-01-02T00:00:00Z")
         # legacy node minted before created_by existed — prop ABSENT
-        reg.query(
+        reg._query(
             "CREATE (k:APIKey {id:'k-legacy', org_id:'team-r', "
             "key_hash:'h', key_prefix:'tt_x', created_at:'2026-01-01T00:00:00Z'})",
         )
@@ -520,13 +520,13 @@ class TestCreatedByOnKeysList:
         forgetting the other is exactly the drift #2380 pins."""
         tc = reg_client
         _seed_team(reg, "team-r")
-        reg.query(
+        reg._query(
             "CREATE (k:APIKey {id:'k-g1', org_id:'team-r', graph_id:'g1', "
             "key_hash:'h', key_prefix:'tt_x', created_by:$cb, "
             "created_at:'2026-01-02T00:00:00Z'})",
             params={"cb": _U2},
         )
-        reg.query(
+        reg._query(
             "CREATE (k:APIKey {id:'k-g2', org_id:'team-r', graph_id:'g2', "
             "key_hash:'h', key_prefix:'tt_x', created_by:$cb, "
             "created_at:'2026-01-01T00:00:00Z'})",
@@ -816,7 +816,7 @@ class TestLaneMarkers:
         _seed_team(reg, "team-r")
         token = "tt_marker_test_key_000000000001"
         _seed_membership(reg, "team-r", _U1, "owner")
-        reg.query(
+        reg._query(
             "CREATE (k:APIKey {id:'marker-key', org_id:'team-r', "
             "key_hash:$h, key_prefix:$kp, created_via:'provisioned', "
             "created_at:'2026-01-01T00:00:00Z'})",

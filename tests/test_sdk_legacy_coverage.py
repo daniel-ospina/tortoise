@@ -36,11 +36,11 @@ def sdk(shared_embedded_db):
 
 
 def _make_operator(sdk: TortoiseSDK, name: str = "op-1") -> str:
-    return sdk.create_point("operator", name, is_operator=True)["id"]
+    return sdk._create_point("operator", name, is_operator=True)["id"]
 
 
 def _make_claim(sdk: TortoiseSDK, content: str = "claim content") -> str:
-    return sdk.create_point("statement", content)["id"]
+    return sdk._create_point("statement", content)["id"]
 
 
 # ── supersede_point ────────────────────────────────────────────────────
@@ -51,12 +51,12 @@ class TestSupersedePoint:
         old = _make_claim(sdk, "old claim")
         new = _make_claim(sdk, "new claim")
 
-        result = sdk.supersede_point(old, new)
+        result = sdk._supersede_point(old, new)
 
         assert result["invalidated"] is True
         assert result["id"] == old
         assert result["corrected_by"] == new
-        assert sdk.get_point(old)["outdated"] is True
+        assert sdk._get_point(old)["outdated"] is True
 
         proj = sdk._get_proj()
         rows = proj.g.query(
@@ -68,10 +68,10 @@ class TestSupersedePoint:
     def test_supersede_transfers_edges(self, sdk):
         old = _make_claim(sdk, "old with edge")
         target = _make_claim(sdk, "target")
-        sdk.create_operator("IMPL", old, [target])
+        sdk._create_operator("IMPL", old, [target])
         new = _make_claim(sdk, "new claim")
 
-        sdk.supersede_point(old, new)
+        sdk._supersede_point(old, new)
 
         # The IMPL edge should now point at the new point, not the old one
         proj = sdk._get_proj()
@@ -95,10 +95,10 @@ class TestInvalidatePoint:
         pid = _make_claim(sdk, "to invalidate")
         replacement = _make_claim(sdk, "replacement")
 
-        result = sdk.invalidate_point(pid, replacement)
+        result = sdk._invalidate_point(pid, replacement)
 
         assert result == {"invalidated": True, "id": pid, "corrected_by": replacement}
-        assert sdk.get_point(pid)["outdated"] is True
+        assert sdk._get_point(pid)["outdated"] is True
 
 
 # ── annotate_operator ──────────────────────────────────────────────────
@@ -108,7 +108,7 @@ class TestAnnotateOperator:
     def test_annotate_happy_path(self, sdk):
         op = _make_operator(sdk)
 
-        result = sdk.annotate_operator(op, 0.3, 0.8, 0.9, 0.4)
+        result = sdk._annotate_operator(op, 0.3, 0.8, 0.9, 0.4)
 
         assert result["annotator_bias"] == 0.3
         assert result["annotator_precision"] == 0.8
@@ -117,19 +117,19 @@ class TestAnnotateOperator:
 
     def test_annotate_rejects_missing_operator(self, sdk):
         with pytest.raises(ValueError, match="not found"):
-            sdk.annotate_operator("no-such-op", 0.5, 0.5, 0.5, 0.5)
+            sdk._annotate_operator("no-such-op", 0.5, 0.5, 0.5, 0.5)
 
     def test_annotate_rejects_non_operator(self, sdk):
         pid = _make_claim(sdk)
         with pytest.raises(ValueError, match="not an operator"):
-            sdk.annotate_operator(pid, 0.5, 0.5, 0.5, 0.5)
+            sdk._annotate_operator(pid, 0.5, 0.5, 0.5, 0.5)
 
     @pytest.mark.parametrize("bad", [(1.5, 0.5, 0.5, 0.5), (-0.1, 0.5, 0.5, 0.5),
                                      (0.5, 1.1, 0.5, 0.5), (0.5, 0.5, 0.5, -0.2)])
     def test_annotate_rejects_out_of_range_dims(self, sdk, bad):
         op = _make_operator(sdk)
         with pytest.raises(ValueError):
-            sdk.annotate_operator(op, *bad)
+            sdk._annotate_operator(op, *bad)
 
 
 # ── mitigate_operator ──────────────────────────────────────────────────
@@ -139,7 +139,7 @@ class TestMitigateOperator:
     def test_mitigate_happy_path(self, sdk):
         op = _make_operator(sdk)
 
-        result = sdk.mitigate_operator(op, "outdated source", strength=0.3)
+        result = sdk._mitigate_operator(op, "outdated source", strength=0.3)
 
         assert result["id"]
         assert result["mitigation_strength"] == 0.3
@@ -147,8 +147,8 @@ class TestMitigateOperator:
     def test_mitigate_is_idempotent(self, sdk):
         op = _make_operator(sdk)
 
-        first = sdk.mitigate_operator(op, "reason A", strength=0.3)
-        second = sdk.mitigate_operator(op, "reason B", strength=0.7)
+        first = sdk._mitigate_operator(op, "reason A", strength=0.3)
+        second = sdk._mitigate_operator(op, "reason B", strength=0.7)
 
         # Same mitigation point updated, not duplicated
         assert first["id"] == second["id"]
@@ -157,11 +157,11 @@ class TestMitigateOperator:
     def test_mitigate_rejects_bad_strength(self, sdk):
         op = _make_operator(sdk)
         with pytest.raises(ValueError, match="strength"):
-            sdk.mitigate_operator(op, "reason", strength=1.5)
+            sdk._mitigate_operator(op, "reason", strength=1.5)
 
     def test_mitigate_rejects_missing(self, sdk):
         with pytest.raises(ValueError, match="not found"):
-            sdk.mitigate_operator("ghost", "reason")
+            sdk._mitigate_operator("ghost", "reason")
 
 
 # ── team_create (multi-tenancy) ────────────────────────────────────────
@@ -169,14 +169,14 @@ class TestMitigateOperator:
 
 class TestTeamCreate:
     def test_team_create_returns_team(self, sdk):
-        result = sdk.org_create("team-alpha")
+        result = sdk._org_create("team-alpha")
 
         assert result["name"] == "team-alpha"
         assert result["graph_name"] == "org_team-alpha"
         assert result["api_key"].startswith("tt_")
 
     def test_team_create_namespaces_graph(self, sdk):
-        sdk.org_create("team-beta")
+        sdk._org_create("team-beta")
 
         # A team-scoped SDK reads its own namespace graph (same embedded DB)
         org_sdk = TortoiseSDK(db_path=sdk._db_path, namespace="team-beta")
@@ -205,7 +205,7 @@ class TestTeamCreate:
     @pytest.mark.parametrize("bad", ["bad name!", "", "x" * 65])
     def test_team_create_rejects_bad_names(self, sdk, bad):
         with pytest.raises(ControlPlaneError):
-            sdk.org_create(bad)
+            sdk._org_create(bad)
 
 
 # ── set_point_baseline / calibrate_summary ─────────────────────────────
@@ -215,13 +215,13 @@ class TestBaselineCalibration:
     def test_set_point_baseline_persists_to_graph(self, sdk):
         pid = _make_claim(sdk, "baselined claim")
 
-        sdk.set_point_baseline(pid, 5.0, 2.0)
+        sdk._set_point_baseline(pid, 5.0, 2.0)
 
         # Persisted to the graph (survives a fresh SDK over the same DB,
         # same namespace graph)
         fresh = TortoiseSDK(db_path=sdk._db_path, namespace=sdk._namespace)
         try:
-            point = fresh.get_point(pid)
+            point = fresh._get_point(pid)
             assert point["baseline_set"] is True
             assert point["baseline_source"] == "set-by-author"
             assert point["ep_alpha"] == 5.0
@@ -231,10 +231,10 @@ class TestBaselineCalibration:
 
     def test_calibrate_summary_reports_calibrated_and_suggested(self, sdk):
         calibrated = _make_claim(sdk, "calibrated claim")
-        sdk.set_point_baseline(calibrated, 5.0, 2.0)
+        sdk._set_point_baseline(calibrated, 5.0, 2.0)
         uncalibrated = _make_claim(sdk, "uncalibrated claim")
 
-        result = {item["id"]: item for item in sdk.calibrate_summary()}
+        result = {item["id"]: item for item in sdk._calibrate_summary()}
 
         assert calibrated in result
         assert result[calibrated]["calibrated"] is True

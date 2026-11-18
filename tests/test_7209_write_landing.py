@@ -140,10 +140,10 @@ def test_create_point_raises_when_its_own_write_is_not_readable(tmp_path):
         # The reported shape, injected at the one place it is observable: the
         # CREATE succeeded and the Point is NOT readable on the read-back that
         # immediately follows (a replacement between the write and the read).
-        sdk.get_point = lambda _id: {}
+        sdk._get_point = lambda _id: {}
 
         with pytest.raises(WriteNotLandedError) as ei:
-            sdk.create_point("observation", "a finding that never landed")
+            sdk._create_point("observation", "a finding that never landed")
 
         msg = str(ei.value)
         assert ei.value.graph == proj.graph_name
@@ -172,9 +172,9 @@ def test_a_journal_less_sdk_never_claims_the_record_is_committed(tmp_path):
     sdk = _sdk(tmp_path, "journalless")
     try:
         assert sdk._get_event_log() is None, "the fixture must be journal-less"
-        sdk.get_point = lambda _id: {}
+        sdk._get_point = lambda _id: {}
         with pytest.raises(WriteNotLandedError) as ei:
-            sdk.create_point("observation", "a finding with no durable home")
+            sdk._create_point("observation", "a finding with no durable home")
         assert ei.value.record_committed is False, (
             "no journal is configured, so no record was committed and a replay "
             "cannot heal the miss — the caller must re-issue")
@@ -207,10 +207,10 @@ def test_create_point_journals_the_record_before_a_cache_readback_miss(tmp_path)
             return real_emit(type_, *a, **k)
 
         sdk._emit_event = _spy
-        sdk.get_point = lambda _id: {}
+        sdk._get_point = lambda _id: {}
 
         with pytest.raises(WriteNotLandedError) as ei:
-            sdk.create_point("observation", "another finding that never landed")
+            sdk._create_point("observation", "another finding that never landed")
 
         assert "PointAdded" in emitted, (
             "the outbox ordering appends the record BEFORE the cache write, so "
@@ -232,10 +232,10 @@ def test_create_point_reports_the_point_when_the_write_lands(tmp_path):
     """
     sdk = _sdk(tmp_path, "landed")
     try:
-        result = sdk.create_point("observation", "a finding that lands")
+        result = sdk._create_point("observation", "a finding that lands")
         assert result and result.get("id"), (
             "a landed write must return the Point, not an error and not `{}`")
-        assert sdk.get_point(result["id"])["content"] == "a finding that lands"
+        assert sdk._get_point(result["id"])["content"] == "a finding that lands"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -259,7 +259,7 @@ def test_a_rebuild_abort_on_the_tag_write_is_retried_and_applies_once(tmp_path):
         proxy = _AbortOnceGraph(proj.g, _TAG_WRITE_NEEDLE, present=True)
         proj.g = proxy
 
-        result = sdk.create_point("observation", "tagged finding",
+        result = sdk._create_point("observation", "tagged finding",
                                   tags=["alpha"])
 
         assert result.get("id"), "the create must succeed once the abort heals"
@@ -289,7 +289,7 @@ def test_a_rebuild_abort_on_the_provenance_write_is_retried_and_applies_once(
         proxy = _AbortOnceGraph(proj.g, _EDGE_WRITE_NEEDLE, present=True)
         proj.g = proxy
 
-        result = sdk.create_point("observation", "sourced finding",
+        result = sdk._create_point("observation", "sourced finding",
                                   extractedFrom="https://example.test/7209")
 
         assert result.get("id"), "the create must succeed once the abort heals"
@@ -320,7 +320,7 @@ def test_a_deleted_graph_abort_on_a_followup_write_stays_loud(tmp_path):
         proj.g = proxy
 
         with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
-            sdk.create_point("observation", "finding on a deleted graph",
+            sdk._create_point("observation", "finding on a deleted graph",
                              tags=["alpha"])
 
         assert proxy.applied == 0, (

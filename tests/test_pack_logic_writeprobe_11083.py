@@ -203,7 +203,7 @@ def test_g1c_the_written_column_distinguishes_a_bridge_from_an_edge():
 def test_g2_produces_stores_the_target_to_source_direction(sdk):
     a = sdk.create_entity("object", "census-g2-asset", objectKind="widget")["node"]["id"]
     b = sdk.create_entity("object", "census-g2-program", objectKind="widget")["node"]["id"]
-    op = sdk.create_operator("IMPL", a, [b], label="producedBy",
+    op = sdk._create_operator("IMPL", a, [b], label="producedBy",
                              semantics="produces")
     direction, basis = _stored(sdk, op["id"])
     assert direction == "<-", (
@@ -218,7 +218,7 @@ def test_g2b_the_direction_survives_a_rebuild(sdk, events_dir):
     the journal, not from the live node."""
     a = sdk.create_entity("object", "census-g2b-asset", objectKind="widget")["node"]["id"]
     b = sdk.create_entity("object", "census-g2b-program", objectKind="widget")["node"]["id"]
-    op = sdk.create_operator("IMPL", a, [b], label="producedBy",
+    op = sdk._create_operator("IMPL", a, [b], label="producedBy",
                              semantics="produces")
     sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
     direction, _basis = _stored(sdk, op["id"])

@@ -398,9 +398,9 @@ class TestReadPathStates:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 None, kind="statement", read_status_out=out, limit=5)
             assert rows
             assert out["status"] == STATUS_AVAILABLE
@@ -412,9 +412,9 @@ class TestReadPathStates:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] == STATUS_EMPTY
@@ -439,9 +439,9 @@ class TestReadPathStates:
         monkeypatch.setenv("TORTOISE_VECTOR_MIN_SIMILARITY", "1.0")
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 "zzzqunmatchedtoken", read_status_out=out, limit=5)
             assert rows == []
             # the sink IS set, with a term from the four-term vocabulary
@@ -464,7 +464,7 @@ class TestReadPathStates:
             monkeypatch.setattr(
                 sdk, "tortoise_fts_query", lambda *a, **k: [])
             out: dict = {}
-            rows = sdk.recall_state("alpha", read_status_out=out, limit=5)
+            rows = sdk._recall_state("alpha", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] in READ_STATUSES
         finally:
@@ -475,10 +475,10 @@ class TestReadPathStates:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
-            base = sdk.tortoise_fts_query("alpha beta", limit=5)
+            sdk._create_point("statement", "alpha beta gamma waves")
+            base = sdk._tortoise_fts_query("alpha beta", limit=5)
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 "alpha beta", read_status_out=out, limit=5)
             assert out["status"] == STATUS_DEGRADED
             # degraded ≠ nothing: the same rows survive the degraded read
@@ -498,7 +498,7 @@ class TestReadPathStates:
         try:
             _unopenable_store(monkeypatch, sdk)
             out: dict = {}
-            rows = sdk.tortoise_fts_query("alpha", read_status_out=out, limit=5)
+            rows = sdk._tortoise_fts_query("alpha", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] == STATUS_DEGRADED
             assert out["status"] != STATUS_UNCONFIGURED
@@ -521,7 +521,7 @@ class TestReadPathStates:
         try:
             assert sdk._db_uri is not None  # a target IS declared
             out: dict = {}
-            rows = sdk.tortoise_fts_query("alpha", read_status_out=out, limit=5)
+            rows = sdk._tortoise_fts_query("alpha", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] == STATUS_DEGRADED
             assert out["status"] != STATUS_UNCONFIGURED
@@ -542,7 +542,7 @@ class TestReadPathStates:
         sdk = sdk_factory()
         try:
             out: dict = {}
-            rows = sdk.tortoise_fts_query("alpha beta", read_status_out=out, limit=5)
+            rows = sdk._tortoise_fts_query("alpha beta", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] == STATUS_DEGRADED
             assert out["status"] != STATUS_UNCONFIGURED
@@ -568,7 +568,7 @@ class TestReadPathStates:
             _no_embedder(monkeypatch)
             # store answered, nothing matched -> empty (NOT unconfigured)
             out_e: dict = {}
-            rows_e = sdk.tortoise_fts_query(
+            rows_e = sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out_e, limit=5)
             assert rows_e == []
             assert out_e["status"] == STATUS_EMPTY
@@ -580,7 +580,7 @@ class TestReadPathStates:
             # store declared but will not open -> degraded (NOT unconfigured)
             _unopenable_store(monkeypatch, sdk2)
             out_u: dict = {}
-            rows_u = sdk2.tortoise_fts_query(
+            rows_u = sdk2._tortoise_fts_query(
                 "alpha", read_status_out=out_u, limit=5)
             assert rows_u == []
             assert out_u["status"] == STATUS_DEGRADED
@@ -597,10 +597,10 @@ class TestReadPathStates:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
-            base = sdk.tortoise_fts_query("alpha beta", limit=5)
+            sdk._create_point("statement", "alpha beta gamma waves")
+            base = sdk._tortoise_fts_query("alpha beta", limit=5)
             out: dict = {}
-            with_status = sdk.tortoise_fts_query(
+            with_status = sdk._tortoise_fts_query(
                 "alpha beta", read_status_out=out, limit=5)
             # additive: asking for a status changes no returned row
             assert with_status == base
@@ -614,7 +614,7 @@ class TestReadPathStates:
         sdk = sdk_factory()
         try:
             out: dict = {}
-            rows = sdk.recall_state(
+            rows = sdk._recall_state(
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] in READ_STATUSES
@@ -627,7 +627,7 @@ class TestReadPathStates:
         try:
             _unopenable_store(monkeypatch, sdk)
             out: dict = {}
-            rows = sdk.recall_state("alpha", read_status_out=out, limit=5)
+            rows = sdk._recall_state("alpha", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] == STATUS_DEGRADED
             assert out["status"] != STATUS_UNCONFIGURED
@@ -644,10 +644,10 @@ class TestReadPathStates:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
-            assert sdk.recall_state(None, kind="statement", limit=5)  # rows exist
+            sdk._create_point("statement", "alpha beta gamma waves")
+            assert sdk._recall_state(None, kind="statement", limit=5)  # rows exist
             out: dict = {}
-            rows = sdk.recall_state(
+            rows = sdk._recall_state(
                 None, kind="statement", min_confidence=1.0,
                 read_status_out=out, limit=5)
             assert rows == []

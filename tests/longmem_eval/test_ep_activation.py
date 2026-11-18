@@ -388,7 +388,7 @@ def test_activate_ep_failure_is_fail_open_and_reported():
     def boom(**kwargs):
         raise RuntimeError("EP exploded")
 
-    sdk.dream = boom  # type: ignore[assignment]
+    sdk._dream = boom  # type: ignore[assignment]
     manifest = epa.activate_beliefs(sdk)
     assert manifest["ep_ran"] is False
     # promotion writes still committed — the manifest is the surface that
@@ -787,9 +787,9 @@ def test_factors_come_from_the_pass_not_the_health_surface():
     pass's."""
     sdk, _ = _make(["c1"], operators=40, with_ep=1,
                    ep_rows=[["c1", 6.0, 2.0, None, None]])
-    sdk.dream = lambda **kw: {"mode": "full", "budget_used": 40,
+    sdk._dream = lambda **kw: {"mode": "full", "budget_used": 40,
                               "operator_counts": 3}   # last batch only
-    sdk.dream_health_check = lambda: {"operator_counts": 3,
+    sdk._dream_health_check = lambda: {"operator_counts": 3,
                                       "no_op_reason": None}
     manifest = epa.activate_beliefs(sdk)
     assert manifest["factors"] == 40
@@ -805,7 +805,7 @@ def test_factors_unknown_when_the_sdk_does_not_report_it():
 
 def test_no_op_reason_is_read_from_the_health_surface():
     sdk, _ = _make([], total=4, with_ep=0)
-    sdk.dream_health_check = lambda: {"no_op_reason": "no_ep_factors"}
+    sdk._dream_health_check = lambda: {"no_op_reason": "no_ep_factors"}
     manifest = epa.activate_beliefs(sdk)
     assert manifest["no_op_reason"] == "no_ep_factors"
 
@@ -823,7 +823,7 @@ def test_no_op_reason_unknown_when_the_health_surface_raises():
     def boom():
         raise RuntimeError("health surface exploded")
 
-    sdk.dream_health_check = boom
+    sdk._dream_health_check = boom
     manifest = epa.activate_beliefs(sdk)
     # fail-open on the diagnosis, never on the census
     assert manifest["no_op_reason"] is None
@@ -838,8 +838,8 @@ def test_no_op_reason_is_not_read_after_a_failed_pass():
     def dream_boom(**kwargs):
         raise RuntimeError("EP exploded")
 
-    sdk.dream = dream_boom
-    sdk.dream_health_check = lambda: {"no_op_reason": "no_ep_factors"}
+    sdk._dream = dream_boom
+    sdk._dream_health_check = lambda: {"no_op_reason": "no_ep_factors"}
     manifest = epa.activate_beliefs(sdk)
     assert manifest["ep_ran"] is False
     assert manifest["factors"] is None
@@ -976,7 +976,7 @@ def test_a_failed_pass_publishes_no_contribution_number():
     def dream_boom(**kwargs):
         raise RuntimeError("EP exploded")
 
-    sdk.dream = dream_boom
+    sdk._dream = dream_boom
     manifest = epa.activate_beliefs(sdk)
 
     assert manifest["ep_ran"] is False
@@ -1001,7 +1001,7 @@ def test_the_contribution_is_the_difference_from_the_pre_pass_baseline():
                          ["post", 6.0, 2.0, None, None]]
         return {"mode": "full"}
 
-    sdk.dream = dream_then_move
+    sdk._dream = dream_then_move
     manifest = epa.activate_beliefs(sdk)
 
     assert manifest["points_off_neutral"] == 2          # state: both are off

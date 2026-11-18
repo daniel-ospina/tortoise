@@ -478,13 +478,13 @@ class TestStatusIsProjectionOwnedOnSubject:
         lands, so the arm cannot pass by dropping the property entirely.
         """
         sdk, proj, _events, _journal_path = env
-        sdk.delete_entity(node_id(sdk, "Subject", "Team Alpha"))
+        sdk._delete_entity__svc(node_id(sdk, "Subject", "Team Alpha"))
         sdk.create_entity("subject", "Team Alpha", subjectKind="core:team")
         (status,), = _subject_row(proj, "Team Alpha", "status")
         assert status is None, status
 
         # anti-vacuity: the ON CREATE arm still writes a caller-supplied status.
-        sdk.delete_entity(node_id(sdk, "Subject", "Team Alpha"))
+        sdk._delete_entity__svc(node_id(sdk, "Subject", "Team Alpha"))
         sdk.create_entity("subject", "Team Alpha", subjectKind="core:team",
                           status="draft")
         (status,), = _subject_row(proj, "Team Alpha", "status")
@@ -567,7 +567,7 @@ def test_provenance_chain_surfaces_the_subject_status(env):
     refuse discipline and not this lane's."""
     sdk, proj, _events, _journal_path = env
     sid = node_id(sdk, "Subject", "Team Alpha")
-    pt = sdk.create_point("statement", "Rollout is approved by the team",
+    pt = sdk._create_point("statement", "Rollout is approved by the team",
                           authoredBy=sid)
     # The chain is not an EP surface: the posterior gate is opted out, exactly as
     # `_check_confidence_provenance` (mcp_server) does the same for the live door.

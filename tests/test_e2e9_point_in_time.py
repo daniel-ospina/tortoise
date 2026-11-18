@@ -140,7 +140,7 @@ def graph(tmp_path, monkeypatch):
 
 
 def _scan(sdk, include_terminal=False):
-    return sdk.tortoise_fts_query(query=None, kind="statement",
+    return sdk._tortoise_fts_query(query=None, kind="statement",
                                   entity_type="point", limit=20,
                                   include_terminal=include_terminal)
 

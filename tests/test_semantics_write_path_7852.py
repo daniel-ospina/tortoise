@@ -59,7 +59,7 @@ def _mechanism_warnings(op: dict) -> list[dict]:
 
 
 def _point(sdk, content: str) -> dict:
-    return sdk.create_point("statement", content, status="live")
+    return sdk._create_point("statement", content, status="live")
 
 
 def _stored(sdk, op_id: str) -> tuple[str, str]:
@@ -99,7 +99,7 @@ def test_semantics_resolves_direction(sdk, semantics, expected):
     mechanism-consistent: it still resolves the direction the semantics fixes,
     and it must stay SILENT on the mechanism leg."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator(SEMANTICS_MECHANISMS.get(semantics, "NAND"),
+    op = sdk._create_operator(SEMANTICS_MECHANISMS.get(semantics, "NAND"),
                              a["id"], [b["id"]], semantics=semantics)
     direction, basis = _stored(sdk, op["id"])
     assert direction == expected, (semantics, direction)
@@ -112,7 +112,7 @@ def test_explicit_direction_outranks_semantics(sdk):
     """An explicit NON-default direction wins: the caller actually declared it,
     so the meaning cannot silently reverse it (chain step 1)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator(
+    op = sdk._create_operator(
         "NAND", a["id"], [b["id"]],
         direction="unidirectional", semantics="mutuallyExclusive",
     )
@@ -126,17 +126,17 @@ def test_absent_direction_still_derives_from_semantics(sdk):
     semantics step (the P1 both reviewers found)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     # absent + meaning -> the meaning resolves the direction (model token)
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]], direction=None,
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]], direction=None,
                              semantics="addresses")
     assert _stored(sdk, op["id"]) == ("->", "semantics")
     # absent + no meaning -> canonicalize per op_type, basis `default`
     # (fresh pair: one pair carries at most one mechanism, #12067)
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op2 = sdk.create_operator("NAND", a["id"], [b["id"]], direction=None)
+    op2 = sdk._create_operator("NAND", a["id"], [b["id"]], direction=None)
     assert _stored(sdk, op2["id"]) == ("unidirectional", "default")
     # absent + PART/WHOLE op_type -> IMPL-class default (bidirectional)
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op3 = sdk.create_operator("composedOf", a["id"], [b["id"]], direction=None)
+    op3 = sdk._create_operator("composedOf", a["id"], [b["id"]], direction=None)
     assert _stored(sdk, op3["id"]) == ("bidirectional", "default")
 
 
@@ -144,8 +144,8 @@ def test_default_unchanged_without_semantics(sdk):
     """No semantics → the historical default, unchanged for every op_type
     (the #7813 ruling keeps the SDK default at bidirectional)."""
     a, b, c = _point(sdk, "a"), _point(sdk, "b"), _point(sdk, "c")
-    impl = sdk.create_operator("IMPL", a["id"], [b["id"]])
-    nand = sdk.create_operator("NAND", a["id"], [c["id"]])
+    impl = sdk._create_operator("IMPL", a["id"], [b["id"]])
+    nand = sdk._create_operator("NAND", a["id"], [c["id"]])
     assert _stored(sdk, impl["id"]) == ("bidirectional", "default")
     assert _stored(sdk, nand["id"]) == ("bidirectional", "default")
 
@@ -156,7 +156,7 @@ def test_unknown_semantics_warns_and_proceeds(sdk):
     """An out-of-vocabulary word names the valid alternatives and the write
     proceeds — the write path must never refuse on the common case."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]], semantics="sideways")
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]], semantics="sideways")
     assert _stored(sdk, op["id"]) == ("bidirectional", "default")
     warns = [w for w in op.get("warnings", []) if w.get("code") == "undeclared_relation"]
     assert warns, op.get("warnings")
@@ -168,7 +168,7 @@ def test_retired_semantics_resolves_to_canonical(sdk):
     """A word the shipped packs still declare (`opposes`) is recognised and
     resolved to its canonical replacement, then resolves the direction."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="opposes")
+    op = sdk._create_operator("NAND", a["id"], [b["id"]], semantics="opposes")
     assert _stored(sdk, op["id"]) == ("<->", "semantics")
     warns = [w for w in op.get("warnings", []) if w.get("code") == "undeclared_relation"]
     assert warns and "mutuallyExclusive" in warns[0]["message"]
@@ -181,7 +181,7 @@ def test_neutral_semantics_records_no_transfer(sdk):
     fall-through to `bidirectional` would have propagated confidence along an
     edge the model declares belief-free (the owner ruling)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]], semantics="related")
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]], semantics="related")
     assert _stored(sdk, op["id"]) == ("-", "semantics")
     assert not [w for w in op.get("warnings", [])
                 if w.get("code") == "undeclared_relation"]
@@ -191,7 +191,7 @@ def test_neutral_semantics_is_op_type_independent(sdk):
     """A neutral meaning records `-` regardless of op_type — it must never be
     the op_type default (`unidirectional` for NAND) nor the signature default."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="related")
+    op = sdk._create_operator("NAND", a["id"], [b["id"]], semantics="related")
     assert _stored(sdk, op["id"]) == ("-", "semantics")
 
 
@@ -209,7 +209,7 @@ def test_every_ruled_semantics_records_its_model_direction(sdk):
         # (#12067's closed set), so a shared pair would be refused from the
         # second mechanism-bearing semantics onwards.
         a, b = _point(sdk, "a"), _point(sdk, "b")
-        op = sdk.create_operator(SEMANTICS_MECHANISMS.get(semantics, "IMPL"),
+        op = sdk._create_operator(SEMANTICS_MECHANISMS.get(semantics, "IMPL"),
                                  a["id"], [b["id"]], semantics=semantics)
         assert _stored(sdk, op["id"]) == (SEMANTICS_DIRECTIONS[semantics],
                                            "semantics"), semantics
@@ -249,7 +249,7 @@ def test_direction_basis_survives_rebuild(tmp_path):
     sdk = TortoiseSDK(db, event_log_path=str(events / "events.jsonl"))
     try:
         a, b = _point(sdk, "a"), _point(sdk, "b")
-        op = sdk.create_operator("NAND", a["id"], [b["id"]], semantics="refutes")
+        op = sdk._create_operator("NAND", a["id"], [b["id"]], semantics="refutes")
         live = _stored(sdk, op["id"])
         assert live == ("->", "semantics")
 

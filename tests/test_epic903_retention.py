@@ -36,7 +36,7 @@ class TestDe2e7aRetentionThenResolve:
                     params={"id": pid, "ts": STAMP_OLD},
                 )
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="local")
+            r = f.sdk._dream(mode="local")
             assert r["converged"] is False, "F3 must fail convergence"
             # A2-fix: affected claim-roots REMAIN dirty after the failed run.
             assert a_id in f.sdk._dirty_roots, "root a dropped on failure (A2)"
@@ -53,14 +53,14 @@ class TestDe2e7aRetentionThenResolve:
             proj = f.sdk._get_proj()
             a_id, b_id = f.claims["a"], f.claims["b"]
             random.seed(FIXED_SEED)
-            r1 = f.sdk.dream(mode="local")
+            r1 = f.sdk._dream(mode="local")
             assert r1["converged"] is False
             # Resolve the conflict: remove the 2:1 IMPL:NAND imbalance that
             # sustains the limit cycle (delete the extra IMPL operators).
             for op_id in f.operators["impl"][1:]:
-                f.sdk.delete_point(op_id)
+                f.sdk._delete_point(op_id)
             random.seed(FIXED_SEED)
-            r2 = f.sdk.dream(mode="local")
+            r2 = f.sdk._dream(mode="local")
             assert r2["converged"] is True, "resolved F3 must converge"
             # Roots cleared + stamped by the converged run.
             assert a_id not in f.sdk._dirty_roots
@@ -81,8 +81,8 @@ class TestDe2e7bAttemptCap:
             f.sdk.retry_attempt_cap = 2  # cap low for the test
             random.seed(FIXED_SEED)
             for _ in range(3):  # 3 attempts > cap 2
-                f.sdk.dream(mode="local")
-            state = f.sdk.dream_health_state()
+                f.sdk._dream(mode="local")
+            state = f.sdk._dream_health_state()
             unresolved = state["stale_unresolved"]
             # Both roots capped and dropped from the dirty set.
             assert a_id not in f.sdk._dirty_roots
@@ -110,7 +110,7 @@ class TestDe2e7bAttemptCap:
             assert f.sdk._retry_attempts.get(f.regions[0].claims[0]) == 1
             # A converged local dream clears the root + resets its state.
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="local")
+            r = f.sdk._dream(mode="local")
             assert r["converged"] is True
             assert f.sdk._retry_attempts.get(f.regions[0].claims[0]) is None
         finally:
@@ -156,7 +156,7 @@ class TestDe2e12dCrashInterplay:
             # Next scheduled pass (stale-first) re-selects them via the
             # null-as-stalest ranking — no dirty set needed.
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="stale-first", budget=2)
+            r = f.sdk._dream(mode="stale-first", budget=2)
             assert r["mode"] == "stale-first"
             assert set(null.claims) <= set(r["affected_claims"]), (
                 "null-stamp claims must re-enter the window after crash"

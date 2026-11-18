@@ -154,8 +154,8 @@ def test_4542_fold_and_rebuild_all_agree_on_a_sdk_retract(journaled):
         ``rebuild_all(journal)``.
     """
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "retract me", status="live")["id"]
-    sdk.retract_point(pid)
+    pid = sdk._create_point("statement", "retract me", status="live")["id"]
+    sdk._retract_point(pid)
 
     live = _graph_belief(sdk, pid)
     assert live == VACUITY_LITERAL, (

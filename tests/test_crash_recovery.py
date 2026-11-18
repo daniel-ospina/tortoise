@@ -13,14 +13,14 @@ def test_crash_recovery_restart():
     db = os.path.join(tempfile.mkdtemp(), "test.db")
     sdk = TortoiseSDK(db)
 
-    points = [sdk.create_point("statement", f"point-{i}") for i in range(10)]
+    points = [sdk._create_point("statement", f"point-{i}") for i in range(10)]
     sdk.mine_knowledge_from_session(items=[{"content": p["content"], "wing": "test", "room": "crash"}
                     for p in points])
     sdk.close()
 
     # ── simulate crash: reopen same db ──
     sdk2 = TortoiseSDK(db)
-    recovered = sdk2.query(kind="statement")
+    recovered = sdk2._query(kind="statement")
     assert len(recovered) == 10
     recovered_ids = {r["id"] for r in recovered}
     original_ids = {p["id"] for p in points}

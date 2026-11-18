@@ -603,7 +603,7 @@ def test_the_sdk_write_lane_still_writes_on_a_journal_backed_projection(
     # `["id"]`, the same idiom `tests/test_7951_enforce_atomic_write.py` uses
     # (`.get("id")`). Passing the dict straight to `_count` would bind it as a
     # map value, match nothing, and read 0 whether or not the write landed.
-    point_id = sdk.create_point("concept", "handle authority lane")["id"]
+    point_id = sdk._create_point("concept", "handle authority lane")["id"]
     assert point_id, "the SDK's own public write API must still write"
     proj = sdk._get_proj()
     assert _count(proj, "Point", "id", point_id) == 1
@@ -744,18 +744,18 @@ def test_a_declared_door_writes_through_the_handle_with_no_declaration_of_its_ow
     sdk = armed_sdk
 
     # retract_point
-    retracted = sdk.create_point("statement", "declared-door retracted")["id"]
-    assert sdk.retract_point(retracted)["id"] == retracted
+    retracted = sdk._create_point("statement", "declared-door retracted")["id"]
+    assert sdk._retract_point(retracted)["id"] == retracted
 
     # invalidate_point — a LIVE corrector, so the CORRECTS arm really writes
-    superseded = sdk.create_point("statement", "declared-door superseded")["id"]
-    corrector = sdk.create_point("statement", "declared-door corrector")["id"]
-    assert sdk.invalidate_point(superseded, corrector)["invalidated"] is True
+    superseded = sdk._create_point("statement", "declared-door superseded")["id"]
+    corrector = sdk._create_point("statement", "declared-door corrector")["id"]
+    assert sdk._invalidate_point(superseded, corrector)["invalidated"] is True
 
     # supersede_point
-    old = sdk.create_point("statement", "declared-door old")["id"]
-    new = sdk.create_point("statement", "declared-door new")["id"]
-    assert sdk.supersede_point(old, new)["invalidated"] is True
+    old = sdk._create_point("statement", "declared-door old")["id"]
+    new = sdk._create_point("statement", "declared-door new")["id"]
+    assert sdk._supersede_point(old, new)["invalidated"] is True
 
 
 def test_a_declared_apply_first_door_writes_under_the_armed_guard(
@@ -783,15 +783,15 @@ def test_a_declared_apply_first_door_writes_under_the_armed_guard(
        the door, not on the statement.
     """
     sdk = armed_sdk
-    doomed = sdk.create_point("statement", "apply-first door declared")["id"]
+    doomed = sdk._create_point("statement", "apply-first door declared")["id"]
     journal = Path(sdk._journal_path_for_test)
     records_before = journal.read_text() if journal.exists() else ""
 
-    assert sdk.delete_point(doomed) is True, (
+    assert sdk._delete_point(doomed) is True, (
         "the declared apply-first door must complete under an armed handle — a "
         "guard that refuses the product's own delete path is the regression "
         "#9124 part 2 must not ship")
-    assert not sdk.get_point(doomed), (
+    assert not sdk._get_point(doomed), (
         "the destroy must LAND: the record this door appends is true of the "
         "cache only when the `DETACH DELETE` ran")
 
@@ -806,11 +806,11 @@ def test_a_declared_apply_first_door_writes_under_the_armed_guard(
 
     # 3. The lane is on the DOOR, not on the statement: an undeclared raw
     #    destroy through the same handle is still refused, BEFORE it lands.
-    survivor = sdk.create_point("statement", "raw destroy refused")["id"]
+    survivor = sdk._create_point("statement", "raw destroy refused")["id"]
     with pytest.raises(DirectCacheWriteRefused):
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": survivor})
-    assert sdk.get_point(survivor) is not None, (
+    assert sdk._get_point(survivor) is not None, (
         "the refusal must precede the destroy — a refused DETACH DELETE that "
         "still removed the Point is the #9207 divergence with the stores "
         "swapped")

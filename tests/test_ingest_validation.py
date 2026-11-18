@@ -115,7 +115,7 @@ class TestPhase1Phase2Parity:
         viols = sdk._validate_bundle(bundle, promotion_policy=promotion_policy)
         assert viols, "Phase 1 missed a violation class Phase 2 raises"
         with pytest.raises(ValueError) as exc:
-            sdk.ingest(bundle, promotion_policy=promotion_policy)
+            sdk._ingest(bundle, promotion_policy=promotion_policy)
         # Phase 2's raise carries the FIRST Phase-1 message (the shipped
         # message contract) — message-level parity.
         assert str(exc.value) == viols[0]["message"]
@@ -186,7 +186,7 @@ class TestPhase1Phase2Parity:
              "kind": "statement", "content": "b"},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["points"] == 2
 
     def test_nonstring_fields_classes(self, sdk):
@@ -290,7 +290,7 @@ class TestPhase1Phase2Parity:
             {"from": "pA", "to": "pB", "relation": "hasPart",
              "mitigation": {"reason": "r", "strength": 0.3}}]}
         with pytest.raises(BundleValidationError) as exc:
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         msg = exc.value.violations[0]["message"]
         assert "mitigate_operator" in msg, msg
         assert "operator" in msg and "mitigation" in msg, msg
@@ -360,7 +360,7 @@ class TestPhase1Phase2Parity:
             self._assert_both_phases(sdk, bundle)
 
     def test_endpoint_classes_need_pre_seeded_graph(self, sdk):
-        existing = sdk.create_point("statement", "pre-existing point",  # noqa: F841
+        existing = sdk._create_point("statement", "pre-existing point",  # noqa: F841
                                     status="live")
         src = sdk.register_source("https://pre.example/s1", "report")
         src_url = src.get("url") or src.get("id")
@@ -369,10 +369,10 @@ class TestPhase1Phase2Parity:
         # operator route (#8499), which accepts terminal endpoints — so a point
         # spelling would assert a refusal the contract no longer makes, while
         # Object↔Object keeps the direct edge and the guard with it.
-        terminal_obj = sdk.create_object("Terminal object")
+        terminal_obj = sdk._create_object("Terminal object")
         _query(sdk, "MATCH (n:Object {name:$n}) SET n.status='superseded'",
                {"n": "Terminal object"})
-        live_obj = sdk.create_object("Live object")
+        live_obj = sdk._create_object("Live object")
 
         cases = {
             "external endpoint does not exist": {
@@ -421,7 +421,7 @@ class TestPhase1Phase2Parity:
         — a false block describing a mechanism (name-MERGE) the change removed.
         Parity here is the ABSENCE of a violation in both phases.
         """
-        sdk.create_object("Terminal object")
+        sdk._create_object("Terminal object")
         _query(sdk, "MATCH (n:Object {name:$n}) SET n.status='superseded'",
                {"n": "Terminal object"})
         bundle = {
@@ -432,7 +432,7 @@ class TestPhase1Phase2Parity:
             "connections": [{"from": "oA", "to": "oT", "operator": "IMPL"}],
         }
         assert sdk._validate_bundle(bundle, promotion_policy="gated") == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 1
 
     def test_gated_operator_connections_accepted_under_parity(self, sdk):
@@ -442,7 +442,7 @@ class TestPhase1Phase2Parity:
             {"from": "pA", "to": "pB", "operator": "IMPL",
              "mitigation": {"reason": "r", "strength": 0.2}}]}
         assert sdk._validate_bundle(bundle, promotion_policy="gated") == []
-        res = sdk.ingest(bundle)  # default gated — must commit, not raise
+        res = sdk._ingest(bundle)  # default gated — must commit, not raise
         assert res["created"]["connections"] == 1
 
 
@@ -502,7 +502,7 @@ class TestE2E1Matrix:
             assert _count(sdk, "MATCH (n:Object) RETURN count(n)") == 0
             assert _count(sdk, "MATCH (s:Source) RETURN count(s)") == 1
             with pytest.raises(ValueError):
-                sdk.ingest(bundle, granularity=granularity)
+                sdk._ingest(bundle, granularity=granularity)
 
     def test_corrected_bundle_commits_and_reingests_clean(self, sdk):
         bundle = {
@@ -517,10 +517,10 @@ class TestE2E1Matrix:
             ],
         }
         assert sdk._validate_bundle(bundle) == []
-        first = sdk.ingest(bundle)
+        first = sdk._ingest(bundle)
         assert first["created"]["points"] == 3
         assert first["created"]["connections"] == 2
-        second = sdk.ingest(bundle)
+        second = sdk._ingest(bundle)
         assert second["created"]["points"] == 0
         assert second["created"]["connections"] == 0
         assert second["deduped"]["connections"] == 2  # exactly-once
@@ -530,30 +530,30 @@ class TestE2E1Matrix:
 
 class TestCycle25Vocabulary:
     def test_statement_is_canonical(self, sdk):
-        res = sdk.ingest({"points": [{"kind": "statement", "content": "s"}]})
+        res = sdk._ingest({"points": [{"kind": "statement", "content": "s"}]})
         pid = res["ids"]["points"][0]
-        assert sdk.get_point(pid)["pointKind"] == "statement"
+        assert sdk._get_point(pid)["pointKind"] == "statement"
 
     def test_legacy_kind_write_compat(self, sdk):
         # A legacy write-compat kind (decision) still writes (compat-only).
-        res = sdk.ingest({"points": [{"kind": "decision", "content": "d"}]})
+        res = sdk._ingest({"points": [{"kind": "decision", "content": "d"}]})
         pid = res["ids"]["points"][0]
-        assert sdk.get_point(pid)["pointKind"] == "decision"
+        assert sdk._get_point(pid)["pointKind"] == "decision"
 
     def test_event_pointkind_rejected_phase1(self, sdk):
         viols = sdk._validate_bundle(
             {"points": [{"kind": "event", "content": "x"}]})
         assert any("'event'" in v["message"] for v in viols)
         with pytest.raises(ValueError, match="event"):
-            sdk.ingest({"points": [{"kind": "event", "content": "x"}]})
+            sdk._ingest({"points": [{"kind": "event", "content": "x"}]})
 
     def test_quote_permitted_within_cap(self, sdk):
         bundle = {"points": [{"kind": "statement", "content": "a",
                               "quote": "provenance quote"}]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         pid = res["ids"]["points"][0]
-        assert sdk.get_point(pid).get("quote") == "provenance quote"
+        assert sdk._get_point(pid).get("quote") == "provenance quote"
 
 
 # ── duplicates: clean dedup vs conflict (§5.2.7) ────────────────────
@@ -579,7 +579,7 @@ class TestDuplicateConnections:
             {"from": "pA", "to": "pB", "operator": "IMPL"},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 1
         assert res["deduped"]["connections"] == 1
         # Reified: ONE operator node, whose IMPL edge runs to EACH input.
@@ -599,7 +599,7 @@ class TestDuplicateConnections:
              "direction": "bidirectional"},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["deduped"]["connections"] == 1
 
     def test_nand_absent_equals_unidirectional(self, sdk):
@@ -613,13 +613,13 @@ class TestDuplicateConnections:
              "direction": "unidirectional"},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] >= 1  # commits; dedup count is A3's
 
     def test_external_plain_point_endpoint_accepted(self, sdk):
         # Positive control: a pre-existing plain Point is a legal endpoint on
         # the operator route (Phase 1 accepts, ingest commits).
-        existing = sdk.create_point("statement", "pre-existing point",
+        existing = sdk._create_point("statement", "pre-existing point",
                                     status="live")
         bundle = {
             "points": [{"ref": "p1", "kind": "statement", "content": "a"}],
@@ -627,7 +627,7 @@ class TestDuplicateConnections:
                              "operator": "IMPL"}],
         }
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 1
 
     def test_label_differing_mitigation_pairs_legal(self, sdk):
@@ -640,7 +640,7 @@ class TestDuplicateConnections:
              "mitigation": {"reason": "r2", "strength": 0.2}},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 2
 
     # ── #8623: the direct-edge conflict rule is EFFECTIVE-route scoped ──
@@ -664,7 +664,7 @@ class TestDuplicateConnections:
             {"from": "pA", "to": "pB", "operator": "IMPL", "label": "L2"},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 2, res
         assert res["deduped"]["connections"] == 0, res
         # Two operators, one per label — NOT one overwriting the other.
@@ -682,7 +682,7 @@ class TestDuplicateConnections:
         resolve as Point-bearing (the bundle ref is minted as a plain :Point in
         step 2, the external id is probed), so the pair is operator-mediated
         and the differing labels are legal."""
-        existing = sdk.create_point("statement", "pre-existing point",
+        existing = sdk._create_point("statement", "pre-existing point",
                                     status="live")
         bundle = {
             "points": [{"ref": "pB", "kind": "statement", "content": "B"}],
@@ -694,7 +694,7 @@ class TestDuplicateConnections:
             ],
         }
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 2, res
         labels = sorted(
             r[0] for r in _query(
@@ -714,7 +714,7 @@ class TestDuplicateConnections:
         assert viols, "Phase 1 accepted a direct-edge label conflict"
         assert "conflicting" in viols[0]["message"], viols
         with pytest.raises(ValueError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         # Zero mutation on the rejection.
         assert _edge_count(sdk, "IMPL") == 0
 
@@ -726,7 +726,7 @@ class TestDuplicateConnections:
             {"from": "oA", "to": "oB", "operator": "IMPL"},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 1, res
         assert res["deduped"]["connections"] == 1, res
         assert _edge_count(sdk, "IMPL") == 1
@@ -752,22 +752,22 @@ class TestTerminalStatusGuard:
         # spelled with a bundle-local POINT, which made it a promotion test by
         # accident — the Point-bearing pair is reified into an operator, which
         # accepts a terminal endpoint, so the guard never applied to it.
-        terminal = sdk.create_object("Terminal object")
+        terminal = sdk._create_object("Terminal object")
         _query(sdk, "MATCH (n:Object {name:$n}) SET n.status='superseded'",
                {"n": "Terminal object"})
-        live = sdk.create_object("Live object")
+        live = sdk._create_object("Live object")
         bundle = {"connections": [{"from": live["id"], "to": terminal["id"],
                                    "operator": "IMPL"}]}
         viols = sdk._validate_bundle(bundle)
         assert any("terminal" in v["message"] for v in viols), viols
         with pytest.raises(ValueError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
 
     def test_operator_mediated_terminal_endpoint_accepted(self, sdk):
         # CARVE-OUT (cycle-4): operator-mediated connections to terminal
         # points keep today's behavior (established editorial surface) — the
         # guard is direct-edge-scoped only.
-        terminal = sdk.create_point("statement", "old claim",
+        terminal = sdk._create_point("statement", "old claim",
                                     status="superseded")
         bundle = {
             "points": [{"ref": "p1", "kind": "statement", "content": "new"}],
@@ -775,7 +775,7 @@ class TestTerminalStatusGuard:
                              "mitigation": {"reason": "r", "strength": 0.2}}],
         }
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 1
 
     def test_bundle_local_point_hitting_terminal_dedup_refused_on_operator_route(
@@ -798,9 +798,9 @@ class TestTerminalStatusGuard:
         # is a separate axis #9173 never decided. What this test now pins is
         # that the bundle is refused in Phase 1 with ZERO mutation, so the
         # terminal point is not rewritten and no earlier item is committed.
-        terminal = sdk.create_point("statement", "same content",
+        terminal = sdk._create_point("statement", "same content",
                                     status="superseded")["id"]
-        before = sdk.get_point(terminal)
+        before = sdk._get_point(terminal)
         bundle = {
             "points": [
                 {"ref": "p1", "kind": "statement", "content": "other"},
@@ -811,8 +811,8 @@ class TestTerminalStatusGuard:
         viols = sdk._validate_bundle(bundle)
         assert any("#9819" in v["message"] for v in viols), viols
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest(bundle)
-        after = sdk.get_point(terminal)
+            sdk._ingest(bundle)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None, (
             "the content fold stamped the retracted point (#9819)")
         assert after.get("updatedAt") == before.get("updatedAt")
@@ -838,7 +838,7 @@ class TestTerminalStatusGuard:
         """
         for kind in ({"a": 1}, ["x"], 5):
             with pytest.raises(BundleValidationError, match="must be a string"):
-                sdk.ingest({"points": [{"ref": "p1", "kind": kind,
+                sdk._ingest({"points": [{"ref": "p1", "kind": kind,
                                          "content": "NONSTR-KIND",
                                          "key": "nonstr-k-9819"}]})
         assert sdk._get_proj().g.query(
@@ -876,7 +876,7 @@ class TestTerminalStatusGuard:
         # well; that second leg was the pre-existing gap #3142 closed (the
         # guard now matches it, via the shared `_terminal_expression`), so
         # both legs are covered.
-        terminal = sdk.create_point("statement", "same content",
+        terminal = sdk._create_point("statement", "same content",
                                     status="superseded")
         _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",
                {"id": terminal["id"]})
@@ -906,7 +906,7 @@ class TestTerminalStatusGuard:
         viols = sdk._validate_bundle(bundle)
         assert any("#9819" in v["message"] for v in viols), viols
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         assert _operator_count(sdk) == 0, "Phase-1 must reject before any write"
 
     def test_terminal_dedup_hit_mirrors_create_point_dedup_predicate(self, sdk):
@@ -929,7 +929,7 @@ class TestTerminalStatusGuard:
         g = sdk._get_proj().g
         # reachable hybrid: modern is_operator=false PLUS a caller-supplied
         # op_type; the writer's shared predicate matches it
-        sdk.create_point("statement", "hybrid content", op_type="IMPL",
+        sdk._create_point("statement", "hybrid content", op_type="IMPL",
                          status="superseded")
         # legacy property-absent plain Point (no is_operator, no op_type) —
         # the writer DOES dedup it (the #2949 F1 fix; before it the guard
@@ -964,12 +964,12 @@ class TestTerminalStatusGuard:
         # duplicate is genuinely hash-less (a partial write, or a graph written
         # before #2795 D2) there is no hash for the writer to resolve to, so
         # the fallback still fires.
-        term = sdk.create_point("statement", "same content",
+        term = sdk._create_point("statement", "same content",
                                 status="superseded")
         _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",
                {"id": term["id"]})
         # legal duplicate: same content+kind, LIVE, hash present (dedup off)
-        live = sdk.create_point("statement", "same content", status="live",
+        live = sdk._create_point("statement", "same content", status="live",
                                 dedup=False)
         assert _query(
             sdk, "MATCH (n:Point {id:$id}) RETURN n.content_hash",
@@ -984,7 +984,7 @@ class TestTerminalStatusGuard:
             "connections": [{"from": "p1", "to": "pT", "operator": "IMPL"}],
         }
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 1
 
     def test_terminal_dedup_fallback_is_conservative_on_hashless_duplicates(
@@ -998,11 +998,11 @@ class TestTerminalStatusGuard:
         # stronger form of the gating leg above: there the live sibling had a
         # hash (so the writer provably never reaches the fallback); here it
         # does not.
-        term = sdk.create_point("statement", "same content",
+        term = sdk._create_point("statement", "same content",
                                 status="superseded")
         _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",
                {"id": term["id"]})
-        live = sdk.create_point("statement", "same content", status="live",
+        live = sdk._create_point("statement", "same content", status="live",
                                 dedup=False)
         _query(sdk, "MATCH (n:Point {id:$id}) REMOVE n.content_hash",
                {"id": live["id"]})
@@ -1038,7 +1038,7 @@ class TestEffectiveRouteScope9173:
                              "operator": "IMPL"}],
         }
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert res["created"]["connections"] == 1
         # promoted, never an operator-less edge (the fan-out shape)
         assert isinstance(res["ids"]["connections"][0], str)  # operator id
@@ -1052,7 +1052,7 @@ class TestEffectiveRouteScope9173:
         viols = sdk._validate_bundle(bundle)
         assert any("multi-item 'to'" in v["message"] for v in viols), viols
         with pytest.raises(ValueError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         # ⛔ review cycle 2: `ingest` raises the Phase-1 `BundleValidationError`
         # BEFORE Phase 2 runs, so an equality assertion here would pin nothing
         # about the Phase-2 arm (it cannot fail). Exercise the arm — and the
@@ -1070,47 +1070,47 @@ class TestEffectiveRouteScope9173:
         # `create_operator` does not evaluate endpoint status, so the guard's
         # premise (a mid-write raise from `create_direct_edge`) cannot hold on
         # the route this connection takes.
-        terminal = sdk.create_point("statement", "terminal",
+        terminal = sdk._create_point("statement", "terminal",
                                     status="superseded")
-        live = sdk.create_point("statement", "live", status="live")
+        live = sdk._create_point("statement", "live", status="live")
         bundle = {"connections": [{"from": live["id"], "to": terminal["id"],
                                    "operator": "IMPL"}]}
         assert sdk._validate_bundle(bundle) == []
-        assert sdk.ingest(bundle)["created"]["connections"] == 1
+        assert sdk._ingest(bundle)["created"]["connections"] == 1
 
     def test_terminal_endpoint_on_object_pair_still_rejected(self, sdk):
         # The direct-edge guard keeps its coverage on the pair that still takes
         # the direct edge. (The twin of the test above, on the OTHER side of
         # the endpoint-kind gate.)
-        terminal = sdk.create_object("Terminal object")
+        terminal = sdk._create_object("Terminal object")
         _query(sdk, "MATCH (n:Object {name:$n}) SET n.status='superseded'",
                {"n": "Terminal object"})
-        live = sdk.create_object("Live object")
+        live = sdk._create_object("Live object")
         bundle = {"connections": [{"from": live["id"], "to": terminal["id"],
                                    "operator": "IMPL"}]}
         viols = sdk._validate_bundle(bundle)
         assert any("terminal" in v["message"] for v in viols), viols
         with pytest.raises(ValueError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
 
     def test_unevaluable_status_endpoint_on_point_bearing_pair_accepted(self, sdk):
         # The `_status_is_evaluable` arm is the same class of prediction: an
         # ARRAY status raises `TypeError` inside `create_direct_edge`'s
         # frozenset test — a primitive the promoted pair never calls.
-        terminal = sdk.create_point("statement", "arr", status="superseded")
+        terminal = sdk._create_point("statement", "arr", status="superseded")
         _query(sdk, "MATCH (n:Point {id:$i}) SET n.status=['superseded']",
                {"i": terminal["id"]})
-        live = sdk.create_point("statement", "live2", status="live")
+        live = sdk._create_point("statement", "live2", status="live")
         bundle = {"connections": [{"from": live["id"], "to": terminal["id"],
                                    "operator": "IMPL"}]}
         assert sdk._validate_bundle(bundle) == []
-        assert sdk.ingest(bundle)["created"]["connections"] == 1
+        assert sdk._ingest(bundle)["created"]["connections"] == 1
 
     def test_effective_route_carve_out_is_still_accepted(self, sdk):
         # The cycle-4 carve-out is unchanged: an explicitly operator-mediated
         # connection to a terminal point keeps its behaviour, and the promoted
         # connection now reaches the SAME verdict through the same route.
-        terminal = sdk.create_point("statement", "old claim",
+        terminal = sdk._create_point("statement", "old claim",
                                     status="superseded")
         bundle = {
             "points": [{"ref": "p1", "kind": "statement", "content": "new"}],
@@ -1119,7 +1119,7 @@ class TestEffectiveRouteScope9173:
                              "mitigation": {"reason": "r", "strength": 0.2}}],
         }
         assert sdk._validate_bundle(bundle) == []
-        assert sdk.ingest(bundle)["created"]["connections"] == 1
+        assert sdk._ingest(bundle)["created"]["connections"] == 1
 
 
 # ── Server-managed keys are read at the write DOOR's fold depth (#7925 r5) ──
@@ -1142,7 +1142,7 @@ def test_server_managed_key_is_refused_when_single_wrapped(sdk, key, value):
     assert any(key in m and "server-managed" in m for m in msgs), msgs
     from tortoise.exceptions import BundleValidationError
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _point_count(sdk) == 0
 
 
@@ -1189,7 +1189,7 @@ def test_server_managed_key_is_refused_when_double_wrapped_on_a_point(
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any(key in m and "server-managed" in m for m in msgs), msgs
     with pytest.raises(ValueError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _point_count(sdk) == 0
 
 
@@ -1210,7 +1210,7 @@ def test_entity_type_vocabulary_is_derived_from_one_map(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("|".join(keys) in m for m in msgs), msgs
     with pytest.raises(ValueError, match="|".join(keys)):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     with pytest.raises(ValueError) as exc:
         sdk.create_entity("bogus", "X")
     for key in keys:
@@ -1231,6 +1231,6 @@ def test_entity_type_vocabulary_is_derived_from_one_map(sdk):
         if key == "document":
             item["documentKind"] = "report"
         try:
-            sdk.ingest({"entities": [item]})
+            sdk._ingest({"entities": [item]})
         except ValueError as err:
             assert "type must be" not in str(err), (key, str(err))

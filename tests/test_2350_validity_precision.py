@@ -265,7 +265,7 @@ def test_precision_roundtrip_three_state_e2e(lane):
     """write year-precision open → read → supersede with an unknown end →
     read 3-state (the #2350 E2E)."""
     sdk, _events = lane
-    old = sdk.create_point("statement", "old claim",
+    old = sdk._create_point("statement", "old claim",
                            validFrom="2024-01-01",
                            validFromPrecision="year")
 
@@ -275,8 +275,8 @@ def test_precision_roundtrip_three_state_e2e(lane):
     assert vp["end_state"] == "open"
     assert "end_state_unknown" not in first
 
-    new = sdk.create_point("statement", "new claim", validFrom="2025-03-01")
-    sdk.supersede_point(old["id"], new["id"], valid_to_precision="unknown")
+    new = sdk._create_point("statement", "new claim", validFrom="2025-03-01")
+    sdk._supersede_point(old["id"], new["id"], valid_to_precision="unknown")
 
     # The predecessor's end is CLOSED but un-datable: no validTo is fabricated.
     assert _window_props(sdk, old["id"]) == {
@@ -293,7 +293,7 @@ def test_precision_roundtrip_three_state_e2e(lane):
 
 def test_legacy_bare_iso_window_reads_as_day_precision_no_migration(lane):
     sdk, _events = lane
-    p = sdk.create_point("statement", "legacy window",
+    p = sdk._create_point("statement", "legacy window",
                          validFrom="2024-01-01", validTo="2024-12-31")
     assert _window_props(sdk, p["id"]) == {
         "validFrom": "2024-01-01", "validTo": "2024-12-31",
@@ -306,8 +306,8 @@ def test_legacy_bare_iso_window_reads_as_day_precision_no_migration(lane):
 
 def test_open_and_closed_unknown_are_distinguishable_on_the_same_read(lane):
     sdk, _events = lane
-    still = sdk.create_point("statement", "still true", validFrom="2024-01-01")
-    ended = sdk.create_point("statement", "ended unknown",
+    still = sdk._create_point("statement", "still true", validFrom="2024-01-01")
+    ended = sdk._create_point("statement", "ended unknown",
                              validFrom="2024-01-01",
                              validToPrecision="unknown")
     open_out = sdk.get_historical_knowledge(still["id"], A_DATE)
@@ -323,34 +323,34 @@ def test_open_and_closed_unknown_are_distinguishable_on_the_same_read(lane):
 def test_create_point_refuses_inconsistent_precision(lane):
     sdk, _events = lane
     with pytest.raises(ValueError, match="not a validity precision"):
-        sdk.create_point("statement", "x", validToPrecision="week")
+        sdk._create_point("statement", "x", validToPrecision="week")
     with pytest.raises(ValueError, match="END only"):
-        sdk.create_point("statement", "x", validFromPrecision="unknown")
+        sdk._create_point("statement", "x", validFromPrecision="unknown")
     with pytest.raises(ValueError, match="contradiction"):
-        sdk.create_point("statement", "x", validTo="2024-01-01",
+        sdk._create_point("statement", "x", validTo="2024-01-01",
                          validToPrecision="unknown")
     with pytest.raises(ValueError, match="requires a validTo"):
-        sdk.create_point("statement", "x", validToPrecision="year")
+        sdk._create_point("statement", "x", validToPrecision="year")
 
 
 def test_update_point_refuses_a_one_sided_move_off_unknown(lane):
     sdk, _events = lane
-    p = sdk.create_point("statement", "x", validFrom="2024-01-01",
+    p = sdk._create_point("statement", "x", validFrom="2024-01-01",
                          validToPrecision="unknown")
     # A stored end of 'unknown' plus a newly dated validTo is refused until the
     # caller states the new precision — no stale marker beside a real date.
     with pytest.raises(ValueError, match="contradiction"):
-        sdk.update_point(p["id"], validTo="2025-01-01")
-    sdk.update_point(p["id"], validTo="2025-01-01", validToPrecision="day")
+        sdk._update_point(p["id"], validTo="2025-01-01")
+    sdk._update_point(p["id"], validTo="2025-01-01", validToPrecision="day")
     assert _window_props(sdk, p["id"])["validToPrecision"] == "day"
 
 
 def test_supersede_inherits_the_successors_start_precision(lane):
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2025-01-01")
-    new = sdk.create_point("statement", "new", validFrom="2026-01-01",
+    old = sdk._create_point("statement", "old", validFrom="2025-01-01")
+    new = sdk._create_point("statement", "new", validFrom="2026-01-01",
                            validFromPrecision="month")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     assert _window_props(sdk, old["id"])["validToPrecision"] == "month"
     assert _window_props(sdk, old["id"])["validTo"] == "2026-01-01"
 
@@ -366,10 +366,10 @@ def test_supersede_inherits_through_an_agreeing_valid_from_kwarg(lane):
     ``valid_from is None`` to the gate left the whole suite green).
     """
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
-    new = sdk.create_point("statement", "new", validFrom="2026-01-01",
+    old = sdk._create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk._create_point("statement", "new", validFrom="2026-01-01",
                            validFromPrecision="month")
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-01-01")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-01-01")
     props = _window_props(sdk, old["id"])
     assert props["validTo"] == "2026-01-01"
     assert props["validToPrecision"] == "month"
@@ -390,10 +390,10 @@ def test_supersede_does_not_inherit_a_declaration_onto_a_fabricated_end(lane):
     one property away.
     """
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
-    new = sdk.create_point("statement", "new", validFrom="TBD",
+    old = sdk._create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk._create_point("statement", "new", validFrom="TBD",
                            validFromPrecision="year")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     props = _window_props(sdk, old["id"])
     # the end came from the fallback ladder (createdAt / now), never from the
     # successor's unorderable start.
@@ -424,11 +424,11 @@ def test_supersede_stamps_no_precision_when_the_end_is_the_writer_clock(lane):
     hold there too, otherwise the fix would only cover the ``createdAt`` step.
     """
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
-    new = sdk.create_point("statement", "new", validFrom="TBD",
+    old = sdk._create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk._create_point("statement", "new", validFrom="TBD",
                            validFromPrecision="month",
                            createdAt="not-a-date")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     props = _window_props(sdk, old["id"])
     assert props["validTo"] not in (None, "TBD", "not-a-date")
     assert props["validToPrecision"] is None
@@ -436,9 +436,9 @@ def test_supersede_stamps_no_precision_when_the_end_is_the_writer_clock(lane):
 
 def test_supersede_does_not_fabricate_precision_on_a_legacy_chain(lane):
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2025-01-01")
-    new = sdk.create_point("statement", "new", validFrom="2026-01-01")
-    sdk.supersede_point(old["id"], new["id"])
+    old = sdk._create_point("statement", "old", validFrom="2025-01-01")
+    new = sdk._create_point("statement", "new", validFrom="2026-01-01")
+    sdk._supersede_point(old["id"], new["id"])
     # No declared precision anywhere ⇒ the property stays ABSENT (legacy day
     # default on read), never a stored guess.
     assert _window_props(sdk, old["id"])["validToPrecision"] is None
@@ -446,9 +446,9 @@ def test_supersede_does_not_fabricate_precision_on_a_legacy_chain(lane):
 
 def test_invalidate_point_accepts_an_unknown_end(lane):
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
-    other = sdk.create_point("statement", "other", validFrom="2024-06-01")
-    sdk.invalidate_point(old["id"], other["id"], valid_to_precision="unknown")
+    old = sdk._create_point("statement", "old", validFrom="2024-01-01")
+    other = sdk._create_point("statement", "other", validFrom="2024-06-01")
+    sdk._invalidate_point(old["id"], other["id"], valid_to_precision="unknown")
     props = _window_props(sdk, old["id"])
     assert props["validTo"] is None
     assert props["validToPrecision"] == "unknown"
@@ -466,11 +466,11 @@ def test_supersede_unknown_end_is_not_refused_by_the_inversion_guard(lane):
     from tortoise.sdk import InvertedSupersedeWindow
 
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2025-01-01")
+    old = sdk._create_point("statement", "old", validFrom="2025-01-01")
     # the successor's start precedes the predecessor's → an inverted window IF
     # an end were stamped (it is not, under the 'unknown' marker).
-    new = sdk.create_point("statement", "new", validFrom="2024-01-01")
-    sdk.supersede_point(old["id"], new["id"], valid_to_precision="unknown")
+    new = sdk._create_point("statement", "new", validFrom="2024-01-01")
+    sdk._supersede_point(old["id"], new["id"], valid_to_precision="unknown")
     props = _window_props(sdk, old["id"])
     assert props["validTo"] is None
     assert props["validToPrecision"] == "unknown"
@@ -480,20 +480,20 @@ def test_supersede_unknown_end_is_not_refused_by_the_inversion_guard(lane):
     # control — the guard is still enforced for a REAL end: the same inverted
     # pair WITHOUT the 'unknown' marker is refused (so the skip is scoped to
     # the no-end-stamped write, not a blanket bypass).
-    old2 = sdk.create_point("statement", "old2", validFrom="2025-01-01")
-    new2 = sdk.create_point("statement", "new2", validFrom="2024-01-01")
+    old2 = sdk._create_point("statement", "old2", validFrom="2025-01-01")
+    new2 = sdk._create_point("statement", "new2", validFrom="2024-01-01")
     with pytest.raises(InvertedSupersedeWindow):
-        sdk.supersede_point(old2["id"], new2["id"])
+        sdk._supersede_point(old2["id"], new2["id"])
 
 
 # ── no re-stamp of pre-existing windows ──────────────────────────────────
 
 def test_supersession_leaves_the_predecessors_own_start_untouched(lane):
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2025-01-01",
+    old = sdk._create_point("statement", "old", validFrom="2025-01-01",
                            validFromPrecision="year")
-    new = sdk.create_point("statement", "new", validFrom="2026-03-01")
-    sdk.supersede_point(old["id"], new["id"])
+    new = sdk._create_point("statement", "new", validFrom="2026-03-01")
+    sdk._supersede_point(old["id"], new["id"])
     assert _window_props(sdk, old["id"])["validFrom"] == "2025-01-01"
     assert _window_props(sdk, old["id"])["validFromPrecision"] == "year"
 
@@ -502,10 +502,10 @@ def test_supersession_leaves_the_predecessors_own_start_untouched(lane):
 
 def test_precision_survives_a_jsonl_wipe_and_rebuild(lane):
     sdk, events = lane
-    old = sdk.create_point("statement", "old", validFrom="2024-01-01",
+    old = sdk._create_point("statement", "old", validFrom="2024-01-01",
                            validFromPrecision="year")
-    new = sdk.create_point("statement", "new", validFrom="2025-03-01")
-    sdk.supersede_point(old["id"], new["id"], valid_to_precision="unknown")
+    new = sdk._create_point("statement", "new", validFrom="2025-03-01")
+    sdk._supersede_point(old["id"], new["id"], valid_to_precision="unknown")
     live = _window_props(sdk, old["id"])
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -517,9 +517,9 @@ def test_precision_survives_a_jsonl_wipe_and_rebuild(lane):
 
 def test_invalidated_unknown_precision_survives_rebuild(lane):
     sdk, events = lane
-    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
-    other = sdk.create_point("statement", "other", validFrom="2024-06-01")
-    sdk.invalidate_point(old["id"], other["id"], valid_to_precision="unknown")
+    old = sdk._create_point("statement", "old", validFrom="2024-01-01")
+    other = sdk._create_point("statement", "other", validFrom="2024-06-01")
+    sdk._invalidate_point(old["id"], other["id"], valid_to_precision="unknown")
     live = _window_props(sdk, old["id"])
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -539,8 +539,8 @@ def test_update_door_precision_survives_rebuild_and_stays_ended_unknown(lane):
     from tortoise.consistency import check_consistency
 
     sdk, events = lane
-    p = sdk.create_point("statement", "a", validFrom="2024-01-01")
-    sdk.update_point(p["id"], validToPrecision="unknown")
+    p = sdk._create_point("statement", "a", validFrom="2024-01-01")
+    sdk._update_point(p["id"], validToPrecision="unknown")
     # non-vacuous: the LIVE write landed (the update door persisted it).
     assert _window_props(sdk, p["id"])["validToPrecision"] == "unknown"
     assert sdk.get_historical_knowledge(
@@ -561,8 +561,8 @@ def test_update_door_start_precision_survives_rebuild(lane):
     """#2350 review P1, start-end leg: the same update door must carry
     ``validFromPrecision`` through replay (pre-fix it rebuilt to ``None``)."""
     sdk, events = lane
-    p = sdk.create_point("statement", "a", validFrom="2024-01-01")
-    sdk.update_point(p["id"], validFromPrecision="year")
+    p = sdk._create_point("statement", "a", validFrom="2024-01-01")
+    sdk._update_point(p["id"], validFromPrecision="year")
     assert _window_props(sdk, p["id"])["validFromPrecision"] == "year"
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -576,10 +576,10 @@ def test_update_door_precision_clear_replays_as_absent(lane):
     — an explicit ``None`` is the documented CLEAR and folds as absent on
     BOTH replay engines, not as a stale value."""
     sdk, events = lane
-    p = sdk.create_point("statement", "a", validFrom="2024-01-01",
+    p = sdk._create_point("statement", "a", validFrom="2024-01-01",
                          validFromPrecision="year",
                          validToPrecision="unknown")
-    sdk.update_point(p["id"], validToPrecision=None)
+    sdk._update_point(p["id"], validToPrecision=None)
     assert _window_props(sdk, p["id"])["validToPrecision"] is None
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -591,7 +591,7 @@ def test_update_door_precision_clear_replays_as_absent(lane):
 # ── search / recall annotation ───────────────────────────────────────────
 
 def _scan(sdk, **kw):
-    return sdk.tortoise_fts_query(query=None, kind="statement",
+    return sdk._tortoise_fts_query(query=None, kind="statement",
                                   entity_type="point", limit=50,
                                   include_terminal=True, **kw)
 
@@ -603,9 +603,9 @@ def test_reader_marker_does_not_relabel_invalidated_unknown_as_still_true(lane):
     from tortoise.retrieval import _validity_marker
 
     sdk, _events = lane
-    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
-    other = sdk.create_point("statement", "other", validFrom="2024-06-01")
-    sdk.invalidate_point(old["id"], other["id"], valid_to_precision="unknown")
+    old = sdk._create_point("statement", "old", validFrom="2024-01-01")
+    other = sdk._create_point("statement", "other", validFrom="2024-06-01")
+    sdk._invalidate_point(old["id"], other["id"], valid_to_precision="unknown")
     hit = next(r for r in _scan(sdk) if r["id"] == old["id"])
     assert hit["end_state"] == "unknown"
     assert hit["valid_to_precision"] == "unknown"
@@ -783,9 +783,9 @@ def test_reader_marker_states_the_end_only_window_invalidate_point_writes(lane):
     from tortoise.retrieval import _validity_marker
 
     sdk, _events = lane
-    old = sdk.create_point("statement", "the gym is open at 6pm")
-    new = sdk.create_point("statement", "the gym is open at 5pm")
-    sdk.invalidate_point(old["id"], new["id"])
+    old = sdk._create_point("statement", "the gym is open at 6pm")
+    new = sdk._create_point("statement", "the gym is open at 5pm")
+    sdk._invalidate_point(old["id"], new["id"])
 
     # non-vacuous premise: the writer stamps BOTH end columns and NO start, and
     # the promotion carries them to the hit the renderer consumes. (No equality
@@ -824,9 +824,9 @@ def test_reader_marker_states_the_end_only_window_closed_unknown(lane):
     from tortoise.retrieval import _validity_marker
 
     sdk, _events = lane
-    old = sdk.create_point("statement", "the gym is open at 6pm")
-    new = sdk.create_point("statement", "the gym is open at 5pm")
-    sdk.invalidate_point(old["id"], new["id"], valid_to_precision="unknown")
+    old = sdk._create_point("statement", "the gym is open at 6pm")
+    new = sdk._create_point("statement", "the gym is open at 5pm")
+    sdk._invalidate_point(old["id"], new["id"], valid_to_precision="unknown")
 
     hit = next(r for r in _scan(sdk) if r["id"] == old["id"])
     assert hit.get("valid_from") is None, hit
@@ -927,12 +927,12 @@ def test_reader_marker_on_the_search_wire_states_an_undatable_end(lane):
     from tortoise.retrieval import _validity_marker
 
     sdk, _events = lane
-    un_datable = sdk.create_point("statement", "un-datable end",
+    un_datable = sdk._create_point("statement", "un-datable end",
                                  validFrom="2024-01-01")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$i}) SET n.validTo = 'TBD'",
         params={"i": un_datable["id"]})
-    dated = sdk.create_point("statement", "dated end",
+    dated = sdk._create_point("statement", "dated end",
                              validFrom="2024-01-01", validTo="2024-06-01")
     hits = {r["id"]: r for r in _scan(sdk)}
     hit = hits[un_datable["id"]]
@@ -984,8 +984,8 @@ def test_reader_marker_on_the_search_wire_never_leaks_an_unorderable_start(lane)
     from tortoise.retrieval import _validity_marker
 
     sdk, _events = lane
-    bogus = sdk.create_point("statement", "undated start", validFrom="TBD")
-    dated = sdk.create_point("statement", "dated start",
+    bogus = sdk._create_point("statement", "undated start", validFrom="TBD")
+    dated = sdk._create_point("statement", "dated start",
                              validFrom="2024-01-01")
     hits = {r["id"]: r for r in _scan(sdk)}
     # non-vacuous: the raw text IS on the wire the renderer consumes.
@@ -1041,9 +1041,9 @@ def test_a_padded_start_is_gated_on_the_raw_bound_not_the_display_copy(lane):
     # the wire: the padded bound is stored VERBATIM (no write-side trim), so the
     # renderer really does receive the raw value it must gate on.
     sdk, _events = lane
-    padded_pt = sdk.create_point("statement", "padded start",
+    padded_pt = sdk._create_point("statement", "padded start",
                                  validFrom=" 2024-06-01 ")
-    dated = sdk.create_point("statement", "clean start",
+    dated = sdk._create_point("statement", "clean start",
                              validFrom="2024-06-01")
     hits = {r["id"]: r for r in _scan(sdk)}
     assert hits[padded_pt["id"]]["valid_from"] == " 2024-06-01 "
@@ -1156,8 +1156,8 @@ def test_the_epoch_zero_start_survives_the_wire_and_renders_its_day(lane):
     from tortoise.sdk import _decorate_fallback_hits
 
     sdk, _events = lane
-    zero = sdk.create_point("statement", "epoch zero", validFrom=0)
-    plain = sdk.create_point("statement", "undated")
+    zero = sdk._create_point("statement", "epoch zero", validFrom=0)
+    plain = sdk._create_point("statement", "undated")
     # non-vacuous: the bound IS stored as the number 0 (not normalised away at
     # the write boundary) — otherwise the read side has nothing to preserve.
     assert _props(sdk, zero["id"])["validFrom"] == 0, _props(sdk, zero["id"])
@@ -1664,8 +1664,8 @@ def test_an_unreadable_expiry_on_the_search_wire_states_the_end(lane):
     from tortoise.retrieval import _validity_marker
 
     sdk, _events = lane
-    p = sdk.create_point("statement", "junk expiry", validFrom="2024-06-01")
-    dated = sdk.create_point("statement", "dated end",
+    p = sdk._create_point("statement", "junk expiry", validFrom="2024-06-01")
+    dated = sdk._create_point("statement", "dated end",
                              validFrom="2024-06-01", validTo="2024-09-01")
     for pid in (p["id"], dated["id"]):
         sdk._get_proj().g.query(
@@ -1700,8 +1700,8 @@ def test_a_numeric_start_through_the_public_write_renders_the_start(lane):
     from tortoise.retrieval import render_context
 
     sdk, _events = lane
-    epoch = sdk.create_point("statement", "epoch start", validFrom=1735689600)
-    iso = sdk.create_point("statement", "iso start", validFrom="2025-01-01")
+    epoch = sdk._create_point("statement", "epoch start", validFrom=1735689600)
+    iso = sdk._create_point("statement", "iso start", validFrom="2025-01-01")
     assert _window_props(sdk, epoch["id"])["validFrom"] == 1735689600
 
     hits = {r["id"]: r for r in _scan(sdk)}
@@ -2011,8 +2011,8 @@ def test_the_pre_2978_predicate_shim_still_drives_assemble_context():
 
 def test_search_annotation_distinguishes_open_from_unknown(lane):
     sdk, _events = lane
-    still = sdk.create_point("statement", "still", validFrom="2024-01-01")
-    ended = sdk.create_point("statement", "ended", validFrom="2024-01-01",
+    still = sdk._create_point("statement", "still", validFrom="2024-01-01")
+    ended = sdk._create_point("statement", "ended", validFrom="2024-01-01",
                              validToPrecision="unknown")
     hits = {r["id"]: r for r in _scan(sdk)}
     assert hits[still["id"]]["end_state"] == "open"
@@ -2023,7 +2023,7 @@ def test_search_annotation_distinguishes_open_from_unknown(lane):
 
 def test_search_annotation_carries_declared_precision(lane):
     sdk, _events = lane
-    p = sdk.create_point("statement", "dated", validFrom="2024-01-01",
+    p = sdk._create_point("statement", "dated", validFrom="2024-01-01",
                          validFromPrecision="year")
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
     assert hit["valid_from_precision"] == "year"
@@ -2047,7 +2047,7 @@ def test_declared_precision_on_an_unorderable_start_reads_null_everywhere(lane):
     from tortoise.assembly import docker_walker_port
     from tortoise.sdk import _decorate_fallback_hits
 
-    p = sdk.create_point("statement", "declared on no instant",
+    p = sdk._create_point("statement", "declared on no instant",
                          validFrom="TBD", validFromPrecision="year")
     # non-vacuous: the write boundary stored BOTH the bound and the declaration
     props = _window_props(sdk, p["id"])
@@ -2080,7 +2080,7 @@ def test_declared_precision_on_an_unorderable_start_reads_null_everywhere(lane):
     # ``createdAt`` stamp, so a run crossing UTC midnight between the two
     # ``_utc_today()`` calls would drop it — the #9406 clock-reading class
     # this file's ``_utc_today`` docstring records).
-    q = sdk.create_point("statement", "declared on an instant",
+    q = sdk._create_point("statement", "declared on an instant",
                          validFrom="2024-06-01", validFromPrecision="year")
     assert sdk.get_historical_knowledge(
         q["id"], A_DATE)["chain"][0]["valid_from_precision"] == "year"
@@ -2117,7 +2117,7 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
     pinned by ``test_unorderable_end_is_emitted_as_null_on_every_read_surface``.
     """
     sdk, _events = lane
-    p = sdk.create_point("statement", "declared end on no instant",
+    p = sdk._create_point("statement", "declared end on no instant",
                          validFrom="2024-06-01")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$i}) "
@@ -2137,7 +2137,7 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
     assert hit["end_state"] == "unknown", hit
 
     # CONTROL — the same declaration on an ORDERABLE end still reads ``year``
-    q = sdk.create_point("statement", "declared end on an instant",
+    q = sdk._create_point("statement", "declared end on an instant",
                          validFrom="2024-06-01", validTo="2026-01-01",
                          validToPrecision="year")
     assert sdk.get_historical_knowledge(
@@ -2148,7 +2148,7 @@ def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
 
 def test_undated_hits_emit_no_precision_keys(lane):
     sdk, _events = lane
-    p = sdk.create_point("statement", "timeless")
+    p = sdk._create_point("statement", "timeless")
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
     for key in ("valid_from_precision", "valid_to_precision", "end_state"):
         assert key not in hit, (key, hit)
@@ -2163,7 +2163,7 @@ def test_get_historical_knowledge_nearest_does_not_gain_an_unrecorded_content_ke
     and no check can see an unrecorded field). Pre-fix this asserted key set
     contained ``content``."""
     sdk, _events = lane
-    p = sdk.create_point("statement", "claim", validFrom="2024-06-01")
+    p = sdk._create_point("statement", "claim", validFrom="2024-06-01")
     out = sdk.get_historical_knowledge(p["id"], "2020-01-01")
     assert out["status"] == "absent"
     assert "nearest" in out
@@ -2186,7 +2186,7 @@ def test_embedded_fallback_decorates_a_falsey_but_present_start(lane):
     from tortoise.sdk import _decorate_fallback_hits
 
     sdk, _events = lane
-    p = sdk.create_point("statement", "empty start", validFrom="")
+    p = sdk._create_point("statement", "empty start", validFrom="")
     assert _props(sdk, p["id"])["validFrom"] == ""
 
     hits = _decorate_fallback_hits([{"id": p["id"]}], sdk._get_proj().g)
@@ -2198,7 +2198,7 @@ def test_embedded_fallback_decorates_a_falsey_but_present_start(lane):
 
     # control — an undated hit still gains NO window keys (the gate is not a
     # blanket emit).
-    q = sdk.create_point("statement", "timeless")
+    q = sdk._create_point("statement", "timeless")
     plain = _decorate_fallback_hits([{"id": q["id"]}], sdk._get_proj().g)
     for key in ("valid_from_precision", "valid_to_precision", "end_state"):
         assert key not in plain[0], (key, plain[0])
@@ -2207,7 +2207,7 @@ def test_embedded_fallback_decorates_a_falsey_but_present_start(lane):
 def test_assembly_window_rows_carry_the_precision_block(lane):
     sdk, _events = lane
     from tortoise.assembly import docker_walker_port
-    ended = sdk.create_point("statement", "ended", validFrom="2024-01-01",
+    ended = sdk._create_point("statement", "ended", validFrom="2024-01-01",
                              validToPrecision="unknown")
     port = docker_walker_port(sdk)
     today = _utc_today()
@@ -2232,7 +2232,7 @@ def test_falsey_but_present_bound_resolves_identically_on_all_three_read_paths(l
     sdk, _events = lane
     from tortoise.assembly import docker_walker_port
 
-    p = sdk.create_point("statement", "empty start", validFrom="")
+    p = sdk._create_point("statement", "empty start", validFrom="")
     # non-vacuous: the empty string is STORED (a falsey-but-present bound),
     # not refused and not normalized away at the write boundary.
     assert _props(sdk, p["id"])["validFrom"] == ""
@@ -2278,7 +2278,7 @@ def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
     # A PRE-2026-10-26 row, written directly: the shaping ruling (#9202) makes
     # the public write store the canonical un-datable form instead, and the read
     # property pinned here is about rows that carry the literal value.
-    p = sdk.create_point("statement", "unorderable end",
+    p = sdk._create_point("statement", "unorderable end",
                          validFrom="2024-01-01")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$i}) SET n.validTo = 'TBD'", params={"i": p["id"]})
@@ -2314,7 +2314,7 @@ def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
 
     # CONTROL — an OPEN end (no validTo at all) keeps its absent key on the
     # wire; emitting ``null`` there would erase the open/un-datable distinction.
-    open_ended = sdk.create_point("statement", "open end",
+    open_ended = sdk._create_point("statement", "open end",
                                   validFrom="2024-01-01")
     open_hit = next(r for r in _scan(sdk) if r["id"] == open_ended["id"])
     assert "valid_to_precision" not in open_hit
@@ -2535,11 +2535,11 @@ def test_window_pre_filter_events_leg_mirrors_the_points_leg(lane):
     from tortoise.assembly import docker_walker_port
 
     for i in range(50):
-        sdk.create_event(f"past-window event {i}", "occurrence",
+        sdk._create_event(f"past-window event {i}", "occurrence",
                          startedAt="2026-10-21")
-    offset = sdk.create_event("offset event", "occurrence",
+    offset = sdk._create_event("offset event", "occurrence",
                               startedAt="2026-10-21T02:00:00+09:00")
-    inside = sdk.create_event("inside event", "occurrence",
+    inside = sdk._create_event("inside event", "occurrence",
                               startedAt="2026-10-20T12:00:00+00:00")
 
     rows = docker_walker_port(sdk).window_rows(
@@ -2576,11 +2576,11 @@ def test_createdAt_writer_claim_and_the_caller_offset_residual(lane):
     sdk, _events = lane
     from tortoise.assembly import _norm_date, docker_walker_port
 
-    plain = sdk.create_point("statement", "plain stamp")
+    plain = sdk._create_point("statement", "plain stamp")
     stamp = _props(sdk, plain["id"])["createdAt"]
     assert stamp.endswith(("+00:00", "Z")), stamp
 
-    offset = sdk.create_point("statement", "caller offset stamp",
+    offset = sdk._create_point("statement", "caller offset stamp",
                               createdAt="2026-10-21T02:00:00+09:00")
     assert _props(sdk, offset["id"])["createdAt"] == \
         "2026-10-21T02:00:00+09:00", "a caller prop must be stored verbatim"
@@ -2606,18 +2606,18 @@ def test_check_consistency_reference_fold_states_the_terminalizer_precision(lane
 
     sdk, events = lane
     # (a) invalidate with the closed-unknown end
-    a = sdk.create_point("statement", "a", validFrom="2024-01-01")
-    other = sdk.create_point("statement", "other", validFrom="2024-06-01")
-    sdk.invalidate_point(a["id"], other["id"], valid_to_precision="unknown")
+    a = sdk._create_point("statement", "a", validFrom="2024-01-01")
+    other = sdk._create_point("statement", "other", validFrom="2024-06-01")
+    sdk._invalidate_point(a["id"], other["id"], valid_to_precision="unknown")
     # (b) supersede inheriting a declared precision from the successor's start
-    b = sdk.create_point("statement", "b", validFrom="2024-02-01")
-    c = sdk.create_point("statement", "c", validFrom="2025-03-01",
+    b = sdk._create_point("statement", "b", validFrom="2024-02-01")
+    c = sdk._create_point("statement", "c", validFrom="2025-03-01",
                          validFromPrecision="month")
-    sdk.supersede_point(b["id"], c["id"])
+    sdk._supersede_point(b["id"], c["id"])
     # (c) a legacy supersede with NO precision stays symmetric-absent
-    d = sdk.create_point("statement", "d", validFrom="2024-03-01")
-    e = sdk.create_point("statement", "e", validFrom="2026-01-01")
-    sdk.supersede_point(d["id"], e["id"])
+    d = sdk._create_point("statement", "d", validFrom="2024-03-01")
+    e = sdk._create_point("statement", "e", validFrom="2026-01-01")
+    sdk._supersede_point(d["id"], e["id"])
 
     result = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
     assert result["ok"], result.get("divergent_points")
@@ -2678,15 +2678,15 @@ def test_no_new_mcp_tool_was_added_for_precision():
 
 
 def test_precision_is_an_optional_param_on_existing_write_verbs():
-    sup = inspect.signature(TortoiseSDK.supersede_point).parameters
-    inv = inspect.signature(TortoiseSDK.invalidate_point).parameters
+    sup = inspect.signature(TortoiseSDK._supersede_point).parameters
+    inv = inspect.signature(TortoiseSDK._invalidate_point).parameters
     assert "valid_to_precision" in sup and sup["valid_to_precision"].default is None
     assert "valid_to_precision" in inv and inv["valid_to_precision"].default is None
     # create/update keep their generic props passthrough — no signature change.
     assert any(p.kind is inspect.Parameter.VAR_KEYWORD
-               for p in inspect.signature(TortoiseSDK.create_point).parameters.values())
+               for p in inspect.signature(TortoiseSDK._create_point).parameters.values())
     assert any(p.kind is inspect.Parameter.VAR_KEYWORD
-               for p in inspect.signature(TortoiseSDK.update_point).parameters.values())
+               for p in inspect.signature(TortoiseSDK._update_point).parameters.values())
 
 
 # ── the ONTOLOGY record: the doc records THIS feature where its convention says ──

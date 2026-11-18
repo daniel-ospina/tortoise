@@ -32,7 +32,7 @@ def sdk(tmp_path):
 
 
 def _decision(sdk, content=DECISION_TEXT, status="draft"):
-    return sdk.create_point("decision", content, status=status)
+    return sdk._create_point("decision", content, status=status)
 
 
 def _already_decided_links(sdk, cand_id, prior_id):
@@ -101,8 +101,8 @@ class TestDe2e3:
         assert linked, "alreadyDecided operator must link D2→D1"
         # Operator node is DRAFT (promote_source=False) and both endpoints draft.
         assert linked[0][1] == "draft", linked
-        assert sdk.get_point(cand["id"])["status"] == "draft"
-        assert sdk.get_point(d1["id"])["status"] == "draft"
+        assert sdk._get_point(cand["id"])["status"] == "draft"
+        assert sdk._get_point(d1["id"])["status"] == "draft"
 
     def test_variant_b_reject(self, sdk, tmp_path):
         d1 = _decision(sdk, status="live")  # noqa: F841
@@ -110,8 +110,8 @@ class TestDe2e3:
         cand = sdk.review_link_candidates("dedup", candidate_type="content")[0]
         res = sdk.approve_merge(cand["id"], action="reject")
         assert res["action"] == "reject"
-        assert sdk.get_point(cand["id"]).get("reviewed") is True
-        assert sdk.get_point(cand["id"]).get("dedup_reviewed") == "reject"
+        assert sdk._get_point(cand["id"]).get("reviewed") is True
+        assert sdk._get_point(cand["id"]).get("dedup_reviewed") == "reject"
         remaining = sdk.review_link_candidates("dedup", candidate_type="content")
         assert all(c["id"] != cand["id"] for c in remaining), (
             "rejected candidate must not be re-surfaced"
@@ -127,15 +127,15 @@ class TestDe2e3:
         assert res["wired"] is False
         assert res["deferred_to_promotion"] is True
         assert _already_decided_links(sdk, cand["id"], d1["id"]) == 0
-        promoted = sdk.promote_point(cand["id"])
+        promoted = sdk._promote_point(cand["id"])
         assert promoted["dedup_wired"] is True, promoted
         # Operator-mediated "alreadyDecided" link, exactly one.
         assert _already_decided_links(sdk, cand["id"], d1["id"]) == 1, (
             "exactly one IMPL wired at promotion")
-        assert sdk.get_point(cand["id"])["status"] == "live"
-        assert sdk.get_point(d1["id"])["status"] == "live"
+        assert sdk._get_point(cand["id"])["status"] == "live"
+        assert sdk._get_point(d1["id"])["status"] == "live"
         # Re-promote: no duplicate wire.
-        sdk.promote_point(cand["id"])
+        sdk._promote_point(cand["id"])
         assert _already_decided_links(sdk, cand["id"], d1["id"]) == 1
 
     def test_corpus_rerun_idempotent(self, sdk, tmp_path):
@@ -162,13 +162,13 @@ class TestDe2e3:
     def test_n11_pointkind_scope(self, sdk):
         """A duplicate observation must never suppress a decision: the
         hash check with pointKind='decision' ignores observation points."""
-        obs = sdk.create_point("observation", "the port is 16379", status="live")
+        obs = sdk._create_point("observation", "the port is 16379", status="live")
         assert sdk._content_exists("the port is 16379", pointKind="decision") is None
         assert sdk._content_exists("the port is 16379") == obs["id"]
 
     def test_semantic_dedup_modes(self, sdk):
         """_semantic_dedup return_pairs / similarity_out / pointKind modes."""
-        sdk.create_point("decision", DECISION_TEXT, status="draft")
+        sdk._create_point("decision", DECISION_TEXT, status="draft")
         pairs = sdk._semantic_dedup(
             [({"id": "x1", "content": DECISION_TEXT}, "")],
             threshold=REVIEW_THRESHOLD, pointKind="decision", return_pairs=True)
@@ -234,7 +234,7 @@ class TestDe2e3:
         content = "the rebuilt graph must not duplicate this checkpoint item"
         first = sdk.mine_knowledge_from_session(items=[{"wing": "w", "room": "r", "content": content}], threshold=1.0)
         assert first == {"filed": 1, "duplicates": 0}
-        pid = sdk.query(kind="checkpoint-item")[0]["id"]
+        pid = sdk._query(kind="checkpoint-item")[0]["id"]
 
         rebuilt = sdk._get_proj().rebuild_all(str(tmp_path), confirm_destructive=True)
         assert rebuilt["events"] > 0
@@ -278,9 +278,9 @@ class TestDe2e3:
         LEGACY operator (``op_type`` set, ``is_operator`` property ABSENT,
         #943) so a dedup never resolves onto an operator node."""
         # (a) hybrid non-operator: is_operator=false AND op_type set.
-        first = sdk.create_point("statement", "hybrid dedup probe",
+        first = sdk._create_point("statement", "hybrid dedup probe",
                                  dedup=True, op_type="IMPL")
-        second = sdk.create_point("statement", "hybrid dedup probe",
+        second = sdk._create_point("statement", "hybrid dedup probe",
                                   dedup=True, op_type="IMPL")
         assert first["id"] == second["id"], (first["id"], second["id"])
         hybrid_count = sdk._get_proj().g.query(

@@ -40,19 +40,19 @@ def belief(nid):
 
 def wire_and_run(src, tgt_kind="point"):
     if tgt_kind == "point":
-        tgt = sdk.create_point("statement", f"t-{uuid.uuid4().hex[:6]}",
+        tgt = sdk._create_point("statement", f"t-{uuid.uuid4().hex[:6]}",
                                status="live")["id"]
     else:
-        tgt = sdk.create_object(f"t-{uuid.uuid4().hex[:6]}", "core:goal")["id"]
-    op = sdk.create_operator("IMPL", src, [tgt], direction="unidirectional")["id"]
-    sdk.compute_confidence(factors=[op], require_calibration=False)
+        tgt = sdk._create_object(f"t-{uuid.uuid4().hex[:6]}", "core:goal")["id"]
+    op = sdk._create_operator("IMPL", src, [tgt], direction="unidirectional")["id"]
+    sdk._compute_confidence(factors=[op], require_calibration=False)
     return tgt, belief(tgt)
 
 
 print("=" * 96)
 print("1. An :Object's `isClosed` written through the DOOR — does the posterior decay?")
 print("=" * 96)
-obj1 = sdk.create_object(f"o1-{SFX}", "core:goal")["id"]
+obj1 = sdk._create_object(f"o1-{SFX}", "core:goal")["id"]
 q("MATCH (n:Object {id:$id}) SET n.posterior_alpha=9.0, n.posterior_beta=1.0, "
   "n.confidence=0.9", id=obj1)
 print("  before close:", belief(obj1))
@@ -66,10 +66,10 @@ print()
 print("=" * 96)
 print("2. A :Point ended with `retract_point` — decay control (the documented path)")
 print("=" * 96)
-P = sdk.create_point("statement", f"p1-{SFX}", status="live")["id"]
-sdk.set_point_baseline(P, 9.0, 1.0)
+P = sdk._create_point("statement", f"p1-{SFX}", status="live")["id"]
+sdk._set_point_baseline(P, 9.0, 1.0)
 print("  before retract:", belief(P))
-sdk.retract_point(P)
+sdk._retract_point(P)
 print("  after  retract:", belief(P))
 
 print()
@@ -83,13 +83,13 @@ for tag, setter in [
     ("pipelineSlot=terminal", "SET n.pipelineSlot='terminal'"),
 ]:
     # wire WHILE LIVE, then end it — the shape pre-existing data has
-    src = sdk.create_point("statement", f"d-{uuid.uuid4().hex[:6]}", status="live")["id"]
-    sdk.set_point_baseline(src, 8.0, 2.0)
-    tgt = sdk.create_point("statement", f"dt-{uuid.uuid4().hex[:6]}", status="live")["id"]
-    sdk.create_direct_edge("IMPL", src, tgt, direction="unidirectional")
+    src = sdk._create_point("statement", f"d-{uuid.uuid4().hex[:6]}", status="live")["id"]
+    sdk._set_point_baseline(src, 8.0, 2.0)
+    tgt = sdk._create_point("statement", f"dt-{uuid.uuid4().hex[:6]}", status="live")["id"]
+    sdk._create_direct_edge("IMPL", src, tgt, direction="unidirectional")
     if setter:
         q(f"MATCH (n:Point {{id:$id}}) {setter}", id=src)
-    sdk.compute_confidence(factors=[src, tgt], require_calibration=False)
+    sdk._compute_confidence(factors=[src, tgt], require_calibration=False)
     print(f"  direct edge, wired-then-{tag:<22} -> target {belief(tgt)}")
 
 print()
@@ -97,12 +97,12 @@ print("  -- and the DOOR against an already-ended endpoint (operator route) --")
 for tag, setter in [("status=superseded", "SET n.status='superseded'"),
                     ("isClosed=true", "SET n.isClosed=true"),
                     ("pipelineSlot=terminal", "SET n.pipelineSlot='terminal'")]:
-    src = sdk.create_point("statement", f"e-{uuid.uuid4().hex[:6]}", status="live")["id"]
-    sdk.set_point_baseline(src, 8.0, 2.0)
+    src = sdk._create_point("statement", f"e-{uuid.uuid4().hex[:6]}", status="live")["id"]
+    sdk._set_point_baseline(src, 8.0, 2.0)
     q(f"MATCH (n:Point {{id:$id}}) {setter}", id=src)
-    tgt = sdk.create_point("statement", f"et-{uuid.uuid4().hex[:6]}", status="live")["id"]
+    tgt = sdk._create_point("statement", f"et-{uuid.uuid4().hex[:6]}", status="live")["id"]
     try:
-        sdk.create_operator("IMPL", src, [tgt], direction="unidirectional")
+        sdk._create_operator("IMPL", src, [tgt], direction="unidirectional")
         print(f"  create_operator over {tag:<24} WROTE")
     except Exception as exc:
         print(f"  create_operator over {tag:<24} REFUSED {str(exc)[:100]}")
@@ -113,11 +113,11 @@ print("4. Per-label participation as an operator INPUT (posterior written on the
 print("=" * 96)
 for tag in ("Object", "Subject", "Event"):
     if tag == "Object":
-        nid = sdk.create_object(f"i-obj-{SFX}", "core:goal")["id"]
+        nid = sdk._create_object(f"i-obj-{SFX}", "core:goal")["id"]
     elif tag == "Subject":
-        nid = sdk.create_subject(f"i-sub-{SFX}", "naturalPerson")["id"]
+        nid = sdk._create_subject(f"i-sub-{SFX}", "naturalPerson")["id"]
     else:
-        nid = sdk.create_event(f"i-evt-{SFX}", "decision")["id"]
+        nid = sdk._create_event(f"i-evt-{SFX}", "decision")["id"]
     tgt, b = wire_and_run(nid)
     print(f"  {tag:<8} input posterior={belief(nid)}  target={b}")
 
@@ -125,7 +125,7 @@ print()
 print("=" * 96)
 print("5. Object status='completed' (connector fold word) as an operator INPUT")
 print("=" * 96)
-C = sdk.create_object(f"c5-{SFX}", "core:workItem")["id"]
+C = sdk._create_object(f"c5-{SFX}", "core:workItem")["id"]
 q("MATCH (n:Object {id:$id}) SET n.status='completed', n.posterior_alpha=9.0, "
   "n.posterior_beta=1.0, n.confidence=0.9", id=C)
 tgt, b = wire_and_run(C)
@@ -136,8 +136,8 @@ print()
 print("=" * 96)
 print("6. Object as a TARGET — is a posterior written onto the Object?")
 print("=" * 96)
-srcP = sdk.create_point("statement", f"s6-{SFX}", status="live")["id"]
-sdk.set_point_baseline(srcP, 9.0, 1.0)
+srcP = sdk._create_point("statement", f"s6-{SFX}", status="live")["id"]
+sdk._set_point_baseline(srcP, 9.0, 1.0)
 o_tgt, b = wire_and_run(srcP, tgt_kind="object")
 print("  Object target posterior:", b)
 print("  Object shape:", q("MATCH (n:Object {id:$id}) RETURN labels(n), n.confidence, "
@@ -150,13 +150,13 @@ print("7. Operator node shape, per endpoint label")
 print("=" * 96)
 for tag in ("Object", "Event", "Subject"):
     if tag == "Object":
-        nid = sdk.create_object(f"7o-{SFX}", "core:goal")["id"]
+        nid = sdk._create_object(f"7o-{SFX}", "core:goal")["id"]
     elif tag == "Subject":
-        nid = sdk.create_subject(f"7s-{SFX}", "naturalPerson")["id"]
+        nid = sdk._create_subject(f"7s-{SFX}", "naturalPerson")["id"]
     else:
-        nid = sdk.create_event(f"7e-{SFX}", "decision")["id"]
-    tgt = sdk.create_point("statement", f"7t-{uuid.uuid4().hex[:6]}", status="live")["id"]
-    op = sdk.create_operator("IMPL", nid, [tgt], direction="unidirectional")["id"]
+        nid = sdk._create_event(f"7e-{SFX}", "decision")["id"]
+    tgt = sdk._create_point("statement", f"7t-{uuid.uuid4().hex[:6]}", status="live")["id"]
+    op = sdk._create_operator("IMPL", nid, [tgt], direction="unidirectional")["id"]
     print(f"  operator over {tag:<8}", q(
         "MATCH (n:Point {id:$id}) RETURN labels(n), n.is_operator, n.op_type, "
         "n.status", id=op))
@@ -166,7 +166,7 @@ print("=" * 96)
 print("8. Does an ENTITY ever reach `_hydrate_evidence` (a persisted baseline)?")
 print("=" * 96)
 try:
-    sdk.set_point_baseline(o_tgt, 5.0, 1.0)
+    sdk._set_point_baseline(o_tgt, 5.0, 1.0)
 except Exception as exc:
     print("  set_point_baseline(Object):", type(exc).__name__, str(exc)[:140])
 sdk._evidence = {}

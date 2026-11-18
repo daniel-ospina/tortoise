@@ -77,7 +77,7 @@ def _corr_total(proj, old_id: str) -> int:
 
 
 def _point_state(sdk, pid: str) -> dict:
-    p = sdk.get_point(pid) or {}
+    p = sdk._get_point(pid) or {}
     return {k: p.get(k) for k in
             ("status", "outdated", "validTo", "expiredAt", "updatedAt")}
 
@@ -86,7 +86,7 @@ def _raw_append(events, sdk, type_: str, **fields) -> None:
     """Append a raw producer JSONL line (the way an unjournaled/raw producer
     would — the SDK-live graph never sees it; only rebuild replays it)."""
     line = {
-        "event_id": sdk.ulid(),
+        "event_id": sdk._ulid(),
         "ts": datetime.datetime.now(datetime.UTC).isoformat(),
         "type": type_,
         "initiated_by": "raw-producer",
@@ -111,9 +111,9 @@ def test_invalidated_point_stays_outdated_after_rebuild(sup):
     survive the JSONL wipe+replay, AND status stays 'live' (invalidate is a
     flag, not a terminal transition)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
-    sdk.invalidate_point(a, corr)
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    corr = sdk._create_point("statement", "corrector B", status="live")["id"]
+    sdk._invalidate_point(a, corr)
     proj = sdk._get_proj()
     pre = _point_state(sdk, a)
     assert pre["outdated"] is True
@@ -145,14 +145,14 @@ def posterior_mean(sdk: TortoiseSDK, pid: str) -> float:
 
 def _chain_ids(sdk: TortoiseSDK) -> dict[str, str]:
     """A --IMPL(op1)--> B --IMPL(op2)--> C chain (the ghost-voting canary)."""
-    a = sdk.create_point("statement", "strong source", status="live")["id"]
-    b = sdk.create_point("statement", "middle claim", status="live")["id"]
-    c = sdk.create_point("statement", "leaf claim", status="live")["id"]
-    sdk.set_point_baseline(a, 10.0, 1.0)
-    sdk.set_point_baseline(b, 1.0, 1.0)
-    sdk.set_point_baseline(c, 1.0, 1.0)
-    op1 = sdk.create_operator("IMPL", a, [b])["id"]
-    op2 = sdk.create_operator("IMPL", b, [c])["id"]
+    a = sdk._create_point("statement", "strong source", status="live")["id"]
+    b = sdk._create_point("statement", "middle claim", status="live")["id"]
+    c = sdk._create_point("statement", "leaf claim", status="live")["id"]
+    sdk._set_point_baseline(a, 10.0, 1.0)
+    sdk._set_point_baseline(b, 1.0, 1.0)
+    sdk._set_point_baseline(c, 1.0, 1.0)
+    op1 = sdk._create_operator("IMPL", a, [b])["id"]
+    op2 = sdk._create_operator("IMPL", b, [c])["id"]
     return {"a": a, "b": b, "c": c, "op1": op1, "op2": op2}
 
 
@@ -178,10 +178,10 @@ def test_rebuilt_invalidated_claim_does_not_vote_in_ep(sup, tmp_path):
     live_mean = posterior_mean(sdk, ids["c"])
     assert live_mean > 0.51, f"chain must carry A's strength, got {live_mean}"
 
-    succ = sdk.create_point("statement", "corrected source",
+    succ = sdk._create_point("statement", "corrected source",
                             status="live")["id"]
-    sdk.invalidate_point(ids["a"], succ)
-    assert sdk.get_point(ids["a"])["outdated"] is True
+    sdk._invalidate_point(ids["a"], succ)
+    assert sdk._get_point(ids["a"])["outdated"] is True
 
     # Control: fresh graph WITHOUT A's operator edge (the #689-clean ref).
     ctrl = TortoiseSDK(db_path=os.path.join(str(tmp_path), "ctrl.db"))
@@ -201,7 +201,7 @@ def test_rebuilt_invalidated_claim_does_not_vote_in_ep(sup, tmp_path):
     # re-establish baselines on the rebuilt graph before the EP run.
     for pid, (al, be) in ((ids["a"], (10.0, 1.0)), (ids["b"], (1.0, 1.0)),
                           (ids["c"], (1.0, 1.0))):
-        sdk.set_point_baseline(pid, al, be)
+        sdk._set_point_baseline(pid, al, be)
     _run_ep(sdk, [ids["op1"], ids["op2"]])
     rebuilt_mean = posterior_mean(sdk, ids["c"])
     # P6.3 tolerance (damping residue only — see test_ep_terminal_ghost.py).
@@ -211,7 +211,7 @@ def test_rebuilt_invalidated_claim_does_not_vote_in_ep(sup, tmp_path):
     assert rebuilt_mean < live_mean - 0.04, (
         "rebuild must not resurrect A's EP influence: "
         f"live={live_mean}, rebuilt={rebuilt_mean}")
-    assert sdk.get_point(ids["a"])["outdated"] is True, (
+    assert sdk._get_point(ids["a"])["outdated"] is True, (
         "outdated flag must survive rebuild for the EP exclusion to hold")
 
 
@@ -226,9 +226,9 @@ def test_rebuild_is_idempotent_for_invalidate_state(sup):
     re-runs and writes the SAME journaled invalidate ts (not rebuild-now), so
     updatedAt is stable across rebuilds too."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    corr = sdk.create_point("statement", "B", status="live")["id"]
-    sdk.invalidate_point(a, corr)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    corr = sdk._create_point("statement", "B", status="live")["id"]
+    sdk._invalidate_point(a, corr)
     proj = sdk._get_proj()
     _rebuild(sdk, events)
     snapshot1 = {
@@ -253,23 +253,23 @@ _MIXED_TS2 = "2026-09-08T13:00:00+00:00"
 
 def _assert_mixed_converges(sup, do_sup_first: bool) -> None:
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B (successor)", status="live")["id"]
-    c = sdk.create_point("statement", "C (corrector)", status="live")["id"]
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B (successor)", status="live")["id"]
+    c = sdk._create_point("statement", "C (corrector)", status="live")["id"]
     t = _MIXED_TS
     if do_sup_first:
-        sdk.supersede_point(a, b)
+        sdk._supersede_point(a, b)
         # #2498: A is terminal (superseded) — invalidate rejected.
         with pytest.raises(ValueError, match="already terminal"):
-            sdk.invalidate_point(a, c)
+            sdk._invalidate_point(a, c)
         # A raw/legacy producer can still journal the second fold.
         _raw_append(events, sdk, "PointInvalidated", id=a, corrected_by=c,
                     ts=t, valid_to=t, expired_at=t)
     else:
-        sdk.invalidate_point(a, c)
+        sdk._invalidate_point(a, c)
         # #2498: A is terminal (legacy outdated=true flag) — supersede rejected.
         with pytest.raises(ValueError, match="already terminal"):
-            sdk.supersede_point(a, b)
+            sdk._supersede_point(a, b)
         _raw_append(events, sdk, "PointSuperseded", id=a, new_id=b, ts=t,
                     valid_to=t, expired_at=t)
     proj = sdk._get_proj()
@@ -315,12 +315,12 @@ def test_double_invalidate_rejected_and_raw_journal_converges(sup):
     must rebuild to 2 CORRECTS (distinct corrected_by), stamps = the last
     fold's ts, idempotently."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    c = sdk.create_point("statement", "C", status="live")["id"]
-    sdk.invalidate_point(a, b)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    c = sdk._create_point("statement", "C", status="live")["id"]
+    sdk._invalidate_point(a, b)
     with pytest.raises(ValueError, match="already terminal"):
-        sdk.invalidate_point(a, c)
+        sdk._invalidate_point(a, c)
     _raw_append(events, sdk, "PointInvalidated", id=a, corrected_by=c,
                 ts=_MIXED_TS2, valid_to=_MIXED_TS2, expired_at=_MIXED_TS2)
     proj = sdk._get_proj()
@@ -339,11 +339,11 @@ def test_double_invalidate_same_corrector_rejected_merges_once(sup):
     """invalidate(A,B) twice: the SDK REJECTS the second call (#2498). A raw
     producer replaying the same pair still folds to ONE CORRECTS edge."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    sdk.invalidate_point(a, b)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    sdk._invalidate_point(a, b)
     with pytest.raises(ValueError, match="already terminal"):
-        sdk.invalidate_point(a, b)
+        sdk._invalidate_point(a, b)
     _raw_append(events, sdk, "PointInvalidated", id=a, corrected_by=b,
                 ts=_MIXED_TS2, valid_to=_MIXED_TS2, expired_at=_MIXED_TS2)
     proj = sdk._get_proj()
@@ -372,10 +372,10 @@ def test_id_reuse_drops_pre_recreation_invalidate_fold(sup):
     exercises the raw producer's own delete/recreate interleaving, which is the
     sequence under test — not because the SDK door is unusable."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A v1", status="live")["id"]
-    b = sdk.create_point("statement", "B (v1 corrector)", status="live")["id"]
-    c = sdk.create_point("statement", "C (v2 corrector)", status="live")["id"]
-    sdk.invalidate_point(a, b)          # seq: pre-recreate fold
+    a = sdk._create_point("statement", "A v1", status="live")["id"]
+    b = sdk._create_point("statement", "B (v1 corrector)", status="live")["id"]
+    c = sdk._create_point("statement", "C (v2 corrector)", status="live")["id"]
+    sdk._invalidate_point(a, b)          # seq: pre-recreate fold
     t2 = "2026-09-08T12:00:00+00:00"
     # Raw producer: hard-delete + re-create the SAME id (fresh live node).
     _raw_append(events, sdk, "PointAdded", point={
@@ -389,9 +389,9 @@ def test_id_reuse_drops_pre_recreation_invalidate_fold(sup):
     # Live (SDK world): only the v1 invalidate applied — the raw events never
     # touched the graph. The JOURNAL (raw producer's truth) is authoritative
     # on rebuild.
-    assert sdk.get_point(a)["outdated"] is True
+    assert sdk._get_point(a)["outdated"] is True
     _rebuild(sdk, events)
-    post = sdk.get_point(a) or {}
+    post = sdk._get_point(a) or {}
     assert post.get("outdated") is True, "post-recreate invalidate must fold"
     assert post.get("status") == "live"
     assert post.get("validTo") == t2 and post.get("expiredAt") == t2
@@ -412,10 +412,10 @@ def test_reemission_same_id_after_invalidate_resurrects_live(sup):
     outdated. Divergence pinned + documented; the survivor rule treats the
     PointAdded as a re-creation boundary."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A v1", status="live")["id"]
-    b = sdk.create_point("statement", "B (corrector)", status="live")["id"]
-    sdk.invalidate_point(a, b)
-    assert sdk.get_point(a)["outdated"] is True, "live stays outdated"
+    a = sdk._create_point("statement", "A v1", status="live")["id"]
+    b = sdk._create_point("statement", "B (corrector)", status="live")["id"]
+    sdk._invalidate_point(a, b)
+    assert sdk._get_point(a)["outdated"] is True, "live stays outdated"
     # Raw producer re-creates the SAME id (no subsequent invalidate).
     _raw_append(events, sdk, "PointAdded", point={
         "id": a, "content": "A v2 (recreated)", "status": "live",
@@ -423,7 +423,7 @@ def test_reemission_same_id_after_invalidate_resurrects_live(sup):
     })
     proj = sdk._get_proj()
     _rebuild(sdk, events)
-    post = sdk.get_point(a) or {}
+    post = sdk._get_point(a) or {}
     assert post.get("outdated") is not True, (
         "rebuilt follows the raw re-creation — clean live node (no outdated)")
     assert post.get("status") == "live"
@@ -449,20 +449,20 @@ def test_invalidate_on_draft_then_promote_preserves_fold(sup):
     promote-time parity is out of scope (#2488 known limitation — pass-1a
     stamps rebuilt nodes at rebuild-now)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "draft A", status="draft")["id"]
-    b = sdk.create_point("statement", "B (corrector)", status="live")["id"]
-    sdk.invalidate_point(a, b)
-    inv_ts = (sdk.get_point(a) or {}).get("validTo")
+    a = sdk._create_point("statement", "draft A", status="draft")["id"]
+    b = sdk._create_point("statement", "B (corrector)", status="live")["id"]
+    sdk._invalidate_point(a, b)
+    inv_ts = (sdk._get_point(a) or {}).get("validTo")
     assert inv_ts, "invalidate must stamp the draft"
-    sdk.promote_point(a)
-    live = sdk.get_point(a) or {}
+    sdk._promote_point(a)
+    live = sdk._get_point(a) or {}
     assert live.get("status") == "live"
     assert live.get("outdated") is True, "promote must not clear the flag"
     assert live.get("validTo") == inv_ts
     proj = sdk._get_proj()
     assert _corr(proj, a, b) == 1
     _rebuild(sdk, events)
-    post = sdk.get_point(a) or {}
+    post = sdk._get_point(a) or {}
     assert post.get("outdated") is True, (
         "pre-promote invalidate fold must survive (promote is not a boundary)")
     assert post.get("status") == "live"
@@ -489,14 +489,14 @@ def test_corrected_by_missing_endpoint_fold_still_applies(sup, caplog):
     handling. NO 'matched no Point' fold-miss warning (that fires only for a
     0-row fold — an absent OLD point)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
+    a = sdk._create_point("statement", "A", status="live")["id"]
     t = "2026-09-08T12:00:00+00:00"
     _raw_append(events, sdk, "PointInvalidated", id=a,
                 corrected_by="ghost-corrector-never-created",
                 ts=t, valid_to=t, expired_at=t)
     proj = sdk._get_proj()
     _rebuild(sdk, events)
-    post = sdk.get_point(a) or {}
+    post = sdk._get_point(a) or {}
     assert post.get("outdated") is True, "fold must still apply to the old point"
     assert post.get("validTo") == t and post.get("expiredAt") == t
     assert post.get("status") == "live"
@@ -511,18 +511,18 @@ def test_revise_after_invalidate_skip_updated_at(sup):
     updatedAt (skip_updated_at via max_inline_seq) so the revise's rebuild
     stamp survives, while outdated/validTo/expiredAt/CORRECTS still fold."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "revise-me", status="live")["id"]
-    b = sdk.create_point("statement", "corrector", status="live")["id"]
-    sdk.invalidate_point(a, corrected_by_id=b)
+    a = sdk._create_point("statement", "revise-me", status="live")["id"]
+    b = sdk._create_point("statement", "corrector", status="live")["id"]
+    sdk._invalidate_point(a, corrected_by_id=b)
     # Live revise AFTER the invalidate — a newer same-id writer. (Plain-prop
     # update_point does NOT re-stamp updatedAt live — the non-Object branch
     # writes per-key n += $props — so the live updatedAt still reads the
     # invalidate ts here; the revise's rebuild-now stamp is what pass-1b
     # applies, and the seq-gate must let it survive the older fold ts.)
-    sdk.update_point(a, props={"note": "revised after invalidate"})
-    inv_ts = (sdk.get_point(a) or {}).get("updatedAt")
+    sdk._update_point(a, props={"note": "revised after invalidate"})
+    inv_ts = (sdk._get_point(a) or {}).get("updatedAt")
     assert inv_ts, "invalidate stamps updatedAt"
-    assert (sdk.get_point(a) or {}).get("outdated") is True
+    assert (sdk._get_point(a) or {}).get("outdated") is True
 
     _rebuild(sdk, events)
     proj = sdk._get_proj()
@@ -549,7 +549,7 @@ def test_invalidate_raw_producer_no_corrected_by_flag_still_folds(sup):
     needs only oid) — only the CORRECTS arm is gated. Regression guard: the
     flag skip would resurrect the ghost."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "raw-target", status="live")["id"]
+    a = sdk._create_point("statement", "raw-target", status="live")["id"]
     t = "2026-09-08T12:00:00+00:00"
     # Raw producer line with NO corrected_by key at all.
     _raw_append(events, sdk, "PointInvalidated", id=a, ts=t, valid_to=t,
@@ -589,9 +589,9 @@ def test_apply_replay_folds_invalidate(sup):
     """#3305: an apply()-based replay of an invalidated Point must end with
     outdated=true and status still 'live' — both asserted as literals."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
-    sdk.invalidate_point(a, corr)
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    corr = sdk._create_point("statement", "corrector B", status="live")["id"]
+    sdk._invalidate_point(a, corr)
     pre = _point_state(sdk, a)
     assert pre["outdated"] is True and pre["status"] == "live"
     _apply_replay(sdk, events)
@@ -612,11 +612,11 @@ def test_apply_replay_folds_the_invalidate_belief_decay(sup):
     apply() arm must reproduce it (or the restored claim keeps its
     pre-invalidate posterior and re-enters EP voting)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
-    sdk.invalidate_point(a, corr)
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    corr = sdk._create_point("statement", "corrector B", status="live")["id"]
+    sdk._invalidate_point(a, corr)
     _apply_replay(sdk, events)
-    decayed = sdk.get_point(a)
+    decayed = sdk._get_point(a)
     assert decayed["confidence"] == 0.5, (
         f"belief decay not folded by the apply() arm: {decayed.get('confidence')}")
     assert decayed["posterior_alpha"] == 1.0
@@ -628,9 +628,9 @@ def test_apply_replay_matches_rebuild_all_on_invalidate(sup):
     the shared ``_fold_point_restamp`` dispatch is what keeps them from
     drifting."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    corr = sdk.create_point("statement", "corrector B", status="live")["id"]
-    sdk.invalidate_point(a, corr)
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    corr = sdk._create_point("statement", "corrector B", status="live")["id"]
+    sdk._invalidate_point(a, corr)
     live = _point_state(sdk, a)
     assert live["outdated"] is True and live["status"] == "live"
 
@@ -648,7 +648,7 @@ def test_apply_replay_keeps_a_clean_point_clean(sup):
     """#3305 no-over-correction: a Point with no invalidate in the journal
     stays clean across the apply() arm."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "never touched", status="live")["id"]
+    a = sdk._create_point("statement", "never touched", status="live")["id"]
     _apply_replay(sdk, events)
     post = _point_state(sdk, a)
     assert post["outdated"] is None
@@ -664,9 +664,9 @@ def test_apply_replay_shares_rebuild_all_selection_on_same_id_reemission(sup):
     STILL fire (#2884 A3). An inline fold that ignores this re-introduces the
     outdated flag + ghost CORRECTS on the recovery path."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A v1", status="live")["id"]
-    b = sdk.create_point("statement", "B (corrector)", status="live")["id"]
-    sdk.invalidate_point(a, b)
+    a = sdk._create_point("statement", "A v1", status="live")["id"]
+    b = sdk._create_point("statement", "B (corrector)", status="live")["id"]
+    sdk._invalidate_point(a, b)
     _raw_append(events, sdk, "PointAdded", point={
         "id": a, "content": "A v2 (recreated)", "status": "live",
         "pointKind": "statement"})
@@ -674,12 +674,12 @@ def test_apply_replay_shares_rebuild_all_selection_on_same_id_reemission(sup):
     _rebuild(sdk, events)
     via_all = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
     corr_all = _corr_total(sdk._get_proj(), a)
-    belief_all = {k: (sdk.get_point(a) or {}).get(k) for k in
+    belief_all = {k: (sdk._get_point(a) or {}).get(k) for k in
                   ("confidence", "posterior_alpha", "posterior_beta")}
     _apply_replay(sdk, events)
     via_apply = {k: _point_state(sdk, a)[k] for k in ("status", "outdated")}
     corr_apply = _corr_total(sdk._get_proj(), a)
-    belief_apply = {k: (sdk.get_point(a) or {}).get(k) for k in
+    belief_apply = {k: (sdk._get_point(a) or {}).get(k) for k in
                     ("confidence", "posterior_alpha", "posterior_beta")}
 
     assert via_all["outdated"] is not True, (

@@ -55,12 +55,12 @@ def _chain(sdk: TortoiseSDK, n: int, prefix: str = "c") -> list[str]:
     writes → _mark_dirty runs and the ep_dirty flags + epoch persist)."""
     ids = []
     for i in range(n):
-        pid = sdk.create_point("statement", f"{prefix}{i}",
+        pid = sdk._create_point("statement", f"{prefix}{i}",
                                dedup=False, status="live")["id"]
-        sdk.set_point_baseline(pid, 1, 1)
+        sdk._set_point_baseline(pid, 1, 1)
         ids.append(pid)
     for i in range(n - 1):
-        sdk.create_operator("IMPL", ids[i], [ids[i + 1]],
+        sdk._create_operator("IMPL", ids[i], [ids[i + 1]],
                             direction="bidirectional")
     return ids
 
@@ -134,10 +134,10 @@ def test_ep_version_epoch_increments_per_write():
         sdk = _open(db)
         try:
             assert sdk._ep_epoch() == 0
-            sdk.create_point("statement", "a1", dedup=False)
+            sdk._create_point("statement", "a1", dedup=False)
             e1 = sdk._ep_epoch()
             assert e1 >= 1
-            sdk.create_point("statement", "a2", dedup=False)
+            sdk._create_point("statement", "a2", dedup=False)
             e2 = sdk._ep_epoch()
             assert e2 > e1, "epoch must be monotonic across writes"
         finally:
@@ -177,7 +177,7 @@ def test_converged_dream_sweeps_graph_flags():
         try:
             _chain(sdk, 3)
             assert _ep_dirty_ids(sdk)
-            result = sdk.dream(mode="local")
+            result = sdk._dream(mode="local")
             assert result["converged"]
             assert not _ep_dirty_ids(sdk), \
                 "converged pass must sweep graph ep_dirty flags"
@@ -206,28 +206,28 @@ def test_mitigation_write_leaves_no_permanent_dirty_root():
     with _db() as db:
         sdk = _open(db)
         try:
-            src = sdk.create_point("statement", "src claim", dedup=False,
+            src = sdk._create_point("statement", "src claim", dedup=False,
                                    status="live")["id"]
-            clm = sdk.create_point("statement", "clm claim", dedup=False,
+            clm = sdk._create_point("statement", "clm claim", dedup=False,
                                    status="live")["id"]
-            sdk.set_point_baseline(src, 3.0, 1.0)
-            sdk.set_point_baseline(clm, 1.0, 1.0)
-            op = sdk.create_operator("IMPL", src, [clm])["id"]
-            assert sdk.compute_confidence()["converged"]
-            conf_before = sdk.get_confidence(clm)["mean"]
+            sdk._set_point_baseline(src, 3.0, 1.0)
+            sdk._set_point_baseline(clm, 1.0, 1.0)
+            op = sdk._create_operator("IMPL", src, [clm])["id"]
+            assert sdk._compute_confidence()["converged"]
+            conf_before = sdk._get_confidence(clm)["mean"]
             assert not _ep_dirty_ids(sdk), "baseline converged state is clean"
 
-            mid = sdk.mitigate_operator(
+            mid = sdk._mitigate_operator(
                 op, "weaker than it looks", strength=0.5)["id"]
             # The mitigation is a factor participant's NEIGHBOUR, so the write
             # legitimately dirties the operator's inputs — that is the
             # propagation. What must NOT survive is a flag nobody can clear.
             assert mid in _ep_dirty_ids(sdk), "the write marks the mitigation"
 
-            assert sdk.compute_confidence()["converged"]
+            assert sdk._compute_confidence()["converged"]
 
             # No belief corruption: the strength still reaches EP's factor.
-            assert sdk.get_confidence(clm)["mean"] < conf_before, (
+            assert sdk._get_confidence(clm)["mean"] < conf_before, (
                 "the mitigation must still dampen the operator's factor")
 
             assert mid not in _ep_dirty_ids(sdk), (
@@ -237,12 +237,12 @@ def test_mitigation_write_leaves_no_permanent_dirty_root():
             assert op not in sdk._dirty_roots, (
                 "the mitigated operator is not a factor participant: as a "
                 "dirty root it can never be swept (#7505)")
-            assert sdk.dream_health_check()["stale_backlog"] == 0, (
+            assert sdk._dream_health_check()["stale_backlog"] == 0, (
                 "the stale backlog must drain — a permanently non-empty one "
                 "is what pins _auto_dream_mode() to 'local'")
             # The observable that was unreachable at head: with the backlog
             # drained, the next no-arg pass has nothing left to do.
-            assert sdk.compute_confidence().get(
+            assert sdk._compute_confidence().get(
                 "diagnostic") == "no_dirty_roots"
         finally:
             sdk.close()
@@ -302,7 +302,7 @@ def test_sweep_preserves_newer_dirty_marking():
         sdk = _open(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")  # converged → flags swept
+            sdk._dream(mode="local")  # converged → flags swept
             assert not _ep_dirty_ids(sdk)
             sdk._mark_dirty([ids[1]])  # newer marking at the current epoch
             e = sdk._ep_epoch()
@@ -413,7 +413,7 @@ def test_targeted_pass_clears_the_roots_it_recomputed():
             ids = _chain(sdk, 4)
             assert {ids[0], ids[1], ids[2], ids[3]} <= _ep_dirty_ids(sdk), \
                 "precondition: the writes marked every claim dirty"
-            result = sdk.compute_confidence(anchors=[ids[0]], max_hops=3,
+            result = sdk._compute_confidence(anchors=[ids[0]], max_hops=3,
                                             require_calibration=False)
             assert result["converged"] is True, result
             assert result["truncated"] is False, \
@@ -446,7 +446,7 @@ def test_targeted_pass_clears_the_factors_path_too():
             claims, ops = _hub(sdk, 2)
             sdk._mark_dirty(claims)
             assert set(claims) <= _ep_dirty_ids(sdk)
-            result = sdk.compute_confidence(factors=ops[:2],
+            result = sdk._compute_confidence(factors=ops[:2],
                                             require_calibration=False)
             assert result["converged"] is True, result
             assert result["truncated"] is False
@@ -473,7 +473,7 @@ def test_targeted_pass_clears_only_the_roots_it_reached():
             reached = _chain(sdk, 2, prefix="r")
             untouched = _chain(sdk, 2, prefix="u")
             assert set(reached) | set(untouched) <= _ep_dirty_ids(sdk)
-            result = sdk.compute_confidence(anchors=[reached[0]], max_hops=1,
+            result = sdk._compute_confidence(anchors=[reached[0]], max_hops=1,
                                             require_calibration=False)
             assert result["converged"] is True, result
             assert result["truncated"] is False
@@ -505,7 +505,7 @@ def test_a_truncated_targeted_pass_clears_nothing():
             claims, _ops = _hub(sdk, 260)
             sdk._mark_dirty(claims)
             assert set(claims) <= _ep_dirty_ids(sdk)
-            result = sdk.compute_confidence(anchors=[claims[0]], max_hops=1,
+            result = sdk._compute_confidence(anchors=[claims[0]], max_hops=1,
                                             require_calibration=False)
             assert result["truncated"] is True, (
                 "precondition: 260 reachable operators against the shipped "
@@ -545,7 +545,7 @@ def test_a_concurrent_marking_mid_pass_survives_the_targeted_pass(monkeypatch):
 
             monkeypatch.setattr(TortoiseEP, "_load_cache",
                                 _load_then_concurrent_write)
-            result = sdk.compute_confidence(anchors=[ids[0]], max_hops=3,
+            result = sdk._compute_confidence(anchors=[ids[0]], max_hops=3,
                                             require_calibration=False)
             assert result["converged"] is True, result
             assert set(ids) <= _ep_dirty_ids(sdk), (
@@ -751,15 +751,15 @@ def test_a_converged_pass_that_ran_no_factor_clears_nothing():
         sdk = _open(db)
         try:
             healthy = _chain(sdk, 2, prefix="r")
-            untouched = sdk.create_point("statement", "u0", dedup=False,
+            untouched = sdk._create_point("statement", "u0", dedup=False,
                                           status="live")["id"]
-            draft = sdk.create_point("statement", "d0", dedup=False,
+            draft = sdk._create_point("statement", "d0", dedup=False,
                                      status="draft")["id"]
-            degenerate = sdk.create_operator("IMPL", untouched, [draft],
+            degenerate = sdk._create_operator("IMPL", untouched, [draft],
                                              direction="bidirectional")["id"]
             # A healthy targeted pass FIRST — it is what leaves a stale epoch
             # snapshot on the cached EP instance (`_get_ep()` is per-SDK).
-            warm = sdk.compute_confidence(anchors=[healthy[0]], max_hops=1,
+            warm = sdk._compute_confidence(anchors=[healthy[0]], max_hops=1,
                                           require_calibration=False)
             assert warm["converged"] is True, warm
             ep = sdk._get_ep()
@@ -769,7 +769,7 @@ def test_a_converged_pass_that_ran_no_factor_clears_nothing():
             assert untouched in _ep_dirty_ids(sdk), \
                 "precondition: the draft-gated claim is still stale"
 
-            result = sdk.compute_confidence(factors=[degenerate],
+            result = sdk._compute_confidence(factors=[degenerate],
                                             require_calibration=False)
             assert result["converged"] is True, result
             assert result["iterations"] == 0, (
@@ -813,7 +813,7 @@ def test_a_fresh_sdk_targeted_pass_clears_persisted_flags():
         try:
             assert not sdk._dirty_roots, \
                 "precondition: a fresh SDK starts with an EMPTY mirror"
-            result = sdk.compute_confidence(anchors=[ids[0]], max_hops=3,
+            result = sdk._compute_confidence(anchors=[ids[0]], max_hops=3,
                                             require_calibration=False)
             assert result["converged"] is True, result
             assert result["truncated"] is False
@@ -853,7 +853,7 @@ def test_a_failed_sweep_does_not_fail_the_pass(monkeypatch):
         sdk = _open(db)
         try:
             claims, ops = _hub(sdk, 1)
-            mid = sdk.mitigate_operator(
+            mid = sdk._mitigate_operator(
                 ops[0], "weaker than it looks", strength=0.5)["id"]
             assert set(claims) <= _ep_dirty_ids(sdk), \
                 "precondition: the mitigation write dirties the operator inputs"
@@ -875,7 +875,7 @@ def test_a_failed_sweep_does_not_fail_the_pass(monkeypatch):
 
             monkeypatch.setattr(TortoiseSDK, "_sweep_dirty_roots",
                                 _subtract_then_boom)
-            result = sdk.compute_confidence(anchors=[claims[0]], max_hops=2,
+            result = sdk._compute_confidence(anchors=[claims[0]], max_hops=2,
                                             require_calibration=False)
             assert result["converged"] is True, result
             assert result["confidences"], (
@@ -919,7 +919,7 @@ def test_the_noarg_path_does_not_use_the_targeted_clear(monkeypatch):
 
             monkeypatch.setattr(TortoiseSDK, "_clear_targeted_pass_dirty", _spy)
             _chain(sdk, 2)
-            result = sdk.compute_confidence(require_calibration=False)
+            result = sdk._compute_confidence(require_calibration=False)
             assert result["converged"] is True, result
             assert calls == [], (
                 "the no-arg branch must not run the targeted clear — it was "
@@ -936,7 +936,7 @@ def test_the_noarg_path_does_not_use_the_targeted_clear(monkeypatch):
             sdk._mark_dirty(ids)
             assert set(ids) <= sdk._dirty_roots, \
                 "precondition: the claims are dirty before the targeted pass"
-            sdk.compute_confidence(anchors=[ids[0]], max_hops=2,
+            sdk._compute_confidence(anchors=[ids[0]], max_hops=2,
                                    require_calibration=False)
             assert len(calls) == 1, (
                 "positive control: a targeted pass must route through the "

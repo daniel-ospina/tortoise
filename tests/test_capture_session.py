@@ -872,7 +872,7 @@ def test_capture_dedup_hit_reports_stored_props_not_payload(sdk, monkeypatch):
     ``test_capture_v2_persists_passthrough_props_on_node`` instead."""
     content = "the auth dead-end is the top issue"
     # Pre-existing canonical with NO passthrough props (pre-#2813 shape).
-    canonical = sdk.create_point("statement", content)
+    canonical = sdk._create_point("statement", content)
     assert _read_passthrough_props(sdk, canonical["id"]) == \
         [None, None, None, None]
 
@@ -899,7 +899,7 @@ def test_capture_dedup_hit_reports_stored_values_over_payload(
     ``search_keys`` is reported in its stored flat-string form
     (``_flatten_search_keys_prop``)."""
     content = "the auth dead-end is the top issue"
-    canonical = sdk.create_point(
+    canonical = sdk._create_point(
         "statement", content, quote="ORIGINAL quote", when="2020-01-01",
         search_keys=["original", "keys"], source_turn_id="turn-0")
 
@@ -989,7 +989,7 @@ def test_capture_passthrough_read_helper_reads_every_whitelisted_prop(sdk):
     # set stays equal to the whitelist — a newly whitelisted OPTIONAL field
     # (span_start/span_end are absent on a spanless point) would otherwise
     # make this assertion vacuous rather than red.
-    pid = sdk.create_point(
+    pid = sdk._create_point(
         "statement", "read helper probe", quote="q-2949",
         when="2026-01-01", search_keys=["a", "b"],
         source_turn_id="turn-2949",
@@ -1075,7 +1075,7 @@ def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatc
     assert cal[0][0] == len(ids), \
         f"every wired claim must calibrate post-ingest ({cal[0][0]}/{len(ids)})"
     for pid in ids:
-        conf = sdk.get_confidence(pid, require_calibration=False)
+        conf = sdk._get_confidence(pid, require_calibration=False)
         assert conf.get("mean") is not None, conf
         assert conf.get("variance") is not None, conf
         assert conf.get("effective_n") is not None and conf["effective_n"] > 0, conf
@@ -1084,10 +1084,10 @@ def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatc
     # ordinary create path: a claim created as an EXPLICIT draft (since #1088
     # a no-status create_point is LIVE, so a draft has to be asked for) stays
     # EP-inert (no persisted α/β) after the same local dream.
-    draft_pid = sdk.create_point(
+    draft_pid = sdk._create_point(
         "statement", "a non-captured draft claim stays EP-inert",
         status="draft")["id"]
-    sdk.dream(mode="local", require_calibration=False, warm_start=False)
+    sdk._dream(mode="local", require_calibration=False, warm_start=False)
     drow = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status, "
         "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
@@ -1242,7 +1242,7 @@ def test_capture_w5_phase_c_full_dream_effective_post_capture(sdk, monkeypatch):
     ]
     res = sdk._capture_session(conv)
     assert res["ok"] is True and res["extracted"] >= 2
-    d = sdk.dream(full=True, require_calibration=False, warm_start=False)
+    d = sdk._dream(full=True, require_calibration=False, warm_start=False)
     assert d.get("total_affected") >= 2, d
     assert d.get("coverage") > 0.0, d
 
@@ -1356,7 +1356,7 @@ def test_keyless_capture_stores_turns_and_stays_searchable(sdk, no_provider_keys
     want = f"{sid}_t0"
     hits: list[dict] = []
     for _ in range(3):
-        hits = sdk.tortoise_fts_query("auth dead-end", limit=40,
+        hits = sdk._tortoise_fts_query("auth dead-end", limit=40,
                                       include_terminal=True)
         if want in {str(h.get("id")) for h in hits}:
             break
@@ -1925,7 +1925,7 @@ def test_capture_session_event_object_canonical_about_edge(sdk):
     assert euid == eid, "Event node id mirrors the EventRecorded eventId"
 
     # 2. Object the session was about (canonical ObjectRegistered event).
-    obj = sdk.create_object("license-research", "skill")
+    obj = sdk._create_object("license-research", "skill")
 
     # 3. Canonical semantic connection: (Event)-[:aboutObject]->(Object).
     #    create_event(aboutObject=…) wires this exact edge; use the same
@@ -1958,8 +1958,8 @@ def test_create_event_wires_about_object_by_name(sdk):
     """E2E-6 companion: create_event(aboutObject=<name>) — the wiring the
     session-capture flow uses once #281 lands — resolves an existing Object
     by name and produces the canonical aboutObject edge."""
-    sdk.create_object("license-research", "skill")
-    ev = sdk.create_event("session-s1", "sessionCaptured",
+    sdk._create_object("license-research", "skill")
+    ev = sdk._create_event("session-s1", "sessionCaptured",
                           aboutObject="license-research")
     proj = sdk._get_proj()
     conn = proj.g.query(
@@ -2636,7 +2636,7 @@ def test_extract_session_v2_counts_point_write_skips(sdk, monkeypatch):
                "client_commit_id": "ccid"}
     monkeypatch.setattr(ev2, "extract_session_v2",
                         lambda *a, **kw: _v2_out(payload=payload))
-    _real_create_point = sdk.create_point
+    _real_create_point = sdk._create_point
 
     def _boom_point(*args, **kwargs):
         if (args and args[1] == "we decided Y") or kwargs.get("content") == "we decided Y":
@@ -2925,7 +2925,7 @@ def test_extract_session_v2_routes_pt_supersession_to_supersede(sdk, monkeypatch
 
     old = _capture_pt_id("the gym moved from 6pm to 5pm")
     new = _capture_pt_id("the gym session is now at 5pm")
-    sdk.create_point("statement", "the gym moved from 6pm to 5pm",
+    sdk._create_point("statement", "the gym moved from 6pm to 5pm",
                      id=old, status="live")
     payload = {"session_id": "sess_p1", "story_arc": "",
                "entities": [], "events": [], "operators": [],
@@ -2961,9 +2961,9 @@ def test_extract_session_v2_terminal_old_is_silent_noop(sdk, monkeypatch):
 
     old = _capture_pt_id("the gym moved from 6pm to 5pm")
     new = _capture_pt_id("the gym session is now at 5pm")
-    sdk.create_point("statement", "the gym moved from 6pm to 5pm",
+    sdk._create_point("statement", "the gym moved from 6pm to 5pm",
                      id=old, status="live")
-    sdk.create_point("statement", "the gym session is now at 5pm",
+    sdk._create_point("statement", "the gym session is now at 5pm",
                      id=new, status="draft")
     sdk.supersede_knowledge(old, new)  # first application — old now terminal
     payload = {"session_id": "sess_p1", "story_arc": "",
@@ -2993,7 +2993,7 @@ def test_extract_session_v2_draft_old_point_supersedeable(sdk, monkeypatch):
 
     old = _capture_pt_id("deploy target is serve --http")
     new = _capture_pt_id("deploy target is serve --https")
-    sdk.create_point("statement", "deploy target is serve --http",
+    sdk._create_point("statement", "deploy target is serve --http",
                      id=old, status="draft")
     payload = {"session_id": "sess_p1", "story_arc": "",
                "entities": [], "events": [], "operators": [],
@@ -3055,7 +3055,7 @@ def test_extract_session_v2_pt_ref_meta_warnings(sdk, monkeypatch):
     #     a phantom).
     old = _capture_pt_id("the point that gets corrected")
     ghost_new = _capture_pt_id("ghost successor never written")
-    sdk.create_point("statement", "the point that gets corrected",
+    sdk._create_point("statement", "the point that gets corrected",
                      id=old, status="live")
     payload2 = {"session_id": "sess_p2", "story_arc": "",
                 "entities": [], "events": [], "operators": [],
@@ -4047,7 +4047,7 @@ def test_apply_supersessions_pt_self_supersession_skipped(sdk):
 
     proj = sdk._get_proj()
     pid = point_content_id("self-supersession pt content")
-    sdk.create_point("statement", "self-supersession pt content", id=pid,
+    sdk._create_point("statement", "self-supersession pt content", id=pid,
                      status="live")
     warns: list[str] = []
     applied = apply_supersessions(
@@ -7458,10 +7458,10 @@ def test_phase_f_deterministic_event_id_converges_two_mints(tmp_path):
     assert eid == expected, (eid, expected)
     sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
     try:
-        sdk.create_event(f"session_{sid}", "sessionCaptured", _server_id=eid,
+        sdk._create_event(f"session_{sid}", "sessionCaptured", _server_id=eid,
                          startedAt="now", endedAt="now", sessionId=sid,
                          is_episodic=True)
-        sdk.create_event(f"session_{sid}", "sessionCaptured", _server_id=eid,
+        sdk._create_event(f"session_{sid}", "sessionCaptured", _server_id=eid,
                          startedAt="now", endedAt="now", sessionId=sid,
                          is_episodic=True)
         proj = sdk._get_proj()
@@ -7488,19 +7488,19 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         sid = "session_server_only"
         eid = _session_capture_event_id(sid)
         # Genuine capture mint still works through the internal channel.
-        ev = sdk.create_event(f"session_{sid}", "sessionCaptured",
+        ev = sdk._create_event(f"session_{sid}", "sessionCaptured",
                               _server_id=eid, is_episodic=True)
         assert ev.get("id") == eid, ev
         # Flat id kwarg — rejected (previously popped + accepted).
         try:
-            sdk.create_event("x", "meeting", id="ev_forced")
+            sdk._create_event("x", "meeting", id="ev_forced")
             raise AssertionError("flat id kwarg must be rejected")
         except ValueError as ex:
             assert "server-managed" in str(ex), ex
         # MCP-style nested props id — flattened by _coerce_props, rejected by
         # the backstop (the MCP boundary only inspects top-level keys).
         try:
-            sdk.create_event("x", "meeting", props={"id": "ev_forced"})
+            sdk._create_event("x", "meeting", props={"id": "ev_forced"})
             raise AssertionError("nested props id must be rejected")
         except ValueError as ex:
             assert "server-managed" in str(ex), ex
@@ -7517,7 +7517,7 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         # props={"props": {...}} dict would otherwise splat-bind the
         # keyword-only param).
         try:
-            sdk.create_event("x", "meeting",
+            sdk._create_event("x", "meeting",
                              props={"_server_id": "ev_forced"})
             raise AssertionError("nested _server_id props must be rejected")
         except ValueError as ex:
@@ -7529,7 +7529,7 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         except ValueError as ex:
             assert "server-managed" in str(ex), ex
         # The EXPLICIT internal param stays the one working channel.
-        ev3 = sdk.create_event("x", "meeting", _server_id="ev_internal_ok")
+        ev3 = sdk._create_event("x", "meeting", _server_id="ev_internal_ok")
         assert ev3.get("id") == "ev_internal_ok", ev3
         # The ingest-bundle surface (Phase-2 **item splat into create_event)
         # must also reject _server_id at shape time — a tenant entity item
@@ -7537,7 +7537,7 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         # in props, so the post-coerce reject cannot see it).
         from tortoise.exceptions import BundleValidationError
         try:
-            sdk.ingest({"entities": [{"type": "event", "name": "ing",
+            sdk._ingest({"entities": [{"type": "event", "name": "ing",
                                       "eventKind": "meeting",
                                       "_server_id": "ev_forced_ingest"}]})
             raise AssertionError("ingest _server_id item must be rejected")
@@ -7548,7 +7548,7 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         ).result_set[0][0]
         assert n_events == 0, "a rejected ingest must mint nothing"
         # A fresh ULID is still minted when no _server_id is supplied.
-        ev2 = sdk.create_event("x", "meeting", is_episodic=False)
+        ev2 = sdk._create_event("x", "meeting", is_episodic=False)
         assert ev2.get("id"), ev2
         assert ev2.get("id") != eid, "no _server_id must not reuse a prior id"
         # eventId is server-managed on the ENTITY-update surface (an Event
@@ -7561,8 +7561,8 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         except ValueError as ex:
             assert "server-managed" in str(ex), ex
         # ...while update_point still allows provenance property authoring.
-        pt = sdk.create_point("statement", "a point")
-        upd = sdk.update_point(pt["id"], eventId="ev_authorable")
+        pt = sdk._create_point("statement", "a point")
+        upd = sdk._update_point(pt["id"], eventId="ev_authorable")
         assert sdk._get_proj().g.query(
             "MATCH (p:Point {id:$i}) RETURN p.eventId",
             params={"i": pt["id"]}).result_set[0][0] == "ev_authorable", upd
@@ -7592,7 +7592,7 @@ def test_phase_f_sweep_event_delete_session_guard(tmp_path):
         eid = _session_capture_event_id(sid)
         proj = sdk._get_proj()
         # Stage a Session + its deterministic capture Event (real graph).
-        ev = sdk.create_event(f"session_{sid}", "sessionCaptured",
+        ev = sdk._create_event(f"session_{sid}", "sessionCaptured",
                               _server_id=eid, startedAt="now",
                               endedAt="now", sessionId=sid,
                               is_episodic=True)
@@ -8051,7 +8051,7 @@ def test_capture_true_retry_heals_unstamped_first_attempt(
     import tortoise.extractor_v2 as ev2
     import tortoise.sdk as sdk_mod
     calls = {"n": 0}
-    real_create_event = sdk.create_event
+    real_create_event = sdk._create_event
     _CLAIM = {"id": "pt_" + sdk_mod._content_hash("the suburbs are home now"),
               "content": "the suburbs are home now", "pointKind": "statement",
               "about_entities": []}

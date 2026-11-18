@@ -61,12 +61,12 @@ def _fresh_sdk():
 
 
 def _live(sdk: TortoiseSDK, content: str) -> dict:
-    return sdk.create_point("statement", content, status="live")
+    return sdk._create_point("statement", content, status="live")
 
 
 def _draft(sdk: TortoiseSDK, content: str) -> dict:
     # #1088: draft must be requested explicitly — live is the create default.
-    return sdk.create_point("statement", content, status="draft")
+    return sdk._create_point("statement", content, status="draft")
 
 
 def _select(proj, anchors, **kw):
@@ -90,8 +90,8 @@ def test_a9_direct_edge_only_subgraph_returns_factor_anchors():
         p1 = _live(sdk, "A")
         p2 = _live(sdk, "B")
         p3 = _live(sdk, "C")
-        sdk.create_direct_edge("IMPL", p1["id"], p2["id"])
-        sdk.create_direct_edge("NAND", p2["id"], p3["id"])
+        sdk._create_direct_edge("IMPL", p1["id"], p2["id"])
+        sdk._create_direct_edge("NAND", p2["id"], p3["id"])
         ops, anchors = _select(sdk._get_proj(), [p1["id"]], max_hops=2)
         assert ops == set(), f"direct-edge-only subgraph must yield zero operators: {ops}"
         assert anchors == {
@@ -112,7 +112,7 @@ def test_a9_factor_anchor_uniqueness_bidirectional_cycle():
         p1 = _live(sdk, "A")
         p2 = _live(sdk, "B")
         # bidirectional IMPL: both endpoints can discover the edge
-        sdk.create_direct_edge("IMPL", p1["id"], p2["id"], direction="bidirectional")
+        sdk._create_direct_edge("IMPL", p1["id"], p2["id"], direction="bidirectional")
         ops_a, anchors_a = _select(sdk._get_proj(), [p1["id"]], max_hops=1)  # noqa: RUF059
         ops_b, anchors_b = _select(sdk._get_proj(), [p2["id"]], max_hops=1)  # noqa: RUF059
         assert anchors_a == anchors_b == {(p1["id"], p2["id"], "IMPL")}
@@ -134,7 +134,7 @@ def test_a9_direction_respect_unidirectional_impl_no_back_traversal():
     try:
         src = _live(sdk, "Source")
         tgt = _live(sdk, "Target")
-        sdk.create_direct_edge("IMPL", src["id"], tgt["id"],
+        sdk._create_direct_edge("IMPL", src["id"], tgt["id"],
                                direction="unidirectional")
         # from the SOURCE: forward traversal finds the edge
         ops_s, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)  # noqa: RUF059
@@ -144,7 +144,7 @@ def test_a9_direction_respect_unidirectional_impl_no_back_traversal():
         assert anchors_t == set(), \
             f"unidirectional IMPL must not back-traverse: {anchors_t}"
         # bidirectional IMPL from the TARGET DOES back-traverse
-        sdk.create_direct_edge("IMPL", src["id"], tgt["id"],
+        sdk._create_direct_edge("IMPL", src["id"], tgt["id"],
                                direction="bidirectional")
         ops_b, anchors_b = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)  # noqa: RUF059
         assert (src["id"], tgt["id"], "IMPL") in anchors_b, anchors_b
@@ -162,7 +162,7 @@ def test_a9_direction_param_gates_direct_edge_traversal():
     try:
         src = _live(sdk, "Source")
         tgt = _live(sdk, "Target")
-        sdk.create_direct_edge("IMPL", src["id"], tgt["id"],
+        sdk._create_direct_edge("IMPL", src["id"], tgt["id"],
                                direction="bidirectional")
         # outgoing from the TARGET: no back-traversal (the edge influences
         # the target, not the source)
@@ -178,7 +178,7 @@ def test_a9_direction_param_gates_direct_edge_traversal():
                                   direction="both")
         assert anchors_both == {(src["id"], tgt["id"], "IMPL")}, anchors_both
         # NAND direct edge: found under a single-direction param (always both)
-        sdk.create_direct_edge("NAND", src["id"], tgt["id"],
+        sdk._create_direct_edge("NAND", src["id"], tgt["id"],
                                direction="unidirectional")
         _, anchors_nand = _select(sdk._get_proj(), [tgt["id"]], max_hops=1,
                                   direction="outgoing")
@@ -194,7 +194,7 @@ def test_a9_nand_always_bidirectional():
     try:
         src = _live(sdk, "Source")
         tgt = _live(sdk, "Target")
-        sdk.create_direct_edge("NAND", src["id"], tgt["id"],
+        sdk._create_direct_edge("NAND", src["id"], tgt["id"],
                                direction="unidirectional")
         ops, anchors = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)  # noqa: RUF059
         assert anchors == {(src["id"], tgt["id"], "NAND")}, anchors
@@ -211,7 +211,7 @@ def test_a9_nand_negative_direction_traversed_neither_way_7852():
     try:
         src = _live(sdk, "Source")
         tgt = _live(sdk, "Target")
-        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="-")
+        sdk._create_direct_edge("NAND", src["id"], tgt["id"], direction="-")
         _, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)
         assert anchors_s == set(), \
             f"a `-` NAND edge must not traverse forward: {anchors_s}"
@@ -219,7 +219,7 @@ def test_a9_nand_negative_direction_traversed_neither_way_7852():
         assert anchors_t == set(), \
             f"a `-` NAND edge must not traverse backward: {anchors_t}"
         # the model token `->` keeps NAND's legacy always-both behaviour
-        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="->")
+        sdk._create_direct_edge("NAND", src["id"], tgt["id"], direction="->")
         _, anchors_f = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
         assert (src["id"], tgt["id"], "NAND") in anchors_f, anchors_f
     finally:
@@ -234,7 +234,7 @@ def test_a9_nand_backward_direction_walked_both_ways_7852():
     try:
         src = _live(sdk, "Source")
         tgt = _live(sdk, "Target")
-        sdk.create_direct_edge("NAND", src["id"], tgt["id"], direction="<-")
+        sdk._create_direct_edge("NAND", src["id"], tgt["id"], direction="<-")
         _, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)
         assert (src["id"], tgt["id"], "NAND") in anchors_s, anchors_s
         _, anchors_t = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
@@ -251,9 +251,9 @@ def test_a9_cyclic_selection_terminates():
         p1 = _live(sdk, "A")
         p2 = _live(sdk, "B")
         p3 = _live(sdk, "C")
-        sdk.create_direct_edge("IMPL", p1["id"], p2["id"])
-        sdk.create_direct_edge("IMPL", p2["id"], p3["id"])
-        sdk.create_direct_edge("IMPL", p3["id"], p1["id"])
+        sdk._create_direct_edge("IMPL", p1["id"], p2["id"])
+        sdk._create_direct_edge("IMPL", p2["id"], p3["id"])
+        sdk._create_direct_edge("IMPL", p3["id"], p1["id"])
         ops, anchors = _select(sdk._get_proj(), [p1["id"]], max_hops=2)
         assert ops == set()
         assert anchors == {
@@ -283,7 +283,7 @@ def test_a9_derived_liveness_1_live_1_draft_boundary():
     try:
         live1 = _live(sdk, "Live1")
         draft1 = _draft(sdk, "Draft1")
-        op = sdk.create_operator("IMPL", live1["id"], [draft1["id"]],
+        op = sdk._create_operator("IMPL", live1["id"], [draft1["id"]],
                                  promote_source=False)
         # (a) post-#780 draft-status operator:
         #  - default mode: excluded by the #780 status filter (draft)
@@ -347,8 +347,8 @@ def test_a9_pre_existing_path_activation():
     try:
         src = _live(sdk, "Legacy edge source")
         tgt = _live(sdk, "Legacy edge target")
-        sdk.set_point_baseline(src["id"], 8.0, 2.0)
-        sdk.set_point_baseline(tgt["id"], 2.0, 8.0)
+        sdk._set_point_baseline(src["id"], 8.0, 2.0)
+        sdk._set_point_baseline(tgt["id"], 2.0, 8.0)
         # legacy-created direct edge (bypasses create_direct_edge)
         sdk._get_proj().g.query(
             "MATCH (a:Point {id:$src}), (b:Point {id:$tgt}) "
@@ -356,7 +356,7 @@ def test_a9_pre_existing_path_activation():
             params={"src": src["id"], "tgt": tgt["id"]},
         )
         sdk._mark_dirty([src["id"], tgt["id"]])
-        result = sdk.dream(dirty_only=True, max_hops=2)
+        result = sdk._dream(dirty_only=True, max_hops=2)
         assert result["converged"] is True, result
         assert result["iterations"] > 0, \
             f"direct-edge factor must run (vacuous convergence is the bug): {result}"
@@ -380,9 +380,9 @@ def _cycle_baselines(sdk, points: list[str]):
     """Give the cycle's points asymmetric priors so the factors have work.
     (8, 2, 5) is rejected: the balanced pair leaves p3 at exactly 0.5 (the
     cycle's messages cancel — no movement). (8, 2, 4) moves all three."""
-    sdk.set_point_baseline(points[0], 8.0, 2.0)
-    sdk.set_point_baseline(points[1], 2.0, 8.0)
-    sdk.set_point_baseline(points[2], 4.0, 6.0)
+    sdk._set_point_baseline(points[0], 8.0, 2.0)
+    sdk._set_point_baseline(points[1], 2.0, 8.0)
+    sdk._set_point_baseline(points[2], 4.0, 6.0)
 
 
 def test_e2e14_impl_3_cycle_honest_convergence():
@@ -402,16 +402,16 @@ def test_e2e14_impl_3_cycle_honest_convergence():
         p2 = _live(sdk, "P2")
         p3 = _live(sdk, "P3")
         _cycle_baselines(sdk, [p1["id"], p2["id"], p3["id"]])
-        sdk.create_direct_edge("IMPL", p1["id"], p2["id"])
-        sdk.create_direct_edge("IMPL", p2["id"], p3["id"])
-        sdk.create_direct_edge("IMPL", p3["id"], p1["id"])
+        sdk._create_direct_edge("IMPL", p1["id"], p2["id"])
+        sdk._create_direct_edge("IMPL", p2["id"], p3["id"])
+        sdk._create_direct_edge("IMPL", p3["id"], p1["id"])
         pre_conf = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.confidence",
             params={"id": p1["id"]},
         ).result_set
         pre = pre_conf[0][0] if pre_conf and pre_conf[0][0] is not None else 0.8
 
-        result = sdk.dream(dirty_only=True, max_hops=2)
+        result = sdk._dream(dirty_only=True, max_hops=2)
         # EP_MAX_ITERATIONS = the live __init__ max_iter default (ep.py:39
         # pins the cap at 50 — read the signature default so drift is caught)
         max_iter = inspect.signature(TortoiseEP.__init__).parameters[
@@ -429,7 +429,7 @@ def test_e2e14_impl_3_cycle_honest_convergence():
         # immediate re-dream is a no-op (epic 903-C6 #1244: explicit local
         # mode pins the no-op contract; auto-select would route the now-clean
         # small graph to full, which is idempotent but not a literal no-op)
-        result2 = sdk.dream(dirty_only=True, max_hops=2, mode="local")
+        result2 = sdk._dream(dirty_only=True, max_hops=2, mode="local")
         assert result2["iterations"] == 0 and result2["converged"] is True \
             and result2["affected_claims"] == [], result2
         # assertion 4: numeric confidence movement off baseline (every
@@ -458,11 +458,11 @@ def test_e2e14_nand_inclusive_cycle_terminates_bounded():
         p2 = _live(sdk, "P2")
         p3 = _live(sdk, "P3")
         _cycle_baselines(sdk, [p1["id"], p2["id"], p3["id"]])
-        sdk.create_direct_edge("IMPL", p1["id"], p2["id"])
-        sdk.create_direct_edge("IMPL", p2["id"], p3["id"])
-        sdk.create_direct_edge("NAND", p3["id"], p1["id"])  # cycle + NAND
+        sdk._create_direct_edge("IMPL", p1["id"], p2["id"])
+        sdk._create_direct_edge("IMPL", p2["id"], p3["id"])
+        sdk._create_direct_edge("NAND", p3["id"], p1["id"])  # cycle + NAND
         from tortoise.ep import TortoiseEP as _EP
-        result = sdk.dream(dirty_only=True, max_hops=2)
+        result = sdk._dream(dirty_only=True, max_hops=2)
         # EP_MAX_ITERATIONS (ep.py:39 __init__ default = 50)
         max_iter = inspect.signature(_EP.__init__).parameters["max_iter"].default
         assert result["iterations"] < max_iter, result

@@ -250,8 +250,8 @@ class TestCliContext:
 
     def test_with_points_prints_digest(self, db_env, capsys):
         """Points → digest includes 'Tortoise memory' header + decision line."""
-        db_env.create_point(kind="decision", content="Use FalkorDB as primary graph store")
-        db_env.create_point(kind="observation", content="Alpha in production")
+        db_env._create_point(kind="decision", content="Use FalkorDB as primary graph store")
+        db_env._create_point(kind="observation", content="Alpha in production")
 
         rc = _run_context()
         assert rc == 0
@@ -263,7 +263,7 @@ class TestCliContext:
     def test_with_points_digest_header_names_local_source(self, db_env, capsys):
         """#2209: the digest header says which memory is answering — local
         mode prints '— local', never a silent hosted label."""
-        db_env.create_point(kind="decision", content="Use FalkorDB as primary graph store")
+        db_env._create_point(kind="decision", content="Use FalkorDB as primary graph store")
 
         rc = _run_context()
         assert rc == 0
@@ -276,13 +276,13 @@ class TestCliContext:
         context`) lists genuine recent decisions/claims only — markdown rule
         lines ('---', '*Gate: filed as child issue…') and list/config fragments
         never surface as 'recent decisions'."""
-        db_env.create_point(kind="decision", content="We decided to adopt BSL 1.1 for the engine")
-        db_env.create_point(kind="statement", content="---")
-        db_env.create_point(kind="statement", content="*Gate: filed as child issue via "
+        db_env._create_point(kind="decision", content="We decided to adopt BSL 1.1 for the engine")
+        db_env._create_point(kind="statement", content="---")
+        db_env._create_point(kind="statement", content="*Gate: filed as child issue via "
                              "`issue-creation` — number recorded in the epic plan doc "
                              "(Stage 4).")
-        db_env.create_point(kind="statement", content="| Trigger | Must invoke |")
-        db_env.create_point(kind="statement", content="model: gpt-5")
+        db_env._create_point(kind="statement", content="| Trigger | Must invoke |")
+        db_env._create_point(kind="statement", content="model: gpt-5")
 
         rc = _run_context()
         assert rc == 0

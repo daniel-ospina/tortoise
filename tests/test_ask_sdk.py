@@ -123,7 +123,7 @@ def _seed_event_graph(sdk: TortoiseSDK, turns: list[dict]) -> list[dict]:
     # is capture's, that one VALUE is the fixture's placeholder.
     merge_capture_session(sdk, SEEDED_EVENT_SESSION, len(turns))
     for i, t in enumerate(turns):
-        point = sdk.create_point("statement", t["content"])
+        point = sdk._create_point("statement", t["content"])
         eid = t.get("eventId", f"ev-{i}")
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
@@ -143,7 +143,7 @@ def _seed_event_graph(sdk: TortoiseSDK, turns: list[dict]) -> list[dict]:
             "MERGE (s)-[:CONTAINS]->(p)",
             params={"sid": SEEDED_EVENT_SESSION, "pid": point["id"]},
         )
-    return sdk.tortoise_fts_query("gym", limit=40, include_terminal=True)
+    return sdk._tortoise_fts_query("gym", limit=40, include_terminal=True)
 
 
 def test_seed_event_graph_ignores_a_session_id_key():
@@ -193,7 +193,7 @@ def test_annotate_session_date_and_speaker():
          "session_date": "2026-08-01", "speaker": "user"},
     ])
     assert hits, "fixture must retrieve"
-    ann = sdk.annotate_ask_hits(hits)
+    ann = sdk._annotate_ask_hits(hits)
     assert len(ann) == len(hits)
     assert ann[0]["session_date"] == "2026-08-01"
     assert ann[0]["speaker"] == "user"
@@ -203,12 +203,12 @@ def test_annotate_speaker_from_source_turn():
     """Extracted point with source_turn_id → speaker from the source turn."""
     sdk = _new_sdk()
     proj = sdk._get_proj()
-    turn = sdk.create_point("statement", "we decided the office hours are 9am")
+    turn = sdk._create_point("statement", "we decided the office hours are 9am")
     proj.g.query(
         "MATCH (p:Point {id: $pid}) SET p.speaker = 'assistant', p.eventId = 'ev9'",
         params={"pid": turn["id"]},
     )
-    extracted = sdk.create_point("statement", "office hours are 9am")
+    extracted = sdk._create_point("statement", "office hours are 9am")
     proj.g.query(
         "MATCH (p:Point {id: $pid}) SET p.eventId = 'ev9', p.source_turn_id = $tid",
         params={"pid": extracted["id"], "tid": turn["id"]},
@@ -216,8 +216,8 @@ def test_annotate_speaker_from_source_turn():
     proj.g.query(
         "MERGE (e:Event {eventId: 'ev9'}) SET e.startedAt = '2026-08-02T10:00:00Z'",
     )
-    hits = sdk.tortoise_fts_query("office hours", limit=40, include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    hits = sdk._tortoise_fts_query("office hours", limit=40, include_terminal=True)
+    ann = sdk._annotate_ask_hits(hits)
     by_id = {h["id"]: h for h in ann}
     assert by_id[extracted["id"]]["speaker"] == "assistant"
 
@@ -225,10 +225,10 @@ def test_annotate_speaker_from_source_turn():
 def test_annotate_undated_hit_byte_identical():
     """Undated hit (no Event join) → no session_date; rendering unchanged."""
     sdk = _new_sdk()
-    point = sdk.create_point("statement", "office hours are 9am")
-    hits = sdk.tortoise_fts_query("office hours", limit=40, include_terminal=True)
+    point = sdk._create_point("statement", "office hours are 9am")
+    hits = sdk._tortoise_fts_query("office hours", limit=40, include_terminal=True)
     assert hits and hits[0]["id"] == point["id"]
-    ann = sdk.annotate_ask_hits(hits)
+    ann = sdk._annotate_ask_hits(hits)
     # additive keys ""/absent — never a marker (byte-identical rendering)
     assert not ann[0].get("session_date")
     assert not ann[0].get("speaker")
@@ -289,8 +289,8 @@ def test_annotate_turn_session_date_from_the_session_record():
         params={"sid": TURN_SESSION}).result_set[0][0] == \
         f"{TURN_DATE}T10:00:00Z"
 
-    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    hits = sdk._tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk._annotate_ask_hits(hits)
     hit = {h["id"]: h for h in ann}[turns[0]]
     assert hit["session_date"] == TURN_DATE, hit
     assert hit["speaker"] == "user", hit
@@ -327,8 +327,8 @@ def test_annotate_unknown_session_date_renders_as_unknown():
         "MATCH (s:Session {id:$sid}) RETURN s.created_at",
         params={"sid": "undated-sess"}).result_set == [[None]]
 
-    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    hits = sdk._tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk._annotate_ask_hits(hits)
     by_id = {h["id"]: h for h in ann}
     # Preconditions, both non-vacuous: the undated turn IS in the pool, and
     # so IS the dated neighbour (whose own date must render).
@@ -364,7 +364,7 @@ def test_date_leg_attaches_no_session_id():
     proj = sdk._get_proj()
     # An EXTRACTED claim with capture's own provenance stamp: its ``eventId``
     # join DOES yield a date (and a sessionId) — the pre-#4106 path.
-    claim = sdk.create_point("statement", "I bought a smoker in May")
+    claim = sdk._create_point("statement", "I bought a smoker in May")
     proj.g.query(
         "MATCH (p:Point {id:$pid}) SET p.eventId = 'ev-x'",
         params={"pid": claim["id"]})
@@ -376,8 +376,8 @@ def test_date_leg_attaches_no_session_id():
         "MERGE (s)-[:CONTAINS]->(p)",
         params={"sid": TURN_SESSION, "pid": claim["id"]})
 
-    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    hits = sdk._tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk._annotate_ask_hits(hits)
     by_id = {h["id"]: h for h in ann}
     # Precondition (non-vacuous): the date leg DID attach a date.
     assert any(h.get("session_date") for h in ann), ann
@@ -432,7 +432,7 @@ def _seed_transcript_chunks(sdk: TortoiseSDK, session_id: str, date: str,
     ids = []
     for ci in range(n):
         pid = f"lme:{session_id}:c{ci}"
-        sdk.create_point("session-transcript",
+        sdk._create_point("session-transcript",
                          f"verbatim chunk {ci} of {session_id}: the smoker",
                          id=pid, is_episodic=True, status="draft")
         proj.g.query("MATCH (s:Session {id:$sid}),(p:Point {id:$pid}) "
@@ -460,9 +460,9 @@ def test_date_leg_does_not_rebucket_a_chunk_pool():
     sdk = _new_sdk()
     _seed_transcript_chunks(sdk, "chunkA", TURN_DATE)
     _seed_transcript_chunks(sdk, "chunkB", TURN_DATE)
-    hits = sdk.tortoise_fts_query("verbatim chunk smoker", limit=40,
+    hits = sdk._tortoise_fts_query("verbatim chunk smoker", limit=40,
                                   include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    ann = sdk._annotate_ask_hits(hits)
     assert len(hits) >= 4, [h.get("id") for h in hits]
     assert all(h["point_kind"] == "session-transcript" for h in hits), hits
     # Preconditions, all measured: the date IS populated; no hit carries a
@@ -504,9 +504,9 @@ def test_date_leg_never_narrows_the_chunk_pool():
     sdk = _new_sdk()
     _seed_transcript_chunks(sdk, "chunkA", "2023-03-15")
     _seed_transcript_chunks(sdk, "chunkB", "2023-04-01")
-    hits = sdk.tortoise_fts_query("verbatim chunk smoker", limit=40,
+    hits = sdk._tortoise_fts_query("verbatim chunk smoker", limit=40,
                                   include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    ann = sdk._annotate_ask_hits(hits)
     from tortoise.retrieval import dedup_pool
     camel_stripped = [{k: v for k, v in h.items() if k != "sessionId"}
                       for h in ann]
@@ -584,7 +584,7 @@ def test_multi_session_point_takes_the_earliest_recorded_date():
     inference. Mirrors the point fetch's own deterministic multi-session pick,
     which is over session IDs rather than dates."""
     sdk = _new_sdk()
-    point = sdk.create_point("statement",
+    point = sdk._create_point("statement",
                              "I bought a smoker on the spring trip")
     proj = sdk._get_proj()
     for sid, ts in (("multi-late", "2023-05-20T10:00:00Z"),
@@ -594,9 +594,9 @@ def test_multi_session_point_takes_the_earliest_recorded_date():
         proj.g.query("MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                      "MERGE (s)-[:CONTAINS]->(p)",
                      params={"sid": sid, "pid": point["id"]})
-    hits = sdk.tortoise_fts_query("smoker spring trip", limit=40,
+    hits = sdk._tortoise_fts_query("smoker spring trip", limit=40,
                                   include_terminal=True)
-    ann = {h["id"]: h for h in sdk.annotate_ask_hits(hits)}
+    ann = {h["id"]: h for h in sdk._annotate_ask_hits(hits)}
     assert ann[point["id"]]["session_date"] == "2023-03-15", \
         ann[point["id"]]
     sdk.close()
@@ -614,8 +614,8 @@ def test_malformed_recorded_time_renders_as_unknown():
     assert proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.created_at",
         params={"sid": "bad-ts-sess"}).result_set == [["not-a-date"]]
-    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
-    ann = {h["id"]: h for h in sdk.annotate_ask_hits(hits)}
+    hits = sdk._tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = {h["id"]: h for h in sdk._annotate_ask_hits(hits)}
     assert not ann[turns[0]].get("session_date"), ann[turns[0]]
     assert "not-a-date" not in str(ann[turns[0]])
     sdk.close()
@@ -647,8 +647,8 @@ def test_eval_ingest_records_no_time_for_a_dateless_session():
         "MATCH (s:Session) RETURN s.id, s.created_at").result_set
     assert rows, "ingest must write the session"
     assert all(r[1] is None for r in rows), rows
-    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    hits = sdk._tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk._annotate_ask_hits(hits)
     assert ann and all(not h.get("session_date") for h in ann), ann
     from tortoise.retrieval import render_context
     assert "(session date" not in render_context(ann)
@@ -706,8 +706,8 @@ def test_eval_ingest_slash_date_reaches_the_reader():
         "haystack_session_ids": ["slash-sess"],
         "haystack_dates": ["2023/05/20 (Sat) 03:29"],
     })
-    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    hits = sdk._tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk._annotate_ask_hits(hits)
     assert ann and all(h.get("session_date") == "2023-05-20" for h in ann), \
         ann
     from tortoise.retrieval import render_context
@@ -754,10 +754,10 @@ def test_annotate_null_join_byte_identical():
     """A hit whose eventId has NO Event node + no source turn → additive keys
     absent, no crash, no stale markers."""
     sdk = _new_sdk()
-    sdk.create_point("statement", "office hours are 9am")
-    hits = sdk.tortoise_fts_query("office hours", limit=40, include_terminal=True)
+    sdk._create_point("statement", "office hours are 9am")
+    hits = sdk._tortoise_fts_query("office hours", limit=40, include_terminal=True)
     # decorate the hit with a dangling eventId
-    ann = sdk.annotate_ask_hits(hits)
+    ann = sdk._annotate_ask_hits(hits)
     assert ann[0]["id"] == hits[0]["id"]
     assert not ann[0].get("session_date")
 
@@ -766,7 +766,7 @@ def test_annotate_has_answer_passthrough():
     """A hit carrying has_answer survives annotate_ask_hits unchanged."""
     sdk = _new_sdk()
     proj = sdk._get_proj()
-    point = sdk.create_point("statement", "office hours are 9am")
+    point = sdk._create_point("statement", "office hours are 9am")
     proj.g.query(
         "MATCH (p:Point {id: $pid}) SET p.has_answer = true, p.eventId = 'ev1'",
         params={"pid": point["id"]},
@@ -774,12 +774,12 @@ def test_annotate_has_answer_passthrough():
     proj.g.query(
         "MERGE (e:Event {eventId: 'ev1'}) SET e.startedAt = '2026-08-02T10:00:00Z'",
     )
-    hits = sdk.tortoise_fts_query("office hours", limit=40, include_terminal=True)
+    hits = sdk._tortoise_fts_query("office hours", limit=40, include_terminal=True)
     # the MockReader-stamping field is not a SearchResult.to_dict field —
     # the eval's read-time marks inject it into the hit dict; annotate must
     # preserve it (dict passthrough, never dropped).
     hits[0]["has_answer"] = True
-    ann = sdk.annotate_ask_hits(hits)
+    ann = sdk._annotate_ask_hits(hits)
     assert ann[0]["has_answer"] is True
     assert ann[0]["session_date"] == "2026-08-02"
 
@@ -788,11 +788,11 @@ def test_annotate_d8_rides_through_decorated_hits():
     """Superseded point → superseded_by rides through the ALREADY-decorated
     hits (annotate_ask_hits does NOT re-fetch D8 state)."""
     sdk = _new_sdk()
-    old = sdk.create_point("statement", "gym schedule is Monday")
-    new = sdk.create_point("statement", "gym schedule is Tuesday")
-    sdk.supersede_point(old["id"], new["id"])
-    hits = sdk.tortoise_fts_query("gym schedule", limit=40, include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    old = sdk._create_point("statement", "gym schedule is Monday")
+    new = sdk._create_point("statement", "gym schedule is Tuesday")
+    sdk._supersede_point(old["id"], new["id"])
+    hits = sdk._tortoise_fts_query("gym schedule", limit=40, include_terminal=True)
+    ann = sdk._annotate_ask_hits(hits)
     old_hit = next(h for h in ann if h["id"] == old["id"])
     assert old_hit.get("superseded_by"), "D8 marker must ride through"
     assert old_hit.get("status") == "superseded"
@@ -1006,7 +1006,7 @@ def test_local_lane_validation_first_zero_calls(monkeypatch):
     fake = _install_fake(sdk, monkeypatch)
     retrieved = []
 
-    orig = sdk.tortoise_fts_query
+    orig = sdk._tortoise_fts_query
     def _no_retrieval(*a, **k):
         retrieved.append(1)
         return orig(*a, **k)
@@ -1058,7 +1058,7 @@ def test_oversized_hit_skip_and_caps(monkeypatch):
     # a pathological CJK-heavy pool (unspaced runs — the word-based estimate
     # under-counts; the byte cap must bind)
     big_run = "\u4f60" * 30000  # ~90 KiB of CJK
-    point = sdk.create_point("statement", big_run)
+    point = sdk._create_point("statement", big_run)
     proj.g.query(
         "MATCH (p:Point {id: $pid}) SET p.eventId = 'ev1'",
         params={"pid": point["id"]},
@@ -1076,7 +1076,7 @@ def test_oversized_hit_skip_and_caps(monkeypatch):
 
 def test_undated_hits(monkeypatch):
     sdk = _new_sdk()
-    sdk.create_point("statement", "office hours are 9am")
+    sdk._create_point("statement", "office hours are 9am")
     fake = _install_fake(sdk, monkeypatch)
     result = run_ask_lane(sdk, "office hours?")
     assert result["answer"] == fake.reply
@@ -1384,7 +1384,7 @@ def test_both_not_either_control(monkeypatch):
          "session_date": "2026-08-01"},
     ])
     fake = _install_fake(sdk, monkeypatch)
-    sdk.tortoise_fts_query("gym", limit=10)
-    sdk.recall_state(query="gym")
-    sdk.recall_gaps(query="gym")
+    sdk._tortoise_fts_query("gym", limit=10)
+    sdk._recall_state(query="gym")
+    sdk._recall_gaps(query="gym")
     assert fake.calls == 0

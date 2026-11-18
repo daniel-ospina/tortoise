@@ -67,7 +67,7 @@ def sdk(tmp_path, monkeypatch, force_sparse_tfidf):
 
 def _seed(sdk, n):
     for i in range(n):
-        sdk.create_point(kind="statement",
+        sdk._create_point(kind="statement",
                          content=f"zebra migration claim number {i:02d}",
                          entity_type="point")
 
@@ -84,7 +84,7 @@ class TestIssueInsightTruncation:
         _seed(sdk, 12)
         assert _store_matches(sdk) == 12
 
-        resp = sdk.issue_insight(QUERY, limit=2)
+        resp = sdk._issue_insight(QUERY, limit=2)
 
         # the delivered rows are a STRICT SUBSET ...
         assert len(resp["data_points"]) == 2 < 12
@@ -96,7 +96,7 @@ class TestIssueInsightTruncation:
         """The prose count was post-cut: a 12-hit read said "2 graph hit(s)"."""
         _seed(sdk, 12)
 
-        resp = sdk.issue_insight(QUERY, limit=2)
+        resp = sdk._issue_insight(QUERY, limit=2)
 
         assert len(resp["data_points"]) == 2
         assert resp["insight"].startswith("12 graph hit(s) relate"), resp["insight"]
@@ -106,7 +106,7 @@ class TestIssueInsightTruncation:
         _seed(sdk, 3)
         assert _store_matches(sdk) == 3
 
-        resp = sdk.issue_insight(QUERY, limit=5)
+        resp = sdk._issue_insight(QUERY, limit=5)
 
         assert len(resp["data_points"]) == 3
         assert resp[TRUNCATED_FIELD] is False
@@ -116,7 +116,7 @@ class TestIssueInsightTruncation:
         """The issue's `exactly-at-limit` boundary: nothing was cut, so nothing is marked."""
         _seed(sdk, 2)
 
-        resp = sdk.issue_insight(QUERY, limit=2)
+        resp = sdk._issue_insight(QUERY, limit=2)
 
         assert len(resp["data_points"]) == 2
         assert resp[TRUNCATED_FIELD] is False
@@ -126,7 +126,7 @@ class TestIssueInsightTruncation:
         """The issue's `limit+1` boundary — the ONE row past the cap is the whole difference."""
         _seed(sdk, 3)
 
-        at_limit = sdk.issue_insight(QUERY, limit=2)
+        at_limit = sdk._issue_insight(QUERY, limit=2)
         assert at_limit[TRUNCATED_FIELD] is True
         assert at_limit[TOTAL_AVAILABLE_FIELD] == 3
 
@@ -141,7 +141,7 @@ class TestIssueInsightTruncation:
         _seed(sdk, 25)
         assert _store_matches(sdk) == 25
 
-        resp = sdk.issue_insight(QUERY, limit=2)
+        resp = sdk._issue_insight(QUERY, limit=2)
 
         assert resp[TRUNCATED_FIELD] is True
         assert TOTAL_AVAILABLE_FIELD not in resp
@@ -159,7 +159,7 @@ class TestIssueInsightTruncation:
         _seed(sdk, 20)
         assert _store_matches(sdk) == 20
 
-        resp = sdk.issue_insight(QUERY, limit=2)
+        resp = sdk._issue_insight(QUERY, limit=2)
 
         assert len(resp["data_points"]) == 2
         assert resp[TRUNCATED_FIELD] is True          # 20 > 2: the cut fired
@@ -195,7 +195,7 @@ class TestIssueInsightTruncation:
         _seed(sdk, 20)
         assert _store_matches(sdk) == 20
 
-        at_bound = sdk.issue_insight(QUERY, limit=2)
+        at_bound = sdk._issue_insight(QUERY, limit=2)
         assert at_bound[TOTAL_AVAILABLE_FIELD] == 20, (
             "a 20-match store under `limit=2`: the pool is at its bound 20 and the "
             "window (120) is not filled, so the total is EXACT"
@@ -204,7 +204,7 @@ class TestIssueInsightTruncation:
         _seed(sdk, 100)                      # 20 -> 120: the WINDOW, not the bound
         assert _store_matches(sdk) == 120
 
-        saturated = sdk.issue_insight(QUERY, limit=2)
+        saturated = sdk._issue_insight(QUERY, limit=2)
         assert len(saturated["data_points"]) == 2
         # the pool is STILL at exactly its bound: 20 rows, all 20 gate-relevant
         # (`at least ` is the prose's own qualification — the count is still 20)
@@ -220,7 +220,7 @@ class TestIssueInsightTruncation:
 
     def test_absence_is_not_claimed_over_an_unread_store(self, sdk):
         """(d) `total_points == 0` is the only path that proves absence."""
-        resp = sdk.issue_insight(QUERY, limit=2)
+        resp = sdk._issue_insight(QUERY, limit=2)
 
         assert resp["no_prior_knowledge"] is True
         # every response path carries the marker — a missing key is a producer
@@ -240,7 +240,7 @@ class TestIssueInsightTruncation:
 
         for bad in (0, -1):
             with pytest.raises(ValueError, match="positive int"):
-                sdk.issue_insight(QUERY, limit=bad)
+                sdk._issue_insight(QUERY, limit=bad)
 
     def test_a_bool_limit_is_refused_not_reinterpreted(self, sdk):
         """`bool` is an `int` SUBCLASS, so the value test alone serves `True` as
@@ -262,7 +262,7 @@ class TestIssueInsightTruncation:
 
         for bad in (True, False):
             with pytest.raises(ValueError, match="positive int"):
-                sdk.issue_insight(QUERY, limit=bad)
+                sdk._issue_insight(QUERY, limit=bad)
 
     def test_the_docstring_names_the_one_refusal_the_guard_raises(self, sdk):
         """The public docstring said "never raises" while the guard 20 lines
@@ -311,7 +311,7 @@ class TestIssueInsightTruncation:
             "does it: " + doc)
         # …and the exception the doc names is the one the guard really raises.
         with pytest.raises(ValueError, match="positive int"):
-            sdk.issue_insight(QUERY, limit=0)
+            sdk._issue_insight(QUERY, limit=0)
 
     def test_a_service_fault_propagates_instead_of_becoming_an_error_dict(
             self, sdk, monkeypatch):
@@ -344,7 +344,7 @@ class TestIssueInsightTruncation:
         monkeypatch.setattr(sdk, "_get_proj", _unreachable)
 
         with pytest.raises(RuntimeError, match="unreachable"):
-            sdk.issue_insight(QUERY, limit=2)
+            sdk._issue_insight(QUERY, limit=2)
 
     def test_the_absence_prose_never_contradicts_the_marker(self, sdk):
         """A non-truncated read must NOT be told "the read was TRUNCATED".
@@ -357,7 +357,7 @@ class TestIssueInsightTruncation:
         """
         _seed(sdk, 3)
 
-        resp = sdk.issue_insight("", limit=2)   # no text -> no retrieval at all
+        resp = sdk._issue_insight("", limit=2)   # no text -> no retrieval at all
 
         assert resp[TRUNCATED_FIELD] is False
         assert resp["insight"] == "No graph matches for this issue title."
@@ -370,7 +370,7 @@ class TestIssueInsightTruncation:
         """
         _seed(sdk, 3)
 
-        resp = sdk.issue_insight(QUERY, repo="an-org/a-repo-that-was-never-indexed",
+        resp = sdk._issue_insight(QUERY, repo="an-org/a-repo-that-was-never-indexed",
                                  limit=5)
         assert resp["repo_not_indexed"] is True
         assert resp[TRUNCATED_FIELD] is False
@@ -385,11 +385,11 @@ class TestIssueInsightTruncation:
         an incomplete read.
         """
         for i in range(25):
-            sdk.create_point(kind="statement",
+            sdk._create_point(kind="statement",
                              content=f"zebra unrelated inventory item {i:02d}",
                              entity_type="point")
 
-        cut = sdk.issue_insight(QUERY, limit=2)
+        cut = sdk._issue_insight(QUERY, limit=2)
         assert cut["data_points"] == []
         # 25 > the pool's own retrieval window: matches past it were never read,
         # so the read may not assert ABSENCE — not in the marker, and not in the
@@ -402,10 +402,10 @@ class TestIssueInsightTruncation:
         # the SAME shape below the pool bound is genuinely complete
         sdk2 = sdk
         for i in range(3):
-            sdk2.create_point(kind="statement",
+            sdk2._create_point(kind="statement",
                               content=f"yak unrelated inventory item {i:02d}",
                               entity_type="point")
-        whole = sdk2.issue_insight("yak migration claim", limit=2)
+        whole = sdk2._issue_insight("yak migration claim", limit=2)
         assert whole["insight"] == "No graph matches for this issue title."
         assert whole[TRUNCATED_FIELD] is False
         assert TOTAL_AVAILABLE_FIELD not in whole

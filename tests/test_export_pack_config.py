@@ -257,7 +257,7 @@ class TestForeignKindsGuard:
         here would mask the foreign kind and wrongly pass.)"""
         from tortoise.hosted_api import _check_foreign_kinds
         from tortoise.hosted_backup import dump_graph
-        sdk.create_object("Contract 1", objectKind="tenant-ops:contract")
+        sdk._create_object("Contract 1", objectKind="tenant-ops:contract")
         dump = dump_graph(sdk._get_proj().g, graph_name="t")
         dump.pop("pack_config", None)  # pre-v1.1 artifact (no pack_config)
         with pytest.raises(ValueError, match="predates pack-config"):
@@ -266,7 +266,7 @@ class TestForeignKindsGuard:
     def test_real_dump_graph_clean_graph_passes(self, sdk):
         from tortoise.hosted_api import _check_foreign_kinds
         from tortoise.hosted_backup import dump_graph
-        sdk.create_point("statement", content="A claim")
+        sdk._create_point("statement", content="A claim")
         dump = dump_graph(sdk._get_proj().g, graph_name="t")
         dump.pop("pack_config", None)
         _check_foreign_kinds(dump)
@@ -277,7 +277,7 @@ class TestForeignKindsGuard:
         (#2028, code-review #2041)."""
         from tortoise.hosted_api import _check_foreign_kinds
         from tortoise.hosted_backup import dump_graph
-        sdk.create_event("Contract signed", eventKind="tenant-ops:contract_signed")
+        sdk._create_event("Contract signed", eventKind="tenant-ops:contract_signed")
         dump = dump_graph(sdk._get_proj().g, graph_name="t")
         dump.pop("pack_config", None)
         with pytest.raises(ValueError, match="predates pack-config"):

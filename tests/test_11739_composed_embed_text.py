@@ -73,7 +73,7 @@ def sdk():
     """A fresh SDK on an isolated embedded graph."""
     db_path = f"{tempfile.mkdtemp(prefix='tt_11739_')}/test.db"
     s = TortoiseSDK(db_path)
-    s.test_guard = lambda: None
+    s._test_guard = lambda: None
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -84,7 +84,7 @@ def journal_sdk(tmp_path):
     """An SDK whose JSONL journal is a temp file — the replay evidence."""
     journal = tmp_path / "journal.jsonl"
     s = TortoiseSDK(str(tmp_path / "journal.db"), event_log_path=str(journal))
-    s.test_guard = lambda: None
+    s._test_guard = lambda: None
     s._journal_path_for_test = journal
     try:
         yield s
@@ -229,10 +229,10 @@ def recorder(monkeypatch):
 def test_OFF_embeds_the_content_and_stores_no_embeddingText(
         sdk, recorder, monkeypatch):
     monkeypatch.delenv(COMPOSE_ENV, raising=False)
-    point = sdk.create_point("statement", "a raw paraphrase",
+    point = sdk._create_point("statement", "a raw paraphrase",
                              quote="the exact words", aboutObject="Acme")
     assert recorder.seen == ["a raw paraphrase"]
-    assert "embeddingText" not in sdk.get_point(point["id"])
+    assert "embeddingText" not in sdk._get_point(point["id"])
 
 
 def test_ON_does_not_touch_a_point_with_no_quote_and_no_neighbours(
@@ -240,13 +240,13 @@ def test_ON_does_not_touch_a_point_with_no_quote_and_no_neighbours(
     """The degrade arm, with content whose whitespace would NOT survive a collapse."""
     content = "an  unbound\nclaim"
     monkeypatch.delenv(COMPOSE_ENV, raising=False)
-    off = sdk.create_point("statement", content)
-    off_point = sdk.get_point(off["id"])
+    off = sdk._create_point("statement", content)
+    off_point = sdk._get_point(off["id"])
     off_calls = list(recorder.seen)
 
     monkeypatch.setenv(COMPOSE_ENV, "1")
-    on = sdk.create_point("statement", content)
-    on_point = sdk.get_point(on["id"])
+    on = sdk._create_point("statement", content)
+    on_point = sdk._get_point(on["id"])
 
     assert recorder.seen[len(off_calls):] == [content]
     assert "embeddingText" not in off_point
@@ -257,9 +257,9 @@ def test_the_field_the_hash_attests_is_the_COMPOSED_text(sdk, recorder,
                                                         monkeypatch):
     """Schema A′ / #4194: the hash attests the text the vector describes."""
     monkeypatch.setenv(COMPOSE_ENV, "1")
-    point = sdk.create_point("statement", "a raw paraphrase",
+    point = sdk._create_point("statement", "a raw paraphrase",
                              quote="the exact words", aboutObject="Acme")
-    composed = sdk.get_point(point["id"])["embeddingText"]
+    composed = sdk._get_point(point["id"])["embeddingText"]
     assert recorder.seen == [composed]
     stamped = stamp_journal_embedding(
         {"id": "p", "content": "a raw paraphrase", "embeddingText": composed,
@@ -279,7 +279,7 @@ def test_the_JOURNAL_carries_the_composed_text_and_its_hash(
     worse, restore a vector whose attested text the node does not hold.
     """
     monkeypatch.setenv(COMPOSE_ENV, "1")
-    point = journal_sdk.create_point("statement", "a raw paraphrase",
+    point = journal_sdk._create_point("statement", "a raw paraphrase",
                                      quote="the exact words")
     composed = "the exact words"
     records = [json.loads(line)
@@ -304,9 +304,9 @@ def test_the_create_door_does_NOT_invent_a_neighbour_from_an_about_prop(
     the quote alone and the names half waits for the recompose seam.
     """
     monkeypatch.setenv(COMPOSE_ENV, "1")
-    point = sdk.create_point("statement", "a raw paraphrase",
+    point = sdk._create_point("statement", "a raw paraphrase",
                              quote="the exact words", aboutObject="Acme Corp")
-    assert sdk.get_point(point["id"])["embeddingText"] == "the exact words"
+    assert sdk._get_point(point["id"])["embeddingText"] == "the exact words"
     assert recorder.seen == ["the exact words"]
 
 
@@ -314,10 +314,10 @@ def test_a_CALLER_supplied_vector_leaves_embeddingText_off_the_node(
         sdk, recorder, monkeypatch):
     """#4194 guard (review finding): nothing describes a caller's own vector."""
     monkeypatch.setenv(COMPOSE_ENV, "1")
-    point = sdk.create_point("statement", "a raw paraphrase",
+    point = sdk._create_point("statement", "a raw paraphrase",
                              quote="the exact words", aboutObject="Acme",
                              embedding=[0.25, 0.25])
-    assert "embeddingText" not in sdk.get_point(point["id"])
+    assert "embeddingText" not in sdk._get_point(point["id"])
 
 
 def test_an_UNAVAILABLE_embedder_leaves_embeddingText_off_the_node(
@@ -326,9 +326,9 @@ def test_an_UNAVAILABLE_embedder_leaves_embeddingText_off_the_node(
     monkeypatch.setenv(COMPOSE_ENV, "1")
     monkeypatch.setattr("tortoise.embeddings.encode_for_row",
                         lambda content, dim: None)
-    point = sdk.create_point("statement", "a raw paraphrase",
+    point = sdk._create_point("statement", "a raw paraphrase",
                              quote="the exact words", aboutObject="Acme")
-    assert "embeddingText" not in sdk.get_point(point["id"])
+    assert "embeddingText" not in sdk._get_point(point["id"])
 
 
 def test_a_QUOTE_revise_does_not_recompose_create_only(sdk, recorder,
@@ -343,14 +343,14 @@ def test_a_QUOTE_revise_does_not_recompose_create_only(sdk, recorder,
     lane meets the residual as a DECLARED state rather than rediscovering it.
     """
     monkeypatch.setenv(COMPOSE_ENV, "1")
-    point = sdk.create_point("statement", "a raw paraphrase",
+    point = sdk._create_point("statement", "a raw paraphrase",
                              quote="the exact words")
-    composed = sdk.get_point(point["id"])["embeddingText"]
+    composed = sdk._get_point(point["id"])["embeddingText"]
     assert composed == "the exact words"
-    vector_before = sdk.get_point(point["id"])["embedding"]
+    vector_before = sdk._get_point(point["id"])["embedding"]
 
-    sdk.update_point(point["id"], quote="completely different words")
-    after = sdk.get_point(point["id"])
+    sdk._update_point(point["id"], quote="completely different words")
+    after = sdk._get_point(point["id"])
     assert after.get("quote") == "completely different words"
     assert after.get("embeddingText") == composed
     assert after.get("embedding") == vector_before

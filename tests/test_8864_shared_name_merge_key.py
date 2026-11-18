@@ -162,8 +162,8 @@ class TestSingleCarrierPathIsUnchanged:
         sdk = TortoiseSDK(str(tmp_path / "g.db"))
         try:
             proj = sdk._get_proj()
-            first = sdk.create_object("Solo", "company")["id"]
-            second = sdk.create_object("Solo", "company")["id"]
+            first = sdk._create_object("Solo", "company")["id"]
+            second = sdk._create_object("Solo", "company")["id"]
             assert first == second
             rows = _nodes(proj, "Object", "name")
             assert len(rows) == 1, f"content-hash dedup regressed: {rows}"
@@ -191,7 +191,7 @@ class TestSingleCarrierPathIsUnchanged:
             proj.g.query("CREATE (o:Object {id:'decoy-2', name:'Acme', status:'live'})")
             for _ in range(2):
                 with pytest.raises(AmbiguousEntityName):
-                    sdk.create_object("Acme", "company")
+                    sdk._create_object("Acme", "company")
             assert sorted(_ids(_nodes(proj, "Object"))) == ["decoy-1", "decoy-2"], (
                 f"a refused create still wrote a carrier: {_nodes(proj, 'Object')}")
         finally:
@@ -204,7 +204,7 @@ class TestSingleCarrierPathIsUnchanged:
             proj = sdk._get_proj()
             # A pre-#7936 style stub: carries the name, a foreign id, no _stub.
             proj.g.query("CREATE (o:Object {id:'random-ulid-stub', name:'Gamma', status:'live'})")
-            created = sdk.create_object("Gamma", "company")
+            created = sdk._create_object("Gamma", "company")
             rows = _nodes(proj, "Object", "name")
             assert len(rows) == 1, rows
             assert rows[0][0] == created["id"], (

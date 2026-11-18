@@ -207,16 +207,16 @@ def test_state_ranker_refuses_a_label_it_has_no_signal_set_for():
 
 def _seed_object_with_claims(sdk, *, beliefs=(0.9, None, None)) -> tuple[str, str]:
     """An Object and three claims about it; only the first carries a belief."""
-    obj = sdk.create_object("the deploy pipeline", objectKind="core:other")
+    obj = sdk._create_object("the deploy pipeline", objectKind="core:other")
     oid = obj["id"]
     pids = []
     for i, belief in enumerate(beliefs):
-        pid = sdk.create_point("statement", f"claim {i} about the deploy pipeline",
+        pid = sdk._create_point("statement", f"claim {i} about the deploy pipeline",
                                status="live")["id"]
         if belief is not None:
-            sdk.set_point_baseline(pid, 9.0 if belief > 0.5 else 1.0,
+            sdk._set_point_baseline(pid, 9.0 if belief > 0.5 else 1.0,
                                    1.0 if belief > 0.5 else 9.0)
-        sdk.create_edge("aboutObject", pid, oid)
+        sdk._create_edge("aboutObject", pid, oid)
         pids.append(pid)
     return oid, pids
 
@@ -259,12 +259,12 @@ def test_entity_confidence_is_absent_when_no_claim_carries_a_belief(sdk):
 
 
 def test_a_subject_gets_the_same_entity_signal_set(sdk):
-    subj = sdk.create_subject("epistemic-team")
+    subj = sdk._create_subject("epistemic-team")
     sid = subj["id"]
-    pid = sdk.create_point("statement", "the epistemic team owns the ranking lane",
+    pid = sdk._create_point("statement", "the epistemic team owns the ranking lane",
                            status="live")["id"]
-    sdk.set_point_baseline(pid, 9.0, 1.0)
-    sdk.create_edge("aboutSubject", pid, sid)
+    sdk._set_point_baseline(pid, 9.0, 1.0)
+    sdk._create_edge("aboutSubject", pid, sid)
     sig = GraphRanker(sdk._get_proj())._fetch_signals([sid], "subject")[sid]
     assert sig["degree"] == 1
     assert sig["confidence"] == pytest.approx(0.9, abs=1e-6)
@@ -279,8 +279,8 @@ def test_a_source_counts_the_claims_extracted_from_it(sdk):
         "CREATE (s:Source {url: $url, sourceKind: 'document'})",
         params={"url": url})
     for i in range(2):
-        pid = sdk.create_point("statement", f"extracted claim {i}", status="live")["id"]
-        sdk.set_point_baseline(pid, 3.0, 1.0)
+        pid = sdk._create_point("statement", f"extracted claim {i}", status="live")["id"]
+        sdk._set_point_baseline(pid, 3.0, 1.0)
         proj.g.query(
             "MATCH (p:Point {id: $pid}), (s:Source {url: $url}) "
             "CREATE (p)-[:extractedFrom]->(s)",
@@ -297,7 +297,7 @@ def test_an_uninformative_entity_read_says_so(sdk):
     the rows" are different facts — the conflation is what let a constant graph
     term read as a graph verdict.
     """
-    oid = sdk.create_object("an unreferenced object", objectKind="core:other")["id"]
+    oid = sdk._create_object("an unreferenced object", objectKind="core:other")["id"]
     r = GraphRanker(sdk._get_proj())
     r.rerank([{"id": oid, "name": "an unreferenced object",
                "scores": {"rrf": 0.5}}], entity_type="object")
@@ -461,7 +461,7 @@ def test_the_degree_ablation_reaches_entity_rows(monkeypatch):
 
 def test_graph_order_over_objects_reports_the_entity_family(sdk):
     oid, _ = _seed_object_with_claims(sdk)
-    rows = sdk.tortoise_fts_query("deploy pipeline", entity_type="object",
+    rows = sdk._tortoise_fts_query("deploy pipeline", entity_type="object",
                                   order_by="graph", limit=5)
     hit = next((r for r in rows if r["id"] == oid), None)
     assert hit is not None, "fixture must return the seeded Object"
@@ -499,13 +499,13 @@ def test_confidence_order_over_objects_uses_the_mean_claim_belief(sdk):
     name = f"conf-order-object-{uuid.uuid4().hex[:8]}"
     # ⚠️ inverted on purpose: `bare` gets the query VERBATIM so it wins fused
     # retrieval; `measured` sorts first only if its belief is read.
-    bare = sdk.create_object(name, objectKind="core:other")["id"]
-    measured = sdk.create_object(f"{name} measured", objectKind="core:other")["id"]
+    bare = sdk._create_object(name, objectKind="core:other")["id"]
+    measured = sdk._create_object(f"{name} measured", objectKind="core:other")["id"]
     for i in range(2):
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "statement", f"a confident claim {i} about {name}", status="live")["id"]
-        sdk.set_point_baseline(pid, 9.0, 1.0)      # mean 0.9
-        sdk.create_edge("aboutObject", pid, measured)
+        sdk._set_point_baseline(pid, 9.0, 1.0)      # mean 0.9
+        sdk._create_edge("aboutObject", pid, measured)
 
     # The sort KEY itself, read through the same call the SDK's
     # ``order_by="confidence"`` branch makes. Asserted as a VALUE because an
@@ -518,7 +518,7 @@ def test_confidence_order_over_objects_uses_the_mean_claim_belief(sdk):
     assert read[bare]["confidence"] is None, (
         "the belief-less Object must answer ABSENT, not a fabricated neutral")
 
-    rows = sdk.tortoise_fts_query(name, entity_type="object",
+    rows = sdk._tortoise_fts_query(name, entity_type="object",
                                   order_by="confidence", limit=10)
     ids = [r["id"] for r in rows]
     assert measured in ids and bare in ids, (
@@ -568,7 +568,7 @@ def test_identity_match_fires_on_a_source_title(sdk):
         params={"url": url, "title": title,
                 "st": f"{title}, supplementary topic"})
 
-    rows = sdk.tortoise_fts_query(title, entity_type="source",
+    rows = sdk._tortoise_fts_query(title, entity_type="source",
                                   order_by="graph", limit=10)
     hit = next((r for r in rows if r["id"] == url), None)
     assert hit is not None, (

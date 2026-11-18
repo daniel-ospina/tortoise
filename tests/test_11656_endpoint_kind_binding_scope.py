@@ -1711,7 +1711,7 @@ class TestTheThirdDoorExists:
     def test_create_direct_edge_takes_a_declared_label(self):
         from tortoise.sdk import TortoiseSDK
 
-        params = inspect.signature(TortoiseSDK.create_direct_edge).parameters
+        params = inspect.signature(TortoiseSDK._create_direct_edge).parameters
         assert "label" in params, "the direct door takes the declared predicate, so it IS a declared-relation writer"
         assert "from_kind" not in params and "to_kind" not in params
 
@@ -1719,7 +1719,7 @@ class TestTheThirdDoorExists:
         """Nothing at this door inspects kinds today — the gate is what #11656 adds there."""
         from tortoise.sdk import TortoiseSDK
 
-        source = inspect.getsource(TortoiseSDK.create_direct_edge)
+        source = inspect.getsource(TortoiseSDK._create_direct_edge)
         for absent in ("kind_pair_verdict", "undeclared_relation", "expand_kind"):
             assert absent not in source, (
                 f"`{absent}` now appears in create_direct_edge — re-derive §1.2: either the gate landed "
@@ -1746,7 +1746,7 @@ class TestTheThirdDoorExists:
             "then be reachable with no declared predicate, and §1.1's 33-of-35 direct-shape count is void"
         )
 
-        ingest = inspect.getsource(TortoiseSDK.ingest)
+        ingest = inspect.getsource(TortoiseSDK._ingest)
         # ⛔ LEADING NEWLINE, not a bare substring. `sdk.py` also carries
         # `if _request_route == "direct" and _route == "operator":` — `_request_route` ENDS IN `_route`,
         # so the needle matches INSIDE it (not at the end of the line) — so a bare `in` check stayed green

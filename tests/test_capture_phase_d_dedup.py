@@ -332,7 +332,7 @@ def test_v2_seam_cross_id_content_hit_no_phantom_no_churn(sdk, monkeypatch):
     pt_<sha> that was never created) and the canonical's props/provenance
     are untouched (no first-writer churn)."""
     content = "The database schema needs normalization before the release."
-    prior = sdk.create_point("statement", content, session_id="prior-session")
+    prior = sdk._create_point("statement", content, session_id="prior-session")
     proj = sdk._get_proj()
     import tortoise.extractor_v2 as ev2
     monkeypatch.setattr(ev2, "extract_session_v2",
@@ -374,7 +374,7 @@ def test_v2_noop_gate_only_surfaces_capture_provenanced_identical(sdk, monkeypat
     assert any("not surfaced" in w for w in res["warnings"]), res["warnings"]
 
     # identical fold onto a node WITHOUT capture provenance → NOT surfaced
-    orphan = sdk.create_point("statement", "unprovenanced identical claim")
+    orphan = sdk._create_point("statement", "unprovenanced identical claim")
     noops = [{"point_id": orphan["id"], "reason": "identical",
               "overlap": 1.0, "evidence": "exact"}]
     monkeypatch.setattr(ev2, "extract_session_v2", _stub_extractor([], noops))
@@ -432,7 +432,7 @@ def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     end-to-end by test_capture_never_promotes_a_folded_explicit_draft."""
     from tortoise.sdk import _capture_ep_target_ids
     proj = sdk._get_proj()
-    live = sdk.create_point("statement", "live calibrated claim")
+    live = sdk._create_point("statement", "live calibrated claim")
     # No promotion call: create_point's implicit status is live since #1088
     # (the old update_point(status="live") here was a redundant no-op).
     # Mark the live node as EP-calibrated (the state a successful ingest EP
@@ -446,7 +446,7 @@ def test_capture_ep_target_ids_first_time_fold_calibration(sdk):
     ) == []
     # a live node WITHOUT EP (its ingest EP pass failed fail-open) gets its
     # FIRST calibration on a folded re-ingest
-    uncal = sdk.create_point("statement", "live but uncalibrated claim")
+    uncal = sdk._create_point("statement", "live but uncalibrated claim")
     assert _capture_ep_target_ids(
         [{"id": uncal["id"], "dedup": DEDUP_CONTENT_HASH_HIT}], proj
     ) == [uncal["id"]]
@@ -488,14 +488,14 @@ def test_capture_never_promotes_a_folded_explicit_draft(sdk, monkeypatch):
         "MATCH (n:Point {id:$id}) SET n.status='draft' "
         "REMOVE n.posterior_alpha, n.posterior_beta, n.ep_alpha, n.ep_beta",
         params={"id": canonical_id})
-    assert sdk.get_point(canonical_id)["status"] == "draft"
+    assert sdk._get_point(canonical_id)["status"] == "draft"
     # 3. A later capture folds onto the explicit draft (no payload points).
     fold = _stub_extractor([], noops=[
         {"point_id": canonical_id, "reason": "identical",
          "overlap": 1.0, "evidence": "exact"}])
     monkeypatch.setattr(ev2, "extract_session_v2", fold)
     res = sdk._capture_session([{"role": "user", "content": "hello"}])
-    after = sdk.get_point(canonical_id)
+    after = sdk._get_point(canonical_id)
     assert after["status"] == "draft", (
         "an explicitly-drafted point a later capture deduped onto was "
         f"promoted: {res}"

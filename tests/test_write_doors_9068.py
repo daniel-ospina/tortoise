@@ -616,11 +616,11 @@ class TestSdkLiveDoorsAreGated:
         """
         sdk = _mk_sdk(tmp_path)
         _seed_install(sdk, DEV)
-        point = sdk.create_point("statement", "gated write")
+        point = sdk._create_point("statement", "gated write")
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
         with pytest.raises(UnapprovedKindNamespace) as excinfo:
-            sdk.update_point(point["id"], pointKind=f"{MARKETING}:campaign")
+            sdk._update_point(point["id"], pointKind=f"{MARKETING}:campaign")
         assert MARKETING in str(excinfo.value)
         assert graph_installed_namespaces(sdk) == frozenset({DEV}), (
             "the refused update must not have widened the approval set")
@@ -632,7 +632,7 @@ class TestSdkLiveDoorsAreGated:
 
         # CONTROL: a bare (core) kind is an input the gate ADMITS — this is an
         # input constraint, never a blanket ban on updating kind properties.
-        sdk.update_point(point["id"], pointKind="hypothesis")
+        sdk._update_point(point["id"], pointKind="hypothesis")
         assert [r[0] for r in sdk._get_proj().g.query(
             "MATCH (n:Point {id: $id}) RETURN n.pointKind",
             params={"id": point["id"]}).result_set] == ["hypothesis"]
@@ -699,7 +699,7 @@ class TestPropsDoorsScreenTheFoldAliases:
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
         with pytest.raises(UnapprovedKindNamespace) as excinfo:
-            sdk.create_object("x", props={"object_kind": f"{PM}:issue"})
+            sdk._create_object("x", props={"object_kind": f"{PM}:issue"})
         assert PM in str(excinfo.value)
         assert excinfo.value.prop == "objectKind", (
             "the refusal must name the stored property, not the alias")
@@ -709,7 +709,7 @@ class TestPropsDoorsScreenTheFoldAliases:
 
         # CONTROL: the SAME alias path with a bare spelling lands, and it
         # lands AS the camel property (which is why the alias leg is needed).
-        sdk.create_object("y", props={"object_kind": "other"})
+        sdk._create_object("y", props={"object_kind": "other"})
         rows = sdk._get_proj().g.query(
             "MATCH (o:Object) RETURN o.name, o.objectKind").result_set
         assert [tuple(r) for r in rows] == [("y", "other")]
@@ -733,7 +733,7 @@ class TestPropsDoorsScreenTheFoldAliases:
         """
         sdk = _mk_sdk(tmp_path)
         _seed_install(sdk, DEV)
-        obj = sdk.create_object("thing")
+        obj = sdk._create_object("thing")
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
         with pytest.raises(UnapprovedKindNamespace) as excinfo:
@@ -776,11 +776,11 @@ class TestPropsDoorsScreenTheFoldAliases:
         """
         sdk = _mk_sdk(tmp_path)
         _seed_install(sdk, DEV)
-        obj = sdk.create_object("target")
+        obj = sdk._create_object("target")
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
         with pytest.raises(UnapprovedKindNamespace) as excinfo:
-            sdk.link_source_to_entity(
+            sdk._link_source_to_entity(
                 "https://example.test/refused", obj["id"], "Object",
                 f"{MARKETING}:anything")
         assert MARKETING in str(excinfo.value)
@@ -788,7 +788,7 @@ class TestPropsDoorsScreenTheFoldAliases:
             "MATCH (s:Source) RETURN s").result_set == []
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
-        sdk.link_source_to_entity(
+        sdk._link_source_to_entity(
             "https://example.test/ok", obj["id"], "Object", "web")
         assert [r[0] for r in sdk._get_proj().g.query(
             "MATCH (s:Source) RETURN s.sourceKind").result_set] == ["web"]

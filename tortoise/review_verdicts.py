@@ -493,7 +493,7 @@ class VerdictLayer:
 
             self.sdk.approve_merge(candidate_id, action="merge")
             try:
-                applied = self.sdk.promote_point(candidate_id)
+                applied = self.sdk._promote_point(candidate_id)
             except Exception:
                 if not _promotion_landed():
                     _roll_back_review_write()
@@ -508,7 +508,7 @@ class VerdictLayer:
             # A live candidate was already promoted — reject must tombstone it.
             if props.get("status") == "live":
                 applied = {"retracted": True,
-                           "retract": self.sdk.retract_point(candidate_id)}
+                           "retract": self.sdk._retract_point(candidate_id)}
         else:  # VERDICT_CLOSE
             reviewed_key = "temporal_reviewed" if is_temporal else "dedup_reviewed"
             self._proj.g.query(

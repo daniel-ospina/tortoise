@@ -105,7 +105,7 @@ def test_create_point_with_unindexed_name_warns_and_still_lands(sdk, caplog):
     findable) and it must still LAND — warn-not-block is #1934's recorded
     decision, and refusing this write would break every existing caller."""
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
-        created = sdk.create_point("statement", "the body says nothing else",
+        created = sdk._create_point("statement", "the body says nothing else",
                                    name=_TITLE)
 
     advisories = _advisories(caplog)
@@ -117,29 +117,29 @@ def test_create_point_with_unindexed_name_warns_and_still_lands(sdk, caplog):
     assert "name" in message, message
 
     # WARN, NEVER BLOCK: the write landed and the node holds the name.
-    point = sdk.get_point(created["id"])
+    point = sdk._get_point(created["id"])
     assert point.get("name") == _TITLE
 
 
 def test_update_point_with_unindexed_name_warns(sdk, caplog):
     """The second door the issue measured (``update_point(pid, name=…)``)."""
-    pid = sdk.create_point("statement", "the body says nothing else")["id"]
+    pid = sdk._create_point("statement", "the body says nothing else")["id"]
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
-        sdk.update_point(pid, name=_TITLE)
+        sdk._update_point(pid, name=_TITLE)
 
     advisories = _advisories(caplog)
     assert len(advisories) == 1, advisories
     assert "update_point" in advisories[0], advisories[0]
-    assert sdk.get_point(pid).get("name") == _TITLE
+    assert sdk._get_point(pid).get("name") == _TITLE
 
 
 def test_update_entity_point_branch_warns(sdk, caplog):
     """The THIRD Point write seam. It writes with a live ``SET n += $p`` and
     does NOT pass through the projection's shared Point writer, so it needs the
     advisory at its own door — this pins that it has one."""
-    pid = sdk.create_point("statement", "the body says nothing else")["id"]
+    pid = sdk._create_point("statement", "the body says nothing else")["id"]
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
@@ -148,7 +148,7 @@ def test_update_entity_point_branch_warns(sdk, caplog):
     advisories = _advisories(caplog)
     assert len(advisories) == 1, advisories
     assert "update_entity" in advisories[0], advisories[0]
-    assert sdk.get_point(pid).get("name") == _TITLE
+    assert sdk._get_point(pid).get("name") == _TITLE
 
 
 # ── no false positives on the shapes that ARE findable ─────────────────────
@@ -158,11 +158,11 @@ def test_a_name_already_in_content_does_not_warn(sdk, caplog):
     is findable and there is nothing to advise — a warning here would be noise
     that hides a genuine one."""
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
-        created = sdk.create_point(
+        created = sdk._create_point(
             "statement", f"the body does say {_TITLE} verbatim", name=_TITLE)
 
     assert _advisories(caplog) == []
-    assert sdk.get_point(created["id"]).get("name") == _TITLE
+    assert sdk._get_point(created["id"]).get("name") == _TITLE
 
 
 def test_a_name_already_in_search_keys_does_not_warn(sdk, caplog):
@@ -170,12 +170,12 @@ def test_a_name_already_in_search_keys_does_not_warn(sdk, caplog):
     string form BEFORE the coverage check, so a list-valued caller sees the
     same verdict as the graph does."""
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
-        created = sdk.create_point("statement", "the body says nothing else",
+        created = sdk._create_point("statement", "the body says nothing else",
                                    name=_TITLE,
                                    search_keys=[_TITLE, "extra-alias"])
 
     assert _advisories(caplog) == []
-    assert sdk.get_point(created["id"]).get("name") == _TITLE
+    assert sdk._get_point(created["id"]).get("name") == _TITLE
 
 
 def test_update_entity_on_a_non_point_does_not_warn(sdk, caplog):
@@ -183,7 +183,7 @@ def test_update_entity_on_a_non_point_does_not_warn(sdk, caplog):
     Subject/Object/Event (``_FULLTEXT_INDEX_LABEL_FIELDS``). A label-blind
     advisory would warn on exactly the shape the index supports — so the check
     is POINT-gated, and this is the pin for that gate."""
-    subject = sdk.create_subject("10122 subject")
+    subject = sdk._create_subject("10122 subject")
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger=_SDK_LOGGER):
@@ -212,9 +212,9 @@ def test_the_name_only_point_is_invisible_to_the_fts_leg(sdk):
     (#5534's blank instrument), certifying nothing — so the same title is
     written into ``content`` on a sibling point and MUST be found.
     """
-    name_only = sdk.create_point("statement", "the body says nothing else",
+    name_only = sdk._create_point("statement", "the body says nothing else",
                                  name=_TITLE)
-    in_content = sdk.create_point("statement",
+    in_content = sdk._create_point("statement",
                                   f"the body carries {_TITLE} verbatim")
 
     hits = [pid for pid, _score in run_fts_query(
@@ -251,7 +251,7 @@ def test_scattered_name_tokens_in_content_do_not_warn(sdk, caplog):
     and this reds with the advisory present.
     """
     with caplog.at_level(logging.WARNING):
-        created = sdk.create_point(
+        created = sdk._create_point(
             "statement",
             "the probe was a write for capstone and 9664 rows, all four tokens",
             name="capstone-9664 write probe",
@@ -269,7 +269,7 @@ def test_a_partial_token_overlap_does_not_warn(sdk, caplog):
     rank, which is not what it may claim. Same mutation as above.
     """
     with caplog.at_level(logging.WARNING):
-        created = sdk.create_point(
+        created = sdk._create_point(
             "statement", "the probe was a write for capstone",
             name="capstone-9664 write probe")
     assert created.get("id"), "FIXTURE NOT REACHED: the point was not created"
@@ -299,7 +299,7 @@ def test_a_prose_pair_does_not_silence_an_identifier_name(sdk, caplog):
     premise.
     """
     with caplog.at_level(logging.WARNING):
-        created = sdk.create_point("statement", "sprint 2024 planning",
+        created = sdk._create_point("statement", "sprint 2024 planning",
                                    name="sprint2024")
     assert created.get("id"), "FIXTURE NOT REACHED: the point was not created"
     hits = [pid for pid, _score in run_fts_query(
@@ -323,7 +323,7 @@ def test_update_point_miss_does_not_warn(sdk, caplog):
     FAIL VALUE: drop the existence probe before the advisory and this reds.
     """
     with caplog.at_level(logging.WARNING):
-        out = sdk.update_point("no-such-point-10122", name="capstone-9664 x")
+        out = sdk._update_point("no-such-point-10122", name="capstone-9664 x")
     assert out == {}, f"FIXTURE NOT REACHED: expected a miss, got {out}"
     assert not _advisories(caplog), (
         "a miss writes nothing, so there is nothing to advise: "
@@ -369,11 +369,11 @@ def test_a_name_only_update_silenced_by_stored_content(sdk, caplog):
 
     FAIL VALUE: drop `stored_text=` from the update door and this reds.
     """
-    created = sdk.create_point(
+    created = sdk._create_point(
         "statement", "the body mentions capstone heavily, and 9664 too")
     pid = created["id"]
     with caplog.at_level(logging.WARNING):
-        sdk.update_point(pid, name="capstone-9664")
+        sdk._update_point(pid, name="capstone-9664")
     assert not _advisories(caplog), (
         "the STORED content already carries the name's tokens, so the record is "
         f"reachable by its name — no advisory belongs here: "
@@ -393,12 +393,12 @@ def test_a_name_only_update_silenced_by_the_stored_QUOTE(sdk, caplog):
     FAIL VALUE: delete the ``"quote": _name_row[3]`` arm from the update door
     and this reds while the content-only test above stays green.
     """
-    created = sdk.create_point(
+    created = sdk._create_point(
         "statement", "an unrelated body about curtains",
         quote="capstone-9664 shipped on Tuesday")
     pid = created["id"]
     with caplog.at_level(logging.WARNING):
-        sdk.update_point(pid, name="capstone-9664")
+        sdk._update_point(pid, name="capstone-9664")
     assert not _advisories(caplog), (
         "the stored QUOTE carries the name's tokens and quote is indexed since "
         "#11682, so the record IS reachable by its name — no advisory belongs "
@@ -412,10 +412,10 @@ def test_a_name_only_update_on_a_point_without_its_tokens_still_warns(sdk, caplo
 
     FAIL VALUE: silence unconditionally on the update door and this reds.
     """
-    created = sdk.create_point("statement", "an unrelated body about curtains")
+    created = sdk._create_point("statement", "an unrelated body about curtains")
     pid = created["id"]
     with caplog.at_level(logging.WARNING):
-        sdk.update_point(pid, name="capstone-9664")
+        sdk._update_point(pid, name="capstone-9664")
     assert len(_advisories(caplog)) == 1, (
         "the stored text carries none of the name's tokens, so the advisory is "
         f"correct here: {[r.message for r in caplog.records]}")
@@ -435,7 +435,7 @@ def test_an_identifier_shaped_name_with_no_tokens_still_warns(sdk, caplog):
     FAIL VALUE: restore the `if not name_tokens: return` guard and this reds.
     """
     with caplog.at_level(logging.WARNING):
-        created = sdk.create_point("statement", "an unrelated body about curtains",
+        created = sdk._create_point("statement", "an unrelated body about curtains",
                                    name="R&D")
     assert created.get("id"), "FIXTURE NOT REACHED: the point was not created"
     assert len(_advisories(caplog)) == 1, (
@@ -454,10 +454,10 @@ def test_a_refused_update_does_not_warn(sdk, caplog):
 
     FAIL VALUE: move the advisory back above the status guard and this reds.
     """
-    created = sdk.create_point("statement", "an unrelated body about curtains")
+    created = sdk._create_point("statement", "an unrelated body about curtains")
     pid = created["id"]
     with caplog.at_level(logging.WARNING), pytest.raises(ValueError):
-        sdk.update_point(pid, name="capstone-9664", status="retracted")
+        sdk._update_point(pid, name="capstone-9664", status="retracted")
     assert not _advisories(caplog), (
         "the update was REFUSED, so nothing was written and there is nothing "
         f"to advise: {[r.message for r in caplog.records]}")
@@ -477,11 +477,11 @@ def test_an_update_that_replaces_the_covering_content_still_warns(sdk, caplog):
     FAIL VALUE: union the stored text unconditionally (the previous version)
     and this reds.
     """
-    created = sdk.create_point(
+    created = sdk._create_point(
         "statement", "the capstone audit body mentions 9664")
     pid = created["id"]
     with caplog.at_level(logging.WARNING):
-        sdk.update_point(pid, name="capstone-9664",
+        sdk._update_point(pid, name="capstone-9664",
                          content="unrelated curtains here")
     assert len(_advisories(caplog)) == 1, (
         "the update REPLACED the only text that carried the name's tokens, so "
@@ -494,11 +494,11 @@ def test_a_search_keys_replacement_also_counts_per_field(sdk, caplog):
 
     FAIL VALUE: as above, unioned stored text reds this.
     """
-    created = sdk.create_point("statement", "an audit body",
+    created = sdk._create_point("statement", "an audit body",
                                search_keys="capstone 9664")
     pid = created["id"]
     with caplog.at_level(logging.WARNING):
-        sdk.update_point(pid, name="capstone-9664",
+        sdk._update_point(pid, name="capstone-9664",
                          search_keys="unrelated alias")
     assert len(_advisories(caplog)) == 1, (
         "the replacement dropped the only aliases that carried the name: "

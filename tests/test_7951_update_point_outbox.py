@@ -117,11 +117,11 @@ def test_update_point_appends_the_revision_before_the_cache_write(env, monkeypat
     journal entry is absent).
     """
     sdk, _events = env
-    pid = sdk.create_point("statement", "a claim to revise")["id"]
+    pid = sdk._create_point("statement", "a claim to revise")["id"]
 
     order = _order_spies(sdk, monkeypatch, r"SET n \+= \$props")
 
-    updated = sdk.update_point(pid, custom_field="revised")
+    updated = sdk._update_point(pid, custom_field="revised")
     assert updated.get("custom_field") == "revised", (
         f"the update did not land, so the cache half is vacuous: {updated!r}")
 
@@ -148,7 +148,7 @@ def test_a_failed_append_does_not_write_the_cache_on_update(env, monkeypatch):
     written with no record — the `custom_field` assertion fails.
     """
     sdk, _events = env
-    pid = sdk.create_point("statement", "a claim whose revision cannot be "
+    pid = sdk._create_point("statement", "a claim whose revision cannot be "
                                         "journalled")["id"]
 
     log = sdk._get_event_log()
@@ -160,7 +160,7 @@ def test_a_failed_append_does_not_write_the_cache_on_update(env, monkeypatch):
     monkeypatch.setattr(log, "append", _boom)
 
     with pytest.raises(WriteNotLandedError) as ei:
-        sdk.update_point(pid, custom_field="never-landed")
+        sdk._update_point(pid, custom_field="never-landed")
 
     assert ei.value.record_committed is False, (
         "the append FAILED, so the record is not committed and the cache must "
@@ -168,7 +168,7 @@ def test_a_failed_append_does_not_write_the_cache_on_update(env, monkeypatch):
     assert ei.value.operation == "update_point", (
         "the error must name the door that raised it — a create_point message "
         f"on an update is a lie the caller cannot see past: {ei.value}")
-    live = dict(sdk.get_point(pid))
+    live = dict(sdk._get_point(pid))
     assert "custom_field" not in live, (
         "the revision was written although its record was never committed — "
         f"the derived store leads the truth (§17.1): {live!r}")
@@ -190,7 +190,7 @@ def test_a_failed_cache_write_leaves_the_revision_replayable(env, monkeypatch):
     """
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "original content")["id"]
+    pid = sdk._create_point("statement", "original content")["id"]
 
     real_query = proj.g.query
     state = {"fail": True}
@@ -203,7 +203,7 @@ def test_a_failed_cache_write_leaves_the_revision_replayable(env, monkeypatch):
     monkeypatch.setattr(type(proj.g), "query", spy_query)
 
     with pytest.raises(RuntimeError, match="simulated write failure"):
-        sdk.update_point(pid, content="revised content")
+        sdk._update_point(pid, content="revised content")
 
     revisions = _revisions(events)
     assert len(revisions) == 1, (
@@ -211,13 +211,13 @@ def test_a_failed_cache_write_leaves_the_revision_replayable(env, monkeypatch):
         f"{revisions!r}")
     assert revisions[0].get("new_content") == "revised content", (
         f"the committed record does not carry the intent: {revisions[0]!r}")
-    assert dict(sdk.get_point(pid)).get("content") == "original content", (
+    assert dict(sdk._get_point(pid)).get("content") == "original content", (
         "the cache write was supposed to fail — the node must still hold the "
         "pre-revision content")
 
     state["fail"] = False
     proj.rebuild_all(str(events), confirm_destructive=True)
-    assert dict(sdk.get_point(pid)).get("content") == "revised content", (
+    assert dict(sdk._get_point(pid)).get("content") == "revised content", (
         "the committed revision did not heal the cache on replay — the update "
         "is lost, which is the window this ordering exists to close")
 
@@ -240,7 +240,7 @@ def test_the_promote_arm_stays_apply_first_a_recorded_deviation(env, monkeypatch
     red the other — the `:Object` arm was measured unpinned before this.
     """
     sdk, _events = env
-    pid = sdk.create_point("statement", "a draft claim", status="draft")["id"]
+    pid = sdk._create_point("statement", "a draft claim", status="draft")["id"]
     proj = sdk._get_proj()
     if arm == "object":
         # No production path mints a `:Point:Object`; build the shape by hand.
@@ -263,7 +263,7 @@ def test_the_promote_arm_stays_apply_first_a_recorded_deviation(env, monkeypatch
 
     order = _order_spies(sdk, monkeypatch, r"SET n\.status = 'live'")
 
-    sdk.update_point(pid, status="live", custom_field="promoted")
+    sdk._update_point(pid, status="live", custom_field="promoted")
     assert "cache" in order and "journal" in order, (
         f"the spy missed one half of the promote — vacuous otherwise: {order!r}")
     assert order.index("cache") < order.index("journal"), (
@@ -282,12 +282,12 @@ def test_a_refused_promote_journals_no_revision(env):
     promotion, and a replay would resurrect it.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "a claim to retract")["id"]
-    sdk.retract_point(pid)
+    pid = sdk._create_point("statement", "a claim to retract")["id"]
+    sdk._retract_point(pid)
     before = len(_revisions(events))
 
     with pytest.raises(ValueError, match="Illegal status transition"):
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
 
     assert len(_revisions(events)) == before, (
         "the refused promote was journalled: a replay would apply a promotion "
@@ -304,7 +304,7 @@ def test_update_point_appends_exactly_one_revision(env):
     pre-write one) reddens here rather than growing the journal silently.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "one claim")["id"]
-    sdk.update_point(pid, custom_field="one revision")
+    pid = sdk._create_point("statement", "one claim")["id"]
+    sdk._update_point(pid, custom_field="one revision")
     assert len(_revisions(events)) == 1, (
         f"a revision must append exactly one PointRevised: {_revisions(events)!r}")

@@ -97,17 +97,17 @@ def _make_candidate(sdk, tmp, *, tx=D2_TX, session=T2):
     """
     _mine(sdk, D1_TX, "rv-d1", T1, str(tmp))
     prior = _prior_id(sdk)
-    sdk.promote_point(prior)
+    sdk._promote_point(prior)
     _mine(sdk, tx, "rv-d2", session, str(tmp))
     cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
     assert cands, "expected a temporal correction candidate"
     cid = cands[0]["id"]
-    props = sdk.get_point(cid)
+    props = sdk._get_point(cid)
     return cid, prior, props.get("batch_id")
 
 
 def _props(sdk, point_id):
-    return sdk.get_point(point_id)
+    return sdk._get_point(point_id)
 
 
 def _seed_candidate(sdk, cid, prior_id):
@@ -285,7 +285,7 @@ class TestVerdictMapping:
 
     def test_reject_retracts_an_already_live_candidate(self, sdk, tmp_path):
         cid, _prior, _batch = _make_candidate(sdk, tmp_path)
-        sdk.promote_point(cid)  # live, but not yet decided by the layer
+        sdk._promote_point(cid)  # live, but not yet decided by the layer
         VerdictLayer(sdk).decide(cid, VERDICT_REJECT)
         assert _props(sdk, cid)["status"] == "retracted"
 

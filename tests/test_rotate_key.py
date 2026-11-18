@@ -1234,7 +1234,7 @@ def _reg_seed_org(reg, org_id: str, *, max_api_keys: int = 5) -> None:
     keeps the gate out of the way so the CLAIM is the deciding write (the same
     reason the Supabase twin uses the `solo` tier).
     """
-    reg.query(
+    reg._query(
         "CREATE (t:Team {id:$id, name:$id, tier:'free', max_api_keys:$mak})",
         params={"id": org_id, "mak": max_api_keys},
     )
@@ -1249,7 +1249,7 @@ def _reg_seed_key(reg, org_id: str, key_id: str, *, token: str | None = None,
     class `_require_keys_manage` admits."""
     from tortoise.auth import hash_api_key
 
-    reg.query(
+    reg._query(
         "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp, "
         "created_at:$ca, revoked_at:$ra, expires_at:null, created_via:$cv})",
         params={
@@ -1263,7 +1263,7 @@ def _reg_seed_key(reg, org_id: str, key_id: str, *, token: str | None = None,
 
 
 def _reg_live(reg, org_id: str) -> list[str]:
-    rows = reg.query(
+    rows = reg._query(
         "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL RETURN k.id",
         params={"tid": org_id},
     ).result_set
@@ -1271,7 +1271,7 @@ def _reg_live(reg, org_id: str) -> list[str]:
 
 
 def _reg_revoked(reg, key_id: str):
-    rows = reg.query(
+    rows = reg._query(
         "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at", params={"id": key_id},
     ).result_set
     return rows[0][0] if rows else None

@@ -62,11 +62,11 @@ def _chain(sdk: TortoiseSDK, n: int = 3) -> list[str]:
     """n live claims linked by n-1 IMPL operators (a real EP factor graph)."""
     ids = []
     for i in range(n):
-        pid = sdk.create_point("statement", f"claim {i}", dedup=False,
+        pid = sdk._create_point("statement", f"claim {i}", dedup=False,
                                status="live")["id"]
         ids.append(pid)
     for a, b in itertools.pairwise(ids):
-        sdk.create_operator("IMPL", a, [b])
+        sdk._create_operator("IMPL", a, [b])
     return ids
 
 
@@ -95,7 +95,7 @@ def _raw_append(events, sdk, type_: str, **fields) -> None:
     rebuild replays it) — the raw-producer leverage the rebuild tests use."""
     import datetime as _dt
     line = {
-        "event_id": sdk.ulid(),
+        "event_id": sdk._ulid(),
         "ts": _dt.datetime.now(_dt.UTC).isoformat(),
         "type": type_,
         "initiated_by": "raw-producer",
@@ -114,8 +114,8 @@ def _outdated(sdk: TortoiseSDK, pid: str):
 
 def _run_dream(sdk: TortoiseSDK, ids: list[str]) -> None:
     """Drive a real incremental EP+dream pass over the chain."""
-    sdk.set_point_baseline(ids[-1], 8.0, 2.0)  # evidence → non-uniform EP
-    sdk.dream(dirty_only=True, require_calibration=False)
+    sdk._set_point_baseline(ids[-1], 8.0, 2.0)  # evidence → non-uniform EP
+    sdk._dream(dirty_only=True, require_calibration=False)
 
 
 # ── (a) the write-back is journaled ───────────────────────────────
@@ -422,7 +422,7 @@ def test_f3_baseline_clear_replays_over_the_prior_posterior(journaled):
     _db, events, sdk = journaled
     ids = _chain(sdk)
     _run_dream(sdk, ids)                       # journals real posteriors
-    sdk.set_point_baseline(ids[0], 5.0, 1.0)   # live clear of posteriors
+    sdk._set_point_baseline(ids[0], 5.0, 1.0)   # live clear of posteriors
     assert _state(sdk, [ids[0]])[ids[0]]["posterior_alpha"] is None
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _state(sdk, [ids[0]])[ids[0]]["posterior_alpha"] is None, (
@@ -433,7 +433,7 @@ def test_f3_inheritance_revert_journals_the_clear(journaled):
     """The `_apply_source_inheritance` revert REMOVE must journal the two
     belief keys it cleared, or a rebuild restores the reverted prior."""
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "inherited claim",
+    pid = sdk._create_point("statement", "inherited claim",
                            extractedFrom="https://s0.example",
                            status="live")["id"]
     sdk._get_proj().g.query(
@@ -490,7 +490,7 @@ def test_f4_update_point_belief_props_folded_on_replay(journaled):
     the `PointRevised` payload; the replay fold must apply it, not drop it."""
     _db, events, sdk = journaled
     ids = _chain(sdk, n=2)
-    sdk.update_point(ids[0], confidence=0.123, posterior_alpha=4.5)
+    sdk._update_point(ids[0], confidence=0.123, posterior_alpha=4.5)
     assert _state(sdk, [ids[0]])[ids[0]]["confidence"] == pytest.approx(0.123)
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -542,11 +542,11 @@ def test_f4b_update_point_moving_the_pair_clears_the_stale_mirror(journaled):
     ids = _chain(sdk, n=2)
     # A caller-set mirror beside no pair — a real public shape
     # (`update_point(confidence=…)` is caller-owned, folded by FIX-4 above).
-    sdk.update_point(ids[0], confidence=0.9)
+    sdk._update_point(ids[0], confidence=0.9)
     assert _state(sdk, [ids[0]])[ids[0]]["confidence"] == pytest.approx(0.9)
 
     # Moving the posterior must not leave it behind.
-    sdk.update_point(ids[0], posterior_alpha=10.0, posterior_beta=10.0)
+    sdk._update_point(ids[0], posterior_alpha=10.0, posterior_beta=10.0)
     st = _state(sdk, [ids[0]])[ids[0]]
     assert st["confidence"] is None, (
         "update_point moved the pair and left the stale mirror: " + repr(st))
@@ -555,14 +555,14 @@ def test_f4b_update_point_moving_the_pair_clears_the_stale_mirror(journaled):
 
     # A HALF pair is the same rule, and it is the shape that used to inherit
     # the mirror's number for a claim with no mean at all.
-    sdk.update_point(ids[1], confidence=0.7)
-    sdk.update_point(ids[1], posterior_alpha=3.0)
+    sdk._update_point(ids[1], confidence=0.7)
+    sdk._update_point(ids[1], posterior_alpha=3.0)
     st1 = _state(sdk, [ids[1]])[ids[1]]
     assert st1["confidence"] is None, st1
 
     # An explicit caller-supplied `confidence` still wins — it is caller-owned,
     # so the only writer this door overrides is the one it defeats.
-    sdk.update_point(ids[0], confidence=0.42, posterior_alpha=1.0,
+    sdk._update_point(ids[0], confidence=0.42, posterior_alpha=1.0,
                      posterior_beta=1.0)
     assert _state(sdk, [ids[0]])[ids[0]]["confidence"] == pytest.approx(0.42)
 
@@ -654,7 +654,7 @@ def test_f5_run_ep_propagation_journals_through_the_threaded_api(journaled):
     # Non-empty evidence: `_run_ep_propagation` refuses a fully
     # uncalibrated graph. (update_point also journals a PointRevised.)
     for pid in ids:
-        sdk.update_point(pid, confidence=0.6)
+        sdk._update_point(pid, confidence=0.6)
 
     ingest_log = _events / "ingest_propagation.jsonl"
     api = EventAPI(EventLog(ingest_log), initiated_by="extractor")
@@ -701,8 +701,8 @@ def test_f5_run_ep_propagation_journals_through_the_threaded_api(journaled):
 
 def test_a2_promote_belief_props_agree_across_rebuild(journaled):
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "draft claim", status="draft")["id"]
-    sdk.update_point(pid, status="live", confidence=0.5, posterior_alpha=3.0)
+    pid = sdk._create_point("statement", "draft claim", status="draft")["id"]
+    sdk._update_point(pid, status="live", confidence=0.5, posterior_alpha=3.0)
     # Live: the promote arm wrote them (write == journal).
     assert _state(sdk, [pid])[pid]["confidence"] == pytest.approx(0.5)
     assert _state(sdk, [pid])[pid]["posterior_alpha"] == pytest.approx(3.0)
@@ -723,7 +723,7 @@ def test_a3_invalidate_decay_respects_journal_order(journaled):
     confidence-only writer that must win, not the whole invalidate fold."""
     _db, events, sdk = journaled
     pid = _chain(sdk, n=1)[0]
-    corr = sdk.create_point("statement", "corrector", status="live")["id"]
+    corr = sdk._create_point("statement", "corrector", status="live")["id"]
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
                 posterior_alpha=9.0, posterior_beta=2.0)
     _raw_append(events, sdk, "PointInvalidated", id=pid, corrected_by=corr)
@@ -768,7 +768,7 @@ def test_a7_belief_fold_drops_across_delete_recreate(journaled):
     not resurrect the dead incarnation's belief values onto the re-created
     node — the #330 parity contract."""
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    pid = sdk._create_point("statement", "c1", status="live")["id"]
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
                 posterior_alpha=9.0)
     _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
@@ -807,7 +807,7 @@ def test_a7_revise_belief_props_drop_across_delete_recreate(journaled):
     real-hard-delete boundary — a pre-recreation `PointRevised`'s belief value
     must not leak onto the re-created node."""
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    pid = sdk._create_point("statement", "c1", status="live")["id"]
     _raw_append(events, sdk, "PointRevised", id=pid, new_content="c2",
                 confidence=0.9, posterior_alpha=9.0)
     _raw_append(events, sdk, "EntityMutated", op="delete", id=pid,
@@ -859,8 +859,8 @@ def _set_confidence(sdk, pid: str, value: float) -> None:
 
 
 def _supersede_pair(sdk) -> tuple[str, str]:
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    b = sdk.create_point("statement", "successor B", status="live")["id"]
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    b = sdk._create_point("statement", "successor B", status="live")["id"]
     return a, b
 
 
@@ -873,7 +873,7 @@ def test_2884_supersede_decay_folds_at_its_own_journal_seq(journaled):
     a, b = _supersede_pair(sdk)
     _set_confidence(sdk, a, 0.9)
     _raw_append(events, sdk, "ConfidenceChanged", id=a, confidence=0.9)
-    sdk.supersede_point(a, b)          # live decay → confidence 0.5
+    sdk._supersede_point(a, b)          # live decay → confidence 0.5
     assert _state(sdk, [a])[a]["confidence"] == pytest.approx(0.5)
     _set_confidence(sdk, a, 0.25)      # the later writer (live truth)
     _raw_append(events, sdk, "ConfidenceChanged", id=a, confidence=0.25)
@@ -893,8 +893,8 @@ def test_2884_supersede_sweep_does_not_clobber_posterior_clear(journaled):
     resurrect 1.0/1.0 over it."""
     _db, events, sdk = journaled
     a, b = _supersede_pair(sdk)
-    sdk.supersede_point(a, b)
-    sdk.set_point_baseline(a, 4.0, 2.0)   # clears posteriors live + journals
+    sdk._supersede_point(a, b)
+    sdk._set_point_baseline(a, 4.0, 2.0)   # clears posteriors live + journals
     live = _state(sdk, [a])[a]
     assert live["posterior_alpha"] is None
     assert live["posterior_beta"] is None
@@ -911,7 +911,7 @@ def test_2884_supersede_decay_still_applies_without_later_write(journaled):
     rebuild must DO THE SAME. Pins that the decay was MOVED, not deleted."""
     _db, events, sdk = journaled
     a, b = _supersede_pair(sdk)
-    sdk.supersede_point(a, b)
+    sdk._supersede_point(a, b)
     live = _state(sdk, [a])[a]
     assert live["confidence"] == pytest.approx(0.5)
     assert live["posterior_alpha"] == pytest.approx(1.0)
@@ -928,7 +928,7 @@ def test_2884_bare_same_id_reemit_keeps_belief_state(journaled):
     keeps the belief value — the replay must not drop the ConfidenceChanged
     fold on the terminalizing `last_recreate_seq` anchor."""
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    pid = sdk._create_point("statement", "c1", status="live")["id"]
     _set_confidence(sdk, pid, 0.9)
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9)
     _raw_append(events, sdk, "PointAdded",
@@ -953,7 +953,7 @@ def test_2884_supersede_decay_survives_bare_same_id_reemit(journaled):
     a, b = _supersede_pair(sdk)
     _set_confidence(sdk, a, 0.9)
     _raw_append(events, sdk, "ConfidenceChanged", id=a, confidence=0.9)
-    sdk.supersede_point(a, b)          # live decay → 0.5
+    sdk._supersede_point(a, b)          # live decay → 0.5
     _raw_append(events, sdk, "PointAdded",
                 point={"id": a, "content": "old A", "pointKind": "",
                        "status": "superseded"})
@@ -977,11 +977,11 @@ def test_2884_invalidate_decay_survives_bare_same_id_reemit(journaled):
     shape: gating this one on `last_recreate_seq` suppressed the decay on the
     re-emit and left replay at the pre-invalidate value while live held 0.5."""
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "old I", status="live")["id"]
-    corr = sdk.create_point("statement", "corrector I", status="live")["id"]
+    pid = sdk._create_point("statement", "old I", status="live")["id"]
+    corr = sdk._create_point("statement", "corrector I", status="live")["id"]
     _set_confidence(sdk, pid, 0.9)
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9)
-    sdk.invalidate_point(pid, corr)    # live decay → 0.5
+    sdk._invalidate_point(pid, corr)    # live decay → 0.5
     _raw_append(events, sdk, "PointAdded",
                 point={"id": pid, "content": "old I", "pointKind": "",
                        "status": "outdated"})
@@ -1004,7 +1004,7 @@ def test_2884_retract_decay_drops_across_delete_recreate(journaled):
     hoists every `PointAdded`, so the fresh node already exists by pass 1b and
     an ungated `_retract` would resurrect a dead incarnation's belief values."""
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    pid = sdk._create_point("statement", "c1", status="live")["id"]
     _set_confidence(sdk, pid, 0.9)
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
                 posterior_alpha=9.0)
@@ -1035,7 +1035,7 @@ def test_2884_promote_belief_props_drop_across_delete_recreate(journaled):
     non-belief props (content, status, embedding) are the point of the fold and
     are NOT gated (#785 parity)."""
     _db, events, sdk = journaled
-    pid = sdk.create_point("statement", "c1", status="live")["id"]
+    pid = sdk._create_point("statement", "c1", status="live")["id"]
     _set_confidence(sdk, pid, 0.9)
     _raw_append(events, sdk, "ConfidenceChanged", id=pid, confidence=0.9,
                 posterior_alpha=9.0)

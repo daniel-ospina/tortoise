@@ -192,10 +192,10 @@ def seeded_sdk(tmp_path_factory, _offline_embedder_cache):
     db = tmp_path_factory.mktemp("framework") / "framework.db"
     sdk = TortoiseSDK(db_path=str(db))
     proj = sdk._get_proj()
-    evidence = sdk.create_point(
+    evidence = sdk._create_point(
         "evidence", "CI deploys on main merge via GitHub Actions [supporting record]")
-    claim = sdk.create_point("statement", _CLAIM)
-    sdk.create_operator("IMPL", evidence["id"], [claim["id"]])
+    claim = sdk._create_point("statement", _CLAIM)
+    sdk._create_operator("IMPL", evidence["id"], [claim["id"]])
     for pid, alpha, beta in ((claim["id"], 12.0, 1.0), (evidence["id"], 12.0, 1.0)):
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=$c, "
@@ -210,7 +210,7 @@ def test_real_reflex_block_rides_every_framework_prompt(seeded_sdk):
     """One seeded graph, one reflex, three prompts — the SAME block lands."""
     reflex = sdk_reflex(seeded_sdk)
     # The reflex's own answer for this window — every adapter must carry it verbatim.
-    expected = seeded_sdk.volunteer_context(
+    expected = seeded_sdk._volunteer_context(
         window=[{"role": "user", "content": _PROMPT}])["block"]
     assert "point/" in expected and _CLAIM in expected, (
         "fixture produced no block — the framework grade would be vacuous")

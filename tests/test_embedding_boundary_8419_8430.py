@@ -107,8 +107,8 @@ def test_a_wrong_width_list_no_longer_costs_the_healthy_neighbour(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "width.db"))
         try:
-            healthy = sdk.create_point("statement", "healthy neighbour")["id"]
-            narrow = sdk.create_point("statement", "narrow")["id"]
+            healthy = sdk._create_point("statement", "healthy neighbour")["id"]
+            narrow = sdk._create_point("statement", "narrow")["id"]
             assert _typeof(sdk, narrow) == "Vectorf32", "premise: a typed row"
             _overwrite_embedding(sdk, narrow, [0.1, 0.2])  # the poison
             assert _typeof(sdk, narrow) == "List", "premise: verdict verbatim List"
@@ -138,8 +138,8 @@ def test_a_non_numeric_list_no_longer_costs_the_healthy_neighbour(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "nonnumeric.db"))
         try:
-            healthy = sdk.create_point("statement", "healthy neighbour")["id"]
-            junk = sdk.create_point("statement", "junk")["id"]
+            healthy = sdk._create_point("statement", "healthy neighbour")["id"]
+            junk = sdk._create_point("statement", "junk")["id"]
             _overwrite_embedding(sdk, junk, ["x"] * DIM)
             assert _typeof(sdk, junk) == "List", "premise: a plain List"
 
@@ -171,8 +171,8 @@ def test_a_boolean_element_list_no_longer_costs_the_healthy_neighbour(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "booleans.db"))
         try:
-            healthy = sdk.create_point("statement", "healthy neighbour")["id"]
-            boolvec = sdk.create_point("statement", "bool vector")["id"]
+            healthy = sdk._create_point("statement", "healthy neighbour")["id"]
+            boolvec = sdk._create_point("statement", "bool vector")["id"]
             _overwrite_embedding(sdk, boolvec, [True] * DIM)
             assert _typeof(sdk, boolvec) == "List", "premise: a plain List"
 
@@ -208,8 +208,8 @@ def test_a_numeric_string_list_no_longer_costs_the_healthy_neighbour(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "numstr.db"))
         try:
-            healthy = sdk.create_point("statement", "healthy neighbour")["id"]
-            junk = sdk.create_point("statement", "stringified")["id"]
+            healthy = sdk._create_point("statement", "healthy neighbour")["id"]
+            junk = sdk._create_point("statement", "stringified")["id"]
             _overwrite_embedding(sdk, junk, ["0.5"] * DIM)
             assert _typeof(sdk, junk) == "List", "premise: a plain List"
 
@@ -243,8 +243,8 @@ def test_a_nested_element_list_no_longer_costs_the_healthy_neighbour(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "nested.db"))
         try:
-            healthy = sdk.create_point("statement", "healthy neighbour")["id"]
-            junk = sdk.create_point("statement", "nested")["id"]
+            healthy = sdk._create_point("statement", "healthy neighbour")["id"]
+            junk = sdk._create_point("statement", "nested")["id"]
             _overwrite_embedding(sdk, junk, [[i, i + 1] for i in range(DIM)])
             assert _typeof(sdk, junk) == "List", "premise: a plain List"
 
@@ -282,7 +282,7 @@ def test_an_integer_verbatim_list_is_still_readable(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "intlist.db"))
         try:
-            pid = sdk.create_point("statement", "integer vector")["id"]
+            pid = sdk._create_point("statement", "integer vector")["id"]
             _overwrite_embedding(sdk, pid, caller)
             assert _typeof(sdk, pid) == "List", "premise: verbatim"
 
@@ -309,7 +309,7 @@ def test_a_readable_verbatim_list_is_still_read_and_value_preserving(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "readable.db"))
         try:
-            pid = sdk.create_point("statement", "caller vector")["id"]
+            pid = sdk._create_point("statement", "caller vector")["id"]
             _overwrite_embedding(sdk, pid, caller)
             assert _typeof(sdk, pid) == "List", "premise: verbatim"
 
@@ -338,7 +338,7 @@ def test_a_wrong_width_TYPED_vector_still_aborts_the_match(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "typednarrow.db"))
         try:
-            sdk.create_point("statement", "healthy neighbour")
+            sdk._create_point("statement", "healthy neighbour")
             sdk._get_proj().g.query(
                 "CREATE (p:Point {id:'narrowtyped', content:'narrow typed', "
                 "pointKind:'statement', embedding: vecf32([0.1, 0.2])})")
@@ -381,7 +381,7 @@ def test_a_store_with_no_row_readable_at_this_width_is_not_a_healthy_empty(
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "allwidth.db"))
         try:
-            only = sdk.create_point("statement", "the only candidate")["id"]
+            only = sdk._create_point("statement", "the only candidate")["id"]
             # A storable, verbatim (PR #3018) row whose width cannot pair with
             # the query vector below — the whole cohort is unreadable here.
             _overwrite_embedding(sdk, only, [0.1, 0.2])
@@ -425,7 +425,7 @@ def test_a_readable_row_keeps_an_empty_result_a_healthy_verdict(tmp_path):
         try:
             # #11824 S0 stores the declared synonym `retracted` as `deprecated`,
             # so the EXCLUDED set names the word the row actually holds.
-            sdk.create_point("statement", "scoped out", status="retracted")
+            sdk._create_point("statement", "scoped out", status="retracted")
             trace: list[dict] = []
             reset_circuit_breakers()
             hits = run_vector_query(

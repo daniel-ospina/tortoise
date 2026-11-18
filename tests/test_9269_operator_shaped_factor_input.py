@@ -76,9 +76,9 @@ def _wire_third_input(sdk, shaped_id: str):
     degeneracy, so the run genuinely executes and the shaped node's absence is
     the filter's doing rather than an artefact of a skipped operator.
     """
-    a = sdk.create_point("statement", "Plain input A", status="live")
-    b = sdk.create_point("statement", "Plain input B", status="live")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"], shaped_id])
+    a = sdk._create_point("statement", "Plain input A", status="live")
+    b = sdk._create_point("statement", "Plain input B", status="live")
+    op = sdk._create_operator("IMPL", a["id"], [b["id"], shaped_id])
     return a["id"], b["id"], (op["id"] if isinstance(op, dict) else op)
 
 
@@ -107,14 +107,14 @@ def test_operator_shaped_factor_input_is_not_stamped(sdk):
     shaped = _shaped_point(sdk, "shaped-9269-true", "true")
     a, b, op = _wire_third_input(sdk, shaped)
     for pid in (a, b):
-        sdk.set_point_baseline(pid, 3.0, 1.0)
+        sdk._set_point_baseline(pid, 3.0, 1.0)
 
     # The gate sees nothing to demand — that was the fail-open half of the bug.
     assert shaped not in sdk._uncalibrated_ep_participants(None)
     # …and the RUN must not consume it, or the two disagree (#7739's rule).
     assert shaped not in sdk._ep_run_scope([op], 2)
 
-    result = sdk.compute_confidence(factors=[op], require_calibration=True)
+    result = sdk._compute_confidence(factors=[op], require_calibration=True)
     assert result["converged"] is True
 
     assert _stamp(sdk, shaped) == [None, None, None, None]
@@ -137,12 +137,12 @@ def test_string_is_operator_factor_input_is_not_stamped(sdk):
     shaped = _shaped_point(sdk, "shaped-9269-string", "'false'")
     a, b, op = _wire_third_input(sdk, shaped)
     for pid in (a, b):
-        sdk.set_point_baseline(pid, 3.0, 1.0)
+        sdk._set_point_baseline(pid, 3.0, 1.0)
 
     assert shaped not in sdk._uncalibrated_ep_participants(None)
     assert shaped not in sdk._ep_run_scope([op], 2)
 
-    sdk.compute_confidence(factors=[op], require_calibration=True)
+    sdk._compute_confidence(factors=[op], require_calibration=True)
     assert _stamp(sdk, shaped) == [None, None, None, None]
 
 
@@ -193,11 +193,11 @@ def test_the_bridge_hop_arm_does_not_admit_the_shaped_node(sdk):
     bridge, which is why this fails on `origin/main`.
     """
     shaped = _shaped_point(sdk, "shaped-9269-bridge", "true")
-    e = sdk.create_point("statement", "Seed E", status="live")
-    f = sdk.create_point("statement", "Middle F", status="live")
-    g = sdk.create_point("statement", "Far G", status="live")
-    sdk.create_operator("IMPL", e["id"], [f["id"], shaped])
-    sdk.create_operator("IMPL", f["id"], [g["id"], shaped])
+    e = sdk._create_point("statement", "Seed E", status="live")
+    f = sdk._create_point("statement", "Middle F", status="live")
+    g = sdk._create_point("statement", "Far G", status="live")
+    sdk._create_operator("IMPL", e["id"], [f["id"], shaped])
+    sdk._create_operator("IMPL", f["id"], [g["id"], shaped])
     ep = sdk._get_ep()
 
     # max_hops=0 = the seed-neighbourhood arm only (the pre-BFS expansion).
@@ -220,7 +220,7 @@ def test_legacy_absent_is_operator_input_is_still_consumed(sdk):
     filter would silently drop that node from every factor on a legacy graph,
     which is the fail-open direction this fix must never move.
     """
-    legacy = sdk.create_point("statement", "Legacy absent", status="live")
+    legacy = sdk._create_point("statement", "Legacy absent", status="live")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.is_operator",
         params={"id": legacy["id"]})
@@ -230,14 +230,14 @@ def test_legacy_absent_is_operator_input_is_still_consumed(sdk):
     assert legacy["id"] in sdk._ep_run_scope([op], 2)
     # …and demanded by the GATE, which is what makes the two agree.
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-        sdk.compute_confidence(factors=[op], require_calibration=True)
+        sdk._compute_confidence(factors=[op], require_calibration=True)
     assert legacy["id"] in str(exc.value)
 
     for pid in (a, b):
-        sdk.set_point_baseline(pid, 3.0, 1.0)
+        sdk._set_point_baseline(pid, 3.0, 1.0)
     # The documented opt-out runs and consumes the legacy node, which is the
     # consumption half this guard pins (the gate refuses it above, by design).
-    sdk.compute_confidence(factors=[op], require_calibration=False)
+    sdk._compute_confidence(factors=[op], require_calibration=False)
     confidence, _ep_alpha, _ep_beta, posterior_alpha = _stamp(sdk, legacy["id"])
     assert confidence is not None
     assert posterior_alpha is not None and posterior_alpha != 1.0
@@ -252,14 +252,14 @@ def test_hybrid_op_type_point_is_still_consumed(sdk):
     the audit has always covered and the gate demands (#9063's recorded
     fail-open). Its participation is unchanged by this fix.
     """
-    hybrid = sdk.create_point("statement", "Hybrid input", op_type="NAND",
+    hybrid = sdk._create_point("statement", "Hybrid input", op_type="NAND",
                               status="live")
     _a, _b, op = _wire_third_input(sdk, hybrid["id"])
 
     assert hybrid["id"] in sdk._ep_run_scope([op], 2)
     assert hybrid["id"] in sdk._uncalibrated_ep_participants(None)
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-        sdk.compute_confidence(factors=[op], require_calibration=True)
+        sdk._compute_confidence(factors=[op], require_calibration=True)
     assert hybrid["id"] in str(exc.value)
 
 
@@ -276,9 +276,9 @@ def test_directional_operator_with_an_operator_shaped_source_is_skipped(sdk):
     C's posterior moved from (0.5, 2.175) to (0.6068, 3.139).
     """
     shaped = _shaped_point(sdk, "shaped-9269-src", "true")
-    b = sdk.create_point("statement", "Target B", status="live")
-    c = sdk.create_point("statement", "Target C", status="live")
-    op = sdk.create_operator("IMPL", shaped, [b["id"], c["id"]],
+    b = sdk._create_point("statement", "Target B", status="live")
+    c = sdk._create_point("statement", "Target C", status="live")
+    op = sdk._create_operator("IMPL", shaped, [b["id"], c["id"]],
                              direction="unidirectional")
     op_id = op["id"] if isinstance(op, dict) else op
     ep = sdk._get_ep()
@@ -296,7 +296,7 @@ def test_directional_operator_with_an_operator_shaped_source_is_skipped(sdk):
         "operator-shaped", "live", "live"]
 
     # …and a run reports it rather than reading as healthy (#6105).
-    result = sdk.compute_confidence(factors=[op_id], require_calibration=False)
+    result = sdk._compute_confidence(factors=[op_id], require_calibration=False)
     assert result["diagnostic"] == "factors_skipped"
     assert [s["reason"] for s in result["skipped_factors"]] == [
         "source_stripped"]
@@ -313,11 +313,11 @@ def test_a_two_input_operator_losing_its_shaped_input_is_reported(sdk):
     than the (owner-reserved, #5566) ``Beta(1,1)`` recompute that follows it.
     """
     shaped = _shaped_point(sdk, "shaped-9269-two", "'false'")
-    a = sdk.create_point("statement", "Only live input", status="live")
-    op = sdk.create_operator("IMPL", a["id"], [shaped])
+    a = sdk._create_point("statement", "Only live input", status="live")
+    op = sdk._create_operator("IMPL", a["id"], [shaped])
     op_id = op["id"] if isinstance(op, dict) else op
 
-    result = sdk.compute_confidence(factors=[op_id], require_calibration=False)
+    result = sdk._compute_confidence(factors=[op_id], require_calibration=False)
     assert result["diagnostic"] == "factors_skipped"
     record = result["skipped_factors"][0]
     assert record["operator_id"] == op_id
@@ -347,19 +347,19 @@ def test_a_nested_operator_is_not_a_permanent_dirty_root(sdk):
     shaped = _shaped_point(sdk, "shaped-9269-nested", "true")
     a, b, _op = _wire_third_input(sdk, shaped)
     for pid in (a, b):
-        sdk.set_point_baseline(pid, 3.0, 1.0)
+        sdk._set_point_baseline(pid, 3.0, 1.0)
 
     # The marking half: the write genuinely flags the shaped node, which is what
     # makes it a root at all (no filter exists on the marking side).
     assert shaped in _dirty_ids(sdk)
 
-    result = sdk.dream(mode="full")
+    result = sdk._dream(mode="full")
     assert result["converged_all"] is True
 
     # The clearing half: a converged pass leaves NO root behind, so the shaped
     # node's flag is gone and the backlog is empty.
     assert _dirty_ids(sdk) == set()
     assert not sdk._dirty_roots
-    assert sdk.dream_health_check()["stale_backlog"] == 0
+    assert sdk._dream_health_check()["stale_backlog"] == 0
     # …and nothing pins auto-select to 'local' (small graph → full, J3).
     assert sdk._auto_dream_mode() == "full"

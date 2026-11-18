@@ -28,7 +28,7 @@ show("source", source)
 SRC = source["id"]
 
 # ---------------------------------------------------------------- 2. Event
-event = sdk.create_event(
+event = sdk._create_event(
     "Pricing & self-serve decision meeting",
     "meeting",
     startedAt="2026-09-14T10:00:00Z",
@@ -39,28 +39,28 @@ show("event", event)
 EV = event["id"]
 
 # ---------------------------------------------------------------- 3. People
-dana = sdk.create_subject("Dana", subjectKind="person", role="CEO", org="the company")
-ravi = sdk.create_subject("Ravi", subjectKind="person", role="PM", org="the company")
-priya = sdk.create_subject("Priya", subjectKind="person", role="Eng", org="the company")
+dana = sdk._create_subject("Dana", subjectKind="person", role="CEO", org="the company")
+ravi = sdk._create_subject("Ravi", subjectKind="person", role="PM", org="the company")
+priya = sdk._create_subject("Priya", subjectKind="person", role="Eng", org="the company")
 show("subjects", [dana, ravi, priya])
 DANA, RAVI, PRIYA = dana["id"], ravi["id"], priya["id"]
 
 # ---------------------------------------------------------------- 4. Objects
-tier = sdk.create_object(
+tier = sdk._create_object(
     "self-serve tier", objectKind="offering", status="being discontinued", effectiveWindow="Q4 2026"
 )
-comms = sdk.create_object(
+comms = sdk._create_object(
     "self-serve migration communications", objectKind="deliverable", assignee="Ravi"
 )
-pricing = sdk.create_object("pricing page", objectKind="productSurface")
-residency = sdk.create_object(
+pricing = sdk._create_object("pricing page", objectKind="productSurface")
+residency = sdk._create_object(
     "EU data residency", objectKind="openQuestion", state="deferred"
 )
 show("objects", [tier, comms, pricing, residency])
 TIER, COMMS, PRICING, RESIDENCY = (tier["id"], comms["id"], pricing["id"], residency["id"])
 
 # ---------------------------------------------------------------- 5. Points
-p_decision = sdk.create_point(
+p_decision = sdk._create_point(
     "decision",
     "The self-serve tier is being killed. Decision made 2026-09-14 by Dana (CEO), effective Q4 2026.",
     extractedFrom=SRC,
@@ -72,7 +72,7 @@ p_decision = sdk.create_point(
 )
 show("p_decision", p_decision)
 
-p_comms = sdk.create_point(
+p_comms = sdk._create_point(
     "plan",
     "Ravi owns migration communications for the self-serve shutdown; first draft due 2026-09-25.",
     extractedFrom=SRC,
@@ -84,7 +84,7 @@ p_comms = sdk.create_point(
 )
 show("p_comms", p_comms)
 
-p_pricing = sdk.create_point(
+p_pricing = sdk._create_point(
     "plan",
     "The pricing page rewrite must land before the migration comms first draft; Priya needs it first.",
     extractedFrom=SRC,
@@ -95,7 +95,7 @@ p_pricing = sdk.create_point(
 )
 show("p_pricing", p_pricing)
 
-p_estimate = sdk.create_point(
+p_estimate = sdk._create_point(
     "estimate",
     "Priya estimates an 80% probability that the pricing page rewrite slips by one week.",
     extractedFrom=SRC,
@@ -108,7 +108,7 @@ p_estimate = sdk.create_point(
 )
 show("p_estimate", p_estimate)
 
-p_residency = sdk.create_point(
+p_residency = sdk._create_point(
     "issue",
     "Open question: EU data residency requirements. Raised by Dana 2026-09-14, explicitly deferred "
     "('at some point') — no owner, no target date, no decision.",
@@ -135,7 +135,7 @@ edges = []
 
 
 def edge(relation: str, frm: str, to: str) -> None:
-    r = sdk.create_edge(relation, frm, to)
+    r = sdk._create_edge(relation, frm, to)
     edges.append({"relation": relation, "from": frm, "to": to, "created": r.get("created")})
     print("edge", relation, frm, "->", to, r.get("created"))
 
@@ -169,7 +169,7 @@ edge("dependsOn", COM, PRI)
 
 # ---------------------------------------------------------------- 7. Epistemic operators
 # The decision requires the downstream work.
-op_impl = sdk.create_operator(
+op_impl = sdk._create_operator(
     "IMPL",
     DEC,
     [COM, PRI],
@@ -180,7 +180,7 @@ op_impl = sdk.create_operator(
 show("operator IMPL", op_impl)
 
 # The 80%-slip estimate attacks the certainty of the 2026-09-25 due date.
-op_nand = sdk.create_operator(
+op_nand = sdk._create_operator(
     "NAND",
     EST,
     [COM],

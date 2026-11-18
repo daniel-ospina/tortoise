@@ -67,7 +67,7 @@ class _StubSDK:
         self.rows = [{"id": f"p{i}", "kind": "statement",
                       "confidence": _LOW_CONFIDENCE} for i in range(n)]
 
-    def tortoise_fts_query(self, query=None, kind=None, *, entity_type="point",
+    def _tortoise_fts_query(self, query=None, kind=None, *, entity_type="point",
                            min_confidence=0.0, order_by="relevance",
                            limit=10, include_terminal=False, **kwargs):
         self.calls.append(("tortoise_fts_query", query, kind, {
@@ -98,13 +98,13 @@ class _StubSDK:
                              f"'graph', got {order_by!r}")
         return self.rows
 
-    def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
+    def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
         self.calls.append(("paginated_query", kind, skip, limit, kwargs))
         total = len(self.rows)
         return {"results": self.rows[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
-    def query_points_by_tag(self, tag, *, _record_reads=True):
+    def _query_points_by_tag(self, tag, *, _record_reads=True):
         self.calls.append(("query_points_by_tag", tag, _record_reads))
         return self.rows
 

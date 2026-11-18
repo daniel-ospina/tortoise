@@ -60,12 +60,12 @@ def test_interim_route_promotes_gated_draft(sdk):
         "connections": [{"ref": "c1", "from": "p1", "to": "p2",
                          "operator": "IMPL"}],
     }
-    res = sdk.ingest(bundle, promotion_policy="gated")
+    res = sdk._ingest(bundle, promotion_policy="gated")
     p1 = res["ids"]["points"][0]
     # created draft; NO promotion before an explicit call
     assert _status(sdk, p1) == "draft", "gated ingest must leave points draft"
     # the interim route promotes
-    out = sdk.update_point(p1, status="live")
+    out = sdk._update_point(p1, status="live")
     assert out["status"] == "live"
     assert _status(sdk, p1) == "live"
     # other points untouched (explicit = per-point)
@@ -78,9 +78,9 @@ def test_interim_route_guarded_terminal_statuses(sdk):
     rejected by the draft→live-only promote guard (the status is in
     POINT_STATUS_VALUES, but update_point only promotes draft/NULL nodes
     to live — no other status change)."""
-    p = sdk.create_point("claim", "X.", status="draft")["id"]
+    p = sdk._create_point("claim", "X.", status="draft")["id"]
     with pytest.raises(ValueError):
-        sdk.update_point(p, status="superseded")
+        sdk._update_point(p, status="superseded")
 
 
 def test_no_zombie_operator_resolution_caveat(sdk):
@@ -99,13 +99,13 @@ def test_no_zombie_operator_resolution_caveat(sdk):
                          "operator": "IMPL",
                          "mitigation": {"reason": "x", "strength": 0.6}}],
     }
-    res = sdk.ingest(bundle, promotion_policy="gated")
+    res = sdk._ingest(bundle, promotion_policy="gated")
     p1, p2 = res["ids"]["points"]
     op_id = res["ids"]["connections"][0]
     assert _status(sdk, op_id) == "draft", "gated operator is draft"
     # promote BOTH endpoints via the interim route
-    sdk.update_point(p1, status="live")
-    sdk.update_point(p2, status="live")
+    sdk._update_point(p1, status="live")
+    sdk._update_point(p2, status="live")
     assert _status(sdk, p1) == "live" and _status(sdk, p2) == "live"
     # endpoint promotion does NOT touch the operator node
     assert _status(sdk, op_id) == "draft", \
@@ -117,7 +117,7 @@ def test_no_zombie_operator_resolution_caveat(sdk):
     assert op_id not in ops, \
         "draft-status operator must stay inert (no zombie auto-resolution)"
     # an EXPLICIT promote of the operator node activates it
-    sdk.update_point(op_id, status="live")
+    sdk._update_point(op_id, status="live")
     ops2, _ = _bfs_select_operators(sdk._get_proj(), [p1, p2], max_hops=1)
     assert op_id in ops2, \
         "explicitly-promoted operator with >=2 live endpoints is EP-active"

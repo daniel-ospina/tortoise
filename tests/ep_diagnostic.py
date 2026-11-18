@@ -47,12 +47,12 @@ def trace_convergent_ep():
 
     sdk = TortoiseSDK(namespace="ep_diag_conv")
 
-    source_a = sdk.create_point("observation", "Source A", credibility="T0")
-    source_b = sdk.create_point("observation", "Source B", credibility="T0")
-    claim = sdk.create_point("hypothesis", "Claim")
+    source_a = sdk._create_point("observation", "Source A", credibility="T0")
+    source_b = sdk._create_point("observation", "Source B", credibility="T0")
+    claim = sdk._create_point("hypothesis", "Claim")
 
-    op_a = sdk.create_operator("IMPL", source_a["id"], [claim["id"]])
-    op_b = sdk.create_operator("IMPL", source_b["id"], [claim["id"]])
+    op_a = sdk._create_operator("IMPL", source_a["id"], [claim["id"]])
+    op_b = sdk._create_operator("IMPL", source_b["id"], [claim["id"]])
 
     proj = sdk._get_proj()
 
@@ -71,21 +71,21 @@ def trace_convergent_ep():
     print(f"  Total effective weight: {w_a + w_b:.4f}")
 
     # Run EP
-    result = sdk.compute_confidence()
+    result = sdk._compute_confidence()
     print(f"\n  EP: {result['iterations']} iters, converged={result['converged']}")
 
-    claim_c = sdk.get_confidence(claim["id"])
-    src_a_c = sdk.get_confidence(source_a["id"])
-    src_b_c = sdk.get_confidence(source_b["id"])
+    claim_c = sdk._get_confidence(claim["id"])
+    src_a_c = sdk._get_confidence(source_a["id"])
+    src_b_c = sdk._get_confidence(source_b["id"])
     print(f"  Claim: {claim_c['mean']:.4f}")
     print(f"  SrcA:  {src_a_c['mean']:.4f}")
     print(f"  SrcB:  {src_b_c['mean']:.4f}")
 
     # Now delete opB and re-run
-    sdk.delete_point(op_b["id"])
+    sdk._delete_point(op_b["id"])
     print(f"\n  ── After removing opB ──")  # noqa: F541
-    result2 = sdk.compute_confidence()
-    claim_c2 = sdk.get_confidence(claim["id"])
+    result2 = sdk._compute_confidence()
+    claim_c2 = sdk._get_confidence(claim["id"])
     print(f"  EP: {result2['iterations']} iters, converged={result2['converged']}")
     print(f"  Claim: {claim_c2['mean']:.4f}")
     print(f"  Change: {claim_c2['mean'] - claim_c['mean']:+.4f} {'(⬆️ with FEWER sources!)' if claim_c2['mean'] > claim_c['mean'] else ''}")
@@ -102,16 +102,16 @@ def trace_bottleneck():
 
     sdk = TortoiseSDK(namespace="ep_diag_btl")
 
-    prem_a = sdk.create_point("observation", "Premise A", credibility="T2")
-    prem_b = sdk.create_point("observation", "Premise B", credibility="T2")
-    prem_c = sdk.create_point("observation", "Premise C", credibility="T2")
-    bottleneck = sdk.create_point("statement", "Bottleneck")
-    conclusion = sdk.create_point("hypothesis", "Conclusion")
+    prem_a = sdk._create_point("observation", "Premise A", credibility="T2")
+    prem_b = sdk._create_point("observation", "Premise B", credibility="T2")
+    prem_c = sdk._create_point("observation", "Premise C", credibility="T2")
+    bottleneck = sdk._create_point("statement", "Bottleneck")
+    conclusion = sdk._create_point("hypothesis", "Conclusion")
 
-    op_a = sdk.create_operator("IMPL", prem_a["id"], [bottleneck["id"]])
-    op_b = sdk.create_operator("IMPL", prem_b["id"], [bottleneck["id"]])
-    op_c = sdk.create_operator("IMPL", prem_c["id"], [bottleneck["id"]])
-    op_btl = sdk.create_operator("IMPL", bottleneck["id"], [conclusion["id"]])
+    op_a = sdk._create_operator("IMPL", prem_a["id"], [bottleneck["id"]])
+    op_b = sdk._create_operator("IMPL", prem_b["id"], [bottleneck["id"]])
+    op_c = sdk._create_operator("IMPL", prem_c["id"], [bottleneck["id"]])
+    op_btl = sdk._create_operator("IMPL", bottleneck["id"], [conclusion["id"]])
 
     proj = sdk._get_proj()
 
@@ -136,12 +136,12 @@ def trace_bottleneck():
     print(f"  With w=0.5 per edge, each message is φ=exp(0.5*cp*cb)")  # noqa: F541
     print(f"  Expected: bottleneck should accumulate ABOVE 0.75 with 3 T2 sources")  # noqa: F541
 
-    result = sdk.compute_confidence()
+    result = sdk._compute_confidence()
     print(f"\n  EP result: {result['iterations']} iters")
 
     for name, nid in [("PremA", prem_a["id"]), ("Btlneck", bottleneck["id"]),
                        ("Conclusion", conclusion["id"])]:
-        c = sdk.get_confidence(nid)
+        c = sdk._get_confidence(nid)
         print(f"  {name}: {c['mean']:.4f} (α={c['alpha']:.2f}, β={c['beta']:.2f})")
 
     sdk.close()
@@ -156,18 +156,18 @@ def test_single_source_baseline():
 
     sdk = TortoiseSDK(namespace="ep_diag_baseline")
 
-    src = sdk.create_point("observation", "T0 Source", credibility="T0")
-    claim = sdk.create_point("hypothesis", "Claim")
+    src = sdk._create_point("observation", "T0 Source", credibility="T0")
+    claim = sdk._create_point("hypothesis", "Claim")
 
-    op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
+    op = sdk._create_operator("IMPL", src["id"], [claim["id"]])
 
     proj = sdk._get_proj()
     w = compute_operator_weight(proj, op["id"])
     print(f"  Operator weight: {w:.4f} (claim has 1 edge)")
 
-    result = sdk.compute_confidence()  # noqa: F841
-    print(f"\n  Source: {sdk.get_confidence(src['id'])['mean']:.4f}")
-    print(f"  Claim:  {sdk.get_confidence(claim['id'])['mean']:.4f}")
+    result = sdk._compute_confidence()  # noqa: F841
+    print(f"\n  Source: {sdk._get_confidence(src['id'])['mean']:.4f}")
+    print(f"  Claim:  {sdk._get_confidence(claim['id'])['mean']:.4f}")
     print(f"\n  This is the reference: single T0 source → claim at ~78%")  # noqa: F541
 
     sdk.close()
@@ -182,12 +182,12 @@ def test_chain_trace():
 
     sdk = TortoiseSDK(namespace="ep_diag_chain")
 
-    src = sdk.create_point("observation", "T0 Source", credibility="T0")
-    mid = sdk.create_point("statement", "Middle")
-    con = sdk.create_point("hypothesis", "Conclusion")
+    src = sdk._create_point("observation", "T0 Source", credibility="T0")
+    mid = sdk._create_point("statement", "Middle")
+    con = sdk._create_point("hypothesis", "Conclusion")
 
-    op1 = sdk.create_operator("IMPL", src["id"], [mid["id"]])
-    op2 = sdk.create_operator("IMPL", mid["id"], [con["id"]])
+    op1 = sdk._create_operator("IMPL", src["id"], [mid["id"]])
+    op2 = sdk._create_operator("IMPL", mid["id"], [con["id"]])
 
     proj = sdk._get_proj()
 
@@ -214,11 +214,11 @@ def test_chain_trace():
     print(f"  And: conclusion gets a STRONG message from middle (w={w2:.4f})")
     print(f"  Net: conclusion can end up HIGHER than middle — attenuation reversed!")  # noqa: F541
 
-    result = sdk.compute_confidence()  # noqa: F841
+    result = sdk._compute_confidence()  # noqa: F841
     print(f"\n  Results:")  # noqa: F541
-    print(f"  Source:     {sdk.get_confidence(src['id'])['mean']:.4f}")
-    print(f"  Middle:     {sdk.get_confidence(mid['id'])['mean']:.4f}")
-    print(f"  Conclusion: {sdk.get_confidence(con['id'])['mean']:.4f}")
+    print(f"  Source:     {sdk._get_confidence(src['id'])['mean']:.4f}")
+    print(f"  Middle:     {sdk._get_confidence(mid['id'])['mean']:.4f}")
+    print(f"  Conclusion: {sdk._get_confidence(con['id'])['mean']:.4f}")
 
     sdk.close()
 

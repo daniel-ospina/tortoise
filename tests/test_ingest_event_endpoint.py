@@ -77,13 +77,13 @@ def test_operator_route_external_event_endpoint_passes_both_phases(sdk):
     Phase-1 (`_validate_bundle` → no violations) AND Phase-2 (ingest's
     per-connection `_check_endpoint_race` re-verify) — pre-fix this bundle
     was rejected with 'must be a plain Point — got a Event endpoint'."""
-    pa = sdk.create_point("statement", "A")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     # single Event endpoint
     bundle = {"connections": [
         {"from": pa, "to": eid, "operator": "IMPL", "reify": True}]}
     assert sdk._validate_bundle(bundle) == []  # Phase-1 clean
-    res = sdk.ingest(bundle)  # Phase-2 race check runs per-connection
+    res = sdk._ingest(bundle)  # Phase-2 race check runs per-connection
     assert res["created"]["connections"] == 1
     assert res["deduped"]["connections"] == 0
     assert _event_edge_count(sdk) == 1
@@ -96,12 +96,12 @@ def test_operator_route_fanout_reingest_absorbs_ingest_created_draft(sdk):
     absorb, #1919 P1) — the operator's edge set is completed, never
     duplicated. Pins the intermediate draft shape (2 edges) so the absorb
     delta (→ 3) is explicit."""
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     bundle = {"connections": [
         {"from": pa, "to": eid, "operator": "IMPL", "reify": True}]}
-    res1 = sdk.ingest(bundle)  # creates the {pa, eid} draft operator
+    res1 = sdk._ingest(bundle)  # creates the {pa, eid} draft operator
     assert res1["created"]["connections"] == 1
     assert _count(sdk, "MATCH (o:Point {is_operator:true})-[r:IMPL]->(t) "
                        "RETURN count(r)") == 2
@@ -109,7 +109,7 @@ def test_operator_route_fanout_reingest_absorbs_ingest_created_draft(sdk):
     bundle2 = {"connections": [
         {"from": pa, "to": [pb, eid], "operator": "IMPL", "reify": True}]}
     assert sdk._validate_bundle(bundle2) == []
-    res2 = sdk.ingest(bundle2)
+    res2 = sdk._ingest(bundle2)
     # the draft {pa, eid} operator partial-absorbs the wider request
     # (proper-subset absorb, #1919 P1 reachable) — never a duplicate
     assert res2["deduped"]["connections"] == 1
@@ -134,7 +134,7 @@ def test_operator_route_bundle_local_event_ref_passes(sdk):
         ],
     }
     assert sdk._validate_bundle(bundle) == []  # Phase-1 clean
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     # the operator's typed edge lands on the created Event node
     evt_id = res["ids"]["refs"]["evt"]
@@ -147,15 +147,15 @@ def test_operator_route_event_as_source_endpoint_passes(sdk):
     """#2062 (I1): the operator route accepts an Event as the FROM endpoint
     too — create_operator's A1b #1272 contract covers both positions, and the
     dedup key is the full (source + targets) input set."""
-    pa = sdk.create_point("statement", "A")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     bundle = {"connections": [
         {"from": eid, "to": pa, "operator": "IMPL", "reify": True}]}
     assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     # re-ingest dedups to the same operator (Event id is in the key)
-    res2 = sdk.ingest(bundle)
+    res2 = sdk._ingest(bundle)
     assert res2["deduped"]["connections"] == 1
     assert _operator_count(sdk) == 1
 
@@ -166,16 +166,16 @@ def test_part_whole_operator_route_event_endpoint_dedups(sdk):
     edges). An Event endpoint on a composedOf connection passes both phases
     and re-ingests exact-hit through the dedup key — the scope names this
     branch, so it is pinned end-to-end (Phase-1 clean + created + dedup)."""
-    pa = sdk.create_point("statement", "A")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     bundle = {"connections": [
         {"from": pa, "to": eid, "operator": "composedOf", "reify": True}]}
     assert sdk._validate_bundle(bundle) == []
-    res1 = sdk.ingest(bundle)
+    res1 = sdk._ingest(bundle)
     assert res1["created"]["connections"] == 1
     assert _count(sdk, "MATCH (o:Point {is_operator:true})-[r:hasPart]->"
                        "(t:Event) RETURN count(r)") == 1
-    res2 = sdk.ingest(bundle)
+    res2 = sdk._ingest(bundle)
     assert res2["deduped"]["connections"] == 1
     assert _count(sdk, "MATCH (o:Point {is_operator:true, op_type:"
                        "'composedOf'}) RETURN count(o)") == 1
@@ -188,15 +188,15 @@ def test_nand_operator_route_event_endpoint_dedups(sdk):
     Event endpoint (distinct direction default — unidirectional) and
     re-ingests to the same operator id; pins the op_type-specific branch the
     IMPL-only tests would not catch."""
-    pa = sdk.create_point("statement", "A")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     bundle = {"connections": [
         {"from": pa, "to": eid, "operator": "NAND", "reify": True}]}
     assert sdk._validate_bundle(bundle) == []
-    res1 = sdk.ingest(bundle)
+    res1 = sdk._ingest(bundle)
     assert res1["created"]["connections"] == 1
     oid = res1["ids"]["connections"][0]
-    res2 = sdk.ingest(bundle)
+    res2 = sdk._ingest(bundle)
     assert res2["deduped"]["connections"] == 1
     assert res2["ids"]["connections"][0] == oid
     assert _count(sdk, "MATCH (o:Point {is_operator:true, op_type:'NAND'}) "
@@ -230,7 +230,7 @@ def test_operator_route_nonexistent_event_shaped_id_rejected(sdk):
     """#2062 (narrowness pin): the relaxation widens the accepted LABEL, not
     existence — an Event-shaped id that does not exist still fails Phase-1
     with 'does not exist'."""
-    pa = sdk.create_point("statement", "A")["id"]
+    pa = sdk._create_point("statement", "A")["id"]
     bundle = {"connections": [
         {"from": pa, "to": "01GHOSTEVENTID", "operator": "IMPL",
          "reify": True}]}
@@ -238,7 +238,7 @@ def test_operator_route_nonexistent_event_shaped_id_rejected(sdk):
     msgs = [v["message"] for v in viols]
     assert any("does not exist" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="does not exist"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
 
 
 def test_operator_route_eventid_only_event_rejected_cleanly(sdk):
@@ -253,7 +253,7 @@ def test_operator_route_eventid_only_event_rejected_cleanly(sdk):
             "eventKind:'DocumentCreated'})")
     assert g.query("MATCH (e:Event {eventId:'EVT-CORPUS-1'}) "
                    "RETURN e.id").result_set[0][0] is None  # id-less shape
-    pa = sdk.create_point("statement", "A")["id"]
+    pa = sdk._create_point("statement", "A")["id"]
     bundle = {"points": [{"kind": "statement", "content": "B"}],
               "connections": [
                   {"from": pa, "to": "EVT-CORPUS-1", "operator": "IMPL",
@@ -269,7 +269,7 @@ def test_operator_route_eventid_only_event_rejected_cleanly(sdk):
     with pytest.raises(
             BundleValidationError,
             match="resolves to a Event node with NO `id`"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # zero partial mutation — the point item never committed
     assert _count(sdk, "MATCH (n:Point {content:'B'}) RETURN count(n)") == 0
 
@@ -280,8 +280,8 @@ def test_operator_route_point_with_eventid_prop_not_resolvable(sdk):
     endpoint key — addressing a Point by its eventId would pass the Point
     branch (no id-guard), then crash the id-keyed write primitives mid-write
     (partial mutation). Such an endpoint stays 'does not exist'."""
-    p = sdk.create_point("statement", "X", eventId="PHA-1")
-    pa = sdk.create_point("statement", "A")["id"]
+    p = sdk._create_point("statement", "X", eventId="PHA-1")
+    pa = sdk._create_point("statement", "A")["id"]
     g = sdk._get_proj().g
     assert g.query("MATCH (n:Point {id:$i}) RETURN n.eventId",
                    params={"i": p["id"]}).result_set[0][0] == "PHA-1"
@@ -293,7 +293,7 @@ def test_operator_route_point_with_eventid_prop_not_resolvable(sdk):
     msgs = [v["message"] for v in viols]
     assert any("does not exist" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="does not exist"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # zero partial mutation
     assert _count(sdk, "MATCH (n:Point {content:'B'}) RETURN count(n)") == 0
 
@@ -308,16 +308,16 @@ def test_event_input_operator_reingest_exact_hits_no_duplicate(sdk):
     input set) key surfaces the same operator id, never a duplicate (EP
     double-count). Pre-fix the Event endpoint was rejected at validation, so
     the dedup path was unreachable on the ingest surface."""
-    pa = sdk.create_point("statement", "A")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     bundle = {"connections": [
         {"from": pa, "to": eid, "operator": "IMPL", "reify": True}]}
-    res1 = sdk.ingest(bundle)
+    res1 = sdk._ingest(bundle)
     assert res1["created"]["connections"] == 1
     oid = res1["ids"]["connections"][0]
     assert _operator_count(sdk) == 1
 
-    res2 = sdk.ingest(bundle)
+    res2 = sdk._ingest(bundle)
     assert res2["created"]["connections"] == 0
     assert res2["deduped"]["connections"] == 1
     assert _operator_count(sdk) == 1
@@ -340,13 +340,13 @@ def test_bundle_local_event_ref_rededups_by_resolved_id(sdk):
         "connections": [
             {"from": "p1", "to": "evt", "operator": "IMPL", "reify": True}],
     }
-    res1 = sdk.ingest(bundle)
+    res1 = sdk._ingest(bundle)
     assert res1["created"]["connections"] == 1
     p1_id = res1["ids"]["refs"]["p1"]
     evt_id = res1["ids"]["refs"]["evt"]
 
     # re-ingest the connection against the RESOLVED Event id (external)
-    res2 = sdk.ingest({"connections": [
+    res2 = sdk._ingest({"connections": [
         {"from": p1_id, "to": evt_id, "operator": "IMPL", "reify": True}]})
     assert res2["deduped"]["connections"] == 1
     assert res2["created"]["connections"] == 0
@@ -368,8 +368,8 @@ def test_bundle_local_event_full_bundle_reingest_is_append_only(sdk):
         "connections": [
             {"from": "p1", "to": "evt", "operator": "IMPL", "reify": True}],
     }
-    sdk.ingest(bundle)
-    res2 = sdk.ingest(bundle)
+    sdk._ingest(bundle)
+    res2 = sdk._ingest(bundle)
     # a second Event occurrence (append-only) → a second operator, by design
     assert _count(sdk, "MATCH (e:Event) RETURN count(e)") == 2
     assert _operator_count(sdk) == 2
@@ -395,16 +395,16 @@ def test_event_input_partial_absorb_completes_via_ingest(sdk):
     duplicate operator, `operator_absorb_completed` warning emitted). The
     MISSING input is the EVENT, pinning the completion loop's Point-OR-Event
     clause (a Point-only MATCH would silently drop the typed Event edge)."""
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     # draft operator whose written set {pa, pb} is a PROPER SUBSET of the
     # requested set {pa, pb, eid} — the MISSING input is the EVENT, so the
     # absorb's edge-completion loop must write the typed Event edge (the
     # #1919 P1 Point-OR-Event clause; a Point-only MATCH would drop it)
-    sdk.create_operator("IMPL", pa, [pb], promote_source=False)
+    sdk._create_operator("IMPL", pa, [pb], promote_source=False)
 
-    res = sdk.ingest({"connections": [
+    res = sdk._ingest({"connections": [
         {"from": pa, "to": [pb, eid], "operator": "IMPL", "reify": True}]})
     assert res["created"]["connections"] == 0
     assert res["deduped"]["connections"] == 1
@@ -420,7 +420,7 @@ def test_event_input_partial_absorb_completes_via_ingest(sdk):
     assert _count(sdk, "MATCH (e:Event)-[:INPUT]->(o:Point "
                        "{is_operator:true}) RETURN count(*)") == 1
     # the completed operator still exact-hits the FULL key on a later re-ingest
-    res2 = sdk.ingest({"connections": [
+    res2 = sdk._ingest({"connections": [
         {"from": pa, "to": [pb, eid], "operator": "IMPL", "reify": True}]})
     assert res2["deduped"]["connections"] == 1
     assert _operator_count(sdk) == 1
@@ -433,12 +433,12 @@ def test_event_input_partial_absorb_completes_via_ingest(sdk):
 def test_plain_point_operator_route_behavior_unchanged(sdk):
     """#2062 (regression): the operator route with plain-Point endpoints
     keeps its exact dedup on re-ingest — the relaxation is additive."""
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
     bundle = {"connections": [
         {"from": pa, "to": pb, "operator": "IMPL", "reify": True}]}
-    sdk.ingest(bundle)
-    res = sdk.ingest(bundle)
+    sdk._ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["deduped"]["connections"] == 1
     assert res["created"]["connections"] == 0
     assert _operator_count(sdk) == 1
@@ -459,13 +459,13 @@ def test_operator_route_subject_object_endpoints_accepted(sdk):
     Subject endpoint'. Re-ingest must exact-hit the operator (no duplicate,
     no double count in EP) — that is what makes the widening safe rather than
     just permissive."""
-    sub = sdk.create_subject("Alpha")["id"]
-    obj = sdk.create_object("Beta")["id"]
+    sub = sdk._create_subject("Alpha")["id"]
+    obj = sdk._create_object("Beta")["id"]
     bundle = {"connections": [{"from": sub, "to": obj, "operator": "IMPL",
                                "reify": True}]}
 
     assert sdk._validate_bundle(bundle) == []
-    res1 = sdk.ingest(bundle)
+    res1 = sdk._ingest(bundle)
     assert res1["created"]["connections"] == 1
     assert _operator_count(sdk) == 1
     # the operator is wired to BOTH inputs (typed edge + reverse INPUT edge)
@@ -474,7 +474,7 @@ def test_operator_route_subject_object_endpoints_accepted(sdk):
     assert _count(sdk, "MATCH ()-[r:INPUT]->(o:Point {is_operator:true}) "
                        "RETURN count(r)") == 2
 
-    res2 = sdk.ingest(bundle)
+    res2 = sdk._ingest(bundle)
     assert res2["created"]["connections"] == 0
     assert res2["deduped"]["connections"] == 1
     assert _operator_count(sdk) == 1
@@ -490,11 +490,11 @@ def test_direct_route_event_endpoint_accepted(sdk):
     operator-mediated and is reified — with the ``point_mediated_route``
     warning. The validator's job is only to stop being stricter than the
     primitives; the structure stays the primitive's call."""
-    pa = sdk.create_point("statement", "A")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     bundle = {"connections": [{"from": pa, "to": eid, "operator": "IMPL"}]}
     assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     # Point-bearing ⇒ operator-mediated (#8499) — and the gate says so out loud
     assert _operator_count(sdk) == 1
@@ -518,7 +518,7 @@ def test_direct_route_event_object_endpoint_is_operatorless(sdk):
         "connections": [{"from": "evt", "to": "obj", "operator": "IMPL"}],
     }
     assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     assert _count(sdk, "MATCH (:Event)-[r:IMPL]->(:Object) "
                        "RETURN count(r)") == 1
@@ -533,22 +533,22 @@ def test_direct_route_subject_object_endpoints_accepted(sdk):
     accepted by ingest too — the two write surfaces agree on the same edge.
     Phase 1 reports 0 violations and ingest writes exactly one
     (Subject)-[:IMPL]->(Object) edge with no raise and no operator."""
-    sub = sdk.create_subject("Alpha")["id"]
-    obj = sdk.create_object("Beta")["id"]
+    sub = sdk._create_subject("Alpha")["id"]
+    obj = sdk._create_object("Beta")["id"]
     bundle = {"connections": [{"from": sub, "to": obj, "operator": "IMPL"}]}
 
     # Indicator 1 — _validate_bundle reports zero violations
     assert sdk._validate_bundle(bundle) == []
 
     # Indicator 2 — exactly one edge, written operator-less
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     assert _count(sdk, f"MATCH (:Subject {{id:'{sub}'}})-[r:IMPL]->"
                        f"(:Object {{id:'{obj}'}}) RETURN count(r)") == 1
     assert _operator_count(sdk) == 0
 
     # the SDK primitive and ingest agree on the SAME edge (idempotent MERGE)
-    assert sdk.create_direct_edge("IMPL", sub, obj)["created"] is False
+    assert sdk._create_direct_edge("IMPL", sub, obj)["created"] is False
 
 
 def test_direct_route_terminal_only_carrier_is_a_different_incarnation(sdk):
@@ -567,8 +567,8 @@ def test_direct_route_terminal_only_carrier_is_a_different_incarnation(sdk):
     node is not reused, not resurrected and not mutated, and the edge lands on
     the NEW incarnation.
     """
-    sub = sdk.create_subject("Alpha")["id"]
-    sdk.create_object("Beta")
+    sub = sdk._create_subject("Alpha")["id"]
+    sdk._create_object("Beta")
     # #12592: the word names its successor (ONTOLOGY §4.2), so the fixture does.
     # The question here is unchanged — the resolver must not reuse the buried one.
     sdk.update_knowledge(sub, status="superseded", supersededBy="Alpha II")
@@ -581,7 +581,7 @@ def test_direct_route_terminal_only_carrier_is_a_different_incarnation(sdk):
     }
     assert sdk._validate_bundle(bundle) == [], (
         "a terminal-only carrier over-rejected a bundle the writer performs")
-    assert sdk.ingest(bundle)["created"]["connections"] == 1
+    assert sdk._ingest(bundle)["created"]["connections"] == 1
 
     # ONE new live incarnation beside the buried one, and the edge is on IT.
     assert _count(sdk, "MATCH (s:Subject {name:'Alpha'}) RETURN count(s)") == 2
@@ -615,7 +615,7 @@ def test_direct_route_entity_declared_terminal_status_rejected_phase1(sdk):
     msgs = [v["message"] for v in viols]
     assert any("declares status 'superseded'" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="declares status 'superseded'"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Subject {name:'Gamma'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
@@ -643,7 +643,7 @@ def test_direct_route_entity_nested_props_declared_terminal_status_rejected_phas
     assert any("declares status 'superseded'" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="declares status 'superseded'"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — neither the predecessor point nor the born-terminal Subject
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
@@ -688,7 +688,7 @@ def test_direct_route_entity_unhashable_status_is_a_violation_not_a_crash(
     # …and it names the writer's vocabulary, so the message is actionable.
     assert any("superseded" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation: neither the predecessor point nor the Subject committed.
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
@@ -740,7 +740,7 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     assert any("declares status" in m and ":Object" in m for m in msgs), msgs
     assert any("declares status" in m and ":Event" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation: the predecessor object and the Event never land.
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 0
@@ -753,7 +753,7 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
          "eventKind": "sessionCaptured"},
     ]}
     assert sdk._validate_bundle(event_no_status) == []
-    sdk.ingest(event_no_status)
+    sdk._ingest(event_no_status)
     assert _count(sdk, "MATCH (n:Event {name:'Plain'}) RETURN count(n)") == 1
 
     # …and the Event's declaration ALONE is refused too, so this isolates the
@@ -768,7 +768,7 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
     ev_msgs = [v["message"] for v in sdk._validate_bundle(event_only)]
     assert any("declares status" in m and ":Event" in m for m in ev_msgs), ev_msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(event_only)
+        sdk._ingest(event_only)
     # ⛔ ZERO mutation on BOTH halves of this bundle, not only the Event: the
     # Object PRECEDES the refused Event in this bundle's entity list, so a Phase 1
     # that refused LATE — validation moved behind the first write — leaves
@@ -804,7 +804,7 @@ def test_direct_route_object_status_values_are_refused_in_phase_1_like_the_write
          "eventKind": "sessionCaptured"},
     ]}
     assert sdk._validate_bundle(ok) == []
-    sdk.ingest(ok)
+    sdk._ingest(ok)
     assert _count(sdk, "MATCH (n:Object {name:'Solo'}) RETURN count(n)") == 1
     assert _count(sdk, "MATCH (n:Event {name:'OnlyEvent'}) RETURN count(n)") == 1
 
@@ -840,7 +840,7 @@ def test_direct_route_event_declared_terminal_status_rejected_phase1(sdk, spelli
     assert any("the Event it creates is born terminal" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="declares status 'superseded'"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — neither the predecessor point nor the born-terminal Event
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
@@ -871,7 +871,7 @@ def test_direct_route_event_outdated_flag_rejected_phase1(sdk, spelling):
     assert any("declares the server-managed 'outdated' flag" in m
                for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="outdated"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Event {name:'Launch'}) RETURN count(n)") == 0
@@ -908,7 +908,7 @@ def test_direct_route_live_event_status_is_refused(sdk):
         {"ref": "o", "type": "object", "name": "Delta"}],
         "connections": [{"from": "evt", "to": "o", "operator": "IMPL"}]}
     assert sdk._validate_bundle(ok) == []
-    assert sdk.ingest(ok)["created"]["connections"] == 1
+    assert sdk._ingest(ok)["created"]["connections"] == 1
     assert _count(sdk, "MATCH (:Event)-[r:IMPL]->(:Object) RETURN count(r)") == 1
     assert _operator_count(sdk) == 0
 
@@ -937,7 +937,7 @@ def test_direct_route_entity_outdated_flag_rejected_phase1(sdk, spelling):
     assert any("declares the server-managed 'outdated' flag" in m
                for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="outdated"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject {name:'Gamma'}) RETURN count(n)") == 0
@@ -957,7 +957,7 @@ def test_direct_route_entity_top_level_status_shadows_nested_props(sdk):
         "connections": [{"from": "s", "to": "o", "operator": "IMPL"}],
     }
     assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     assert _count(sdk, "MATCH (n:Subject {name:'Gamma', status:'live'}) "
                        "RETURN count(n)") == 1
@@ -970,8 +970,8 @@ def test_direct_route_live_entity_not_over_rejected(sdk):
     does not apply the re-declared value), so the endpoint stays live and the
     direct edge is legal. Without the by-name existence test the guard would
     reject a bundle the writer accepts."""
-    sdk.create_subject("Alpha")
-    sdk.create_object("Beta")
+    sdk._create_subject("Alpha")
+    sdk._create_object("Beta")
     bundle = {
         "entities": [{"ref": "s", "type": "subject", "name": "Alpha",
                       "status": "superseded"},
@@ -979,7 +979,7 @@ def test_direct_route_live_entity_not_over_rejected(sdk):
         "connections": [{"from": "s", "to": "o", "operator": "IMPL"}],
     }
     assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     assert _count(sdk, "MATCH (:Subject {name:'Alpha'})-[r:IMPL]->"
                        "(:Object {name:'Beta'}) RETURN count(r)") == 1
@@ -993,7 +993,7 @@ def test_direct_route_non_point_endpoints_still_rejected(sdk):
     that #2062 expected to be refused is now ACCEPTED (it moved to the
     epistemic side, see test_direct_route_event_endpoint_accepted) — the pin
     is re-specified, never silently deleted."""
-    pa = sdk.create_point("statement", "A")["id"]
+    pa = sdk._create_point("statement", "A")["id"]
     src = sdk.register_source("https://pre.example/s", "report")
     bundle = {
         "points": [{"ref": "pO", "kind": "statement", "content": "op-shaped",
@@ -1021,7 +1021,7 @@ def test_direct_route_non_point_endpoints_still_rejected(sdk):
     assert not any("evtL" in m for m in msgs), msgs
     # Phase 2 is defense-in-depth: the same bundle raises, never a partial write
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1061,7 +1061,7 @@ def test_direct_route_same_name_earlier_item_declared_terminal_status(sdk):
     assert any("resolves into a terminal status" in m
                and "declares status 'superseded'" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="declares status 'superseded'"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — counted on the graph, not inferred from the exception
     # (the pre-fix failure raised too, it just left the bundle behind)
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
@@ -1096,7 +1096,7 @@ def test_direct_route_same_name_earlier_item_outdated_flag(sdk):
         msgs
     with pytest.raises(BundleValidationError,
                        match="declares the server-managed 'outdated' flag"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — counted on the graph, not inferred from the exception
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 0
@@ -1144,7 +1144,7 @@ def test_reify_route_referenced_entity_outdated_flag_rejected_phase1(sdk):
                for v in viols), viols
     with pytest.raises(BundleValidationError,
                        match="declares the server-managed 'outdated' flag"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — counted on the graph, not inferred from the exception
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 0
@@ -1177,7 +1177,7 @@ def test_reify_route_same_name_earlier_item_outdated_flag_rejected_phase1(sdk):
                for v in viols), viols
     with pytest.raises(BundleValidationError,
                        match="declares the server-managed 'outdated' flag"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Object) RETURN count(n)") == 0
@@ -1211,7 +1211,7 @@ def test_direct_route_unreferenced_entity_outdated_flag_rejected_phase1(sdk):
                for v in viols), viols
     with pytest.raises(BundleValidationError,
                        match="declares the server-managed 'outdated' flag"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Object) RETURN count(n)") == 0
@@ -1242,7 +1242,7 @@ def test_direct_route_unreferenced_event_outdated_flag_rejected_phase1(sdk):
                for v in viols), viols
     with pytest.raises(BundleValidationError,
                        match="declares the server-managed 'outdated' flag"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Object) RETURN count(n)") == 0
@@ -1287,7 +1287,7 @@ def test_points_section_outdated_flag_rejected_phase1(sdk, spelling):
     assert "points[1]" in viols[0]["message"], viols[0]["message"]
     with pytest.raises(BundleValidationError,
                        match="declares the server-managed 'outdated' flag"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — counted on the graph, not inferred from the exception
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
 
@@ -1324,7 +1324,7 @@ def test_direct_route_operator_shaped_entity_item_rejected_phase1(sdk, spelling)
     assert any("got an operator-shaped entity item" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="operator-shaped entity item"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — counted on the graph, not inferred from the exception
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 0
@@ -1349,7 +1349,7 @@ def test_direct_route_operator_shaped_same_name_item_rejected_phase1(sdk):
     As with the other guard tests, the earlier pins used ONE entity item per
     name — which is why the taint shape was missed.
     """
-    sub = sdk.create_subject("Gamma")["id"]
+    sub = sdk._create_subject("Gamma")["id"]
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],
@@ -1365,7 +1365,7 @@ def test_direct_route_operator_shaped_same_name_item_rejected_phase1(sdk):
                for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="whose bundle item 's2' is operator-shaped"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation beyond the seeded Subject, and the seeded node is untouched
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Object) RETURN count(n)") == 0
@@ -1402,7 +1402,7 @@ def test_direct_route_name_merged_self_edge_rejected_phase1(sdk):
                and "address the same endpoint" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="from and to address the same endpoint"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — counted on the graph, not inferred from the exception
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 0
@@ -1425,7 +1425,7 @@ def test_direct_route_self_edge_rejected_when_the_name_is_only_terminal(sdk):
 
     Mutation that must red this: restoring `if _h[0]:` in the guard.
     """
-    sub = sdk.create_subject("Gamma")["id"]
+    sub = sdk._create_subject("Gamma")["id"]
     # #12592: a bare `superseded` is refused, so the fixture names its successor.
     sdk.update_knowledge(sub, status="superseded", supersededBy="Gamma II")
     bundle = {
@@ -1444,7 +1444,7 @@ def test_direct_route_self_edge_rejected_when_the_name_is_only_terminal(sdk):
     assert not any("resolves to terminal" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="from and to address the same endpoint"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — counted on the graph, not inferred from the exception
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 1
@@ -1463,8 +1463,8 @@ def test_external_endpoint_tainted_by_operator_shaped_name_rejected_phase1(
     (`_check_endpoint_race` is route-independent), so the Phase-1 check must be
     too — hence `reify` here.
     """
-    sub = sdk.create_subject("Gamma")["id"]
-    obj = sdk.create_object("Delta")["id"]
+    sub = sdk._create_subject("Gamma")["id"]
+    obj = sdk._create_object("Delta")["id"]
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],
@@ -1479,7 +1479,7 @@ def test_external_endpoint_tainted_by_operator_shaped_name_rejected_phase1(
                and "is operator-shaped" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="so the endpoint is operator-shaped"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — no point, and the pre-existing Subject is NOT tainted
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject {id:$id, is_operator:true}) "
@@ -1497,8 +1497,8 @@ def test_pre_existing_operator_shaped_holder_rejected_phase1(sdk):
     the next one. The holder probe now returns the holder's operator-ness from
     the MATCH it already ran (same query, one more column).
     """
-    sdk.create_subject("Gamma", is_operator=True)
-    sdk.create_object("Delta")
+    sdk._create_subject("Gamma", is_operator=True)
+    sdk._create_object("Delta")
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],
@@ -1511,7 +1511,7 @@ def test_pre_existing_operator_shaped_holder_rejected_phase1(sdk):
     assert any("merge target is operator-shaped" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="merge target is operator-shaped"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — no point committed, no second Subject minted
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 1
@@ -1528,7 +1528,7 @@ def test_direct_route_external_id_self_edge_rejected_phase1(sdk):
     entity ref lands on `entity_name_id(label, name)` and an external ref on the
     id it names, so the pair is one node here.
     """
-    sub = sdk.create_subject("Gamma")["id"]
+    sub = sdk._create_subject("Gamma")["id"]
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],
@@ -1541,7 +1541,7 @@ def test_direct_route_external_id_self_edge_rejected_phase1(sdk):
                for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="from and to address the same endpoint"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 1
 
@@ -1564,7 +1564,7 @@ def test_reified_route_merged_name_twins_not_rejected(sdk):
                          "reify": True}],
     }
     assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 1
     assert _operator_count(sdk) == 1
@@ -1587,10 +1587,10 @@ def test_operator_shaped_name_cleared_by_falsy_declaration_accepted(
     them could regress independently.
     """
     if shape == "heals-holder":
-        sdk.create_subject("Gamma", is_operator=True)
+        sdk._create_subject("Gamma", is_operator=True)
         entities = [{"ref": "s", "type": "subject", "name": "Gamma"}]
     else:
-        sdk.create_subject("Gamma")
+        sdk._create_subject("Gamma")
         entities = [{"ref": "s1", "type": "subject", "name": "Gamma",
                      "is_operator": True},
                     {"ref": "s", "type": "subject", "name": "Gamma"}]
@@ -1598,14 +1598,14 @@ def test_operator_shaped_name_cleared_by_falsy_declaration_accepted(
         entities[-1]["is_operator"] = False
     else:
         entities[-1]["props"] = {"is_operator": False}
-    sdk.create_object("Delta")
+    sdk._create_object("Delta")
     bundle = {
         "entities": [*entities,
                      {"ref": "o", "type": "object", "name": "Delta"}],
         "connections": [{"from": "s", "to": "o", "operator": "IMPL"}],
     }
     assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     # the writer's outcome: the flag is CLEARED on the merged node
     assert _count(sdk, "MATCH (n:Subject {name:'Gamma'}) WHERE "
@@ -1627,13 +1627,13 @@ def test_operator_null_does_not_clear_operator_shape_rejected_phase1(
     node, after the point had committed (measured). "Declares" must mean "the
     writer will write a boolean", the same standard the sibling helpers use.
     """
-    sub = sdk.create_subject("Gamma", is_operator=True)["id"]
+    sub = sdk._create_subject("Gamma", is_operator=True)["id"]
     item = {"ref": "s", "type": "subject", "name": "Gamma"}
     if spelling == "top":
         item["is_operator"] = None
     else:
         item["props"] = {"is_operator": None}
-    sdk.create_object("Delta")
+    sdk._create_object("Delta")
     bundle = {
         "points": [{"ref": "pX", "kind": "statement",
                     "content": "must-not-commit"}],
@@ -1646,7 +1646,7 @@ def test_operator_null_does_not_clear_operator_shape_rejected_phase1(
                for m in msgs), msgs
     with pytest.raises(BundleValidationError,
                        match="merge target is operator-shaped"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — the point never committed, the holder is unchanged
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Subject {id:$id, is_operator:true}) "
@@ -1677,7 +1677,7 @@ def test_operator_shaped_taint_without_ref_names_the_bundle_item(sdk):
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 0
     with pytest.raises(BundleValidationError,
                        match="bundle item \\(no"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
 
 
 def test_external_operator_shaped_endpoint_cleared_by_bundle_declaration(sdk):
@@ -1691,15 +1691,15 @@ def test_external_operator_shaped_endpoint_cleared_by_bundle_declaration(sdk):
     bundle-local arm already deferred to the declaration; both arms must, or one
     gate holds two verdicts about one node.
     """
-    sub = sdk.create_subject("Gamma", is_operator=True)["id"]
-    obj = sdk.create_object("Delta")["id"]
+    sub = sdk._create_subject("Gamma", is_operator=True)["id"]
+    obj = sdk._create_object("Delta")["id"]
     bundle = {
         "entities": [{"ref": "sx", "type": "subject", "name": "Gamma",
                       "is_operator": False}],
         "connections": [{"from": sub, "to": obj, "operator": "IMPL"}],
     }
     assert sdk._validate_bundle(bundle) == []
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     assert res["created"]["connections"] == 1
     assert _count(sdk, "MATCH (n:Subject {name:'Gamma'}) WHERE "
                        "coalesce(n.is_operator,false) "
@@ -1758,7 +1758,7 @@ def test_subject_status_vocabulary_is_refused_bundle_wide(sdk, shape, spelling):
     assert any("declares status 'bogus'" in m and ":Subject" in m
                for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="declares status 'bogus'"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — no point, no Subject, no edge.
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
@@ -1805,11 +1805,11 @@ def test_entity_prop_depth_matches_the_write_door(sdk, shape):
     viols = sdk._validate_bundle(bundle)
     if accepted:
         assert viols == [], viols
-        sdk.ingest(bundle)  # the writer accepts it — no mid-write raise
+        sdk._ingest(bundle)  # the writer accepts it — no mid-write raise
     else:
         assert viols, "depth-2 spelling must be refused in Phase 1"
         with pytest.raises(BundleValidationError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
 
 
 def test_point_dedup_relay_double_nested_outdated_is_refused_in_phase1(sdk):
@@ -1828,7 +1828,7 @@ def test_point_dedup_relay_double_nested_outdated_is_refused_in_phase1(sdk):
     spelling — the ambiguity is unresolvable at Phase 1 without re-deriving the
     dedup resolution, and refusing is the safe direction.)
     """
-    sdk.create_point("statement", "dedup-target")
+    sdk._create_point("statement", "dedup-target")
     bundle = {
         "points": [
             {"kind": "statement", "content": "must-not-commit"},
@@ -1839,7 +1839,7 @@ def test_point_dedup_relay_double_nested_outdated_is_refused_in_phase1(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("outdated" in m and "points[1]" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -1855,8 +1855,8 @@ def test_node_with_unhashable_status_is_refused_not_a_crash(sdk):
     close. Measured pre-fix: ``_validate_bundle`` returned ``[]`` and ``ingest``
     raised ``TypeError`` with the earlier point already committed.
     """
-    sdk.create_object("Alpha")
-    sdk.create_object("Beta")
+    sdk._create_object("Alpha")
+    sdk._create_object("Beta")
     proj = sdk._get_proj()
     proj.g.query("MATCH (n:Object {name:'Alpha'}) SET n.status = ['retracted']")
     alpha = proj.g.query(
@@ -1871,7 +1871,7 @@ def test_node_with_unhashable_status_is_refused_not_a_crash(sdk):
     assert any("cannot evaluate" in m and "['retracted']" in m
                for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -1911,7 +1911,7 @@ def test_bundle_declared_array_status_is_refused_in_phase1(sdk):
     assert any("would store status" in m and "entities[0]" in m
                for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 0
@@ -1934,7 +1934,7 @@ def test_merge_onto_array_status_holder_is_refused_in_phase1(sdk):
     `create_operator` never reads a status. The original spelling put a point on
     the other side, which quietly turned this into a promotion test.
     """
-    sdk.create_object("Holder")
+    sdk._create_object("Holder")
     sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Holder'}) SET n.status = ['retracted']")
     bundle = {
@@ -1946,7 +1946,7 @@ def test_merge_onto_array_status_holder_is_refused_in_phase1(sdk):
     assert any("resolves onto the Object" in m and "cannot be evaluated" in m
                for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Object {name:'Live one'}) "
                        "RETURN count(n)") == 0
 
@@ -1962,7 +1962,7 @@ def test_gated_policy_reads_point_status_at_the_dedup_depth(sdk):
     status went `'draft'` → `'live'`, silently, with `_validate_bundle` []).
     The gated reader now uses the same per-door depth as the `outdated` leg.
     """
-    sdk.create_point("statement", "dedup-target", status="draft")
+    sdk._create_point("statement", "dedup-target", status="draft")
     for spelling in ({"props": {"status": "live"}},
                      {"props": {"props": {"status": "live"}}}):
         bundle = {"points": [{"kind": "statement",
@@ -1972,7 +1972,7 @@ def test_gated_policy_reads_point_status_at_the_dedup_depth(sdk):
         assert any("promotion_policy 'gated'" in m for m in msgs), (spelling,
                                                                    msgs)
         with pytest.raises(BundleValidationError):
-            sdk.ingest(bundle, promotion_policy="gated")
+            sdk._ingest(bundle, promotion_policy="gated")
         assert sdk._get_proj().g.query(
             "MATCH (n:Point {content:'dedup-target'}) RETURN n.status"
         ).result_set == [["draft"]]
@@ -1995,10 +1995,10 @@ def test_object_item_declaring_a_non_string_status_is_refused_in_phase_1(sdk):
     `test_direct_route_explicit_null_status_is_the_delete_sentinel`, so this test
     no longer has to carry it implicitly.
     """
-    sdk.create_object("Held")
+    sdk._create_object("Held")
     # The WRITER's answer for the same value — the authority Phase 1 mirrors.
     with pytest.raises(ValueError, match="must be a plain string"):
-        sdk.create_object("Held", status=["retracted"])
+        sdk._create_object("Held", status=["retracted"])
 
     bundle = {
         "entities": [{"ref": "h", "type": "object", "name": "Held",
@@ -2009,7 +2009,7 @@ def test_object_item_declaring_a_non_string_status_is_refused_in_phase_1(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("declares status" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # #9974 R1: the holder is still born status-less (absent READS live) — the
     # refusal wrote nothing.
     assert sdk._get_proj().g.query(
@@ -2027,7 +2027,7 @@ def test_operator_shaped_holder_with_array_status_is_refused_in_phase1(sdk):
     returned [] and step 4 raised `Phase2Error` with the earlier Point
     committed (measured). Both axes are now filled in one pass.
     """
-    sdk.create_object("Poisoned")
+    sdk._create_object("Poisoned")
     sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Poisoned'}) "
         "SET n.is_operator = true, n.status = ['x']")
@@ -2043,7 +2043,7 @@ def test_operator_shaped_holder_with_array_status_is_refused_in_phase1(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("merge target is operator-shaped" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -2061,7 +2061,7 @@ def test_double_nested_draft_stays_draft_under_gated(sdk):
     bundle = {"points": [{"kind": "statement", "content": "born-draft",
                           "props": {"props": {"status": "draft"}}}]}
     assert sdk._validate_bundle(bundle, promotion_policy="gated") == []
-    sdk.ingest(bundle, promotion_policy="gated")
+    sdk._ingest(bundle, promotion_policy="gated")
     assert sdk._get_proj().g.query(
         "MATCH (n:Point {content:'born-draft'}) RETURN n.status"
     ).result_set == [["draft"]]
@@ -2132,7 +2132,7 @@ def test_shared_name_declared_terminal_status_is_refused_in_phase1(sdk):
     assert any("terminal status" in m for m in msgs), msgs
     assert any("shared name" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -2159,7 +2159,7 @@ def test_shared_name_live_holder_is_the_landing_node(sdk):
         "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
     }
     assert sdk._validate_bundle(bundle) == []
-    created = sdk.ingest(bundle)
+    created = sdk._ingest(bundle)
     assert created["created"]["connections"] == 1
     # No third Acme was minted: the ONE live carrier is the endpoint.
     assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 2
@@ -2183,7 +2183,7 @@ def test_single_carrier_declared_terminal_status_is_still_dropped(sdk):
         "connections": [{"from": "a", "to": "b", "operator": "IMPL"}],
     }
     assert sdk._validate_bundle(bundle) == []
-    assert sdk.ingest(bundle)["created"]["connections"] == 1
+    assert sdk._ingest(bundle)["created"]["connections"] == 1
     assert sdk._get_proj().g.query(
         "MATCH (o:Object {name:'Solo'}) RETURN o.status").result_set == [["live"]]
 
@@ -2260,7 +2260,7 @@ def test_two_live_carriers_of_one_name_are_refused_in_phase1(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("2 LIVE entities" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="LIVE entities"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
     assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 2, (
@@ -2282,7 +2282,7 @@ def test_an_unreferenced_ambiguous_item_is_refused_too(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("2 LIVE entities" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -2325,7 +2325,7 @@ def test_a_kind_routed_item_probes_the_label_the_write_lands_on(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("2 LIVE entities" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError, match="LIVE entities"):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0, (
         "the point committed before step 3 raised AmbiguousEntityName")
@@ -2356,7 +2356,7 @@ def test_a_single_live_operator_shaped_holder_is_refused(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("whose merge target is operator-shaped" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -2379,7 +2379,7 @@ def test_a_single_live_holder_with_array_status_is_refused(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("cannot be evaluated" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -2396,7 +2396,7 @@ def test_shared_name_distinct_nodes_are_not_a_self_edge(sdk):
         ],
     }
     assert sdk._validate_bundle(bundle) == []
-    assert sdk.ingest(bundle)["created"]["connections"] == 1
+    assert sdk._ingest(bundle)["created"]["connections"] == 1
 
 
 def test_first_same_name_item_declaring_array_is_refused(sdk):
@@ -2421,7 +2421,7 @@ def test_first_same_name_item_declaring_array_is_refused(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("an array is stored verbatim" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -2444,7 +2444,7 @@ def test_second_same_name_item_declaring_an_array_is_refused_in_phase_1(sdk):
     all, and the writer would have refused the same value".
     """
     with pytest.raises(ValueError, match="must be a plain string"):
-        sdk.create_object("Acme", status=["retracted"])
+        sdk._create_object("Acme", status=["retracted"])
 
     bundle = {
         "entities": [
@@ -2458,7 +2458,7 @@ def test_second_same_name_item_declaring_an_array_is_refused_in_phase_1(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("declares status" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     # ZERO mutation — neither the minting item nor the resolving one committed.
     assert sdk._get_proj().g.query(
         "MATCH (o:Object {name:'Acme'}) RETURN count(o)").result_set == [[0]]
@@ -2488,7 +2488,7 @@ def test_two_bundle_refs_to_one_shared_name_are_a_self_edge(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("address the same endpoint" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
     assert _count(sdk, "MATCH (o:Object {name:'Acme'}) RETURN count(o)") == 0, (
@@ -2509,7 +2509,7 @@ def test_two_carrier_ids_are_not_a_self_edge(sdk):
         ],
     }
     assert sdk._validate_bundle(bundle) == []
-    assert sdk.ingest(bundle)["created"]["connections"] == 1
+    assert sdk._ingest(bundle)["created"]["connections"] == 1
 
 
 def test_phase1_and_the_primitive_agree_on_terminal_endpoints(sdk):
@@ -2519,8 +2519,8 @@ def test_phase1_and_the_primitive_agree_on_terminal_endpoints(sdk):
     accepts an endpoint the primitive raises on mid-write. This drives both
     surfaces over one fixture so the pairing is a detector, not a comment.
     """
-    term = sdk.create_subject("Term", status="superseded")["id"]
-    live = sdk.create_object("Live")["id"]
+    term = sdk._create_subject("Term", status="superseded")["id"]
+    live = sdk._create_object("Live")["id"]
     # Phase 1 predicts the refusal of the direct route …
     msgs = [v["message"] for v in sdk._validate_bundle({
         "connections": [{"from": term, "to": live, "operator": "IMPL"}],
@@ -2528,14 +2528,14 @@ def test_phase1_and_the_primitive_agree_on_terminal_endpoints(sdk):
     assert any("terminal" in m and "superseded" in m for m in msgs), msgs
     # … and the primitive is what refuses it.
     with pytest.raises(ValueError, match="terminal"):
-        sdk.create_direct_edge("IMPL", term, live)
+        sdk._create_direct_edge("IMPL", term, live)
     # A reified pair takes `create_operator`, which tolerates the terminal node —
     # so Phase 1 must not refuse it, and the primitive must actually write it.
     assert sdk._validate_bundle({
         "connections": [{"from": live, "to": term, "operator": "IMPL",
                          "reify": True}],
     }) == []
-    assert sdk.create_operator("IMPL", live, [term]) is not None
+    assert sdk._create_operator("IMPL", live, [term]) is not None
 
 
 def test_non_canonical_single_carrier_self_edge_is_refused(sdk):
@@ -2557,7 +2557,7 @@ def test_non_canonical_single_carrier_self_edge_is_refused(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("address the same endpoint" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -2566,7 +2566,7 @@ def test_bare_name_subject_stub_is_the_same_endpoint_as_the_bundle_ref(sdk):
     """`aboutSubject="Gamma"` mints a `:Subject {id:'Gamma'}` stub — a third id
     spelling. The bundle item adopts it (name merge) and re-registers it under the
     canonical id, so an endpoint naming the stub's id is the same node."""
-    sdk.create_event("meeting", "other", aboutSubject="Gamma")
+    sdk._create_event("meeting", "other", aboutSubject="Gamma")
     bundle = {
         "points": [{"kind": "statement", "content": "must-not-commit"}],
         "entities": [{"ref": "g", "type": "subject", "name": "Gamma"}],
@@ -2575,7 +2575,7 @@ def test_bare_name_subject_stub_is_the_same_endpoint_as_the_bundle_ref(sdk):
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("address the same endpoint" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
 
@@ -2622,7 +2622,7 @@ def test_endpoint_naming_a_live_carrier_is_the_same_endpoint_as_the_ref(sdk):
         msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
         assert any("address the same endpoint" in m for m in msgs), (frm, to, msgs)
         with pytest.raises(BundleValidationError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
                        "RETURN count(n)") == 0
     # the carrier kept its own id and no edge was written

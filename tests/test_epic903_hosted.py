@@ -79,7 +79,7 @@ class TestModeWiring:
         try:
             f.sdk._mark_dirty([f.claims["p1"]])
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(dirty_only=True, mode="local")
+            r = f.sdk._dream(dirty_only=True, mode="local")
             assert r["mode"] == "local"
         finally:
             f.sdk.close()

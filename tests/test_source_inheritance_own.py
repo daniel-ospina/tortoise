@@ -41,7 +41,7 @@ def fresh_sdk():
 
 def tier_source(sdk, url: str, tier: str, source_date: str = FRESH) -> str:
     """Create a Point extracted from a tiered Source. Returns point id."""
-    p = sdk.create_point("statement", f"claim from {url}", extractedFrom=url)
+    p = sdk._create_point("statement", f"claim from {url}", extractedFrom=url)
     sdk._get_proj().g.query(
         "MATCH (s:Source {url:$url}) SET s.credibilityTier = $t, s.sourceDate = $sd, "
         "s.ingestedAt = $sd",
@@ -51,7 +51,7 @@ def tier_source(sdk, url: str, tier: str, source_date: str = FRESH) -> str:
 
 
 def inherited_alpha(sdk, pid) -> float | None:
-    return sdk.get_point(pid).get("ep_alpha")
+    return sdk._get_point(pid).get("ep_alpha")
 
 
 class TestCorroboration:
@@ -62,7 +62,7 @@ class TestCorroboration:
             sdk._apply_source_inheritance(recency_decay=1.0)
             alpha_1 = inherited_alpha(sdk, p1)
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "two T4 sources", extractedFrom="https://a.example")
+            p = sdk._create_point("statement", "two T4 sources", extractedFrom="https://a.example")
             sdk._get_proj()._link_source(p["id"], "https://b.example")
             for u in ("https://a.example", "https://b.example"):
                 sdk._get_proj().g.query(
@@ -91,7 +91,7 @@ class TestAntiSybil:
 
     def test_1000_t4_approx_1_t3(self):
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "1000 T4 sources", extractedFrom="https://s0.example")
+            p = sdk._create_point("statement", "1000 T4 sources", extractedFrom="https://s0.example")
             for i in range(1, 1000):
                 sdk._get_proj()._link_source(p["id"], f"https://s{i}.example")
             for i in range(1000):
@@ -120,7 +120,7 @@ class TestTierOrdering:
                 alpha, beta = TIER_PRIORS[tier]
                 confs[tier] = inherited_alpha(sdk, pid)
                 assert confs[tier] == alpha
-                assert sdk.get_point(pid).get("ep_beta") == beta
+                assert sdk._get_point(pid).get("ep_beta") == beta
         ordered = ["T4", "T3", "T2", "T1", "T0"]
         for i in range(len(ordered) - 1):
             assert confs[ordered[i]] < confs[ordered[i + 1]]
@@ -147,7 +147,7 @@ class TestTemporal:
             sdk._apply_source_inheritance(recency_decay=0.95)
             fresh_alpha = inherited_alpha(sdk, pid)
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "fresh + ancient", extractedFrom="https://fresh.example")
+            p = sdk._create_point("statement", "fresh + ancient", extractedFrom="https://fresh.example")
             sdk._get_proj()._link_source(p["id"], "https://ancient.example")
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T1', "
@@ -166,7 +166,7 @@ class TestTemporal:
 
     def test_malformed_source_date_safe_no_decay(self):
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "bad date", extractedFrom="https://bad.example")
+            p = sdk._create_point("statement", "bad date", extractedFrom="https://bad.example")
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T1', s.sourceDate = 'garbage'",
                 params={"url": "https://bad.example"},
@@ -181,7 +181,7 @@ class TestLegacyActivation:
         register_source_kind_default("github_issue", "T2")
         try:
             with fresh_sdk() as sdk:
-                p = sdk.create_point("statement", "from github", extractedFrom="https://github.example")
+                p = sdk._create_point("statement", "from github", extractedFrom="https://github.example")
                 # Source has sourceKind='document' (default) — set it to github_issue
                 sdk._get_proj().g.query(
                     "MATCH (s:Source {url:$url}) SET s.sourceKind = 'github_issue', s.ingestedAt = $ts",
@@ -196,7 +196,7 @@ class TestLegacyActivation:
 
     def test_unregistered_legacy_kind_stays_neutral(self):
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "neutral", extractedFrom="https://neutral.example")
+            p = sdk._create_point("statement", "neutral", extractedFrom="https://neutral.example")
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.sourceKind = 'slack_message', s.ingestedAt = $ts",
                 params={"url": "https://neutral.example", "ts": FRESH},
@@ -206,7 +206,7 @@ class TestLegacyActivation:
 
     def test_malformed_tier_excluded_from_counts(self):
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "multi-source", extractedFrom="https://t4.example")
+            p = sdk._create_point("statement", "multi-source", extractedFrom="https://t4.example")
             # Link a second source with a malformed tier to the SAME point
             sdk._get_proj()._link_source(p["id"], "https://t9.example")
             sdk._get_proj().g.query(
@@ -232,13 +232,13 @@ class TestNANDRealPath:
                 # draft filter (create_point's implicit status is live since
                 # #1088; it was draft from #943), making the NAND operator
                 # degenerate and silently excluded from EP.
-                b = sdk.create_point("statement", "contradiction target", status="live")
-                sdk.set_point_baseline(b["id"], 1, 1)  # #344: neutral baseline (gate active)
-                op = sdk.create_operator("NAND", a, [b["id"]])  # noqa: F841
+                b = sdk._create_point("statement", "contradiction target", status="live")
+                sdk._set_point_baseline(b["id"], 1, 1)  # #344: neutral baseline (gate active)
+                op = sdk._create_operator("NAND", a, [b["id"]])  # noqa: F841
                 sdk._apply_source_inheritance(recency_decay=1.0)
-                result = sdk.compute_confidence()
+                result = sdk._compute_confidence()
                 conf_a = result["confidences"][a]["mean"]
-                return conf_a, sdk.get_point(a).get("ep_alpha")
+                return conf_a, sdk._get_point(a).get("ep_alpha")
 
         conf_t0, alpha_t0 = build("T0")
         conf_t4, alpha_t4 = build("T4")
@@ -252,13 +252,13 @@ class TestAssessmentExclusion:
     def test_assessment_points_excluded_from_inheritance(self):
         with fresh_sdk() as sdk:
             url = "https://assessed.example"
-            p = sdk.create_point("statement", "real claim", extractedFrom=url)
+            p = sdk._create_point("statement", "real claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T1', s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
             )
             # An assessment point referencing the same source (no extractedFrom)
-            sdk.create_point("assessment", "assessment of source",
+            sdk._create_point("assessment", "assessment of source",
                              props={"targetSource": url, "assessor": "alice", "score": 0.2})
             sdk._apply_source_inheritance(recency_decay=1.0)
             assert inherited_alpha(sdk, p["id"]) == 5.0  # T1 exact — no assessment interference
@@ -268,8 +268,8 @@ class TestReliabilityAPI:
     def test_untiered_unassessed_null(self):
         with fresh_sdk() as sdk:
             url = "https://untiered.example"
-            sdk.create_point("statement", "untiered claim", extractedFrom=url)
-            r = sdk.get_source_reliability(url)
+            sdk._create_point("statement", "untiered claim", extractedFrom=url)
+            r = sdk._get_source_reliability(url)
             assert r["reliability"] is None
             assert r["components"]["reason"] == "untiered"
 
@@ -277,19 +277,19 @@ class TestReliabilityAPI:
         from datetime import datetime, timezone
         with fresh_sdk() as sdk:
             url = "https://tiered.example"
-            sdk.create_point("statement", "tiered claim", extractedFrom=url)
+            sdk._create_point("statement", "tiered claim", extractedFrom=url)
             now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T1', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
                 params={"url": url, "ts": now},
             )
-            r = sdk.get_source_reliability(url)
+            r = sdk._get_source_reliability(url)
             assert r["reliability"] == pytest.approx(5.0 / 6.0, rel=5e-4)  # mean Beta(5,1) @ decay~1
             assert r["components"]["tier"] == "T1"
             assert r["cache"] == "recomputed"
             # Second call serves the fresh cache (float round-trip → approx)
-            r2 = sdk.get_source_reliability(url)
+            r2 = sdk._get_source_reliability(url)
             assert r2["cache"] == "fresh"
             assert r2["reliability"] == pytest.approx(r["reliability"], rel=1e-6)
 
@@ -297,20 +297,20 @@ class TestReliabilityAPI:
         """Raw graph writes bypassing the SDK cannot leave the cache stale forever."""
         with fresh_sdk() as sdk:
             url = "https://raw.example"
-            sdk.create_point("statement", "raw claim", extractedFrom=url)
+            sdk._create_point("statement", "raw claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
             )
-            r1 = sdk.get_source_reliability(url)
+            r1 = sdk._get_source_reliability(url)
             assert r1["components"]["tier"] == "T2"
             # Raw tier change (bypasses SDK) — old cache is stale on inputs
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T0'",
                 params={"url": url},
             )
-            r2 = sdk.get_source_reliability(url)
+            r2 = sdk._get_source_reliability(url)
             assert r2["components"]["tier"] == "T0"
             assert r2["reliability"] == pytest.approx(10.0 / 11.0, rel=5e-4)
 
@@ -318,19 +318,19 @@ class TestReliabilityAPI:
         """reliability.mean == the inherited prior mean EP applied (single source)."""
         with fresh_sdk() as sdk:
             url = "https://invariant.example"
-            p = sdk.create_point("statement", "invariant claim", extractedFrom=url)
+            p = sdk._create_point("statement", "invariant claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T3', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
             )
-            rel = sdk.get_source_reliability(url)["reliability"]
+            rel = sdk._get_source_reliability(url)["reliability"]
             sdk._apply_source_inheritance(recency_decay=0.95)
             prior = sdk._compute_source_prior(url)
             ep_mean = prior["alpha"] / (prior["alpha"] + prior["beta"])
             assert rel == pytest.approx(ep_mean, rel=5e-4)
             # And the point's inherited prior matches the source reliability
-            alpha = sdk.get_point(p["id"]).get("ep_alpha")
+            alpha = sdk._get_point(p["id"]).get("ep_alpha")
             assert alpha is not None
             assert alpha / (alpha + 1.0) == pytest.approx(rel, rel=5e-4)
 
@@ -338,14 +338,14 @@ class TestReliabilityAPI:
         """Untiered + assessed → assessment-only reliability (never feeds EP)."""
         with fresh_sdk() as sdk:
             url = "https://assessed-untiered.example"
-            sdk.create_point("statement", "claim", extractedFrom=url)
-            sdk.create_point("assessment", "rating",
+            sdk._create_point("statement", "claim", extractedFrom=url)
+            sdk._create_point("assessment", "rating",
                              props={"targetSource": url, "assessor": "alice",
                                     "score": 0.9, "assessorReputation": 1.0})
-            sdk.create_point("assessment", "rating2",
+            sdk._create_point("assessment", "rating2",
                              props={"targetSource": url, "assessor": "bob",
                                     "score": 0.5, "assessorReputation": 0.5})
-            r = sdk.get_source_reliability(url)
+            r = sdk._get_source_reliability(url)
             assert r["reliability"] is not None
             assert r["components"]["reason"] == "untiered; assessment-only"
             # EP unaffected: untiered sources never feed EP — point stays neutral
@@ -355,7 +355,7 @@ class TestReliabilityAPI:
                 "MATCH (p:Point) WHERE p.pointKind = 'statement' RETURN p.id"
             ).result_set
             for (pid,) in pts:
-                pt = sdk.get_point(pid)
+                pt = sdk._get_point(pid)
                 assert pt.get("ep_alpha") in (None, 1.0)
 
 
@@ -367,18 +367,18 @@ def _give_reputation(sdk, agent: str) -> None:
         "CREATE (s)-[:performs]->(e) RETURN e.eventId",
         params={"aid": agent, "eid": f"e_{agent}"},
     ).result_set
-    p_claim = sdk.create_point("statement", f"{agent}'s correct claim")
+    p_claim = sdk._create_point("statement", f"{agent}'s correct claim")
     sdk._get_proj().g.query(  # noqa: B018
         "MATCH (e:Event {eventId:$eid}), (n:Point {id:$id}) CREATE (e)-[:IMPL]->(n)",
         params={"eid": f"e_{agent}", "id": p_claim["id"]},
     ).result_set
-    assert sdk.compute_reputation(agent)["mean"] > 0.5
+    assert sdk._compute_reputation(agent)["mean"] > 0.5
 
 class TestAssessSource:
     def test_creates_assessment_with_correct_props(self):
         with fresh_sdk() as sdk:
             url = "https://assess1.example"
-            sdk.create_point("statement", "claim", extractedFrom=url)
+            sdk._create_point("statement", "claim", extractedFrom=url)
             r = sdk.manage_source_trust(url=url, assessor="alice", score=0.8, rationale="well-sourced and verified")
             row = sdk._get_proj().g.query(
                 "MATCH (p:Point {id:$id}) RETURN p.pointKind, p.targetSource, "
@@ -395,7 +395,7 @@ class TestAssessSource:
     def test_score_validation(self):
         with fresh_sdk() as sdk:
             url = "https://validate.example"
-            sdk.create_point("statement", "claim", extractedFrom=url)
+            sdk._create_point("statement", "claim", extractedFrom=url)
             with pytest.raises(ValueError):
                 sdk.manage_source_trust(url=url, assessor="alice", score=1.5, rationale="too high")
             with pytest.raises(ValueError):
@@ -411,7 +411,7 @@ class TestAssessSource:
         with fresh_sdk() as sdk:
             _give_reputation(sdk, "alice")  # rep ~0.67 → snapshot > 0.5
             url = "https://latest.example"
-            p = sdk.create_point("statement", "claim", extractedFrom=url)
+            p = sdk._create_point("statement", "claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
@@ -421,7 +421,7 @@ class TestAssessSource:
             sdk.manage_source_trust(url=url, assessor="alice", score=0.9, rationale="revised assessment")
             # Latest-wins: only 0.9 counts → factor = 1 + (rep-0.5)*0.4 > 1
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-            alpha = sdk.get_point(p["id"]).get("ep_alpha")
+            alpha = sdk._get_point(p["id"]).get("ep_alpha")
             # rep 0.667: factor = 1 + 0.167*0.4 = 1.0667 → pc = 2.0*1.0667 = 2.133 → alpha 3.133
             # If BOTH counted (double-count bug): factor ~1.0 → alpha 3.0. Assert > 3.0 proves latest-wins.
             assert alpha > 3.0
@@ -438,7 +438,7 @@ class TestAssessSource:
         """High-reputation assessor shifts reliability more than neutral at equal score."""
         with fresh_sdk() as sdk:
             url = "https://reputation.example"
-            sdk.create_point("statement", "claim", extractedFrom=url)
+            sdk._create_point("statement", "claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
@@ -446,18 +446,18 @@ class TestAssessSource:
             )
             # Neutral assessor (no track record): rep 0.5 → term 0 → factor 1.0
             sdk.manage_source_trust(url=url, assessor="neutral-agent", score=0.1, rationale="meh")
-            rel_neutral = sdk.get_source_reliability(url)["reliability"]
+            rel_neutral = sdk._get_source_reliability(url)["reliability"]
             # Expert assessor with a strong track record FIRST (snapshot at write)
             _give_reputation(sdk, "expert-agent")
             sdk.manage_source_trust(url=url, assessor="expert-agent", score=0.1, rationale="unreliable")
-            rel_expert = sdk.get_source_reliability(url)["reliability"]
+            rel_expert = sdk._get_source_reliability(url)["reliability"]
             assert rel_expert < rel_neutral  # expert's low score carries more weight
 
     def test_reputation_snapshot_invariant(self):
         """Reputation changes after write never rewrite the assessment factor."""
         with fresh_sdk() as sdk:
             url = "https://snapshot.example"
-            sdk.create_point("statement", "claim", extractedFrom=url)
+            sdk._create_point("statement", "claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
@@ -465,7 +465,7 @@ class TestAssessSource:
             )
             # Assess with a zero-track-record assessor (rep snapshot 0.5)
             sdk.manage_source_trust(url=url, assessor="growing-agent", score=0.1, rationale="assessment before reputation")
-            r_before = sdk.get_source_reliability(url)
+            r_before = sdk._get_source_reliability(url)
             # Raise the assessor's reputation
             sdk._get_proj().g.query(  # noqa: B018
                 "CREATE (s:Subject {id:'growing-agent', name:'growing-agent', "
@@ -473,34 +473,34 @@ class TestAssessSource:
                 "CREATE (e:Event {eventId:'e2', eventKind:'review'}) "
                 "CREATE (s)-[:performs]->(e) RETURN e.eventId"
             ).result_set
-            p_claim = sdk.create_point("statement", "growing agent's claim")
+            p_claim = sdk._create_point("statement", "growing agent's claim")
             sdk._get_proj().g.query(  # noqa: B018
                 "MATCH (e:Event {eventId:'e2'}), (n:Point {id:$id}) CREATE (e)-[:IMPL]->(n)",
                 params={"id": p_claim["id"]},
             ).result_set
-            assert sdk.compute_reputation("growing-agent")["mean"] > 0.5
+            assert sdk._compute_reputation("growing-agent")["mean"] > 0.5
             # Snapshot: factor unchanged despite reputation growth
-            r_after = sdk.get_source_reliability(url)
+            r_after = sdk._get_source_reliability(url)
             assert r_after["reliability"] == pytest.approx(r_before["reliability"], rel=1e-6)
 
     def test_assessment_invalidates_cache_and_gate(self):
         """assess_source refreshes reliability + dirty-marks the inheritance gate."""
         with fresh_sdk() as sdk:
             url = "https://invalidate.example"
-            p = sdk.create_point("statement", "claim", extractedFrom=url)
+            p = sdk._create_point("statement", "claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
             )
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-            alpha_before = sdk.get_point(p["id"]).get("ep_alpha")  # 3.0 (T2, no factor)
+            alpha_before = sdk._get_point(p["id"]).get("ep_alpha")  # 3.0 (T2, no factor)
             _give_reputation(sdk, "alice")  # rep > 0.5 → snapshot at write
             sdk.manage_source_trust(url=url, assessor="alice", score=0.0, rationale="downweight")
             # rep ~0.667: factor = 1 + 0.167*(-0.5) = 0.9167 → pc = 2.0*0.9167 = 1.833
             # → alpha 2.833 < 3.0. Gate dirty-marked → recomputes NOW (interval 3600).
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-            alpha_after = sdk.get_point(p["id"]).get("ep_alpha")
+            alpha_after = sdk._get_point(p["id"]).get("ep_alpha")
             assert alpha_after < alpha_before
             # rep 0.667 → factor = 1 + (0.667-0.5)*(-0.5) = 0.9167 → pc = 2*0.9167 = 1.833
             assert alpha_after == pytest.approx(1.0 + 2.0 * 0.9167, rel=1e-3)
@@ -530,7 +530,7 @@ class TestSourceTierAPI:
     def test_url_collision_preserves_existing_sourcekind(self):
         """A Source auto-created by _link_source keeps its sourceKind; tier lands on credibilityTier."""
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "from link", extractedFrom="https://collide.example")  # noqa: F841
+            p = sdk._create_point("statement", "from link", extractedFrom="https://collide.example")  # noqa: F841
             # Auto-created Source has sourceKind='document'
             sdk.register_source("https://collide.example", "T0", tier="T0")
             rows = sdk._get_proj().g.query(
@@ -556,31 +556,31 @@ class TestSourceTierAPI:
         from datetime import datetime, timezone
         with fresh_sdk() as sdk:
             url = "https://retier.example"
-            p = sdk.create_point("statement", "claim", extractedFrom=url)
+            p = sdk._create_point("statement", "claim", extractedFrom=url)
             now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
                 params={"url": url, "ts": now},
             )
-            r1 = sdk.get_source_reliability(url)  # noqa: F841
+            r1 = sdk._get_source_reliability(url)  # noqa: F841
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-            alpha_before = sdk.get_point(p["id"]).get("ep_alpha")  # 3.0
+            alpha_before = sdk._get_point(p["id"]).get("ep_alpha")  # 3.0
             # Re-tier to T0 via the sanctioned writer
             sdk.manage_source_trust(url=url, tier="T0")
-            r2 = sdk.get_source_reliability(url)
+            r2 = sdk._get_source_reliability(url)
             assert r2["components"]["tier"] == "T0"  # cache invalidated → recomputed
             # Gate dirty-marked → recomputes within the interval
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-            alpha_after = sdk.get_point(p["id"]).get("ep_alpha")
+            alpha_after = sdk._get_point(p["id"]).get("ep_alpha")
             assert alpha_after == 10.0  # T0, no decay
             assert alpha_after != alpha_before
 
     def test_calibrate_summary_surfaces_untiered_with_actionable_suggestion(self):
         with fresh_sdk() as sdk:
             url = "https://untiered2.example"
-            p = sdk.create_point("statement", "claim", extractedFrom=url)
-            summary = sdk.calibrate_summary()
+            p = sdk._create_point("statement", "claim", extractedFrom=url)
+            summary = sdk._calibrate_summary()
             item = next(i for i in summary if i["id"] == p["id"])
             assert item["calibrated"] is False
             # #12948 review F3: this pinned `set_source_tier`, which the same PR RETIRED —
@@ -599,13 +599,13 @@ class TestSourceTierAPI:
         try:
             with fresh_sdk() as sdk:
                 url = "https://registry-tiered.example"
-                p = sdk.create_point("statement", "claim", extractedFrom=url)
+                p = sdk._create_point("statement", "claim", extractedFrom=url)
                 sdk._get_proj().g.query(
                     "MATCH (s:Source {url:$url}) SET s.sourceKind = 'substack_reg', "
                     "s.ingestedAt = $ts",
                     params={"url": url, "ts": FRESH},
                 )
-                summary = sdk.calibrate_summary()
+                summary = sdk._calibrate_summary()
                 item = next(i for i in summary if i["id"] == p["id"])
                 # Effectively tiered (registry) → suggestion mentions inheritance, not untiered
                 assert "untiered" not in item.get("suggestion", "")
@@ -668,14 +668,14 @@ class TestReviewGateFixes:
         """set_point_baseline(default set-by-author) + strong source → untouched."""
         with fresh_sdk() as sdk:
             url = "https://explicit2.example"
-            p = sdk.create_point("statement", "explicit claim", extractedFrom=url)
-            sdk.set_point_baseline(p["id"], 2.0, 8.0)  # low prior, author-set
+            p = sdk._create_point("statement", "explicit claim", extractedFrom=url)
+            sdk._set_point_baseline(p["id"], 2.0, 8.0)  # low prior, author-set
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T0', s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
             )
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-            pt = sdk.get_point(p["id"])
+            pt = sdk._get_point(p["id"])
             assert pt["ep_alpha"] == 2.0  # untouched despite strong T0 source
             assert pt["ep_beta"] == 8.0
             assert pt["baseline_source"] == "set-by-author"
@@ -685,7 +685,7 @@ class TestReviewGateFixes:
         import math as _math  # noqa: F401
         with fresh_sdk() as sdk:
             url = "https://multi-rel.example"
-            p = sdk.create_point("statement", "multi", extractedFrom=url)
+            p = sdk._create_point("statement", "multi", extractedFrom=url)
             sdk._get_proj()._link_source(p["id"], "https://multi-rel2.example")
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T1', s.ingestedAt = $ts",
@@ -696,7 +696,7 @@ class TestReviewGateFixes:
                 params={"url": "https://multi-rel2.example", "ts": FRESH},
             )
             # NOTE: reliability is per-SOURCE; each source's prior is its own tier
-            r = sdk.get_source_reliability(url)
+            r = sdk._get_source_reliability(url)
             assert r["reliability"] is not None
             prior = sdk._compute_source_prior(url)
             # The source-level prior uses the resolved tier of THIS source
@@ -706,9 +706,9 @@ class TestReviewGateFixes:
     def test_calibrate_summary_excludes_assessment_points(self):
         with fresh_sdk() as sdk:
             url = "https://calib-excl.example"
-            p = sdk.create_point("statement", "claim", extractedFrom=url)
+            p = sdk._create_point("statement", "claim", extractedFrom=url)
             a = sdk.manage_source_trust(url=url, assessor="alice", score=0.8, rationale="an assessment")
-            summary = sdk.calibrate_summary()
+            summary = sdk._calibrate_summary()
             ids = {item["id"] for item in summary}
             assert p["id"] in ids
             assert a["assessment_point_id"] not in ids  # assessments excluded
@@ -717,7 +717,7 @@ class TestReviewGateFixes:
         """Within-interval skip does NOT refresh inherited_at (gate mechanism)."""
         with fresh_sdk() as sdk:
             url = "https://gate-stamp.example"
-            p = sdk.create_point("statement", "claim", extractedFrom=url)
+            p = sdk._create_point("statement", "claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T1', s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
@@ -738,7 +738,7 @@ class TestReviewGateFixes:
         """~1000 assessments (mixed outdated/active) → only the ACTIVE set counts."""
         with fresh_sdk() as sdk:
             url = "https://scaled.example"
-            p = sdk.create_point("statement", "claim", extractedFrom=url)
+            p = sdk._create_point("statement", "claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
@@ -752,7 +752,7 @@ class TestReviewGateFixes:
             for i in range(980):
                 sdk.manage_source_trust(url=url, assessor=f"neutral{i}", score=0.9, rationale=f"assessment {i}")
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-            alpha = sdk.get_point(p["id"]).get("ep_alpha")
+            alpha = sdk._get_point(p["id"]).get("ep_alpha")
             # Only the 20 ACTIVE 0.9s (rep 2/3) count: factor = 1 + 20*0.1667*0.4 = 2.33 → clamped 2.0
             # → pc = 2.0*2.0 = 4.0 → alpha 5.0. If outdated 0.1s leaked (double-count),
             # their -0.4 terms cancel the +0.4 → factor ~1.0 → alpha ~3.0.
@@ -763,7 +763,7 @@ class TestReviewGateFixes:
         """Inclusive score edges 0.0 and 1.0 are valid."""
         with fresh_sdk() as sdk:
             url = "https://edges.example"
-            sdk.create_point("statement", "claim", extractedFrom=url)
+            sdk._create_point("statement", "claim", extractedFrom=url)
             r1 = sdk.manage_source_trust(url=url, assessor="alice", score=0.0, rationale="floor")
             r2 = sdk.manage_source_trust(url=url, assessor="bob", score=1.0, rationale="ceiling")
             assert r1["score"] == 0.0
@@ -781,7 +781,7 @@ class TestReviewGateFixes:
 
     def test_get_source_reliability_unknown_url(self):
         with fresh_sdk() as sdk:
-            r = sdk.get_source_reliability("https://unknown.example")
+            r = sdk._get_source_reliability("https://unknown.example")
             assert r["reliability"] is None
 
     def test_crash_safe_latest_wins_double_active(self):
@@ -789,7 +789,7 @@ class TestReviewGateFixes:
         with fresh_sdk() as sdk:
             _give_reputation(sdk, "crash-agent")
             url = "https://crash.example"
-            p = sdk.create_point("statement", "claim", extractedFrom=url)
+            p = sdk._create_point("statement", "claim", extractedFrom=url)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.ingestedAt = $ts",
                 params={"url": url, "ts": FRESH},
@@ -804,7 +804,7 @@ class TestReviewGateFixes:
                 params={"url": url},
             )
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-            alpha = sdk.get_point(p["id"]).get("ep_alpha")
+            alpha = sdk._get_point(p["id"]).get("ep_alpha")
             # Only the LATEST (0.9) counts: factor = 1 + (rep-0.5)*0.4 > 1 → alpha > 3.0.
             # If both counted: factor = 1 + (rep-0.5)*(-0.4+0.4) = 1.0 → alpha 3.0 exactly.
             assert alpha > 3.0
@@ -909,7 +909,7 @@ def _one_point_sdk(urls: list[str], tier: str = "T4", extra_duplicate: str | Non
     Returns the point's inherited alpha.
     """
     sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
-    p = sdk.create_point("statement", "fan-in claim", extractedFrom=urls[0])
+    p = sdk._create_point("statement", "fan-in claim", extractedFrom=urls[0])
     if urls[1:]:
         sdk._get_proj()._link_source(p["id"], urls[1:])
     for u in urls:
@@ -953,7 +953,7 @@ def _assessed_single_ref(score: float = 2.0) -> float:
     """
     sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
     try:
-        p = sdk.create_point("statement", "ref", extractedFrom=URL_OTHER_DOC)
+        p = sdk._create_point("statement", "ref", extractedFrom=URL_OTHER_DOC)
         sdk._get_proj().g.query(
             "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
             "s.sourceDate=$sd, s.ingestedAt=$sd",
@@ -983,7 +983,7 @@ def _collapse_with_assessment_on(assessed_url: str, score: float = 2.0) -> float
     dup = "https://mirror.example/one-document"
     sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
     try:
-        p = sdk.create_point("statement", "assessed", extractedFrom=URL_ONE_DOC)
+        p = sdk._create_point("statement", "assessed", extractedFrom=URL_ONE_DOC)
         sdk._get_proj().g.query(
             "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
             "s.sourceDate=$sd, s.ingestedAt=$sd",
@@ -1083,7 +1083,7 @@ class TestSourceIdentityCollapse:
         """
         sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
         try:
-            p = sdk.create_point("statement", "merged", extractedFrom=URL_ONE_DOC)
+            p = sdk._create_point("statement", "merged", extractedFrom=URL_ONE_DOC)
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier='T4', "
                 "s.sourceDate=$old, s.ingestedAt=$old",
@@ -1122,7 +1122,7 @@ class TestSourceIdentityCollapse:
         """
         sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_fanin_"), "test.db"))
         try:
-            p = sdk.create_point("statement", "anon", extractedFrom=URL_ONE_DOC)
+            p = sdk._create_point("statement", "anon", extractedFrom=URL_ONE_DOC)
             for _ in range(2):
                 sdk._get_proj().g.query(
                     "MATCH (n:Point {id:$pid}) "

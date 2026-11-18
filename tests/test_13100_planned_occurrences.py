@@ -576,7 +576,7 @@ class TestThePlanPipeline:
 
     def test_the_gate_reads_the_RESOLVED_end_of_a_plan(self, sdk):
         """R2's other direction: a plan that ENDED must not suppress for ever."""
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Ended via the generic door")
         op = f"op-ended-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
@@ -680,7 +680,7 @@ class TestThePlanPipeline:
         spellings; THIS one pins the two consequences the fix is FOR — the
         suppression is actually in force afterwards, and the STORED prop moved.
         """
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         bare = sdk.create_entity("object", "extractor plan",
                                  objectKind=PO.PLAN_PIPELINE_KEY)["node"]
         assert PO.plan_position(_stage(sdk, bare["id"])["stageId"])[
@@ -1215,7 +1215,7 @@ class TestThePromotionSuppressionIsRehomed:
         """THE RE-HOME: a plan that has not reached a terminal stage has not
         happened, so it suppresses exactly as the retired ``status='scheduled'``
         on an Event did."""
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Not yet")
         op = f"op-plan-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
@@ -1229,7 +1229,7 @@ class TestThePromotionSuppressionIsRehomed:
     def test_the_suppression_lifts_when_the_plan_is_settled(self, sdk):
         """Control, so the negative above cannot pass vacuously: the same
         operator promotes once the plan reaches a terminal stage."""
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Happened")
         op = f"op-settled-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
@@ -1243,7 +1243,7 @@ class TestThePromotionSuppressionIsRehomed:
 
     def test_a_missed_plan_does_not_suppress(self, sdk):
         """``missed`` is terminal: it ended, so the record is settled."""
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Missed it")
         op = f"op-missed-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
@@ -1254,7 +1254,7 @@ class TestThePromotionSuppressionIsRehomed:
         """R2's other bound: an extractor-minted ``core:plan`` Object has no
         pipeline position and was promoted over before this change — inventing a
         "not yet" for it would block that operator for ever."""
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         bare = sdk.create_entity("object", "extracted plan",
                                  objectKind="core:plan")["node"]
         op = f"op-bare-{bare['id']}"
@@ -1264,7 +1264,7 @@ class TestThePromotionSuppressionIsRehomed:
     def test_a_marker_closed_plan_does_not_suppress(self, sdk):
         """An ending is durable through ``isClosed`` (§6), so a closed plan is a
         settled record even while its stage still reads non-terminal."""
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Closed but scheduled stage")
         op = f"op-closed-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
@@ -1279,7 +1279,7 @@ class TestThePromotionSuppressionIsRehomed:
         plan's operator back to `live` — over an occurrence that demonstrably has
         not happened.
         """
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Scheduled, key cleared")
         op = f"op-brokenkey-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
@@ -1306,7 +1306,7 @@ class TestThePromotionSuppressionIsRehomed:
         The Q5 read must answer the same row the same way (`ended: False`) —
         the two readers of one plan cannot disagree about whether it happened.
         """
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Unknown stage id")
         op = f"op-badstage-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
@@ -1331,7 +1331,7 @@ class TestThePromotionSuppressionIsRehomed:
         refusal names (`update_knowledge(id, pipelineStageId=<declared id>)`)
         puts the plan back on a stage the writers can move, after which the
         ordinary ending lifts the suppression."""
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         plan = PO.create_plan(sdk, "Repairable stage id")
         op = f"op-repaired-{plan['id']}"
         _operator_over(sdk, (point, plan["id"]), op)
@@ -1371,8 +1371,8 @@ class TestThePromotionSuppressionIsRehomed:
         assert endpoint_permits_operator_promotion(["archived"], False) is False
 
         # 2. Through the door, which is where a raise becomes a bare 500.
-        point = sdk.create_point("statement", "a live point")["id"]
-        endpoint = sdk.create_point("statement", "an array-status endpoint")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
+        endpoint = sdk._create_point("statement", "an array-status endpoint")["id"]
         op = f"op-array-{endpoint}"
         _operator_over(sdk, (point, endpoint), op)
         sdk._get_proj().g.query(
@@ -1400,7 +1400,7 @@ class TestThePromotionSuppressionIsRehomed:
         below the doors — and the gate must still hold promotion, because
         refusing new writes does not correct a stored fact (#2977).
         """
-        point = sdk.create_point("statement", "a live point")["id"]
+        point = sdk._create_point("statement", "a live point")["id"]
         ev = sdk.create_entity("event", "Legacy draft", eventKind="deployment")[
             "node"]
         eid = ev.get("eventId") or ev.get("id")

@@ -421,7 +421,7 @@ def test_docker_lane_cross_lens_calibrated(monkeypatch):
                 "CREATE (p)-[:extractedFrom]->(s)")
         g.query("MATCH (p:Point {id:'p3'}), (s:Source {id:'http://s1'}) "
                 "CREATE (p)-[:extractedFrom]->(s)")
-        res = sdk.get_cross_lens_candidates(threshold=DEFAULT_THRESHOLD, top_k=10)
+        res = sdk._get_cross_lens_candidates(threshold=DEFAULT_THRESHOLD, top_k=10)
         by = {(c["src"], c["dst"]): c for c in res["candidates"]}
         assert ("p1", "p2") in by, (
             "docker cross-lens must surface the cross-vocab in-band pair: "

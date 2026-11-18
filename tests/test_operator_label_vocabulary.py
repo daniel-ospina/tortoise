@@ -124,8 +124,8 @@ def sdk(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def pair(sdk):
-    a = sdk.create_point("evidence", "7551 evidence probe")["id"]
-    b = sdk.create_point("statement", "7551 claim probe")["id"]
+    a = sdk._create_point("evidence", "7551 evidence probe")["id"]
+    b = sdk._create_point("statement", "7551 claim probe")["id"]
     return a, b
 
 
@@ -149,7 +149,7 @@ class TestWritePathDeclaredness:
         # semantics value that is NOT the mechanism pair.
         a, b = pair
         for label in ("IMPL", "supports", "addresses", "related"):
-            out = sdk.create_operator("IMPL", a, [b], label=label)
+            out = sdk._create_operator("IMPL", a, [b], label=label)
             assert self._codes(out) == [], (label, out.get("warnings"))
             assert out.get("id"), label
 
@@ -157,14 +157,14 @@ class TestWritePathDeclaredness:
         # The UNION leg: the fix must ADD the core vocabulary, not replace the
         # pack registry lookup with it.
         a, b = pair
-        out = sdk.create_operator("IMPL", a, [b], label=PACK_ONLY_PREDICATE)
+        out = sdk._create_operator("IMPL", a, [b], label=PACK_ONLY_PREDICATE)
         assert self._codes(out) == [], out.get("warnings")
 
     def test_measures_still_warns_and_still_writes(self, sdk, pair):
         # `measures` is declared nowhere. warn-not-block is a RECORDED decision
         # (#1934 / #6131) — this fix must not turn it into a refusal.
         a, b = pair
-        out = sdk.create_operator("IMPL", a, [b], label=UNDECLARED_NAME)
+        out = sdk._create_operator("IMPL", a, [b], label=UNDECLARED_NAME)
         assert self._codes(out) == ["undeclared_relation"], out.get("warnings")
         assert UNDECLARED_NAME in out["warnings"][0]["message"]
         assert out.get("id"), "the write must proceed (warn-not-block, #1934)"
@@ -184,14 +184,14 @@ class TestWritePathDeclaredness:
             ("opposes", ["undeclared_relation", "mechanism_mismatch"]),
             ("does_not_support", ["undeclared_relation"]),
         ):
-            out = sdk.create_operator("IMPL", a, [b], label=label)
+            out = sdk._create_operator("IMPL", a, [b], label=label)
             assert self._codes(out) == codes, (label, out)
 
     def test_mitigates_is_still_not_an_operator_label(self, sdk, pair):
         # #4937: MITIGATES is a capability, not a predicate — it must not ride
         # the widened vocabulary back into the menu.
         a, b = pair
-        out = sdk.create_operator("IMPL", a, [b], label="MITIGATES")
+        out = sdk._create_operator("IMPL", a, [b], label="MITIGATES")
         assert self._codes(out) == ["undeclared_relation"], out.get("warnings")
 
     def test_the_write_path_reads_the_ONE_declaration_home(self, sdk, pair,
@@ -214,7 +214,7 @@ class TestWritePathDeclaredness:
             pack_registry, "declared_relation_predicates",
             lambda: frozenset({"IMPL", UNDECLARED_NAME}))
         a, b = pair
-        out = sdk.create_operator("IMPL", a, [b], label=UNDECLARED_NAME)
+        out = sdk._create_operator("IMPL", a, [b], label=UNDECLARED_NAME)
         assert self._codes(out) == [], out.get("warnings")
         assert out.get("id"), "the write must still land"
 

@@ -640,25 +640,25 @@ class LocalTarget:
 
     # -- write doors ---------------------------------------------------------
 
-    def create_object(self, name: str, kind: str, props: dict | None = None) -> dict:
-        return self.sdk.create_object(name, objectKind=kind, **(props or {}))
+    def _create_object(self, name: str, kind: str, props: dict | None = None) -> dict:
+        return self.sdk._create_object(name, objectKind=kind, **(props or {}))
 
     def set_lifecycle_word(self, ref_id: str, word: str) -> dict:
         return self.sdk.update_knowledge(ref_id, status=word)
 
-    def create_point(self, content: str, kind: str) -> dict:
-        return self.sdk.create_point(kind=kind, content=content)
+    def _create_point(self, content: str, kind: str) -> dict:
+        return self.sdk._create_point(kind=kind, content=content)
 
-    def supersede_point(self, old_id: str, new_id: str) -> dict:
-        return self.sdk.supersede_point(old_id, new_id)
+    def _supersede_point(self, old_id: str, new_id: str) -> dict:
+        return self.sdk._supersede_point(old_id, new_id)
 
-    def retract_point(self, point_id: str) -> dict:
-        return self.sdk.retract_point(point_id)
+    def _retract_point(self, point_id: str) -> dict:
+        return self.sdk._retract_point(point_id)
 
     def create_reading(
         self, indicator_id: str, name: str, value: float, unit: str, as_of: str
     ) -> dict:
-        return self.sdk.create_event(
+        return self.sdk._create_event(
             name, "measurement", aboutObject=indicator_id, value=value, unit=unit, startedAt=as_of
         )
 
@@ -734,7 +734,7 @@ class LocalTarget:
             request["elevated_timeout_ms"] = self.search_timeout_ms
         try:
             rows = (
-                self.sdk.tortoise_fts_query(
+                self.sdk._tortoise_fts_query(
                     query=query,
                     entity_type=entity_type,
                     limit=limit,
@@ -816,7 +816,7 @@ class LocalTarget:
 
     def read_events(self, limit: int = 50, *, role: str = "") -> Call:
         try:
-            rows = self.sdk.get_events(limit=limit) or []
+            rows = self.sdk._get_events(limit=limit) or []
         except Exception as exc:
             return Call(
                 "read_events",

@@ -110,7 +110,7 @@ def test_point_stub_path_does_not_mint_a_second_source():
     """create_point(extractedFrom=<variant>) resolves to the registered node."""
     with fresh_sdk() as sdk:
         sdk.register_source("https://e.com/c/d/", "document")
-        sdk.create_point("statement", "a claim", extractedFrom="https://e.com/c/d")
+        sdk._create_point("statement", "a claim", extractedFrom="https://e.com/c/d")
         rows = _source_rows(sdk)
         assert len(rows) == 1, rows
         edges = sdk._get_proj().g.query(

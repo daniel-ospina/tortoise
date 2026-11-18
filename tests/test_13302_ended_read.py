@@ -290,7 +290,7 @@ def sdk(monkeypatch):
 def _ended(sdk, **kwargs):
     """The read under test: the ended population of a family."""
     kwargs.setdefault("limit", 50)
-    return sdk.tortoise_fts_query(None, ended_scope=True, **kwargs)
+    return sdk._tortoise_fts_query(None, ended_scope=True, **kwargs)
 
 
 def _ids(rows) -> set[str]:
@@ -303,9 +303,9 @@ def _ids(rows) -> set[str]:
 @_docker_only
 def test_a_withdrawn_claim_is_discoverable_without_knowing_its_id(sdk):
     """Q6. The answer must arrive with NO id, NO query and NO terminal flag."""
-    keep = sdk.create_point(kind="statement", content="the venue is booked")
-    dead = sdk.create_point(kind="statement", content="The beach club confirmed our booking.")
-    sdk.retract_point(dead["id"])
+    keep = sdk._create_point(kind="statement", content="the venue is booked")
+    dead = sdk._create_point(kind="statement", content="The beach club confirmed our booking.")
+    sdk._retract_point(dead["id"])
 
     rows = _ended(sdk, entity_type="point")
     by_id = {r["id"]: r for r in rows}
@@ -326,9 +326,9 @@ def test_a_cancelled_plan_is_discoverable_and_a_live_plan_is_not_never_happened(
     from tortoise import pipeline
 
     pipeline.seed_pipeline(sdk._get_proj().g, "core:testplan", PLAN_PIPELINE)
-    cancelled = sdk.create_object("Thursday partner call", objectKind="core:testplan")
+    cancelled = sdk._create_object("Thursday partner call", objectKind="core:testplan")
     pipeline.advance_stage(sdk, cancelled["id"], "core:testplan", "cancelled")
-    live = sdk.create_object("Launch event", objectKind="core:testplan")
+    live = sdk._create_object("Launch event", objectKind="core:testplan")
 
     rows = {r["id"]: r for r in _ended(sdk, entity_type="object")}
 
@@ -354,8 +354,8 @@ def test_a_plan_that_happened_carries_its_occurrence(sdk):
     from tortoise import pipeline
 
     pipeline.seed_pipeline(sdk._get_proj().g, "core:testplan", PLAN_PIPELINE)
-    held = sdk.create_object("Launch event", objectKind="core:testplan")
-    sdk.create_event("Launch event held", "occurrence", aboutObject=held["id"])
+    held = sdk._create_object("Launch event", objectKind="core:testplan")
+    sdk._create_event("Launch event held", "occurrence", aboutObject=held["id"])
     pipeline.advance_stage(sdk, held["id"], "core:testplan", "held")
 
     row = {r["id"]: r for r in _ended(sdk, entity_type="object")}[held["id"]]
@@ -368,9 +368,9 @@ def test_a_plan_that_happened_carries_its_occurrence(sdk):
 
 @_docker_only
 def test_a_superseded_point_names_its_successor_by_id(sdk):
-    old = sdk.create_point(kind="decision", content="the entry tier is 29")
-    new = sdk.create_point(kind="decision", content="the entry tier is 39")
-    sdk.supersede_point(old["id"], new["id"])
+    old = sdk._create_point(kind="decision", content="the entry tier is 29")
+    new = sdk._create_point(kind="decision", content="the entry tier is 39")
+    sdk._supersede_point(old["id"], new["id"])
 
     row = {r["id"]: r for r in _ended(sdk, entity_type="point")}[old["id"]]
     assert row["status"] == "superseded"
@@ -389,8 +389,8 @@ def test_a_superseded_object_names_its_successor_by_NAME_not_by_id(sdk):
     unioning it with `allSuccessorIds` mixes a name with ids. The two facts are two
     keys, and this test fails if they are ever collapsed.
     """
-    new = sdk.create_object("Onboarding flow v2", objectKind="process")
-    old = sdk.create_object("Onboarding flow", objectKind="process")
+    new = sdk._create_object("Onboarding flow v2", objectKind="process")
+    old = sdk._create_object("Onboarding flow", objectKind="process")
     sdk.supersede_knowledge(old["id"], new["id"])
 
     row = {r["id"]: r for r in _ended(sdk, entity_type="object")}[old["id"]]
@@ -413,9 +413,9 @@ def test_a_record_carrying_BOTH_successor_facts_serves_both(sdk):
     carrier was ALSO written (`update_knowledge` accepts `supersededBy` on a Point)
     carries both, and only a row that serves BOTH can pass this.
     """
-    new = sdk.create_point(kind="decision", content="the entry tier is 39")
-    old = sdk.create_point(kind="decision", content="the entry tier is 29")
-    sdk.supersede_point(old["id"], new["id"])
+    new = sdk._create_point(kind="decision", content="the entry tier is 39")
+    old = sdk._create_point(kind="decision", content="the entry tier is 29")
+    sdk._supersede_point(old["id"], new["id"])
     sdk.update_knowledge(old["id"], supersededBy="the entry tier is 39")
 
     row = {r["id"]: r for r in _ended(sdk, entity_type="point")}[old["id"]]
@@ -428,7 +428,7 @@ def test_a_record_carrying_BOTH_successor_facts_serves_both(sdk):
 
 @_docker_only
 def test_a_deprecated_record_says_nothing_replaced_it(sdk):
-    gone = sdk.create_object("Old onboarding flow", objectKind="process")
+    gone = sdk._create_object("Old onboarding flow", objectKind="process")
     sdk.update_knowledge(gone["id"], status="deprecated")
 
     row = {r["id"]: r for r in _ended(sdk, entity_type="object")}[gone["id"]]
@@ -449,9 +449,9 @@ def test_an_ended_record_carries_the_time_it_ended_where_it_has_one(sdk):
     below. This case keeps the behavioural half honest: the served value IS the
     window end, not merely "one of the record's time fields".
     """
-    old = sdk.create_point(kind="decision", content="the tier is 29")
-    new = sdk.create_point(kind="decision", content="the tier is 39")
-    sdk.supersede_point(old["id"], new["id"])
+    old = sdk._create_point(kind="decision", content="the tier is 29")
+    new = sdk._create_point(kind="decision", content="the tier is 39")
+    sdk._supersede_point(old["id"], new["id"])
 
     row = {r["id"]: r for r in _ended(sdk, entity_type="point")}[old["id"]]
     assert row["endedAt"], "a supersede stamps the predecessor's end — it must be served"
@@ -500,7 +500,7 @@ def test_the_snake_successor_spelling_is_read_too(sdk):
     was no case exercising it, so dropping the snake half from `_SUCCESSOR_PROPS`
     left every row green and the documented reason unpinned.
     """
-    gone = sdk.create_object("Old onboarding flow", objectKind="process")
+    gone = sdk._create_object("Old onboarding flow", objectKind="process")
     sdk.update_knowledge(gone["id"], status="deprecated")
     # ⛔ WRITTEN DIRECTLY, not through `update_knowledge`: since #12914 the revise
     # door REFUSES a snake-only carrier (`_successor_named_by` requires the CAMEL
@@ -539,7 +539,7 @@ def test_a_record_ended_only_by_the_position_axis_is_returned(sdk):
     A read that selected on a status list would miss it, which is the defect the
     shared predicate exists to prevent: this test fails for any second vocabulary.
     """
-    closed = sdk.create_object("Closed by marker only", objectKind="process",
+    closed = sdk._create_object("Closed by marker only", objectKind="process",
                               isClosed=True)
 
     rows = {r["id"]: r for r in _ended(sdk, entity_type="object")}
@@ -551,8 +551,8 @@ def test_a_record_ended_only_by_the_position_axis_is_returned(sdk):
 @_docker_only
 def test_a_word_the_model_does_not_treat_as_an_ending_is_not_returned(sdk):
     """The population is "ended", not "has a status"."""
-    live = sdk.create_object("Still current", objectKind="process", status="live")
-    draft = sdk.create_point(kind="statement", content="a draft claim", status="draft")
+    live = sdk._create_object("Still current", objectKind="process", status="live")
+    draft = sdk._create_point(kind="statement", content="a draft claim", status="draft")
 
     assert live["id"] not in _ids(_ended(sdk, entity_type="object"))
     assert draft["id"] not in _ids(_ended(sdk, entity_type="point"))
@@ -564,11 +564,11 @@ def test_a_word_the_model_does_not_treat_as_an_ending_is_not_returned(sdk):
 @_docker_only
 def test_the_default_read_is_byte_for_byte_the_current_picture(sdk):
     """`ended_scope` is an ADDITION: nothing about "current" moves."""
-    keep = sdk.create_point(kind="statement", content="the venue is booked")
-    dead = sdk.create_point(kind="statement", content="the venue booked the beach club")
-    sdk.retract_point(dead["id"])
+    keep = sdk._create_point(kind="statement", content="the venue is booked")
+    dead = sdk._create_point(kind="statement", content="the venue booked the beach club")
+    sdk._retract_point(dead["id"])
 
-    default = sdk.tortoise_fts_query("venue", entity_type="point", limit=50)
+    default = sdk._tortoise_fts_query("venue", entity_type="point", limit=50)
     default_ids = _ids(default)
 
     assert keep["id"] in default_ids
@@ -584,14 +584,14 @@ def test_the_default_read_is_byte_for_byte_the_current_picture(sdk):
 @_docker_only
 def test_the_page_is_bounded_and_reports_whether_it_is_the_whole_population(sdk):
     for i in range(3):
-        pid = sdk.create_point(kind="statement", content=f"withdrawn claim {i}")
-        sdk.retract_point(pid["id"])
+        pid = sdk._create_point(kind="statement", content=f"withdrawn claim {i}")
+        sdk._retract_point(pid["id"])
 
     full_tr: dict = {}
-    full = sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+    full = sdk._tortoise_fts_query(None, entity_type="point", ended_scope=True,
                                   limit=50, _truncation_out=full_tr)
     cut_tr: dict = {}
-    cut = sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+    cut = sdk._tortoise_fts_query(None, entity_type="point", ended_scope=True,
                                  limit=2, _truncation_out=cut_tr)
 
     assert len(full) == 3 and len(cut) == 2
@@ -606,8 +606,8 @@ def test_the_page_is_bounded_and_reports_whether_it_is_the_whole_population(sdk)
 @_docker_only
 def test_a_subject_is_served_by_its_own_carriers(sdk):
     """The read is one shape across the families, each read by ITS OWN spellings."""
-    subj = sdk.create_subject("Acme", subjectKind="organization")
-    sdk.supersede_knowledge(subj["id"], sdk.create_subject(
+    subj = sdk._create_subject("Acme", subjectKind="organization")
+    sdk.supersede_knowledge(subj["id"], sdk._create_subject(
         "Acme Corp", subjectKind="organization")["id"])
 
     rows = {r["id"]: r for r in _ended(sdk, entity_type="subject")}
@@ -628,7 +628,7 @@ def test_a_subject_is_served_by_its_own_carriers(sdk):
 def test_a_query_beside_ended_scope_is_refused_rather_than_dropped(sdk):
     """A silently dropped query would serve a whole population as the answer."""
     with pytest.raises(ValueError) as exc:
-        sdk.tortoise_fts_query("has anything been withdrawn", entity_type="point",
+        sdk._tortoise_fts_query("has anything been withdrawn", entity_type="point",
                               ended_scope=True)
     message = str(exc.value)
     assert "ended_scope" in message
@@ -641,7 +641,7 @@ def test_a_query_beside_ended_scope_is_refused_rather_than_dropped(sdk):
 def test_a_family_without_a_lifecycle_is_refused_not_answered_empty(sdk):
     """`[]` is a factual claim; an Event has no ending this model defines."""
     with pytest.raises(ValueError) as exc:
-        sdk.tortoise_fts_query(None, entity_type="event", ended_scope=True)
+        sdk._tortoise_fts_query(None, entity_type="event", ended_scope=True)
     assert "event" in str(exc.value).lower()
 
 
@@ -701,7 +701,7 @@ def test_every_retrieval_knob_beside_ended_scope_is_refused(sdk, knob, kwargs):
     call = dict(kwargs)
     query = call.pop("query", None)
     with pytest.raises(ValueError) as exc:
-        sdk.tortoise_fts_query(query, entity_type="point", ended_scope=True, **call)
+        sdk._tortoise_fts_query(query, entity_type="point", ended_scope=True, **call)
     message = str(exc.value)
     assert "ended_scope" in message
     assert knob in message, (
@@ -718,13 +718,13 @@ def test_include_terminal_beside_ended_scope_is_a_no_op_not_a_refusal(sdk):
     caller for asking for what they are already getting; honouring it as a
     retrieval knob would mean a live record could enter a state enumeration.
     """
-    keep = sdk.create_point(kind="statement", content="the venue is booked")
-    dead = sdk.create_point(kind="statement", content="the club withdrew the booking")
-    sdk.retract_point(dead["id"])
+    keep = sdk._create_point(kind="statement", content="the venue is booked")
+    dead = sdk._create_point(kind="statement", content="the club withdrew the booking")
+    sdk._retract_point(dead["id"])
 
-    with_flag = _ids(sdk.tortoise_fts_query(None, entity_type="point", limit=50,
+    with_flag = _ids(sdk._tortoise_fts_query(None, entity_type="point", limit=50,
                                             ended_scope=True, include_terminal=True))
-    without = _ids(sdk.tortoise_fts_query(None, entity_type="point", limit=50,
+    without = _ids(sdk._tortoise_fts_query(None, entity_type="point", limit=50,
                                           ended_scope=True))
     assert with_flag == without, (
         "include_terminal must not change the ended population — the flag is a "
@@ -748,9 +748,9 @@ def test_a_direct_caller_naming_one_kind_is_narrowed_not_given_the_family(sdk):
     from tortoise.ended import enumerate_ended
 
     pipeline.seed_pipeline(sdk._get_proj().g, "core:testplan", PLAN_PIPELINE)
-    plan = sdk.create_object("Thursday partner call", objectKind="core:testplan")
+    plan = sdk._create_object("Thursday partner call", objectKind="core:testplan")
     pipeline.advance_stage(sdk, plan["id"], "core:testplan", "cancelled")
-    other = sdk.create_object("Old onboarding flow", objectKind="process")
+    other = sdk._create_object("Old onboarding flow", objectKind="process")
     sdk.update_knowledge(other["id"], status="deprecated")
 
     rows = {r["id"]: r for r in enumerate_ended(
@@ -846,7 +846,7 @@ def test_the_enumeration_is_issued_with_the_reads_own_bound(monkeypatch):
 
     graph = _RecordingGraph()
     sdk = _hermetic_sdk(monkeypatch, graph)
-    sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True, limit=5)
+    sdk._tortoise_fts_query(None, entity_type="point", ended_scope=True, limit=5)
 
     statement = graph.enumeration()
     assert statement["timeout"] == ENDED_SCAN_BUDGET_MS, (
@@ -870,7 +870,7 @@ def test_the_enumeration_is_issued_with_the_reads_own_bound(monkeypatch):
     # elevated timeout reach the statement it was measured for.
     graph2 = _RecordingGraph()
     sdk2 = _hermetic_sdk(monkeypatch, graph2)
-    sdk2.tortoise_fts_query(None, entity_type="point", ended_scope=True, limit=5,
+    sdk2._tortoise_fts_query(None, entity_type="point", ended_scope=True, limit=5,
                             _elevated_timeout_ms=4321)
     assert graph2.enumeration()["timeout"] == 4321, (
         "the caller's elevated budget must reach the enumeration, or the read "
@@ -894,7 +894,7 @@ def test_a_store_that_overruns_the_budget_degrades_instead_of_raising(monkeypatc
     status: dict = {}
     truncation: dict = {}
 
-    rows = sdk.tortoise_fts_query(
+    rows = sdk._tortoise_fts_query(
         None, entity_type="point", ended_scope=True, limit=5,
         read_status_out=status, _truncation_out=truncation)
 
@@ -943,7 +943,7 @@ def test_the_degraded_arm_does_not_swallow_the_family_refusal(monkeypatch):
     graph = _RecordingGraph(raise_on_enumerate=RuntimeError("Query timed out"))
     sdk = _hermetic_sdk(monkeypatch, graph)
     with pytest.raises(ValueError) as exc:
-        sdk.tortoise_fts_query(None, entity_type="event", ended_scope=True)
+        sdk._tortoise_fts_query(None, entity_type="event", ended_scope=True)
     assert "event" in str(exc.value).lower()
 
 
@@ -960,7 +960,7 @@ def test_a_trace_only_caller_sees_the_ended_leg_did_not_answer(monkeypatch):
     sdk = _hermetic_sdk(monkeypatch, graph)
     trace: list[dict] = []
 
-    rows = sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+    rows = sdk._tortoise_fts_query(None, entity_type="point", ended_scope=True,
                                   limit=5, leg_trace=trace)
 
     assert rows == []
@@ -992,7 +992,7 @@ def test_the_fail_safe_refuses_to_serve_an_unmarked_empty(monkeypatch):
     sdk = _hermetic_sdk(monkeypatch, graph)
 
     with pytest.raises(RuntimeError, match="Query timed out"):
-        sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+        sdk._tortoise_fts_query(None, entity_type="point", ended_scope=True,
                                limit=5)
 
 
@@ -1012,7 +1012,7 @@ def test_a_truncation_only_caller_still_degrades(monkeypatch):
     sdk = _hermetic_sdk(monkeypatch, graph)
     truncation: dict = {}
 
-    rows = sdk.tortoise_fts_query(
+    rows = sdk._tortoise_fts_query(
         None, entity_type="point", ended_scope=True, limit=5,
         _truncation_out=truncation)
 

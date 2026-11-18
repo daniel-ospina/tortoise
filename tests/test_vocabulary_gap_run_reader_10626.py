@@ -192,7 +192,7 @@ def test_a_run_that_absorbs_an_unlisted_marker_reports_it_in_its_own_receipt(sdk
     census — the gap existed only as a process log line and an in-memory dict
     nobody read (measured on #10626: `stats` had no census key, `warnings` only
     the unrelated source-turn note)."""
-    sdk.create_point("statement", PRIOR_CLAIM)
+    sdk._create_point("statement", PRIOR_CLAIM)
 
     out = _run(sdk, GAP_CLAIM, "gap-1")
 
@@ -237,7 +237,7 @@ def test_a_run_with_no_fold_reports_nothing_and_no_alarm(sdk):
 def test_the_reading_is_this_run_not_the_process_lifetime(sdk):
     """A process-global counter cannot answer "what did THIS run absorb" — the
     second run must not inherit the first run's tokens."""
-    sdk.create_point("statement", PRIOR_CLAIM)
+    sdk._create_point("statement", PRIOR_CLAIM)
     first = _run(sdk, GAP_CLAIM, "gap-a")
     assert first["stats"]["vocabulary_gap"]["tokens"], first["stats"]
 
@@ -295,7 +295,7 @@ def test_the_per_process_log_cap_cannot_spend_the_run_level_record(sdk, monkeypa
     """The defect #10626 names: after 32 distinct tokens the WARNING is spent for
     the life of the process. The run-level reading must survive that."""
     monkeypatch.setattr(v2, "_VOCABULARY_GAP_LOG_CAP", 0)
-    sdk.create_point("statement", PRIOR_CLAIM)
+    sdk._create_point("statement", PRIOR_CLAIM)
 
     out = _run(sdk, GAP_CLAIM, "gap-capped")
 

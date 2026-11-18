@@ -176,7 +176,7 @@ class TestPricingLoader:
 class TestTeamCreateTierLimits:
     def test_team_create_stores_tier_limits(self):
         sdk = sdk_fixture()
-        result = sdk.org_create("alice-team")
+        result = sdk._org_create("alice-team")
         team = sdk._org_get(result["id"])
         assert team["tier"] == "free"
         assert team.get("max_graphs") == 1
@@ -187,7 +187,7 @@ class TestTeamCreateTierLimits:
 
     def test_team_create_creates_default_graph_node(self):
         sdk = sdk_fixture()
-        result = sdk.org_create("graph-team")
+        result = sdk._org_create("graph-team")
         graphs = sdk.list_memory_graphs(result["id"])
         assert len(graphs) == 1
         assert graphs[0]["kind"] == "default"
@@ -197,7 +197,7 @@ class TestTeamCreateTierLimits:
 
     def test_custom_graph_node(self):
         sdk = sdk_fixture()
-        result = sdk.org_create("multi-graph-team")
+        result = sdk._org_create("multi-graph-team")
         g = sdk._graph_create(result["id"], "project-b")
         assert g["kind"] == "custom"
         assert g["namespace"] == f"org_{result['id']}_{g['graph_id']}"

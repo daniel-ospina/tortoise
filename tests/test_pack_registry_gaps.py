@@ -2476,8 +2476,8 @@ class TestCoreHierarchy:
                 namespace=f"form_scope_{os.urandom(6).hex()}")
             # the kind-only form, then the text-query form — the two the
             # docstring says disagree
-            sdk.tortoise_fts_query(kind="Object", entity_type="object")
-            sdk.tortoise_fts_query(
+            sdk._tortoise_fts_query(kind="Object", entity_type="object")
+            sdk._tortoise_fts_query(
                 "widget", kind="Object", entity_type="object")
         finally:
             search_engine.degradation_chain = original_chain
@@ -2557,7 +2557,7 @@ class TestCoreHierarchy:
                 str(tmp_path / "form_scope_widen.db"),
                 namespace=f"form_scope_widen_{os.urandom(6).hex()}")
             sdk._get_proj = lambda: types.SimpleNamespace(g=filter_graph)
-            sdk.tortoise_fts_query(
+            sdk._tortoise_fts_query(
                 "widget", kind="Object", entity_type="object")
             # The set the CODE UNDER TEST must use is the READ FILTER's, not the
             # membership set: #11679 split them, and deriving `expected` from
@@ -2632,7 +2632,7 @@ class TestCoreHierarchy:
                 str(tmp_path / "form_scope_gate.db"),
                 namespace=f"form_scope_gate_{os.urandom(6).hex()}")
             sdk._get_proj = lambda: types.SimpleNamespace(g=kind_only_graph)
-            sdk.tortoise_fts_query(kind="Object", entity_type="object")
+            sdk._tortoise_fts_query(kind="Object", entity_type="object")
         finally:
             search_engine.degradation_chain = original_chain
             if sdk is not None:

@@ -1725,7 +1725,7 @@ def run_benchmark(
             session_results.append(result)
         if ep_pass:
             try:
-                dream = sdk.dream(
+                dream = sdk._dream(
                     full=True, require_calibration=False, warm_start=False
                 )
                 notes.append(

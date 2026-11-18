@@ -77,17 +77,17 @@ def _strip_timing(d: dict) -> dict:
 
 def _seed_graph(sdk: TortoiseSDK) -> dict:
     """Deterministic seed: points, source, tag, entity, event, operator."""
-    p1 = sdk.create_point("statement", "alpha claim", authoredBy="tester")
-    p2 = sdk.create_point("decision", "beta decision", authoredBy="tester",
+    p1 = sdk._create_point("statement", "alpha claim", authoredBy="tester")
+    p2 = sdk._create_point("decision", "beta decision", authoredBy="tester",
                           tags=["t1", "t2"])
     src = sdk.register_source("https://w3.example.com/doc", "document")
-    sdk.create_point("statement", "from source", extractedFrom=src["url"])
-    subj = sdk.create_subject("W3 Team", "team")
-    sdk.create_object("W3 Widget", "product", ownedBy=subj["id"])
-    ev = sdk.create_event("w3 review", "meeting")
-    sess = sdk.create_event("w3 session", "AgentSession",
+    sdk._create_point("statement", "from source", extractedFrom=src["url"])
+    subj = sdk._create_subject("W3 Team", "team")
+    sdk._create_object("W3 Widget", "product", ownedBy=subj["id"])
+    ev = sdk._create_event("w3 review", "meeting")
+    sess = sdk._create_event("w3 session", "AgentSession",
                             session_id="sess-1")
-    op = sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+    op = sdk._create_operator("IMPL", p1["id"], [p2["id"]])
     return {"p1": p1, "p2": p2, "source": src, "subject": subj,
             "event": ev, "session": sess, "operator": op}
 
@@ -623,8 +623,8 @@ class TestOverviewBoundedSections:
         magnitude — not report 1 per tag."""
         from tortoise.mcp_server import tortoise_list_tags, tortoise_overview
         for i in range(5):
-            sdk.create_point("statement", f"tagged {i}", tags=["hot"])
-        sdk.create_point("statement", "untagged")
+            sdk._create_point("statement", f"tagged {i}", tags=["hot"])
+        sdk._create_point("statement", "untagged")
         legacy = {r["name"]: r["count"] for r in tortoise_list_tags()}
         summary = tortoise_overview()["tags"]
         assert legacy["hot"] == 5
@@ -861,7 +861,7 @@ class TestLegacyAliases:
         assert mcp_mod.tortoise_list_tags() == _section_payload(
             mcp_mod.tortoise_overview(section="tags"))
         # get types
-        pid = sdk.create_point("statement", "alias-check")["id"]
+        pid = sdk._create_point("statement", "alias-check")["id"]
         assert mcp_mod.tortoise_get_point(pid) == mcp_mod.tortoise_get(pid, type="point")
         assert mcp_mod.tortoise_get_point(pid) == mcp_mod.tortoise_get(pid)
 

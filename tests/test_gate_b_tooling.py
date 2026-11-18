@@ -56,7 +56,7 @@ def make_point(sdk: TortoiseSDK, content: str, *, confidence=None,
     if confidence is not None:
         props["confidence"] = confidence
     props["status"] = status
-    return sdk.create_point("statement", content, **props)
+    return sdk._create_point("statement", content, **props)
 
 
 # ── mean_grounding: DE2E-4 formula ────────────────────────────────
@@ -76,7 +76,7 @@ def test_mean_grounding_live_non_operator_only(sdk):
     # Operator Point excluded (is_operator: true) regardless of confidence.
     s = make_point(sdk, "source", confidence=0.5)
     t = make_point(sdk, "target", confidence=0.5)
-    sdk.create_operator("IMPL", s["id"], [t["id"]])
+    sdk._create_operator("IMPL", s["id"], [t["id"]])
     # Legacy NULL-status Point is LIVE (#780 semantics) and counts.
     legacy = make_point(sdk, "legacy", confidence=0.7)
     proj.g.query("MATCH (n:Point {id:$id}) REMOVE n.status",

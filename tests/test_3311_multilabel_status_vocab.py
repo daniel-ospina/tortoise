@@ -66,7 +66,7 @@ def _multilabel_point(sdk, *, status: str = "draft") -> str:
     confirms it: only hand-written test fixtures do), so the shape is built the
     only way it can be — create a Point, then add the sibling label.
     """
-    pid = sdk.create_point("statement", "multi-label claim",
+    pid = sdk._create_point("statement", "multi-label claim",
                            dedup=False, status=status)["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
@@ -153,7 +153,7 @@ def test_a_NONE_status_is_refused_on_a_POINT_though_it_DELETES_on_an_Object(env)
     """
     sdk, events = env
     pid = _multilabel_point(sdk)
-    obj = sdk.create_object("Status None Widget", kind="core:entity")["id"]
+    obj = sdk._create_object("Status None Widget", kind="core:entity")["id"]
     before = _mutations(events, pid)
 
     with pytest.raises(ValueError, match="Invalid status"):
@@ -234,7 +234,7 @@ def test_the_DEDICATED_point_doors_grade_a_renderer_named_status_key(env):
     # 1. a single renderer-named key carrying a position/junk word: REFUSED.
     for word in ("in_progress", "garbage"):
         with pytest.raises(ValueError, match="was refused"):
-            sdk.create_point("statement", f"rendered key {word}", dedup=False,
+            sdk._create_point("statement", f"rendered key {word}", dedup=False,
                              **{key: word})
     rows = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.status IN ['in_progress','garbage'] "
@@ -247,7 +247,7 @@ def test_the_DEDICATED_point_doors_grade_a_renderer_named_status_key(env):
     pid = _multilabel_point(sdk, status="draft")
     before = _mutations(events, pid)
     with pytest.raises(ValueError, match="was refused"):
-        sdk.update_point(pid, **{key: "garbage"})
+        sdk._update_point(pid, **{key: "garbage"})
     assert _status(sdk, pid) == "draft", "a refused update must write nothing"
     assert _mutations(events, pid) == before
 
@@ -255,15 +255,15 @@ def test_the_DEDICATED_point_doors_grade_a_renderer_named_status_key(env):
     #    the entity door does — the landing word of two status keys cannot be
     #    known, and guessing is a bypass (#12786).
     with pytest.raises(ValueError, match="CONFLICTING status write"):
-        sdk.create_point("statement", "rendered ambiguity", dedup=False,
+        sdk._create_point("statement", "rendered ambiguity", dedup=False,
                          **{key: "garbage", "status": "live"})
     with pytest.raises(ValueError, match="CONFLICTING status write"):
-        sdk.update_point(pid, **{key: "garbage", "status": "live"})
+        sdk._update_point(pid, **{key: "garbage", "status": "live"})
     assert _status(sdk, pid) == "draft"
 
     # 4. CONTROL — the fix must not over-reject: a rendered CONSISTENT word is
     #    accepted and delivered as exactly one `status` column.
-    ok = sdk.create_point("statement", "rendered consistent", dedup=False,
+    ok = sdk._create_point("statement", "rendered consistent", dedup=False,
                           **{key: "live"})["id"]
     assert _status(sdk, ok) == "live", "a legal rendered status must still land"
 
@@ -351,11 +351,11 @@ def test_status_write_after_supersede_wins_on_rebuild(env):
     from tortoise.consistency import check_consistency
 
     sdk, events = env
-    old = sdk.create_point("statement", "old claim", dedup=False,
+    old = sdk._create_point("statement", "old claim", dedup=False,
                            status="live")["id"]
-    new = sdk.create_point("statement", "new claim", dedup=False,
+    new = sdk._create_point("statement", "new claim", dedup=False,
                            status="live")["id"]
-    sdk.supersede_point(old, new)
+    sdk._supersede_point(old, new)
     # The pre-#9649 live write, reproduced: graph first, record second (this
     # door's own order), with the refusal replaced by the write it used to do.
     sdk._get_proj().g.query(
@@ -384,14 +384,14 @@ def test_supersede_after_status_write_still_ends_superseded(env):
     not an inversion.
     """
     sdk, events = env
-    old = sdk.create_point("statement", "old claim", dedup=False,
+    old = sdk._create_point("statement", "old claim", dedup=False,
                            status="draft")["id"]
-    new = sdk.create_point("statement", "new claim", dedup=False,
+    new = sdk._create_point("statement", "new claim", dedup=False,
                            status="live")["id"]
     # #9649: a DECLARED transition (draft → live). The pre-#9649 fixture used
     # live → draft, which ONTOLOGY §5 does not declare and the door now refuses.
     sdk.update_knowledge(old, status="live")
-    sdk.supersede_point(old, new)
+    sdk._supersede_point(old, new)
     assert _status(sdk, old) == "superseded"
 
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -415,14 +415,14 @@ def test_supersede_status_then_delete_rebuild_does_not_miss(env):
     The node is deleted before the rebuild, so no graph value needs reproducing.
     """
     sdk, events = env
-    old = sdk.create_point("statement", "old claim", dedup=False,
+    old = sdk._create_point("statement", "old claim", dedup=False,
                            status="live")["id"]
-    new = sdk.create_point("statement", "new claim", dedup=False,
+    new = sdk._create_point("statement", "new claim", dedup=False,
                            status="live")["id"]
-    sdk.supersede_point(old, new)
+    sdk._supersede_point(old, new)
     sdk._journal_entity_mutation("Point", old, "restatus",
                                  state={"status": "archived"})
-    sdk.delete(old)
+    sdk._delete(old)
 
     # Must not raise: the deleted Point's later status op is legitimately
     # unfolded (there is no node left), not a reconciliation failure.
@@ -519,7 +519,7 @@ def test_update_point_still_only_promotes_draft_to_live(env):
     sdk, _ = env
     pid = _multilabel_point(sdk, status="draft")
 
-    sdk.update_point(pid, status="live")
+    sdk._update_point(pid, status="live")
     assert _status(sdk, pid) == "live"
 
     # ⛔ #11824 S0 split this loop, because the two halves are refused by two
@@ -531,7 +531,7 @@ def test_update_point_still_only_promotes_draft_to_live(env):
     # The claim is unchanged: `update_point` still only promotes draft→live.
     for word in ("archived", "retracted", "deprecated"):
         with pytest.raises(ValueError, match="only promotes"):
-            sdk.update_point(pid, status=word)
+            sdk._update_point(pid, status=word)
     for bad in ("not-a-status-word", ""):
         with pytest.raises(ValueError, match="was refused"):
-            sdk.update_point(pid, status=bad)
+            sdk._update_point(pid, status=bad)

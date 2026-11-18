@@ -506,7 +506,7 @@ def test_content_stays_keyword_searchable_when_enriched(sdk, embedder, enrichmen
     raw text before still matches with enrichment on (the enriched text is a
     NEW field, never a replacement for ``content``)."""
     sdk._capture_session(CONV, session_id="sess-raw")
-    hits = sdk.tortoise_fts_query("release", limit=5)
+    hits = sdk._tortoise_fts_query("release", limit=5)
     assert any(h["id"].startswith("sess-raw_t") for h in hits), (
         f"raw retrieval lost the keyword the enriched text replaced: "
         f"{[h['id'] for h in hits]}")
@@ -1014,7 +1014,7 @@ def test_content_edit_clears_the_enriched_text(sdk, embedder, enrichment_on):
     t0 = _turn_rows(sdk, "sess-edit")[0]
     assert t0[2] == "[user] the auth flow is blocked", t0
 
-    sdk.update_point(t0[0], content="the billing migration is blocked")
+    sdk._update_point(t0[0], content="the billing migration is blocked")
     after = _turn_rows(sdk, "sess-edit")[0]
     assert after[2] is None, (
         "a stale embeddingText survived a content edit that re-encoded the "
@@ -1041,7 +1041,7 @@ def test_a_caller_supplied_vector_clears_the_enriched_text(
     assert t0[3] is not None, t0
 
     # A caller vector: the node must not keep the text the OLD vector described.
-    sdk.update_point(t0[0], embedding=[1.0, 0.0, 0.0, 0.0])
+    sdk._update_point(t0[0], embedding=[1.0, 0.0, 0.0, 0.0])
     after = _turn_rows(sdk, "sess-vec")[0]
     assert after[2] is None, (
         "a caller-supplied vector replaced the vector an embeddingText was "
@@ -1053,7 +1053,7 @@ def test_a_caller_supplied_vector_clears_the_enriched_text(
     sdk._capture_session(CONV, session_id="sess-vec2")
     t0b = _turn_rows(sdk, "sess-vec2")[0]
     assert t0b[2] == "[user] the auth flow is blocked", t0b
-    sdk.update_point(t0b[0], status="live")
+    sdk._update_point(t0b[0], status="live")
     assert _turn_rows(sdk, "sess-vec2")[0][2] == t0b[2], (
         "an update with no vector changed the writer-minted embeddingText")
 
@@ -1134,7 +1134,7 @@ def test_a_caller_vector_does_not_resurrect_the_enriched_text_on_rebuild(
         before = _turn_rows(s, "sess-vec-rebuild")
         assert before[0][2] == "[user] the auth flow is blocked", before
 
-        s.update_point(before[0][0], embedding=[1.0, 0.0, 0.0, 0.0])
+        s._update_point(before[0][0], embedding=[1.0, 0.0, 0.0, 0.0])
         live = _turn_rows(s, "sess-vec-rebuild")
         assert live[0][2] is None, live
 
@@ -1195,7 +1195,7 @@ def test_check_consistency_does_not_red_a_faithful_enriched_graph(
         s._capture_session(CONV, session_id="sess-cc-edit")
         t0 = _turn_rows(s, "sess-cc-edit")[0]
         assert t0[2] is not None, t0
-        s.update_point(t0[0], content="the billing migration is blocked")
+        s._update_point(t0[0], content="the billing migration is blocked")
         assert _turn_rows(s, "sess-cc-edit")[0][2] is None
 
         result = check_consistency(log_path, s._get_proj())
@@ -1208,7 +1208,7 @@ def test_check_consistency_does_not_red_a_faithful_enriched_graph(
         s._capture_session(CONV, session_id="sess-cc-vec")
         t1 = _turn_rows(s, "sess-cc-vec")[0]
         assert t1[2] is not None, t1
-        s.update_point(t1[0], embedding=[1.0, 0.0, 0.0, 0.0])
+        s._update_point(t1[0], embedding=[1.0, 0.0, 0.0, 0.0])
         assert _turn_rows(s, "sess-cc-vec")[0][2] is None
 
         result = check_consistency(log_path, s._get_proj())
@@ -1225,7 +1225,7 @@ def test_check_consistency_does_not_red_a_faithful_enriched_graph(
         # ── an unrelated revision must NOT clear it (presence-conditional) ──
         s._capture_session(CONV, session_id="sess-cc-ok")
         t2 = _turn_rows(s, "sess-cc-ok")[0]
-        s.update_point(t2[0], status="live")
+        s._update_point(t2[0], status="live")
         assert _turn_rows(s, "sess-cc-ok")[0][2] == t2[2], (
             "a revision that never spoke about embeddingText cleared it in the "
             "pure fold")

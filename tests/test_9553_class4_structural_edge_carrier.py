@@ -86,10 +86,10 @@ def _edge_count(proj, rel: str, src: str, tgt: str) -> int:
 def test_the_structural_edge_is_journaled_and_survives_the_rebuild(env):
     """The issue's own target: a record carrier exists AND the census matches."""
     sdk, events = env
-    team = sdk.create_subject("Team Atlas")
-    widget = sdk.create_object("Widget X", "product")
+    team = sdk._create_subject("Team Atlas")
+    widget = sdk._create_object("Widget X", "product")
 
-    res = sdk.create_edge("ownedBy", widget["id"], team["id"])
+    res = sdk._create_edge("ownedBy", widget["id"], team["id"])
     assert res["created"] is True
 
     proj = sdk._get_proj()
@@ -127,10 +127,10 @@ def test_every_structural_predicate_of_the_door_survives(env, relation):
     """The door is ONE statement shape for every allowlisted predicate, so the
     carrier must not be wired for `ownedBy` alone."""
     sdk, events = env
-    team = sdk.create_subject("Team Atlas")
-    widget = sdk.create_object(f"Widget {relation}", "product")
+    team = sdk._create_subject("Team Atlas")
+    widget = sdk._create_object(f"Widget {relation}", "product")
 
-    assert sdk.create_edge(relation, widget["id"], team["id"])["created"] is True
+    assert sdk._create_edge(relation, widget["id"], team["id"])["created"] is True
     proj = sdk._get_proj()
     assert _edge_count(proj, relation, widget["id"], team["id"]) == 1
 
@@ -151,9 +151,9 @@ def test_the_carrier_shape_is_the_folds_flat_descriptor(env):
     that widens the resolve set must not silently lose edges.)
     """
     sdk, events = env
-    team = sdk.create_subject("Team Atlas")
-    widget = sdk.create_object("Widget Shaped", "product")
-    sdk.create_edge("ownedBy", widget["id"], team["id"])
+    team = sdk._create_subject("Team Atlas")
+    widget = sdk._create_object("Widget Shaped", "product")
+    sdk._create_edge("ownedBy", widget["id"], team["id"])
 
     created = [e for e in _journal(events) if e.get("type") == "DirectEdgeCreated"]
     assert created, "no carrier emitted"
@@ -205,13 +205,13 @@ def test_a_dedup_hit_still_emits(env):
     edge on the second call would leave this green too.
     """
     sdk, events = env
-    team = sdk.create_subject("Team Atlas")
-    widget = sdk.create_object("Widget Dedup", "product")
+    team = sdk._create_subject("Team Atlas")
+    widget = sdk._create_object("Widget Dedup", "product")
     proj = sdk._get_proj()
 
-    assert sdk.create_edge("ownedBy", widget["id"], team["id"])["created"] is True
+    assert sdk._create_edge("ownedBy", widget["id"], team["id"])["created"] is True
     assert _edge_count(proj, "ownedBy", widget["id"], team["id"]) == 1
-    assert sdk.create_edge("ownedBy", widget["id"], team["id"])["created"] is True
+    assert sdk._create_edge("ownedBy", widget["id"], team["id"])["created"] is True
     assert _edge_count(proj, "ownedBy", widget["id"], team["id"]) == 1, (
         "the second call minted a SECOND edge — the `MERGE` is not idempotent "
         "here, so this test is not measuring a dedup hit at all")
@@ -258,11 +258,11 @@ def test_bound_a_source_endpoint_is_declined_not_restored(env):
     from tortoise.projection.nonfolded import collect_identity_skips
 
     sdk, events = env
-    team = sdk.create_subject("Team Atlas")
+    team = sdk._create_subject("Team Atlas")
     sdk.register_source("https://docs9553.example/page", "document")
 
     with collect_identity_skips() as skips:
-        assert sdk.create_edge(
+        assert sdk._create_edge(
             "references", team["id"],
             "https://docs9553.example/page")["created"] is True
 
@@ -308,12 +308,12 @@ def test_bound_a_url_only_source_stub_emits_no_record_and_reports_it(env):
     from tortoise.projection.nonfolded import collect_identity_skips
 
     sdk, events = env
-    widget = sdk.create_object("Widget Stub Source", "product")
+    widget = sdk._create_object("Widget Stub Source", "product")
     stub_url = "https://docs9553.example/url-only-stub"
     # `_link_source` mints the `:Source` through `_mint_source_stub`, which
     # writes sourceKind/title/canonicalUrl/urlAliases/contentHash/ingestedAt
     # and NO `id`.
-    sdk.link_source_to_entity(stub_url, widget["id"], "Object")
+    sdk._link_source_to_entity(stub_url, widget["id"], "Object")
     proj = sdk._get_proj()
     assert proj.g.query(
         "MATCH (s:Source {url:$u}) RETURN s.id",
@@ -322,7 +322,7 @@ def test_bound_a_url_only_source_stub_emits_no_record_and_reports_it(env):
         "emission WOULD write a record)")
 
     with collect_identity_skips() as skips:
-        assert sdk.create_edge("references", stub_url, widget["id"])["created"] is True
+        assert sdk._create_edge("references", stub_url, widget["id"])["created"] is True
     live_by_url = proj.g.query(
         "MATCH (s:Source {url:$u})-[r:references]->(t {id:$t}) RETURN count(r)",
         params={"u": stub_url, "t": widget["id"]}).result_set[0][0]
@@ -365,8 +365,8 @@ def test_the_mint_carries_the_node_property_lane(env):
     fix, not a description of it.
     """
     sdk, events = env
-    team = sdk.create_subject("Team Atlas")
-    widget = sdk.create_object("Widget Owned", "product", ownedBy=team["id"])
+    team = sdk._create_subject("Team Atlas")
+    widget = sdk._create_object("Widget Owned", "product", ownedBy=team["id"])
 
     proj = sdk._get_proj()
     live = _edge_count(proj, "ownedBy", widget["id"], team["id"])
@@ -389,9 +389,9 @@ def test_bound_a_self_edge_is_minted_live_and_never_replayed(env):
     """BOUND: `create_edge(rel, X, X)` mints a live self-edge; the fold refuses
     to re-create one (`E2E-11.6` no-self contract), so no carrier is emitted."""
     sdk, events = env
-    widget = sdk.create_object("Widget Self", "product")
+    widget = sdk._create_object("Widget Self", "product")
 
-    assert sdk.create_edge("related", widget["id"], widget["id"])["created"] is True
+    assert sdk._create_edge("related", widget["id"], widget["id"])["created"] is True
     proj = sdk._get_proj()
     assert _edge_count(proj, "related", widget["id"], widget["id"]) == 1
     assert not [
@@ -417,13 +417,13 @@ def test_the_mint_carries_an_edge_at_a_later_superseded_endpoint(env):
     ⛔ On `#9827`'s tree this reds at `rebuilt == 0`.
     """
     sdk, events = env
-    p1 = sdk.create_point("statement", "edge at a doomed endpoint A")
-    p2 = sdk.create_point("statement", "endpoint B")
-    p3 = sdk.create_point("statement", "successor of A")
-    assert sdk.create_edge("dependsOn", p1["id"], p2["id"])["created"] is True
+    p1 = sdk._create_point("statement", "edge at a doomed endpoint A")
+    p2 = sdk._create_point("statement", "endpoint B")
+    p3 = sdk._create_point("statement", "successor of A")
+    assert sdk._create_edge("dependsOn", p1["id"], p2["id"])["created"] is True
 
     proj = sdk._get_proj()
-    sdk.supersede_point(p1["id"], p3["id"])
+    sdk._supersede_point(p1["id"], p3["id"])
     assert _edge_count(proj, "dependsOn", p1["id"], p2["id"]) == 1, (
         "the live supersede moved the edge — this leg no longer describes the "
         "behaviour it was written for")

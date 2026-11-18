@@ -139,7 +139,7 @@ def test_object_door_refuses_a_subject_kind(sdk):
     kind declares, which is the assertion the issue's own snippet makes
     (`assert labels == [["Subject"]]`), and reports the re-route.
     """
-    r = sdk.create_object("T3 Acme Holdings", objectKind="core:organization")
+    r = sdk._create_object("T3 Acme Holdings", objectKind="core:organization")
     labels, _object_kind, subject_kind, _pk, _ek = _node(sdk, r["id"])
     assert labels == ["Subject"], (
         f"a §5 Subject kind was minted as {labels} — the Subject read can never "
@@ -156,7 +156,7 @@ def test_subject_door_writes_an_object_kind_as_an_object(sdk):
     ``core:skill`` is in the classifier's ``objects`` section, so it is an
     Object kind by the ROUTING authority (``kind_layers.routing_layers``).
     """
-    r = sdk.create_subject("Widget", subjectKind="core:skill")
+    r = sdk._create_subject("Widget", subjectKind="core:skill")
     labels, object_kind, _sk, _pk, _ek = _node(sdk, r["id"])
     assert labels == ["Object"], r
     assert object_kind == "core:skill"
@@ -191,7 +191,7 @@ def test_a_vocabulary_only_kind_stays_on_the_door_the_caller_chose(sdk):
         "the caveat in this docstring is what this pin protects: the bare form "
         "has no section, the namespaced one does")
     assert entity_route("agent") is None
-    r = sdk.create_subject("pi-agent", subjectKind="agent")
+    r = sdk._create_subject("pi-agent", subjectKind="agent")
     labels, object_kind, subject_kind, _pk, _ek = _node(sdk, r["id"])
     assert labels == ["Subject"], r
     assert subject_kind == "agent"
@@ -199,7 +199,7 @@ def test_a_vocabulary_only_kind_stays_on_the_door_the_caller_chose(sdk):
     assert [n["code"] for n in _layer_notes(r)] == ["kind_other_layer"], \
         r.get("advisories")
     # ...and the Subject-side read the door exists for still answers.
-    p = sdk.create_point("statement", "A claim", authoredBy=r["id"])
+    p = sdk._create_point("statement", "A claim", authoredBy=r["id"])
     # The chain is not an EP surface: the posterior gate is opted out, exactly as
     # `_check_confidence_provenance` (mcp_server) does the same for the live door.
     assert sdk.check_confidence(p["id"], include_provenance=True,
@@ -225,7 +225,7 @@ def test_a_write_with_no_legal_status_is_refused_before_it_can_be_routed(sdk):
     a write the caller addressed to an Object.
     """
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("Zeta Holdings", objectKind="core:team",
+        sdk._create_object("Zeta Holdings", objectKind="core:team",
                           status="active")
     message = str(exc.value)
     assert "status 'active' was refused" in message
@@ -238,7 +238,7 @@ def test_a_write_with_no_legal_status_is_refused_before_it_can_be_routed(sdk):
         "Subject layer on its way to being refused")
     # The same write with a lifecycle word IS routed — the router's rule is the
     # layer the kind declares; the status no longer distinguishes the families.
-    r2 = sdk.create_object("Zeta Live", objectKind="core:team", status="live")
+    r2 = sdk._create_object("Zeta Live", objectKind="core:team", status="live")
     labels2, _ok2, subject_kind2, _pk2, _ek2 = _node(sdk, r2["id"])
     assert labels2 == ["Subject"], r2
     assert subject_kind2 == "core:team"
@@ -247,7 +247,7 @@ def test_a_write_with_no_legal_status_is_refused_before_it_can_be_routed(sdk):
 def test_no_object_carries_a_subject_kind_through_the_doors(sdk):
     """The issue's indicator 2, object half — written through the SDK doors."""
     for i, kind in enumerate(SUBJECT_KINDS):
-        sdk.create_object(f"Acme {i}", objectKind=kind)
+        sdk._create_object(f"Acme {i}", objectKind=kind)
     rows = _graph(sdk).query(
         "MATCH (o:Object) WHERE o.objectKind IN $kinds RETURN count(o)",
         params={"kinds": SUBJECT_KINDS},
@@ -278,7 +278,7 @@ def test_a_nil_kind_does_not_veto_the_kind_that_names_a_layer(sdk):
     ⛔ Non-vacuous: pre-fix this write stays ``:Object`` carrying
     ``objectKind='core:organization'`` (measured by reverting the filter).
     """
-    r = sdk.create_object("Acme Nil Peer", objectKind="core:organization",
+    r = sdk._create_object("Acme Nil Peer", objectKind="core:organization",
                           subjectKind="other")
     labels, object_kind, subject_kind, _pk, _ek = _node(sdk, r["id"])
     assert labels == ["Subject"], r
@@ -297,7 +297,7 @@ def test_a_nil_kind_does_not_veto_the_kind_that_names_a_layer(sdk):
         "RETURN count(o)").result_set[0][0] == 0
 
     # The mirror door, the other NIL spelling: `core:other` is equally silent.
-    m = sdk.create_subject("Skill Nil Peer", subjectKind="core:skill",
+    m = sdk._create_subject("Skill Nil Peer", subjectKind="core:skill",
                            objectKind="core:other")
     labels2, object_kind2, subject_kind2, _pk2, _ek2 = _node(sdk, m["id"])
     assert labels2 == ["Object"], m
@@ -442,11 +442,11 @@ def test_the_automatic_entity_case_lands_on_the_subject_layer(sdk):
 def test_the_point_object_overlap_is_not_corrected(sdk, kind):
     """`goal`/`plan`/`strategy`/`target` are Point AND Object kinds by ruling."""
     assert declared_layers(kind) >= {"point", "object"}, declared_layers(kind)
-    point = sdk.create_point(kind, f"the {kind} holds")
+    point = sdk._create_point(kind, f"the {kind} holds")
     assert _node(sdk, point["id"])[0] == ["Point"]
     assert _node(sdk, point["id"])[3] == kind
     assert _layer_notes(point) == [], point.get("advisories")
-    obj = sdk.create_object(f"{kind} node", objectKind=kind)
+    obj = sdk._create_object(f"{kind} node", objectKind=kind)
     assert _node(sdk, obj["id"])[0] == ["Object"]
     assert _layer_notes(obj) == [], obj.get("advisories")
 
@@ -455,7 +455,7 @@ def test_the_point_object_overlap_is_not_corrected(sdk, kind):
 def test_the_point_event_overlap_is_not_corrected(sdk, kind):
     """`decision`/`humanApproval` are Point AND Event kinds by ruling."""
     assert declared_layers(kind) >= {"point", "event"}, declared_layers(kind)
-    point = sdk.create_point(kind, f"the {kind} was made")
+    point = sdk._create_point(kind, f"the {kind} was made")
     assert _node(sdk, point["id"])[0] == ["Point"]
     assert _layer_notes(point) == [], point.get("advisories")
 
@@ -465,7 +465,7 @@ def test_the_point_event_overlap_is_not_corrected(sdk, kind):
 def test_an_event_kind_on_the_point_door_lands_with_a_specific_warning(sdk):
     """The write is NOT refused, and the caller now hears what used to be a log line."""
     assert undeclared_on("core:deployment", "point") == ("event",)
-    r = sdk.create_point("core:deployment", "the deploy happened")
+    r = sdk._create_point("core:deployment", "the deploy happened")
     assert r.get("id"), "warn-not-block (#1934): the write must land"
     labels, _ok, _sk, point_kind, _ek = _node(sdk, r["id"])
     assert labels == ["Point"] and point_kind == "core:deployment", r
@@ -476,7 +476,7 @@ def test_an_event_kind_on_the_point_door_lands_with_a_specific_warning(sdk):
 
 
 def test_an_entity_kind_on_the_event_door_names_the_entity_door(sdk):
-    r = sdk.create_event("mislabeled", "core:organization")
+    r = sdk._create_event("mislabeled", "core:organization")
     assert r.get("id"), "warn-not-block (#1934): the write must land"
     assert _node(sdk, r["id"])[0] == ["Event"]
     notes = _layer_notes(r)
@@ -488,20 +488,20 @@ def test_an_entity_kind_on_the_event_door_names_the_entity_door(sdk):
 # ── the silences: they are what keeps the warning discriminating ─────────
 
 def test_a_declared_kind_on_its_own_layer_is_silent(sdk):
-    point = sdk.create_point("statement", "a plain claim")
+    point = sdk._create_point("statement", "a plain claim")
     assert _layer_notes(point) == [], point.get("advisories")
     # a pack DOCUMENT kind is in the classifier's `objects` section — the same
     # declaration says the object door is its layer, so no warning either.
-    obj = sdk.create_object("Runbook", objectKind="dev:runbook")
+    obj = sdk._create_object("Runbook", objectKind="dev:runbook")
     assert _layer_notes(obj) == [], obj.get("advisories")
 
 
 def test_undeclared_nil_and_absent_kinds_are_silent(sdk):
     """The vocabulary is open, and `other` asserts nothing about the layer."""
     for kind in ("analyst", "core:other", "other"):
-        node = sdk.create_subject(f"subject {kind}", subjectKind=kind)
+        node = sdk._create_subject(f"subject {kind}", subjectKind=kind)
         assert _layer_notes(node) == [], (kind, node.get("advisories"))
-    bare = sdk.create_object("no kind named")
+    bare = sdk._create_object("no kind named")
     assert _layer_notes(bare) == [], bare.get("advisories")
 
 
@@ -541,9 +541,9 @@ def test_a_malformed_pack_manifest_cannot_refuse_a_write(sdk, tmp_path,
     monkeypatch.setenv("TORTOISE_PACKS_DIR", str(packs))
     _clear_kind_spec_cache()
     try:
-        obj = sdk.create_object("T3 Acme Holdings", objectKind="core:organization")
+        obj = sdk._create_object("T3 Acme Holdings", objectKind="core:organization")
         assert obj.get("id"), "the advisory refused an entity write (#1934)"
-        point = sdk.create_point("statement", "the deploy happened")
+        point = sdk._create_point("statement", "the deploy happened")
         assert point.get("id"), "the advisory refused a point write (#1934)"
     finally:
         _clear_kind_spec_cache()
@@ -581,7 +581,7 @@ def test_the_mcp_nested_props_shape_is_reported(sdk):
     `no_source`). Reading the props AFTER coercion is what makes the reported
     kind the one the fold actually stores.
     """
-    r = sdk.create_point("statement", "nested props",
+    r = sdk._create_point("statement", "nested props",
                          props={"pointKind": "core:deployment"})
     assert r.get("id")
     labels, _ok, _sk, point_kind, _ek = _node(sdk, r["id"])
@@ -607,7 +607,7 @@ def test_an_unhashable_status_is_refused_not_a_crash_in_the_routing_guard(sdk):
     assertion that the crash is gone).
     """
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("Q3", objectKind="core:team", status=["active"])
+        sdk._create_object("Q3", objectKind="core:team", status=["active"])
     assert "must be a plain string" in str(exc.value), str(exc.value)
     assert _graph(sdk).query(
         "MATCH (n) WHERE n.name = 'Q3' RETURN count(n)",
@@ -623,7 +623,7 @@ def test_an_unhashable_status_is_refused_not_a_crash_in_the_routing_guard(sdk):
     # asserted instead: nothing lands, and no row is left behind for the guard to
     # trip over later.
     with pytest.raises(ValueError):
-        sdk.create_object("Q3b", objectKind="core:team", status=["active"])
+        sdk._create_object("Q3b", objectKind="core:team", status=["active"])
     assert sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Q3b'}) RETURN count(n)").result_set[0][0] == 0, (
         "the refused create left an Object row behind")
@@ -641,7 +641,7 @@ def test_two_disagreeing_spellings_never_drop_the_caller_s_kind(sdk):
     This module's contract is "no prop is ever rewritten to fit", so an
     ambiguous write keeps its layer, keeps BOTH spellings, and is reported.
     """
-    r = sdk.create_object("Q4", objectKind="core:organization",
+    r = sdk._create_object("Q4", objectKind="core:organization",
                           object_kind="core:team")
     assert r.get("id")
     labels, object_kind, subject_kind, _pk, _ek = _node(sdk, r["id"])
@@ -652,7 +652,7 @@ def test_two_disagreeing_spellings_never_drop_the_caller_s_kind(sdk):
         r.get("advisories")
     # Agreement is still routed — the ambiguity is the disagreement, not the
     # second spelling (the #5475 lesson: a snake-cased kind cannot escape).
-    ok = sdk.create_object("Q5", objectKind="core:organization",
+    ok = sdk._create_object("Q5", objectKind="core:organization",
                            object_kind="core:organization")
     labels2, _ok2, subject_kind2, _pk2, _ek2 = _node(sdk, ok["id"])
     assert labels2 == ["Subject"], ok
@@ -673,10 +673,10 @@ def test_a_re_route_that_splits_an_existing_entity_names_both_ids(sdk):
     must name both ids instead, and keep the lossless wording only when the write
     really did not split anything.
     """
-    legacy = sdk.create_object("Acme Split")          # no kind → a plain :Object
+    legacy = sdk._create_object("Acme Split")          # no kind → a plain :Object
     assert _node(sdk, legacy["id"])[0] == ["Object"]
 
-    routed = sdk.create_object("Acme Split", objectKind="core:organization")
+    routed = sdk._create_object("Acme Split", objectKind="core:organization")
     assert _node(sdk, routed["id"])[0] == ["Subject"]
     assert routed["id"] != legacy["id"], "ids are label-scoped — the split IS real"
     notes = _layer_notes(routed)
@@ -695,7 +695,7 @@ def test_a_re_route_that_splits_an_existing_entity_names_both_ids(sdk):
     # the caller just used (#9964 review: it rendered `DOOR[requested]`, so
     # `create_object(objectKind='core:organization')` was told "the door that
     # writes a Object explicitly is ``create_object``").
-    clean = sdk.create_object("Fresh Holdings", objectKind="core:organization")
+    clean = sdk._create_object("Fresh Holdings", objectKind="core:organization")
     clean_notes = _layer_notes(clean)
     assert [n["code"] for n in clean_notes] == ["kind_layer_routed"]
     assert "no data was lost" in clean_notes[0]["message"], clean_notes[0]
@@ -717,11 +717,11 @@ def test_the_split_advisory_states_a_graph_fact_not_a_causal_one(sdk):
     here (ingest and capture both re-issue writes) and the advisory is the
     statement a caller reconciles from, so the claim is about the GRAPH.
     """
-    legacy = sdk.create_object("Acme Retry")            # no kind → a plain :Object
-    first = sdk.create_object("Acme Retry", objectKind="core:organization")
+    legacy = sdk._create_object("Acme Retry")            # no kind → a plain :Object
+    first = sdk._create_object("Acme Retry", objectKind="core:organization")
     assert _node(sdk, first["id"])[0] == ["Subject"], first
 
-    again = sdk.create_object("Acme Retry", objectKind="core:organization")
+    again = sdk._create_object("Acme Retry", objectKind="core:organization")
     assert again["id"] == first["id"], (
         "the routed id is deterministic — the retry must MERGE onto the node the "
         f"first call minted, not mint a third: {first['id']} vs {again['id']}")
@@ -761,11 +761,11 @@ def test_ingest_dedup_follows_the_label_the_write_lands_on(sdk):
     """
     bundle = {"entities": [{"type": "object", "name": "Ingest Team",
                             "objectKind": "core:team"}]}
-    first = sdk.ingest(bundle)
+    first = sdk._ingest(bundle)
     assert first["created"]["entities"] == 1, first
     assert _node(sdk, first["ids"]["entities"][0])[0] == ["Subject"]
 
-    second = sdk.ingest(bundle)
+    second = sdk._ingest(bundle)
     assert second["created"]["entities"] == 0, (
         f"the probe missed the node the first run created: {second}")
     assert second["deduped"]["entities"] == 1, second
@@ -774,10 +774,10 @@ def test_ingest_dedup_follows_the_label_the_write_lands_on(sdk):
     # The mirror: an Object kind declared on a `type="subject"` item.
     mirror = {"entities": [{"type": "subject", "name": "Ingest Widget",
                             "subjectKind": "core:skill"}]}
-    m1 = sdk.ingest(mirror)
+    m1 = sdk._ingest(mirror)
     assert m1["created"]["entities"] == 1, m1
     assert _node(sdk, m1["ids"]["entities"][0])[0] == ["Object"]
-    m2 = sdk.ingest(mirror)
+    m2 = sdk._ingest(mirror)
     assert m2["created"]["entities"] == 0, m2
     assert m2["deduped"]["entities"] == 1, m2
     assert _graph(sdk).query(
@@ -802,12 +802,12 @@ def test_ingest_dedup_follows_the_label_the_write_lands_on(sdk):
             return {"entities": [{"type": "object", "name": name,
                                   "props": dict(props)}]}
 
-        n1 = sdk.ingest(_bundle())
+        n1 = sdk._ingest(_bundle())
         assert n1["created"]["entities"] == 1, (spelling, n1)
         assert _node(sdk, n1["ids"]["entities"][0])[0] == ["Subject"], (
             f"{spelling}: the nested kind did not re-label the write, so this "
             f"case has stopped exercising the probe", n1)
-        n2 = sdk.ingest(_bundle())
+        n2 = sdk._ingest(_bundle())
         assert n2["created"]["entities"] == 0, (
             f"{spelling}: the probe missed the node the first run created — the "
             f"write MERGED onto the routed label while the probe read the "
@@ -859,13 +859,13 @@ def test_ingest_dedup_predicts_the_door_not_an_idealised_door(sdk):
             # A FRESH item per run: `ingest` consumes the item it is handed.
             return {"entities": [dict(raw, name=name)]}
 
-        first = sdk.ingest(_bundle())
+        first = sdk._ingest(_bundle())
         assert first["created"]["entities"] == 1, (shape, first)
         assert _node(sdk, first["ids"]["entities"][0])[0] == [landed], (
             f"{shape}: the write landed on {landed}, not where this case "
             f"expects it — the shape no longer exercises the probe", first)
 
-        second = sdk.ingest(_bundle())
+        second = sdk._ingest(_bundle())
         assert second["created"]["entities"] == 0, (
             f"{shape}: the probe queried the wrong entity label — the write "
             f"MERGED onto the {landed} the first run created while the probe "
@@ -887,10 +887,10 @@ def test_the_dedup_hit_keeps_the_layer_advisory(sdk):
     re-run — the branch a retry actually takes. Both advisories ride ONE
     `advisories` key, so the merge (not a second `**` splat) is what keeps them.
     """
-    first = sdk.create_point("core:deployment", "deploy twice", status="superseded")
+    first = sdk._create_point("core:deployment", "deploy twice", status="superseded")
     assert [n["code"] for n in _layer_notes(first)] == ["kind_other_layer"], \
         first.get("advisories")
-    again = sdk.create_point("core:deployment", "deploy twice",
+    again = sdk._create_point("core:deployment", "deploy twice",
                              status="superseded", dedup=True,
                              validFrom="2020-01-01T00:00:00Z")
     codes = [n["code"] for n in (again.get("advisories") or [])]

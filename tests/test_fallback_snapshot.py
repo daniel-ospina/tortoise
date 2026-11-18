@@ -40,7 +40,7 @@ def sdk(tmp_path):
     yield sdk
     fs._store.clear()
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -63,7 +63,7 @@ def _no_embedder(monkeypatch):
 
 
 def _no_match_query(sdk, q=FTS_MISS):
-    return sdk.tortoise_fts_query(query=q, limit=10)
+    return sdk._tortoise_fts_query(query=q, limit=10)
 
 
 def _cached_results(sdk, q=FTS_MISS):
@@ -80,7 +80,7 @@ def _store_has(sdk) -> bool:
 def test_fallback_snapshot_parity_with_legacy(sdk, monkeypatch):
     """Cached snapshot results == legacy path results (identical ids+order)."""
     for i in range(6):
-        sdk.create_point("statement", f"pricing tier {i} enterprise plans memory")
+        sdk._create_point("statement", f"pricing tier {i} enterprise plans memory")
     # #1625: the query must MISS FTS (a 'zzz pricing memory' query now matches
     # the corpus directly via the R2 multi-field index, so the fallback never
     # fires and the snapshot never builds). FTS_MISS has no token in any
@@ -90,7 +90,7 @@ def test_fallback_snapshot_parity_with_legacy(sdk, monkeypatch):
 
     # 1. legacy (snapshot capped off) — restore the cap BEFORE the cached leg
     monkeypatch.setattr(fs, "MAX_CORPUS_POINTS", 0)
-    legacy = [r["id"] for r in sdk.tortoise_fts_query(query=q, limit=10)]
+    legacy = [r["id"] for r in sdk._tortoise_fts_query(query=q, limit=10)]
     assert not _store_has(sdk), "legacy leg must not build the snapshot"
 
     monkeypatch.setattr(fs, "MAX_CORPUS_POINTS", 50_000)
@@ -108,10 +108,10 @@ def test_fallback_snapshot_parity_with_legacy(sdk, monkeypatch):
 
 def test_fallback_snapshot_status_and_kind_semantics(sdk):
     """include_terminal + exclude_status + kind mirror the legacy semantics."""
-    a = sdk.create_point("statement", "onboarding zero cost strategy")
-    b = sdk.create_point("statement", "onboarding zero cost strategy")
-    c = sdk.create_point("decision", "onboarding zero cost strategy")  # other kind
-    sdk.supersede_point(b["id"], a["id"])  # b → superseded (terminal)
+    a = sdk._create_point("statement", "onboarding zero cost strategy")
+    b = sdk._create_point("statement", "onboarding zero cost strategy")
+    c = sdk._create_point("decision", "onboarding zero cost strategy")  # other kind
+    sdk._supersede_point(b["id"], a["id"])  # b → superseded (terminal)
 
     _no_match_query(sdk)  # build the snapshot
     proj = sdk._get_proj()
@@ -151,18 +151,18 @@ def test_fallback_snapshot_turn_echo_exclusion_is_pre_ranking(sdk):
     the fallback returns the whole corpus on a non-matching query, so all four
     rows are in the window; only the corpus filter can remove the echoes."""
     for i in range(3):
-        sdk.create_point("event", f"[user] unrelated filler {i}",
+        sdk._create_point("event", f"[user] unrelated filler {i}",
                          id=f"fb_t{i}", is_episodic=True)
-    sdk.create_point("statement", "unrelated filler prior", id="fb_real")
+    sdk._create_point("statement", "unrelated filler prior", id="fb_real")
 
     default = [r["id"] for r in _no_match_query(sdk)]
     assert {"fb_t0", "fb_t1", "fb_t2", "fb_real"} <= set(default), default
 
-    other = [r["id"] for r in sdk.tortoise_fts_query(
+    other = [r["id"] for r in sdk._tortoise_fts_query(
         query=FTS_MISS, limit=10, exclude_turn_echo_session="other")]
     assert other == default, (default, other)
 
-    opted = [r["id"] for r in sdk.tortoise_fts_query(
+    opted = [r["id"] for r in sdk._tortoise_fts_query(
         query=FTS_MISS, limit=10, exclude_turn_echo_session="fb")]
     assert "fb_real" in opted, opted
     assert not any(i.startswith("fb_t") for i in opted), opted
@@ -174,13 +174,13 @@ def test_fallback_snapshot_supersede_decoration(sdk):
     machinery the full path uses) so [SUPERSEDED BY] renders in embedded
     mode. A superseded hit (include_terminal=True) carries status + the
     superseding claim; undecorated hits stay byte-identical."""
-    a = sdk.create_point("statement", "espresso preferred in the morning",  # noqa: F841
+    a = sdk._create_point("statement", "espresso preferred in the morning",  # noqa: F841
                          id="ku_old", status="live")
-    b = sdk.create_point("statement", "drip coffee preferred now",  # noqa: F841
+    b = sdk._create_point("statement", "drip coffee preferred now",  # noqa: F841
                          id="ku_new", status="live")
-    sdk.supersede_point("ku_old", "ku_new")
+    sdk._supersede_point("ku_old", "ku_new")
 
-    hits = sdk.tortoise_fts_query("espresso preferred morning drip coffee",
+    hits = sdk._tortoise_fts_query("espresso preferred morning drip coffee",
                                   entity_type="point",
                                   include_terminal=True, limit=10)
     old = next((h for h in hits if h["id"] == "ku_old"), None)
@@ -196,9 +196,9 @@ def test_fallback_snapshot_no_corrects_renders_byte_identical(sdk):
     """E5 Task 5 negative: a graph with no CORRECTS edges renders
     byte-identically to today — status/superseded_by/supersedes keys are
     absent (the to_dict convention), markers stay empty."""
-    sdk.create_point("statement", "plain espresso preference",
+    sdk._create_point("statement", "plain espresso preference",
                      id="plain", status="live")
-    hits = sdk.tortoise_fts_query("espresso preference",
+    hits = sdk._tortoise_fts_query("espresso preference",
                                   entity_type="point", limit=10)
     assert hits, "the plain point must surface"
     h = next(x for x in hits if x["id"] == "plain")
@@ -216,10 +216,10 @@ def test_fallback_snapshot_invalidated_point_absent():
 
 def test_fallback_snapshot_invalidated_on_write(sdk):
     """A new point invalidates the snapshot (store dropped) and reappears."""
-    sdk.create_point("statement", "alpha beta gamma delta")
+    sdk._create_point("statement", "alpha beta gamma delta")
     _no_match_query(sdk)  # build
     assert _store_has(sdk)
-    sdk.create_point("statement", "alpha beta gamma delta zzz-new")
+    sdk._create_point("statement", "alpha beta gamma delta zzz-new")
     assert not _store_has(sdk), "create must invalidate the snapshot"
     # #1625: query the NEW point's unique token ('zzz-new' is in the new
     # point only; the old point has no zzz token) — the pre-R2 query
@@ -230,18 +230,18 @@ def test_fallback_snapshot_invalidated_on_write(sdk):
 
 def test_fallback_snapshot_invalidated_on_operator(sdk):
     """create_operator invalidates the snapshot (via _mark_dirty)."""
-    a = sdk.create_point("statement", "alpha beta gamma delta")
-    b = sdk.create_point("statement", "alpha beta gamma delta")
+    a = sdk._create_point("statement", "alpha beta gamma delta")
+    b = sdk._create_point("statement", "alpha beta gamma delta")
     _no_match_query(sdk)  # build
     assert _store_has(sdk)
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
     assert not _store_has(sdk), "operator write must invalidate the snapshot"
 
 
 def test_fallback_snapshot_invalidated_on_delete(sdk):
     """A delete invalidates the snapshot — the deleted point leaves the corpus."""
-    keep = sdk.create_point("statement", "zzz unique deleted content token")
-    pid = sdk.create_point("statement", "zzz unique deleted content other")["id"]
+    keep = sdk._create_point("statement", "zzz unique deleted content token")
+    pid = sdk._create_point("statement", "zzz unique deleted content other")["id"]
     # Force the fallback (FTS-miss query) → snapshot built with both points
     _no_match_query(sdk)
     proj = sdk._get_proj()
@@ -249,7 +249,7 @@ def test_fallback_snapshot_invalidated_on_delete(sdk):
     assert fs._store.get(key) is not None, "snapshot must be built"
     assert pid in {p["id"] for p in fs._store.get(key)["points"]}
 
-    sdk.delete_point(pid)
+    sdk._delete_point(pid)
     assert fs._store.get(key) is None, "delete must invalidate the snapshot"
 
     # Rebuild → the deleted point is gone from the corpus; the keeper remains
@@ -289,16 +289,16 @@ def test_fallback_snapshot_dirty_dropped():
 
 def test_fallback_snapshot_size_cap(sdk, monkeypatch):
     """Above the cap the snapshot is skipped → legacy path, no crash."""
-    sdk.create_point("statement", "some content here")
+    sdk._create_point("statement", "some content here")
     monkeypatch.setattr(fs, "MAX_CORPUS_POINTS", 0)
-    results = sdk.tortoise_fts_query(query=FTS_MISS, limit=10)
+    results = sdk._tortoise_fts_query(query=FTS_MISS, limit=10)
     assert isinstance(results, list), "must fall back to legacy, not crash"
     assert not _store_has(sdk), "snapshot must be skipped over the cap"
 
 
 def test_search_snapshot_legacy_delegation(sdk, monkeypatch):
     """No cached vectors (sklearn/model unavailable) → legacy scorer runs."""
-    sdk.create_point("statement", "alpha beta gamma delta")
+    sdk._create_point("statement", "alpha beta gamma delta")
     _no_match_query(sdk)  # build (sklearn available in this env → vectors present)
     proj = sdk._get_proj()
     snap = fs._store.get(fs.snapshot_key(proj, sdk._namespace))
@@ -347,7 +347,7 @@ def test_snapshot_store_isolated_across_embedded_dbs(tmp_path, monkeypatch):
         assert ka != kb, (
             "distinct embedded DBs must derive distinct snapshot keys, got "
             f"{ka!r} for both")
-        a.create_point("statement", "fallback producer probe point")
+        a._create_point("statement", "fallback producer probe point")
         _no_match_query(a)  # builds + caches A's corpus snapshot
         assert fs._store.get(ka) is not None, "A must cache its own snapshot"
         assert fs._store.get(kb) is None, (
@@ -412,12 +412,12 @@ def test_snapshot_key_memory_shares_the_store_identity(tmp_path, monkeypatch):
                 f"(socket), not an instance token: {ka[1]!r}")
 
         # A builds and caches its corpus snapshot under the shared key.
-        a.create_point("statement", "shared memory store alpha beta")
+        a._create_point("statement", "shared memory store alpha beta")
         _no_match_query(a)  # FTS-miss → snapshot built
         assert fs._store.get(ka) is not None, "A must cache its snapshot"
 
         # A write through the SIBLING SDK dirties the same store → same key.
-        b.create_point("statement", "shared memory store gamma delta")
+        b._create_point("statement", "shared memory store gamma delta")
         assert fs._store.get(ka) is None, (
             "a create through the sibling :memory: SDK must invalidate the "
             "cached snapshot — per-projection keys leave it stale")
@@ -1385,7 +1385,7 @@ def test_degraded_read_with_claim_class_never_uses_the_snapshot(sdk, monkeypatch
     ``get_or_build`` first would silently break the pre-truncation class filter
     with every other test green.
     """
-    sdk.create_point("statement", "alpha beta gamma delta")
+    sdk._create_point("statement", "alpha beta gamma delta")
     called = []
     real = fs.get_or_build
 
@@ -1395,7 +1395,7 @@ def test_degraded_read_with_claim_class_never_uses_the_snapshot(sdk, monkeypatch
 
     monkeypatch.setattr(fs, "get_or_build", spy)
     trace: list[dict] = []
-    results = sdk.tortoise_fts_query(
+    results = sdk._tortoise_fts_query(
         query=FTS_MISS, limit=10, claim_class="asserted", leg_trace=trace)
     # ⛔ NOT a bare ``called == []``: that assertion alone passes VACUOUSLY if the
     # degraded arm stops firing for any reason (a leg starts answering, the miss
@@ -1422,7 +1422,7 @@ def test_degraded_read_path_goes_through_get_or_build(sdk, monkeypatch):
     fleet), so the call itself is pinned: one degraded read → ``get_or_build``
     once and no bare ``build_snapshot``.
     """
-    sdk.create_point("statement", "alpha beta gamma delta")
+    sdk._create_point("statement", "alpha beta gamma delta")
     calls = []
     real = fs.get_or_build
 
@@ -1432,7 +1432,7 @@ def test_degraded_read_path_goes_through_get_or_build(sdk, monkeypatch):
 
     monkeypatch.setattr(fs, "get_or_build", counting)
     trace: list[dict] = []
-    results = sdk.tortoise_fts_query(
+    results = sdk._tortoise_fts_query(
         query=FTS_MISS, limit=10, leg_trace=trace)
     assert isinstance(results, list)
     assert calls, (

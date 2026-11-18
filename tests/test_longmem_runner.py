@@ -1359,7 +1359,7 @@ def test_hybrid_search_tr_union_includes_events(tmp_path):
     try:
         q = next(x for x in _mini() if x["question_id"] == "mini_tr_003")
         ingest_haystack(sdk, q)
-        sdk.create_event("adopted dog", "core:occurrence",
+        sdk._create_event("adopted dog", "core:occurrence",
                          subject="Ava adopted a dog last week",
                          sessionId="mini-s0", lme_question_id="mini_tr_003",
                          lme_session_index=0, startedAt="2025-06-10",
@@ -1391,7 +1391,7 @@ def test_hybrid_search_default_stays_points_only(tmp_path):
     try:
         q = next(x for x in _mini() if x["question_id"] == "mini_tr_003")
         ingest_haystack(sdk, q)
-        sdk.create_event("adopted dog", "core:occurrence",
+        sdk._create_event("adopted dog", "core:occurrence",
                          subject="Ava adopted a dog last week",
                          sessionId="mini-s0", lme_question_id="mini_tr_003",
                          lme_session_index=0, startedAt="2025-06-10",
@@ -1466,7 +1466,7 @@ def test_tr_question_uses_tr_top_k_and_events_pool(tmp_path):
         # a retrievable event (subject content matching the question) —
         # proves the TR union pool carries event hits (E2E-4's "no
         # point-only filter")
-        sdk.create_event("adopted dog", "core:occurrence",
+        sdk._create_event("adopted dog", "core:occurrence",
                          subject="Ava adopted a dog last week",
                          sessionId="mini-s0", lme_question_id="mini_tr_003",
                          lme_session_index=0, startedAt="2025-06-10",
@@ -2323,7 +2323,7 @@ def test_ingest_v2_does_not_retype_a_stored_entity(tmp_path):
 
     sdk = _fresh_sdk(tmp_path)
     try:
-        sdk.create_object("Tea set 9572", "capability")
+        sdk._create_object("Tea set 9572", "capability")
 
         def _ingest(entity):
             _write_payload(
@@ -2509,15 +2509,15 @@ def test_retrieve_for_question_surfaces_supersession_annotation(tmp_path):
                  if x["question_id"] == "mini_ku_004")
         ingest_haystack(sdk, q)
         # real supersession on the eval graph (CORRECTS ku_new → ku_old)
-        sdk.create_point(
+        sdk._create_point(
             "statement", "I used to prefer espresso in the morning.",
             id="ku_old", status="live", lme_question_id=q["question_id"],
             lme_session_index=0, is_episodic=True)
-        sdk.create_point(
+        sdk._create_point(
             "statement", "I now prefer drip coffee over espresso.",
             id="ku_new", status="live", lme_question_id=q["question_id"],
             lme_session_index=1, is_episodic=True)
-        sdk.supersede_point("ku_old", "ku_new")
+        sdk._supersede_point("ku_old", "ku_new")
 
         # co-retrieve with a query matching the OLD claim verbatim — the
         # superseded point must surface in the hits (embedded mode)
@@ -2558,7 +2558,7 @@ def test_retrieve_for_question_structural_recall_amplifier(tmp_path):
         ingest_haystack(sdk, q)
         # mint an extracted statement (v2-write shape) with NO text overlap
         # with the question, then wire turn → op → statement (IMPL)
-        sdk.create_point(
+        sdk._create_point(
             EXTRACTION_POINT_KIND, "personal best 5K time is 27:12",
             id="r4-amp-stmt-1", session_id="s1",
             lme_question_id=q["question_id"], lme_session_index=0,
@@ -3393,10 +3393,10 @@ class TestE3SpeakerDerivation:
         from tools.longmem_eval.ingest import point_props_for_hits
         sdk = _fresh_sdk(tmp_path)
         try:
-            sdk.create_point("statement", "my 5K best is 27:12", id="pt_x",
+            sdk._create_point("statement", "my 5K best is 27:12", id="pt_x",
                              source_turn_id="lme:q1:s0:t0",
                              lme_session_index=0, is_episodic=True)
-            sdk.create_point("event", "[user] my 5K best is 27:12",
+            sdk._create_point("event", "[user] my 5K best is 27:12",
                              id="lme:q1:s0:t0", speaker="user",
                              lme_session_index=0, is_episodic=True)
             proj = sdk._get_proj()
@@ -3419,11 +3419,11 @@ class TestE3SpeakerDerivation:
         from tools.longmem_eval import retrieve as rt
         sdk = _fresh_sdk(tmp_path)
         try:
-            sdk.create_point("statement", "my 5K best is 27:12", id="pt_x",
+            sdk._create_point("statement", "my 5K best is 27:12", id="pt_x",
                              source_turn_id="lme:q1:s0:t0",
                              lme_question_id="q1", lme_session_index=0,
                              session_id="s0", is_episodic=True)
-            sdk.create_point("event", "[user] ack",
+            sdk._create_point("event", "[user] ack",
                              id="lme:q1:s0:t0", speaker="user",
                              lme_question_id="q1", lme_session_index=0,
                              session_id="s0", is_episodic=True)
@@ -3453,7 +3453,7 @@ class TestE3SpeakerDerivation:
         from tools.longmem_eval import retrieve as rt
         sdk = _fresh_sdk(tmp_path)
         try:
-            sdk.create_point("statement", "my 5K best is 27:12", id="pt_x",
+            sdk._create_point("statement", "my 5K best is 27:12", id="pt_x",
                              source_turn_id="lme:q1:s0:t99",
                              lme_question_id="q1", lme_session_index=0,
                              session_id="s0", is_episodic=True)
@@ -3481,11 +3481,11 @@ def test_session_dedup_cap_in_pool(tmp_path, monkeypatch):
     sdk = _fresh_sdk(tmp_path)
     try:
         for ci in range(5):
-            sdk.create_point("session-transcript", f"chunk {ci}", id=f"a{ci}",
+            sdk._create_point("session-transcript", f"chunk {ci}", id=f"a{ci}",
                              session_id="sess-a", lme_question_id="dedup_q",
                              lme_session_index=0, is_episodic=True,
                              status="draft")
-        sdk.create_point("statement", "the answer point", id="b0",
+        sdk._create_point("statement", "the answer point", id="b0",
                          session_id="sess-b", lme_question_id="dedup_q",
                          lme_session_index=1, is_episodic=True, status="draft")
 
@@ -3573,11 +3573,11 @@ def test_session_crowded_out_still_surfaces(tmp_path, monkeypatch):
         # affected by a stray TORTOISE_LME_POOL_SIZE in the shell
         monkeypatch.delenv("TORTOISE_LME_POOL_SIZE", raising=False)
         for i in range(20):
-            sdk.create_point("event", f"filler {i}", id=f"a{i}",
+            sdk._create_point("event", f"filler {i}", id=f"a{i}",
                              session_id="crowd-a", lme_question_id="crowd_q",
                              lme_session_index=0, is_episodic=True,
                              status="draft")
-        sdk.create_point("event", "the sky is blue", id="b0",
+        sdk._create_point("event", "the sky is blue", id="b0",
                          session_id="crowd-b", lme_question_id="crowd_q",
                          lme_session_index=1, is_episodic=True, status="draft")
         captured = {}
@@ -3626,7 +3626,7 @@ def test_recall_on_deduped_pool(tmp_path, monkeypatch):
     sdk = _fresh_sdk(tmp_path)
     try:
         for ci in range(3):
-            sdk.create_point("session-transcript", f"evidence chunk {ci}",
+            sdk._create_point("session-transcript", f"evidence chunk {ci}",
                              id=f"e{ci}", session_id="sess-e",
                              lme_question_id="pool_q", lme_session_index=0,
                              is_episodic=True, has_answer=True, status="draft")
@@ -3806,7 +3806,7 @@ def _write_deep_pool_graph(sdk, *, n_points: int = 120) -> list[int]:
     shape. Returns the marked ranks."""
     marked_ranks = [i for i in range(60, n_points, 12)]
     for i in range(n_points):
-        sdk.create_point(
+        sdk._create_point(
             "event", f"filler content {i}", id=f"pt{i}",
             session_id="deep-s0", lme_question_id="deep_pool_q",
             lme_session_index=0, is_episodic=True,
@@ -3846,7 +3846,7 @@ def test_pool_size_knob_controls_fetch_depth(tmp_path, monkeypatch):
 
     sdk = _fresh_sdk(tmp_path)
     try:
-        sdk.create_point("event", "the sky is blue", id="b0",
+        sdk._create_point("event", "the sky is blue", id="b0",
                          session_id="deep-s0", lme_question_id="deep_pool_q",
                          lme_session_index=0, is_episodic=True,
                          status="draft")
@@ -4336,13 +4336,13 @@ def test_boost_before_recall_metrics(tmp_path, monkeypatch):
     sdk = _fresh_sdk(tmp_path)
     try:
         q = _boost_question()
-        sdk.create_point("statement", "I painted the wall a light gray",
+        sdk._create_point("statement", "I painted the wall a light gray",
                          id="evidence-pt", session_id="b-s1",
                          lme_question_id="boost_q", lme_session_index=1,
                          is_episodic=True, has_answer=True, status="draft",
                          quote="I painted the wall a light gray")
         for i in range(24):
-            sdk.create_point("statement", f"unrelated filler chat {i}",
+            sdk._create_point("statement", f"unrelated filler chat {i}",
                              id=f"fill{i}", session_id="b-s0",
                              lme_question_id="boost_q", lme_session_index=0,
                              is_episodic=True, status="draft")
@@ -4402,13 +4402,13 @@ def test_answer_string_evidence_recall_emitted(tmp_path, monkeypatch):
     sdk = _fresh_sdk(tmp_path)
     try:
         q = _boost_question()  # gold "light gray"
-        sdk.create_point("statement", "I painted the wall a light gray",
+        sdk._create_point("statement", "I painted the wall a light gray",
                          id="evidence-pt", session_id="b-s1",
                          lme_question_id="boost_q", lme_session_index=1,
                          is_episodic=True, has_answer=True, status="draft",
                          quote="I painted the wall a light gray")
         for i in range(24):
-            sdk.create_point("statement", f"unrelated filler chat {i}",
+            sdk._create_point("statement", f"unrelated filler chat {i}",
                              id=f"fill{i}", session_id="b-s0",
                              lme_question_id="boost_q", lme_session_index=0,
                              is_episodic=True, status="draft")
@@ -4560,12 +4560,12 @@ def test_max_chunks_per_session_three(tmp_path, monkeypatch):
         # chunk) + the containment-marked evidence chunk from the answer
         # session — a pool where the 2-cap would starve the evidence chunk
         for ci in range(4):
-            sdk.create_point("session-transcript", f"filler chunk {ci}",
+            sdk._create_point("session-transcript", f"filler chunk {ci}",
                              id=f"c{ci}", session_id="cap-s0",
                              lme_question_id="cap3_q", lme_session_index=0,
                              is_episodic=True, has_answer=False,
                              status="draft")
-        sdk.create_point("session-transcript", "the cat is named Whiskers",
+        sdk._create_point("session-transcript", "the cat is named Whiskers",
                          id="ev-chunk", session_id="cap-s1",
                          lme_question_id="cap3_q", lme_session_index=1,
                          is_episodic=True, has_answer=True, status="draft")
@@ -4646,12 +4646,12 @@ def test_reader_context_contains_chunk_evidence(tmp_path, monkeypatch):
         # 25 unmarked extracted points + ONE containment-marked evidence
         # chunk (session b-s1, chunk_turns=1 transcript)
         for i in range(25):
-            sdk.create_point("statement", f"unrelated filler chat {i}",
+            sdk._create_point("statement", f"unrelated filler chat {i}",
                              id=f"fill{i}", session_id="b-s0",
                              lme_question_id="chunk-ev-q",
                              lme_session_index=0, is_episodic=True,
                              status="draft")
-        sdk.create_point("session-transcript",
+        sdk._create_point("session-transcript",
                          "I painted the wall a light gray",
                          id="evidence-chunk", session_id="b-s1",
                          lme_question_id="chunk-ev-q", lme_session_index=1,
@@ -4754,17 +4754,17 @@ def test_reader_surface_counts_context_evidence_beyond_pool_k(tmp_path, monkeypa
         # marked chunk at rank 26 — both evidence-bearing items sit in the
         # rank-(20, 40] window the pool@20 metrics cannot see.
         for i in range(24):
-            sdk.create_point("statement", f"unrelated filler chat {i}",
+            sdk._create_point("statement", f"unrelated filler chat {i}",
                              id=f"fill{i}", session_id="b-s0",
                              lme_question_id="reader-surface-q",
                              lme_session_index=0, is_episodic=True,
                              status="draft")
-        sdk.create_point("statement", "I painted the wall a light gray",
+        sdk._create_point("statement", "I painted the wall a light gray",
                          id="evidence-pt", session_id="b-s1",
                          lme_question_id="reader-surface-q",
                          lme_session_index=1, is_episodic=True,
                          has_answer=True, status="draft")
-        sdk.create_point("session-transcript",
+        sdk._create_point("session-transcript",
                          "I painted the wall a light gray",
                          id="evidence-chunk", session_id="b-s1",
                          lme_question_id="reader-surface-q",
@@ -4816,7 +4816,7 @@ def test_reader_surface_vacuity_is_none(tmp_path, monkeypatch):
         q = _boost_question()
         q["question_id"] = "reader-surface-vac"
         for i in range(5):
-            sdk.create_point("statement", f"unrelated filler chat {i}",
+            sdk._create_point("statement", f"unrelated filler chat {i}",
                              id=f"fill{i}", session_id="b-s0",
                              lme_question_id="reader-surface-vac",
                              lme_session_index=0, is_episodic=True,
@@ -6698,7 +6698,7 @@ def test_ingest_over_mixed_blob_chunk_graph(tmp_path):
             "MERGE (s:Session {id:'lme:mini_ie_user_001:s0'}) "
             "SET s.lme_question_id='mini_ie_user_001', s.lme_session_index=0",
             params={})
-        sdk.create_point("session-transcript", "stale whole-session blob",
+        sdk._create_point("session-transcript", "stale whole-session blob",
                          id="lme:mini_ie_user_001:s0:raw",
                          session_id="mini-s0", lme_question_id="mini_ie_user_001",
                          lme_session_index=0, is_episodic=True, status="draft")
@@ -7572,8 +7572,8 @@ def test_write_time_embeddings_land_on_points_and_chunks(tmp_path):
         # dim check via get_point (size() is unsupported on vecf32 in
         # FalkorDBLite — the read-back property is a plain 384-list)
         dims = [len(p["embedding"]) for p in
-                (sdk.get_point(f"lme:{q['question_id']}:s0:t0"),
-                 sdk.get_point(f"lme:{q['question_id']}:s1:c1"))]
+                (sdk._get_point(f"lme:{q['question_id']}:s0:t0"),
+                 sdk._get_point(f"lme:{q['question_id']}:s1:c1"))]
         assert all(d == 384 for d in dims)
     finally:
         sdk.close()
@@ -7702,7 +7702,7 @@ def test_tortoise_fts_query_records_no_embedder_and_encode_failed(
         monkeypatch.setattr(EmbeddingModel, "get",
                             staticmethod(lambda load_timeout=None: None))
         trace: list[dict] = []
-        sdk.tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
+        sdk._tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
         vec = next(e for e in trace if e["leg"] == "vector")
         assert vec["reason"] == "no_embedder"
         assert vec["ran"] is False
@@ -7715,7 +7715,7 @@ def test_tortoise_fts_query_records_no_embedder_and_encode_failed(
         monkeypatch.setattr(EmbeddingModel, "get", staticmethod(
             lambda load_timeout=None: _BrokenEncodeModel()))
         trace = []
-        sdk.tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
+        sdk._tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
         vec = next(e for e in trace if e["leg"] == "vector")
         assert vec["reason"] == "encode_failed"
         assert vec["ran"] is False
@@ -7793,7 +7793,7 @@ def test_trace_timeout_on_overrun(tmp_path, monkeypatch):
         monkeypatch.setattr(proj.g._g, "query", _slow_vector_query)
         t0 = time.monotonic()
         trace: list[dict] = []
-        sdk.tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
+        sdk._tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
         elapsed = time.monotonic() - t0
         vec = next(e for e in trace if e["leg"] == "vector")
         assert vec["reason"] == "timeout"  # never absent
@@ -7834,7 +7834,7 @@ def test_fallback_entry_all_early_returns(tmp_path, monkeypatch):
     try:
         ingest_haystack(sdk, q)
         trace: list[dict] = []
-        sdk.tortoise_fts_query(miss, limit=5, leg_trace=trace)
+        sdk._tortoise_fts_query(miss, limit=5, leg_trace=trace)
         fb = next(e for e in trace if e["leg"] == "fallback")
         assert fb["reason"] == "tfidf_snapshot"
         assert fb["count"] > 0
@@ -7849,7 +7849,7 @@ def test_fallback_entry_all_early_returns(tmp_path, monkeypatch):
     try:
         ingest_haystack(sdk, q)
         trace = []
-        sdk.tortoise_fts_query(miss, limit=5, leg_trace=trace)
+        sdk._tortoise_fts_query(miss, limit=5, leg_trace=trace)
         fb = next(e for e in trace if e["leg"] == "fallback")
         assert fb["reason"] == "tfidf_legacy"
         assert fb["count"] > 0
@@ -7860,7 +7860,7 @@ def test_fallback_entry_all_early_returns(tmp_path, monkeypatch):
     sdk = _fresh_sdk(tmp_path / "c")
     try:
         trace = []
-        sdk.tortoise_fts_query(miss, entity_type="event",
+        sdk._tortoise_fts_query(miss, entity_type="event",
                                limit=5, leg_trace=trace)
         fb = next(e for e in trace if e["leg"] == "fallback")
         assert fb["reason"] == "no_fallback_applicable"
@@ -7929,9 +7929,9 @@ def test_leg_trace_default_none_byte_identical(tmp_path):
     sdk = _fresh_sdk(tmp_path)
     try:
         ingest_haystack(sdk, q)
-        base = sdk.tortoise_fts_query(q["question"], limit=5)
+        base = sdk._tortoise_fts_query(q["question"], limit=5)
         trace: list[dict] = []
-        traced = sdk.tortoise_fts_query(q["question"], limit=5,
+        traced = sdk._tortoise_fts_query(q["question"], limit=5,
                                         leg_trace=trace)
         assert [h["id"] for h in base] == [h["id"] for h in traced]
         assert trace  # tracing recorded entries

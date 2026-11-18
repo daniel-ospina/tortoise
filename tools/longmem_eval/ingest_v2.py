@@ -273,7 +273,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                     and _ss >= 0 and _se > _ss):
                 point_props["span_start"] = _ss
                 point_props["span_end"] = _se
-            sdk.create_point(
+            sdk._create_point(
                 EXTRACTION_POINT_KIND, content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, has_answer=mark["has_answer"],
@@ -385,7 +385,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 logger.info("v2 ingest event %r already present — "
                             "edges self-healed", eid)
                 continue
-            sdk.create_event(
+            sdk._create_event(
                 event_name, event_kind,
                 sessionId=sid, lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, **event_props,
@@ -422,7 +422,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
         if dup_edge and dup_edge[0][0]:
             continue
         try:
-            sdk.create_operator(op_type, src, [dst],
+            sdk._create_operator(op_type, src, [dst],
                                 direction="unidirectional",
                                 promote_source=False)
             stats["operators"] += 1
@@ -552,7 +552,7 @@ def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
         if not pid:
             continue
         try:
-            sdk.retract_point(pid)
+            sdk._retract_point(pid)
             applied += 1
         except ValueError as e:
             logger.warning("v2 deletion %s skipped (fail-open): %s", pid, e)
@@ -613,7 +613,7 @@ def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
         role = str(turn.get("role") or "unknown")
         turn_id = f"lme:{qid}:s{si}:t{ti}"
         if turn_id not in existing:
-            sdk.create_point(
+            sdk._create_point(
                 "event", _turn_text(role, str(turn.get('content') or '')),
                 id=turn_id, session_id=sid, lme_question_id=qid,
                 lme_session_index=si, speaker=role,
@@ -638,7 +638,7 @@ def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
             bool(turn.get("has_answer"))
             for ti, turn in enumerate(session) if ti in turn_idxs)
         if chunk_id not in existing:
-            sdk.create_point(
+            sdk._create_point(
                 SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
                 session_id=sid, lme_question_id=qid,
                 lme_session_index=si, lme_chunk_index=ci,

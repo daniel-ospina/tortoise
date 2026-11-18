@@ -146,7 +146,7 @@ def sdk_reflex(sdk: Any, **options: Any) -> Reflex:
     ``min_confidence``, ``max_pointers``, ``why``).
     """
     def reflex(window: list[dict], **kwargs: Any) -> Any:
-        return sdk.volunteer_context(window=window, **{**options, **kwargs})
+        return sdk._volunteer_context(window=window, **{**options, **kwargs})
     return reflex
 
 

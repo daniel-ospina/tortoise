@@ -127,7 +127,7 @@ def test_rebuild_all_preserves_the_team_meta_marker(tmp_path):
     `rebuild_all`, not a no-op).
     """
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "journaled, so the replay is real")
+    sdk._create_point("statement", "journaled, so the replay is real")
     _create_marker(sdk, "Acme", "2026-01-01T00:00:00+00:00")
     assert _markers(sdk) == [
         {"name": "Acme", "created": "2026-01-01T00:00:00+00:00"}], \
@@ -159,7 +159,7 @@ def test_rebuild_all_leaves_the_2789_guard_reading_provisioned(tmp_path):
     is the INPUT half, driven against a graph that was really wiped+replayed.
     """
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "point")
+    sdk._create_point("statement", "point")
     _create_marker(sdk, "Acme", "2026-01-01T00:00:00+00:00")
 
     _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
@@ -178,7 +178,7 @@ def test_rebuild_all_leaves_no_marker_when_the_graph_had_none(tmp_path):
     from “provisioned”, which is the state the guard exists to read.
     """
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "point")
+    sdk._create_point("statement", "point")
     assert _markers(sdk) == []
 
     counts = _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
@@ -200,7 +200,7 @@ def test_rebuild_journal_only_engine_keeps_the_marker(tmp_path):
     from tortoise.log import EventLog
 
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "only event")
+    sdk._create_point("statement", "only event")
     _create_marker(sdk, "Acme", "2026-01-01T00:00:00+00:00")
 
     _proj(sdk).rebuild(
@@ -244,7 +244,7 @@ def test_rebuild_all_carries_the_marker_in_the_prewipe_sidecar(
     monkeypatch.setattr(pr, "_write_prewipe_snapshot", spy)
 
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "journaled")
+    sdk._create_point("statement", "journaled")
     _create_marker(sdk, "Acme", "2026-01-01T00:00:00+00:00")
 
     _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
@@ -486,7 +486,7 @@ def test_rebuild_all_refuses_before_the_wipe_when_the_marker_capture_fails(
     from tortoise import projection as pr
 
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "keep me")
+    sdk._create_point("statement", "keep me")
     _create_marker(sdk, "Acme", "2026-01-01T00:00:00+00:00")
     before_points = _seen_points(sdk)
     before_markers = _markers(sdk)

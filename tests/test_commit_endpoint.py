@@ -611,7 +611,7 @@ class TestFourNodeChain:
         assert any(ev.get("sessionId") == "s1" or ev.get("session_id") == "s1"
                    for ev in found), f"s1 not discoverable: {found}"
         # get_session by session_id
-        ev = sdk.get_session("s1")
+        ev = sdk._get_session("s1")
         assert ev is not None and ev.get("eventKind") == "AgentSession"
 
     def test_duplicate_entities_merge_and_gate_flag_written(self, client):
@@ -642,7 +642,7 @@ class TestFourNodeChain:
         twin survived four review rounds.
         """
         sdk = _team_sdk()
-        sdk.create_object("ProbeCommitZ", "capability")
+        sdk._create_object("ProbeCommitZ", "capability")
         r = _commit(client, _raw_payload(1, entities=[
             {"name": "Alpha", "kind": "Project",
              "passes_frequency_gate": True},
@@ -1323,7 +1323,7 @@ class TestRekeyedPointResolvedIds:
     def test_rekey_keeps_operator_contains_and_about_object(self, client, caplog):
         # The graph pre-exists holding the payload point's CONTENT under a
         # legacy (auto-minted ULID) id — the re-key source.
-        legacy_id = _team_sdk().create_point("decision", "point 0")["id"]
+        legacy_id = _team_sdk()._create_point("decision", "point 0")["id"]
         assert legacy_id and not legacy_id.startswith("pt_"), legacy_id
 
         p0 = f"pt_{'0' * 64}"   # payload id — re-keys onto legacy_id
@@ -1388,7 +1388,7 @@ class TestRekeyedPointResolvedIds:
         # the successor CONTENT pre-exists under a legacy id → the new
         # ``pt_<sha>`` payload id re-keys onto it in §5
         new_id = point_content_id("gym at 5pm")
-        legacy_id = _team_sdk().create_point("decision", "gym at 5pm")["id"]
+        legacy_id = _team_sdk()._create_point("decision", "gym at 5pm")["id"]
         assert not legacy_id.startswith("pt_"), legacy_id
 
         r = _commit(client, _raw_payload(1, session_id="s2", points=[
@@ -1417,7 +1417,7 @@ class TestRekeyedPointResolvedIds:
         on the capture path, reproduced here). §7 hands the helper a
         map-aware resolver (the reverse map) so the payload content still
         resolves."""
-        legacy_id = _team_sdk().create_point("decision", "point 0")["id"]
+        legacy_id = _team_sdk()._create_point("decision", "point 0")["id"]
         assert not legacy_id.startswith("pt_"), legacy_id
         p0 = f"pt_{'0' * 64}"   # payload id — re-keys onto legacy_id
         p1 = f"pt_{'1' * 64}"   # genuinely new
@@ -1465,7 +1465,7 @@ class TestRekeyedPointResolvedIds:
         ])).status_code == 200
         # the successor CONTENT pre-exists under a legacy id → the recomputed
         # ``supersede_id`` re-keys onto it in §5
-        legacy_id = _team_sdk().create_point("decision", "gym at 5pm")["id"]
+        legacy_id = _team_sdk()._create_point("decision", "gym at 5pm")["id"]
         assert not legacy_id.startswith("pt_"), legacy_id
         r = _commit(client, _raw_payload(1, session_id="s2", points=[
             {"id": old_id, "content": "gym at 5pm", "pointKind": "decision",
@@ -1593,14 +1593,14 @@ class TestRekeyedPointResolvedIds:
         # Pre-existing OBSERVATION holding the shared content under a legacy
         # id: record A's write dedup-hits it, so A resolves to the legacy node
         # (never to ``shared_id``).
-        legacy_observation = _team_sdk().create_point(
+        legacy_observation = _team_sdk()._create_point(
             "observation", shared)["id"]
         assert not legacy_observation.startswith("pt_"), legacy_observation
         # Pre-existing DECISION to supersede, seeded at its own
         # content-addressed id: the payload point below reuses that id with
         # changed content, so reconcile takes the supersede path.
         prior_old_id = point_content_id("old claim")
-        prior_decision = _team_sdk().create_point(
+        prior_decision = _team_sdk()._create_point(
             "decision", "old claim", id=prior_old_id)["id"]
         assert prior_decision == prior_old_id
 
@@ -1768,7 +1768,7 @@ class TestFailedWriteRetry4704:
         """Make the FIRST payload point write raise — i.e. fail the phase
         AFTER step 1 (the counters) landed, which is the whole window this
         bug needs. Every later call delegates to the real writer."""
-        real = TortoiseSDK.create_point
+        real = TortoiseSDK._create_point
         calls = {"n": 0}
 
         def _boom_once(self, *args, **kwargs):

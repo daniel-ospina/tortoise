@@ -85,7 +85,7 @@ _NAME_ID_REFETCH = re.compile(
 
 def _about_decision(sdk, content: str, object_id: str) -> str:
     """A decision Point aboutObject-linked to ``object_id`` (id-keyed write)."""
-    pid = sdk.create_point("decision", content)["id"]
+    pid = sdk._create_point("decision", content)["id"]
     sdk._get_proj().create_about_edge(pid, object_id, "aboutObject")
     return pid
 
@@ -109,12 +109,12 @@ class TestThe12120UnaddressableTimelineFallback:
         # An id-less stub whose name IS the folded spelling ("widget"), asked for
         # as "The Widget": the resolver admits it (fold-equal), the raw arms miss.
         g.query("CREATE (o:Object {name:'widget', objectKind:'company'})")
-        pid = sdk.create_point("decision", "the widget should ship in Q1")["id"]
+        pid = sdk._create_point("decision", "the widget should ship in Q1")["id"]
         g.query(
             "MATCH (p:Point {id:$pid}), (o:Object {name:'widget'}) "
             "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid})
 
-        ts = sdk.belief_timeline("The Widget")
+        ts = sdk._belief_timeline("The Widget")
         assert [e.get("content") for e in ts] == [
             "the widget should ship in Q1"], (
             f"the id-less fallback asked a narrower key space than the resolver "
@@ -129,12 +129,12 @@ class TestThe12120UnaddressableTimelineFallback:
         g.query(
             "CREATE (o:Object {name:'zeta', objectKind:'company', "
             "aliases:['omega corp']})")
-        pid = sdk.create_point("decision", "omega should ship in Q2")["id"]
+        pid = sdk._create_point("decision", "omega should ship in Q2")["id"]
         g.query(
             "MATCH (p:Point {id:$pid}), (o:Object {name:'zeta'}) "
             "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid})
 
-        ts = sdk.belief_timeline("The Omega Corp")
+        ts = sdk._belief_timeline("The Omega Corp")
         assert [e.get("content") for e in ts] == [
             "omega should ship in Q2"], (
             f"an alias-only holder was unreachable from the fallback: {ts!r}")
@@ -147,12 +147,12 @@ class TestBeliefTimelineIdentityRead:
         and the name-keyed read unioned the two carriers' Points."""
         sdk = sdk_factory()
         proj = sdk._get_proj()
-        acme = sdk.create_object("Acme", "company")
-        beta = sdk.create_object("Beta", "company")
+        acme = sdk._create_object("Acme", "company")
+        beta = sdk._create_object("Beta", "company")
         _about_decision(sdk, "Acme should ship in Q1", acme["id"])
         _about_decision(sdk, "Beta should ship in Q3", beta["id"])
 
-        before = sdk.belief_timeline("Acme")
+        before = sdk._belief_timeline("Acme")
         assert [t["content"] for t in before] == ["Acme should ship in Q1"], (
             f"one live carrier must resolve to its own chain: {before}")
 
@@ -171,7 +171,7 @@ class TestBeliefTimelineIdentityRead:
                 acme["id"], beta["id"]}, "fixture did not produce the D2 shape"
 
         try:
-            after = sdk.belief_timeline("Acme")
+            after = sdk._belief_timeline("Acme")
         except AmbiguousEntityName as exc:
             after = None
             assert set(exc.candidate_ids) == {acme["id"], beta["id"]}
@@ -186,12 +186,12 @@ class TestBeliefTimelineIdentityRead:
         D2's ``single_terminal_holder_reference`` refuses it."""
         sdk = sdk_factory()
         proj = sdk._get_proj()
-        obj = sdk.create_object("Acme", "company")
+        obj = sdk._create_object("Acme", "company")
         _about_decision(sdk, "Acme should ship in Q1", obj["id"])
         proj.g.query("MATCH (o:Object {id:$id}) SET o.status='superseded'",
                      params={"id": obj["id"]})
 
-        assert sdk.belief_timeline("Acme") == []
+        assert sdk._belief_timeline("Acme") == []
         assert [e.shape for e in non_folded_entries()] == ["no-live-holder"]
 
     def test_one_live_carrier_still_resolves(self, sdk_factory):
@@ -199,10 +199,10 @@ class TestBeliefTimelineIdentityRead:
         sides pass — pinned so the route cannot be "fixed" by always refusing).
         """
         sdk = sdk_factory()
-        obj = sdk.create_object("Acme", "company")
+        obj = sdk._create_object("Acme", "company")
         _about_decision(sdk, "Acme should ship in Q1", obj["id"])
         _about_decision(sdk, "Acme should ship in Q2", obj["id"])
-        timeline = sdk.belief_timeline("Acme")
+        timeline = sdk._belief_timeline("Acme")
         assert [t["content"] for t in timeline] == [
             "Acme should ship in Q1", "Acme should ship in Q2"]
 
@@ -211,19 +211,19 @@ class TestBeliefTimelineIdentityRead:
         coordinate before this change and must stay one — but through the
         resolver's holder count, not a second union arm."""
         sdk = sdk_factory()
-        obj = sdk.create_object("Acme Corporation", "company",
+        obj = sdk._create_object("Acme Corporation", "company",
                                 canonical_name="acme-corp")
         _about_decision(sdk, "Acme should ship in Q1", obj["id"])
-        assert [t["content"] for t in sdk.belief_timeline("acme-corp")] == [
+        assert [t["content"] for t in sdk._belief_timeline("acme-corp")] == [
             "Acme should ship in Q1"]
 
     def test_an_id_coordinate_resolves(self, sdk_factory):
         """The resolver's id arm: an id names exactly one node, so it is the
         one coordinate that never needs a holder count."""
         sdk = sdk_factory()
-        obj = sdk.create_object("Acme", "company")
+        obj = sdk._create_object("Acme", "company")
         _about_decision(sdk, "Acme should ship in Q1", obj["id"])
-        assert [t["content"] for t in sdk.belief_timeline(obj["id"])] == [
+        assert [t["content"] for t in sdk._belief_timeline(obj["id"])] == [
             "Acme should ship in Q1"]
 
 
@@ -239,7 +239,7 @@ class TestSubjectBinderTargetIdentityRead:
                                 subjectKind="core:team")["node"]["id"]
         proj.g.query("MATCH (n:Subject {id:$id}) SET n.status='superseded'",
                      params={"id": sid})
-        pid = sdk.create_point("statement", "the team shipped")["id"]
+        pid = sdk._create_point("statement", "the team shipped")["id"]
 
         out = bind_point_subjects(proj, sdk, point_id=pid, slots={"subject": [
             {"name": "the team", "kind": "core:team", "confidence": 0.99}]})
@@ -262,7 +262,7 @@ class TestSubjectBinderTargetIdentityRead:
                 "CREATE (s:Subject {id:$id, name:'the team', "
                 "subjectKind:'core:team', status:'live'})",
                 params={"id": sid})
-        pid = sdk.create_point("statement", "the team shipped")["id"]
+        pid = sdk._create_point("statement", "the team shipped")["id"]
         out = bind_point_subjects(proj, sdk, point_id=pid, slots={"subject": [
             {"name": "the team", "kind": "core:team", "confidence": 0.99}]})
         assert out[0]["outcome"] == "unbound"
@@ -274,12 +274,12 @@ class TestSubjectBinderTargetIdentityRead:
         sdk = sdk_factory()
         proj = sdk._get_proj()
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "the team shipped")["id"]
+        pid = sdk._create_point("statement", "the team shipped")["id"]
         ok = bind_point_subjects(proj, sdk, point_id=pid, slots={"subject": [
             {"name": "the team", "kind": "core:team", "confidence": 0.99}]})
         assert (ok[0]["outcome"], ok[0]["reason"]) == ("bound", "linked")
 
-        pid2 = sdk.create_point("statement", "the team shipped again")["id"]
+        pid2 = sdk._create_point("statement", "the team shipped again")["id"]
         bad = bind_point_subjects(proj, sdk, point_id=pid2, slots={"subject": [
             {"name": "the team", "kind": "core:role", "confidence": 0.99}]})
         assert (bad[0]["outcome"], bad[0]["reason"]) == (
@@ -339,7 +339,7 @@ class TestCanonicalIdIsNotReReadByName:
         recorder = _RecordingGraph(proj.g)
         proj.g = recorder
         try:
-            obj = sdk.create_object("Acme Widget", "company")
+            obj = sdk._create_object("Acme Widget", "company")
             subj = sdk.create_entity("subject", "Acme Team",
                                      subjectKind="core:team")["node"]
             # The write path supplied the id, and #3590 made it OPAQUE — so the

@@ -287,11 +287,11 @@ class TestDeleteSoft:
             assert rows and rows[0][0] == "retracted"
 
             # default retrieval does NOT surface the retracted point...
-            hits = sdk.tortoise_fts_query("coffee at 8am", entity_type="point",
+            hits = sdk._tortoise_fts_query("coffee at 8am", entity_type="point",
                                           limit=5)
             assert all(h.get("id") != coffee for h in hits)
             # ...include_terminal opt-in does (audit/history — no hard delete)
-            hits = sdk.tortoise_fts_query("coffee at 8am", entity_type="point",
+            hits = sdk._tortoise_fts_query("coffee at 8am", entity_type="point",
                                           limit=5, include_terminal=True)
             assert any(h.get("id") == coffee for h in hits)
         finally:
@@ -336,7 +336,7 @@ class TestUpdateChain:
                 "MATCH (p:Point {id:$id}) RETURN coalesce(p.status, '')",
                 params={"id": gym5}).result_set
             assert rows[0][0] not in ("superseded", "retracted", "archived")
-            hits = sdk.tortoise_fts_query("gym at 6pm", entity_type="point",
+            hits = sdk._tortoise_fts_query("gym at 6pm", entity_type="point",
                                           limit=5)
             assert all(h.get("id") != gym6 for h in hits)
         finally:
@@ -530,7 +530,7 @@ class TestE2E11IntegrationGate:
                 "MATCH (p:Point {id:$id}) RETURN coalesce(p.status, '')",
                 params={"id": coffee}).result_set
             assert rows[0][0] == "retracted"
-            hits = sdk.tortoise_fts_query("coffee at 8am", entity_type="point",
+            hits = sdk._tortoise_fts_query("coffee at 8am", entity_type="point",
                                           limit=5)
             assert all(h.get("id") != coffee for h in hits)
 

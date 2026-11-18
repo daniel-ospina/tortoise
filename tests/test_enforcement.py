@@ -36,8 +36,8 @@ def sdk(tmp_path):
 
 
 def _two_points(sdk):
-    a = sdk.create_point("statement", "the strategy is durable")["id"]
-    b = sdk.create_point("statement", "the strategy is not durable")["id"]
+    a = sdk._create_point("statement", "the strategy is durable")["id"]
+    b = sdk._create_point("statement", "the strategy is not durable")["id"]
     return a, b
 
 
@@ -396,7 +396,7 @@ class TestResolveEnforcement:
 class TestCreateOperatorWarnNotBlock:
     def test_undeclared_label_warns_but_writes(self, sdk):
         a, b = _two_points(sdk)
-        result = sdk.create_operator("IMPL", a, [b], label="totallyUndeclaredVerb")
+        result = sdk._create_operator("IMPL", a, [b], label="totallyUndeclaredVerb")
         assert "warnings" in result, "undeclared relation must return a warning"
         w = result["warnings"][0]
         assert w["code"] == "undeclared_relation"
@@ -408,12 +408,12 @@ class TestCreateOperatorWarnNotBlock:
         """'addresses' is declared by product-strategy (feature→customerSegment
         etc.) — a declared predicate must NOT warn."""
         a, b = _two_points(sdk)
-        result = sdk.create_operator("IMPL", a, [b], label="addresses")
+        result = sdk._create_operator("IMPL", a, [b], label="addresses")
         assert "warnings" not in result, "declared relation must not warn"
 
     def test_no_label_no_warning(self, sdk):
         a, b = _two_points(sdk)
-        result = sdk.create_operator("IMPL", a, [b])
+        result = sdk._create_operator("IMPL", a, [b])
         assert "warnings" not in result
         assert result.get("id"), "the write must proceed"
 
@@ -422,7 +422,7 @@ class TestCreateOperatorWarnNotBlock:
         import logging
         a, b = _two_points(sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.enforcement"):
-            sdk.create_operator("IMPL", a, [b], label="bogusRel")
+            sdk._create_operator("IMPL", a, [b], label="bogusRel")
         # the violations event is a committed future data contract
         # ({event, code, kind|relation, pack, actor, ts}) — pin the
         # STRUCTURED shape, not just substrings. The transport

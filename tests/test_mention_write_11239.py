@@ -163,7 +163,7 @@ def _assert_record_is_the_payload_surfaces(prop) -> None:
 def test_a_mention_written_by_create_reaches_the_node_and_survives_a_rebuild(env):
     """The CREATE path — the one `hosted_api._execute_commit_writes` rides."""
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     live = _node_prop(sdk, pid)
     # PRESENCE FIRST: an absent-on-both-sides equality is the silent-drop
@@ -191,11 +191,11 @@ def test_a_mention_written_by_update_survives_a_rebuild(env):
     reverted the node to "no mentions".
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft")["id"]
     assert _node_prop(sdk, pid) is None
 
-    sdk.update_point(pid, mentions=MENTIONS)
+    sdk._update_point(pid, mentions=MENTIONS)
     live = _node_prop(sdk, pid)
     assert live is not None, "the update door did not store the record live"
     _assert_record_is_the_payload_surfaces(live)
@@ -235,13 +235,13 @@ def test_a_recommit_with_no_mentions_does_not_clear_the_stored_record(env):
     record; this row pins the semantics at the SDK door it funnels through.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     stored = _node_prop(sdk, pid)
     assert stored is not None
 
     # the re-commit: same content, no mentions spoken about
-    again = sdk.create_point("statement", CONTENT, dedup=True, status="draft")
+    again = sdk._create_point("statement", CONTENT, dedup=True, status="draft")
     assert again["id"] == pid, "the re-commit must dedup onto the same claim"
     after = _node_prop(sdk, pid)
     assert after == stored, (
@@ -273,7 +273,7 @@ def test_the_replay_door_normalises_a_non_canonical_record(env):
     arm through a real `rebuild_all` rather than through source text.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     live = _node_prop(sdk, pid)
     assert live is not None, "the live create did not store the record"
@@ -324,7 +324,7 @@ def test_a_mention_written_by_update_entity_survives_a_rebuild(env):
     and the rebuild loses it.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft")["id"]
     assert _node_prop(sdk, pid) is None
 
@@ -367,12 +367,12 @@ def test_a_recommit_passing_mentions_none_does_not_clear_the_record(env):
     `point_props["mentions"] = _mention_props or None`).
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     stored = _node_prop(sdk, pid)
     assert stored is not None
 
-    again = sdk.create_point("statement", CONTENT, dedup=True, status="draft",
+    again = sdk._create_point("statement", CONTENT, dedup=True, status="draft",
                              mentions=None)
     assert again["id"] == pid, "the re-commit must dedup onto the same claim"
     after = _node_prop(sdk, pid)
@@ -404,16 +404,16 @@ def test_a_recreate_without_mentions_does_not_inherit_the_deleted_record(env):
     Mutant it reds on: dropping `n.mentions = NULL` from the pass-1a wipe.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     assert _node_prop(sdk, pid) is not None, "the fixture never stored a record"
     # A JOURNALED hard delete (`EntityMutated op=delete`) is what makes the next
     # same-id creation a RE-creation to pass 1a; a raw DETACH DELETE journals
     # nothing, the wipe would never fire, and this row would pass for the wrong
     # reason (the #5256 row's warning).
-    assert sdk.delete_point(pid) is True
+    assert sdk._delete_point(pid) is True
 
-    sdk.create_point("statement", "second life", id=pid)
+    sdk._create_point("statement", "second life", id=pid)
     assert _node_prop(sdk, pid) is None, (
         "guard: the LIVE re-creation must carry no record — otherwise this row "
         "is comparing the wrong thing")
@@ -453,7 +453,7 @@ def test_a_second_creation_saying_nothing_keeps_the_record_in_both_folds(env):
     `_apply_one`'s creation arm.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     stored = _node_prop(sdk, pid)
     assert stored is not None
@@ -501,11 +501,11 @@ def test_an_unwritable_record_folds_as_absent_not_as_stored(env):
     gate.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     assert _node_prop(sdk, pid) is not None
 
-    sdk.update_point(pid, mentions="a\x00b")
+    sdk._update_point(pid, mentions="a\x00b")
     assert _node_prop(sdk, pid) is None, (
         "guard: the store must have REFUSED the unusable string — otherwise "
         "this row measures nothing")
@@ -647,12 +647,12 @@ def test_an_addressed_clear_removes_the_stored_record_and_survives_a_rebuild(env
     and the hosted-door row) does not.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     stored = _node_prop(sdk, pid)
     assert stored is not None, "the create did not store the record"
 
-    sdk.update_point(pid, mentions=None)
+    sdk._update_point(pid, mentions=None)
     cleared = _node_prop(sdk, pid)
     assert cleared is None, (
         "`update_point(mentions=None)` did not clear the stored record: this is "
@@ -736,9 +736,9 @@ def test_a_revision_stating_the_payload_spelling_folds_to_the_writers_bytes(env)
     real `rebuild_all`.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft")["id"]
-    sdk.update_point(pid, mentions=MENTIONS)
+    sdk._update_point(pid, mentions=MENTIONS)
     live = _node_prop(sdk, pid)
     assert live is not None
 
@@ -796,12 +796,12 @@ def test_a_creation_after_a_revision_wins_the_mention_record_on_replay(env):
     and `check_consistency` reds the resulting graph on `fields: ['mentions']`.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft", mentions=MENTIONS)["id"]
     assert _node_prop(sdk, pid) is not None, "the fixture never stored a record"
 
     # A revision that STATES the key, journalled BETWEEN the two creations.
-    sdk.update_point(pid, mentions=RESTATED)
+    sdk._update_point(pid, mentions=RESTATED)
     live = _node_prop(sdk, pid)
     assert live is not None
     assert [r["surface"] for r in json.loads(live)] == ["the problem"]
@@ -969,7 +969,7 @@ def test_a_promotion_carrying_a_store_refusing_scalar_is_named_uncarried(env):
     then reported as carried and the promotion's divergence is never named).
     """
     sdk, events = env
-    pid = sdk.create_point("statement", CONTENT, dedup=True,
+    pid = sdk._create_point("statement", CONTENT, dedup=True,
                            status="draft")["id"]
 
     log = events / "events.jsonl"

@@ -106,7 +106,7 @@ _REG_SDKS: list = []
 
 
 def _seed_team(reg, org_id: str, tier: str = "free"):
-    reg.query(
+    reg._query(
         "CREATE (t:Team {id:$id, name:$id, tier:$tier})",
         params={"id": org_id, "tier": tier},
     )
@@ -114,7 +114,7 @@ def _seed_team(reg, org_id: str, tier: str = "free"):
 
 def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
-    reg.query(
+    reg._query(
         "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
         params={"uid": user_id, "tid": org_id, "role": role, "status": status},
@@ -127,7 +127,7 @@ def _seed_api_key(reg, org_id: str, key_id: str, *, created_by: str,
                   expires_at: str | None = None,
                   key_prefix: str = "tt_x",
                   last_used_at: str | None = None):
-    reg.query(
+    reg._query(
         "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', key_prefix:$kp, "
         "created_by:$cb, created_at:$ca, revoked_at:$ra, expires_at:$ea, "
         "created_via:$cv, last_used_at:$lua})",
@@ -138,7 +138,7 @@ def _seed_api_key(reg, org_id: str, key_id: str, *, created_by: str,
 
 
 def _count_active_keys(reg, org_id: str) -> int:
-    rows = reg.query(
+    rows = reg._query(
         "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
         params={"tid": org_id},
     ).result_set
@@ -148,7 +148,7 @@ def _count_active_keys(reg, org_id: str) -> int:
 def _count_persistent_keys(reg, org_id: str) -> int:
     """Non-revoked keys that COUNT against max_api_keys (bootstrap-excluded
     — mirrors the mint's count predicate)."""
-    rows = reg.query(
+    rows = reg._query(
         "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
         "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
         params={"tid": org_id},
@@ -189,7 +189,7 @@ class TestBootstrapMint:
         assert body["key_prefix"] == body["key"][:10]
 
         # Registry stores hash only — never the plaintext key
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey {org_id:'team-a'}) RETURN k.key_hash, "
             "k.key_prefix, k.created_via, k.created_by",
         ).result_set
@@ -265,7 +265,7 @@ class TestRecoveryMint:
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey {org_id:'team-a'}) RETURN k.created_via",
         ).result_set
         assert rows[0][0] == "recovery"
@@ -282,7 +282,7 @@ class TestRecoveryMint:
         assert _count_active_keys(reg, "team-a") == 2
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['other-old','other-new'] "
             "RETURN k.id, k.revoked_at",
         ).result_set
@@ -375,7 +375,7 @@ class TestRecoveryMint:
         assert detail["code"] == "quota_exceeded", detail
         assert "Key limit reached" in detail["message"], detail
         # Own keys untouched
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-1','own-2'] RETURN k.revoked_at",
         ).result_set
         assert all(revoked is None for (revoked,) in rows)
@@ -415,7 +415,7 @@ class TestRecoveryMint:
         detail = r.json()["detail"]
         assert detail["code"] == "quota_exceeded", detail
         assert "Key limit reached" in detail["message"], detail
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-boot-1','own-boot-2'] "
             "RETURN k.id, k.revoked_at",
         ).result_set
@@ -423,7 +423,7 @@ class TestRecoveryMint:
         assert by_id["own-boot-1"] is not None  # oldest own bootstrap rotated
         assert by_id["own-boot-2"] is None      # newest own bootstrap survives
         # Persistent keys untouched (#750.10) + count never exceeds the cap
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-prov-1','own-prov-2'] "
             "RETURN k.revoked_at",
         ).result_set
@@ -459,7 +459,7 @@ class TestRecoveryMint:
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
         assert r.json()["rotated"] is True     # rotation signal → UI banner
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2','own-prov-1'] "
             "RETURN k.id, k.revoked_at",
         ).result_set
@@ -497,7 +497,7 @@ class TestRecoveryMint:
         assert r.json()["rotated"] is True
         # the NEVER-USED key is rotated, not the oldest-created one
         assert r.json()["rotated_key_prefix"] == "tt_newrec1"
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-rec-old','own-rec-new'] "
             "RETURN k.id, k.revoked_at",
         ).result_set
@@ -524,7 +524,7 @@ class TestRecoveryMint:
         assert r.status_code == 200, r.text
         assert r.json()["rotated"] is True
         assert r.json()["rotated_key_prefix"] == "tt_lrurec1"  # LRU rotated
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-rec-older','own-rec-lru'] "
             "RETURN k.id, k.revoked_at",
         ).result_set
@@ -567,7 +567,7 @@ class TestRecoveryMint:
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
         assert r.json()["rotated"] is True  # recovery rotation → UI banner
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2','own-boot-1'] "
             "RETURN k.id, k.revoked_at",
         ).result_set
@@ -601,7 +601,7 @@ class TestRecoveryMint:
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
         assert r.json()["rotated"] is True     # rotation signal → UI banner
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) WHERE k.id IN ['legacy-1','own-boot-1','own-rec-1'] "
             "RETURN k.id, k.revoked_at",
         ).result_set
@@ -705,7 +705,7 @@ class TestMintedKeyRoundTrip:
         assert r.status_code == 200
         key = r.json()["key"]
         # Revoke via registry, then the same key must 401
-        reg.query(
+        reg._query(
             "MATCH (k:APIKey {key_prefix:$kp}) SET k.revoked_at = $now",
             params={"kp": key[:10], "now": _now_iso()},
         )
@@ -1040,7 +1040,7 @@ class TestOthersBranchFailClosedRecheck1879:
         assert r.status_code == 402, r.text
         assert r.json()["detail"]["code"] == "quota_exceeded", r.json()
         # and the mint really did NOT create the key it would have created
-        own_recovery = reg.query(
+        own_recovery = reg._query(
             "MATCH (k:APIKey) WHERE k.created_via = 'recovery' "
             "AND k.created_by = $u RETURN count(k)",
             params={"u": _U1},
@@ -1053,7 +1053,7 @@ class TestOthersBranchFailClosedRecheck1879:
         # back. `other-old` is live again, and the surviving count is the two
         # pre-existing keys PLUS the concurrent writer's add: this lane's mint
         # contributed nothing.
-        revoked = reg.query(
+        revoked = reg._query(
             "MATCH (k:APIKey {id:'other-old'}) RETURN k.revoked_at",
         ).result_set
         assert revoked and revoked[0][0] is None, (

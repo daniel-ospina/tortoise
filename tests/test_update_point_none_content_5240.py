@@ -117,7 +117,7 @@ def _revised_records(events_dir) -> list[dict]:
 
 def _created(sdk: TortoiseSDK) -> str:
     """Create the subject point and pin the pre-update state; return its id."""
-    pid = sdk.create_point("statement", _ORIGINAL).get("id")
+    pid = sdk._create_point("statement", _ORIGINAL).get("id")
     # The no-op must be measurable against a NON-EMPTY starting state: a wipe
     # of content/hash/vector is then visible, which it would not be from None.
     assert _point(sdk, pid) == (_ORIGINAL, True)
@@ -139,7 +139,7 @@ def test_content_none_is_a_no_op_not_an_attributeerror(sup):
     pid = _created(sdk)
 
     with mock.patch(_EMBED_PATCH, _embed_a):
-        result = sdk.update_point(pid, content=None)  # ← AttributeError before
+        result = sdk._update_point(pid, content=None)  # ← AttributeError before
 
     assert result["content"] == _ORIGINAL, result
     # Asserted on the NODE, not through `get_point`: the property must still
@@ -166,7 +166,7 @@ def test_content_none_keeps_live_and_rebuild_in_agreement(sup):
     pid = _created(sdk)
 
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content=None)
+        sdk._update_point(pid, content=None)
     live = (_point(sdk, pid), _hash(sdk, pid), _vector(sdk, pid))
 
     with mock.patch(_EMBED_PATCH, _embed_a):
@@ -188,9 +188,9 @@ def test_content_none_does_not_swallow_the_other_props(sup):
     pid = _created(sdk)
 
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content=None, confidence=0.42)
+        sdk._update_point(pid, content=None, confidence=0.42)
 
-    assert sdk.get_point(pid)["confidence"] == pytest.approx(0.42)
+    assert sdk._get_point(pid)["confidence"] == pytest.approx(0.42)
     assert _point(sdk, pid) == (_ORIGINAL, True)
     assert _hash(sdk, pid) == _sha(_ORIGINAL)
 
@@ -215,14 +215,14 @@ def test_an_empty_string_is_still_a_real_edit(sup):
     pid = _created(sdk)
 
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content="")
+        sdk._update_point(pid, content="")
     assert _point(sdk, pid) == ("", True), "an empty string must be stored"
     assert _hash(sdk, pid) == _sha(""), "'' must re-derive the hash"
     assert _vector(sdk, pid) is None, "'' must WIPE the stale vector"
 
     # ...and a following `None` neither restores nor changes that state.
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content=None)
+        sdk._update_point(pid, content=None)
     assert _point(sdk, pid) == ("", True)
     assert _hash(sdk, pid) == _sha("")
     assert _vector(sdk, pid) is None
@@ -238,7 +238,7 @@ def test_a_non_str_content_is_refused_by_name(sup):
     pid = _created(sdk)
 
     with pytest.raises(TypeError) as exc:
-        sdk.update_point(pid, content=123)
+        sdk._update_point(pid, content=123)
     assert "content" in str(exc.value) and "update_point" in str(exc.value)
     # Refused BEFORE the write: the point is untouched.
     assert _point(sdk, pid) == (_ORIGINAL, True)
@@ -257,6 +257,6 @@ def test_the_consolidated_update_route_shares_the_boundary(sup):
     _events, sdk = sup
     pid = _created(sdk)
     with mock.patch(_EMBED_PATCH, _embed_a):
-        result = sdk.update(pid, content=None)
+        result = sdk._update(pid, content=None)
     assert result["content"] == _ORIGINAL
     assert _point(sdk, pid) == (_ORIGINAL, True)

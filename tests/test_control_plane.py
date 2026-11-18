@@ -28,7 +28,7 @@ def team(sdk):
     Nothing cleans up now because nothing needs to — `sdk` is built on a
     `tmp_path` database, so this team's graph is discarded with the test.
     """
-    result = sdk.org_create("test-team")
+    result = sdk._org_create("test-team")
     yield result
 
 
@@ -36,7 +36,7 @@ class TestTeamCRUD:
     """Team create, read, update, delete."""
 
     def test_team_create_writes_to_registry_graph(self, sdk):
-        result = sdk.org_create("acme-corp")
+        result = sdk._org_create("acme-corp")
         assert result["name"] == "acme-corp"
         assert result["api_key"].startswith("tt_")
         assert result["graph_name"] == "org_acme-corp"
@@ -48,8 +48,8 @@ class TestTeamCRUD:
         assert team["name"] == "acme-corp"
 
     def test_team_create_is_idempotent_with_key(self, sdk):
-        result1 = sdk.org_create("durable", idempotency_key="key-123")
-        result2 = sdk.org_create("durable", idempotency_key="key-123")
+        result1 = sdk._org_create("durable", idempotency_key="key-123")
+        result2 = sdk._org_create("durable", idempotency_key="key-123")
         assert result2.get("existing") is True
         assert result2["id"] == result1["id"]
 
@@ -61,8 +61,8 @@ class TestTeamCRUD:
         plaintext from the original creation."""
         from tortoise.auth import verify_api_key
 
-        result1 = sdk.org_create("durable-no-key", idempotency_key="key-abc")
-        result2 = sdk.org_create("durable-no-key", idempotency_key="key-abc")
+        result1 = sdk._org_create("durable-no-key", idempotency_key="key-abc")
+        result2 = sdk._org_create("durable-no-key", idempotency_key="key-abc")
 
         assert result2.get("existing") is True
         assert result2["id"] == result1["id"]
@@ -83,17 +83,17 @@ class TestTeamCRUD:
         assert verify_api_key(result1["api_key"], stored_hash) is True
 
     def test_team_create_rejects_duplicate_name(self, sdk):
-        sdk.org_create("unique-name")
+        sdk._org_create("unique-name")
         with pytest.raises(ControlPlaneError, match="already exists"):
-            sdk.org_create("unique-name")
+            sdk._org_create("unique-name")
 
     def test_team_create_rejects_empty_name(self, sdk):
         with pytest.raises(ControlPlaneError, match="must not be empty"):
-            sdk.org_create("")
+            sdk._org_create("")
 
     def test_team_create_accepts_spaces(self, sdk):
         """Spaces in team names are now accepted."""
-        result = sdk.org_create("name with spaces")
+        result = sdk._org_create("name with spaces")
         assert result["name"] == "name with spaces"
         assert result["api_key"].startswith("tt_")
 

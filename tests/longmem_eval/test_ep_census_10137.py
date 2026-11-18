@@ -63,7 +63,7 @@ def sdk():
 
 
 def _claim(sdk: TortoiseSDK, content: str, *, status: str = "live") -> str:
-    return sdk.create_point("statement", content, dedup=False,
+    return sdk._create_point("statement", content, dedup=False,
                             status=status)["id"]
 
 
@@ -73,8 +73,8 @@ def _impl_pair(sdk: TortoiseSDK) -> tuple[str, str, str]:
     a = _claim(sdk, "conclusion A")
     b = _claim(sdk, "premise B")
     c = _claim(sdk, "premise C")
-    sdk.create_operator("IMPL", b, [a])
-    sdk.create_operator("IMPL", c, [a])
+    sdk._create_operator("IMPL", b, [a])
+    sdk._create_operator("IMPL", c, [a])
     return a, b, c
 
 
@@ -155,7 +155,7 @@ def test_a_real_source_baseline_moves_the_census(sdk):
     """The census is not hard-wired to zero: the same graph with a source
     baseline moves all three claims off the neutral mean."""
     _, b, _c = _impl_pair(sdk)
-    sdk.set_point_baseline(b, 6.0, 2.0)
+    sdk._set_point_baseline(b, 6.0, 2.0)
 
     manifest = _manifest_of(sdk)
 
@@ -234,7 +234,7 @@ def test_a_hybrid_op_type_claim_reads_operator_shaped_not_structural(sdk):
     the structural ``no_operators``. Non-structural is the safe side for a
     verdict that routes a fix.
     """
-    sdk.create_point("statement", "hybrid claim", dedup=False,
+    sdk._create_point("statement", "hybrid claim", dedup=False,
                      status="live", op_type="IMPL")
 
     manifest = _manifest_of(sdk)
@@ -260,20 +260,20 @@ def _ingest_claim(sdk: TortoiseSDK, content: str) -> str:
     (``ingest_v2.py:275-290``). The flag is the QUOTA discriminator
     (``quota.py:1046-1050``), not a belief/evidence one; a denominator filtered
     on it would exclude every claim EP stamps (review P0)."""
-    return sdk.create_point("statement", content, dedup=False,
+    return sdk._create_point("statement", content, dedup=False,
                             is_episodic=True, status="draft")["id"]
 
 
 def _ingest_turn(sdk: TortoiseSDK, i: int) -> None:
     """A turn point, as ``ingest_v2.py:611-618`` writes it: kind ``event`` with
     a ``speaker``, ``is_episodic=True``."""
-    sdk.create_point("event", f"[user] turn {i}", dedup=False, speaker="user",
+    sdk._create_point("event", f"[user] turn {i}", dedup=False, speaker="user",
                      is_episodic=True, status="draft")
 
 
 def _ingest_chunk(sdk: TortoiseSDK, i: int) -> None:
     """A transcript chunk, as ``ingest_v2.py:637-643`` writes it."""
-    sdk.create_point("session-transcript", f"chunk {i}", dedup=False,
+    sdk._create_point("session-transcript", f"chunk {i}", dedup=False,
                      is_episodic=True, status="draft")
 
 
@@ -296,8 +296,8 @@ def test_the_episodic_substrate_is_not_a_belief_denominator(sdk):
     a = _ingest_claim(sdk, "conclusion A")
     b = _ingest_claim(sdk, "premise B")
     c = _ingest_claim(sdk, "premise C")
-    sdk.create_operator("IMPL", b, [a])
-    sdk.create_operator("IMPL", c, [a])
+    sdk._create_operator("IMPL", b, [a])
+    sdk._create_operator("IMPL", c, [a])
     for i in range(5):
         _ingest_turn(sdk, i)
     for i in range(2):
@@ -332,7 +332,7 @@ def test_the_two_denominators_agree_on_a_graph_with_no_substrate(sdk):
     population, not a second, more flattering measurement."""
     a = _ingest_claim(sdk, "conclusion A")
     b = _ingest_claim(sdk, "premise B")
-    sdk.create_operator("IMPL", b, [a])
+    sdk._create_operator("IMPL", b, [a])
 
     manifest = _manifest_of(sdk)
 
@@ -361,7 +361,7 @@ def test_a_partial_census_does_not_publish_a_ratio(sdk):
     the ``*_unread`` companions exist to prevent (review P1)."""
     a = _ingest_claim(sdk, "conclusion A")
     b = _ingest_claim(sdk, "premise B")
-    sdk.create_operator("IMPL", b, [a])
+    sdk._create_operator("IMPL", b, [a])
     measured = _manifest_of(sdk)
 
     summary = mp.summarize_belief_activation(
@@ -391,8 +391,8 @@ def test_a_pre_speaker_turn_is_substrate_and_a_kindless_point_is_neither_hole(sd
     """
     a = _ingest_claim(sdk, "conclusion A")
     b = _ingest_claim(sdk, "premise B")
-    sdk.create_operator("IMPL", b, [a])
-    sdk.create_point("event", "[user] legacy turn", dedup=False,  # no speaker
+    sdk._create_operator("IMPL", b, [a])
+    sdk._create_point("event", "[user] legacy turn", dedup=False,  # no speaker
                      is_episodic=True, status="draft")
     sdk._get_proj().g.query("MERGE (n:Point {id:'legacy-kindless'})")
 
@@ -461,7 +461,7 @@ def test_the_census_agrees_with_the_canonical_read(sdk):
     come from a hand-written Cypher query and the arithmetic from this test.
     """
     a, b, c = _impl_pair(sdk)
-    sdk.set_point_baseline(b, 6.0, 2.0)
+    sdk._set_point_baseline(b, 6.0, 2.0)
     manifest = _manifest_of(sdk)
 
     rows = sdk._get_proj().g.query(

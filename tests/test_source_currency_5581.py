@@ -143,7 +143,7 @@ def test_point_currency_aggregates_every_link_and_names_each():
         graph = sdk._get_proj().g
         sdk.register_source("https://ex.com/a", "corpus", contentHash="h1")
         sdk.register_source("https://ex.com/b", "corpus", contentHash="h9")
-        p = sdk.create_point("statement", "beta ships in October",
+        p = sdk._create_point("statement", "beta ships in October",
                              extractedFrom=["https://ex.com/a",
                                             "https://ex.com/b"])
         fresh = point_currency(graph, p["id"])
@@ -175,7 +175,7 @@ def test_a_point_with_no_link_reads_unknown():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         graph = sdk._get_proj().g
-        p = sdk.create_point("statement", "an orphan claim")
+        p = sdk._create_point("statement", "an orphan claim")
         assert read_links(graph, p["id"]) == []
         assert point_currency(graph, p["id"])["status"] == "unknown"
         # ... and a Point that does not exist at all is the same honest answer,
@@ -198,7 +198,7 @@ def test_a_source_with_no_version_reads_unknown_not_current():
     try:
         graph = sdk._get_proj().g
         # auto-minted stub: no contentHash
-        p = sdk.create_point("statement", "from an unversioned source",
+        p = sdk._create_point("statement", "from an unversioned source",
                              extractedFrom="https://ex.com/nohash")
         assert point_currency(graph, p["id"])["status"] == "unknown"
 
@@ -206,7 +206,7 @@ def test_a_source_with_no_version_reads_unknown_not_current():
         # whose Source has no version (the operand is what is missing, not the
         # link).
         sdk.register_source("https://ex.com/versioned", "corpus", contentHash="h1")
-        q = sdk.create_point("statement", "a second claim",
+        q = sdk._create_point("statement", "a second claim",
                              extractedFrom="https://ex.com/versioned")
         assert point_currency(graph, q["id"])["status"] == "current"
         graph.query("MATCH (s:Source {url:'https://ex.com/versioned'}) "
@@ -228,9 +228,9 @@ def test_read_currency_links_is_batched_and_omits_points_with_no_link():
     try:
         graph = sdk._get_proj().g
         sdk.register_source("https://ex.com/a", "corpus", contentHash="h1")
-        linked = sdk.create_point("statement", "linked claim",
+        linked = sdk._create_point("statement", "linked claim",
                                   extractedFrom="https://ex.com/a")
-        orphan = sdk.create_point("statement", "orphan claim")
+        orphan = sdk._create_point("statement", "orphan claim")
         out = read_currency_links(graph, [linked["id"], orphan["id"]])
         assert set(out) == {linked["id"]}, out
         assert out[linked["id"]][0]["currency"] == "current"
@@ -251,7 +251,7 @@ def test_a_stale_verdict_discloses_its_source():
     try:
         graph = sdk._get_proj().g
         sdk.register_source("https://ex.com/a", "corpus", contentHash="h1")
-        p = sdk.create_point("statement", "beta ships in October",
+        p = sdk._create_point("statement", "beta ships in October",
                              extractedFrom="https://ex.com/a")
         assert sourced_fyi(point_currency(graph, p["id"])) is None, (
             "a current Point has no drift to disclose — an empty FYI would make "
@@ -313,7 +313,7 @@ def test_currency_is_derived_not_stored():
     try:
         graph = sdk._get_proj().g
         sdk.register_source("https://ex.com/a", "corpus", contentHash="h1")
-        p = sdk.create_point("statement", "beta ships in October",
+        p = sdk._create_point("statement", "beta ships in October",
                              extractedFrom="https://ex.com/a")
         edge_keys = graph.query(
             "MATCH (:Point {id:$pid})-[r:extractedFrom]->(:Source) "
@@ -332,7 +332,7 @@ def test_currency_is_derived_not_stored():
 # ── the report on the EXISTING read surface ───────────────────────────────────
 
 def _scan(sdk, kind="statement", limit=50):
-    return sdk.tortoise_fts_query(query=None, kind=kind, entity_type="point",
+    return sdk._tortoise_fts_query(query=None, kind=kind, entity_type="point",
                                   limit=limit)
 
 
@@ -352,7 +352,7 @@ def test_search_hit_reports_the_verdict_and_discloses_the_source(tmp_path,
         graph = sdk._get_proj().g
         sdk.register_source("https://ex.com/a", "corpus", contentHash="h1")
         sdk.register_source("https://ex.com/b", "corpus", contentHash="h9")
-        p = sdk.create_point("statement", "beta ships in October",
+        p = sdk._create_point("statement", "beta ships in October",
                              extractedFrom=["https://ex.com/a",
                                             "https://ex.com/b"])
 

@@ -49,12 +49,12 @@ def _chain(sdk: TortoiseSDK, n: int, prefix: str = "c") -> list[str]:
     so `_mark_dirty` runs and the flags + epoch persist)."""
     ids = []
     for i in range(n):
-        pid = sdk.create_point("statement", f"{prefix}{i}",
+        pid = sdk._create_point("statement", f"{prefix}{i}",
                                dedup=False, status="live")["id"]
-        sdk.set_point_baseline(pid, 1, 1)
+        sdk._set_point_baseline(pid, 1, 1)
         ids.append(pid)
     for i in range(n - 1):
-        sdk.create_operator("IMPL", ids[i], [ids[i + 1]],
+        sdk._create_operator("IMPL", ids[i], [ids[i + 1]],
                             direction="bidirectional")
     return ids
 
@@ -117,7 +117,7 @@ def test_stale_epoch_sweep_keeps_the_root_in_the_mirror():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")  # converged → mirrors and flags swept
+            sdk._dream(mode="local")  # converged → mirrors and flags swept
             assert ids[1] not in sdk._dirty_roots
 
             sdk._mark_dirty([ids[1]])          # newer marking at epoch e
@@ -159,7 +159,7 @@ def test_failed_sweep_write_leaves_the_mirror_untouched():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             sdk._mark_dirty([ids[1]])
             before = set(sdk._dirty_roots)
             assert ids[1] in before
@@ -209,7 +209,7 @@ def test_epoch_guarded_sweep_still_spares_an_unstamped_flag():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             # A flag with no ordering stamp at all.
             sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) SET n.ep_dirty = true",
@@ -246,7 +246,7 @@ def test_sweep_drops_a_root_a_peer_already_cleared():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             sdk._mark_dirty([ids[1]])
             assert ids[1] in sdk._dirty_roots
 
@@ -299,7 +299,7 @@ def test_mixed_verdict_in_one_call_reconciles_each_class():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 4)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             assert sdk._dirty_roots == set()
             # Stamp the three roots DIRECTLY (epochs 5 / 50), so the classes are
             # exact and `_mark_dirty`'s reverse-BFS cannot re-stamp a sibling.
@@ -338,7 +338,7 @@ def test_sweep_never_acquires_a_root_the_mirror_never_held():
         peer = TortoiseSDK(db)
         try:
             ids = _chain(peer, 3)
-            peer.dream(mode="local")
+            peer._dream(mode="local")
             peer._mark_dirty(ids)          # peer marks all three, at epoch E
             e = peer._ep_epoch()
 
@@ -375,7 +375,7 @@ def test_run_ep_none_clears_stamped_and_unstamped_alike():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             sdk._mark_dirty([ids[1]])
             # an unstamped flag from legacy/raw state
             sdk._get_proj().g.query(
@@ -408,7 +408,7 @@ def test_retry_cap_does_not_erase_a_peers_newer_marking():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             sdk._mark_dirty([ids[1]])
             e = sdk._ep_epoch()
             cap = sdk.retry_attempt_cap
@@ -451,7 +451,7 @@ def test_retry_cap_retires_an_absent_or_unstamped_root():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             cap = sdk.retry_attempt_cap
 
             # unstamped legacy flag → retired
@@ -541,7 +541,7 @@ def test_a_retaining_sweep_costs_one_write_not_one_per_root():
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 6)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             assert sdk._dirty_roots == set()
             # A rebuilt graph: every flag stamped ahead of the counter this
             # process sweeps at. Stamped directly so the classes are exact.
@@ -597,7 +597,7 @@ def test_retry_cap_fails_safe_and_logs_when_the_verdict_cannot_be_read(caplog):
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             cap = sdk.retry_attempt_cap
             sdk._dirty_roots.add(ids[1])
             sdk._retry_attempts[ids[1]] = cap
@@ -682,7 +682,7 @@ def test_retry_cap_retires_and_announces_when_the_epoch_snapshot_is_unusable(cap
         sdk = TortoiseSDK(db)
         try:
             ids = _chain(sdk, 2)
-            sdk.dream(mode="local")
+            sdk._dream(mode="local")
             sdk._mark_dirty([ids[1]])
             # A rebuilt graph: the counter is gone, the stamp is not.
             sdk._get_proj().g.query("MATCH (m:EpMeta) DELETE m")

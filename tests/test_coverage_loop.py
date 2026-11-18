@@ -203,20 +203,20 @@ def seeded_sdk(monkeypatch):
         proj = sdk._get_proj()
         sdk.create_entity("object", ENTITY_ANCHOR, objectKind="core:other",
                           is_episodic=True)
-        sdk.create_point(
+        sdk._create_point(
             "event",
             "the road bike repairs cost 120 dollars at the shop",
             id=SEED_ID, session_id=SEED_SESSION, lme_session_index=0,
             search_keys="road bike repairs bill paid 120 dollars",
             status="draft")
-        sdk.create_point(
+        sdk._create_point(
             "event",
             "on saturday morning the weather was sunny so i went for a "
             "long walk instead",
             id=JOIN_ID, session_id=JOIN_SESSION, lme_session_index=1,
             search_keys=JOIN_KEYS, status="draft")
         for i in range(12):
-            sdk.create_point(
+            sdk._create_point(
                 "statement",
                 f"{DISTRACTOR_TOPIC} number {i}",
                 id=f"p2567dist{i}", session_id=f"dist2567{i}",
@@ -432,13 +432,13 @@ def test_loop_hard_one_extra_pass_bound(seeded_sdk, monkeypatch):
     proj = seeded_sdk._get_proj()
     seeded_sdk.create_entity("object", "kitchen renovation",
                              objectKind="core:other", is_episodic=True)
-    seeded_sdk.create_point(
+    seeded_sdk._create_point(
         "event",
         "the kitchen renovation cost 2500 dollars at the end",
         id="p2567sessC0", session_id="sessC2567",
         search_keys="kitchen renovation total paid 2500 dollars",
         status="draft")
-    seeded_sdk.create_point(
+    seeded_sdk._create_point(
         "event",
         "the oven light stays on after closing the door",
         id="p2567sessD1", session_id="sessD2567",
@@ -502,7 +502,7 @@ def test_complete_single_session_span_never_fires(seeded_sdk):
     proj = seeded_sdk._get_proj()
     seeded_sdk.create_entity("object", "garden herb patch",
                              objectKind="core:other", is_episodic=True)
-    seeded_sdk.create_point(
+    seeded_sdk._create_point(
         "event",
         "we grew basil and rosemary in the garden herb patch",
         id="p2567solo0", session_id="soloS2567",

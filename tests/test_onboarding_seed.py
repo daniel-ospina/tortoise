@@ -40,7 +40,7 @@ class _FakeSDK:
         self.subjects: dict[str, dict] = {}
         self.edges: list[tuple] = []
 
-    def query(self, cypher, **params):
+    def _query(self, cypher, **params):
         # #12120: `find_subject_by_name` asks the FOLDED UNION, so the spelling
         # arrives as `n0`/`n1`… (and alias arms as `an0`…) beside any `name`.
         # Answer over the same key space the real writer merges on — raw name,
@@ -70,7 +70,7 @@ class _FakeSDK:
         digest = hashlib.sha256(f"{label}:{name}".encode()).hexdigest()[:26]
         return f"{label[:3].lower()}-{digest}"
 
-    def create_subject(self, name, subjectKind="other", **props):
+    def _create_subject(self, name, subjectKind="other", **props):
         node = self.subjects.get(name)
         if node is None:
             node = {"id": self._id_for("Subject", name), "name": name,
@@ -86,7 +86,7 @@ class _FakeSDK:
             node[k] = v
         return dict(node)
 
-    def create_edge(self, relation, from_id, to_id):
+    def _create_edge(self, relation, from_id, to_id):
         edge = (relation, from_id, to_id)
         created = edge not in self.edges
         if created:

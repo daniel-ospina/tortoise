@@ -128,7 +128,7 @@ def sdk(tmp_path):
 def _absent_point(sdk) -> str:
     """A Point nothing has been persisted for: no posterior, no prior, no
     mirror. `create_point` alone does not write belief columns."""
-    return sdk.create_point("statement", "no belief was ever computed")["id"]
+    return sdk._create_point("statement", "no belief was ever computed")["id"]
 
 
 def _store_f32(value):
@@ -146,7 +146,7 @@ def _store_f32(value):
 
 def _symmetric_point(sdk) -> str:
     """A Point with a REAL symmetric posterior — a legitimately computed 0.5."""
-    pid = sdk.create_point("statement", "a measured symmetric coin flip")["id"]
+    pid = sdk._create_point("statement", "a measured symmetric coin flip")["id"]
     alpha, beta = SYMMETRIC_POSTERIOR
     sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id = $id "
@@ -321,7 +321,7 @@ def test_a_born_terminal_claim_has_no_decayed_posterior(sdk):
     because a terminal row never held a belief" — which is exactly this row, and
     NOT the `retract` row the prose described).
     """
-    pid = sdk.create_point("statement", "born-terminal claim",
+    pid = sdk._create_point("statement", "born-terminal claim",
                            status="superseded")["id"]
     eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
     assert eps.ep_state == EP_STATE_ABSENT, eps
@@ -338,10 +338,10 @@ def test_a_declared_baseline_with_a_mirror_reports_the_mirror_not_the_prior(sdk)
     flag still says prior-only, which is why the two must not be read as one
     statement.
     """
-    pid = sdk.create_point("statement", "declared baseline with mirror",
+    pid = sdk._create_point("statement", "declared baseline with mirror",
                            dedup=False, status="live")["id"]
-    sdk.set_point_baseline(pid, 2.0, 1.0)
-    sdk.update_point(pid, confidence=0.95)
+    sdk._set_point_baseline(pid, 2.0, 1.0)
+    sdk._update_point(pid, confidence=0.95)
     eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
     assert eps.ep_state == EP_STATE_BASELINE, eps
     assert eps.baseline is True, eps
@@ -417,7 +417,7 @@ def test_a_non_point_node_carries_neither_belief_key(sdk):
     non-Point shape, which is why the row survived twenty-odd cycles.
     """
     pid = _absent_point(sdk)
-    obj = sdk.create_object("zq-absent-node", "product")
+    obj = sdk._create_object("zq-absent-node", "product")
     oid = obj["id"]
     proj = sdk._get_proj()
     proj.g.query("MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
@@ -467,8 +467,8 @@ def test_declared_baseline_prior_keeps_its_value_and_is_not_measured(sdk):
     """A #2199 declared baseline is a persisted VALUE EP has not measured
     (#3276): it keeps its prior mean and is named `baseline`, never `absent`
     and never `measured`."""
-    pid = sdk.create_point("statement", "a baseline-backed decision")["id"]
-    sdk.set_point_baseline(pid, 18.0, 2.0)
+    pid = sdk._create_point("statement", "a baseline-backed decision")["id"]
+    sdk._set_point_baseline(pid, 18.0, 2.0)
 
     ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
     assert ep.confidence_mean == pytest.approx(18.0 / 20.0, abs=1e-4)
@@ -486,8 +486,8 @@ def test_a_degenerate_declared_baseline_is_absent_and_not_prior_only(sdk):
     contradiction the state vocabulary exists to remove — a consumer deciding
     "there is a prior, use the mean" from `baseline` got `None`.
     """
-    pid = sdk.create_point("statement", "a degenerate baseline")["id"]
-    sdk.set_point_baseline(pid, 0.0, 0.0)
+    pid = sdk._create_point("statement", "a degenerate baseline")["id"]
+    sdk._set_point_baseline(pid, 0.0, 0.0)
 
     from tortoise.why import assemble_why_blocks
 
@@ -752,7 +752,7 @@ def test_a_hex_exponent_past_the_bound_its_mantissa_cancels_is_still_read(sdk):
     # …and every surface agrees once it is STORED. `β = 3` keeps the mean off
     # 0.5, so an imputed Beta(1,1) cannot pass this test by coincidence.
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "ZQHEXBOUND a cancelled exponent")["id"]
+    pid = sdk._create_point("statement", "ZQHEXBOUND a cancelled exponent")["id"]
     proj.g.query(
         "MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
         "n.posterior_beta = '3'",
@@ -832,7 +832,7 @@ def test_a_cancelling_hex_exponent_reads_at_both_band_edges(sdk):
 
     # …and the STORE agrees, on both twins, for the two that read.
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "ZQHEXEDGE cancelling edge")["id"]
+    pid = sdk._create_point("statement", "ZQHEXEDGE cancelling edge")["id"]
     for raw, expected in ((max_hex, 3.4028234663852886e38),
                           (sub_hex, float.fromhex("0x1p-149"))):
         proj.g.query(
@@ -949,7 +949,7 @@ def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
     # and 285 tests stay green — measured by mutation. At degree 1 connectivity
     # is 0.5: correct absent 0.25 < measured 0.45, mutant 0.50 > 0.45.
     for pid in (absent, measured):
-        sdk.create_operator("IMPL", pid, [sdk.create_point(
+        sdk._create_operator("IMPL", pid, [sdk._create_point(
             "statement", f"a support for {pid}")["id"]])
     degrees = {r["id"]: r["recall_ranking"].get("degree", 0) for r in
                StateRanker(projection=sdk._get_proj()).rerank(
@@ -1009,18 +1009,18 @@ def test_set_point_baseline_refuses_a_non_numeric_operand(sdk):
     given it a readable belief. The caller was told the write succeeded.
     """
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "ZQBASELINE guard probe")["id"]
+    pid = sdk._create_point("statement", "ZQBASELINE guard probe")["id"]
 
     for bad in (True, [0.7], "0.7", {"a": 1}, 1j):
         with pytest.raises(ValueError):
-            sdk.set_point_baseline(pid, bad, 0.5)
+            sdk._set_point_baseline(pid, bad, 0.5)
         stored = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, "
             "coalesce(n.baseline_set, false)", params={"id": pid}).result_set[0]
         assert stored[0] is None, (bad, stored)
         assert stored[1] is False, (bad, stored)
 
-    sdk.set_point_baseline(pid, 2.0, 1.0)
+    sdk._set_point_baseline(pid, 2.0, 1.0)
     ann = annotate_ep_batch(proj.g, [pid])[pid]
     assert ann.ep_state == EP_STATE_BASELINE, ann
     assert ann.confidence_mean == pytest.approx(2.0 / 3.0, abs=1e-3), ann
@@ -1040,8 +1040,8 @@ def test_the_persisted_why_snapshot_encodes_absent_as_absent(sdk):
     from tortoise import why_snapshot
 
     proj = sdk._get_proj()
-    absent = sdk.create_point("statement", "ZQWHYSNAP no belief")["id"]
-    measured = sdk.create_point("statement", "ZQWHYSNAP measured")["id"]
+    absent = sdk._create_point("statement", "ZQWHYSNAP no belief")["id"]
+    measured = sdk._create_point("statement", "ZQWHYSNAP measured")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
                  "n.posterior_beta = 1.0", params={"id": measured})
 
@@ -1077,7 +1077,7 @@ def test_the_subgraph_labels_a_terminal_claim_the_same_way_the_ep_block_does(sdk
     from tortoise.why import assemble_why_blocks
 
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "ZQTERM a superseded claim")["id"]
+    pid = sdk._create_point("statement", "ZQTERM a superseded claim")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1.0, "
                  "n.posterior_beta = 1.0, n.status = 'superseded'",
                  params={"id": pid})
@@ -1141,7 +1141,7 @@ def test_a_legacy_string_operand_outside_float32_is_absent_on_every_surface(sdk)
         assert numeric_operand(literal) is None, (
             f"the Python twin still answers {numeric_operand(literal)!r} for "
             f"{literal!r}, which the store reports as absent")
-    pid = sdk.create_point("statement", "ZQERANGE an out-of-range mirror")["id"]
+    pid = sdk._create_point("statement", "ZQERANGE an out-of-range mirror")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '1e-320'",
                  params={"id": pid})
     _assert_absent_everywhere(proj, pid)
@@ -1217,7 +1217,7 @@ def test_a_literal_at_the_stores_rounding_boundary_is_read_not_refused(sdk):
     # is the surface this boundary belongs on. (The MIRROR is a probability and is
     # banded at [0, 1] since cycle 24: see
     # `test_a_mirror_outside_the_probability_band_is_not_a_belief`.)
-    pid = sdk.create_point("statement", "ZQROUND a boundary operand")["id"]
+    pid = sdk._create_point("statement", "ZQROUND a boundary operand")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = "
                  "'3.4028235e38', n.posterior_beta = '1'", params={"id": pid})
     ann = annotate_ep_batch(proj.g, [pid])[pid]
@@ -1250,7 +1250,7 @@ def test_an_unreadable_mirror_is_not_replaced_by_an_imputed_pair(sdk):
     from tortoise.ranking import GapsRanker, GraphRanker, StateRanker
 
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "ZQIMPUTE an unreadable mirror")["id"]
+    pid = sdk._create_point("statement", "ZQIMPUTE an unreadable mirror")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '0x1p4'",
                  params={"id": pid})
     ann = annotate_ep_batch(proj.g, [pid])[pid]
@@ -1265,7 +1265,7 @@ def test_an_unreadable_mirror_is_not_replaced_by_an_imputed_pair(sdk):
         assert not sig.get("belief_informed_order"), (name, sig)
     # A claim WITH stored operands still reads normally — the fix is about the
     # default, not the pair.
-    ok = sdk.create_point("statement", "ZQIMPUTE a measured claim")["id"]
+    ok = sdk._create_point("statement", "ZQIMPUTE a measured claim")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 3.0, "
                  "n.posterior_beta = 1.0", params={"id": ok})
     assert StateRanker(projection=proj)._fetch_point_signals([ok])[
@@ -1287,11 +1287,11 @@ def test_a_numpy_boolean_is_not_a_belief_count(sdk):
     import numpy as np
 
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "ZQNPBOOL a pseudo-count")["id"]
+    pid = sdk._create_point("statement", "ZQNPBOOL a pseudo-count")["id"]
     with pytest.raises(ValueError):
-        sdk.update_point(pid, confidence=np.bool_(True))
+        sdk._update_point(pid, confidence=np.bool_(True))
     with pytest.raises(ValueError):
-        sdk.set_point_baseline(pid, np.bool_(True), 0.5)
+        sdk._set_point_baseline(pid, np.bool_(True), 0.5)
     stored = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.confidence, n.ep_alpha, "
         "coalesce(n.baseline_set, false)", params={"id": pid}).result_set[0]
@@ -1351,7 +1351,7 @@ def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
         "RETURN toFloatOrNull('1.00000001') AS v").result_set == [[1.0]]
 
     for raw in ("'0x1p4'", "2.5", "-0.5"):
-        pid = sdk.create_point("statement", f"ZQBAND mirror {raw}")["id"]
+        pid = sdk._create_point("statement", f"ZQBAND mirror {raw}")["id"]
         proj.g.query(f"MATCH (n:Point {{id:$id}}) SET n.confidence = {raw}",
                      params={"id": pid})
         ann = annotate_ep_batch(proj.g, [pid])[pid]
@@ -1376,7 +1376,7 @@ def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
 
     # …and a claim carrying BOTH an out-of-band mirror and a stored pair serves
     # the PAIR on every surface (no `ep`-block-vs-ranking split).
-    mixed = sdk.create_point("statement", "ZQBAND mirror + pair")["id"]
+    mixed = sdk._create_point("statement", "ZQBAND mirror + pair")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '0x1p4', "
                  "n.posterior_alpha = 9.0, n.posterior_beta = 1.0",
                  params={"id": mixed})
@@ -1390,14 +1390,14 @@ def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
     # an out-of-band value entering it as a belief is not.
     from tortoise.analyze import mean_grounding
 
-    gap = sdk.create_point("statement", "ZQBAND a 2.5 mirror")["id"]
+    gap = sdk._create_point("statement", "ZQBAND a 2.5 mirror")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = 2.5",
                  params={"id": gap})
     assert mean_grounding(proj) <= 1.0, mean_grounding(proj)
 
     # …and the ORDER: an out-of-band mirror must not outrank a measured 0.9.
-    hexed = sdk.create_point("statement", "ZQBAND a hexed claim")["id"]
-    measured = sdk.create_point("statement", "ZQBAND a measured claim")["id"]
+    hexed = sdk._create_point("statement", "ZQBAND a hexed claim")["id"]
+    measured = sdk._create_point("statement", "ZQBAND a measured claim")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '0x1p4'",
                  params={"id": hexed})
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
@@ -1432,7 +1432,7 @@ def test_a_hex_operand_reads_the_same_on_every_surface(sdk):
     assert numeric_operand("0x1p4") == 16.0, (
         "the Python grammar refuses a spelling the store reads — the twins "
         "split, and presence is decided by the Cypher side")
-    pid = sdk.create_point("statement", "ZQHEXOP a hex operand pair")["id"]
+    pid = sdk._create_point("statement", "ZQHEXOP a hex operand pair")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = '0x1p4', "
                  "n.posterior_beta = 1.0", params={"id": pid})
 
@@ -1481,10 +1481,10 @@ def test_the_object_aggregate_reports_absent_without_a_mean_over_nothing(sdk):
     # signal map for a batch of mixed labels).
     ranker = StateRanker(projection=proj)
 
-    measured_point = sdk.create_point("statement", "ZQOBJ a measured claim")["id"]
+    measured_point = sdk._create_point("statement", "ZQOBJ a measured claim")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
                  "n.posterior_beta = 1.0", params={"id": measured_point})
-    absent_point = sdk.create_point("statement", "ZQOBJ a belief-less claim")["id"]
+    absent_point = sdk._create_point("statement", "ZQOBJ a belief-less claim")["id"]
 
     # Created with raw Cypher on purpose: `sdk.create_object` DEDUPES by kind
     # and returned ONE node for two different names (measured: same id twice,
@@ -1522,7 +1522,7 @@ def test_absent_never_outranks_a_strongly_measured_claim(sdk):
     without one, at equal relevance.
     """
     absent = _absent_point(sdk)
-    strong = sdk.create_point("statement", "a strongly measured claim")["id"]
+    strong = sdk._create_point("statement", "a strongly measured claim")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id = $id "
         "SET n.posterior_alpha = 19.0, n.posterior_beta = 1.0",
@@ -1573,8 +1573,8 @@ def test_ep_block_and_rankers_agree_on_the_state(sdk):
     claim's belief, the rankers that ordered on it say the same."""
     absent = _absent_point(sdk)
     measured = _symmetric_point(sdk)
-    baseline = sdk.create_point("statement", "a baseline-backed claim 2")["id"]
-    sdk.set_point_baseline(baseline, 3.0, 1.0)
+    baseline = sdk._create_point("statement", "a baseline-backed claim 2")["id"]
+    sdk._set_point_baseline(baseline, 3.0, 1.0)
 
     eps = annotate_ep_batch(sdk._get_proj().g, [absent, measured, baseline])
     sigs = GraphRanker(projection=sdk._get_proj())._fetch_signals(
@@ -1621,7 +1621,7 @@ def test_mirror_only_claim_agrees_on_the_value_everywhere(sdk):
     surface; the `ep` block used to compute from α/β alone and answer the
     Beta(1,1) 0.5 for it while the rankers read 0.95.
     """
-    pid = sdk.create_point("statement", "a mirror-only claim")["id"]
+    pid = sdk._create_point("statement", "a mirror-only claim")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.confidence = 0.95", params={"id": pid})
 
@@ -1659,7 +1659,7 @@ def test_degenerate_posterior_pair_is_ABSENT_on_every_surface(sdk):
     token). The presence predicate is therefore a SUM (`α + β > 0`), and this
     is the regression test that keeps every surface on that one rule.
     """
-    pid = sdk.create_point("statement", "a degenerate posterior pair")["id"]
+    pid = sdk._create_point("statement", "a degenerate posterior pair")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.0, "
         "n.posterior_beta = 0.0", params={"id": pid})
@@ -1741,7 +1741,7 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     proj = sdk._get_proj()
 
     def _point(content, sql=None, params=None):
-        pid = sdk.create_point("statement", content)["id"]
+        pid = sdk._create_point("statement", content)["id"]
         if sql:
             proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {sql}",
                          params={"id": pid, **(params or {})})
@@ -1754,7 +1754,7 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     mirror_only = _point("a mirror-only claim", "n.confidence = 0.95")
     measured = _symmetric_point(sdk)  # α = β = 2.0, a real measured 0.5
     baseline = _point("a declared baseline")
-    sdk.set_point_baseline(baseline, 18.0, 2.0)
+    sdk._set_point_baseline(baseline, 18.0, 2.0)
     # The readability boundary, split into its TWO shapes (they are not the
     # same row and they do not have the same answer — see the docstring):
     #
@@ -1988,7 +1988,7 @@ def test_a_draft_withholds_its_belief_without_denying_it(sdk):
     would have been green.
     """
     proj = sdk._get_proj()
-    draft = sdk.create_point(
+    draft = sdk._create_point(
         "statement", "a staged claim that carries a prior",
         credibility="high", status="draft")["id"]
     rows = {r["id"]: r for r in StateRanker(projection=proj).rerank(
@@ -2018,8 +2018,8 @@ def test_zero_total_pair_does_not_survive_an_equal_relevance_order(sdk):
     The value check above is not enough on its own: the failure it guards was
     an ORDERING one (absent sorted as if it were 0.5, above a measured low).
     """
-    absent = sdk.create_point("statement", "zero-total claim")["id"]
-    low = sdk.create_point("statement", "measured low claim")["id"]
+    absent = sdk._create_point("statement", "zero-total claim")["id"]
+    low = sdk._create_point("statement", "measured low claim")["id"]
     proj = sdk._get_proj()
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.0, "
                  "n.posterior_beta = 0.0", params={"id": absent})
@@ -2164,7 +2164,7 @@ def test_ep_evidence_prewrite_journals_the_mirror_clear(tmp_path):
     sdk = TortoiseSDK(db, event_log_path=str(events / "events.jsonl"))
     try:
         # A claim carrying a posterior AND the flush-mirror beside it.
-        pid = sdk.create_point("statement", "mirrored claim", dedup=False,
+        pid = sdk._create_point("statement", "mirrored claim", dedup=False,
                                status="live")["id"]
         g = sdk._get_proj().g
         g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 3.0, "
@@ -2172,7 +2172,7 @@ def test_ep_evidence_prewrite_journals_the_mirror_clear(tmp_path):
                 params={"id": pid})
         # An EP run seeded with this claim as evidence takes the pre-write
         # branch that clears a non-baseline claim's posterior + mirror.
-        sdk.compute_confidence(evidence={pid: (10, 1)},
+        sdk._compute_confidence(evidence={pid: (10, 1)},
                                require_calibration=False)
 
         recs = [r for r in ( _json.loads(line)
@@ -2209,9 +2209,9 @@ def test_entity_profile_floor_reads_a_posterior_only_belief(sdk):
     from tortoise.navigation import entityProfile
 
     proj = sdk._get_proj()
-    root = sdk.create_point("statement", "the profiled root entity")["id"]
-    measured_kid = sdk.create_point("statement", "a posterior-only kid")["id"]
-    absent_kid = sdk.create_point("statement", "a kid with no belief")["id"]
+    root = sdk._create_point("statement", "the profiled root entity")["id"]
+    measured_kid = sdk._create_point("statement", "a posterior-only kid")["id"]
+    absent_kid = sdk._create_point("statement", "a kid with no belief")["id"]
     for kid in (measured_kid, absent_kid):
         proj.g.query(
             "MATCH (a:Point {id:$a}), (b:Point {id:$b}) "
@@ -2367,9 +2367,9 @@ def test_set_point_baseline_journals_the_mirror_it_writes(sdk, tmp_path):
     events.mkdir()
     j = TortoiseSDK(db, event_log_path=str(events / "events.jsonl"))
     try:
-        pid = j.create_point("statement", "baseline journal claim",
+        pid = j._create_point("statement", "baseline journal claim",
                              dedup=False, status="live")["id"]
-        j.set_point_baseline(pid, 3.0, 1.0)
+        j._set_point_baseline(pid, 3.0, 1.0)
         mirror = j._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.confidence",
             params={"id": pid}).result_set[0][0]
@@ -2397,9 +2397,9 @@ def test_degenerate_baseline_writes_no_mirror(sdk):
     reproduced it. The degenerate write now leaves the row ABSENT, which is
     what every read surface reports.
     """
-    pid = sdk.create_point("statement", "degenerate baseline claim",
+    pid = sdk._create_point("statement", "degenerate baseline claim",
                            dedup=False, status="live")["id"]
-    sdk.set_point_baseline(pid, 0.0, 0.0)
+    sdk._set_point_baseline(pid, 0.0, 0.0)
     stored = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.confidence", params={"id": pid}
     ).result_set[0][0]
@@ -2435,14 +2435,14 @@ def test_update_point_clearing_the_mirror_leaves_one_answer(sdk):
     Discriminating power: pre-fix every assertion below sees 0.9 (the stale
     mirror) where the pair says 0.5.
     """
-    pid = sdk.create_point("statement", "mirror vs pair claim",
+    pid = sdk._create_point("statement", "mirror vs pair claim",
                            dedup=False, status="live")["id"]
     proj = sdk._get_proj()
     # A caller-set mirror beside no pair — a real public shape.
-    sdk.update_point(pid, confidence=0.9)
+    sdk._update_point(pid, confidence=0.9)
     assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(0.9)
     # Moving the pair must not leave it behind.
-    sdk.update_point(pid, posterior_alpha=10.0, posterior_beta=10.0)
+    sdk._update_point(pid, posterior_alpha=10.0, posterior_beta=10.0)
     stored = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.confidence",
         params={"id": pid}).result_set[0][0]
@@ -2462,10 +2462,10 @@ def test_update_point_clearing_the_mirror_leaves_one_answer(sdk):
     # A HALF pair is the same rule, and it used to inherit the mirror's number
     # for a claim that has no mean at all — so on a FRESH claim (no stored β)
     # the cleared mirror is what turns 0.7 into an honest `absent`.
-    half = sdk.create_point("statement", "half pair after a mirror",
+    half = sdk._create_point("statement", "half pair after a mirror",
                             dedup=False, status="live")["id"]
-    sdk.update_point(half, confidence=0.7)
-    sdk.update_point(half, posterior_alpha=3.0)
+    sdk._update_point(half, confidence=0.7)
+    sdk._update_point(half, posterior_alpha=3.0)
     eps = annotate_ep_batch(proj.g, [half])[half]
     assert eps.ep_state == EP_STATE_ABSENT, eps
     assert eps.confidence_mean is None, eps
@@ -2487,11 +2487,11 @@ def test_the_mirror_wins_over_a_contradicting_pair(sdk):
 
     Discriminating power: a reader that preferred α/β answers 0.5 here.
     """
-    pid = sdk.create_point("statement", "contradicting pair claim",
+    pid = sdk._create_point("statement", "contradicting pair claim",
                            dedup=False, status="live")["id"]
     proj = sdk._get_proj()
-    sdk.update_point(pid, posterior_alpha=1.0, posterior_beta=1.0)  # pair 0.5
-    sdk.update_point(pid, confidence=0.9)  # caller-owned mirror, wins
+    sdk._update_point(pid, posterior_alpha=1.0, posterior_beta=1.0)  # pair 0.5
+    sdk._update_point(pid, confidence=0.9)  # caller-owned mirror, wins
     stored = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
         "n.posterior_beta", params={"id": pid}).result_set[0]
@@ -2524,9 +2524,9 @@ def test_a_draft_with_a_persisted_prior_names_its_belief_beside_a_null_value(sdk
     from being reverted as noise.
     """
     proj = sdk._get_proj()
-    measured = sdk.create_point("statement", "a live measured claim",
+    measured = sdk._create_point("statement", "a live measured claim",
                                 dedup=False, status="live")["id"]
-    draft = sdk.create_point("statement", "a draft carrying a prior",
+    draft = sdk._create_point("statement", "a draft carrying a prior",
                              dedup=False, status="draft")["id"]
     proj.g.query(
         "MATCH (n:Point {id:$id}) SET n.ep_alpha = 5.0, n.ep_beta = 1.0, "
@@ -2574,10 +2574,10 @@ def test_why_support_chain_does_not_weigh_an_absent_supporter(sdk):
     from tortoise.why import _assemble_supports
 
     proj = sdk._get_proj()
-    target = sdk.create_point("statement", "the supported target")["id"]
-    absent = [sdk.create_point("statement", f"absent supporter {i}")["id"]
+    target = sdk._create_point("statement", "the supported target")["id"]
+    absent = [sdk._create_point("statement", f"absent supporter {i}")["id"]
               for i in range(3)]
-    measured = sdk.create_point("statement", "measured 0.4 supporter")["id"]
+    measured = sdk._create_point("statement", "measured 0.4 supporter")["id"]
     proj.g.query(
         "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
         "n.posterior_beta = 3.0", params={"id": measured})
@@ -2759,9 +2759,9 @@ def test_why_conflict_severity_and_tradeoff_weight_use_the_shared_reader(sdk):
     from tortoise.why import _assemble_conflicts, _assemble_tradeoffs
 
     proj = sdk._get_proj()
-    target = sdk.create_point("statement", "the contested claim")["id"]
-    absent = sdk.create_point("statement", "absent counter-claim")["id"]
-    measured = sdk.create_point("statement", "measured 0.55 counter-claim")["id"]
+    target = sdk._create_point("statement", "the contested claim")["id"]
+    absent = sdk._create_point("statement", "absent counter-claim")["id"]
+    measured = sdk._create_point("statement", "measured 0.55 counter-claim")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 11.0, "
                  "n.posterior_beta = 9.0", params={"id": measured})
     for nander in (absent, measured):
@@ -2787,12 +2787,12 @@ def test_why_conflict_severity_and_tradeoff_weight_use_the_shared_reader(sdk):
         + repr(by_id[absent]))
 
     # Tradeoffs: absent must sort BELOW a measured 0.4 alternative.
-    decision = sdk.create_point("statement", "the decision",
+    decision = sdk._create_point("statement", "the decision",
                                 status="live")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.pointKind = 'decision'",
                  params={"id": decision})
-    absent_alt = sdk.create_point("statement", "absent alternative")["id"]
-    measured_alt = sdk.create_point("statement", "measured 0.4 alternative")["id"]
+    absent_alt = sdk._create_point("statement", "absent alternative")["id"]
+    measured_alt = sdk._create_point("statement", "measured 0.4 alternative")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
                  "n.posterior_beta = 3.0", params={"id": measured_alt})
     for alt in (absent_alt, measured_alt):
@@ -2834,7 +2834,7 @@ def test_why_half_posterior_is_not_contested_and_has_no_variance(sdk):
     from tortoise.why import _assemble_ep_rows
 
     proj = sdk._get_proj()
-    half = sdk.create_point("statement", "half pair claim")["id"]
+    half = sdk._create_point("statement", "half pair claim")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_beta = 3.0",
                  params={"id": half})
     blocks = {half: {}}
@@ -2872,9 +2872,9 @@ def test_ranking_conflict_boost_ignores_a_counter_claim_with_no_belief(sdk):
     from tortoise.ranking import resolve_contested_relevance
 
     proj = sdk._get_proj()
-    target = sdk.create_point("statement", "the contested claim")["id"]
-    absent = sdk.create_point("statement", "absent zebra counter-claim")["id"]
-    measured = sdk.create_point("statement", "measured zebra counter-claim")["id"]
+    target = sdk._create_point("statement", "the contested claim")["id"]
+    absent = sdk._create_point("statement", "absent zebra counter-claim")["id"]
+    measured = sdk._create_point("statement", "measured zebra counter-claim")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
                  "n.posterior_beta = 3.0", params={"id": measured})
     for nander in (absent, measured):
@@ -2888,10 +2888,10 @@ def test_ranking_conflict_boost_ignores_a_counter_claim_with_no_belief(sdk):
     # ungraded claim winning the <=2 relevance BUDGET against a measured one:
     # pre-fix the coalesce default weighed it 0.5 — ABOVE the measured 0.4 —
     # so the measured counter-claim was the one squeezed out.
-    crowded = sdk.create_point("statement", "contested by three")["id"]
-    filler_a = sdk.create_point("statement", "zebra filler a")["id"]
-    filler_b = sdk.create_point("statement", "zebra filler b")["id"]
-    real = sdk.create_point("statement", "zebra measured 0.4")["id"]
+    crowded = sdk._create_point("statement", "contested by three")["id"]
+    filler_a = sdk._create_point("statement", "zebra filler a")["id"]
+    filler_b = sdk._create_point("statement", "zebra filler b")["id"]
+    real = sdk._create_point("statement", "zebra measured 0.4")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
                  "n.posterior_beta = 3.0", params={"id": real})
     for nander in (filler_a, filler_b, real):
@@ -2938,10 +2938,10 @@ def test_conflict_dedupe_ranks_a_nullable_mean_without_raising(sdk):
         "a measured claim must rank above an absent one in the dedupe")
 
     proj = sdk._get_proj()
-    target = sdk.create_point("statement", "dedupe target")["id"]
-    bare = sdk.create_point("statement", "zebra bare counter-claim")["id"]
+    target = sdk._create_point("statement", "dedupe target")["id"]
+    bare = sdk._create_point("statement", "zebra bare counter-claim")["id"]
     # The NAND operator: is_operator + op_type, carrying the belief.
-    op = sdk.create_point("statement", "zebra operator counter")["id"]
+    op = sdk._create_point("statement", "zebra operator counter")["id"]
     proj.g.query(
         "MATCH (o:Point {id:$o}) SET o.is_operator = true, "
         "o.op_type = 'NAND', o.posterior_alpha = 3.0, o.posterior_beta = 1.0",
@@ -3133,8 +3133,8 @@ def test_no_surface_fabricates_a_variance_for_an_absent_belief(sdk):
     assert ep_pair_stored() is False
 
     proj = sdk._get_proj()
-    absent = sdk.create_point("statement", "no belief at all")["id"]
-    alpha_only = sdk.create_point("statement", "alpha-only half pair")["id"]
+    absent = sdk._create_point("statement", "no belief at all")["id"]
+    alpha_only = sdk._create_point("statement", "alpha-only half pair")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.5",
                  params={"id": alpha_only})
 
@@ -3184,7 +3184,7 @@ def test_no_surface_fabricates_a_variance_for_an_absent_belief(sdk):
     # And a genuinely stored pair is STILL wide and still contested, so the
     # guard cannot pass by answering "no" for everything.
     # Beta(1, 1): mean 0.5, variance 1/12 — the maximum, and legitimately wide.
-    wide = sdk.create_point("statement", "a genuinely uncertain claim")["id"]
+    wide = sdk._create_point("statement", "a genuinely uncertain claim")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1.0, "
                  "n.posterior_beta = 1.0", params={"id": wide})
     bd = annotate_ep_batch(proj.g, [wide])[wide]
@@ -3215,17 +3215,17 @@ def test_relationship_peer_block_uses_the_shared_belief_readers(sdk):
     from tortoise.search_engine import annotate_ep_batch, get_relationships_bounded
 
     proj = sdk._get_proj()
-    target = sdk.create_point("statement", "the peer-block target")["id"]
-    half = sdk.create_point("statement", "half pair peer")["id"]
-    degenerate = sdk.create_point("statement", "degenerate pair peer")["id"]
-    measured = sdk.create_point("statement", "genuinely wide peer")["id"]
+    target = sdk._create_point("statement", "the peer-block target")["id"]
+    half = sdk._create_point("statement", "half pair peer")["id"]
+    degenerate = sdk._create_point("statement", "degenerate pair peer")["id"]
+    measured = sdk._create_point("statement", "genuinely wide peer")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.5",
                  params={"id": half})
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.0, "
                  "n.posterior_beta = 0.0", params={"id": degenerate})
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1.0, "
                  "n.posterior_beta = 1.0", params={"id": measured})
-    op = sdk.create_point("statement", "the peer-block operator")["id"]
+    op = sdk._create_point("statement", "the peer-block operator")["id"]
     proj.g.query(
         "MATCH (o:Point {id:$o}) SET o.is_operator = true, o.op_type = 'IMPL'",
         params={"o": op})
@@ -3301,7 +3301,7 @@ def test_relationship_peer_block_agrees_on_ep_state_for_every_stored_shape(sdk):
     from tortoise.search_engine import annotate_ep_batch, get_relationships_bounded
 
     proj = sdk._get_proj()
-    target = sdk.create_point("statement", "the ep-state peer target")["id"]
+    target = sdk._create_point("statement", "the ep-state peer target")["id"]
     shapes = {
         # id: (cypher SET body, expected token) — every stored shape the
         # presence/measurement rules distinguish.
@@ -3321,11 +3321,11 @@ def test_relationship_peer_block_agrees_on_ep_state_for_every_stored_shape(sdk):
     }
     ids = {}
     for pid, (sets, _expected) in shapes.items():
-        ids[pid] = sdk.create_point("statement", f"shape {pid}")["id"]
+        ids[pid] = sdk._create_point("statement", f"shape {pid}")["id"]
         if sets:
             proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {sets}",
                          params={"id": ids[pid]})
-    op = sdk.create_point("statement", "the ep-state peer operator")["id"]
+    op = sdk._create_point("statement", "the ep-state peer operator")["id"]
     proj.g.query(
         "MATCH (o:Point {id:$o}) SET o.is_operator = true, o.op_type = 'IMPL'",
         params={"o": op})
@@ -3500,7 +3500,7 @@ def test_a_hex_subnormal_operand_is_a_belief_on_every_surface(sdk):
     )
 
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "a hex subnormal operand")["id"]
+    pid = sdk._create_point("statement", "a hex subnormal operand")["id"]
     proj.g.query(
         "MATCH (n:Point {id:$id}) "
         "SET n.posterior_alpha = '0x1p-149', n.posterior_beta = '1'",
@@ -3551,13 +3551,13 @@ def test_the_peer_block_serves_a_rounded_belief_like_every_sibling(sdk):
     from tortoise.search_engine import annotate_ep_batch, get_relationships_bounded
 
     proj = sdk._get_proj()
-    target = sdk.create_point("statement", "the rounded-peer target")["id"]
-    peer = sdk.create_point("statement", "the rounded-peer claim")["id"]
+    target = sdk._create_point("statement", "the rounded-peer target")["id"]
+    peer = sdk._create_point("statement", "the rounded-peer claim")["id"]
     proj.g.query(
         "MATCH (n:Point {id:$id}) "
         "SET n.posterior_alpha = 1.0, n.posterior_beta = 2.0",
         params={"id": peer})
-    op = sdk.create_point("statement", "the rounded-peer operator")["id"]
+    op = sdk._create_point("statement", "the rounded-peer operator")["id"]
     proj.g.query(
         "MATCH (o:Point {id:$o}) SET o.is_operator = true, o.op_type = 'IMPL'",
         params={"o": op})
@@ -3617,7 +3617,7 @@ def test_negative_beta_operands_are_not_a_belief(sdk):
 
     # …and the Cypher twin agrees on the live engine.
     proj = sdk._get_proj()
-    bad = sdk.create_point("statement", "negative beta operand")["id"]
+    bad = sdk._create_point("statement", "negative beta operand")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 3.0, "
                  "n.posterior_beta = -1.0", params={"id": bad})
     present = proj.g.query(
@@ -3635,9 +3635,9 @@ def test_negative_beta_operands_are_not_a_belief(sdk):
 
     # The write path REFUSES a negative operand rather than persisting it.
     with pytest.raises(ValueError, match="must be >= 0"):
-        sdk.set_point_baseline(bad, -1.0, 3.0)
+        sdk._set_point_baseline(bad, -1.0, 3.0)
     with pytest.raises(ValueError, match="must be >= 0"):
-        sdk.set_point_baseline(bad, 3.0, -1.0)
+        sdk._set_point_baseline(bad, 3.0, -1.0)
     after = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta, n.confidence",
         params={"id": bad}).result_set[0]
@@ -3659,8 +3659,8 @@ def test_contested_claims_reads_an_int_stored_pair(sdk):
     from tortoise.search_engine import annotate_ep_batch
 
     proj = sdk._get_proj()
-    int_pair = sdk.create_point("statement", "int stored contested pair")["id"]
-    float_pair = sdk.create_point("statement", "float stored pair")["id"]
+    int_pair = sdk._create_point("statement", "int stored contested pair")["id"]
+    float_pair = sdk._create_point("statement", "float stored pair")["id"]
     # Written as INTEGERS — the shape that truncated.
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2, "
                  "n.posterior_beta = 2", params={"id": int_pair})
@@ -3710,7 +3710,7 @@ def test_every_ranker_reads_an_overflowing_pair_the_same_way(sdk):
     proj = sdk._get_proj()
 
     def _point(content, alpha, beta):
-        pid = sdk.create_point("statement", content)["id"]
+        pid = sdk._create_point("statement", content)["id"]
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
                      "n.posterior_beta = $b, n.confidence = null",
                      params={"id": pid, "a": alpha, "b": beta})
@@ -3776,7 +3776,7 @@ def test_a_width_that_cannot_be_computed_is_not_the_widest_claim(sdk):
     proj = sdk._get_proj()
 
     def _point(content, alpha, beta):
-        pid = sdk.create_point("statement", content)["id"]
+        pid = sdk._create_point("statement", content)["id"]
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
                      "n.posterior_beta = $b", params={"id": pid, "a": alpha,
                                                       "b": beta})
@@ -3822,9 +3822,9 @@ def test_a_draft_with_no_belief_is_absent_not_withheld(sdk):
     conflation this issue removes, at the contract boundary.
     """
     proj = sdk._get_proj()
-    bare = sdk.create_point("statement", "a draft with no belief at all",
+    bare = sdk._create_point("statement", "a draft with no belief at all",
                             status="draft")["id"]
-    with_prior = sdk.create_point("statement", "a draft carrying a prior",
+    with_prior = sdk._create_point("statement", "a draft carrying a prior",
                                   credibility="high", status="draft")["id"]
     rows = {r["id"]: r["recall_ranking"] for r in StateRanker(projection=proj).rerank(
         [{"id": p, "scores": {"rrf": 1.0}} for p in (bare, with_prior)])}
@@ -3888,7 +3888,7 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
 
     ids = []
     for i, (a, b) in enumerate(pairs):
-        pid = sdk.create_point("statement", f"width sweep {i}")["id"]
+        pid = sdk._create_point("statement", f"width sweep {i}")["id"]
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
                      "n.posterior_beta = $b, n.confidence = null",
                      params={"id": pid, "a": a, "b": b})
@@ -4001,7 +4001,7 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
 
     # …and the rendered answer contains no NaN, with ordinary widths in order.
     for i, (a, b) in enumerate(((1.0, 1.0), (2.0, 2.0), (90.0, 10.0))):
-        pid = sdk.create_point("statement", f"ordinary width {i}")["id"]
+        pid = sdk._create_point("statement", f"ordinary width {i}")["id"]
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
                      "n.posterior_beta = $b", params={"id": pid, "a": a, "b": b})
         ids.append(pid)
@@ -4027,7 +4027,7 @@ def test_the_subgraph_display_agrees_with_every_other_surface(sdk):
     from tortoise.ranking import SubgraphExpander
 
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "a claim with string operands")["id"]
+    pid = sdk._create_point("statement", "a claim with string operands")["id"]
     proj.g.query('MATCH (n:Point {id:$id}) SET n.posterior_alpha = "0.7", '
                  'n.posterior_beta = "0.3", n.confidence = null',
                  params={"id": pid})
@@ -4117,14 +4117,14 @@ def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
         "all_numeric_control": ("SET n.posterior_alpha = 0.7, "
                                 "n.posterior_beta = 0.3"),
     }
-    support = sdk.create_point("statement", "ZQDECOR one supported claim")["id"]
+    support = sdk._create_point("statement", "ZQDECOR one supported claim")["id"]
     pids = {}
     for label, setter in shapes.items():
-        pid = sdk.create_point("statement", f"ZQDECOR {label}")["id"]
+        pid = sdk._create_point("statement", f"ZQDECOR {label}")["id"]
         # The operator is what lets Q2-crit evaluate the peer variance at all,
         # and the requested point is its own `other` row, so the bad operands
         # below reach the variance expression through the shape under test.
-        sdk.create_operator("IMPL", pid, [support])
+        sdk._create_operator("IMPL", pid, [support])
         proj.g.query(f"MATCH (n:Point {{id:$id}}) {setter}", params={"id": pid})
         pids[label] = pid
 
@@ -4201,7 +4201,7 @@ def test_a_numeric_string_operand_is_measured_on_both_twins(sdk):
     from tortoise.why import assemble_why_blocks
 
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "a claim with string operands")["id"]
+    pid = sdk._create_point("statement", "a claim with string operands")["id"]
     proj.g.query('MATCH (n:Point {id:$id}) SET n.posterior_alpha = "0.7", '
                  'n.posterior_beta = "0.3", n.confidence = null',
                  params={"id": pid})
@@ -4256,8 +4256,8 @@ def test_one_malformed_mirror_does_not_discard_the_batch(sdk):
     from tortoise.why import assemble_why_blocks
 
     proj = sdk._get_proj()
-    bad = sdk.create_point("statement", "ZQFORMAT bad mirror claim")["id"]
-    good = sdk.create_point("statement", "ZQFORMAT good measured claim")["id"]
+    bad = sdk._create_point("statement", "ZQFORMAT bad mirror claim")["id"]
+    good = sdk._create_point("statement", "ZQFORMAT good measured claim")["id"]
     # …WITH a valid pair beside it (cycle 18): with the mirror alone the
     # presence predicate takes its `ELSE null` arm and the bad mirror is never
     # served, so the test could not fail. This is the shape that reaches the
@@ -4318,7 +4318,7 @@ def test_a_belief_value_the_store_cannot_read_is_refused_at_the_write(sdk):
     writer defect that no reader should have to absorb.
     """
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "ZQWRITE guard probe")["id"]
+    pid = sdk._create_point("statement", "ZQWRITE guard probe")["id"]
 
     # Two refusal CLASSES, two owners, deliberately: a value that is not a number
     # at all is refused HERE (the engine cannot inspect it), while a number the
@@ -4338,14 +4338,14 @@ def test_a_belief_value_the_store_cannot_read_is_refused_at_the_write(sdk):
         ("confidence", 1j),
     ):
         with pytest.raises(ValueError) as exc:
-            sdk.update_point(pid, **{prop: bad})
+            sdk._update_point(pid, **{prop: bad})
         assert "must be a number" in str(exc.value), (prop, bad, str(exc.value))
     for prop, bad in (
         ("posterior_alpha", float("inf")),
         ("posterior_alpha", float("nan")),
     ):
         with pytest.raises(ValueError) as exc:
-            sdk.update_point(pid, **{prop: bad})
+            sdk._update_point(pid, **{prop: bad})
         assert "not a finite number" in str(exc.value), (prop, bad, str(exc.value))
         # Cycle 22 P3: the domain's remedy ("store it as a string") is refused
         # by the belief guard, so the message must say so — otherwise the caller
@@ -4364,30 +4364,30 @@ def test_a_belief_value_the_store_cannot_read_is_refused_at_the_write(sdk):
     # "malformed", a regression against the pre-PR tree.
     from decimal import Decimal
 
-    sdk.update_point(pid, confidence=Decimal("0.5"))
+    sdk._update_point(pid, confidence=Decimal("0.5"))
     assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
         0.5, abs=1e-6)
     import numpy as np
 
-    sdk.update_point(pid, confidence=np.float64(0.5))
+    sdk._update_point(pid, confidence=np.float64(0.5))
     assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
         0.5, abs=1e-6)
     # …and one it does NOT hold exactly is refused by the domain, with ITS
     # reason (a precision loss is not "malformed").
     with pytest.raises(ValueError) as exc:
-        sdk.update_point(pid, confidence=np.float32(0.1))
+        sdk._update_point(pid, confidence=np.float32(0.1))
     assert "exactly representable" in str(exc.value) or "alter" in str(
         exc.value), str(exc.value)
 
     # The legitimate writes still work, including clearing.
-    sdk.update_point(pid, confidence=0.42)
+    sdk._update_point(pid, confidence=0.42)
     assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == 0.42
     # Moving the PAIR clears the mirror (cycle 12's third-writer rule), so the
     # pair's mean is what the block reports next.
-    sdk.update_point(pid, posterior_alpha=3.0, posterior_beta=1.0)
+    sdk._update_point(pid, posterior_alpha=3.0, posterior_beta=1.0)
     assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
         0.75, abs=1e-4)
-    sdk.update_point(pid, confidence=None)
+    sdk._update_point(pid, confidence=None)
     assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
         0.75, abs=1e-4)
 
@@ -4459,7 +4459,7 @@ def test_the_twins_parse_the_same_string_language(sdk):
     from tortoise.search_engine import numeric_operand, numeric_operand_cypher
 
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "ZQPARSE a string-operand claim")["id"]
+    pid = sdk._create_point("statement", "ZQPARSE a string-operand claim")["id"]
     shapes = {
         "0.7": 0.7,
         # Leading whitespace is skipped by `toFloat`, trailing is not — measured
@@ -4688,7 +4688,7 @@ def test_a_half_pair_reports_measured_but_absent_by_design(sdk):
     for label, assignment in (
             ("half pair", "n.posterior_alpha = 0.5"),
             ("zero pair", "n.posterior_alpha = 0.0, n.posterior_beta = 0.0")):
-        pid = sdk.create_point("statement", f"ZQMEAS {label}")["id"]
+        pid = sdk._create_point("statement", f"ZQMEAS {label}")["id"]
         proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {assignment}",
                      params={"id": pid})
 
@@ -4731,8 +4731,8 @@ def test_a_legacy_list_operand_is_absent_without_blanking_the_batch(sdk):
     )
 
     proj = sdk._get_proj()
-    bad = sdk.create_point("statement", "ZQLIST legacy list operand")["id"]
-    good = sdk.create_point("statement", "ZQLIST healthy neighbour")["id"]
+    bad = sdk._create_point("statement", "ZQLIST legacy list operand")["id"]
+    good = sdk._create_point("statement", "ZQLIST healthy neighbour")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = [0.7], "
                  "n.posterior_beta = 0.3", params={"id": bad})
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 3.0, "
@@ -4797,7 +4797,7 @@ def test_the_third_ranker_reads_an_unreadable_mirror_like_the_other_two(sdk):
         "clean_pair": ("SET n.posterior_alpha = 0.7, n.posterior_beta = 0.3"),
         "measured_half": ("SET n.posterior_alpha = 1.0, n.posterior_beta = 1.0"),
     }.items():
-        pid = sdk.create_point("statement", f"ZQGRAPH {label}")["id"]
+        pid = sdk._create_point("statement", f"ZQGRAPH {label}")["id"]
         proj.g.query(f"MATCH (n:Point {{id:$id}}) {setter}", params={"id": pid})
         pids[label] = pid
 
@@ -4858,7 +4858,7 @@ def test_a_boolean_is_not_a_belief_on_either_twin(sdk):
     # still there, so the reader must be TOTAL for it. Pinned through the raw
     # door deliberately — the API now raises (see the next test).
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "a claim with a boolean mirror")["id"]
+    pid = sdk._create_point("statement", "a claim with a boolean mirror")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = true",
                  params={"id": pid})
     stored = proj.g.query(
@@ -4900,7 +4900,7 @@ def test_a_non_numeric_operand_is_absent_on_every_surface(sdk):
     from tortoise.why import assemble_why_blocks
 
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "a claim with a string operand")["id"]
+    pid = sdk._create_point("statement", "a claim with a string operand")["id"]
     proj.g.query('MATCH (n:Point {id:$id}) SET n.posterior_alpha = "abc", '
                  "n.posterior_beta = 1.0, n.confidence = null",
                  params={"id": pid})
@@ -5039,7 +5039,7 @@ def test_a_variance_scan_never_invents_a_width_for_an_absent_belief(sdk):
     proj = sdk._get_proj()
 
     def _point(content, sql=None):
-        pid = sdk.create_point("statement", content)["id"]
+        pid = sdk._create_point("statement", content)["id"]
         if sql:
             proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {sql}",
                          params={"id": pid})
@@ -5068,7 +5068,7 @@ def test_a_variance_scan_never_invents_a_width_for_an_absent_belief(sdk):
     # …but the #169 arm is NOT narrowed: a claim with no persisted belief at
     # all still lists at the zero-information maximum, because for THAT claim
     # "maximally uncertain" is the truth and the pin exists for it.
-    untracked = sdk.create_point("statement", "no belief at all zzq")["id"]
+    untracked = sdk._create_point("statement", "no belief at all zzq")["id"]
     listed_again = {c["id"] for c in ep_view.get_contested_claims()}
     assert untracked in listed_again, (
         "the #169 deliberate listing (an unmeasured claim IS the least certain "
@@ -5110,8 +5110,8 @@ def test_an_overflowing_pair_is_not_maximum_disbelief(sdk):
     from tortoise.search_engine import _beta_mean, belief_value
 
     proj = sdk._get_proj()
-    symmetric = sdk.create_point("statement", "an overflowing symmetric pair")["id"]
-    biased = sdk.create_point("statement", "an overflowing skewed pair")["id"]
+    symmetric = sdk._create_point("statement", "an overflowing symmetric pair")["id"]
+    biased = sdk._create_point("statement", "an overflowing skewed pair")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1e308, "
                  "n.posterior_beta = 1e308, n.confidence = null",
                  params={"id": symmetric})
@@ -5192,7 +5192,7 @@ def test_why_width_is_guarded_for_hostile_pairs_like_every_other_surface(sdk):
     for label, (a, b) in (("neg", (3.0, -1.0)), ("big", (1e200, 1e200)),
                           ("huge", (1e308, 1e308)),
                           ("tiny", (1e-200, 1e-200))):
-        pid = sdk.create_point("statement", f"{label} pair claim")["id"]
+        pid = sdk._create_point("statement", f"{label} pair claim")["id"]
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
                      "n.posterior_beta = $b", params={"id": pid, "a": a, "b": b})
         ids[label] = pid
@@ -5253,9 +5253,9 @@ def test_the_volunteer_reflex_never_fires_on_a_claim_with_no_belief(sdk):
     """
     from tortoise.volunteer import _band, run_volunteer_pipeline, why_entry
 
-    unmeasured = sdk.create_point(
+    unmeasured = sdk._create_point(
         "statement", "zq ledger rollout owners assigned")["id"]
-    measured = sdk.create_point(
+    measured = sdk._create_point(
         "statement", "zq ledger rollout shipped to staging")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 12.0, "
@@ -5313,14 +5313,14 @@ def test_min_confidence_refuses_an_absent_belief_at_a_floor_below_half(sdk):
     MUTANT THAT REDS THIS: reintroduce `_mean = 0.5 if ep.confidence_mean is
     None else ep.confidence_mean` and compare `_mean` against the floor.
     """
-    pid = sdk.create_point("statement", "zqminconf floor absent claim")["id"]
+    pid = sdk._create_point("statement", "zqminconf floor absent claim")["id"]
 
-    kept = sdk.tortoise_fts_query("zqminconf", limit=10, min_confidence=0.0)
+    kept = sdk._tortoise_fts_query("zqminconf", limit=10, min_confidence=0.0)
     assert [r["id"] for r in kept] == [pid], (
         "the shipped 0.0 default is 'filter off' and must keep admitting an "
         "unmeasured claim: " + repr(kept))
     for floor in (0.1, 0.3, 0.5):
-        got = sdk.tortoise_fts_query("zqminconf", limit=10,
+        got = sdk._tortoise_fts_query("zqminconf", limit=10,
                                      min_confidence=floor)
         assert got == [], (
             f"an absent belief has no number to clear a floor of {floor}, so "
@@ -5344,9 +5344,9 @@ def test_review_prune_lists_a_string_stored_contested_pair(sdk):
     """
     from tortoise.ep import TortoiseEP
 
-    a = sdk.create_point("statement", "string-stored contested claim")["id"]
-    b = sdk.create_point("statement", "counter claim")["id"]
-    sdk.create_operator("IMPL", a, [b])
+    a = sdk._create_point("statement", "string-stored contested claim")["id"]
+    b = sdk._create_point("statement", "counter claim")["id"]
+    sdk._create_operator("IMPL", a, [b])
     proj = sdk._get_proj()
     # STRING-stored pair: readable to `numeric_operand_cypher` as float32, and
     # Beta(2,2) has variance 0.05 > the 0.04 default threshold.
@@ -5366,7 +5366,7 @@ def test_review_prune_lists_a_string_stored_contested_pair(sdk):
         "the twin scan did not list the string-stored contested pair, so this "
         "test cannot discriminate the divergence: " + repr(sorted(listed)))
 
-    out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
+    out = sdk._review_connections(mode="prune", scope=None, prune_limit=50)
     contested = {e["detail"].get("contested_endpoint")
                  for e in out["prune"] if e["issue"] == "contested"}
     assert a in contested, (
@@ -5471,7 +5471,7 @@ def test_the_inheritance_revert_clears_the_mirror_it_stamped(sdk):
     from tortoise.ranking import GraphRanker
     from tortoise.search_engine import annotate_ep_batch
 
-    pid = sdk.create_point("statement", "inherited claim",
+    pid = sdk._create_point("statement", "inherited claim",
                            extractedFrom="https://s0.example",
                            status="live")["id"]
     proj = sdk._get_proj()
@@ -5548,9 +5548,9 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
     j = TortoiseSDK(str(tmp_path / "ue.db"),
                     event_log_path=str(events / "events.jsonl"))
     try:
-        pid = j.create_point("statement", "entity-door claim")["id"]
+        pid = j._create_point("statement", "entity-door claim")["id"]
         proj = j._get_proj()
-        j.set_point_baseline(pid, 9.0, 1.0)          # mirror 0.9, pair (9, 1)
+        j._set_point_baseline(pid, 9.0, 1.0)          # mirror 0.9, pair (9, 1)
         assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == \
             pytest.approx(0.9, abs=1e-3)
 
@@ -7621,21 +7621,21 @@ def test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair(sdk):
     The last row is what gives "loses to a pair" its name: the word is not
     averaged and not weighed, it is discarded, so no label is stamped.
     """
-    default = sdk.create_point("option", "cred word: default alone")["id"]
-    plus_word = sdk.create_point(
+    default = sdk._create_point("option", "cred word: default alone")["id"]
+    plus_word = sdk._create_point(
         "option", "cred word: default plus word", credibility="low")["id"]
-    word_alone = sdk.create_point(
+    word_alone = sdk._create_point(
         "option", "cred word: word alone", status="draft",
         credibility="low")["id"]
     content = "cred word: explicit pair"
-    pair = sdk.create_point("statement", content, dedup=True)["id"]
-    sdk.set_point_baseline(pair, 3, 1)
+    pair = sdk._create_point("statement", content, dedup=True)["id"]
+    sdk._set_point_baseline(pair, 3, 1)
     # ⛔ ASSERT THE FOLD, do not assume it. The row's claim is that the word is
     # DROPPED against the explicit pair; if the dedup identity ever stopped
     # matching, this call would mint a SECOND point at Beta(1.1,1) and `pair`
     # would be untouched — so both assertions below would pass while the row
     # covered nothing (review cycle 9, P2).
-    again = sdk.create_point("statement", content, dedup=True,
+    again = sdk._create_point("statement", content, dedup=True,
                              credibility="low")
     assert again["id"] == pair, (
         "the credentialed call did not fold onto the explicit-pair point, so "
@@ -7654,5 +7654,5 @@ def test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair(sdk):
     assert served(pair) == pytest.approx(0.75, abs=1e-4), (
         "an EXPLICIT set_point_baseline pair is the one shape the word never "
         "moves — dropping the word is why the note says it 'loses' here")
-    assert sdk.get_point(pair).get("credibility") is None, (
+    assert sdk._get_point(pair).get("credibility") is None, (
         "the word is DROPPED against an explicit pair, so no label is stamped")
