@@ -84,7 +84,7 @@ restored, so `projection/__init__.py` is `tortoise/projection/__init__.py`; a pa
 (`tests/…`, `tools/…`, `tortoise/…`) is resolved AS WRITTEN and never prefixed — **skipping that step is what
 produced the `96 of 218` this header carried before the `#13124` review**, which reported **31 pairs as
 naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
-was itself measured false; a range cite counts once, by its **start** line), which dedupes the 324 as-written spellings to 215 — 109
+was itself measured false; a range cite counts once, by its **start** line), which dedupes the 326 as-written spellings to 215 — 111
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
 text; **all 215 are comparable at BOTH heads** — every written path resolves to a module that exists at
 `ccb49741b2ec`, so **no pair sits outside the ratio** — and **none of
@@ -138,7 +138,10 @@ that nothing else is at `main`** — and a range entry spans every line it cover
 `record_serve.py:461` (`READ_POINT_BY_ID`); `sdk.py:36985`/`:37008` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5089`/`:8034`; `goal_judgement.py:1128`; and §2.1's own table, which carries
 two of this class as well — `sdk.py:23982` and `search_engine.py:6721`, both open at `main` and neither
-open at the pin. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin
+open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at `main` but
+absent from this list, so the rule above was sending a reader to the pin where each of them is a comment:
+`sdk.py:21668` (the capture writer) with its read-back `:21791`, and `hosted_api.py:22919` (the commit
+door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:22731`. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin
 `ccb49741b2ec` is where the census USUALLY wrote it, not where it provably IS.**: open it there first, but
 a hit at the pin is a hypothesis about the census's history, not a fact about the line. A review of this
 PR found one address in exactly that position whose head is `main`: `goal_judgement.py:1128` is
@@ -149,7 +152,7 @@ UNDECLARED head is resolved by OPENING it, never by inference. If the
 line does not carry what the row quotes, re-derive the cite from the row's own quoted fragment
 (`grep -n '<fragment>' <path>`) rather than moving its head by a guess. That is the enumeration the rule at
 the top of this header sends the reader to.
-⚠️ **The figure counts the file it is written in, so every revision moves it — and it is MEASURED over this file as it now stands, not carried forward**: the form this paragraph replaced quoted `111 of 217`, and `111` reproduces over NO edition of this file — measuring the edition that carried it (`295c26ebc8`) by this header's own rule gives 216 unique pairs, not 111 — so it is recorded as RETIRED, not as history. The figures here are **324 written spellings → 215 pairs → 109 collisions → 123 drifters of the 215 comparable**, at `main` `340d500491`, re-measured against this file rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
+⚠️ **The figure counts the file it is written in, so every revision moves it — and it is MEASURED over this file as it now stands, not carried forward**: the form this paragraph replaced quoted `111 of 217`, and `111` reproduces over NO edition of this file — measuring the edition that carried it (`295c26ebc8`) by this header's own rule gives 216 unique pairs, not 111 — so it is recorded as RETIRED, not as history. The figures here are **326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215 comparable**, at `main` `340d500491`, re-measured against this file rather than carried forward by arithmetic from an earlier edition. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of this header) instead of enumerated here.

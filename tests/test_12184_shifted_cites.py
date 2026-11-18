@@ -157,6 +157,14 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":2715", _CP, 2715, "tail_denied = forbidden | {"),
     (":3735", _CP, 3735, 'if table == "point"'),
     (":5646", _ENT, 5646, "s.summary=coalesce($summary, s.summary, '')"),
+    # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
+    # sent readers to the pin, where every one of them is a comment.
+    ("sdk.py:23982", _SDK, 23982, "(n:Point {id:$id})-[:TAGGED]->()"),
+    ("search_engine.py:6721", _SE, 6721, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
+    ("sdk.py:21668", _SDK, 21668, "s.summary=CASE WHEN $sum"),
+    (":21791", _SDK, 21791, "s.summary, s.topics, s."),
+    ("hosted_api.py:22919", "tortoise/hosted_api.py", 22919, "MERGE (s:Source {url:$did})"),
+    (":22731", "tortoise/hosted_api.py", 22731, "def _execute_commit_writes"),
 )
 
 
@@ -198,6 +206,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6865`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6870`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:461'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:23982'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6721'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3449'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3447`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2886'): 1,
@@ -205,14 +216,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4904'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4823`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3079-3094'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:23982'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6721'): 2,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21668'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21791`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22919'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22731`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21668'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21791`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22919'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22731`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33583`'): 1,
 }
 
@@ -247,7 +255,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """REVERT GUARD, not a re-measurement — say what this does NOT prove.
 
     The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
-    the counts still read `322`/`216`/`106` for a file that measures `324`/`215`/`109`, and the pin-side
+    the counts still read `322`/`216`/`106` for a file that measures `326`/`215`/`111`, and the pin-side
     prose described `:3735` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; `:3735`
     is `for prop in sorted(STORED_VECTOR_PROPS):`) and `:2715` as `placement_spellings()` (that function is
     the pin's `:1798`; `:2715` is `if k not in tail_denied})`). Nothing asserted them, so both could revert
@@ -260,8 +268,8 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
         "123 of this document's 215",
-        "dedupes the 324 as-written spellings to 215 — 109",
-        "324 written spellings → 215 pairs → 109 collisions → 123 drifters of the 215 comparable",
+        "dedupes the 326 as-written spellings to 215 — 111",
+        "326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215 comparable",
         "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
