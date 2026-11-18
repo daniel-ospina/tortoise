@@ -203,10 +203,21 @@ def test_the_description_still_carries_the_forms_that_are_accepted():
 
 
 def test_the_blocked_write_tool_still_advertises_an_optional_string_graph():
-    props = _props("tortoise_create_point")
+    """The case the fix was built for: a WRITE tool whose `graph` used to be blocked.
+
+    ⛔ The representative moved to `tortoise_create_entity` in #11609 lane P1, when
+    `tortoise_create_point` retired forward into its `type="point"` arm: a retired
+    name is served only through the #3883 shim, so `tools/list` — the population
+    `_advertised()` reads — no longer carries it, and naming it here would be a
+    `KeyError` on the retirement rather than on a missing `graph`. The container is
+    the same KIND of caller (an `http_policy` write door) and it is where a
+    migrating point-writer lands, so the property is asserted on the door that now
+    answers it.
+    """
+    props = _props("tortoise_create_entity")
     assert "graph" in props, "removing it would be a surface change and would strand #9340"
     assert props["graph"] == {"type": "string", "description": GRAPH_ARGUMENT_DESCRIPTION}
-    assert "graph" not in _advertised()["tortoise_create_point"].get("required", [])
+    assert "graph" not in _advertised()["tortoise_create_entity"].get("required", [])
 
 
 def test_every_advertising_tool_keeps_graph_optional_and_a_string():
@@ -276,9 +287,14 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   Stating either one's net as if both
     #   populations were the same hides a real `http_policy=False` row behind a
     #   coincidence.
-    assert len(advertising) >= 38, (
+    # 48 -> 46 when #11609 lane P1 retired the two POINT-shaped doors (`create_point`,
+    # `diary_write`) — both were `http_policy=True` and neither brought a container row,
+    # because `create_entity` absorbs them as ARMS on a tool already in this population —
+    # and 46 -> 44 when #11609 P2 retired `compute_confidence`/`recall` into
+    # `check_confidence` the same way (both `http_policy=True`, no container row).
+    assert len(advertising) >= 36, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
-        "at least 38 (41 HTTP-filtered live tools minus the 3 excluded names in that "
+        "at least 36 (39 HTTP-filtered live tools minus the 3 excluded names in that "
         "view); a lower number means the registry lost entries, not that a pin moved")
     # …and the served view must BE that population, name for name, so a name that is
     # registered-but-unserved is caught too (the floor above cannot see a substitution).
@@ -289,11 +305,13 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
         "the served list carries names the registry does not declare as http_policy — "
         f"served-only={sorted(set(advertised) - http_population)}")
     # 50 until #11609's door-retirement wave retired seven `http_policy=True`
-    # doors into containers already in this population (50 − 7 = 43), and 43 until
-    # #11609 P2's confidence arms retired two more the same way (43 − 2 = 41). A floor,
-    # for the same reason as the one above: an equality would move with a collapsed
+    # doors into containers already in this population (50 − 7 = 43), then 43 − 2 = 41
+    # when #11609 lane P1 retired the two POINT-shaped doors the same way, and 41 − 2 = 39
+    # when #11609 P2's confidence arms retired `compute_confidence`/`recall` into
+    # `check_confidence` the same way. A floor, for the same reason as the one above: an
+    # equality would move with a collapsed
     # registry and pass over it.
-    assert len(http_population) >= 41, (
+    assert len(http_population) >= 39, (
         f"the registry's http_policy population collapsed to {len(http_population)}")
     for name in advertising:
         schema = advertised[name]

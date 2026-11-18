@@ -218,15 +218,27 @@ family_rank:
 # six keywords are unmoved because NO container row arrived here — this wave removes doors
 # only. Recorded deliberately, per the note above: the ten rows are the check's own output
 # against the merged registry, not a hand-arithmetic guess.
-# #11609 CONFIDENCE ARMS (P2): 48 -> 46 advertised, and TWO counts moved with the two doors
+# #11609 lane P1: 48 -> 46 advertised, and ONE keyword count moved. `create` 10 -> 8 —
+# `tortoise_create_point` and `tortoise_diary_write` BOTH derive `create` (the door name
+# token for the first, `diary_write`'s own description "Creates a Point with
+# pointKind=diary" for the second), and both are absorbed by `create_entity`, whose row was
+# already counted. Nothing else moves because no container row arrives: lane P1 adds ARMS
+# to a live tool, so the `fetch`/`list`/`find`/`check`/`update`/`delete`/`link`/`trace`/
+# `operate` rows are untouched. ⛔ This is the ONE value in this file that is not derived,
+# which is exactly why it is edited HERE and in the same PR as the retirement — a stale
+# expectation is a red `check`, and a `check` made green by loosening the comparison would
+# turn the distribution lint off for every future change.
+# #11609 CONFIDENCE ARMS (P2): a further 46 -> 44, and TWO counts moved with the two doors
 # that left: `fetch` 10 -> 9 (`recall` -> `check_confidence(recall=True, ...)`) and
 # `check` 6 -> 5 (`compute_confidence` -> `check_confidence(recompute=True, ...)`). Again no
 # container row arrives — the arms are PARAMETERS on `tortoise_check_confidence`, which was
 # already advertised and already derived `check` — so no other keyword can move. The eight
-# unmoved rows are the check's own output against the merged registry.
+# unmoved rows are the check's own output against the merged registry. ⛔ The two waves'
+# notes are kept in sequence rather than rewritten into one: each records the measurement
+# IT made against its own base, and P1's `create` 10 -> 8 arithmetic is the input P2 saw.
 baseline_counts:
   fetch: 9
-  create: 10
+  create: 8
   list: 4
   check: 5
   operate: 2

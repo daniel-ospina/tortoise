@@ -139,9 +139,19 @@ def test_the_guard_reds_when_a_public_method_is_added(tmp_path):
 
 
 def test_an_exemption_cannot_outlive_the_fact_it_records(tmp_path):
-    """A method marked exempt that has since become reachable must be un-exempted."""
+    """A method marked exempt that has since become reachable must be un-exempted.
+
+    ⛔ THE REPRESENTATIVE CANNOT BE A METHOD NOTHING REACHES, and `create_point`
+    became exactly that in #11609 lane P1: `tortoise_create_point` carried the
+    `sdk_method: create_point` binding, so when the door retired nothing bound the
+    method any more and `exemption: True` stopped being a lie. The guard was right
+    to stay silent — the TEST was reading a fact that had expired. `create_entity`
+    is bound by the live `tortoise_create_entity`, so the property still holds.
+    """
     doc = _manifest()
-    target = next(r for r in doc["rows"] if r.get("method") == "create_point")
+    target = next(r for r in doc["rows"] if r.get("method") == "create_entity")
+    assert target.get("exemption") is False, (
+        "the representative must START unexempted — otherwise this case proves nothing")
     target["exemption"] = True
     modified = tmp_path / "exempt.yml"
     modified.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
@@ -388,11 +398,21 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
             f"the composed arithmetic does not add up"
         )
     movements = re.findall(
-        r"then the ([a-z0-9-]+) wave's\s*−(\d+) with no container row arriving\s*=\s*(\d+)",
+        r"then the ([A-Za-z0-9/-]+)\s+wave's\s*−\s*(\d+)\s+with no container row arriving\s*"
+        r"=\s*(\d+)",
         arithmetic)
     assert movements, (
         "canonical-mcp-tools.md's parenthetical stopped stating a wave's subtraction and its "
         "result; that is how the movement this container's own arithmetic records is told")
+    # ⛔ ONE CLAUSE PER WAVE, IN ORDER, AND THE LAST ONE IS THE HEAD. The record has grown
+    # four times now (the three container waves, then the door wave, then #11609 lane P1's
+    # POINT/DIARY wave, then #11609 P2's confidence-arms wave), and each append left the
+    # previous clause stating an INTERMEDIATE figure — so binding any single clause to `live`
+    # is a false RED on a correct record the next time it grows (measured: P1's `48 − 2 = 46`
+    # was bound by name and went stale the moment P2 appended `−2 = 44`). The chain is
+    # therefore walked in document order: every clause must follow from the one before it, and
+    # the accumulation must land on `live`. A skipped or out-of-order wave reds, an append reds
+    # until this reader is extended in the same change, and no clause is identified by position.
     running = int(movements[0][2])
     for wave, subtracted, stated in movements[1:]:
         running -= int(subtracted)
@@ -438,6 +458,10 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         f"canonical-mcp-tools.md's first movement clause starts from "
         f"{advertised_eq.group(2)} and subtracts {movements[0][1]}, but states "
         f"{movements[0][2]} — the running record does not join the advertised total")
+    # Every door-retirement wave subtracts, so the composition needs ALL of them: the chain's
+    # own terms, applied to the advertised equation's result, must land on `live`. This is
+    # the same accumulation as the walk above, stated as one equation so a wave that is in
+    # the chain but NOT applied advertises itself here rather than only in the loop.
     assert int(advertised_eq.group(2)) - sum(
         int(subtracted) for _wave, subtracted, _stated in movements) == live, (
         f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
@@ -5277,12 +5301,16 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # and there is no `+ n` term. No container row arrives here, the SDK pin does not move
     # (94, inherited from `main`), and no row is archived: `archive/mcp-tools/` is for doors
     # with NO destination.
-    # #11609 CONFIDENCE ARMS (#11609 P2): 48 -> 46 — `tortoise_compute_confidence` and
-    # `tortoise_recall` retire FORWARD into `tortoise_check_confidence`, which was already
-    # advertised; the arms are PARAMETERS on it (`recompute=` / `recall=`), so again the
-    # live delta is exactly −2 with no `+ n` term and no SDK movement — the container grew
-    # parameters, never a method.
-    assert live["mcp"] == manifest["counts"]["tools"] == 46
+    # #11609 lane P1: 48 -> 46. The two POINT-shaped doors retire FORWARD into
+    # `create_entity`'s new `type="point"`/`type="diary"` ARMS, i.e. onto a container that
+    # was already advertised, so the live delta is exactly −2 with no `+ n` term and the
+    # SDK pin does not move (94 — only MCP names retire here).
+    # #11609 CONFIDENCE ARMS (#11609 P2): a further 46 -> 44 — `tortoise_compute_confidence`
+    # and `tortoise_recall` retire FORWARD into `tortoise_check_confidence`, which was
+    # already advertised; the arms are PARAMETERS on it (`recompute=` / `recall=`), so again
+    # the live delta is exactly −2 with no `+ n` term and no SDK movement — the container
+    # grew parameters, never a method.
+    assert live["mcp"] == manifest["counts"]["tools"] == 44
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

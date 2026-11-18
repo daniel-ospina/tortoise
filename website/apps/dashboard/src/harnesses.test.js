@@ -272,10 +272,24 @@ test('DE2E-5: EVERY harness verifies through an ADVERTISED tool — the clause i
   for (const h of rendered) {
     const step2 = wizardPromptText(h, 2, KEY, 'included') || ''
     assert.match(step2, /tortoise_(health|graph_overview)/, `${h}: rendered step 2 names the verify tool`)
-    assert.match(step2, /tortoise_create_point/, `${h}: rendered step 2 files the first memory`)
     if (LEGACY_VERIFY_HARNESSES.includes(h)) {
+      // The legacy body still words it `tortoise_create_point`. That is a name a
+      // `get_tool` client can call (the #3883 shim answers it), which is the whole
+      // reason this list exists — see the file half below for the other polarity.
+      assert.match(step2, /tortoise_create_point/, `${h}: rendered step 2 files the first memory`)
       assert.match(step2, /tortoise_health/, `${h}: the shared body keeps the legacy name`)
     } else {
+      // ⛔ THE FILE HALF IS A GRANT-BASED CALL TOO (#11609 lane P1). This guard
+      // previously checked only the VERIFY half per branch and left the file half
+      // universal — which was fine while `tortoise_create_point` was advertised and
+      // became a live defect the moment it retired forward into
+      // `create_entity`'s `type="point"` arm: a grant-based leaf would have kept
+      // asking for a call absent from its `tools/list`. Same rule, second half.
+      assert.match(step2, /tortoise_create_entity\(type="point"/,
+        `${h}: rendered step 2 must file the first memory through the ADVERTISED `
+        + 'door, not the retired `tortoise_create_point`')
+      assert.ok(!step2.includes('tortoise_create_point'),
+        `${h}: never the retired point door — it is absent from tools/list (#11609 lane P1)`)
       assert.match(step2, /tortoise_graph_overview\(section="health"\)/,
         `${h}: the verify call is the ADVERTISED tool (tools/list), not the retired alias`)
       assert.ok(!step2.includes('tortoise_health'),
