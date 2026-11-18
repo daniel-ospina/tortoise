@@ -278,7 +278,14 @@ def _ontology_status_section() -> str:
 
 #: The markdown BLOCK STARTS that end a lazy paragraph continuation (CommonMark).
 #: Prose that merely begins with a word — or with a code span — keeps continuing.
-_BLOCK_START_RE = re.compile(r"^(?:[#>|]|[-*+]\s|\d+[.)]\s|=+\s*$)")
+#: ⛔ THE THEMATIC BREAKS, FENCES AND HTML BLOCKS ARE LOAD-BEARING, not completeness
+#: for its own sake: with `---` (and `***`, `___`, ``` ``` ```, `~~~`, `<`) missing,
+#: the lazy rule GLUED them to the note and then kept absorbing the lines after
+#: them — a gutted disclosure passed by borrowing a word from the next block
+#: (measured: v3.37 review, round 5). `test_ontology_legacy_pin_reads_the_note_not_
+#: the_section` drives each one adjacent, with no blank line.
+_BLOCK_START_RE = re.compile(
+    r"^(?:[#>|]|[-*+]\s|\d+[.)]\s|=+\s*$|(?:[-*_][ \t]*){3,}$|```|~~~|<)")
 
 
 def _unwrap(text: str) -> str:
@@ -650,6 +657,25 @@ def test_ontology_legacy_pin_reads_the_note_not_the_section():
     )
     with pytest.raises(AssertionError, match="exactly one note"):
         _read_side_legacy_note(two_notes)
+    # ⛔ AND A BLOCK START ENDS THE PARAGRAPH TOO — the lazy-continuation allowance
+    # above must not become an ABSORPTION one. Each of these begins a new BLOCK in
+    # CommonMark, so the unquoted prose after it must NOT be read as part of the
+    # disclosure. Measured before the fix (round 5): a note missing `archived`,
+    # followed by `---` and then "rows may still hold `archived`", PASSED the word
+    # check — and so did `***`, `___`, a ``` fence, `~~~` and a `<div>`.
+    for block_start in ("---", "***", "___", "```", "~~~", "<div>", "### Heading",
+                        "| a | b |", "- item", "1. item"):
+        absorbing = (
+            "### Point Status Vocabulary (canonical)\n"
+            "\n"
+            "> **`retracted` and `outdated` are read-side legacy**, not statuses.\n"
+            f"{block_start}\n"
+            "rows may still hold `archived`.\n"
+        )
+        note = _read_side_legacy_note(absorbing)
+        assert "`archived`" not in note, (
+            f"a `{block_start}` BLOCK START did not end the note, so the lazy rule "
+            f"absorbed the block after it into the disclosure: {note!r}")
 
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):
