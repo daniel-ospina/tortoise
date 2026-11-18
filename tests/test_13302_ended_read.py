@@ -49,6 +49,21 @@ from tests import _live_utils  # noqa: E402, RUF100
 
 def _probe(candidates):
     env_uri = os.environ.get("TORTOISE_DB_URI")
+    # ⛔ THE PROBE'S OWN GRAPH IS NAMED, per-run, and reaped by construction.
+    # `from_uri` defaults to `ensure_indexes=True`, whose schema DDL **CREATES**
+    # the graph it names — so an unnamed probe graph names a graph THIS PROBE
+    # DOES NOT OWN: shared with every other test in the session. On the ambient
+    # candidate that is the SHARED env-URI graph (the same handle `_uri()` hands
+    # to every `sdk` fixture below), and the fixed `tortoise_test_13302` path
+    # this file builds its candidates from is not a per-run MINT shape. This is
+    # the #10164 rule (`graph_name=` at the call) applied with a mint, so BOTH
+    # cleanup arms admit it: the `tortoise_test` prefix puts it inside
+    # `_SERVER_WIPE_PREFIXES`, and the 10-hex suffix meets
+    # `_PER_RUN_GRAPH_NAME_RE` so `drop_test_graph` would not refuse it either.
+    # The census this satisfies is `test_derived_names.py::
+    # test_from_uri_sites_resolve_test_prefixed`, which was RED on `main` for
+    # this site (measured at `f462ad3acb`).
+    probe_graph = f"tortoise_test_13302_probe_{uuid.uuid4().hex[:10]}"
     for uri in candidates:
         if not uri:
             continue
@@ -56,7 +71,7 @@ def _probe(candidates):
         try:
             from tortoise.projection import FalkorProjection
 
-            proj = FalkorProjection.from_uri(uri)
+            proj = FalkorProjection.from_uri(uri, graph_name=probe_graph)
             proj.g.query("RETURN 1")
             return True, uri
         except Exception:
