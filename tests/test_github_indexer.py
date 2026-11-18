@@ -3187,18 +3187,6 @@ _PINNED_MODULES = {
 # text required ON the last line; None when the citation is a single line)
 _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # entities.py — the status latch, its two refusals, and the by-name reopen reach
-    # ⛔ RE-DERIVED at the `origin/main` (`c0463806dbb4`) merge of `#13345`, never
-    # carried: `main`'s `63bc13edb44d` (`#13363`) moved `tortoise/projection/entities.py`
-    # by +12 BELOW line 5128, so the twelve `entities.py` addresses under the status
-    # latch sat 12 lines short on the parent this merge inherited them from (this
-    # branch's own parent was GREEN here — the rot arrived with `main`). Measured per
-    # span, the same way the `sdk.py` rows below are: the expected FIRST-line text was
-    # searched for in the merged file and each resolved at +12 (5922→5934, 6004→6016,
-    # 6162→6174, 6186→6198, 6187→6199, 6194→6206, 6215→6227, 6247→6259, 6256→6268,
-    # 6267→6279) — EXCEPT the first row, which STAYS at 5128-5130 because `main`'s
-    # insertion is BELOW it. That exception is why this is a measurement and not `+12`
-    # applied to the table: the arithmetic that fixes twelve rows would break the
-    # thirteenth. Every resolved span's text is byte-identical to the pre-merge span.
     ("entities.py", 5137, 5139): (
         '"st": ev.get("status"),  # #1350: status ON CREATE only —',
         "# re-mention cannot reset superseded→live)."),
@@ -3228,38 +3216,21 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("cache_projection.py", 810, 810): (
         "NOT MONOTONE — the carriers CAN be cleared", None),
     # sdk.py — the non-scalar refusal and the coherent un-supersede admission arm
-    # ⛔ RE-DERIVED, never carried (`#13348` post-merge review): `main` inserted a
-    # uniform +150 lines above this arm (`#13416` (`e52460b55e`), the `ended_scope`
-    # read — `git show --numstat e52460b55e -- tortoise/sdk.py` → `150 0`), so the
-    # three addresses below moved together and the pin was RED on `main` before
-    # this change. The shift was MEASURED, not inferred from a diff stat: the
-    # expected FIRST-line text of each pin was searched for at the current tree and
-    # each resolved at exactly +150 (53911→54061, 54063→54213, 54512→54662). A pin
-    # resolved by arithmetic on a number you did not measure is how these rot.
-    # ⛔ RE-DERIVED AGAIN at the `origin/main` (`c0463806dbb4`) merge of `#13345`:
-    # the branch's own live-write arm AND that merge both moved this tail, so
-    # neither side's numbers held at the merged tree. Measured the same way — the
-    # expected FIRST/LAST-line text of each span searched for in the merged
-    # `tortoise/sdk.py` — every span resolved +22 from THIS branch's head
-    # (54067→54094, 54219→54246, 22394→22421, 54668→54695), and each span's text
-    # was byte-identical to the pre-merge span (`sha256` compared), so the pin
-    # names the same statements it did before the merge.
-    # ⛔ RE-DERIVED YET AGAIN at the `origin/main` (`130e20fdaf`) merge — same rule,
-    # and this time the offsets were deliberately NOT treated as one constant:
-    # `main`'s `#13302`/`#13486` grew `tortoise/sdk.py` by +141 overall but with a
-    # `+39` insertion above the `update_knowledge` region, so a single uniform hop
-    # would have redded two of these four pins. Each span's FIRST/LAST-line text
-    # was searched for in the MERGED tree, never added to: 54094→54235,
-    # 54096→54237, 54246→54387, 54255→54396, 22421→22460, 22596→22635,
-    # 54695→54836.
-    # ⛔ RE-DERIVED ONCE MORE at the `origin/main` (`501270a4bf`) merge of `#13345`:
-    # `main`'s `e216c42c62` (#13531) inserts above this whole region, so every
-    # address below moved again. Searched for, never added to — each expected
-    # FIRST/LAST-line text was grepped in the merged `tortoise/sdk.py` and resolved
-    # at the SAME measured +38 (54235→54273, 54237→54275, 54387→54425,
-    # 54396→54434, 54836→54874); `update_knowledge` at 22460 sits ABOVE the
-    # insertion and did not move, which is why the offset is measured per span
-    # rather than applied to the table.
+    # ⛔ RE-DERIVED THREE TIMES on the way into `main` (`#13447`), always BY CONTENT.
+    # Every input block was stale by the time it was read: this branch's was derived
+    # at its own base, and `main`'s at `f6793959a2ae` (`#13486`) — and each forward
+    # merge (`130e20fdaf`, then `501270a4bf`, whose `sdk.py` moves the same region
+    # again) left both sides wrong against the merged tree. So NO number here is an
+    # offset or a carry: every address was found by searching for its own pinned
+    # FIRST-line text (and, where the row has one, its own LAST-line text) at the tree
+    # that was about to be committed. `entities.py` happened to keep this branch's
+    # values across both merges because its inserts are the ones above the status
+    # latch; `sdk.py` moved for both sides each time, including
+    # `update_knowledge`'s range end, which is located as the function's own last
+    # line rather than computed. The numbers in this block are therefore a
+    # MEASUREMENT of the tree that carries them, and the test re-checks all 18 rows on
+    # every run — a pin resolved by arithmetic on a number you did not measure is how
+    # these rot.
     ("sdk.py", 54286, 54288): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 54438, 54447): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),

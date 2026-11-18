@@ -4431,7 +4431,7 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
 
     ⛔ Each description is RESOLVED, not merely negative (#12989). The sweep knows
     the anchor the rule claims and the file it claims it in, so the old message —
-    `sdk.py:19331 reads '# #4716 Part 1: …', which carries none of
+    `sdk.py:19326 reads '# #4716 Part 1: …', which carries none of
     ['"stats": _capture_stats_with_step_witness(…)']` — told a fixer what was wrong
     and made them grep `sdk.py` to find what was right. That grep IS the
     re-derivation this whole exercise keeps paying for (#12877 re-derived these;
@@ -6324,7 +6324,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # comment block that prints this record's own `git grep` output had readers for
         # NONE of its cites — and the document DID carry two numbers for one hit: at
         # `30d222f40b` (this PR's pre-rebase first commit, held by `refs/av/pr/12569`)
-        # §0 read `sdk.py:19004` while BOTH appendix copies still read `:18996` —
+        # §0 read `sdk.py:18999` while BOTH appendix copies still read `:18996` —
         # `git show 30d222f40b:docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md |
         # grep -n 'sdk\.py:[0-9]*'` → `104:…18999`, `732:…18996`, `756:…18996`. A scan
         # that found no such revision was a scan miss, not a refutation; `#12545`
@@ -6562,13 +6562,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15254` (inside the span),
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15264` (still inside it). The END was re-derived
         # at the `#13486` head -- `return OrgInfoResponse(` -> `:15303`, so END = `:15302` (+77 at this START).
-        #
-        # ⛔ RE-DERIVED AGAIN at the merge of `origin/main` `c0463806db` then `f6793959a2`
-        # (this cut): the span is now 15225-15302 (+23 at BOTH ends from the `0774035055`
-        # cut above) and the call itself is `:15303`. Re-derived by CONTENT, never by the
-        # offset: `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py`
-        # -> `:15225`, `nodes_used` -> `:15254`, `max_nodes` -> `:15264`, and `:15302` is the
-        # blank line immediately before `return OrgInfoResponse(` at `:15303`.
         #
         # The `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span
@@ -7583,7 +7576,7 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
     ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
      []),
-    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:16953` — another row's cite.",
+    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:16948` — another row's cite.",
      []),
     # …and the forms it MUST still catch, so the "another file" exemption cannot become
     # a bypass: a bare cite with NO other file named, and the history-trimmed number.
@@ -14740,7 +14733,7 @@ _CITE_QUALIFIER_PATTERN = (
     # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
     # false BLOCK of a conformant edit whose own message told the author to add the base
     # they had already added (measured by a fresh-context review at `f885a51663`).
-    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18642-18666`
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18637-18661`
     # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
     # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
     # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
@@ -14888,8 +14881,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
     Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
-    #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17477`->`:17681`,
-    `sdk.py:16419-16433`->`:16536-16550` x3 — `#11548` moved this seam +13 after that
+    #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17681`,
+    `sdk.py:16414-16428`->`:16536-16550` x3 — `#11548` moved this seam +13 after that
     re-point. ⛔ The number printed here is a CONVENIENCE COPY, not a pin: the arm below
     reads this range OUT OF THE RECORD and asserts both of its endpoints against
     `tortoise/sdk.py`, so the value above is what a reader is spared from grepping for,
@@ -14909,7 +14902,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
     bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
     review found still unwatched (`pack_hierarchy.py:431`, the
-    `probes/capstone_measure.py:275-283` window and the `sdk.py:19888` cite it carries
+    `probes/capstone_measure.py:275-283` window and the `sdk.py:19883` cite it carries
     INSIDE it, `identity_hold.py:125`, `value_gate.py:89`) — and, measured before
     this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
@@ -15263,7 +15256,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "\"nothing consumes it\" reading is what this arm replaced")
     assert "nothing in this tree consumes" not in "\n".join(ext), (
         "the retracted sentence is back in the live file — it was false while this record's own §5 "
-        "cited `sdk.py:19888` as the consumer, so no arm may require it again")
+        "cited `sdk.py:19883` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the
@@ -15609,7 +15602,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
-        # `tortoise/value_gate.py:89` (`_cite` loop below) and `sdk.py:18642-18666` (the count-3
+        # `tortoise/value_gate.py:89` (`_cite` loop below) and `sdk.py:18637-18661` (the count-3
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph
