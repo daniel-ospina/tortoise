@@ -14419,11 +14419,19 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     submission RAN and did not answer inside the lane's bound — asked, not
     unasked, and not an outage claim either) — and the sixth,
     `record-label-not-served`, is the ENTITY union's coverage reason (#13093):
-    while `entity_coverage_complete()` is False the union cannot settle every
-    label a bare id COULD name (it serves three of the five), so a `no row` miss
-    names the DOOR's coverage gap rather than an absent node — including when the
-    id happens to name a served label, which is why the reason is the door's and
-    not the label's. It is not reachable from THIS route, which is why the count
+    the fallback NAMES a coverage problem; coverage does not cause the fallback —
+    any `props is None` in `prefer` falls back, and coverage only picks which of
+    the two names it gets. ⛔ And coverage is a TWO-FACT conjunction, so no single
+    repair clears it: every label a bare id can NAME must be SERVED at parity
+    (`record_serve.ENTITY_UNION_JURISDICTION` is the resolver's five labels and
+    this union serves three of them; `Event` AND `Source` are the two it does not,
+    both for want of parity — #9721), AND none of those five may sit in
+    `record_serve.ENTITY_UNION_ADDRESS_RESIDUALS` (`Source` does: the record keys
+    it `url`, so a bare id does not address it — #13351, a residual that is not
+    itself a parity gap but sits on top of one). Nor is the name chosen per label:
+    `serve_entity`'s `_miss_reason()` is handed NO label and branches on
+    `entity_coverage_complete()` alone, so a miss on a label that IS served names
+    this same reason. It is not reachable from THIS route, which is why the count
     above is over the vocabulary rather than over the reasons a point read can
     name.
 

@@ -868,17 +868,20 @@ FALLBACK_RECORD_BOUND_MISS = "record-read-bound-miss"
 #: named coordinate: the record WAS asked, answered `no row` for every label this
 #: door serves, and the door does NOT serve every label the read could have
 #: meant. It is the UNION door's own condition (#13093): `tortoise_get_entity`
-#: resolves across five labels, only `ENTITY_UNION_LABELS` are served at parity,
-#: so a `no row` among those cannot establish that the id is absent — it may name
-#: an `Event` or a `Source`, both excluded by #9721.
+#: resolves across five labels while only `ENTITY_UNION_LABELS` are served, so a
+#: `no row` among those cannot establish that the id is absent — it may name an
+#: `Event` or a `Source`, neither of which this door serves: BOTH carry the open
+#: parity gap in #9721, and `Source` is additionally unaddressable by a bare id
+#: (its record key is `url` — the residual #13351 exists to retire).
 #:
 #: ⛔ NOT folded into `record-miss`, and the difference is not cosmetic:
 #: `record-miss` is a member of :data:`RECORD_ANSWERED_REASONS`, which is what
 #: makes an empty answer an ESTABLISHED absence. Folding this in would turn
 #: "this door does not serve that label" into "the node does not exist" — the
 #: exact conflation #7952 forbids, re-introduced by a reason string. The repair
-#: differs too: `record-miss` is a backfill question, this is the per-label
-#: parity work in #9721.
+#: differs too: `record-miss` is a backfill question, while this one needs the
+#: parity work in #9721 AND the addressing repair in #13351 — two facts, and
+#: :func:`entity_coverage_complete` requires both.
 FALLBACK_RECORD_LABEL_NOT_SERVED = "record-label-not-served"
 FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
@@ -1884,12 +1887,14 @@ def serve_entity(*, tenant: tuple[str, str], id_val: str,
         `record-miss` is a member of :data:`RECORD_ANSWERED_REASONS`, i.e. it
         makes the empty answer an ESTABLISHED ABSENCE. That is true for a
         single-label read (which has settled its whole coordinate) and FALSE
-        here while any label this union can be handed is unserved (#9721): the
-        id may name an `Event` or a `Source`, which the record holds and this
-        door cannot answer at parity. In ``prefer``, naming it
+        here while :func:`entity_coverage_complete` is ``False`` — a TWO-fact
+        gap, not one repair and not one label's problem: ``Event`` and ``Source``
+        BOTH lack parity (#9721), and ``Source`` is additionally unaddressable by
+        a bare id (:data:`ENTITY_UNION_ADDRESS_RESIDUALS`, #13351 — a read-path
+        decision on top of the parity one). In ``prefer``, naming it
         `record-label-not-served` is what keeps the verdict honest — and the two
-        reasons have different repairs (a backfill vs the parity work), so folding
-        them would also send an operator to the wrong one. ⚠️ This helper is
+        reasons have different repairs (a backfill vs the parity-plus-addressing
+        work), so folding them would also send an operator to the wrong one. ⚠️ This helper is
         therefore called from the ``prefer`` arm ONLY: a ``record``-mode miss
         reached no fallback and must not name one (#13353 review cycle 2/3).
         """

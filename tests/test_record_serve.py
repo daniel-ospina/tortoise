@@ -207,9 +207,9 @@ def test_every_served_read_carries_its_parity_rule_and_its_coordinate():
         assert read.cypher, name
         if read.coordinate is None:
             assert name in MULTI_COORDINATE_READS, (
-                f"{name} declares no coordinate and is not a declared union read — "
-                f"every served read either carries a real (label, property) pair "
-                f"or says here why it cannot")
+                f"{name} declares no coordinate and is not a declared "
+                f"multi-coordinate read — every served read either carries a real "
+                f"(label, property) pair or says here why it cannot")
             assert read.cypher and read.reason, name
             shape = MULTI_COORDINATE_READS[name]
             assert shape.lower() in read.cypher.lower(), (

@@ -59282,16 +59282,19 @@ class TortoiseSDK:
         regardless of how the call is spelled (``test_11926_derived_invalidation``).
         ⚠️ The flag is a DEFAULT, not a structural guarantee: a new internal caller
         that forgets it gets the seam — a bounded record round trip on the caller's
-        thread — and then, mid-write, one of two hazards. ⛔ WHICH ONE DEPENDS ON
-        THE ARMED MODE, and the modes differ in kind, not in degree: in ``record``
-        an outage or an unnameable tenant RAISES, whereas in ``prefer`` — the armed
-        mode these readers actually run under — those same two conditions are
-        NAMED, COUNTED FALLBACKS and the caller gets the cache answer. What both
-        modes share is the likelier arm, a projection miss: the TRUTHY
+        thread, and then, mid-write, EITHER a raise (record unavailable, or no
+        tenant to scope the read — ⛔ both of those raise in ``record`` mode ONLY:
+        in ``prefer`` they are named, counted fallbacks) OR a projection miss. The
+        miss is the arm that bites in EITHER mode: in ``prefer`` it hands back the
+        cache's answer (this marker only when the cache misses too), while in
+        ``record`` there is no cache branch at all — the answer is ``props is
+        None`` from the record itself, and
+        :func:`record_serve.entity_absent_wire` mints the TRUTHY
         ``{"residency": "not-hot"}`` this docstring warns about two paragraphs up,
-        where an ``or MISSING`` test reads it as a found node. So the cost of
-        forgetting the flag is never "a faster answer" and never a silent found
-        node either — it is a raise (``record``) or a truthy marker (either mode).
+        where an ``or MISSING`` test reads it as a found node (absence IS
+        established there — ``served_from == "record"`` — and what keeps the falsy
+        ``{}`` arm unreachable is the entity union's incomplete coverage, not the
+        mode).
         """
         if cache_only:
             return self._get_entity(id_val)
