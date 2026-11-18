@@ -3614,6 +3614,36 @@ def test_a_pricing_only_diff_runs_the_storage_dimension_pins():
     )
 
 
+def test_a_bridge_table_only_diff_runs_the_structural_blocker_pin():
+    """#11609 P4 review (P2): the map's own diff must select the pin that reads it.
+
+    `tests/test_11609_structural_blockers.py`'s S1-sufficiency arm reads
+    `tools/bridge_table.py`'s `DESTINATION` map. `tools/bridge_table.py` is a
+    `SOURCE_PATTERNS["api"]` entry and is absent from `CORE_ALSO`, so a
+    bridge_table-only diff selects `api` and DROPS `core` — measured **before the
+    dual row this change adds**: the selected set was `['api']` with this pin
+    absent, so a PR re-pointing a door in the very
+    map the pin reads ran neither leg that carries it. A `core`-only registration
+    was coverage theatre for that path; the registration is now dual (the same
+    pattern as `test_bridge_table.py`, whose guards have the same exposure).
+
+    Asserts the SELECTION, not the registration, so it reds on the pre-fix
+    registration.
+    """
+    r = _sel(["tools/bridge_table.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["api"], (
+        f"a bridge_table.py-only diff selects {r['surfaces']} — expected ['api']. If "
+        "that changed, re-derive this pin (a `core` selection would make the dual "
+        "registration unnecessary rather than wrong)"
+    )
+    assert "test_11609_structural_blockers.py" in r["test_files"], (
+        "a tools/bridge_table.py-only diff does not run "
+        "tests/test_11609_structural_blockers.py, so the pin on S1's "
+        "door→container edge cannot fire on the change that breaks it (#11609)"
+    )
+
+
 def test_a_client_identity_only_diff_runs_the_consent_identity_guards():
     """#8218 review (finding 3): the identity RULE's own diff must select the
     guards that pin it.
