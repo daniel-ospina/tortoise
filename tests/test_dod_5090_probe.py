@@ -8386,8 +8386,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 184 candidate sentences
-# (the 151 rows across the four sets — 63 / 20 / 35 / 33 — plus the 33 sentences of
+# one of the same four verbs AFTER the negation, so on all 186 candidate sentences
+# (the 151 rows across the four sets — 63 / 20 / 35 / 33 — plus the 35 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
@@ -11172,7 +11172,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `280 + 1` and `279 + 2` at THIS tree, both equal to the `281` the pin re-derives
+    count: `281 + 1` and `280 + 2` at THIS tree, both equal to the `282` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as lane-bound: a carve-out run must not
     "correct" the docker lane's figure.
@@ -11336,6 +11336,48 @@ def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
     recall = next(e for e in sc["surface"]
                   if e.get("tool") == "tortoise_check_confidence")
     assert str(recall["reaches_affected_labels"]).startswith("UNMEASURED"), recall
+
+
+def test_the_census_doc_names_every_entrant_the_derivation_currently_names():
+    """§3's entrant table is the derivation's OUTPUT, so today's entrants must be reachable from it.
+
+    ⛔ MEASURED ON THE PRE-FIX TREE (#13595 fresh review, P2): the table's seven rows named
+    `tortoise_recall`, `tortoise_search_sessions`, `tortoise_review_connections` and
+    `tortoise_suggest_entry_points`, and NONE of the seven tools `vector_leg_surface()`
+    derives appeared anywhere in the section — 0 of 7. Four of those rows are doors
+    #11609 Phase 2 retired or renamed, so the table described a surface that no longer
+    exists, and the sentence beside it cited
+    `test_the_surface_named_is_the_one_that_can_pass_entity_type` — the very test that
+    now asserts `tortoise_recall` is ABSENT. Nothing redded: no pin read the table at all.
+
+    ⚠️ This does NOT require the table to be re-derived. §7 records the census as a dated
+    measurement that is deliberately not retro-edited, and that decision stands — the
+    table's rows are the 2026-11-06 derivation and stay. What must hold is narrower and
+    checkable: a reader of §3 can reach every entrant the derivation names TODAY, which
+    the note under the table does by naming each successor beside the door it replaced.
+    So the arm is a COVERAGE test over the live set, not an equality with the table —
+    re-deriving the rows is still a judgement call, while hiding a live entrant is not.
+    """
+    doc = (Path(probe.__file__).resolve().parent.parent / "docs" / "epics"
+           / "2026-11-04-5090-vector-layer" / "S3-VECTOR-CENSUS.md")
+    assert doc.exists(), f"the census doc moved: {doc}"
+    section = _doc_section(doc.read_text(encoding="utf-8"), "## 3.", "## 4.")
+    # A parser that found nothing is not a pass: the table is asserted so a section
+    # rename or an emptied table cannot satisfy this by naming no entrant at all.
+    rows = [ln for ln in section.splitlines() if ln.startswith("| `tortoise")]
+    assert len(rows) >= 5, (
+        f"the section carries {len(rows)} entrant row(s) — the table this pin reads has "
+        "gone missing or moved out of §3, so a green here would mean nothing")
+    derived = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
+    assert len(derived) >= 5, (
+        f"the derivation named {sorted(derived)} — a surface this small means the scan "
+        "or the registry broke, and a green here would measure nothing")
+    missing = sorted(t for t in derived if t not in section)
+    assert not missing, (
+        f"§3 names none of these live entrants: {missing}. The table is the 2026-11-06 "
+        "derivation and is not retro-edited (§7), but a reader must still be able to reach "
+        "every tool the derivation names TODAY — name each successor beside the door it "
+        "replaced, re-derived from `vector_leg_surface()`, never carried from a row")
 
 
 def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
