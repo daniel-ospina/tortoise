@@ -1405,3 +1405,80 @@ def test_the_destructive_warning_names_the_width_the_ddl_actually_builds():
         assert f"{width} columns in public.{table}" in message, (
             f"the refusal does not state the derived width of public.{table} "
             f"({width} columns): {message}")
+
+
+def _column_path_statement_sites() -> int:
+    """How many DATA statements the column-filtered path really issues — from SOURCE.
+
+    ⛔ THE EXPECTED VALUE MUST NOT COME FROM THE DECLARATION THAT PRODUCES IT
+    (`#13466` cycle 6, P2). `RECORD_LEG_STATEMENTS_PER_READ` is DEFINED as
+    ``COLUMN_ARM_STATEMENTS + 1``, so asserting that relation back is a TAUTOLOGY
+    that cannot red for any value. Measured by the cycle-6 reviewer: with the count
+    set to 3 the only failing assertion was the cross-arm one, while
+    "count + 1 == divisor" and the reserve loop both PASSED. The count therefore
+    needs an oracle that reads the implementation, which is what this is.
+
+    What counts, and why: `vector_search` issues the kNN read
+    (``cur.execute(sql, params)``) and, on the SHORT path only, the shortfall
+    ``count(*)`` probe. ``set_config`` is a session setting, not a data statement,
+    so it is excluded — the same rule `test_13422`'s folded oracle applies.
+
+    ⛔ DECLARED BOUND: a data statement added inside a HELPER is invisible here,
+    exactly as it is to the folded arm's oracle. What this catches is the shape
+    that actually drifted twice already — another ``cur.execute`` written inline in
+    the arm — and it catches it in the direction that matters: an UNDER-divided
+    arm, whose cancelled kNN hands the graph branch a floored ``1 ms``.
+    """
+    module = (pathlib.Path(__file__).resolve().parent.parent
+              / "tortoise" / "record_vector.py")
+    tree = ast.parse(module.read_text())
+    vector_search = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "vector_search")
+    sites = 0
+    for child in ast.walk(vector_search):
+        if not (isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == "execute"):
+            continue
+        sql = ast.unparse(child.args[0]) if child.args else ""
+        if "set_config" in sql:
+            continue
+        sites += 1
+    return sites
+
+
+def test_each_arm_divides_by_its_own_statement_count_plus_the_reserve():
+    """⛔ THE DIVISOR IS NOT THE STATEMENT COUNT (`#13466` cycle 6, P2).
+
+    `RECORD_LEG_STATEMENTS_PER_READ` and `FOLD_ARM_DIVISOR` are DIVISORS: the data
+    statements an arm issues PLUS the one share left for the graph branch. The two
+    numbers are different, and conflating them is the defect `#13466` cycle 4
+    fixed — a divisor equal to the count spends the whole read and hands the graph
+    branch a floored ``1 ms``.
+
+    ⛔ THE COUNT SIDE IS MEASURED FROM SOURCE, not read back from a declaration
+    derived from the divisor (`_column_path_statement_sites` below; the folded arm
+    has had such an oracle since cycle 5). The relation-only version of this pin
+    was a tautology and was replaced — see that oracle's docstring for the
+    measurement that proved it.
+    """
+    column_statements = _column_path_statement_sites()
+    folded_statements = record_vector.FOLD_ARM_STATEMENTS
+
+    assert column_statements == record_vector.COLUMN_ARM_STATEMENTS, (
+        f"the column path issues {column_statements} data statement(s) at its "
+        f"source sites but COLUMN_ARM_STATEMENTS says "
+        f"{record_vector.COLUMN_ARM_STATEMENTS} — the divisor is sized from the "
+        f"declaration, so a count that drifts under it under-divides the arm")
+
+    # The reserve is REAL, per arm: on a budget the arm spends its share for each
+    # statement and still leaves the graph branch at least one share.
+    for divisor, statements in (
+        (record_vector.RECORD_LEG_STATEMENTS_PER_READ, column_statements),
+        (record_vector.FOLD_ARM_DIVISOR, folded_statements),
+    ):
+        share = record_vector.record_statement_ms(BUDGET_MS, divisor)
+        assert BUDGET_MS - share * statements >= share, (
+            f"divisor={divisor} statements={statements} leaves the graph branch "
+            f"less than one share of a {BUDGET_MS} ms read")
