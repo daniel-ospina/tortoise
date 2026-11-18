@@ -172,10 +172,16 @@ def test_the_published_decomposition_names_the_measured_operands():
     pair and §1's PRODUCT-surface row, plus FOUR rows of §0's count TABLE —
     `statement sites`, `` `plain` READS``, `non-Cypher door calls` and `AST door calls`.
     It does NOT pin the shape-split rows under them (`860 (579 read, 281 write)`,
-    `adjacency` / `ep` / `traversal` / `fulltext` / `ddl` / `unresolved`, the two file
-    counts): those are DERIVED from the four that ARE graded, so a re-cut that moves
-    them without moving a graded row is not a stale publication, and pinning nine more
-    scalars buys a wider re-cut obligation for no false-PASS it would catch. It does
+    `adjacency` / `ep` / `traversal` / `fulltext` / `ddl` / `unresolved`) nor §0's
+    scanned-file count: those are INDEPENDENT census quantities, NOT derived from the
+    four that are graded, so any of them CAN go stale here and stay green. (The files
+    carrying a site ARE pinned, by (c).) That is a declared trade-off, not a property:
+    pinning nine more scalars buys a wider re-cut obligation, and this test chooses not
+    to pay it. Measured on a `/tmp` copy (`#13424` review P2-F2): changing `traversal`
+    from `3` to `4`, and `860 (579 read, 281 write)` to `860 (579 read, 999 write)`,
+    each leaves this test GREEN while §0 publishes a row whose own split does not add
+    up. Only their SUM is constrained by `sites`. Do not read the absence of these
+    assertions as a guarantee that they are right. It does
     NOT pin the `--all-surface` row that
     sits beneath that row in §1's mode table: that population includes `tests/`, so
     a pin on it would red an unrelated PR for a number this document does not rest
@@ -192,10 +198,32 @@ def test_the_published_decomposition_names_the_measured_operands():
     non_cypher = result["non_cypher_door_calls"]
     candidates = sum(1 for s in result["sites"] if s.verdict.startswith("candidate"))
 
+    # ⛔ REGION BOUNDS, established ONCE for every arm below.
+    #
+    # Each of the four publications this test grades lives in a SPECIFIC section, and a
+    # whole-document `re.search` takes the FIRST match ANYWHERE in the file. So a decoy —
+    # say a correct `= 1314 … + 258` planted above §0, or any other prose quoting the
+    # phrase — silently re-points the arm at the decoy while the real publication rots
+    # green. That is a false PASS, the exact failure mode every guard in this test exists
+    # to refuse (`#13424` review P2-F1).
+    #
+    # Slicing first makes the SHAPE GUARD do its job: if a section stops publishing its
+    # pair, the arm REDS instead of matching some other section. Arm (b) was scoped this
+    # way from the start; leaving (a), (a2) and (c) unscoped was an inconsistency, not a
+    # decision, and it was measurably exploitable.
+    section0 = re.search(r"^## 0\..*?^## 1\.", doc_text, re.MULTILINE | re.DOTALL)
+    assert section0, "§0's section bounds moved (no `## 0.` … `## 1.`); re-cut this pin with them"
+    section1 = re.search(r"^## 1\..*?^## 2\.", doc_text, re.MULTILINE | re.DOTALL)
+    assert section1, "§1's section bounds moved (no `## 1.` … `## 2.`); re-cut this pin with them"
+
     # (a) §0's decomposition: `= N classified Cypher statements + M non-Cypher door calls`
+    #
+    # ⛔ It sits in §1's block, not §0 — §0 publishes the same pair in its table and its
+    # narrative, and this line is the third publication, one screen further down. Scoped
+    # to §1 for the decoy reason above.
     decomposition = re.search(
         r"^= ([\d,]+) +classified Cypher statements \+ ([\d,]+) non-Cypher door calls$",
-        doc_text, re.MULTILINE)
+        section1.group(0), re.MULTILINE)
     assert decomposition, "§0's decomposition line moved or changed shape; re-cut this pin with it"
     doc_sites = int(decomposition.group(1).replace(",", ""))
     doc_non_cypher = int(decomposition.group(2).replace(",", ""))
@@ -208,12 +236,14 @@ def test_the_published_decomposition_names_the_measured_operands():
     # table and the block both read `260 / 1571` while the pins said `258 / 1569`
     # and `--check` printed `25 pinned counts match` — a whole merge shipped a table
     # contradicting the pins, the block's own `1,622 − 53` arithmetic AND §7.
+    # Scoped to §0 (`#13424` review P2-F1): the table is the FIRST publication in the
+    # document, so a decoy above it would re-point these four rows.
     table_non_cypher = re.search(
         r"^\| non-Cypher door calls \(excluded from every shape total\) \| (\d+) \|$",
-        doc_text, re.MULTILINE)
+        section0.group(0), re.MULTILINE)
     table_ast = re.search(
         r"^\| \*\*AST door calls\*\* = census \+ non-Cypher \| \*\*(\d+)\*\* \|$",
-        doc_text, re.MULTILINE)
+        section0.group(0), re.MULTILINE)
     # The two OPERAND rows, not just the two derived ones: `non-Cypher` and `AST` are
     # both COMPUTED from the pair below, so a re-cut that moved only the operands would
     # red (a)/(b) and this arm alike — but the reverse is what shipped at `ffe10dd198`:
@@ -224,10 +254,10 @@ def test_the_published_decomposition_names_the_measured_operands():
     # while every other publication is right — the exact class the arm exists for.
     table_sites = re.search(
         r"^\| \*\*statement sites \(this census\)\*\* \| \*\*(\d+)\*\* \|$",
-        doc_text, re.MULTILINE)
+        section0.group(0), re.MULTILINE)
     table_candidates = re.search(
         r"^\| \*\*`plain` READS — the migration candidates\*\* \| \*\*(\d+)\*\* \|$",
-        doc_text, re.MULTILINE)
+        section0.group(0), re.MULTILINE)
     assert table_non_cypher and table_ast and table_sites and table_candidates, (
         "§0's count table rows moved or changed shape; re-cut this pin with them")
     assert int(table_sites.group(1)) == sites, (
@@ -245,16 +275,11 @@ def test_the_published_decomposition_names_the_measured_operands():
     # (b) §0's narrative: `N of M product statements (P %)` — N is the candidate
     # count (plain READS), M is the statement sites, and P is DERIVED from them.
     #
-    # ⛔ SCOPED TO §0's OWN TEXT. The pattern is deliberately loose about the line's
-    # PREFIX (a legitimate reword must not red) but it must not be loose about WHERE:
-    # searched over the whole document it takes the first occurrence anywhere, so any
-    # earlier prose that quotes the same phrase silently re-points this arm at the
-    # wrong region while §0's real narrative rots green — a false PASS, which is the
-    # failure mode every guard in this test exists to refuse (`#13249` review). The
-    # section bounds below make the shape guard do its job instead: if §0 stops
-    # publishing the pair, the arm REDS rather than matching some other section.
-    section0 = re.search(r"^## 0\..*?^## 1\.", doc_text, re.MULTILINE | re.DOTALL)
-    assert section0, "§0's section bounds moved (no `## 0.` … `## 1.`); re-cut this pin with them"
+    # ⛔ SCOPED TO §0's OWN TEXT, for the same decoy reason every arm above is now
+    # scoped (`#13249` review, `#13424` P2-F1). The pattern is deliberately loose about
+    # the line's PREFIX (a legitimate reword must not red) but not about WHERE: the
+    # shared `section0` slice above makes the shape guard do its job, so if §0 stops
+    # publishing the pair the arm REDS rather than matching some other section.
     narrative = re.search(
         r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)", section0.group(0))
     assert narrative, "§0's 'N of M product statements (P %)' line moved; re-cut this pin with it"
@@ -271,7 +296,7 @@ def test_the_published_decomposition_names_the_measured_operands():
     # (c) §1's comparison table: the product-surface row, and the files carrying a site.
     table_row = re.search(
         r"^\| product surface \(this census\) \| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \|",
-        doc_text, re.MULTILINE)
+        section1.group(0), re.MULTILINE)
     assert table_row, "§1's product-surface table row moved; re-cut this pin with it"
     assert (int(table_row.group(1)), int(table_row.group(2))) == (sites, result["files_with_sites"]), (
         "§1's comparison table disagrees with the census: "
