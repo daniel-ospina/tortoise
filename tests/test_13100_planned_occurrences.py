@@ -20,6 +20,10 @@ What this file proves, one class per acceptance bullet:
   draft Points).
 * :class:`TestPlannedButNeverHappened` — *"what was planned and never
   happened?"* is answerable from position + link, with no mutable status read.
+* :class:`TestAMentionIsNotAnOccurrence` (#13128) — the ``aboutObject`` link is
+  the occurrence ONLY for an Event of the occurrence kind: a note *about* a plan
+  is counted (``mentions``) and never read as the plan happening, and
+  ``record_occurrence`` refuses to mint the ambiguous shape.
 * :class:`TestTheIngestMarkerIsNotAnOccurrence` — an ingested ``eventStatus``
   transition cannot be mistaken for an occurrence.
 
@@ -35,6 +39,7 @@ import re
 import shutil
 import sys
 import tempfile
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1466,10 +1471,16 @@ class TestPlannedButNeverHappened:
         counting `e.id` (a property `collect` DROPS when null) reported a plan with
         a real linked occurrence as "planned and never happened" — the exact
         inversion this read exists to prevent.
+
+        ⛔ The fixture's kind is the OCCURRENCE kind (#13128): an Event of another
+        kind is a MENTION of the plan, and since #13128 the read counts the two
+        apart. This case is about the id key, so it must use the kind that IS the
+        occurrence, or it would pin the old conflation.
         """
         g = sdk._get_proj().g
         plan = PO.create_plan(sdk, "Occurrence with an eventId-only Event")
-        g.query("CREATE (e:Event {eventId:'sess-noid', eventKind:'AgentSession'})")
+        g.query("CREATE (e:Event {eventId:'sess-noid', eventKind:$k})",
+                params={"k": PO.OCCURRENCE_EVENT_KIND})
         g.query("MATCH (e:Event {eventId:'sess-noid'}), (p:Object {id:$p}) "
                 "CREATE (e)-[:aboutObject]->(p)", params={"p": plan["id"]})
         assert g.query(
@@ -1486,6 +1497,158 @@ class TestPlannedButNeverHappened:
         g.query("MATCH (p:Object {id:$p}) SET p.status='draft'",
                 params={"p": held["id"]})
         assert [r["name"] for r in PO.planned_without_occurrence(g)] == []
+
+
+# ── #13128: a MENTION is not an occurrence ────────────────────────────────
+
+
+class TestAMentionIsNotAnOccurrence:
+    """``aboutObject`` is BOTH the occurrence link and §3.2's ``schema:about``.
+
+    So an Event can be *about* a plan without being its occurrence — a note, a
+    reminder, an email summary — and before #13128 the read counted every linked
+    Event, so a note made a plan read as "it happened". The distinguishing fact
+    is the linked Event's OWN kind: :data:`PO.OCCURRENCE_EVENT_KIND`, whose only
+    writer is :func:`record_occurrence` (which refuses any other kind).
+
+    The two facts are then served SEPARATELY — ``mentions`` on the row — rather
+    than one number being asked to mean both.
+    """
+
+    def test_a_mention_does_not_make_a_plan_read_as_happened(self, sdk):
+        """The reported defect, end to end: the exact call from the issue."""
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Offsite at the beach club")
+        sdk.create_entity("event", "email about the offsite",
+                         eventKind="email", aboutObject=plan["id"])
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 1
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert rows.get("Offsite at the beach club"), (
+            "an Event merely ABOUT the plan was read as the plan happening")
+        assert rows["Offsite at the beach club"]["ended"] is False
+
+    def test_the_mention_count_is_served_beside_the_occurrence(self, sdk):
+        """A caller can say "mentioned twice, never happened" — not "nothing"."""
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Quarterly partner call")
+        for _ in range(2):
+            sdk.create_entity("event", "a reminder about it",
+                             eventKind="email", aboutObject=plan["id"])
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert rows["Quarterly partner call"]["mentions"] == 2
+        # …and the occurrence, when it lands, is what removes the row.
+        PO.record_occurrence(sdk, plan["id"])
+        assert [r["name"] for r in PO.planned_without_occurrence(g)] == []
+
+    def test_a_mentions_count_is_ZERO_not_ONE_when_nothing_is_linked(self, sdk):
+        """The OPTIONAL MATCH's null row must not read as a mention.
+
+        `coalesce(e.eventKind,'') <> 'occurrence'` is TRUE for the planned null
+        row, so an unguarded count reported every unlinked plan as mentioned.
+        """
+        g = sdk._get_proj().g
+        PO.create_plan(sdk, "Nothing linked at all")
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        assert rows["Nothing linked at all"]["mentions"] == 0
+
+    def test_a_mention_does_not_change_an_ENDED_plan_s_ending(self, sdk):
+        """Q5's capstone row: a cancelled plan with a note about it.
+
+        The ending comes from the position axis and is served with its outcome;
+        the note is neither the reason nor a hidden occurrence.
+        """
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Thursday partner call")
+        PO.settle_plan(sdk, plan["id"], PO.STAGE_CANCELLED, reason="called off")
+        sdk.create_entity("event", "email about the partner call",
+                         eventKind="email", aboutObject=plan["id"])
+        rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+        row = rows["Thursday partner call"]
+        assert row["ended"] is True
+        assert row["outcome"] == "withdrawn"
+        assert row["mentions"] == 1
+
+    def test_the_KIND_is_the_proof_not_the_edge(self, sdk):
+        """Only an Event OF THE OCCURRENCE KIND satisfies Q5.
+
+        Every canonical kind links the same way; one of them is the occurrence.
+        """
+        g = sdk._get_proj().g
+        for kind in ("email", "note", "meeting", "review", "decision"):
+            plan = PO.create_plan(sdk, f"Mentioned by a {kind}")
+            sdk.create_entity("event", f"a {kind}", eventKind=kind,
+                             aboutObject=plan["id"])
+            rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
+            assert f"Mentioned by a {kind}" in rows, kind
+            assert rows[f"Mentioned by a {kind}"]["mentions"] == 1, kind
+
+    def test_record_occurrence_REFUSES_a_non_occurrence_kind(self, sdk):
+        """The writer half: it may not mint a link its own reader must discount.
+
+        A refused call leaves NOTHING behind — no Event, no link, no stage move.
+        """
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held as a meeting")
+        with pytest.raises(ValueError) as exc:
+            PO.record_occurrence(sdk, plan["id"], event_kind="meeting")
+        message = str(exc.value)
+        assert "MENTION" in message and "create_entity" in message, message
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+        assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_SCHEDULED
+        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
+
+    def test_the_explicit_occurrence_kind_is_accepted(self, sdk):
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held, kind stated")
+        recorded = PO.record_occurrence(sdk, plan["id"],
+                                        event_kind=PO.OCCURRENCE_EVENT_KIND)
+        assert recorded["move"].applied is True
+        assert plan["id"] not in {r["id"]
+                                 for r in PO.planned_without_occurrence(g)}
+        assert _stage(sdk, plan["id"])["stageId"] == PO.STAGE_HELD
+
+    def test_the_occurrence_kind_is_a_core_event_kind(self):
+        """The marker is not a coined word: it is ONTOLOGY §5's own kind."""
+        from tortoise.pack_registry import CANONICAL_EVENT_KINDS
+
+        assert PO.OCCURRENCE_EVENT_KIND == PO.DEFAULT_OCCURRENCE_KIND
+        assert PO.OCCURRENCE_EVENT_KIND in CANONICAL_EVENT_KINDS
+
+    def test_the_read_counts_the_linked_KIND_and_not_a_bare_edge(self):
+        """The mutation that matters: a reader that counts every link is the bug.
+
+        Hermetic: a stub graph captures the statement the read ACTUALLY issues, so
+        this pins the Cypher (not a copy of it in prose) and cannot be satisfied by
+        a reader that special-cases its fixtures. Both arms must be null-guarded —
+        an unguarded third arm is how an unlinked plan reads as mentioned — and the
+        kind must arrive as a PARAMETER, not be spelled at the call site.
+        """
+
+        class _Captured:
+            result_set: ClassVar[list] = []
+
+            def __init__(self) -> None:
+                self.cypher = ""
+                self.params: dict = {}
+
+            def query(self, cypher, params=None):
+                self.cypher, self.params = cypher, dict(params or {})
+                return self
+
+        graph = _Captured()
+        assert PO.planned_without_occurrence(graph) == []
+        assert "count(e) AS occurrences" not in graph.cypher, (
+            "the read counts every linked Event again — that is #13128")
+        assert graph.params["occurrence_kind"] == PO.OCCURRENCE_EVENT_KIND
+        assert graph.cypher.count("$occurrence_kind") == 2, (
+            "the two arms (occurrence / mention) must both read the kind")
+        assert graph.cypher.count("e IS NOT NULL") == 2, (
+            "each arm must guard the OPTIONAL MATCH's null row")
+        assert graph.params["kinds"] == sorted(PO.PLAN_KINDS)
 
 
 # ── acceptance 5: the ingest marker is not an occurrence ────────────────────

@@ -73,6 +73,29 @@ def test_the_register_is_tied_to_the_real_symbols():
         assert entry["reason"].strip(), f"{name} registered without a reason"
 
 
+def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
+    """#13205/#13490: ONE declaration of the tenant family, and it is `sdk.py`'s.
+
+    `_PRODUCT_GRAPH_PREFIXES` and the tenant half of `_SWEEP_OWNED_PREFIXES`
+    must be the COMPOSER's own tuple **by object identity**. The register test
+    above cannot see this: it builds its expectation from the same module
+    attribute (`entry["set"] is getattr(embedded, name)`), so re-inlining the
+    literal `("org_", "team_")` at either site leaves it green — and a copy
+    that kept a spelling the composer had dropped would then widen a
+    `DETACH DELETE` gate over a family nothing mints. Hence `is`, not `==`:
+    an equal-but-redeclared tuple is exactly the drift, and it is the failure
+    that makes this test a lie.
+    """
+    from tortoise import sdk
+
+    assert embedded._PRODUCT_GRAPH_PREFIXES is sdk._TENANT_GRAPH_PREFIXES
+    assert _SWEEP_OWNED_PREFIXES[len(("test_", "tortoise_test")):] \
+        == sdk._TENANT_GRAPH_PREFIXES
+    # The two non-tenant stems must stay AHEAD of the composed family, or the
+    # slice above would be measuring the wrong end of the tuple.
+    assert _SWEEP_OWNED_PREFIXES[:2] == ("test_", "tortoise_test")
+
+
 def test_the_wipe_literal_is_a_subset_of_the_journal_set():
     """#7795: GRAPH.LIST authorises strictly less than the journal does.
 

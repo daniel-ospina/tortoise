@@ -350,6 +350,15 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
 
     # 1c. The SAME movement is also stated as ARITHMETIC, in the parenthetical that opens "(68 −
     # 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 … = 48, and 23 + 9 + 14 + 7 + 7 = 60)".
+    # ⛔ THE RECORD GROWS BY APPENDING A MOVEMENT CLAUSE, so this pin reads a SEQUENCE of them
+    # (#11609 P2 added `then the confidence-arms wave's −2 … = 46` after the door wave's). The
+    # pin's own rule — "If the record grows, extend this pin in the same change rather than
+    # reshaping the sentence to fit it" — is what this block does: EVERY clause is read, each
+    # one's own stated result is checked against the arithmetic accumulated so far, and only
+    # the LAST one is bound to the manifest, because only it claims the count at this head.
+    # Binding the door wave's 48 to `live` (the pre-P2 form) is now a FALSE RED: 48 is a true
+    # statement about an EARLIER head, and rewriting it to 46 would misrecord the history the
+    # record exists to hold.
     # Nothing parsed that form (#13052 review at 7752959, finding 2's second half): a movement
     # stated as arithmetic is a claim with no machine behind it, and the earlier pin only read the
     # "… → …" form, so an error here stayed green. Every equation is evaluated against its own
@@ -388,25 +397,33 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
             f"canonical-mcp-tools.md states `{lhs} = {rhs}`, which evaluates to {computed} — "
             f"the composed arithmetic does not add up"
         )
-    door_wave = re.search(r"the door wave's\s*−(\d+) with no container row arriving\s*=\s*(\d+)", arithmetic)
-    assert door_wave, (
-        "canonical-mcp-tools.md's parenthetical stopped stating the door wave's subtraction and "
-        "its result; that is half the movement this container's own arithmetic records"
-    )
-    # ⛔ A WAVE'S OWN RESULT IS HISTORY; THE HEAD IS THE LAST WAVE'S RESULT. #11609 lane P1
-    # appended a second door-retirement wave (`create_point`/`diary_write` -> the new
-    # `type="point"`/`type="diary"` arms), so `door_wave`'s 48 is now an intermediate
-    # figure and binding it to `live` is a false RED on a correct record. The wave after
-    # it is bound instead, by its own sentence, and `door_wave` stays asserted as the
-    # arithmetic it is (the generic equation check above already evaluates `48 − 2 = 46`).
-    p1_wave = re.search(r"#11609 lane P1's\s*−(\d+)\s*=\s*(\d+)", arithmetic)
-    assert p1_wave, (
-        "canonical-mcp-tools.md's parenthetical no longer states the #11609 lane P1 "
-        "subtraction and its result; that is the wave that lands the surface on THIS "
-        "head, so without it the block above binds an intermediate figure")
-    assert int(p1_wave.group(2)) == live, (
-        f"canonical-mcp-tools.md says the last door wave lands the surface on "
-        f"{p1_wave.group(2)} advertised tools; the manifest derives {live}")
+    movements = re.findall(
+        r"then the ([A-Za-z0-9/-]+)\s+wave's\s*−\s*(\d+)\s+with no container row arriving\s*"
+        r"=\s*(\d+)",
+        arithmetic)
+    assert movements, (
+        "canonical-mcp-tools.md's parenthetical stopped stating a wave's subtraction and its "
+        "result; that is how the movement this container's own arithmetic records is told")
+    # ⛔ ONE CLAUSE PER WAVE, IN ORDER, AND THE LAST ONE IS THE HEAD. The record has grown
+    # four times now (the three container waves, then the door wave, then #11609 lane P1's
+    # POINT/DIARY wave, then #11609 P2's confidence-arms wave), and each append left the
+    # previous clause stating an INTERMEDIATE figure — so binding any single clause to `live`
+    # is a false RED on a correct record the next time it grows (measured: P1's `48 − 2 = 46`
+    # was bound by name and went stale the moment P2 appended `−2 = 44`). The chain is
+    # therefore walked in document order: every clause must follow from the one before it, and
+    # the accumulation must land on `live`. A skipped or out-of-order wave reds, an append reds
+    # until this reader is extended in the same change, and no clause is identified by position.
+    running = int(movements[0][2])
+    for wave, subtracted, stated in movements[1:]:
+        running -= int(subtracted)
+        assert running == int(stated), (
+            f"canonical-mcp-tools.md says the {wave} wave lands the surface on {stated} "
+            f"advertised tools, but the parenthetical's own terms give {running} — the "
+            "running record does not compose")
+    assert running == live, (
+        f"canonical-mcp-tools.md's LAST movement clause lands the surface on {running} "
+        f"advertised tools; the manifest derives {live} — the record stops before the "
+        "head it describes, or a wave's subtraction is missing from it")
     # ⛔ NEITHER SIDE IS FOUND BY POSITION (#13052 review at 0881a403, then at 7a61cde, both
     # P3). The parenthetical is a RUNNING record that has already grown twice, so an index into
     # `equations` retargets on the next append, and a first-match regex retargets on the next
@@ -437,15 +454,19 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "match a plus-chain at all, so it reds here. If the record grows, extend this pin "
         "in the same change rather than reshaping the sentence to fit it"
     )
-    # Both door waves subtract now, so the composition needs BOTH terms: the first one
-    # (`door_wave`) is the intermediate result the advertised equation stops at, and the
-    # second (`p1_wave`) is the head.
-    assert (int(advertised_eq.group(2)) - int(door_wave.group(1))
-            - int(p1_wave.group(1))) == live, (
+    assert int(advertised_eq.group(2)) - int(movements[0][1]) == int(movements[0][2]), (
+        f"canonical-mcp-tools.md's first movement clause starts from "
+        f"{advertised_eq.group(2)} and subtracts {movements[0][1]}, but states "
+        f"{movements[0][2]} — the running record does not join the advertised total")
+    # Every door-retirement wave subtracts, so the composition needs ALL of them: the chain's
+    # own terms, applied to the advertised equation's result, must land on `live`. This is
+    # the same accumulation as the walk above, stated as one equation so a wave that is in
+    # the chain but NOT applied advertises itself here rather than only in the loop.
+    assert int(advertised_eq.group(2)) - sum(
+        int(subtracted) for _wave, subtracted, _stated in movements) == live, (
         f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
-        f"{door_wave.group(1)} − {p1_wave.group(1)} = "
-        f"{int(advertised_eq.group(2)) - int(door_wave.group(1)) - int(p1_wave.group(1))}, "
-        f"not {live}"
+        f"{sum(int(s) for _w, s, _t in movements)} = "
+        f"{int(advertised_eq.group(2)) - sum(int(s) for _w, s, _t in movements)}, not {live}"
     )
     assert int(retired_eq.group(2)) == retired, (
         f"canonical-mcp-tools.md's retired-forward arithmetic (`{retired_eq.group(1)}`) states "
@@ -5275,16 +5296,21 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # five arriving containers (the sixth, `graph_overview`, was already live via #10914),
     # so 59 - 9 + 5 = 55. The retired names keep their #3883 shims, which is why the SERVED
     # population rises to 108 while the ADVERTISED one falls.
-    # #11609 DOOR RETIREMENT (this PR, lane E): 55 -> 48 — seven doors retired FORWARD into
+    # #11609 DOOR RETIREMENT (lane E): 55 -> 48 — seven doors retired FORWARD into
     # containers the Phase 2 waves had ALREADY advertised, so the live delta is exactly −7
     # and there is no `+ n` term. No container row arrives here, the SDK pin does not move
     # (94, inherited from `main`), and no row is archived: `archive/mcp-tools/` is for doors
     # with NO destination.
-    # #11609 lane P1 (THIS PR): 48 -> 46. The two POINT-shaped doors retire FORWARD into
+    # #11609 lane P1: 48 -> 46. The two POINT-shaped doors retire FORWARD into
     # `create_entity`'s new `type="point"`/`type="diary"` ARMS, i.e. onto a container that
     # was already advertised, so the live delta is exactly −2 with no `+ n` term and the
     # SDK pin does not move (94 — only MCP names retire here).
-    assert live["mcp"] == manifest["counts"]["tools"] == 46
+    # #11609 CONFIDENCE ARMS (#11609 P2): a further 46 -> 44 — `tortoise_compute_confidence`
+    # and `tortoise_recall` retire FORWARD into `tortoise_check_confidence`, which was
+    # already advertised; the arms are PARAMETERS on it (`recompute=` / `recall=`), so again
+    # the live delta is exactly −2 with no `+ n` term and no SDK movement — the container
+    # grew parameters, never a method.
+    assert live["mcp"] == manifest["counts"]["tools"] == 44
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
