@@ -3094,41 +3094,84 @@ def test_the_tool_really_has_the_omission_flag_its_docstring_promises():
 
 
 def test_a_ci_that_excludes_zero_where_the_exact_test_does_not_is_CALLED_OUT():
-    """F1 — a published interval contradicted the test printed in the same row.
+    """F1 — a published interval contradicted the exact test printed beside it.
 
-    `#13267` review 10 F1: the k = 3 row prints `McNemar exact p 0.0625` and
-    95 % CI `[+0.33, +3.33]` side by side, and §4.1 said "neither side can be
-    separated from noise" about a cell whose recorded CI excludes zero. The cause
-    is real and mechanical: with 5 of 300 discordant and c = 0, the percentile
-    bootstrap's 2.5th percentile is ONE discordant item, so `(1 - 5/300)**300`
-    of resamples are cut off below it — the interval is anti-conservative exactly
-    where the exact test is conservative. By duality both statements cannot hold,
-    and the brief never reconciled them. Nine rounds of figure re-derivation could
-    not see this because the interval IS pinned to the artifact's own value.
+    `#13267` reviews 10 F1 and 11 F1–F3. The headline's k = 3 row prints
+    `McNemar exact p 0.0625` beside 95 % CI `[+0.33, +3.33]`, and §4.1 called that
+    cell "neither side can be separated from noise". The cause is mechanical: with
+    b = 5, c = 0, n = 300 the percentile bootstrap's 2.5th percentile is ONE
+    discordant item, so `(1 - 5/300)**300` of resamples are cut off below it — the
+    interval is anti-conservative exactly where the exact test is conservative.
+
+    ⛔ The FIRST version of this caveat named k = 3, 5 and 10 of the headline and
+    stated one mechanism number for all of them; k = 5's exact p is 0.0313 (it DOES
+    separate), k = 10's percentile is 7 items, and the §4.1 copy carried the k = 5
+    row's `b`. So this pin derives the ROW SET and every NUMBER from the artifacts
+    rather than asserting three phrases (`#13267` review 11 F5).
     """
     brief = (_DOCS / "research-brief.md").read_text()
-    clashes = []
+    clash, not_clash = [], []
     for name in ("paired-point-300.json", "paired-point-300-short-query.json"):
         art = _artifact(name)
+        n = art["population"]["sample"]
         for k, cell in art["arms"]["point"]["per_k"].items():
-            lo = cell["bootstrap"]["ci95"][0]
-            p_value = cell["mcnemar_exact_p"]
-            if lo > 0 and p_value > 0.05:
-                clashes.append((name, k, round(lo * 100, 2), p_value))
-    assert clashes, (
-        "this reproduction still expects the small-k rows to disagree; if they no "
-        "longer do, the caveat below can be removed rather than left as folklore")
-    assert "ANTI-CONSERVATIVE" in brief, (
-        "the brief prints an interval that excludes zero beside an exact p > 0.05 "
-        f"({clashes}) and does not say the interval is anti-conservative")
-    # the caveat must name the mechanism, not merely assert a vibe
-    assert "one discordant item" in brief, (
-        "the caveat must name WHY: the percentile lower bound is one discordant item")
-    assert "the exact test governs" in brief, (
-        "the caveat must say which statement governs")
-    # and the harm-side sentence must defer to the exact test rather than to noise
-    assert "neither side is separated from the null at" in brief, (
-        "§4.1 must name the exact test as the thing that fails to separate the "
-        "sides; 'cannot be separated from noise' contradicted its own recorded CI")
+            b = cell["discordant_miss_to_hit"]
+            c = cell["discordant_hit_to_miss"]
+            lo_items = round(cell["bootstrap"]["ci95"][0] * n)
+            p0 = (1 - (b + c) / n) ** n
+            (clash if lo_items > 0 and cell["mcnemar_exact_p"] > 0.05
+             else not_clash).append(
+                {"artifact": name, "k": k, "b": b, "c": c, "n": n,
+                 "lo_items": lo_items, "p0": p0,
+                 "p": cell["mcnemar_exact_p"]})
+    assert clash, ("this reproduction expects at least one clash; if none remain, "
+                   "the caveat can be deleted rather than left as folklore")
+    # ── the caveat's OWN mechanism must hold for every clashing cell ──────
+    for cell in clash:
+        assert cell["lo_items"] == 1, (
+            f"{cell['artifact']}/{cell['k']}: the caveat says the interval excludes "
+            f"zero because the 2.5th percentile is ONE discordant item; it is "
+            f"{cell['lo_items']}")
+        assert cell["p0"] < 0.025, (
+            f"{cell['artifact']}/{cell['k']}: P(zero discordant in a resample) is "
+            f"{cell['p0']:.5f}, so resamples showing no gain are NOT cut off below "
+            "the 2.5th percentile and this mechanism does not explain the clash")
+        assert cell["b"] == 5 and cell["c"] == 0, (
+            f"{cell['artifact']}/{cell['k']}: the caveat states b = 5, c = 0; the "
+            f"artifact records b = {cell['b']}, c = {cell['c']}")
+    # ── and the NUMBERS the caveat prints must be those derived values ────
+    cells = {c["k"] for c in clash if "point-300.json" in c["artifact"]}
+    short = {c["k"] for c in clash if "short-query" in c["artifact"]}
+    assert cells == {"k=3"}, (
+        f"the caveat names the headline k = 3 only; derived clash set is {cells}")
+    assert short == {"k=10", "k=15"}, (
+        f"the caveat names the short-query arm's k = 10 and k = 15; derived set is "
+        f"{short}")
+    named = "the short-query arm's k = 10 and k = 15"
+    # the brief hard-wraps, so compare on whitespace-normalised prose
+    assert named in " ".join(brief.split()), (
+        f"the caveat must NAME the short-query cells it covers ({sorted(short)}); "
+        "naming them as a set from the artifacts is not the same as printing them")
+    assert "0.0065" in brief and "(1 − 5/300)³⁰⁰" in brief, (
+        "the caveat must print the resample probability it derives")
+    assert f"1/300 = {1 / 300 * 100:.2f} pp" in brief, (
+        "the caveat must print the one-discordant-item lower bound")
+    assert "cut off" in brief and "below the 2.5th percentile" in brief
+    assert "the exact test governs" in brief
+    assert "ANTI-CONSERVATIVE" in brief
+    # ── k = 5 must be EXCLUDED explicitly, with its own true reason ───────
+    assert "k = 5 is NOT one of these cells" in brief, (
+        "k = 5's exact p = 0.0313 separates it; it is excluded from the win rows by "
+        "the MDE rule, and the caveat must not claim the null failed to separate it")
+    assert "+2.00` against `2.28 pp" in brief, (
+        "the k = 5 exclusion must cite the MDE rule that actually excludes it")
+    # ── §4.1's copy carries ITS OWN cell's b, not another row's ───────────
+    para = brief[brief.index("neither side is separated from the null at"):]
+    para = para[:para.index("\n\n")] if "\n\n" in para else para
+    for cell in clash:
+        if "short-query" in cell["artifact"]:
+            assert f"with {cell['b']} of 300 discordant" in para, (
+                f"§4.1's caveat must quote its own cell's b = {cell['b']}; it "
+                f"carries {para[:400]}")
     assert "neither side can be separated from noise" not in brief, (
         "the retracted phrasing is back")

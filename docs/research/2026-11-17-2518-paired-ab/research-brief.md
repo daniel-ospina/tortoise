@@ -202,16 +202,20 @@ so a re-run measures the read, not the target's presence.
 | 10 | 0/300 | 13/300 | 13 | 0 | **0.00024** | +4.33 pp | [+2.33, +6.67] | 3.35 pp |
 | **15** | 0/300 | **17/300** | 17 | 0 | **0.00002** | **+5.67 pp** | [+3.33, +8.33] | 3.84 pp |
 
-⛔ **The three smallest-`k` rows' bootstrap intervals are ANTI-CONSERVATIVE, and the exact test governs
-(`#13267` review 10 F1).** At k = 3, 5 and 10 every discordant item is a miss→hit (`c = 0`), so the
-percentile bootstrap's 2.5th percentile is **one** discordant item — 1/300 = 0.33 pp — and the interval
-excludes zero **by that discreteness, not by evidence**: `P(a 300-item resample contains zero discordant
-items) = (1 − 5/300)³⁰⁰ = 0.0065`, so the resamples that DO show no gain are cut off below 2.5 %. By
-duality an interval that excludes 0 and a two-sided exact p of 0.0625 cannot both be right about the same
-test, and the exact test is the one §2 chose *because* the discordant totals here are 5–17. So: **k = 3 and
-k = 5 are NOT separated from the null by the exact test, and their intervals must not be read as
-separating them.** The headline is unaffected — k = 10 and k = 15 clear both their interval AND their exact
-test — and that agreement is the reason the win is claimed there and nowhere else.
+⛔ **Three rows' bootstrap intervals exclude zero while their OWN exact test does not, and the exact test
+governs (`#13267` reviews 10 F1 and 11 F1–F3).** The affected cells are **the headline's k = 3** and **the
+short-query arm's k = 10 and k = 15**. In every one of them `b = 5`, `c = 0`, `n = 300`, so the percentile
+bootstrap's 2.5th percentile is **one** discordant item — 1/300 = 0.33 pp — and the interval excludes zero
+**by that discreteness, not by evidence**: `P(a 300-item resample contains zero discordant items) =
+(1 − 5/300)³⁰⁰ = 0.0065`, which is below 0.025, so the resamples that show no gain at all are cut off
+below the 2.5th percentile. The interval is therefore ANTI-CONSERVATIVE exactly where the exact test is
+conservative, and by duality an interval excluding 0 and a two-sided exact p of 0.0625 cannot both be right
+about the same test — so **those three cells are NOT separated from the null by the exact test, and their
+intervals must not be read as separating them.**
+⛔ **The headline's k = 5 is NOT one of these cells**: its exact p is 0.0313, which does separate it — it is
+excluded from the win rows by the **MDE** rule (`+2.00` against `2.28 pp`), a different falsifier, and the
+2.5th percentile there is two discordant items, not one. And the headline's k = 10 and k = 15 clear **both**
+their interval and their exact test; that agreement is why the win is claimed there and nowhere else.
 
 **Reading it.**
 
@@ -284,7 +288,7 @@ k-window" is `seed_lost_from_window`'s own definition (`off_rank < k` and `on_ra
 "gone from the read": a seed that fell to rank 20 of the 60-wide read is counted. On this arm **the lever's cost
 and its benefit are indistinguishable in size**, and **neither side is separated from the null at
 n = 300 by the exact test** — the gain's exact McNemar p is 0.0625 (its bootstrap interval excludes zero,
-and ⛔ that interval is the anti-conservative one described at the §3 table: with 6 of 300 discordant and every one of them
+and ⛔ that interval is the anti-conservative one described at the §3 table: with 5 of 300 discordant and every one of them
 miss→hit, the percentile lower bound is one discordant item; the exact test governs, so this arm's gain is
 **not** established), and the 3 seeds lost are a bare count (1 % of items)
 with no interval and no test attached. ⚠️ The 5 is `seed_lost_from_window` 3 **plus**
