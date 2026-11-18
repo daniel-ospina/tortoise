@@ -3235,7 +3235,7 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("sdk.py", 54294, 54296): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 54446, 54455): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22470, 22646): ("def update_knowledge(", None),
+    ("sdk.py", 22470, 22645): ("def update_knowledge(", None),
     ("sdk.py", 54895, 54895): ("SET n += $props", None),
 }
 
