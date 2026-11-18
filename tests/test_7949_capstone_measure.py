@@ -6541,8 +6541,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # is how the figures below were re-derived rather than nudged: `grep -n
         # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15202`,
         # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15231` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15241` (inside it), and `:15279` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:15280`.
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15241` (still inside it). The END was re-derived
+        # at the `#13486` head -- `return OrgInfoResponse(` -> `:15303`, so END = `:15302` (offset +100, not +77).
         #
         # The `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span
@@ -6697,22 +6697,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
-    assert _i7.count("`hosted_api.py:15202-15279`") == 1, (
+    assert _i7.count("`hosted_api.py:15202-15302`") == 1, (
         "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
         "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
     _org_info = _EPIC_CITE_SOURCES["hosted_api"].read_text(encoding="utf-8").splitlines()
-    _span = _org_info[15202 - 1:15279]
+    _span = _org_info[15202 - 1:15302]
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:15202-15279` publishes `nodes_used` / `max_nodes`, but "
+            f"04-plan.md I7 says `:15202-15302` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.
-    _i7_end_ok = _org_info[15279 - 1].strip() == "" and bool(
-        _org_info[15279].lstrip().startswith("return OrgInfoResponse("))
+    _i7_end_ok = _org_info[15302 - 1].strip() == "" and bool(
+        _org_info[15302].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:15279`) is no longer the blank line before "
+        "04-plan.md I7's range end (`:15302`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 
