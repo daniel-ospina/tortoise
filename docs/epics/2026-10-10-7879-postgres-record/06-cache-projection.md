@@ -584,10 +584,12 @@ own row kept as the control); `test_the_display_summary_stays_declined_and_the_r
 The `#10852` prose-retraction arms live in `tests/test_10000_source_prose.py`:
 `test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node` (the write
 site's comment) and `test_a_re_capture_does_not_heal_a_pre_fix_node` (the stale
-pair SURVIVES a replay); and this section is itself guarded, in both directions,
-by `tests/test_10000_cache_projection_doc_pin.py` — the doc is the fourth
-artifact to have carried the retracted premise, and its guard is DB-free and
-registered in `tier1` because a docs-only edit runs `tier1` only.
+pair SURVIVES a replay). The BEHAVIOUR is that second row; this section is the
+**target** it describes, not its subject — re-wording this paragraph must not red
+the suite, and breaking the mint gate must (`CONTRIBUTING.md`, "A test asserts
+behaviour; a document states the target"). A separate text-assertion module
+guarded this paragraph's wording until #13439 retired it (`#13554` carries the
+remaining arms of that class).
 
 ### The other narrowing — a column can be authoritative and NOT projectable (`#10394`)
 

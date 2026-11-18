@@ -147,6 +147,7 @@
 manifest_version: 1
 issue: 3863
 cut_at_commit: 549bad0c77b7956a3aec424e3f16b8eb7ceac5e0
+cut_at_commit: 4ec1eb80fc6c53024660316a5f08a64c72098928
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1011,6 +1012,9 @@ counts:
   tools: 44
   sdk_public_methods: 94
   retired: 64
+  tools: 46
+  sdk_public_methods: 105
+  retired: 62
   keyword_distribution:
     fetch: 9
     create: 8
@@ -1024,7 +1028,7 @@ counts:
     operate: 2
 high_water_counts:
   tools: 48
-  sdk_public_methods: 94
+  sdk_public_methods: 105
 retired:
 - name: tortoise_annotate_operator
   use_instead: tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)
@@ -2668,6 +2672,52 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
+- name: sdk:add_member
+  method: add_member
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.add_member.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
+- name: sdk:adjust_relationship
+  method: adjust_relationship
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.adjust_relationship.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:annotate_ask_hits
   method: annotate_ask_hits
   approved: false
@@ -2981,11 +3031,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_direct_edge.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
+  dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, other-tooling'
+  reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
@@ -3083,6 +3133,52 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:create_key
+  method: create_key
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.create_key.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
+- name: sdk:create_memory_graph
+  method: create_memory_graph
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.create_memory_graph.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:create_object
   method: create_object
   approved: false
@@ -3234,6 +3330,29 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_knowledge.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
+- name: sdk:delete_memory_graph
+  method: delete_memory_graph
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.delete_memory_graph.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, docs
@@ -3889,6 +4008,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:list_keys
+  method: list_keys
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.list_keys.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:list_knowledge
   method: list_knowledge
   approved: true
@@ -3912,6 +4054,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:list_members
+  method: list_members
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.list_members.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:list_memory_graphs
   method: list_memory_graphs
   approved: true
@@ -4281,6 +4446,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:refresh_confidence
+  method: refresh_confidence
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.refresh_confidence.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:register_source
   method: register_source
   approved: true
@@ -4304,6 +4492,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:remove_member
+  method: remove_member
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.remove_member.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:resolve_id
   method: resolve_id
   approved: false
@@ -4419,6 +4630,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:revoke_key
+  method: revoke_key
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.revoke_key.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:search_knowledge
   method: search_knowledge
   approved: true
@@ -4812,6 +5046,29 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
+- name: sdk:write_knowledge_batch
+  method: write_knowledge_batch
+  approved: true
+  family: null
+  family_rank: null
+  served: sdk
+  sdk_method: null
+  group_source: null
+  keyword: null
+  keyword_rank: null
+  cluster: null
+  canonical: null
+  job: Public SDK method TortoiseSDK.write_knowledge_batch.
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  lifecycle: active
+  used_by: tooling, docs
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: no-caller-found
 - name: sdk:write_question
   method: write_question
   approved: true

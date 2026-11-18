@@ -704,8 +704,10 @@ def test_the_refusal_names_a_recorded_cause_for_a_trace_only_decline(monkeypatch
     defect restored: reverting ``failure_kind = cls._as_failure_kind(kind)`` back
     to the removed fixed dict at the ``_unavailable`` seam leaves the helper
     intact and every translator row above green (measured at this head: with the
-    call site reverted the two files are `1 failed, 47 passed`, and the only red
-    is THIS row — the translator rows stay green, which is the whole point).
+    call site reverted the two files are `2 failed, 47 passed` — the two reds are
+    THIS row and the end-to-end refusal block inside
+    ``test_a_spent_read_attempt_is_rearmed_and_spawned``; the translator rows stay
+    green, which is the gap this pair closes).
     Driven through ``_unavailable`` — the seam that actually
     writes ``failure_kind`` onto the refusal — so that revert reds here.
 
