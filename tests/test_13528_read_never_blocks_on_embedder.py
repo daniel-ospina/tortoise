@@ -467,6 +467,24 @@ def test_a_spent_read_attempt_is_rearmed_and_spawned(monkeypatch):
             f"the re-armed read waited {elapsed:.2f}s (budget "
             f"{READ_EMBED_BUDGET_S}s) — it must SPAWN the retry and decline, "
             f"not sit out the budget for the attempt it just restarted")
+
+        # ⛔ END-TO-END, ON THE STATE THIS TEST ALREADY BUILT (#13548 review F2).
+        # Everything above reaches the real defect state — a stale recorded
+        # ``load_failed`` behind a ``load_in_flight`` decline — so the REFUSAL is
+        # asserted here rather than only on the translator. ``main``'s fixed dict
+        # answered ``model_unavailable`` for this decline (the "nothing was
+        # recorded" fallback) while a cause WAS recorded, which is #13543. This
+        # is the row that reds under that dict on the REAL path, not a
+        # re-statement of the translator's own rows.
+        monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(
+                context="read: embedder not warm within the read's budget",
+                kind=decline)
+        assert excinfo.value.failure_kind == "load_failed", (
+            "the refusal must name the cause that was recorded, got "
+            f"{excinfo.value.failure_kind!r} — `model_unavailable` here means "
+            "the recorded cause was replaced by the nothing-recorded fallback")
         assert EmbeddingModel._warm_up_started is True, (
             "the re-arm must SPAWN the retry before answering, or the answer "
             "is a claim about a load that does not exist")
@@ -512,6 +530,105 @@ def test_a_rearm_that_cannot_spawn_answers_absent(monkeypatch):
             "read would read it as an attempt in flight")
     finally:
         monkeypatch.undo()
+        EmbeddingModel._reset()
+
+
+def test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason():
+    """The translator's recorded-cause arm, pinned directly (#13528 review P2).
+
+    ``load_in_flight`` names no failure, but a load CAN fail between the read's
+    decline and the raise that carries it, and ``_last_failure_kind`` then holds
+    the operator's real answer. The earlier shape special-cased ``no_embedder``
+    and returned the ``model_unavailable`` fallback for everything else, so that
+    recorded cause was discarded. This is the READ PATH's real state, not a
+    hypothetical: a failure older than ``_FAIL_COOLDOWN_S`` leaves
+    ``load_in_flight`` on the trace with a recorded kind, and ``_as_failure_kind``
+    then reports that kind. ``test_a_spent_read_attempt_is_rearmed_and_spawned``
+    builds exactly that state (``_last_failure_kind = "load_failed`` with
+    ``_last_failed_at`` older than the cooldown) and this file pins the
+    translation it feeds BOTH ways: the direct rows below, and the end-to-end
+    refusal at the end of that test.
+
+    ⛔ THE SECOND BEHAVIOUR CHANGE IS PINNED HERE TOO (#13548 review F1).
+    ``no_embedder`` with NOTHING recorded now answers ``model_unavailable``;
+    ``main``'s dict answered ``not_installed``. That is deliberate — the
+    contract's wording puts the fallback on "no kind was recorded", and a
+    designed-absence word is not itself a cause — and the two ``no_embedder``
+    arms below are what stop a re-added ``no_embedder -> not_installed`` special
+    case from shipping green, which is the #5275 mis-attribution one arm over.
+
+    ⛔ THE #13543 DEFECT THIS PINS. ``main`` translated with a FIXED dict
+    (``_READ_DECLINE_FAILURE_KIND``) that ignored ``_last_failure_kind`` entirely
+    and answered ``model_unavailable`` for ``load_in_flight`` — the contract's
+    documented "nothing was recorded" fallback — so an ARMED process was told
+    silence while the operator's real answer sat in ``_last_failure_kind``. The
+    two recorded-state assertions below (``load_failed``, ``not_installed``) are
+    the rows that red under that dict; the ``load_timeout`` row is a pass-through
+    the dict also got right.
+    """
+    EmbeddingModel._reset()
+    try:
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == \
+            "model_unavailable", (
+            "with nothing recorded the contract's documented fallback is the "
+            "honest answer — the load was in flight, nothing broke")
+
+        assert EmbeddingModel._as_failure_kind("no_embedder") == \
+            "model_unavailable", (
+            "with nothing recorded even the designed-absence trace word names no "
+            "cause of its own — the fallback is the honest answer, not "
+            "`not_installed`")
+
+        EmbeddingModel._last_failure_kind = "load_failed"
+        assert EmbeddingModel._as_failure_kind("no_embedder") == "load_failed", (
+            "the recorded kind outranks the designed-absence trace word too — "
+            "the special-case shape this replaces")
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == "load_failed", (
+            "a cause recorded by the time the refusal is raised must be named, "
+            "not replaced by the fallback")
+
+        EmbeddingModel._last_failure_kind = "not_installed"
+        assert EmbeddingModel._as_failure_kind("load_in_flight") == "not_installed", (
+            "the recorded kind is the answer whatever it is, not only for "
+            "`no_embedder` — the special-case shape this replaces")
+
+        assert EmbeddingModel._as_failure_kind("load_timeout") == "load_timeout", (
+            "a reason already in the refusal's vocabulary is passed through")
+    finally:
+        EmbeddingModel._reset()
+
+
+def test_the_refusal_names_a_recorded_cause_for_a_trace_only_decline(monkeypatch):
+    """⛔ THE CALL SITE, PINNED END-TO-END (#13543 review round 2).
+
+    ``test_the_translation_keeps_a_recorded_cause_for_a_trace_only_reason`` pins
+    the TRANSLATOR. A translator that is correct but no longer CALLED is the
+    defect restored: reverting ``failure_kind = cls._as_failure_kind(kind)`` back
+    to the removed fixed dict at the ``_unavailable`` seam leaves the helper
+    intact and every translator row above green (measured at this head: with the
+    call site reverted the two files are `1 failed, 47 passed`, and the only red
+    is THIS row — the translator rows stay green, which is the whole point).
+    Driven through ``_unavailable`` — the seam that actually
+    writes ``failure_kind`` onto the refusal — so that revert reds here.
+
+    Shape copied from ``test_a_designed_absence_is_refused_with_not_installed``:
+    the predicate and ``_unavailable`` are the two halves of the seam, and the
+    assertion is on the KIND the caller receives, never on a trace word.
+    """
+    EmbeddingModel._reset()
+    monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+    monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_failed")
+    try:
+        with pytest.raises(EmbedderUnavailableError) as excinfo:
+            EmbeddingModel._unavailable(
+                context="read: embedder not warm within the read's budget",
+                kind="load_in_flight")
+        assert excinfo.value.failure_kind == "load_failed", (
+            "the REFUSAL must carry the cause that was recorded, got "
+            f"{excinfo.value.failure_kind!r} — `model_unavailable` here means "
+            "the translator is no longer consulted at the seam, i.e. the "
+            "#13543 defect is back even though `_as_failure_kind` is correct")
+    finally:
         EmbeddingModel._reset()
 
 

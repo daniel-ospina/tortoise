@@ -342,6 +342,19 @@ class PropagationCensusRefused(RuntimeError):
         )
 
 
+#: The whole ``EmbedderUnavailableError.failure_kind`` vocabulary. Declared here,
+#: next to the contract that defines it, because the producers (the
+#: ``_last_failure_kind`` assignments in ``embeddings.py``) and the consumer that
+#: translates trace reasons into it (``EmbeddingModel._as_failure_kind``) must not
+#: each carry a hand copy — the drift class ``MEMORY.md`` records under ``[vocab]``.
+#: ``tests/test_embedding_model_required.py`` derives the producer set from the AST
+#: and asserts it is a subset — a producer value written as a plain string literal
+#: cannot appear unnoticed, and a producer value that is NOT a literal is itself
+#: refused (the pin reds rather than silently measuring nothing).
+FAILURE_KINDS = frozenset(
+    {"not_installed", "load_failed", "load_timeout", "model_unavailable"})
+
+
 class EmbedderUnavailableError(RuntimeError):
     """(C) #4861 — a process that REQUIRED the embedder must not be handed
     ``None``.
@@ -363,7 +376,9 @@ class EmbedderUnavailableError(RuntimeError):
     ``failure_kind`` is ``not_installed`` (the environment never had it — a
     runner-down or missing-extra run) or ``load_failed`` / ``load_timeout``
     (the environment had it and the load broke — a different thing to fix).
-    ``model_unavailable`` is the fallback when no kind was recorded.
+    ``model_unavailable`` is the fallback when no kind was recorded. The whole
+    vocabulary is :data:`FAILURE_KINDS`, the ONE declaration the producer literals
+    are pinned against, rather than a list re-typed per reader.
 
     ⛔ Its guarantee is only as wide as the narrowest ``except`` between the
     raise and the caller: #5275 found ``TortoiseSDK.tortoise_fts_query``
