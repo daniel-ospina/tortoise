@@ -1,0 +1,299 @@
+{
+  "arm_set": "P7 \u2014 write-path costs, diagnosis only (no optimisation)",
+  "arms": {
+    "kindgate": {
+      "approved_set": [
+        "dev"
+      ],
+      "arm": "kindgate",
+      "by_shape": [
+        {
+          "expected_gate_reads": 0,
+          "gate_ms_per_request": 0.0,
+          "gate_reads_per_request": 0,
+          "note": "control \u2014 names no pack",
+          "request_ms": {
+            "max_ms": 15.773,
+            "median_ms": 14.18,
+            "min_ms": 12.44,
+            "n": 7
+          },
+          "shape": "point_core"
+        },
+        {
+          "expected_gate_reads": 0,
+          "gate_ms_per_request": 0.0,
+          "gate_reads_per_request": 0,
+          "note": "control \u2014 names no pack",
+          "request_ms": {
+            "max_ms": 19.906,
+            "median_ms": 16.761,
+            "min_ms": 15.863,
+            "n": 7
+          },
+          "shape": "point_bare"
+        },
+        {
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 19.727,
+          "gate_reads_per_request": 1,
+          "note": "names a pack",
+          "request_ms": {
+            "max_ms": 48.474,
+            "median_ms": 46.406,
+            "min_ms": 43.183,
+            "n": 7
+          },
+          "shape": "point_ns"
+        },
+        {
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 19.727,
+          "gate_reads_per_request": 1,
+          "note": "names a pack through the props passthrough",
+          "request_ms": {
+            "max_ms": 52.818,
+            "median_ms": 36.248,
+            "min_ms": 34.73,
+            "n": 7
+          },
+          "shape": "point_ns_in_props"
+        },
+        {
+          "expected_gate_reads": 1,
+          "gate_ms_per_request": 19.727,
+          "gate_reads_per_request": 1,
+          "note": "names a pack",
+          "request_ms": {
+            "max_ms": 61.642,
+            "median_ms": 49.946,
+            "min_ms": 36.946,
+            "n": 7
+          },
+          "shape": "object_ns"
+        },
+        {
+          "expected_gate_reads": 2,
+          "gate_ms_per_request": 39.454,
+          "gate_reads_per_request": 2,
+          "note": "SAME pack named twice (positional + props)",
+          "request_ms": {
+            "max_ms": 73.738,
+            "median_ms": 67.384,
+            "min_ms": 54.457,
+            "n": 7
+          },
+          "shape": "point_ns_twice"
+        },
+        {
+          "expected_gate_reads": 2,
+          "gate_ms_per_request": 39.454,
+          "gate_reads_per_request": 2,
+          "note": "SAME pack named twice (camel + snake)",
+          "request_ms": {
+            "max_ms": 74.771,
+            "median_ms": 62.26,
+            "min_ms": 57.078,
+            "n": 7
+          },
+          "shape": "object_ns_twice"
+        }
+      ],
+      "cost": "whole-graph approval scan (#5475 gate), per write that names a pack",
+      "hosted_commit_composition": {
+        "measured_as": "composition of measured parts \u2014 not an HTTP sample",
+        "per_entity_site": "tortoise/sdk.py::_create_entity \u2192 _refuse_unapproved_kinds_in_props",
+        "per_entity_writes": 1,
+        "pre_check_reads": 1,
+        "pre_check_site": "tortoise/hosted_api.py:23946 (deliberately NOT rescanned at :23976)",
+        "rule": "1 pre-check read per request + 1 read per namespaced entity written",
+        "single_entity_commit_total_reads": 2
+      },
+      "points": 5000,
+      "single_gate_read": {
+        "max_ms": 22.2,
+        "median_ms": 19.727,
+        "min_ms": 18.231,
+        "n": 7
+      }
+    },
+    "nudges": {
+      "arm": "nudges",
+      "by_content_length": [
+        {
+          "content_bytes_returned": 23936,
+          "content_chars_per_row": 60,
+          "nudge_call": {
+            "max_ms": 13.524,
+            "median_ms": 9.371,
+            "min_ms": 9.318,
+            "n": 7
+          },
+          "points": 1000,
+          "rows_returned": 400
+        },
+        {
+          "content_bytes_returned": 119925,
+          "content_chars_per_row": 300,
+          "nudge_call": {
+            "max_ms": 19.004,
+            "median_ms": 13.339,
+            "min_ms": 12.794,
+            "n": 7
+          },
+          "points": 1000,
+          "rows_returned": 400
+        },
+        {
+          "content_bytes_returned": 479990,
+          "content_chars_per_row": 1200,
+          "nudge_call": {
+            "max_ms": 24.589,
+            "median_ms": 24.242,
+            "min_ms": 23.509,
+            "n": 7
+          },
+          "points": 1000,
+          "rows_returned": 400
+        }
+      ],
+      "by_size": [
+        {
+          "nudge_call": {
+            "max_ms": 17.721,
+            "median_ms": 12.684,
+            "min_ms": 12.339,
+            "n": 7
+          },
+          "nudges_produced": 3,
+          "object_create_ms": {
+            "delta_ms": 8.79,
+            "with_nudge": {
+              "max_ms": 28.955,
+              "median_ms": 16.732,
+              "min_ms": 16.404,
+              "n": 7
+            },
+            "without_nudge": {
+              "max_ms": 8.228,
+              "median_ms": 7.942,
+              "min_ms": 6.771,
+              "n": 7
+            }
+          },
+          "points": 1000,
+          "scan": {
+            "content_bytes_per_row": 299.8,
+            "content_bytes_returned": 119925,
+            "content_chars_returned": 119925,
+            "name_bytes_returned": 5490,
+            "row_cap": 400,
+            "rows_returned": 400
+          }
+        },
+        {
+          "nudge_call": {
+            "max_ms": 13.001,
+            "median_ms": 12.845,
+            "min_ms": 12.644,
+            "n": 7
+          },
+          "nudges_produced": 3,
+          "object_create_ms": {
+            "delta_ms": 11.008,
+            "with_nudge": {
+              "max_ms": 17.511,
+              "median_ms": 17.144,
+              "min_ms": 16.192,
+              "n": 7
+            },
+            "without_nudge": {
+              "max_ms": 7.223,
+              "median_ms": 6.136,
+              "min_ms": 5.995,
+              "n": 7
+            }
+          },
+          "points": 5000,
+          "scan": {
+            "content_bytes_per_row": 299.8,
+            "content_bytes_returned": 119925,
+            "content_chars_returned": 119925,
+            "name_bytes_returned": 5490,
+            "row_cap": 400,
+            "rows_returned": 400
+          }
+        }
+      ],
+      "cost": "400-row :Point scan returning full content"
+    },
+    "schema": {
+      "arm": "schema",
+      "by_size": [
+        {
+          "points": 1000,
+          "probe_ms": {
+            "max_ms": 6.136,
+            "median_ms": 5.327,
+            "min_ms": 4.946,
+            "n": 7
+          },
+          "us_per_point": 5.327,
+          "verdict": true
+        },
+        {
+          "points": 5000,
+          "probe_ms": {
+            "max_ms": 7.867,
+            "median_ms": 6.552,
+            "min_ms": 6.087,
+            "n": 7
+          },
+          "us_per_point": 1.31,
+          "verdict": true
+        },
+        {
+          "points": 20000,
+          "probe_ms": {
+            "max_ms": 10.32,
+            "median_ms": 10.013,
+            "min_ms": 9.096,
+            "n": 7
+          },
+          "us_per_point": 0.501,
+          "verdict": true
+        }
+      ],
+      "cost": "per-construction _schema_is_current() probe"
+    }
+  },
+  "box": {
+    "db_uri_env": "docker://:@127.0.0.1:16402/tortoise_test_matrix",
+    "engine": "graph ver 42006 (4.20.6)",
+    "graphs_measured": [
+      "test_measure13436_version_0_2622964",
+      "test_measure13436_nudge_1000_2622964",
+      "test_measure13436_nudge_5000_2622964",
+      "test_measure13436_nudgec60_1000_2622964",
+      "test_measure13436_nudgec300_1000_2622964",
+      "test_measure13436_nudgec1200_1000_2622964",
+      "test_measure13436_kindgate_5000_2622964",
+      "test_measure13436_schema_1000_2622964",
+      "test_measure13436_schema_5000_2622964",
+      "test_measure13436_schema_20000_2622964"
+    ],
+    "loadavg_at_end": [
+      6.87,
+      6.36,
+      6.13
+    ],
+    "loadavg_at_start": [
+      7.31,
+      6.41,
+      6.14
+    ],
+    "python": "3.12.3"
+  },
+  "issue": 13436,
+  "measured_at": "2026-11-18T02:15:10Z"
+}

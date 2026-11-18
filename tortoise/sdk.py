@@ -55719,19 +55719,24 @@ class TortoiseSDK:
 
         ⚠️ **COST — MEASURED, and nothing about it is optimised (#13436 P7).** The
         scan returns the FULL ``content`` of all 400 rows and the only product is
-        the advisory below: **12-13 ms per call at 1,000 Points AND at 5,000**
-        (the 400-row cap is constant), moving **118.1 KiB** of content, and the
-        CALLER pays **+11 ms** of a ~16 ms ``create_entity`` — roughly 65-70 % of
-        the write. ⛔ **The payload is NOT the term that moves**: 22x the content
-        length did not move the call beyond run-to-run noise, so what is paid is
-        the label scan plus row materialisation (`#4997`'s unindexed-label shape),
-        not the bytes returned. ⛔ **Do not "fix" it from this docstring**:
-        `#13436`'s mandate is *"an optimisation off an unmeasured cost is the
-        regression path"*, so a change here starts from
-        `docs/evidence/13436-write-path-costs/README.md` (instrument:
-        `tools/measure_13436_write_costs.py`), which states what was measured and
-        what it deliberately does not decide. Cost 1 has no owning issue yet —
-        that absence is the finding.
+        the advisory below: **12.3-12.9 ms per call at 1,000 Points AND at 5,000**
+        (the 400-row cap is constant), moving **117.1 KiB** of content, and the
+        CALLER pays **+8.8 to +12.1 ms** of a ~15-17 ms ``create_entity``. The
+        CONTENT LENGTH is a real term once the seed is realistic: 60 / 300 / 1,200
+        chars per row measured **9.1 / 12.8 / 23.4 ms** (run 1) and **9.4 / 13.3 /
+        24.2 ms** (run 2) — so 20x the length roughly doubles the call. ⚠️ A first
+        cut of the instrument seeded a repeated character and concluded the
+        opposite; that seed holds TOKENISATION constant while varying bytes, and
+        this method scores by token overlap, so the reading was an artefact.
+        ⛔ **Do not "fix" it from this docstring**: `#13436`'s mandate is *"an
+        optimisation off an unmeasured cost is the regression path"*, so a change
+        here starts from `docs/evidence/13436-write-path-costs/README.md`
+        (instrument: `tools/measure_13436_write_costs.py`), which states what was
+        measured, what it does not decide, and who owns which half. **Ownership:**
+        the ``ingest`` half is `#11796` (a placeholder keyed on the literal word
+        ``related``, one scan PER WRITTEN POINT); the ``create_entity`` /
+        ``create_edge`` half — one scan per write, measured above — is UNOWNED,
+        and that absence is the finding.
         """
         tokens = {w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower())}
         if not tokens:

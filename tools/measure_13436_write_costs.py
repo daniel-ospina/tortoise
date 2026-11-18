@@ -73,7 +73,7 @@ USAGE
     export TORTOISE_DB_URI='docker://:@127.0.0.1:16402/tortoise_test_matrix'   # a lane
     uv run python tools/measure_13436_write_costs.py                 # all arms
     uv run python tools/measure_13436_write_costs.py --arm nudges
-    uv run python tools/measure_13436_write_costs.py --json docs/evidence/13436/write-path-costs.json
+    uv run python tools/measure_13436_write_costs.py --json docs/evidence/13436-write-path-costs/write-path-costs.json
 
 Exit codes: 0 every requested arm measured · 3 an arm was refused (reason printed) ·
 2 usage.
@@ -89,15 +89,14 @@ import sys
 import time
 from pathlib import Path
 
-#: A real-shaped claim, ~220 chars — the length a captured `:Point` carries on the
-#: graphs this repo writes (the seeded `10,457 keys / 21,110 nodes` dogfood shape is
-#: Points of a line or two, not one word).
-CONTENT_TEMPLATE = (
-    "the write door refused the record because the fold had already committed the "
-    "status change and the journal line for it was appended first, so the refusal "
-    "left no node behind and the caller saw one error instead of a partial write "
-    "(round {i}, measured on a graph whose point population was {i} rows deep)"
-)
+#: Default seeded content length (chars/row). ~300 chars is a captured `:Point` of a
+#: line or two — the shape the dogfood graphs carry — and it is the SAME default for
+#: every arm, so a cross-arm difference is the length and nothing else.
+DEFAULT_CONTENT_CHARS = 300
+
+#: The graphs this run created and measured. Published in the artifact so a later
+#: reader can re-inspect the measured population instead of re-running blind.
+_GRAPHS: list[str] = []
 
 #: The nudge probe text: ordinary vocabulary, so the token overlap is realistic rather
 #: than either maximal (every token shared) or zero (no candidates scored at all).
@@ -144,8 +143,36 @@ def _time_call(fn, repeats: int, warmups: int = 2) -> dict:
     return _median_ms(samples)
 
 
-def _content(i: int) -> str:
-    return CONTENT_TEMPLATE.format(i=i)
+def _content(chars: int, i: int) -> str:
+    """A ~`chars`-long claim built from a REAL word list.
+
+    ⛔ NOT `"x" * n`: a repeated character produces one distinct token, so a
+    content-length axis built that way varies BYTES while holding TOKENISATION
+    roughly constant — and `_nudge_candidates` scores by token overlap, which makes
+    that shape blind to the scoring leg it is supposed to include. Measured once
+    the hard way: the first cut of this tool read a 3.45 ms level shift between two
+    1,000-Point arms that differed only in content SHAPE, and the "the bytes are
+    not the term" sentence built on it was an artefact of the seed, not a finding.
+    """
+    words = _WORD_BANK
+    out: list[str] = []
+    used = 0
+    k = i
+    while used < chars:
+        w = words[k % len(words)]
+        out.append(w)
+        used += len(w) + 1
+        k += 1
+    return " ".join(out)[:chars]
+
+
+#: Real vocabulary, so both the byte length AND the token structure scale together.
+_WORD_BANK = (
+    "record fold journal projection cache write door refusal status change "
+    "measured graph index vector embedding label kind owner decision slice "
+    "gate cost latency scan review commit branch head evidence artifact "
+    "retire sequence release boundary reason reader writer surface"
+).split()
 
 
 def _loadavg() -> list[float] | str:
@@ -198,14 +225,20 @@ def _assert_statement_matches_source() -> None:
             "site and update both the statement and this tool's account of it.")
 
 
-def _seed_points(proj, n: int, *, prefix: str, content: str | None = None) -> None:
-    """Seed `n` `:Point` rows through ONE `UNWIND` per 500 (fast, verifiable)."""
+def _seed_points(proj, n: int, *, prefix: str, chars: int = DEFAULT_CONTENT_CHARS) -> None:
+    """Seed `n` `:Point` rows through ONE `UNWIND` per 500 (fast, verifiable).
+
+    ONE seeder for every arm: the point-population arms and the content-length arms
+    therefore share a content SHAPE, so a difference between them is the length and
+    nothing else (the first cut used a different shape per arm and could not tell a
+    length effect from a seed effect).
+    """
     batch = 500
     for start in range(0, n, batch):
         rows = [
             {
                 "id": f"{prefix}-{i:06d}",
-                "content": content if content is not None else _content(i),
+                "content": _content(chars, i),
                 "label": "statement",
                 "name": f"seed claim {i}",
             }
@@ -232,6 +265,7 @@ def _assert_seeded(proj, n: int, prefix: str) -> None:
 def _fresh_sdk(graph_name: str):
     from tortoise.sdk import TortoiseSDK
 
+    _GRAPHS.append(graph_name)
     return TortoiseSDK(graph_name=graph_name)
 
 
@@ -241,6 +275,14 @@ def _graph_name(tag: str, n: int) -> str:
 
 
 # ── arm 1: `_nudge_candidates` ──────────────────────────────────────────────
+
+
+def _reads_of(rows: list[dict], shape: str) -> int | None:
+    """The measured gate-read count for ONE named shape (None if absent)."""
+    for row in rows:
+        if row["shape"] == shape:
+            return row["gate_reads_per_request"]
+    return None
 
 
 def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
@@ -256,8 +298,11 @@ def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
 
         # The PAYLOAD: what the statement moves, read exactly as the call reads it.
         rows = proj.g.query(NUDGE_SQL, params={"ex": []}).result_set
-        content_bytes = sum(len(str(r[1] or "")) for r in rows)
-        name_bytes = sum(len(str(r[2] or "")) for r in rows)
+        # BYTES, not code points: `len(str)` counts characters, and the moment the
+        # instrument is re-run on real content the two diverge.
+        content_bytes = sum(len(str(r[1] or "").encode("utf-8")) for r in rows)
+        content_chars = sum(len(str(r[1] or "")) for r in rows)
+        name_bytes = sum(len(str(r[2] or "").encode("utf-8")) for r in rows)
         scanned = len(rows)
 
         call = _time_call(lambda: sdk._nudge_candidates(NUDGE_TEXT, limit=3), reps)
@@ -288,6 +333,7 @@ def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
                 "rows_returned": scanned,
                 "row_cap": 400,
                 "content_bytes_returned": content_bytes,
+                "content_chars_returned": content_chars,
                 "name_bytes_returned": name_bytes,
                 "content_bytes_per_row": round(content_bytes / scanned, 1) if scanned else 0,
             },
@@ -312,11 +358,10 @@ def arm_nudges(sizes: list[int], reps: int, content_lengths: list[int]) -> dict:
         sdk = _fresh_sdk(_graph_name(f"nudgec{chars}", n))
         proj = sdk._get_proj()
         prefix = f"nudgec{chars}"
-        body = ("x" * max(1, chars - 24)) + " tail marker text"
-        _seed_points(proj, n, prefix=prefix, content=body[:chars])
+        _seed_points(proj, n, prefix=prefix, chars=chars)
         _assert_seeded(proj, n, prefix)
         rows = proj.g.query(NUDGE_SQL, params={"ex": []}).result_set
-        content_bytes = sum(len(str(r[1] or "")) for r in rows)
+        content_bytes = sum(len(str(r[1] or "").encode("utf-8")) for r in rows)
         call = _time_call(lambda: sdk._nudge_candidates(NUDGE_TEXT, limit=3), reps)
         out["by_content_length"].append({
             "points": n,
@@ -452,10 +497,13 @@ def arm_kindgate(n: int, reps: int) -> dict:
         "hosted_commit_composition": {
             "rule": "1 pre-check read per request + 1 read per namespaced entity written",
             "pre_check_reads": 1,
-            "per_entity_writes": rows[-1]["gate_reads_per_request"] if rows else None,
+            # ⛔ BY NAME, never `rows[-1]`: the last shape is the TWO-SPELLING one,
+            # so `[-1]` published 3 here while every prose statement said 2 — the
+            # artifact was the wrong side of its own contradiction (found by review).
+            "per_entity_writes": _reads_of(rows, "object_ns"),
             "pre_check_site": "tortoise/hosted_api.py:23946 (deliberately NOT rescanned at :23976)",
             "per_entity_site": "tortoise/sdk.py::_create_entity → _refuse_unapproved_kinds_in_props",
-            "single_entity_commit_total_reads": 1 + (rows[-1]["gate_reads_per_request"] if rows else 0),
+            "single_entity_commit_total_reads": 1 + (_reads_of(rows, "object_ns") or 0),
             "measured_as": "composition of measured parts — not an HTTP sample",
         },
     }
@@ -547,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     artifact["box"]["loadavg_at_end"] = _loadavg()
+    artifact["box"]["graphs_measured"] = list(_GRAPHS)
 
     if args.json:
         path = Path(args.json)
