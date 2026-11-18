@@ -308,11 +308,17 @@ class TestTheArmArgumentsNameTheirArm:
         against NOTHING armed, so an explicitly-armed call carrying the other arm's
         arguments was served with them on the floor."""
         sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
-        sdk2, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
+        _, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
         with pytest.raises(ValueError) as exc:
             sdk.check_confidence(**kwargs)
         assert arg in str(exc.value), str(exc.value)
         assert f"{off}-arm argument(s)" in str(exc.value), str(exc.value)
+        # ⛔ The refusal is the whole claim ("served with them on the floor"), so it
+        # must be proven to have happened BEFORE dispatch: "raised" alone is also
+        # what a raise-after-serve looks like. Both recorders stay empty; an
+        # unused `calls` was exactly the assertion this test had dropped (RUF059).
+        assert calls == [], calls
+        assert calls2 == [], calls2
 
     @pytest.mark.parametrize("kwargs,arg", [
         ({"recall": True, "query": "q", "factors": [{"id": "f1"}]}, "factors"),
