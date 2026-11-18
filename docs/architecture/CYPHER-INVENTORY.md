@@ -412,8 +412,11 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**This regeneration's base:** `origin/main` **`340d500491`** — the rebase base this branch now sits
-on. **No census SCALAR moved**: `--check` reports **`25 pinned counts match`**, and §1's `rg`
+**This regeneration's base:** `origin/main` **`340d500491`** — the base this branch last merged
+before the one it lands on. `main` has not touched `tortoise/` at all since
+(`git diff --stat 340d500491 origin/main -- tortoise/` is empty), so the cut derived at that base is
+the cut at the landing head: re-running `--markdown` here reproduces it line for line.
+**No census SCALAR moved**: `--check` reports **`25 pinned counts match`**, and §1's `rg`
 reconciliation re-measured at this tree reproduces it exactly (door **1,625 / 108**, verb
 **2,343 / 144** whole-text, bare **1,631 / 109**), so every scalar below is the `9d13dc1bf7` cut's,
 carried through unchanged. **Appendix A moved anyway — 226 of its 1,313 rows were stale**, across
@@ -552,20 +555,15 @@ exact `file:line`-versus-SCALAR gap this section describes, caught by regenerati
 rather than by trusting the pins: `--check` passes on both trees while the appendix's `file:line`
 column is stale on one of them.
 
-⚠️ **THIS cut's own drift, measured against the appendix `origin/main` carried at `340d500491`** —
-the base this branch last merged before the one it lands on: **237 rows added and 237 dropped** of
-1,313 (`git show 340d500491:docs/architecture/CYPHER-INVENTORY.md` versus a fresh `--markdown` at THIS
-merged tree). ⛔ **It splits in two, and the split is the point — the 237 is NOT all `main`'s:**
-**226** are `main`'s own staleness at that base (`340d500491`'s committed table against a fresh cut at
-`340d500491`'s OWN tree) in `tortoise/hosted_api.py` (220 rows), `tortoise/sdk.py` (4) and
-`tortoise/cache_projection.py` (2), from `c51afee5a8` (`#13392`) and `792198587b` (`#13290`) — and the
-other **11** are THIS BRANCH's own comment/docstring hunks, which add 16 net lines to
-`tortoise/indexer/github_indexer.py` and move every one of that file's rows (a fresh cut at
-`340d500491`'s tree against a fresh cut at this merged tree differs in exactly those 11, and in no
-other file). **Not one of the 25 pins moved, in either half.** `main` has not touched `tortoise/` at
-all since `340d500491` (`git diff --stat 340d500491 origin/main -- tortoise/` is empty), so both halves
-are base-stable rather than head-lucky: 226 + 11 is the 237, and each half is reproducible from the
-commits it names.
+⚠️ **THIS cut's own drift, measured against the appendix `origin/main` carried at `340d500491`:**
+**237 rows added and 237 dropped** of 1,313 (`git show 340d500491:docs/architecture/CYPHER-INVENTORY.md`
+versus a fresh `--markdown` at THIS merged tree). The 226 above are `main`'s; the extra **11** are
+THIS BRANCH's own, and they are a different cause, not a rounding of the same one: these
+comment/docstring hunks add 16 net lines to `tortoise/indexer/github_indexer.py`, which moves every
+row of that file (a fresh cut at `340d500491`'s tree against a fresh cut here differs in exactly those
+11, and in no other file). 226 + 11 is the whole 237, and **not one of the 25 pins moved** in either
+half. ⛔ An earlier revision of this paragraph attributed the indexer's 11 to `main`'s insertions —
+`main` inserted nothing into that file — which is the defect class this section exists to name.
 ⚠️ Earlier revisions of this sentence are RETIRED rather than reconciled, because each named a unit,
 a metric or a base it did not measure: one said "31 of 1,313 rows" (`1,313` is the table's LINE
 count — the table carries **1,313 rows over 1,315 lines** here — and `31` was attributed to no
