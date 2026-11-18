@@ -263,16 +263,16 @@ RAW_EMBEDDED_ALLOWLIST = {
     # under-test input, so it is carve-out by its `carve_out:` row and needs
     # this entry — a redirected construction would count a vectorless row
     # against the server instead of the embedded file the case is about.
+    # ⛔ ONE entry only: the stem is also a `tests/_embedded.py::TEST_NO_REDIRECT_STEMS`
+    # carve-out member whose raw construction (`tests/test_13417_vectorless_rows.py:95`)
+    # IS the under-test input, and `#13492` re-added the same literal here when the
+    # registration landed without it (which redded `test-carve-out` — and so
+    # `python-ci-gate` — on main for every PR). A second copy of the string is what
+    # `ruff`'s B033 reds on, and merge produced exactly that: this branch's copy of the
+    # `#13492` fix and `main`'s own both survived the union, so the duplicate is folded
+    # back into this one entry rather than left for `agent-infra-ci / lint` to find.
     "test_13417_vectorless_rows.py",
     "test_backup_e2e.py",
-    # #13417: carve-out member (`tests/_embedded.py::TEST_NO_REDIRECT_STEMS` and its
-    # `carve_out` row in `config/ci-surfaces.yml`) that drives real DERIVED-entity
-    # folds against its OWN embedded `FalkorProjection` per test, so the raw
-    # construction (`tests/test_13417_vectorless_rows.py:95`) IS the under-test
-    # input. Membership of the carve-out list is the justification (#13492: the
-    # stem was registered without this entry, which redded `test-carve-out` — and
-    # so `python-ci-gate` — on main for every PR).
-    "test_13417_vectorless_rows.py",
     "test_config.py",
     "test_derived_names.py",  # epic #1647 Task 7 — the path= construction IS the derived-name-under-test input
     "test_divergence_conformance.py",  # epic #1647 E2E-8 — both legs construct the projection as the input
