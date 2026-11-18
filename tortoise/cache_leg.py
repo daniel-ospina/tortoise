@@ -125,9 +125,10 @@ CACHE_TARGET_OVERFLOW = "(other targets)"
 _TARGETS_CAP = 16
 
 #: ``{"<store>|<graph>": live write attempts}`` for THIS process, and its lock.
-#: Written by :func:`note_cache_write_target` from the five live lanes — the fold,
-#: the structural-edge mint, and the three declared gateways — so the UNIT is one
-#: lane operation (a fold, a mint, a gateway statement), not one journal record.
+#: Written by :func:`note_cache_write_target` from the SEVEN live lanes — the fold,
+#: the structural-edge mint, the three declared gateways, and the two hosted
+#: session-delete lanes — so the UNIT is one lane operation (a fold, a mint, a
+#: gateway statement), not one journal record.
 #: Read it for WHERE a process writes; do not read it as "writes landed", because
 #: an arm whose fold returns no count is counted even when its statement matched
 #: 0 rows (the bound is stated on `note_cache_write_target`).
@@ -228,7 +229,7 @@ def cache_store_fingerprint(endpoint: object) -> str:
 def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     """Record one LIVE write ATTEMPT against the store+graph it reached.
 
-    Five call sites, and the list is maintained rather than implied:
+    SEVEN call sites, and the list is maintained rather than implied:
     ``projection.note_live_write_target`` is the ONE helper they all go through,
     so the endpoint resolution has a single owner.
 
@@ -242,10 +243,15 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     * ``onboarding.state._run``, ``webhook_delivery._run``,
       ``why_snapshot._run`` — the three declared live GATEWAYS that issue their
       own statements under ``_onboarding_write_scope`` /
-      ``_cache_write_authorized(<lane>)`` and fold no record at all.
+      ``_cache_write_authorized(<lane>)`` and fold no record at all;
+    * ``hosted_api._delete_session_sync`` and
+      ``hosted_api._sweep_orphaned_writes`` — the two hosted lanes that raw-
+      ``DETACH DELETE`` the session's nodes in the graph the credential opened,
+      which is a graph CHOICE, so "this lane does not choose its graph" does not
+      excuse them.
 
-    A sixth gateway added tomorrow must be added here; a raw statement issued at
-    ``proj.g`` from somewhere else is the named residual (see the helper).
+    An eighth producer added tomorrow must be added here; a raw statement issued
+    at ``proj.g`` from somewhere else is the named residual (see the helper).
 
     ⛔ THE RESIDUAL IS NAMED RATHER THAN IMPLIED: a raw statement issued at
     ``proj.g`` inside a live scope — the capture provenance stamps
@@ -257,9 +263,14 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     Closing it belongs at the write handle (``_GuardedGraph``), where a
     per-statement census already exists (§17.1), not here.
 
-    Replay is excluded by both callers: a rebuild WRITES the target on purpose,
-    and counting it would let a repair make the picture look healthier than the
-    live traffic it repaired.
+    Replay is excluded by the HELPER, not here: ``projection.note_live_write_target``
+    returns before calling this function whenever ``replay_window_open()`` — a
+    rebuild WRITES the target on purpose, and counting it would let a repair make
+    the picture look healthier than the live traffic it repaired. ⛔ This function
+    itself has NO replay guard, by design it is CALLER-UNCHECKED: it records the
+    attempt it is handed, so a caller that reaches it directly (rather than
+    through the helper) would count a rebuild's writes as live traffic. Always go
+    through ``projection.note_live_write_target``.
 
     WHAT THIS ANSWERS THAT ``cache_leg_failures`` CANNOT. ``cache_leg_failures``
     counts a CONFIGURATION split (record armed + this process's cache is the

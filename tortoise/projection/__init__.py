@@ -4648,10 +4648,19 @@ def note_live_write_target(proj) -> None:
       mint that created a row;
     * the three declared live gateways that issue their own statements —
       `onboarding.state._run`, `webhook_delivery._run`, `why_snapshot._run`;
+    * the two `hosted_api` lanes that raw-`DETACH DELETE` and choose their own
+      graph — `_delete_session_sync` and `_sweep_orphaned_writes`;
     * and ``replay_window_open()`` excludes every one of them, because a rebuild
       writes the same target on purpose and counting it would let a repair make
-      the live picture look healthier than the traffic it repaired. (The fold and
-      the mint check the window at their own seam, before this helper.)
+      the live picture look healthier than the traffic it repaired.
+
+      ⛔ THE EXCLUSION LIVES HERE, in this helper, and nowhere else. Neither the
+      fold nor the mint checks the window before calling it (`apply` does not
+      check at all, and `edges._record_structural_edges` calls this helper
+      BEFORE its own check), and `cache_leg.note_cache_write_target` carries no
+      guard of its own — by design it is caller-unchecked. So a producer that
+      calls `note_cache_write_target` DIRECTLY would count a rebuild's writes as
+      live traffic: go through this helper, always.
 
     ⛔ RESIDUAL, stated: a raw statement issued at ``proj.g`` inside a live scope
     from anywhere ELSE — the capture provenance stamps (`_CAPTURE_PROVENANCE_LANE`)
