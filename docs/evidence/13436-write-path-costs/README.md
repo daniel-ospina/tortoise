@@ -6,7 +6,7 @@ three costs is bound by a recorded decision that forbids its obvious "fix", cite
 
 | | |
 |---|---|
-| **Artifacts** | [`write-path-costs.json`](write-path-costs.json) — **run 1**, 2026-11-18T02:14:49Z, load **6.1–7.6** (written before the `box.git_*` provenance fields existed) · [`write-path-costs-run2.json`](write-path-costs-run2.json) — **run 2**, 2026-11-18T03:01:16Z, load **9.4–9.9**, whose `box.git_head` names the tree it measured and whose `git_dirty` is EMPTY. Two runs because one sample on a shared box is a number, not a measurement; and the second records **which tree** it measured, so the provenance claim is checkable from the artifact instead of from this sentence. |
+| **Artifacts** | [`write-path-costs.json`](write-path-costs.json) — **run 1**, 2026-11-18T02:14:49Z, load **6.1–7.6** (written before the `box.git_*` provenance fields existed) · [`write-path-costs-run2.json`](write-path-costs-run2.json) — **run 2**, 2026-11-18T03:01:16Z, load **9.4–11.3** (it rose during the run), whose `box.git_head` names the tree it measured and whose `git_dirty` is EMPTY. Two runs because one sample on a shared box is a number, not a measurement; and the second records **which tree** it measured, so the provenance claim is checkable from the artifact instead of from this sentence. |
 | **Instrument** | [`tools/measure_13436_write_costs.py`](../../../tools/measure_13436_write_costs.py) |
 | **Box** | docker lane `falkordb/falkordb-server:v4.20.6`, `graph` ver **42006 (4.20.6)**, Python 3.12.3 |
 
@@ -28,9 +28,13 @@ none, a shape paying a varying number of reads, and a `_schema_is_current()` tha
 `True` (which would make the sample the full sweep's cost, not the probe's).
 
 ⚠️ **Both runs are reported for every figure, and where they disagree both numbers stand.** The box
-carried load **6.1–7.6** in run 1 and **9.4–9.9** in run 2 — two different machines-under-load, one
+carried load **6.1–7.6** in run 1 and **9.4–11.3** in run 2 — two different machines-under-load, one
 of them heavily oversubscribed — which is why the ABSOLUTE cost is the figure this file leads with and
-the derived SHARES are given as ranges.
+the derived SHARES are given as ranges. ⚠️ **Run 2 drifted materially DURING the measurement** (1-min
+average 9.59 → 11.27, +17.5 %), and the §1 block-pair deltas are the figures most exposed to that: the
+delta is a before/after pair of sequential blocks, so a load rise between them lands in it. That is
+stated rather than smoothed — it is also why the §1 numbers are quoted as a RANGE across the two runs
+and why no single figure is presented as *the* cost.
 
 ## 1 · `_nudge_candidates` — a 400-row `:Point` scan returning FULL `content`
 
@@ -50,9 +54,12 @@ call reads **12.3–13.3 ms** in the four cells.
 The door delta is self-controlled **on ONE graph**: same seeds, same door, the only difference is an
 instance-attribute patch (`sdk._nudge_candidates = lambda *a, **k: []`). ⚠️ **The two blocks are
 SEQUENTIAL, not interleaved** (with-nudge first, then patched), so a load drift between them lands
-entirely in the delta — the artifact publishes load before AND after so a reader can see that it did
-not drift materially in either run. ⇒ **an advisory field is ~65–68 % of the `create_entity` latency
-measured here** (12.06/18.41 = 65.5 %, 11.12/16.81 = 66.1 %, 12.28/17.97 = 68.3 %, 12.84/18.81 = 68.2 %)
+entirely in the delta — the artifact publishes load before AND after so a reader can see it.
+⚠️ In run 2 that check FAILS: the 1-min average rose 9.59 → 11.27, so its block-pair deltas are
+the figures most exposed to drift and are quoted as part of a cross-run range, never on their own.
+
+⇒ **an advisory field is ~65–68 % of the `create_entity` latency measured here** (12.06/18.41 = 65.5 %,
+11.12/16.81 = 66.1 %, 12.28/17.97 = 68.3 %, 12.84/18.81 = 68.2 %)
 — **+11.1 to +12.8 ms of a 16.8–18.8 ms write.**
 
 **The payload axis — and the first cut of this instrument got it wrong.** Content length against the
