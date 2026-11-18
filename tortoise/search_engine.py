@@ -3744,12 +3744,19 @@ def run_vector_query(
     four-slot contract recorded there, and the arity this function's own
     annotation and call site use. It is tried FIRST and records
     :data:`MECHANISM_PGVECTOR` when it answers. ``None`` from the
-    callable means this label is not served from the record
-    (``object``/``subject`` — see ``record_vector.LABEL_SERVED``), and the call
-    falls through to the graph branches below, which is that label's real path
-    and always was. An EXCEPTION takes the same graph fallback and is recorded
-    as ``scan_fallback``, because the payload is still IN the graph — the move
-    took the INDEX, not the property. Default ``None`` = the graph branches
+    callable means this label has **no record table serving it at all**, so the
+    call falls through to the graph branches below, which is that label's real
+    path and always was. ⛔ Since `#13422` that is NOT `object`/`subject`: both are
+    in ``record_vector.LABEL_SERVED`` and answer from the record when the leg is
+    armed, with `#689`'s terminal cage applied from the record's own fold. A label
+    that IS served but DECLINEs this particular read (the folded arm's bind bound
+    or its row/event prefetch budget) raises
+    ``record_vector.RecordVectorDeclined`` instead, deliberately — so the
+    fallback is NAMED (`#4999`) and the graph branch is handed only the REMAINDER
+    of the read rather than the whole budget again (`#11691`). Any EXCEPTION takes
+    the same graph fallback and is recorded as ``scan_fallback``, because the
+    payload is still IN the graph — the move took the INDEX, not the property.
+    Default ``None`` = the graph branches
     only, byte-identical to the pre-#11642 behaviour, so a box with no record
     armed is unchanged and every existing caller is unchanged.
 
@@ -3759,8 +3766,10 @@ def run_vector_query(
     one shape for both legs is what makes the single ordering pass
     ranking-identical between them. So the budget reaches the record's
     ``statement_timeout`` as ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``, where
-    the quotient is ``record_vector.record_statement_ms`` — a THIRD of the read
-    per statement, because the leg may issue two of them and this collector takes
+    the quotient is ``record_vector.record_statement_ms`` — the read divided by
+    the ARM's statement count plus one (two statements for a column-filtered
+    label, three for a folded one, so a third or a quarter of the read per
+    statement) — and this collector takes
     only futures that are already done when its deadline expires. That leaves the
     graph branch a reserve to answer from after a cancellation, so a record query
     slower than the read is cancelled INSIDE the read, the graph answers, and the
@@ -3980,10 +3989,16 @@ def run_vector_query(
     # graph (writes stay there; the INDEX is what moved).
     #
     # Three outcomes from the searcher, and each takes a different branch:
-    #   * None  -> this label is not served from the record (object/subject).
-    #             Fall THROUGH to the graph, silently: that is their real path
-    #             and always was (`#4997`: the graph holds exactly one vector
-    #             index, on `Point`).
+    #   * None  -> NO record table serves this label, so the graph is its real
+    #             path. Fall THROUGH, silently. ⛔ Since `#13422` that is no
+    #             longer `object`/`subject` — both are in
+    #             `record_vector.LABEL_SERVED` and answer `pgvector` once the
+    #             dense leg is armed, with `#689`'s terminal cage applied from the
+    #             record's own fold. A label that IS served but declines THIS read
+    #             (the folded arm's bind bound) takes the `raise` arm below
+    #             instead, so the fallback is named. The graph still answers while
+    #             `record_vector.cutover_armed()` is OFF, which is the default, so
+    #             the graph leg is what ships today.
     #   * rows  -> record `pgvector` and return through the SAME ordering pass
     #             the graph branches use, so the ranking cannot drift between
     #             the two by construction (`#6214`/`#10121`).

@@ -266,6 +266,7 @@ __all__ = [
     "AmbiguousRecordColumn",
     "CacheProjectionError",
     "LifecycleEvent",
+    "LifecycleEventStreamTruncated",
     "PlacementTableUnavailable",
     "ProjectionPlan",
     "ProjectionReport",
@@ -1487,6 +1488,26 @@ class AmbiguousRecordColumn(CacheProjectionError):
 
 class UnprojectableRecord(CacheProjectionError):
     """A record row that cannot be projected (a missing contract key)."""
+
+
+class LifecycleEventStreamTruncated(CacheProjectionError):
+    """A caller-supplied event ``limit`` was reached — the stream may be longer.
+
+    ⛔ RAISED, NOT REPORTED IN THE RETURN VALUE, because the count the caller can
+    see is the wrong count. ``_lifecycle_events`` applies its ``LIMIT`` to the
+    RAW rows and then DROPS rows its parse loop cannot use (a non-int ``seq``, a
+    creation record with no ``node_id``, a payload with no ``eventKind``, ...),
+    so ``len(events)`` under-counts the stream by exactly the number of dropped
+    rows — and a caller that fetches ``budget + 1`` and compares ``len(events) >
+    budget`` therefore cannot witness truncation at all once ONE row is dropped.
+    The ROW count is the only honest witness, and only this function holds it.
+
+    The failure that made this a raise: the caller's guard silently passed, the
+    fold replayed a TRUNCATED stream, terminal folds went unapplied, and the leg
+    SERVED rows the record calls terminal — the `#689` fail-OPEN direction the
+    budget exists to prevent (measured: 50,001 raw rows, one unparseable, 50,000
+    parsed, 10,000 events never seen, guard silent).
+    """
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3170,7 +3191,8 @@ def _as_names(value: Any) -> tuple[str, ...]:
 
 def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
                       target: str | None = None,
-                      target_id: str | None = None) -> tuple[LifecycleEvent, ...]:
+                      target_id: str | None = None,
+                      limit: int | None = None) -> tuple[LifecycleEvent, ...]:
     """The record's lifecycle rows as fold inputs, ordered by `seq`.
 
     `target` narrows by NAME (the connector/pack fold's coordinate), `target_id`
@@ -3179,13 +3201,47 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
     they are OR-ed by the SQL, and a caller that holds both must pass both or the
     single-row fold disagrees with the rebuild (#9974 — a `restatus` names its
     target by id only).
+
+    ``limit`` is a ROW bound for a caller that cannot afford the whole stream
+    (`record_vector._folded_terminal_keys`, whose prefetch runs an uncancellable
+    Python fold over every event it is handed). ``None`` — the DEFAULT, and every
+    pre-existing caller — reads the stream whole, byte-identically to before.
+    ⚠️ A caller that passes one MUST handle
+    :class:`LifecycleEventStreamTruncated`, which this function raises when the
+    page came back FULL: a truncated stream folds to the WRONG answer — a
+    terminal fold left unapplied — and a silent short answer is exactly the
+    failure a row bound must not introduce. ⛔ The witness is the ROW count, so
+    this function is the ONLY place it can be taken: the parse loop below drops
+    rows, which makes the count of returned events under-count the stream by the
+    number of drops.
     """
+    # ⛔the `LIMIT` is APPENDED, never substituted, and the params tuple is
+    # EXTENDED rather than rebuilt: with `limit=None` the statement and its
+    # parameters are byte-identical to what every pre-existing caller already
+    # sends, so this bound cannot change an unbounded read's plan or pin.
+    tail = "" if limit is None else " LIMIT %s"
     if target is None and target_id is None:
-        rows = _rows(cur, _LIFECYCLE_EVENTS_SQL + " ORDER BY seq",
-                     (org_id, graph_id))
+        params: tuple[Any, ...] = (org_id, graph_id)
+        sql = _LIFECYCLE_EVENTS_SQL + " ORDER BY seq" + tail
     else:
-        rows = _rows(cur, _LIFECYCLE_EVENTS_FOR_ONE_SQL + " ORDER BY seq",
-                     (org_id, graph_id, target, target, target, target_id))
+        params = (org_id, graph_id, target, target, target, target_id)
+        sql = _LIFECYCLE_EVENTS_FOR_ONE_SQL + " ORDER BY seq" + tail
+    rows = _rows(cur, sql, params if limit is None else (*params, int(limit)))
+    # ⛔ THE TRUNCATION WITNESS IS TAKEN HERE, ON THE RAW ROWS, AND NOWHERE ELSE.
+    # `_rows` already applied `LIMIT` to the ROWS; the loop below then DROPS the
+    # rows it cannot parse. So a caller comparing `len(events) > budget` is
+    # comparing a post-drop count against a pre-drop bound: one dropped row in a
+    # `budget + 1` page makes that comparison false, the overflow goes unseen,
+    # and the fold replays a truncated stream (terminal folds unapplied -> the
+    # leg serves rows the record calls terminal, the `#689` fail-OPEN direction).
+    # A FULL page is treated as truncated even when nothing was dropped: with
+    # `LIMIT budget + 1`, "page is full" and "stream continues" are the same
+    # observation, and declining is the safe side of that ambiguity.
+    if limit is not None and len(rows) >= int(limit):
+        raise LifecycleEventStreamTruncated(
+            f"event stream reached the caller's LIMIT of {int(limit)} row(s) "
+            f"({len(rows)} fetched) — the stream may be longer, so this page "
+            "cannot be folded as if it were whole")
     out: list[LifecycleEvent] = []
     for row in rows:
         try:
@@ -3272,13 +3328,20 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
 
 def read_lifecycle_events(conn: Any, *, org_id: str, graph_id: str,
                           target: str | None = None,
-                          target_id: str | None = None) -> tuple[LifecycleEvent, ...]:
+                          target_id: str | None = None,
+                          limit: int | None = None) -> tuple[LifecycleEvent, ...]:
     """The record's event stream as fold inputs, for one tenant scope.
 
     The CONNECTION-scoped entry point to :func:`_lifecycle_events`, for a door
     that holds a connection rather than a cursor (``record_serve.read_node``).
     ``target`` narrows to the events that could name one Object, so a
     single-row read folds only the events that could POSSIBLY name it.
+
+    ``limit`` is a ROW bound, forwarded as-is: a page that comes back FULL raises
+    :class:`LifecycleEventStreamTruncated` — this function can therefore
+    RAISE, and a caller that passes a ``limit`` must handle it. See
+    :func:`_lifecycle_events` for why the witness is the row count and not the
+    number of events returned.
 
     ⚠️ What that buys is bounded, and it is not "avoids a scan": the predicate
     is on `payload` expressions, while the table's only index is
@@ -3292,7 +3355,7 @@ def read_lifecycle_events(conn: Any, *, org_id: str, graph_id: str,
     """
     cur = _rp.scope_connection(conn, org_id)
     return _lifecycle_events(cur, org_id=org_id, graph_id=graph_id,
-                             target=target, target_id=target_id)
+                             target=target, target_id=target_id, limit=limit)
 
 
 def _lifecycle_index():
