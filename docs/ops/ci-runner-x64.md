@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-runner-pool, ci-headroom-guards
 aboutObjects: tortoise, tools/install-ci-runner-x64.sh, scripts/ci_runner_gate.sh
 created: 2026-10-22
-updated: 2026-11-01
+updated: 2026-11-18
 ---
 
 # x86_64 CI runners — the fallback pool's second architecture
@@ -22,22 +22,22 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 80 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 76 until `release-artifact-canary` added its `canary` + `report` jobs (#12422, which did not re-derive this row: 78), then the `consent-key-drift` scheduled job (#12464), and now `cypher-diff.yml`'s `differential` job (#13098) |
+| `ubuntu-latest` | 78 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool — was 76 until `release-artifact-canary` added its `canary` + `report` jobs (#12422, which did not re-derive this row: 78), then the `consent-key-drift` scheduled job (#12464), then `cypher-diff.yml`'s `differential` job (#13098), and now `closes-coherence.yml`'s `closes-coherence` and `redis-guard.yml`'s `redis-guard` have LEFT this row for the fleet's x64 pool (#13596, departures 3 and 4 below) |
 | `ubuntu-24.04` | 10 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
-Counts are JOBS (not files), re-measured 2026-11-17 at this head (`yaml.safe_load` each workflow,
-count each job's `runs-on`): **80 / 10** — the label classes `--status`'s `label-coverage` block
+Counts are JOBS (not files), re-measured 2026-11-18 at this head (`yaml.safe_load` each workflow,
+count each job's `runs-on`): **78 / 10** — the label classes `--status`'s `label-coverage` block
 measures, though that block reports RUNNER counts per label, not job counts: measured on the live
 pool on 2026-10-29 it printed `ubuntu-24.04 = 7 of 7
 online runner(s)` (a bare version pin is measured against the x64 sub-pool, its own denominator,
 and only ONLINE runners are counted — an offline runner cannot be handed a job) and
 `ubuntu-latest = 0 of 12 online runner(s)` (a report — the gate is simply not routing that label
 here). ⛔ On THIS tree that block refuses instead — `exit 4` and NO row — because one job has no
-static label set at all (see *Verify it*); it counted 90 / 13 before it stripped whole-line
-comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so TWO jobs
-here are in neither — `python-ci.yml`'s `test` (`${{ fromJSON(matrix.runner) }}`, the refusal below)
-and `ci.yml`'s `repo-harnesses` (`[self-hosted, self-hosted-x64]`, the #10237 canary, which names
-no `ubuntu-*` label); `--status` reads every documented `runs-on` form (scalar, array, block
+static label set at all (see *Verify it*); it counted 88 / 13 before it stripped whole-line
+comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so FOUR jobs
+here are in neither — `python-ci.yml`'s `test` (`${{ fromJSON(matrix.runner) }}`, the refusal below),
+`ci.yml`'s `repo-harnesses` (the #10237 canary), plus the two #13596 housekeeping pins
+(`closes-coherence.yml`, `redis-guard.yml`) — none of whose `runs-on` names an `ubuntu-*` label; `--status` reads every documented `runs-on` form (scalar, array, block
 sequence, and a `group:`/`labels:` mapping) and refuses with `exit 4` rather than guess on an
 expression it cannot resolve to a static label set — including when the expression is only ONE
 member of a list that otherwise parses, since a parsed sibling must not answer for an unparsed
@@ -54,9 +54,9 @@ The architecture labels are **derived by GitHub from the host at registration** 
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
 and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
 
-- `ARM64`/`X64` are **ornaments in DEFAULT routing** — exactly one job in the default tree names
-  one (`ci.yml`'s `repo-harnesses`, `[self-hosted, self-hosted-x64]`, the #10237 canary recorded
-  below, whose pin excludes the ARM64 VMs), and nothing else in the tree is class-sensitive today.
+- `ARM64`/`X64` are **ornaments in DEFAULT routing** — exactly three jobs in the default tree name
+  one (`ci.yml`'s `repo-harnesses`, the #10237 canary below, and the two #13596 housekeeping pins
+  `closes-coherence` + `redis-guard`), and nothing else in the tree is class-sensitive today.
   They are NOT unroutable: labels match cumulatively and a custom label routes on its own (that is
   how `ubuntu-latest` reaches the pool, next bullet), so a bare `runs-on: self-hosted-x64` DOES
   select this box. What the repo refuses **as a default** is not a spelling but a CLASS — any
@@ -66,8 +66,8 @@ and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`
   never to `self-hosted`", and the reason is recorded at `:2153-2155` — a `self-hosted` pin removes
   the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS and "the
   aggregate stays pending — not answered yet" instead of being answered by the pool.
-  **Two departures are recorded below** — `CI_SHARD_ROUTING=pool-split` names
-  `[self-hosted, self-hosted-x64]` on the ODD rows (OPT-IN), and the #10237 canary pins it by DEFAULT on a non-required job (both carry `OVERRIDES:` + outage-wait exposure).
+  **Four departures are recorded below** — `CI_SHARD_ROUTING=pool-split` names
+  `[self-hosted, self-hosted-x64]` on the ODD rows (OPT-IN), the #10237 canary pins it by DEFAULT on a non-required job, and the two #13596 housekeeping pins do the same on non-required legs (all carry `OVERRIDES:` + outage-wait exposure).
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
   (`fallback_on`) attaches it, `:292` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
@@ -984,9 +984,13 @@ job itself:
   layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5403`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
-⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a
-re-run before that head can land; a required leg's red also reddens the aggregate. It bypasses the
-label attachment `scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
+⛔ **Do not copy this pin onto a required leg.** The override is scoped to NON-REQUIRED jobs whose red
+costs a re-run before that head can land — `repo-harnesses` here, and the two #13596 housekeeping
+pins recorded at the foot of this page. A required leg's red also reddens the aggregate, which is why
+no required leg is pinned **by default**: the one exception is `pool-split`, which pins the ODD rows
+of a REQUIRED shard (`test (b)`, `(d)`, `(f)`, `(h)`), is OPT-IN and off by default, and records its
+own cost under its `OVERRIDES:` block above (`:905-922`). It bypasses the label attachment
+`scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
 
 ### Scope of the #10237 canary's proof — scheduling only; the ask's proof list is NOT discharged
 
@@ -1146,3 +1150,47 @@ tools/install-ci-runner-x64.sh --repair-labels --count 8
   fallback not engaged the computed set is `self-hosted-x64` alone and `ubuntu-latest` stays off
   until the gate attaches it again. It cannot *detach* either — an explicit `--fallback off` is
   refused (exit 2) precisely because a repair cannot remove a label.
+
+### Residual: the two #13596 housekeeping pins are POOL-ONLY too — departures 3 and 4
+
+**OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `closes-coherence.yml`'s
+`closes-coherence` job and `redis-guard.yml`'s `redis-guard` job now read
+`runs-on: [self-hosted, self-hosted-x64]` (#13596), because both were queueing on the hosted pool
+while the fleet's own capacity sat idle — measured at the owner's 2026-11-18 decision on that PR:
+**151 runs queued, 8 in progress, 21 self-hosted runners online with only 3 busy**, so 18 pool
+runners were idle while the hosted pool backed up. Neither is a required context
+(`docs/ci/required-contexts.json`'s `required_contexts` lists all seven, and neither job is among
+them; `redis-guard.yml`'s own header records the same), so the departure is scoped exactly like
+the #10237 canary above: a pin whose red costs a WAIT and a re-run, never a required leg.
+
+What it costs, stated rather than inherited, in the three modes the canary records above. A "WAIT
+with no hosted half" is only the first: while the pool is down or the label is detached,
+`closes-coherence` never advises on **any** PR (that workflow carries no `paths:` filter) and
+`redis-guard`'s `push: main` run never measures — a QUEUED job with no red and no annotation.
+
+⛔ Two of those modes are not only a missing measurement, which is why this pin is not free: a pool
+box without `gh` reds `closes-coherence` by design (the #9018 contract below fails closed), and a
+runner that claims the job and drops it reports ZERO steps (the canary's recorded mode above,
+`:977-985`). `closes-coherence` is unfiltered, so either red sits on every PR's tree, and the rail
+merges with `--admin` — required-ness decides nothing, so any red on that tree blocks the head's
+landing until someone re-runs it (`:959-961`). Non-required is what keeps this work out of the
+aggregate; it is NOT what makes its red free.
+
+`redis-guard` is the cheaper half: it is filtered both ways (`paths:` on `pull_request` and on
+`push: main`, `redis-guard.yml:19,26`), so its red can only reach a PR that touches `tortoise/**`,
+`graph-scripts/**`, the guard itself, or that workflow.
+
+Two things this pin keeps TRUE, which is why it is safe on a pool runner:
+
+- `closes-coherence` carries the #9018 tool contract (`Ensure gh` from
+  `.github/scripts/runner-tools.sh`, no `continue-on-error`), so a pool box without `gh` REDS this
+  leg instead of silently reporting the advisory as measured — the property
+  `tests/test_runner_tool_contract.py` sweeps for any job pinned to a pool label.
+- `redis-guard` needs no contract step: its only `run:` is `python3 tools/redis-guard.py`, whose only
+  subprocess is `git rev-parse --show-toplevel`, and the job pins `actions/setup-python@v5` / `3.12`
+  itself, so moving off `ubuntu-latest` cannot change the interpreter.
+
+`tests/test_ci_runner_x64_install.py::test_every_pool_only_pin_is_named_in_the_runbooks_departure_record`
+pins this: a new static pool-only `runs-on:` that is not named in one of these `OVERRIDES:` blocks
+reds at TEST time instead of drifting into the tree unrecorded — the defect this section exists to
+repair, one layer up.
