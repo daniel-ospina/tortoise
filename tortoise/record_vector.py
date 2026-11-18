@@ -132,14 +132,24 @@ HNSW_ITERATIVE_SCAN = "strict_order"
 #: `docs/architecture/SEARCH-ARCHITECTURE.md` carries the same correction.
 #:
 #: WHAT IT COSTS, named rather than implied: two tenant-scoped record reads
-#: (the label's rows, then its status-bearing journal events) before the kNN, so
-#: these two labels spend all :data:`RECORD_LEG_STATEMENTS_PER_READ` of a read's
-#: budget and have no share left for a separate shortfall `count(*)` — the
-#: prefetch IS the count (:func:`_folded_terminal_keys` returns both). A tenant
-#: whose journal makes that prefetch slow falls through to the graph branch by
-#: TIMEOUT, recorded as the named `scan_fallback`, which is the same posture every
-#: other over-budget record leg takes. Materialising the fold so the prefetch
-#: disappears is the follow-up, and it is what `#13335`'s successor should cost.
+#: (the label's rows, then its status-bearing journal events) before the kNN — THREE
+#: data statements where the column arm issues two. Two consequences, both taken
+#: deliberately rather than inherited:
+#:
+#:   * **the shortfall `count(*)` is not issued.** The prefetch already returns the
+#:     exact `available` figure (:func:`_folded_terminal_keys` returns both), so a
+#:     fourth statement would re-ask a question this leg has answered.
+#:   * **the read budget is divided by FOUR, not by
+#:     :data:`RECORD_LEG_STATEMENTS_PER_READ`.** The divisor counts the statements
+#:     the leg may issue PLUS the one share it must leave for the graph branch; with
+#:     three statements a divisor of three would let this leg spend the whole read
+#:     and hand the graph a floored `1 ms` — the `#11691` reserve, which is exactly
+#:     what `record_statement_ms`'s ``statements`` argument exists for.
+#:
+#: ⚠️ And the FOLD's Python work is bounded by nothing in this module — the
+#: per-statement bound does not reach between statements. See
+#: :data:`_FOLDED_TERMINAL_KEY_BUDGET` for the measured cost and the residual.
+#: Materialising the fold, so the prefetch disappears, is the follow-up.
 #:
 #: The ``id column`` mirrors `search_engine`'s ``id_field`` derivation exactly
 #: (#448): ``source``/``document`` answer the canonical key ``url``, ``event``
@@ -514,57 +524,82 @@ def _sql_literal(value: str) -> str:
 #: and the bound is therefore reachable only while the PREFETCH fits its statement
 #: share — which is why that prefetch selects every column EXCEPT the two payload
 #: ones (:func:`_fold_prefetch_select`). MEASURED on 8,000 `object` rows: `SELECT *`
-#: took **~2.0 s** (it materialised `embedding` jsonb at ~2.5 KB/row and the
-#: generated `embedding_vec` at ~7 KB/row, neither of which the fold reads), and the
-#: payload-free read took **~0.19 s** — against the ~0.125 s share a 500 ms read
-#: gives three folded statements plus the graph's reserve. So the bound is the
-#: operative guard it claims to be at this scale, while `SELECT *` made it
-#: unreachable (the statement was cancelled first, and the leg reported a timeout
-#: while presenting a bound it could never fire).
+#: took **~2.0 s** and the payload-free read took **~0.19 s** (≈47 ms of it the
+#: SELECT, the rest `node_from_row` + `apply_event_stream_folds`), against the
+#: ~0.125 s share a 500 ms read gives three folded statements plus the graph's
+#: reserve. So the bound is the operative guard it claims to be at this scale,
+#: while `SELECT *` made it unreachable — the statement was cancelled first, and the
+#: leg reported a timeout while presenting a bound it could never fire.
 #:
-#: ⛔ THE RESIDUAL, named rather than implied: ~0.19 s for 8,000 rows is still ABOVE
-#: the folded arm's per-statement share of a 500 ms read, so a tenant at that scale
-#: overruns its share and falls through to the graph as the NAMED `scan_fallback` —
-#: correct, but it means these two labels are not record-served at fleet scale. The
-#: cost is the FOLD ITSELF (~0.14 s of it is `node_from_row` +
-#: `apply_event_stream_folds` over 8,000 nodes), not the read, and it is removed by
-#: materialising the fold — the follow-up that makes the prefetch and this constant
-#: both disappear. Filed rather than attempted here: a per-target narrowing of the
-#: node read is exactly the place where a missed path becomes a `#689` LEAK, and
-#: correctness-before-cost is the order this lane was given.
+#: ⛔ THE RESIDUAL, named rather than implied, and named CORRECTLY (`#13466` review
+#: cycle 2, P3 — the first statement of it was wrong in its mechanism): the fold's
+#: Python work is bounded by NOTHING in this module. `statement_timeout` bounds
+#: STATEMENTS; `record_statement_ms` divides the read among them; the fold runs
+#: BETWEEN them and no arithmetic here bounds it. So a tenant large enough that the
+#: fold overruns what is left of the read does not get a `scan_fallback` — it gets
+#: the fused read's collector (`search_engine.degradation_chain`) expiring on its own
+#: deadline and DISCARDING the rows as `timeout`, which is the `#11691` outcome the
+#: divisor work exists to prevent, one layer up. At the measured 0.19 s for 8,000
+#: rows inside a 500 ms read the leg ANSWERS; the cost is the fold, it is
+#: unbounded above, and it is removed by materialising the fold — the follow-up that
+#: makes the prefetch and this constant both disappear. Filed rather than attempted
+#: here: a per-target narrowing of the node read is exactly the place where a missed
+#: path becomes a `#689` LEAK, and correctness-before-cost is the order this lane was
+#: given.
 _FOLDED_TERMINAL_KEY_BUDGET = 4000
 
-#: `table -> `t.col, t.col, …`` — every column of the label's table EXCEPT the two
-#: payload ones. Built once per process from the record's OWN column census
-#: (`record_projection.table_columns`, itself migration-fingerprint-cached), so a
-#: column added by a later migration is read without an edit here and no
-#: hand-written list can go stale.
+#: The column names dropped from the fold's prefetch: the record's STORED payloads.
 #:
-#: ⛔ WHY THE PAYLOAD IS DROPPED, measured (`#13466` review P2): the fold reads
-#: `id`/`name`/kind/`superseded_by`/`superseded_at` and the NULL-ness of
-#: `embedding_vec` — never the vector, never the jsonb. `SELECT *` materialises
-#: both (≈2.5 KB + ≈7 KB per row) and measured **~2.0 s on 8,000 rows** against
-#: **~0.19 s** for this projection end to end (**~47 ms** for the SELECT alone), so
-#: the great majority of the cost was two columns the fold never looks at.
-#:
-#: ⚠️ THE TWO NAMES ARE NOT A SECOND DECLARATION OF THE SCHEMA: they are the two
-#: the record declares DERIVED-and-STORED as VECTORS (`STORED_VECTOR_PROPS`' own
-#: columns), and a column merely absent here would not be dropped silently — it
-#: would still be `SELECT`ed once the census lists it.
-_FOLD_PREFETCH_SELECT: dict[str, str] = {}
+#: ⛔ NOT A THIRD DECLARATION — both are read from the homes that already declare
+#: them. `stored_form.STORED_VECTOR_PROPS` is the set of STORED vector properties,
+#: and `cache_projection.GENERATED_COLUMNS` is the generated-column set (the
+#: `embedding_vec` the ONE converter derives). `#13466` review cycle 2 (P3) caught
+#: the first cut hardcoding both names while its own docstring claimed it was
+#: reading those declarations: a vector prop added to either home would have been
+#: re-selected here (cost) with nothing going red.
+def _fold_prefetch_dropped() -> frozenset[str]:
+    """The columns the fold never reads — declared by the modules that own them."""
+    from .cache_projection import GENERATED_COLUMNS
+    from .stored_form import STORED_VECTOR_PROPS
+
+    return frozenset(STORED_VECTOR_PROPS) | frozenset(GENERATED_COLUMNS)
 
 
 def _fold_prefetch_select(table: str) -> str:
-    """The payload-free column list for `table`, built once and cached."""
-    cached = _FOLD_PREFETCH_SELECT.get(table)
-    if cached is not None:
-        return cached
+    """`t.col, t.col, …` for `table` — every column EXCEPT the stored payloads.
+
+    ⛔ WHY THE PAYLOAD IS DROPPED, measured (`#13466` review P2): the fold reads
+    `id`/`name`/kind/`superseded_by`/`superseded_at` and the NULL-ness of
+    `embedding_vec` — never the vector, never the jsonb. `SELECT *` materialises
+    both, and on 8,000 rows it measured **~2.0 s** against **~0.19 s** for this
+    projection. Per-row sizes, measured with `pg_column_size` on `pgvector/pgvector:pg16`
+    (`#13466` review cycle 2): `embedding_vec` is a FIXED `vector(384)` = **1,544 B**
+    (it is a fixed-width type, so it cannot be larger), and `embedding` jsonb for a
+    384-element array is **4.8–7.7 KB** depending on whether the floats are
+    short-repr or full-precision. Both dwarf every column the fold does read.
+
+    ⚠️ NOTHING IS SILENTLY LOST BY THE NARROWER ROW. `cache_projection.projected_columns`
+    excludes these two for both labels, so `_props_from_row` never projected them in
+    the first place — the `RecordNode`s here are byte-identical to the ones
+    `SELECT *` produced (verified in `#13466` cycle 2: keys equal, props identical,
+    no prop gained or lost). A missing payload column therefore cannot change a fold
+    OUTCOME, which is what makes this a cost fix rather than a behaviour change.
+
+    ⛔ RE-DERIVED PER CALL FROM THE CENSUS, deliberately UNCACHED here.
+    `record_projection.table_columns()` is itself cached and invalidated on the
+    migrations' fingerprint (~0.5 ms per call including its own copy), and a
+    process-lifetime cache in THIS module would defeat exactly that invalidation: a
+    column added by a migration mid-process would be silently absent from the fold's
+    props, and a dropped one would render a statement that errors on every read until
+    restart (`#13466` review cycle 2, P3 — demonstrated against the cached first cut).
+    A sub-millisecond re-derivation against a leg that spends tens of milliseconds is
+    the right side of that trade.
+    """
     from .record_projection import table_columns
 
-    columns = sorted(table_columns()[table] - {"embedding", "embedding_vec"})
-    rendered = ", ".join(f"t.{column}" for column in columns)
-    _FOLD_PREFETCH_SELECT[table] = rendered
-    return rendered
+    dropped = _fold_prefetch_dropped()
+    return ", ".join(f"t.{column}"
+                     for column in sorted(table_columns()[table] - dropped))
 
 
 def _rows_as_dicts(cur: Any, sql: str, params: tuple) -> list[dict[str, Any]]:
@@ -880,17 +915,18 @@ def vector_search(
 
     THREE outcomes, and the third is the one that is easy to get wrong:
 
-    * ``None`` — this ``entity_type`` is NOT served from the record *on this
-      read*: either it is not in :data:`LABEL_SERVED` at all, or its folded
-      terminal-key set exceeded :data:`_FOLDED_TERMINAL_KEY_BUDGET`. The caller
+    * ``None`` — **no record table serves this ``entity_type`` at all**. The caller
       MUST take its graph branch; this is not an empty answer and must never be
       rendered as one.
     * ``[]`` — served, asked, and the filter genuinely selects nothing.
     * rows — the answer.
 
-    Raises :class:`RecordVectorError` when the record cannot answer (so the
-    caller can take the graph branch and NAME the fallback), and
-    :class:`VectorShortfall` when it answered with fewer rows than the filter
+    Raises :class:`RecordVectorDeclined` when a SERVED label declines THIS read (its
+    folded terminal-key set exceeded :data:`_FOLDED_TERMINAL_KEY_BUDGET`) — a
+    different answer from ``None`` on purpose, because the caller must NAME the
+    fallback and hand the graph only the remainder of the read;
+    :class:`RecordVectorError` when the record cannot answer (same two consequences);
+    and :class:`VectorShortfall` when it answered with fewer rows than the filter
     selects (so the caller reports an incomplete answer rather than a small one).
 
     ``timeout_ms`` is the READ's budget (#11691) — not the statement's. It is

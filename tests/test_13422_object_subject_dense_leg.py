@@ -22,7 +22,8 @@ WHAT THIS FILE PINS (DB-FREE — the live arm is
    (the ONE dispatcher) rather than carrying a list of its own, and it reads the
    fold from `cache_projection` rather than restating it;
 4. the over-budget bound declines the RECORD's turn and never degrades the
-   answer — it returns `None`, which the caller answers from the graph.
+   answer — it RAISES `RecordVectorDeclined`, so the caller NAMES the fallback
+   (`#4999`) and hands the graph only what is left of the read (`#11691`).
 """
 from __future__ import annotations
 
@@ -128,13 +129,17 @@ def test_the_audit_opt_in_emits_no_clause_on_the_column_arm():
 def test_the_folded_keys_are_the_columns_the_leg_returns():
     """⛔ THE KEY COORDINATE. The exclusion list must name what the SELECT emits.
 
-    For `object`/`subject` the record's ``node_key`` is the ``name``, while the
-    leg SELECTs ``id`` and `node_from_row` folds by `id`
-    (`cache_projection.KEY_PROPERTY`). A list built from ``node_key`` would
-    exclude nothing — every terminal row would still be served — and nothing
-    would error, which is the silent-`#689` shape this whole change is about.
-    Pinned textually because the mistake is a column NAME, and the live arm can
-    only catch it once a row exists.
+    ⛔ This docstring used to say the record's ``node_key`` is the ``name``, which
+    is FALSE at this head — `20261027000001`'s `chk_*_node_key_is_contract_key`
+    forces ``node_key = id``, and `cache_projection.KEY_PROPERTY` is `id` for both
+    labels. The claim is corrected here rather than left, because a lane following
+    it would build the exclusion from the wrong column and that sentence is what
+    would have told them to. What matters is narrower and is what this pins: the
+    exclusion must use ``LABEL_SERVED[...][1]`` — the column the SELECT returns —
+    and `test_the_fold_key_coordinate_is_the_legs_id_column` below pins the other
+    half, that `node_from_row(...).key` IS that column. The mistake is a column
+    NAME, so it is pinned textually; the live arm cannot catch it because every
+    seeded row satisfies `id == name == node_key` by constraint.
     """
     tree = ast.parse(MODULE.read_text())
     func = next(node for node in ast.walk(tree)
@@ -333,7 +338,17 @@ def test_the_prefetch_does_not_select_the_payload_columns():
     ~27 ms without — i.e. at a 166 ms statement share the leg could never answer on
     any tenant of realistic size, while claiming a bound it could not reach.
     """
+    from tortoise.cache_projection import GENERATED_COLUMNS
     from tortoise.record_projection import table_columns
+    from tortoise.stored_form import STORED_VECTOR_PROPS
+
+    # ⛔ The dropped set comes from the DECLARED homes, not a literal in this test
+    # either (`#13466` cycle 2, P3): the first cut hardcoded the two names while its
+    # docstring claimed to read those declarations.
+    assert record_vector._fold_prefetch_dropped() == (
+        frozenset(STORED_VECTOR_PROPS) | frozenset(GENERATED_COLUMNS))
+    assert "embedding" in STORED_VECTOR_PROPS
+    assert "embedding_vec" in GENERATED_COLUMNS
 
     columns = table_columns()
     for table in ("object", "subject"):
@@ -342,6 +357,6 @@ def test_the_prefetch_does_not_select_the_payload_columns():
         assert "embedding_vec" not in rendered, rendered
         # …and it is the census minus exactly the two payload columns, so a
         # migration that adds a column is read without an edit here.
-        expected = set(columns[table]) - {"embedding", "embedding_vec"}
+        expected = set(columns[table]) - record_vector._fold_prefetch_dropped()
         named = {part.strip().removeprefix("t.") for part in rendered.split(",")}
         assert named == expected, (sorted(expected - named), sorted(named - expected))
