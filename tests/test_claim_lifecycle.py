@@ -291,6 +291,14 @@ def _read_side_legacy_note(section: str | None = None) -> str:
     Reads the paragraph's `>` continuation lines with it: a rewrap changes nothing
     semantic and must not redden a content pin.
 
+    ⛔ AND TWO NOTES ARE REFUSED, NOT JOINED. The paragraph break above replaced a
+    blank-line split whose uniqueness assert (``§5 has 2 blockquote paragraph(s)
+    naming 'read-side legacy'``) was the only thing stopping a GUTTED disclosure
+    from borrowing another paragraph's words: joining them makes the disclosure
+    assertions pass on a note that names none of the retired words (measured —
+    deleting the words from the real note and adding them to a second paragraph
+    beside it left the pin green). Exactly one paragraph must say it.
+
     Returns ``""`` when no such paragraph exists, so the caller's assertion fails
     with the reason rather than this helper raising on a doc that lost the note.
     ``section`` is injectable so the non-vacuity pin can drive it with the pre-v3.37
@@ -309,9 +317,17 @@ def _read_side_legacy_note(section: str | None = None) -> str:
         current.append(stripped)
     if current:
         paragraphs.append(current)
-    return "\n".join(
+    matches = [
         paragraph for paragraph in ("\n".join(p) for p in paragraphs)
-        if "read-side legacy" in paragraph)
+        if "read-side legacy" in paragraph
+    ]
+    if not matches:  # the CALLER fails, and says which words went missing
+        return ""
+    assert len(matches) == 1, (
+        f"§5 has {len(matches)} blockquote paragraph(s) naming 'read-side legacy'; "
+        "exactly one note must disclose the retired words — joining them lets a "
+        "gutted disclosure borrow the words of another paragraph in the same section")
+    return matches[0]
 
 
 def _ontology_status_table_words() -> frozenset[str]:
@@ -493,6 +509,23 @@ def test_ontology_legacy_pin_reads_the_note_not_the_section():
         "the scoped read picked up a word from the tombstone paragraph beside the "
         "note — the paragraph break is being read as a blank line, and §5's notes "
         "are one MD028 blockquote with bare `>` separators")
+    # ⛔ AND A SECOND NOTE IS REFUSED, NOT JOINED. The blank-line split this pin
+    # replaced asserted exactly ONE paragraph said 'read-side legacy' (measured on
+    # this fixture: `§5 has 2 blockquote paragraph(s) naming 'read-side legacy'`).
+    # Dropping that assert leaves a gutted disclosure able to borrow the retired
+    # words from any other paragraph in §5 — the disclosure test passes while the
+    # note discloses nothing. Driven here so the refusal cannot be deleted quietly.
+    two_notes = (
+        "### Point Status Vocabulary (canonical)\n"
+        "\n"
+        "> **`retracted` is read-side legacy** — and this paragraph names neither "
+        "`outdated` nor `archived`.\n"
+        "\n"
+        "> **Unrelated note.** read-side legacy rows may still hold `outdated` and "
+        "`archived` in storage.\n"
+    )
+    with pytest.raises(AssertionError, match="exactly one note"):
+        _read_side_legacy_note(two_notes)
 
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):
