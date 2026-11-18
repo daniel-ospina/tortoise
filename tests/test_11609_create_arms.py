@@ -304,6 +304,53 @@ class TestTheRetiredNamesStillAnswer:
             "state would be silently dropped by the arm")
 
 
+def _point_count(sdk) -> int:
+    """How many `:Point` nodes the graph holds — the ZERO-MUTATION witness."""
+    return sdk._get_proj().g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
+
+
+class TestTheIngestGateStaysClosed:
+    """N1 (#13556 review round 2): a MESSAGE vocabulary is not an allow-list.
+
+    `_ENTITY_ITEM_LABELS` is ingest's Phase-1 `entities[]` type ALLOW-LIST, and
+    step 3's entity writer has no `point`/`diary` branch. Naming the two new arms
+    in that map therefore ACCEPTED a bundle at Phase 1 that step 3 refused with
+    `Phase2Error` — after step 2 had already committed the bundle's points, i.e.
+    the #2422/#7925 partial-mutation class this module closes in half a dozen
+    other places. The arms are named in `create_entity`'s `unknown type` message
+    from `_CREATE_ENTITY_TYPE_ARMS` instead, which no gate reads.
+    """
+
+    @pytest.mark.parametrize("declared", ["point", "diary"])
+    def test_a_point_shaped_entity_item_is_refused_before_any_write(
+            self, sdk_factory, declared):
+        from tortoise.exceptions import Phase2Error
+
+        sdk = sdk_factory()
+        bundle = {"points": [{"content": "a claim in the same bundle"}],
+                  "entities": [{"ref": "e1", "type": declared, "name": "y"}]}
+        with pytest.raises(ValueError) as exc:
+            sdk.ingest(bundle)
+        assert not isinstance(exc.value, Phase2Error), (
+            f"an entities[] item typed {declared!r} reached step 3, so the points it "
+            f"was bundled with were already committed: {exc.value} — Phase 1 must "
+            "refuse the type, with zero mutation")
+        assert _point_count(sdk) == 0, (
+            f"the bundle's points were WRITTEN before the {declared!r} entity item "
+            "was refused — the partial-mutation shape #2422/#7925 exists to stop")
+
+    def test_the_container_message_still_names_its_own_arms(self, sdk_factory):
+        """…and the fix must not shrink the message the map was widened for."""
+        sdk = sdk_factory()
+        with pytest.raises(ValueError) as exc:
+            sdk.create_entity("nonsense", "x")
+        message = str(exc.value)
+        for arm in ("point", "diary"):
+            assert arm in message, (
+                f"`create_entity`'s unknown-type message no longer names type={arm!r}: "
+                f"{message!r} — a caller is left without the call that would work")
+
+
 class TestTheCompletionSignalMovedWithTheDoor:
     """`tortoise_create_point` carried TWO things, and only one was the node.
 
@@ -365,13 +412,46 @@ class TestTheCompletionSignalMovedWithTheDoor:
             "who files their first memory through the ADVERTISED call never sees "
             "the dashboard flip to Connected")
 
-    def test_the_diary_arm_observes_too(self, observed):
+    def test_the_diary_arm_does_not_observe(self, observed):
+        """⛔ THE FIFTH NEVER-OBSERVED DOOR, and the one a pin USED to call intended.
+
+        `tortoise_diary_write` (`tortoise/mcp_server.py:6258-6265`) is a two-line
+        passthrough — no `_maybe_onboarding_auto_complete` anywhere in it — so the
+        `type="diary"` arm that absorbs it must not fire the signal either. A
+        retirement that OBSERVES where the door did not flips the dashboard to
+        *Connected* on a diary entry, which is a product behaviour change, not a
+        retirement (#13556 review F2; the block's own invariant, three lines above
+        the guard, says the observation may not widen as a side effect).
+        """
         calls, install = observed
         install({"node": {"id": "d1", "pointKind": "diary"}, "nudges": []})
-        mcp_server.tortoise_create_entity(
+        result = mcp_server.tortoise_create_entity(
             type="diary", name="a first entry",
             props={"authoredBy": "agent-1"})
-        assert calls == [{"decision_observed": False}], calls
+        assert result["node"]["id"] == "d1", result
+        assert calls == [], (
+            "the diary arm recorded an onboarding observation its retired door "
+            f"never made: {calls} — `tortoise_diary_write` has no "
+            "`_maybe_onboarding_auto_complete` call at all")
+
+    @pytest.mark.parametrize("kind", sorted(mcp_server.DECISION_SHAPED_POINT_KINDS))
+    def test_the_decision_branch_observes_a_persisted_decision(self, observed, kind):
+        """The POSITIVE control for the `decision_observed` branch (#13556 F3).
+
+        Every other pin in this class asserts `decision_observed is False`, so a
+        mutant that hard-codes `decision_observed=False` reds none of them: the one
+        behaviour the block exists to preserve for a migrating decision-writer —
+        `decide-completed` on a `decision`/`option` persisted through the ADVERTISED
+        door — was unpinned. Both members of `DECISION_SHAPED_POINT_KINDS` are
+        exercised, because the branch's whole value is choosing BETWEEN them and
+        every other kind.
+        """
+        calls, install = observed
+        install({"node": {"id": "p3", "pointKind": kind}, "nudges": []})
+        mcp_server.tortoise_create_entity(type="point", name="we chose A")
+        assert calls == [{"decision_observed": True}], (
+            f"a persisted {kind!r} did not observe the decision step: {calls} — the "
+            "decide-completed signal a migrating decision-writer relied on is lost")
 
     def test_the_persisted_kind_is_what_observes(self, observed):
         """Asked `option`, stored `statement` — the STORED kind decides (#9287).
@@ -398,6 +478,100 @@ class TestTheCompletionSignalMovedWithTheDoor:
             f"a non-point arm recorded an onboarding observation: {calls} — "
             "`tortoise_create_point` observed, `create_subject` never did, and the "
             "container must not flatten that difference")
+
+    def test_the_container_gates_the_retired_doors_tag_quota(self, monkeypatch):
+        """#329's cap + value rules followed the door into the container (N2a).
+
+        Both refusals used to live only in `tortoise_create_point`'s handler; a
+        container without them accepts an unbounded tag list and non-string tags on
+        the ONLY advertised point-write path, i.e. a quota limit failing OPEN.
+        Driven through the handler so the assertion covers the wiring, not just the
+        helper — and the recording stub proves the refusal happens BEFORE the write
+        rather than filtering its result.
+        """
+        from tortoise.mcp_auth import _transport_mode
+        from tortoise.quota import MAX_TAGS_PER_POINT
+
+        asked: list[dict] = []
+
+        class _SDK:
+            def create_entity(self, *a, **k):
+                asked.append({"args": a, "kwargs": k})
+                return {"node": {"id": "p1", "pointKind": "statement"}, "nudges": []}
+
+        monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _SDK())
+        token = _transport_mode.set("http")
+        try:
+            over = mcp_server.tortoise_create_entity(
+                type="point", name="too many tags",
+                props={"tags": [f"t{i}" for i in range(MAX_TAGS_PER_POINT + 1)]})
+            assert isinstance(over, mcp_server._SafeError), over
+            assert over["code"] == mcp_server.ERR_QUOTA, over
+
+            bad = mcp_server.tortoise_create_entity(
+                type="point", name="non-string tag", props={"tags": [7]})
+            assert isinstance(bad, mcp_server._SafeError), bad
+            assert "invalid tag value" in bad["error"], bad
+
+            # the SAME gate on the diary arm: both relay to `create_point`
+            diary = mcp_server.tortoise_create_entity(
+                type="diary", name="e", props={"authoredBy": "a", "tags": [""]})
+            assert isinstance(diary, mcp_server._SafeError), diary
+
+            ok = mcp_server.tortoise_create_entity(
+                type="point", name="within the cap", props={"tags": ["fine"]})
+            assert not isinstance(ok, mcp_server._SafeError), ok
+        finally:
+            _transport_mode.reset(token)
+        assert len(asked) == 1, (
+            f"a refused tag list reached the writer: {asked} — the guard must run "
+            "BEFORE the write, not filter its result")
+
+    def test_the_container_records_the_doors_r1_abuse_weight(self, observed):
+        """N2b: `record_point_create` must still fire where the write now lives."""
+        for t, want in (("point", 1), ("diary", 1), ("subject", 0),
+                        ("object", 0), ("event", 0), ("document", 0)):
+            got = mcp_server._container_abuse_weight(
+                {"node": {}}, (t, "a name"), {})
+            assert got == want, (
+                f"type={t!r} recorded R1 weight {got}, not {want} — the retired "
+                "doors recorded weight 1 for a point and 0 for everything else")
+        # a NON-STR type must not crash the metering hook (`_quota_gated` swallows
+        # exceptions, so a TypeError here would be a SILENT zero weight)
+        assert mcp_server._container_abuse_weight({}, (None,), {}) == 0
+        # …and no positional arg at all (a kwargs-only future call) is 0, not 1
+        assert mcp_server._container_abuse_weight({}, (), {"type": "point"}) == 0
+
+    def test_the_container_passes_that_weight_to_the_quota_gate(self, monkeypatch):
+        """N2b's WIRING, not just the callable: the gate must receive it.
+
+        A weight function nobody passes records nothing — the pre-fix container
+        called `_quota_gated(..., "points")` and left `abuse_weight=None`, which is
+        exactly the silent loss this pin reds.
+        """
+        from tortoise.mcp_auth import _transport_mode
+
+        seen: dict = {}
+
+        def _gate(fn, resource="points", abuse_weight=None):
+            seen["resource"] = resource
+            seen["abuse_weight"] = abuse_weight
+            return lambda *a, **k: {"node": {"id": "p1"}, "nudges": []}
+
+        class _SDK:
+            def create_entity(self, *a, **k):  # never called: `_gate` is the stub
+                raise AssertionError("the stubbed gate was bypassed")
+
+        monkeypatch.setattr(mcp_server, "_quota_gated", _gate)
+        monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _SDK())
+        token = _transport_mode.set("http")
+        try:
+            mcp_server.tortoise_create_entity(type="point", name="n")
+        finally:
+            _transport_mode.reset(token)
+        assert seen.get("abuse_weight") is mcp_server._container_abuse_weight, (
+            f"the container did not hand R1 a weight to record: {seen} — "
+            "`record_point_create` stops firing for point creation here")
 
     def test_a_failed_write_never_observes(self, observed):
         calls, install = observed

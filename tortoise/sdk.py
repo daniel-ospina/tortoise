@@ -10660,14 +10660,28 @@ def _item_type_text(item: dict) -> str:
     return _type_text(item.get("type"))
 
 
-#: The label each `type=` arm writes, for the `unknown type` message ONLY.
-#: ⛔ It decides nothing (see `tests/test_11609_door_retirement.py`, which reads
-#: the arms themselves and refused an earlier revision that asserted on this
-#: map). `point`/`diary` land on `:Point` — ONE belief kind, so a point is
-#: `:Point {pointKind: …}` and there is no `:Diary` label (#10977).
+#: The label each ENTITY-ITEM `type=` writes — and, load-bearing, ingest's
+#: PHASE-1 VOCABULARY: `_validate_bundle` uses this map as the `entities[]` type
+#: ALLOW-LIST (`:31120`), step 3 dispatches on the same labels, and the
+#: connection-endpoint gate resolves an item's label through it.
+#: ⛔ IT DECIDES THINGS — so a key added here must come with a step-3 writer
+#: branch in the SAME batch (#13556 review N1). `point`/`diary` were added here
+#: for a `create_entity` MESSAGE, and the bundle path then accepted items that
+#: step 3 refused with `Phase2Error` — after step 2 had already committed the
+#: bundle's points, the #2422/#7925 partial-mutation class this file closes in
+#: half a dozen comments. They live in `_CREATE_ENTITY_TYPE_ARMS` only; both
+#: land on `:Point` (ONE belief kind, #10977), never on a label of their own.
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
-                       "event": "Event", "document": "Source",
-                       "point": "Point", "diary": "Point (pointKind=diary)"}
+                       "event": "Event", "document": "Source"}
+
+
+#: The `type=` values `TortoiseSDK.create_entity` DISPATCHES on — its arms, and
+#: the whole vocabulary of its `unknown type` message.
+#: ⛔ SEPARATE FROM `_ENTITY_ITEM_LABELS` ON PURPOSE (#13556 review N1): that map
+#: is ingest's Phase-1 allow-list and `point`/`diary` have no ingest writer, so
+#: adding them there opens a validation gate instead of extending a message. A
+#: message may name a type the ingest bundle cannot carry; a gate may not.
+_CREATE_ENTITY_TYPE_ARMS = (*_ENTITY_ITEM_LABELS, "point", "diary")
 
 
 def _indefinite(phrase: str) -> str:
@@ -55600,7 +55614,7 @@ class TortoiseSDK:
         else:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
-                f"{', '.join(_ENTITY_ITEM_LABELS)}")
+                f"{', '.join(_CREATE_ENTITY_TYPE_ARMS)}")
         # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
         # `extractedFrom` is a recognised prop on this door — it rides the
         # generic passthrough and is stored on the node.
