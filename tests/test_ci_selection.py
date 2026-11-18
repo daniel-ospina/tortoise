@@ -10235,6 +10235,13 @@ ROWED_BY_THIS_FOLD = (
     # mapping key, which `--integrity` reds rather than silently keeping the last value.
     "test_13110_goalstate_doors.py",
     "test_13034_currency_rule_reads_position.py",
+    # #13422 (PR #13466) — the fold that made `object`/`subject` record-served behind the
+    # `#689` cage. A file this fold ADDED and registered on `core` because
+    # `tortoise/record_vector.py` has no `SOURCE_PATTERNS` entry, so it collects nowhere on the
+    # only diff that can break it. It shipped NO `durations:` row until the round-9/10 reviews
+    # reported it — the same defect `#13110`'s own comment records surviving a round, which is
+    # the reason this ENTRY-RULE tuple is explicit rather than derived.
+    "test_13422_object_subject_dense_leg.py",
 )
 
 
