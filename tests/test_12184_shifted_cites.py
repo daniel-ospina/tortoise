@@ -198,7 +198,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
 #: header must carry, target file, 1-based line **on this branch's tree**, verbatim fragment on that
 #: line). Five of these
-#: are reached by `_PINS` already; `:2464`, `:2521` and `projection/entities.py:5666` were in NO pin at all
+#: are reached by `_PINS` already; the rest, including `projection/entities.py:5666`, were in NO pin at all
 #: before this one, and the header named none of the eight — which is the defect
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
 #: ⚠️ The sdk/hosted_api rows here were `main`'s figures until `#13363` re-derived them: that branch's
@@ -432,8 +432,8 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
         "122 of this document's 214",
-        "dedupes the 326 as-written spellings to 214 — 112",
-        "326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214",
+        "dedupes the **327** as-written spellings to 214 — **113**",
+        "327 written spellings → 214 pairs → 113 collisions → 122 drifters of the 214",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -690,8 +690,12 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     `#13124`'s header said the enumeration was "the WHOLE of the `main` set" and that every other
     `file:line` "is at the pin `ccb49741b2ec`". The `#13124` REVIEW measured both false: eight addresses
-    open at `main` and are named in neither list — `cache_projection.py` `:2464`, `:2521`, `:2693-2660`,
-    `:2714-2715`, `:2724-2726`, `:2776`, `:3841` and `projection/entities.py`:5666. `:3778` is a
+    open at `main` and are named in neither list — the set `_MAIN_SET_MISSED` pins, every member of which
+    the CLAIM arm below requires the header to name. ⚠️ That list is deliberately NOT restated here as
+    literals: measured at three editions, `:2464` and `:2521` appear in the enumeration of none of them
+    (`295c26ebc8`, `origin/main`, HEAD) and `:2755` only on `origin/main`, so a hardcoded enumeration in
+    this docstring would be a claim about history that no edition supports — the addresses travel in the
+    pinned tuple, which is the artifact that can be re-derived. `:3778` is a
     `MERGE (n:…) SET n += $props` at the pin and the `cache_tier` arm at `main`, so a reader who followed
     the rule opened the pin and landed on a statement their row does not quote: "cite rotated, reader
     confidently opens the wrong line" — this document's own failure class, inverted.
@@ -712,8 +716,9 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
     NON-VACUOUS on the pre-fix document (`git show 295c26ebc8:<the file>`): the header region — every
     line before `## 1.` — carries **0** occurrences of `cache_projection` and **1** of each of the three
     absolutes, so every assertion below reds there. The region bound is what makes the token arm
-    discriminating: `:2464`, `:2521` and `:2755` DO appear later in the document (row 13, §2.5), so an
-    unbounded `in text` check would pass on the broken file.
+    discriminating: that same pre-fix file carries **18** occurrences of `cache_projection` AFTER `## 1.`
+    (row 13, §2.5), so an unbounded `in text` check would pass on the broken file — it is the TOKEN, not
+    any one address, that the unbounded form cannot distinguish.
     """
     # ⛔ THE POPULATION HAS AN ANTI-SHRINK ARM (#13509), the mirror of the one the sibling
     # `_MAIN_HEAD_FIGURES` guard carries. BOTH use sites below ITERATE this tuple, so a row deleted to
