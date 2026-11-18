@@ -412,7 +412,29 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         binds.setdefault(key, set()).add(name)
 
     def _target_names(target: ast.AST) -> list[str]:
-        return [node.id for node in ast.walk(target) if isinstance(node, ast.Name)]
+        """The names a binding target actually BINDS — and only those.
+
+        ⛔ AN ATTRIBUTE/SUBSCRIPT STORE BINDS NOTHING (`#13585 review 402d71d8` P2). `ast.walk`
+        on `A.handlers = {}` yields `Name('A')`, so the store was recorded as a REBINDING of
+        `A` and `_apply_assignment` then dropped the alias for the whole block — reporting `[]`
+        for a module that really wires the adapter AFTER some attribute bookkeeping. That is the
+        false PASS this reader exists to prevent, and a REGRESSION against `main` (whose target
+        loop skipped every non-`Name` target). The language reference is explicit: only a
+        `Name` target binds (`a.b = …` stores an ATTRIBUTE on the object `a` already names; it
+        does not rebind `a` — CPython's execution model §4.2.1).
+
+        So recurse over the BINDING shapes — `Name`, the elements of `Tuple`/`List`, and
+        `Starred` — and answer `[]` for `Attribute`/`Subscript`. Both consumers
+        (`_note_binding`, `_apply_assignment`) share this one function, so the fix lands in
+        both and they cannot drift apart.
+        """
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [name for element in target.elts for name in _target_names(element)]
+        if isinstance(target, ast.Starred):
+            return _target_names(target.value)
+        return []
 
     def _parameter_names(args: ast.arguments) -> list[str]:
         names = [param.arg for param in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
@@ -772,26 +794,28 @@ def test_the_container_still_advertises_no_envelope(name):
 
 
 def test_every_envelope_door_destination_is_one_of_the_six_containers():
-    """S1's SUFFICIENCY: annotating these six unblocks exactly those NINE doors.
+    """S1's SUFFICIENCY: annotating S1's doors unblocks exactly the no-arm doors.
 
     Without this edge, the two populations are pinned independently and nothing notices a
-    door re-pointed at a container outside S1's six — the door would keep its `list[dict]`,
+    door re-pointed at a container outside S1 — the door would keep its `list[dict]`,
     that other container would keep its `None` schema, and S1 would silently stop
     unblocking it while every pin stayed green. `tools/bridge_table.py`'s `DESTINATION` is
     the map that decides it, so it is read rather than restated.
 
-    ⛔ It iterates `S1_DOORS` (nine), NOT `ENVELOPE_DOORS` (eight): the plan's S2 arithmetic
-    (`12 → 3` — `PROTECTED` holds 12 and S2 retires 9 of them, per
-    `test_11609_door_retirement.py`'s own `assert len(PROTECTED) == 12`) rests on
-    `tortoise_search` landing in one of these six containers, and a review round found that
-    edge unpinned — re-pointing `search` in `DESTINATION` left every pin green while the
-    count went wrong.
+    ⛔ It iterates `S1_DOORS`, NOT `ENVELOPE_DOORS`: the plan's S2 arithmetic (CITED, NEVER
+    RESTATED — the count it rests on is asserted at
+    `tests/test_11609_door_retirement.py:638`, and the derivation lives in
+    `docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §4) rests on `tortoise_search` landing
+    in one of S1's containers, and a review round found that edge unpinned — re-pointing
+    `search` in `DESTINATION` left every pin green while the count went wrong.
 
-    ⛔ THE FIGURE IS CITED, NEVER RESTATED (#13585 review P3#2). This docstring said
-    `16 → 7` while the same change corrected the doc to `12 → 3`: `main` moved the tree twice
-    under that number (`#13556` retired `create_point`/`diary_write` from the no-arm class,
-    `#13550` retired `compute_confidence`/`recall`, so that class is now empty). A count
-    written twice is a count that drifts; the authority file asserts it.
+    ⛔ THE FIGURE IS CITED, NEVER RESTATED (#13585 review P3#2 — carried into a second round
+    because the first fix kept the digits while forbidding them). `main` moved the tree twice
+    under the numbers this docstring used to carry (`#13556` retired
+    `create_point`/`diary_write` from the no-arm class, `#13550` retired
+    `compute_confidence`/`recall`, so that class is now empty), which is exactly why no count
+    belongs here: a count written twice is a count that drifts, and a marker that forbids
+    restating a figure must not restate it.
     """
     from tools.bridge_table import DESTINATION
 
@@ -1093,10 +1117,13 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     # in `tortoise/mcp_server.py` was enough. That is the same defect the sibling reader above
     # documents for `FastAPIRouterAdapter` (:188-189), so this scan is an AST read too.
     # What it still catches: `e.rest_spec.path`, `getattr(e, "rest_spec")`, `e["rest_spec"]`,
-    # and `vars(e)["rest_spec"]` (a constant subscript — the residual list claimed otherwise
-    # until #13585 review P3).
+    # `vars(e)["rest_spec"]` (a constant subscript — the residual list claimed otherwise
+    # until #13585 review P3), and a constant-KEY method call (`d.get("rest_spec")` — added
+    # in `#13585 review 402d71d8` P3#2, after the AST arms proved NARROWER than the substring
+    # scan they replaced).
     # What it therefore does NOT catch, stated rather than hidden: a field name built at
-    # runtime (`getattr(e, "rest" + "_spec")`), which no static read can answer.
+    # runtime (`getattr(e, "rest" + "_spec")`) or behind a COMPUTED key (`d[field]`,
+    # `d.get(field)`), neither of which a static read can answer.
     # ⛔ THE SEAM *AND THE STATEMENT THAT CONSUMES IT* ARE PINNED (#13585 review P2#1). The
     # predicate had its own test and this wiring had none: reverting it to the pre-PR
     # `"rest_spec" in source.read_text(...)` comprehension reded NO row, because the scanned
@@ -1408,6 +1435,47 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "FastAPIRouterAdapter(x)\n"
     ) == [], ("an UNCONDITIONAL rebinding after a guarded import still reads as an instantiation "
               "— the join must replace on a path that always runs, not accumulate forever")
+    # ⛔ AN ATTRIBUTE / SUBSCRIPT STORE DOES NOT REBIND ITS BASE (`#13585 review 402d71d8` P2).
+    # `ast.walk` on `A.handlers = {}` yields `Name('A')`, so the store was recorded as a
+    # REBINDING of `A` and the alias was dropped for the whole block — `[]` for a module that
+    # really wires the adapter after the store, while `main` reported the site. Each row below
+    # was MEASURED to flip from `[n]` on `main`'s reader to `[]` on the pre-fix head, so they
+    # are a regression pin, not a stylistic preference. The last row is the mirror that keeps
+    # the fix from over-reaching: a store is TRANSPARENT, so a real `Name` rebinding before it
+    # still governs.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter\n"
+        "FastAPIRouterAdapter.handlers = {}\n"
+        "def install(app, handlers):\n"
+        "    return FastAPIRouterAdapter(app).register_all(TOOL_REGISTRY, handlers)\n"
+    ), ("an ATTRIBUTE STORE on the adapter erased a real wiring AFTER it — `ast.walk` read "
+        "the store's root name as a rebinding (`main` reported this site)")
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "tr.mount = {}\n"
+        "def install(app):\n"
+        "    return tr.FastAPIRouterAdapter(app)\n"
+    ), "an attribute store on a MODULE alias erased a real wiring — the module spelling of the above"
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A[0] = 1\n"
+        "A(app)\n"
+    ), "a SUBSCRIPT store on an alias erased the call after it"
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "def build(app):\n"
+        "    A = FastAPIRouterAdapter\n"
+        "    A.handlers = {}\n"
+        "    return A(app)\n"
+    ), ("a SAME-BLOCK attribute store erased the alias bound in that very block "
+        "(measured `[]` at the pre-fix head, `[5]` on `main`)")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A = object\n"
+        "A.handlers = {}\n"
+        "A(app)\n"
+    ) == [], ("a NAME rebinding before the attribute store was forgotten — a store must be "
+              "TRANSPARENT, not a reset to the module binding")
     # and the forward-reference half must survive the per-position read: Python resolves a name
     # at CALL time, so a chain declared below its use still instantiates the adapter.
     assert _adapter_instantiation_sites(
@@ -1460,7 +1528,7 @@ def test_the_rest_spec_read_is_an_attribute_not_a_substring(tmp_path):
     wrong in the other: ONE comment or docstring naming the field in any product module reded
     the three served-route rows with "routes may be registry-derived again" — a claim about a
     string, on a tree that derives nothing. Both directions are asserted here, and a real
-    attribute read must still be caught in each of its three static spellings.
+    attribute read must still be caught in each of its static spellings.
     """
     def reads(text: str) -> list[int]:
         probe = tmp_path / "probe.py"
@@ -1488,6 +1556,20 @@ def test_the_rest_spec_read_is_an_attribute_not_a_substring(tmp_path):
         "route; the predicate gates on `ast.Load` since #13585 review P3#3")
     assert reads("entry['rest_spec'] = spec\n") == [], (
         "a subscript STORE counts as a read — only a `Load` is a read")
+    # ⛔ A CONSTANT-KEY METHOD CALL (`#13585 review 402d71d8` P3#2). The substring scan this
+    # replaced caught `vars(entry).get("rest_spec")`; the three AST arms alone did not, so the
+    # reader was NARROWER than the scan it stands in for — in the false-PASS direction, and
+    # incoherently, since the same read spelled as a SUBSCRIPT was caught. All three rows below
+    # were measured `[]` on the pre-fix head.
+    assert reads("spec = vars(entry).get('rest_spec')\n"), (
+        "`vars(entry).get('rest_spec')` — a constant-key read — is not caught, though the "
+        "substring scan this replaced caught it, and the subscript spelling is caught")
+    assert reads("spec = entry.__dict__.get('rest_spec')\n"), (
+        "`entry.__dict__.get('rest_spec')` is a constant-key read and is not caught")
+    assert reads("spec = row.pop('rest_spec')\n"), "`row.pop('rest_spec')` is not caught"
+    assert reads("spec = d.get(field)\n") == [], (
+        "a COMPUTED key (`d.get(field)`) counts as a read — no static pass can answer it, so it "
+        "belongs in the residual list rather than in an over-blocking arm")
 
 
 def test_the_rest_spec_scan_is_wired_to_the_attribute_reader(tmp_path):
@@ -1619,7 +1701,8 @@ def test_the_excluded_module_is_graded_by_the_same_predicate(tmp_path):
 
 
 def _is_rest_spec_read(node: ast.AST) -> bool:
-    """The ONE predicate for a static `rest_spec` read: attribute, `getattr`, constant subscript.
+    """The ONE predicate for a static `rest_spec` read: attribute, `getattr`, constant subscript,
+    and a constant-key `.get`/`.pop`/`.setdefault`.
 
     ⛔ Shared by BOTH readers on purpose (`#13585 review` P3 — the EXCLUDED module was graded
     by a weaker spelling reader). `_rest_spec_readers` exempts the DEFINING module's path
@@ -1650,6 +1733,21 @@ def _is_rest_spec_read(node: ast.AST) -> bool:
         and len(node.args) >= 2
         and isinstance(node.args[1], ast.Constant)
         and node.args[1].value == _REST_SPEC_FIELD
+    ):
+        return True
+    # ⛔ A CONSTANT-KEY `.get`/`.pop` IS A READ TOO (`#13585 review 402d71d8` P3#2). The three
+    # arms above missed `vars(entry).get("rest_spec")` and `row.pop("rest_spec")`, which the
+    # substring scan this replaced DID catch — a coverage NARROWING in the false-PASS direction,
+    # and an incoherent one: `vars(e)["rest_spec"]` is matched by the subscript arm, so the same
+    # read spelled as a method call was invisible. The KEY must be a literal; a computed key
+    # (`d.get(field)`) stays in the residual list, because no static pass can answer it.
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"get", "pop", "setdefault"}
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == _REST_SPEC_FIELD
     ):
         return True
     return (
@@ -1734,7 +1832,9 @@ def _rest_spec_attribute_reads(source: Path) -> list[int]:
 
     Three shapes count as a read, and prose counts as none: an attribute access
     (`e.rest_spec`), a `getattr(e, "rest_spec")` call, and a constant subscript
-    (`e["rest_spec"]`). A comment or a docstring is not an `ast.Attribute`, so it cannot red
+    (`e["rest_spec"]`). A fourth is a constant-KEY method call (`d.get("rest_spec")`,
+    `d.pop("rest_spec")` — see the arm below). A comment or a docstring is not an
+    `ast.Attribute`, so it cannot red
     the pin — which is the whole point (#13537 review F2; the sibling reader's docstring above
     records the identical false BLOCK for the literal `FastAPIRouterAdapter(`).
 
@@ -1742,7 +1842,9 @@ def _rest_spec_attribute_reads(source: Path) -> list[int]:
     has the same node shape and is NOT a read, so both arms gate on it (#13585 review P3#3).
 
     Deliberately NOT matched, stated rather than hidden: a field name assembled at runtime
-    (`getattr(e, "rest" + "_spec")`), which no static pass can answer.
+    (`getattr(e, "rest" + "_spec")`), and a keyed read whose KEY is computed rather than
+    literal (`d[field]`, `d.get(field)`) — neither is answerable by a static pass, and both are
+    the same shape as the runtime-assembled name above.
 
     ⛔ `vars(e)["rest_spec"]` IS matched, by the `ast.Subscript` arm below — it is a constant
     subscript, not a dynamic read. This paragraph listed it as NOT matched until
