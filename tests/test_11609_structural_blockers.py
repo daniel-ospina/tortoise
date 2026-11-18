@@ -278,8 +278,13 @@ class _RecordingRouter:
 
 
 @pytest.mark.parametrize("door,path", sorted(REST_SPEC_DOORS.items()))
-def test_the_served_route_is_hand_written_and_never_reads_the_registry_row(door, path):
+def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, path):
     """Question (b), MEASURED — and the answer is the opposite of the registry's prose.
+
+    Three separate measurements, because the doc's headline rests on all three:
+      (1) nothing in `tortoise/` instantiates the adapter that would derive routes;
+      (2) a hand-written decorator serves the route, with the row's own METHOD;
+      (3) neither app reads a `rest_spec`, so no other path derives a route either.
 
     The registry records that *"retiring the registry entry deletes its REST route with it"*,
     and `PROTECTED` lists three doors on that basis. It is not true on `main`:
@@ -306,10 +311,15 @@ def test_the_served_route_is_hand_written_and_never_reads_the_registry_row(door,
     # ⛔ Repo-wide, not the two apps: an instantiation in a third module (a startup hook,
     # `hosted_app.py`) would make the recorded reason TRUE again, and scanning only the
     # two files would report "nowhere" for a claim about the whole product.
+    # ⛔ RECURSIVE, not a claim about `tortoise/*.py` only: an instantiation in a subpackage
+    # (`indexer/`, `connectors/`, `packs/`) would make the recorded reason TRUE again, and a
+    # non-recursive glob would report "nowhere" for a claim about the whole product.
     repo = Path(__file__).resolve().parent.parent
+    scanned = sorted((repo / "tortoise").rglob("*.py"))
+    assert len(scanned) > 250, f"only {len(scanned)} modules found — the scan is not recursive"
     offenders = [
-        source.name
-        for source in sorted((repo / "tortoise").glob("*.py"))
+        str(source.relative_to(repo))
+        for source in scanned
         if "FastAPIRouterAdapter(" in source.read_text(encoding="utf-8", errors="replace")
     ]
     assert offenders == [], (
@@ -341,6 +351,14 @@ def test_the_served_route_is_hand_written_and_never_reads_the_registry_row(door,
         f"{path} is not served by a hand-written {entry.rest_spec.method} decorator in "
         f"{hosted_api.__name__} or {selfhost_api.__name__} — if the route is really gone, "
         "this pin's premise changed")
+
+    # (3) and neither app reads a `rest_spec` to build routes. Without this, a hand-rolled
+    # `for e in TOOL_REGISTRY: app.add_api_route(e.rest_spec.path, …)` would leave every
+    # assertion above green while making the doc's headline finding false again.
+    for module in (hosted_api, selfhost_api):
+        assert "rest_spec" not in inspect.getsource(module), (
+            f"{module.__name__} now reads `rest_spec` — routes may be registry-derived again; "
+            "re-derive §1.5 before trusting the `rest_spec` half of the plan")
 
 
 # ── what the SERVING HANDLER does — the other half of S3's premise ───────────

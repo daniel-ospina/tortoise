@@ -85,7 +85,9 @@ Two consequences the decision turns on:
 - `tortoise/mcp_server.py:2118` `_violates_wrap_envelope` treats a **missing `result`** as a
   violation for *every* wrap envelope, including `anyOf` — so a union keeps the wait-bound
   refusal repair.
-- A dict `result` is only a violation under a **declared `type: array`**; under `anyOf` it is
+- A dict `result` is a violation only under a **declared scalar/array `type`** (`array`,
+  `string`, `boolean`, `number`, `integer` — every `_WRAP_ENVELOPE_TYPE_CHECKS` member); under
+  `anyOf`, or an undeclared `type`, it is
   admissible (`:2144-2150`). So under a union, a `_safe` failure payload **stops** being
   repaired by #8482 and is left to **#11153** (`_payload_refusal_result`, defined `:2420`,
   applied `:3290`), which flips `isError` and keeps the payload byte-identical. That is the protocol-correct verdict channel
@@ -184,9 +186,11 @@ $ rg -n 'FastAPIRouterAdapter' --glob '!.venv/*' .
 ./tortoise/tool_registry.py:2343:# 9 REST tool-ops classified for the FastAPIRouterAdapter:
 ./tortoise/tool_registry.py:2367:class FastAPIRouterAdapter:
 ./tests/test_tool_registry.py:809:class TestFastAPIRouterAdapter:
-./tests/test_tool_registry.py:814:        from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter
+./tests/test_tool_registry.py:814:        from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter  # noqa: I001
 ./tests/test_tool_registry.py:818:        adapter = FastAPIRouterAdapter(router)
 ```
+
+(Excerpt: the full run also prints 11 `docs/…` hits, none of which is code.)
 
 The only **instantiation** is in a test (`tests/test_tool_registry.py:818`); the product has
 a comment and the class definition, and nothing else. And `tortoise/hosted_api.py` does not import
@@ -341,7 +345,7 @@ is the finding that removed three steps from the plan.
 | **S2** | retire those 9 in S1's batch; move them out of `PROTECTED` (16 → 7) in the same change | the 9 above | follows S1 |
 | **S3** | retire `tortoise_issue_insight` and `tortoise_session_context` — **no route work**, because the `rest_spec` reason is stale (§1.5) | `issue_insight`, `session_context` (**2**) | 27/40 ruling batch; update `PROTECTED` with the evidence |
 | **S4** | re-point `paginated_query` / `query_points_by_tag`, then retire `query` | `query` (**1**) | migration decision |
-| **S5** | land the missing containers (`delete_knowledge`, `link_entities`, `poll_events`, `recall_beliefs`, `write_knowledge_batch`, tenancy pair) | the 9 `NO_CONTAINER_YET` | out of scope here |
+| **S5** | land the six missing destinations (`delete_knowledge`, `link_entities`, `poll_events`, `write_knowledge_batch`, `create_memory_graph`, `list_memory_graphs`) | the 9 `NO_CONTAINER_YET` | out of scope here |
 
 Twelve structural doors: **9 in S1/S2** (8 envelope-only + `search`), **2 in S3** (stale
 reason, no work), **1 (`query`) in S4**. Nine `NO_CONTAINER_YET`: all in S5. Nothing is retired
