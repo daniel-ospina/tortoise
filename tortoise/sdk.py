@@ -44829,6 +44829,11 @@ class TortoiseSDK:
         `ended_scope` is not a visibility field on the record and adds no word
         to the model: it is design §6's "option on the call", and the default
         keeps every existing surface answering exactly what it answered before.
+        The scan it issues is BOUNDED by `ended.ENDED_SCAN_BUDGET_MS`
+        (10 000 ms — FalkorDB's own general-query default, not the 500 ms leg
+        budget: #13302 review F1), overridable by the caller's own budget; a
+        budget it overruns degrades to zero rows + `incomplete` + a `degraded`
+        leg rather than raising (#13302 review F1).
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -45515,21 +45520,27 @@ class TortoiseSDK:
         # legs first would either waste them or — worse — let a degraded FTS
         # fallback fill an answer to a question that was never about words.
         if ended_scope:
-            from .ended import enumerate_ended
+            from .ended import ENDED_SCAN_BUDGET_MS, enumerate_ended
 
             # ONE row beyond the page, so the TRUNCATION marker is PROVEN rather
             # than guessed: a population wider than ``limit`` is the only way a
             # caller learns rows were cut, and asking for the extra row costs one
             # slot in a bounded scan. Without it the marker would have to report a
             # full page as complete (the #8447 defect) or an unfilled one as cut.
-            _ended_bound = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
+            _ended_bound = int(_elevated_timeout_ms or ENDED_SCAN_BUDGET_MS)
             try:
                 _fatter = enumerate_ended(
                     graph, entity_type=entity_type, kind=kind,
                     kinds=expanded_kinds, limit=limit + 1,
                     # BOUNDED like every other statement this read issues: the
                     # caller's own budget (the capstone's `_elevated_timeout_ms`)
-                    # or the shipped read budget, never an unbounded query.
+                    # or `ENDED_SCAN_BUDGET_MS`, never an unbounded query. ⛔ That
+                    # budget is the SCAN's own, not `VECTOR_LEG_BUDGET_MS`
+                    # (#13302 review F1): 500 ms is calibrated for the single-hop
+                    # legs (the `RETURN 1` probe, `_read_declaration`, the vector
+                    # legs), and a family-wide `MATCH … collect() … ORDER BY …
+                    # LIMIT` is not one of them — under it this arm degraded to an
+                    # empty answer on the population the read exists for.
                     timeout_ms=_ended_bound)
             except ValueError:
                 # ⛔ NOT a store failure: the door REFUSES a family with no

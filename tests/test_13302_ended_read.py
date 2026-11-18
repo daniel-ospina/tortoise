@@ -830,11 +830,18 @@ def test_the_enumeration_is_issued_with_the_reads_own_bound(monkeypatch):
     """#13302 review F2: the budget is PLUMBED, and a mutant that drops it reds.
 
     Two edits leave this suite green without this row: deleting
-    ``timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)`` at the SDK
+    ``timeout_ms=int(_elevated_timeout_ms or ENDED_SCAN_BUDGET_MS)`` at the SDK
     call site, and reverting the door to ``graph.query(cypher, params=params)``.
     Both are the unbounded statement the docstring says must never be issued on
     this path, and neither is observable from the rows a live store returns.
+
+    #13302 review F1: the budget the statement carries is the SCAN's own, not
+    ``VECTOR_LEG_BUDGET_MS``. That constant is the dense leg's (single-hop) budget
+    and pointing it at a family-wide ``MATCH … collect() … ORDER BY … LIMIT``
+    made the read answer ``[]`` + ``incomplete`` on the population it exists for,
+    so both facts are pinned: the value, and that it is NOT the leg budget.
     """
+    from tortoise.ended import ENDED_SCAN_BUDGET_MS
     from tortoise.search_engine import VECTOR_LEG_BUDGET_MS
 
     graph = _RecordingGraph()
@@ -842,9 +849,17 @@ def test_the_enumeration_is_issued_with_the_reads_own_bound(monkeypatch):
     sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True, limit=5)
 
     statement = graph.enumeration()
-    assert statement["timeout"] == VECTOR_LEG_BUDGET_MS, (
-        "the ended-scope statement must carry the shipped read budget — an "
-        "unbounded statement hangs on a wedged store instead of degrading"
+    assert statement["timeout"] == ENDED_SCAN_BUDGET_MS, (
+        "the ended-scope statement must carry the SCAN's budget (10 000 ms, the "
+        "vendor's own general-query default) — an unbounded statement hangs on a "
+        "wedged store instead of degrading, and the 500 ms leg budget makes it "
+        "degrade on a production-sized family"
+    )
+    assert statement["timeout"] != VECTOR_LEG_BUDGET_MS, (
+        "the leg budget is calibrated for the single-hop legs (the `RETURN 1` "
+        "probe, `_read_declaration`, the vector legs); reusing it here is the "
+        "F1 defect — the read degrades to an empty, incomplete answer on exactly "
+        "the population it was written for"
     )
     assert statement["params"]["limit"] == 6, (
         "the statement asks for ONE row beyond the page (the truncation PROOF); "
