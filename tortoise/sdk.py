@@ -55719,15 +55719,16 @@ class TortoiseSDK:
 
         ⚠️ **COST — MEASURED, and nothing about it is optimised (#13436 P7).** The
         scan returns the FULL ``content`` of all 400 rows and the only product is
-        the advisory below: **12.07 ms per call at 1,000 Points and 12.10 ms at
-        5,000** (the 400-row cap is constant), moving **118.1 KiB** of content,
-        and the CALLER pays **+9.6 to +14.1 ms** of a ~15 ms ``create_entity`` —
-        ~60-70 % of the write. The payload is NOT the dominant term (22x the
-        content length buys ~1.9 ms of a ~12 ms call), so this is the label scan
-        plus row materialisation, `#4997`'s unindexed-label shape. ⛔ **Do not
-        "fix" it from this docstring**: `#13436`'s mandate is *"an optimisation
-        off an unmeasured cost is the regression path"*, so a change here starts
-        from `docs/evidence/13436-write-path-costs/README.md` (instrument:
+        the advisory below: **12-13 ms per call at 1,000 Points AND at 5,000**
+        (the 400-row cap is constant), moving **118.1 KiB** of content, and the
+        CALLER pays **+11 ms** of a ~16 ms ``create_entity`` — roughly 65-70 % of
+        the write. ⛔ **The payload is NOT the term that moves**: 22x the content
+        length did not move the call beyond run-to-run noise, so what is paid is
+        the label scan plus row materialisation (`#4997`'s unindexed-label shape),
+        not the bytes returned. ⛔ **Do not "fix" it from this docstring**:
+        `#13436`'s mandate is *"an optimisation off an unmeasured cost is the
+        regression path"*, so a change here starts from
+        `docs/evidence/13436-write-path-costs/README.md` (instrument:
         `tools/measure_13436_write_costs.py`), which states what was measured and
         what it deliberately does not decide. Cost 1 has no owning issue yet —
         that absence is the finding.

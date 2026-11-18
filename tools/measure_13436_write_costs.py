@@ -364,22 +364,35 @@ def arm_kindgate(n: int, reps: int) -> dict:
 
     shapes = [
         ("point_core", "control — names no pack", lambda i: sdk.create_point(
-            "core:Project", f"a core point {i}")),
+            "core:Project", f"a core point {i}"), 0),
         ("point_bare", "control — names no pack", lambda i: sdk.create_point(
-            "statement", f"a bare-kind point {i}")),
+            "statement", f"a bare-kind point {i}"), 0),
         ("point_ns", "names a pack", lambda i: sdk.create_point(
-            "dev:epic", f"a dev point {i}")),
+            "dev:epic", f"a dev point {i}"), 1),
         ("point_ns_in_props", "names a pack through the props passthrough",
          lambda i: sdk.create_point("statement", f"a dev point via props {i}",
-                                    pointKind="dev:epic")),
+                                    pointKind="dev:epic"), 1),
         ("object_ns", "names a pack", lambda i: sdk.create_entity(
-            type="object", name=f"a dev object {i}", objectKind="dev:epic")),
+            type="object", name=f"a dev object {i}", objectKind="dev:epic"), 1),
+        # ⛔ THE ONE SHAPE THAT PAYS TWICE — and it is the SPELLING, not the
+        # namespace: a write that names the SAME pack kind through two spellings
+        # (`create_point`'s positional `kind` plus the props passthrough, or the
+        # camel/snake pair the fold accepts) is gated once per SPELLING, so the
+        # whole-graph read is paid twice in one request. Pinned here so the arm
+        # reports the count rather than leaving two as folklore.
+        ("point_ns_twice", "SAME pack named twice (positional + props)",
+         lambda i: sdk.create_point("dev:epic", f"a doubled dev point {i}",
+                                    pointKind="dev:epic"), 2),
+        ("object_ns_twice", "SAME pack named twice (camel + snake)",
+         lambda i: sdk.create_entity(
+             type="object", name=f"a doubled dev object {i}",
+             objectKind="dev:epic", object_kind="dev:epic"), 2),
     ]
 
     rows = []
     pack_state.graph_installed_namespaces = counted  # type: ignore[assignment]
     try:
-        for shape, note, fn in shapes:
+        for shape, note, fn, expect in shapes:
             i = {"n": 0}
             samples = []
             scans_per_request = []
@@ -400,6 +413,7 @@ def arm_kindgate(n: int, reps: int) -> dict:
             rows.append({
                 "shape": shape,
                 "note": note,
+                "expected_gate_reads": expect,
                 "gate_reads_per_request": scans[0],
                 "request_ms": _median_ms(samples),
                 "gate_ms_per_request": round(scans[0] * single_scan["median_ms"], 3),
@@ -410,17 +424,15 @@ def arm_kindgate(n: int, reps: int) -> dict:
     finally:
         pack_state.graph_installed_namespaces = real  # type: ignore[assignment]
 
-    # The CONTROLS must be right, or the counter is lying.
+    # The expectations must hold, or the counter is lying. A control that pays a
+    # read, a namespaced write that pays none, and a two-spelling write that pays
+    # one are each REFUSED rather than published.
     for row in rows:
-        if row["shape"].startswith(("point_core", "point_bare")) and row["gate_reads_per_request"]:
+        if row["gate_reads_per_request"] != row["expected_gate_reads"]:
             raise ArmRefused(
-                f"{row['shape']} names no pack but paid {row['gate_reads_per_request']} "
-                "gate reads — the counter is measuring something else")
-        if row["shape"].endswith("_ns") or row["shape"] == "point_ns_in_props":
-            if row["gate_reads_per_request"] < 1:
-                raise ArmRefused(
-                    f"{row['shape']} names a pack but paid 0 gate reads — the gate did "
-                    "not run, so the cost is not what this arm reports")
+                f"{row['shape']} paid {row['gate_reads_per_request']} gate reads, "
+                f"expected {row['expected_gate_reads']} ({row['note']}) — either the "
+                "gate moved or the counter measures something else; re-read the arm")
 
     return {
         "arm": "kindgate",
