@@ -1658,10 +1658,24 @@ class TestAMentionIsNotAnOccurrence:
         This change makes the Event's kind load-bearing, so a replay that dropped
         it would flip every happened plan to "never happened" — the inversion the
         read exists to prevent — with nothing else red.
+
+        ⛔ BOTH legal spellings are recorded here ON PURPOSE (#13604 review,
+        FINDING 1). With only the bare spelling this pin was VACUOUS against the
+        mutant that matters most to this diff — the read narrowed back to
+        `= 'occurrence'` — because nothing in it ever stored `core:occurrence`, so
+        a red could only come from reverting pre-existing lines this PR does not
+        touch. The `core:` plan is the one that makes the pin discriminate the
+        ALIAS arm, and the post-replay `eventKind` assertion pins the fact the
+        whole read newly depends on: the spelling is journalled with the Event and
+        survives `rebuild_all` verbatim (`_EVENT_HANDLED` carries `eventKind`).
         """
         g = sdk._get_proj().g
         happened = PO.create_plan(sdk, "Happened before the rebuild")
         PO.record_occurrence(sdk, happened["id"], name="it happened")
+        aliased = PO.create_plan(sdk, "Happened, spelt with the namespace")
+        recorded = PO.record_occurrence(sdk, aliased["id"],
+                                        name="it happened, spelt with the namespace",
+                                        event_kind="core:occurrence")
         mentioned = PO.create_plan(sdk, "Mentioned before the rebuild")
         sdk.create_entity("event", "a note", eventKind="email",
                          aboutObject=mentioned["id"])
@@ -1669,10 +1683,19 @@ class TestAMentionIsNotAnOccurrence:
         # the DIRECTORY (the rotated-journal view) — the shape
         # tests/test_8398_aboutobject_replay.py uses.
         sdk._get_proj().rebuild_all(sdk._test_root, confirm_destructive=True)
+        assert g.query(
+            "MATCH (e:Event {id:$e}) RETURN e.eventKind",
+            params={"e": recorded["eventId"]}).result_set[0][0] == (
+                "core:occurrence"), (
+            "replay dropped/normalised the journalled `core:` spelling — the "
+            "kind the read tests is no longer the kind that was written")
         rows = {r["name"]: r for r in PO.planned_without_occurrence(g)}
         assert "Happened before the rebuild" not in rows, (
             "replay lost the occurrence kind — a happened plan reads as never "
             "happened")
+        assert "Happened, spelt with the namespace" not in rows, (
+            "the `core:` spelling of the occurrence kind read as a mention after "
+            "the rebuild")
         assert "Mentioned before the rebuild" in rows
         assert rows["Mentioned before the rebuild"]["mentions"] == 1, (
             "replay lost the mention link")
