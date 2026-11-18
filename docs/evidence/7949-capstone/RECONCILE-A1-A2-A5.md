@@ -94,14 +94,14 @@ is §7's lesson one merge later: **a count is only as good as the base it was ta
 record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
-`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:21432` (`relation_write = apply_relation_edges(` —
-the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:21431`, and the
+`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:21454` (`relation_write = apply_relation_edges(` —
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:21453`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
 - `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:12487`,
-  `relation_write.py:7`, `sdk.py:21419`), against the *"that comment and no consumer at all"* this
+  `relation_write.py:7`, `sdk.py:21441`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
   and one of them the **call** (`:700`): a declared hierarchy over a pair the story *states* is routed
@@ -747,11 +747,11 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
 # extractor_v2.py:12487 (the comment that WAS stale, corrected in place by #11001's lane),
-# relation_write.py:7, sdk.py:21419.
+# relation_write.py:7, sdk.py:21441.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# sdk.py:21432 (`_capture_session` reaches it at `sdk.py:19334`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+# sdk.py:21454 (`_capture_session` reaches it at `sdk.py:19356`). Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:12487`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:12487` was
@@ -772,7 +772,7 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # consumes it" comment; CORRECTED in
                                                           # place — see the note above),
                                                           # relation_write.py:7 (the
-                                                          # CONSUMER's docstring) and sdk.py:21419 (the
+                                                          # CONSUMER's docstring) and sdk.py:21441 (the
                                                           # #10999 transport-only note). ⛔ NOT "no
                                                           # consumer": the second hit IS the consumer
                                                           # (§0 above). (⚠️ the `-- tortoise/` scope is
@@ -788,7 +788,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:15103`) that derives the doc's cite, two are the
+                                                          # (`:15110`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
