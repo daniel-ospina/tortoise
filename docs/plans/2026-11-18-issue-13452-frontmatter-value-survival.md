@@ -649,11 +649,11 @@ neither causes nor clears — and they are NOT all one kind, so naming only the 
 mis-describe the bound. All five reproduce IDENTICALLY through `origin/main`'s `_closing_quote` +
 `_split_comment` (measured shape by shape), so the exclusion is about ownership, not severity.
 
-* FOUR are the pin's FIRST and most severe direction — **refused-but-green**, a comparing verdict
+- FOUR are the pin's FIRST and most severe direction — **refused-but-green**, a comparing verdict
   on input a real parser REJECTS — all of the `''''X'` form: `''''"'`, `''''\'`, `'''' '`,
   `''''a'`. None is an end-to-end fail-open: `parse_frontmatter` returns `{}` for every one, so the
   PARSE arm refuses the file before a comparing verdict is consumed (measured at `f43f4971`).
-* ONE is a mis-slice of the harmless direction — `''''#'` is loadable YAML (`'`) and the arm's body
+- ONE is a mis-slice of the harmless direction — `''''#'` is loadable YAML (`'`) and the arm's body
   is `''#`, because `body = value[1:-1]` is never sliced at the close the parity scan already
   located. False red, so it fails CLOSED. Recorded, not fixed, because the one-line fix —
   `body = value[1:close]` — CANNOT land alone: it would make `'a'x'` GREEN with body `a` on input
