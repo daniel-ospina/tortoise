@@ -113,8 +113,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6933`", _PI, 6933, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6934`", _PI, 6934, '("Subject", ["name"])'),
     # ⛔ The Object half of the SAME declaration had NO row, and that absence is ISSUE 1 of the
-    # `#13489` review: §2.5's row cited `:6869`, which is now 69 lines short of the block its three
-    # siblings (`:6923-6939`, `:6933`, `:6934`, `:6939`) moved to — `:6869` opens on `"pointKind",`,
+    # `#13489` review: §2.5's row cited `:6869`, which is now 54 lines short of the block (`:6923-6939`)
+    # its three siblings (`:6933`, `:6934`, `:6939`) moved to — and 69 short of the Object declaration
+    # (`:6938`) inside that block — `:6869` opens on `"pointKind",`,
     # an unrelated property list, so the cite read exactly like a correct one. An absent pin is not
     # coverage. ⚠️ That `:6869` was wrong AT THIS TREE and right at `main` (`ae54df166d`), which is
     # why the header's enumeration keeps `:6869` (its paragraph announces that head, not this one) and why
@@ -551,7 +552,9 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     number in that sentence is therefore an address AT `ae54df166d`, not at this tree.
 
     `#13489`'s first cut re-pointed the Object entry from `:6869` to `:6938` — this tree's value, correct
-    for §2.5's row 69 lines lower and WRONG under a sentence that announces the other head. A
+    for §2.5's row — the Object declaration there is `:6938`, which is `:6869` + 69 IN
+    `projection/__init__.py` (an address delta, not a document distance) — and WRONG under a sentence
+    that announces the other head. A
     `⚠️ CORRECTED` marker records that the text changed, never that the change was right: the
     FALSE CORRECTION this file's own docstring is built around, one head over.
 
