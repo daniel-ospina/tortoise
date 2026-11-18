@@ -157,6 +157,7 @@ REFUSE_GRAPH_ONLY = "REFUSE_GRAPH_ONLY"
 REFUSE_WRITE_STILL_EMITS = "REFUSE_WRITE_STILL_EMITS"
 REFUSE_TARGET_DRIFT = "REFUSE_TARGET_DRIFT"
 REFUSE_NOTHING_TO_STRIP = "REFUSE_NOTHING_TO_STRIP"
+REFUSE_WRITE_FAILED = "REFUSE_WRITE_FAILED"
 
 REFUSALS = (
     REFUSE_NO_PLAN,
@@ -168,6 +169,7 @@ REFUSALS = (
     REFUSE_WRITE_STILL_EMITS,
     REFUSE_TARGET_DRIFT,
     REFUSE_NOTHING_TO_STRIP,
+    REFUSE_WRITE_FAILED,
 )
 
 
@@ -188,6 +190,79 @@ class Refusal(Exception):
 #: the refusal message and the lookup cannot disagree about where the answer lives.
 WRITE_GATE_MODULE = "tortoise.record_vector"
 WRITE_GATE_SYMBOL = "mirror_required"
+
+#: The fold that derives and writes each label's vector, in `tortoise/projection/entities.py`.
+#:
+#: ⛔ THIS MAP EXISTS BECAUSE THE READ PREDICATE IS NOT THE WRITE FACT, and the measurement
+#: that proves it is the reason this map is not optional. On the tree that introduces
+#: `mirror_required` (`#13610`'s write half, PR #13617), `COVERAGE_GATED_LABELS` is
+#: `frozenset(LABEL_SERVED)` — ALL SEVEN LABELS — so `mirror_required("event")` answers
+#: ``False`` as soon as the record's coverage verifies. But the gate is consulted at exactly
+#: TWO folds (`entities.py:_upsert_subject`, `_upsert_object`); `_upsert_event`,
+#: `_upsert_source` and `_upsert_document` write `embedding` regardless. A tool that trusted
+#: the predicate alone would therefore declare Event/Source *write-stopped* and strip them
+#: into a live writer — the exact race `REFUSE_WRITE_STILL_EMITS` exists to prevent, and it
+#: would have shipped green because no test can see a boolean that means two things.
+#:
+#: So a label's write is treated as stopped only when its OWN fold consults the gate, read
+#: from the source with `ast` (the repo's established idiom for "is this writer gated?" —
+#: `tools/dod_5090_probe.py`). Fail-closed throughout: an unparseable module, a missing
+#: function, or a function that never mentions the gate all answer "still emits".
+FOLD_MODULE = "tortoise.projection.entities"
+FOLD_WRITERS: dict[str, tuple[str, ...]] = {
+    "Object": ("_upsert_object",),
+    "Subject": ("_upsert_subject",),
+    "Event": ("_upsert_event", "_event_plain_merge"),
+    # `_event_plain_merge` MERGEs `(s:Source {url:$id})` and sets its embedding, so the
+    # source label has THREE writers, not two — verified by walking `MERGE (x:Label`
+    # targets in each fold body, not by reading the function names.
+    "Source": ("_upsert_source", "_upsert_document", "_event_plain_merge"),
+}
+
+#: Any of these in a fold body means the fold ASKS the gate before encoding.
+_GATE_REFERENCES = ("mirror_required", "_derived_mirror_required")
+
+
+def _fold_consults_gate(label: str) -> tuple[bool, str]:
+    """``(every_writer_gated, reason)`` for ``label``, read from the fold's OWN source.
+
+    Answers the question the write gate cannot: *does the code that writes this label's
+    vector ask whether it still should?* A record-coverage predicate says what the record
+    holds; only the fold says what the fold will do.
+    """
+    import ast
+    import importlib
+
+    names = FOLD_WRITERS.get(label)
+    if not names:  # pragma: no cover - the map covers the population
+        return False, f"no fold writer is declared for :{label} — refusing"
+    try:
+        module = importlib.import_module(FOLD_MODULE)
+        path = Path(module.__file__)
+        source = path.read_text()
+        tree = ast.parse(source)
+    except Exception as exc:
+        return False, (
+            f"the fold module {FOLD_MODULE} could not be read for AST inspection "
+            f"({type(exc).__name__}: {exc}) — the write path's behaviour cannot be "
+            "established, so it is treated as STILL EMITTING")
+    bodies: dict[str, str] = {}
+    lines = source.splitlines()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            bodies.setdefault(node.name, "\n".join(lines[node.lineno - 1:node.end_lineno]))
+    missing = [n for n in names if n not in bodies]
+    if missing:
+        return False, (
+            f"the fold writer(s) {', '.join(missing)} are ABSENT from {FOLD_MODULE} — a "
+            "renamed fold cannot be proven stopped, so it is treated as STILL EMITTING")
+    ungated = [n for n in names if not any(g in bodies[n] for g in _GATE_REFERENCES)]
+    if ungated:
+        return False, (
+            f"`{', '.join(ungated)}` (the :{label} fold) writes `embedding` without "
+            f"consulting `{WRITE_GATE_SYMBOL}` — the record reporting coverage does NOT "
+            "stop that write, so a strip would be undone by the next one")
+    return True, f"every :{label} fold consults {WRITE_GATE_SYMBOL}"
 
 
 def write_gate(entity_type: str) -> tuple[bool, str]:
@@ -216,9 +291,11 @@ def write_gate(entity_type: str) -> tuple[bool, str]:
         return True, (
             f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL} is ABSENT on this tree, so the "
             "graph fold still derives and writes this label's vector on every write "
-            f"(including ON MATCH). That is #13610's write half (PR #13617) for "
-            f"object/subject; for event/source no write-stop exists at all. Stripping "
-            "now would be undone by the next write of the same node")
+            "(including ON MATCH). #13610's write half (PR #13617) gates the "
+            "object/subject folds only; it leaves the event, source and document folds "
+            "writing unconditionally — which this function ALSO checks below, so the "
+            "predicate appearing is necessary and not sufficient. Stripping now would "
+            "be undone by the next write of the same node")
     try:
         needed = bool(gate(entity_type))
     except Exception as exc:  # a raising gate is not a permission
@@ -230,10 +307,26 @@ def write_gate(entity_type: str) -> tuple[bool, str]:
             f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) answers True: "
             "the record has not proved it holds this label's vectors, so the graph "
             "copy is still the answering leg and the fold keeps writing it")
+    # ⛔ THE COVERAGE ANSWER IS NECESSARY AND NOT SUFFICIENT. It is a READ predicate: it
+    # says what the record holds, never what the fold will do. `COVERAGE_GATED_LABELS` is
+    # every served label while only two folds consult the gate, so trusting it alone
+    # declares Event/Source stopped and strips them into a live writer. The fold's own
+    # source is the only witness to the write.
+    from tortoise.security import ENTITY_TYPE_LABELS
+
+    label = ENTITY_TYPE_LABELS.get(entity_type)
+    if label is None:
+        return True, (
+            f"{entity_type!r} has no declared graph label "
+            f"({WRITE_GATE_MODULE} coverage alone is not a write fact)")
+    gated, why = _fold_consults_gate(label)
+    if not gated:
+        return True, (
+            f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) answers False "
+            f"(the record reports coverage), but {why}")
     return False, (
-        f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) answers False: the "
-        "record has proved coverage for this label, so the fold no longer writes the "
-        "graph copy")
+        f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) answers False and "
+        f"{why} — the graph copy is no longer written for this label")
 
 
 def label_write_gate(label: str) -> tuple[bool, str]:
@@ -266,14 +359,24 @@ def strip_readiness(label: str) -> tuple[bool, str]:
 
 
 def digest(entries: list[tuple[str, str]]) -> str:
-    """The canonical digest of an exact node set: one ``label<TAB>key`` line per node.
+    """The canonical digest of an exact node set: one LENGTH-FRAMED row per node.
 
-    Sorted, tab-separated, newline-joined, `sha256`-prefixed. Two properties matter and
-    both are load-bearing: the digest is over the WHOLE set (so a single key moving
-    changes it), and it is over ROWS rather than a JSON blob (so a re-serialisation of
-    the plan file cannot change what was approved).
+    Sorted, `sha256`-prefixed, and **length-framed** — ``<len(label)>:<label>`` then
+    ``<len(key)>:<key>`` per row. Three properties, all load-bearing:
+
+    * over the WHOLE set, so a single key moving changes it;
+    * over ROWS rather than a JSON blob, so a re-serialisation of the plan file cannot
+      change what was approved;
+    * ⛔ FRAMED, because a node key is **caller-supplied** (`:Object.id`, a `:Source`
+      `url`) and may contain the separator. With a bare ``label<TAB>key`` join, the
+      single node ``(Object, "a\nSubject\tb")`` and the pair ``(Object, "a") +
+      (Subject, "b")`` produce ONE digest — and this digest is the authority to delete,
+      so a collision is a set the human did not approve being executed as if it were.
+      Length framing makes an embedded separator unrepresentable rather than unlikely.
     """
-    body = "\n".join(f"{label}\t{key}" for label, key in sorted(set(entries)))
+    body = "\n".join(
+        f"{len(label)}:{label}{len(key)}:{key}"
+        for label, key in sorted(set(entries)))
     return "sha256:" + hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -287,15 +390,21 @@ def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
     entries: list[tuple[str, str]] = []
     per_label: list[dict] = []
     for row in report["labels"]:
-        keys = sorted(parity.read_graph_vector_keys(g, row["label"],
-                                                   _key_prop(row["label"]))["keys"])
+        keys = list(report["keys_by_label"].get(row["label"]) or ())
+        # ⛔ THE KEYS ARE CARRIED IN THE PLAN, and that is the authority contract. The
+        # execution compares the live set against this one (its digest) and then strips
+        # EXACTLY these keys — never a set re-read after the check. A re-read would let a
+        # vector that appeared between the digest check and the `REMOVE` be deleted
+        # without ever having been in the approved plan, and without its record copy
+        # having been parity-checked: the authority gap the token exists to close.
         if row["unkeyed_graph_nodes"]:
-            # An unkeyed vector-bearing node cannot be named in a plan, so it cannot
-            # be stripped — and it must not be silently left out of the population a
-            # human is approving either. It blocks (the census already counts it into
+            # An unkeyed vector-bearing node cannot be named in a plan, so it cannot be
+            # stripped — and it must not be silently left out of the population a human
+            # is approving either. It blocks (the census already counts it into
             # graph_only), and the count is stated here in the plan.
             per_label.append({
                 "label": row["label"],
+                "keys": [],
                 "nodes": 0,
                 "unkeyed_nodes_blocking": row["unkeyed_graph_nodes"],
                 "strip_ready": False,
@@ -305,6 +414,7 @@ def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
         entries.extend((row["label"], key) for key in keys)
         per_label.append({
             "label": row["label"],
+            "keys": keys,
             "nodes": len(keys),
             "unkeyed_nodes_blocking": 0,
             "strip_ready": row["blocked_reason"] is None,
@@ -320,13 +430,29 @@ def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
         "graph_id": graph_id,
         "batch": batch,
         "population": list(report["population"]),
+        "declared_population": list(report["declared_population"]),
         "census": report["labels"],
         "labels": per_label,
+        # DERIVED from the entry list, never trusted from a field a hand can edit: the
+        # emptiness refusal and the "expected" count both read this.
         "total_nodes": len(entries),
         "digest": digest(entries),
-        "digest_scope": "one `label<TAB>key` line per node, sorted, sha256",
+        "digest_scope": "one LENGTH-FRAMED `len(label):label len(key):key` row per "
+                        "node, sorted, sha256",
         "ready": all(row["strip_ready"] for row in per_label) and bool(entries),
     }
+
+
+def plan_entries(plan: dict) -> list[tuple[str, str]]:
+    """The approved node set, reconstructed from the plan's own per-label key lists.
+
+    ⛔ NEVER from ``total_nodes``: a count cannot be digested, so a count-based
+    emptiness test (or a count-based "expected") is a number a hand can edit into a
+    plan while the set it describes stays empty — which is exactly the vacuous
+    "finished retirement" `REFUSE_NOTHING_TO_STRIP` exists to refuse.
+    """
+    return [(row["label"], key) for row in plan.get("labels") or ()
+            for key in (row.get("keys") or ())]
 
 
 def _key_prop(label: str) -> str:
@@ -359,12 +485,23 @@ def render_plan(plan: dict) -> str:
         "  --execute --plan <this file> --confirm-plan-digest "
         f"{plan['digest']}",
     ]
+    measured = plan.get("population") or [r["label"] for r in plan["labels"]]
+    declared = plan.get("declared_population") or measured
+    dropped = sorted(set(declared) - set(measured))
+    if dropped:
+        lines += [
+            "",
+            f"⚠️ NARROWED: this plan covers {', '.join(measured)} only and says NOTHING "
+            f"about {', '.join(dropped)}. Execution is limited to the labels above.",
+        ]
     if not plan["ready"]:
         lines += [
             "",
-            "⛔ NOT READY: at least one label is blocked. Execution would REFUSE. "
-            "Resolve the block (backfill the record, or land the write-stop) and "
-            "re-plan; a partial strip is not available by design.",
+            "⛔ NOT READY: at least one label above is blocked, so execution of THIS plan "
+            "would REFUSE (nothing is written). Resolve the block (backfill the record, "
+            "or land that label's write-stop) and re-plan. ⚠️ A NARROWED plan is a "
+            "different thing: `--label` at PLAN time drops the blocked labels instead of "
+            "refusing, and the narrowed plan names what it left out above.",
         ]
     return "\n".join(lines)
 
@@ -398,6 +535,12 @@ def _load_plan(path: str, confirmed: str) -> dict:
 
 
 def _live_entries(g: Any, labels: list[str]) -> list[tuple[str, str]]:
+    """The graph's CURRENT set, per label — the digest comparison's other side.
+
+    Used only to decide whether the approved plan still describes the store. The
+    vectors actually removed come from the PLAN (`plan_entries`), never from this read:
+    a set re-read between the check and the write is a set the human never approved.
+    """
     entries: list[tuple[str, str]] = []
     for label in labels:
         keys = parity.read_graph_vector_keys(g, label, _key_prop(label))["keys"]
@@ -409,12 +552,25 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
             graph_name: str, confirmed: str, batch: int,
             expect_empty: bool) -> dict:
     """Every precondition, then the batched removal. Refuses BEFORE the first write."""
-    if plan["graph"] != graph_name:
+    # ⛔ THE WHOLE TARGET TRIPLE. The graph NAME alone is not the target: the tenant
+    # flags default from `TORTOISE_RECORD_ORG_ID`/`TORTOISE_RECORD_GRAPH_ID`, and the
+    # graph name is very often the `tortoise` default — so a preview on one tenant and an
+    # execute on another would certify parity against the WRONG record and strip the
+    # vectors whose own tenant's record never held them. `org_id`/`graph_id` are in the
+    # plan; all three are compared.
+    drift = [name for name, planned, live_value in (
+        ("graph", plan.get("graph"), graph_name),
+        ("org_id", plan.get("org_id"), org_id),
+        ("graph_id", plan.get("graph_id"), graph_id),
+    ) if planned != live_value]
+    if drift:
         raise Refusal(
             REFUSE_TARGET_DRIFT,
-            f"the plan was built against graph {plan['graph']!r} but this run resolves "
-            f"{graph_name!r}. A plan is an authority over ONE target. Nothing was "
-            "removed.")
+            f"the plan was built against a different target on {', '.join(drift)} "
+            f"(plan graph={plan.get('graph')!r} org={plan.get('org_id')!r} "
+            f"graph_id={plan.get('graph_id')!r}; this run graph={graph_name!r} "
+            f"org={org_id!r} graph_id={graph_id!r}). A plan is an authority over ONE "
+            "target. Nothing was removed.")
     labels = [row["label"] for row in plan["labels"]]
 
     # ── the parity re-check, LIVE, immediately before the first write ────────
@@ -457,7 +613,10 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
             "removed.")
 
     # ── nothing to strip is a REFUSAL, not a success ─────────────────────────
-    total = int(plan.get("total_nodes") or 0)
+    # ⛔ DERIVED from the approved ENTRY list, never read from `total_nodes`: a count is
+    # a field a hand can edit into a plan whose set is empty, and the refusal would then
+    # not fire on the one shape it exists for.
+    total = len(plan_entries(plan))
     if total == 0 or not live["labels"]:
         if not expect_empty:
             raise Refusal(
@@ -473,8 +632,12 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
     shortfalls: dict[str, int] = {}
     for row in plan["labels"]:
         label = row["label"]
-        keys = sorted(parity.read_graph_vector_keys(
-            g, label, _key_prop(label))["keys"])
+        # ⛔ THE APPROVED KEYS, not a fresh read of the table. The digest above already
+        # proved the live set equals this one; stripping the live set instead would let
+        # a vector that appeared in the check-to-write window be deleted without ever
+        # being in the plan a human approved, and without its record copy having been
+        # parity-checked.
+        keys = sorted(row.get("keys") or ())
         quoted_label = parity._quote_identifier(label)
         quoted_key = parity._quote_identifier(_key_prop(label))
         removed[label] = 0
@@ -491,12 +654,18 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
                 result = g.query(statement, params={"keys": chunk})
                 seen = int(result.result_set[0][0]) if result.result_set else 0
             except Exception as exc:  # report, never swallow
+                # ⛔ A DISTINCT TOKEN AND A DISTINCT EXIT CODE. This is NOT
+                # `REFUSE_GRAPH_ONLY` (parity is fine — the answer is "re-plan", not
+                # "backfill") and NOT the generic exit 2 ("refused, nothing written" —
+                # the graph is already PART-STRIPPED). A caller that gates on either
+                # would be misrouted by the exact state that most needs a human.
                 raise Refusal(
-                    REFUSE_GRAPH_ONLY,
+                    REFUSE_WRITE_FAILED,
                     f"the removal statement FAILED on {label} at offset {start} "
                     f"({type(exc).__name__}: {exc}). {sum(removed.values())} node(s) "
-                    "were already stripped; re-plan to see the current set. Nothing "
-                    "further was removed.") from exc
+                    "were ALREADY STRIPPED before the failure — the graph is "
+                    "part-stripped, which is why this is not a plain refusal. Nothing "
+                    "further was removed; re-plan to see the current set.") from exc
             removed[label] += seen
             # `REMOVE` of an absent property is a no-op, so a shortfall is benign — but
             # it is also the signal that the population moved under us, so it is
@@ -525,6 +694,23 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
         "residual_by_label": residual,
         "empty": False,
     }
+
+
+def result_exit_code(result: dict) -> int:
+    """The exit status for a COMPLETED execution — the post-write verdict, in one place.
+
+    ⛔ Extracted so its polarity can be asserted without a store, because the polarity is
+    the whole content of exit 5. `0` means "stripped and verified"; anything the run
+    could not verify is NOT zero — an unmeasurable residual summing to nothing is how a
+    strip whose result nobody could read reports a clean retirement.
+    """
+    if result.get("empty"):
+        return 0
+    residuals = list((result.get("residual_by_label") or {}).values())
+    unmeasured = [v for v in residuals if not isinstance(v, int)]
+    if unmeasured or sum(v for v in residuals if isinstance(v, int)):
+        return 5
+    return 0
 
 
 def _require_tokens(args: Any) -> dict:
@@ -670,7 +856,12 @@ def main(argv: list[str] | None = None) -> int:
     except Refusal as exc:
         sys.stderr.write(
             f"strip_graph_entity_vectors: {exc.token} — {exc}\n")
-        return 2
+        # ⛔ EXIT 6 IS "PART-STRIPPED", and it is a DIFFERENT code from exit 2 on
+        # purpose. Exit 2 promises "refused, nothing written", which a caller may treat
+        # as safe-to-retry; a mid-strip failure has already removed some nodes, and the
+        # only correct next action is to re-plan. One code for both would misroute the
+        # state that most needs a human.
+        return 6 if exc.token == REFUSE_WRITE_FAILED else 2
     except CensusError as exc:
         sys.stderr.write(f"strip_graph_entity_vectors: REFUSED — {exc}\n")
         return 3
@@ -678,16 +869,25 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(result, indent=2))
     if args.json:
         Path(args.json).write_text(json.dumps(result, indent=2) + "\n")
-    residual = sum(v for v in result["residual_by_label"].values()
-                   if isinstance(v, int))
-    if residual and not result["empty"]:
-        sys.stderr.write(
-            f"strip_graph_entity_vectors: {residual} vector(s) remain after the "
-            "removal — a CONCURRENT WRITER re-added them, or the write gate is not "
-            "actually closed on the running deployment. Re-plan; do not re-execute "
-            "this plan (its preconditions no longer hold).\n")
-        return 5
-    return 0
+    code = result_exit_code(result)
+    if code == 5:
+        residuals = result.get("residual_by_label") or {}
+        unmeasured = sorted(label for label, v in residuals.items()
+                            if not isinstance(v, int))
+        if unmeasured:
+            sys.stderr.write(
+                "strip_graph_entity_vectors: the post-removal count could NOT be taken "
+                f"for {', '.join(unmeasured)} — a strip whose result could not be "
+                "verified is not a completed strip. Re-run the census against this graph "
+                "before reporting the retirement.\n")
+        else:
+            sys.stderr.write(
+                "strip_graph_entity_vectors: "
+                f"{sum(v for v in residuals.values() if isinstance(v, int))} vector(s) "
+                "remain after the removal — a CONCURRENT WRITER re-added them, or the "
+                "write gate is not actually closed on the running deployment. Re-plan; "
+                "do not re-execute this plan (its preconditions no longer hold).\n")
+    return code
 
 
 if __name__ == "__main__":  # pragma: no cover

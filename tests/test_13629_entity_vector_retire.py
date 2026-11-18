@@ -37,6 +37,7 @@ import json
 import os
 import re
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -89,6 +90,9 @@ class FakeGraph:
         #: this many rows TOTAL while the aggregate count still reports the whole label.
         self.page_cap: int | None = None
         self._served = 0
+        #: Every REMOVE that actually reached the store, with its params — so a test can
+        #: assert WHICH keys were removed, not merely how many.
+        self.removal_calls: list[tuple[str, dict]] = []
 
     # ── seeding ────────────────────────────────────────────────────────────
     def add(self, label, key, has_embedding=True):
@@ -113,6 +117,7 @@ class FakeGraph:
         label = _LABEL_RE.search(cypher).group(1)
         if "REMOVE n.embedding" in cypher:
             assert write, "a REMOVE must never travel the read-only verb"
+            self.removal_calls.append((cypher, dict(params or {})))
             keys = set((params or {}).get("keys") or ())
             hit = 0
             for node in self.nodes[label]:
@@ -153,12 +158,23 @@ class Record:
         """A row whose `embedding` payload is present but whose `embedding_vec` is NULL."""
         self.rows[table][key] = (False, True)
 
-    def reader(self, record_dsn, org_id, graph_id, table):
+    def reader(self, record_dsn, org_id, graph_id, table, keys):
+        """The census's record leg, narrowed to the graph's key set.
+
+        ⛔ The NARROWING IS PART OF THE CONTRACT being faked: the real leg reads one
+        aggregate row plus only those rows whose `node_key` is in ``keys``. A fake that
+        returned the whole table would still pass while the real read had become an
+        unbounded full-table fetch.
+        """
         rows = self.rows[table]
+        wanted = set(str(k) for k in keys)
         return {
-            "keys": {k for k, (readable, _p) in rows.items() if readable},
-            "unreadable": sum(1 for r, p in rows.values() if p and not r),
-            "rows": len(rows),
+            "readable": {k for k, (readable, _p) in rows.items()
+                         if readable and k in wanted},
+            "unreadable": sum(1 for k, (r, p) in rows.items()
+                              if p and not r and k in wanted),
+            "record_readable_total": sum(1 for r, _p in rows.values() if r),
+            "rows": len(wanted & set(rows)),
         }
 
 
@@ -424,14 +440,86 @@ def test_write_gate_is_fail_closed_when_the_gate_raises(monkeypatch):
     assert "not a permission" in reason
 
 
-def test_write_gate_reports_a_stopped_writer(monkeypatch):
+def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
+    """⛔ THE P1 FINDING, AS A FALSIFIER: coverage is a READ fact, not a WRITE fact.
+
+    On the tree that introduces `mirror_required` (`#13610`'s write half), the predicate
+    is answered from `COVERAGE_GATED_LABELS`, which is **every served label** — while the
+    gate is consulted at exactly TWO folds (`_upsert_subject`, `_upsert_object`). So
+    `mirror_required("event")` answers `False` while `_upsert_event` still writes
+    `embedding` on every event. A tool that trusted the predicate alone would declare
+    `:Event` write-stopped and strip it into a live writer.
+
+    A mutation that drops the `_fold_consults_gate` call reds this test.
+    """
     from tortoise import record_vector
 
     monkeypatch.setattr(record_vector, "mirror_required",
                         lambda entity_type: False, raising=False)
+    # The real folds on this tree do NOT consult the gate, so the answer must still be
+    # "emits" — the record's coverage does not stop a write nobody gated.
     emits, reason = strip.write_gate("object")
-    assert emits is False
-    assert "no longer writes" in reason
+    assert emits is True
+    assert "writes `embedding` without consulting" in reason
+    # …and the reason NAMES the fold, so an operator can read which code to fix.
+    assert "_upsert_object" in reason
+
+
+def _fake_fold_module(tmp_path, monkeypatch, body):
+    source = body
+    path = tmp_path / "fake_fold_13629.py"
+    path.write_text(source)
+    module = types.ModuleType("fake_fold_13629")
+    module.__file__ = str(path)
+    sys.modules["fake_fold_13629"] = module
+    monkeypatch.setattr(strip, "FOLD_MODULE", "fake_fold_13629")
+    return module
+
+
+def test_fold_consults_gate_flips_in_BOTH_directions(tmp_path, monkeypatch):
+    """The AST check is the witness, so it must be able to say YES as well as NO.
+
+    A one-directional guard (always "not gated") would be an inert enforcer: it would
+    refuse for ever after the write-stop lands, which reads as a working gate right up
+    until someone removes it. So the positive direction is driven with a real module on
+    disk, not with a monkeypatched boolean.
+    """
+    _fake_fold_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        return
+    return 1
+""")
+    monkeypatch.setattr(strip, "FOLD_WRITERS", {"Object": ("_upsert_object",)})
+    assert strip._fold_consults_gate("Object")[0] is True
+
+    _fake_fold_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    return 1
+""")
+    gated, why = strip._fold_consults_gate("Object")
+    assert gated is False
+    assert "_upsert_object" in why
+
+
+def test_fold_consults_gate_is_fail_closed_on_an_unreadable_or_renamed_fold(
+        tmp_path, monkeypatch):
+    """An unparseable module, a missing function and a `SyntaxError` are all "emits"."""
+    path = tmp_path / "broken_fold_13629.py"
+    path.write_text("def (:\n")
+    module = types.ModuleType("broken_fold_13629")
+    module.__file__ = str(path)
+    sys.modules["broken_fold_13629"] = module
+    monkeypatch.setattr(strip, "FOLD_MODULE", "broken_fold_13629")
+    gated, why = strip._fold_consults_gate("Object")
+    assert gated is False
+    assert "could not be read" in why
+
+    # A renamed fold cannot be proven stopped.
+    _fake_fold_module(tmp_path, monkeypatch, "def something_else():\n    return 1\n")
+    gated, why = strip._fold_consults_gate("Object")
+    assert gated is False
+    assert "ABSENT" in why
 
 
 def test_label_write_gate_requires_every_entity_type_addressing_the_label(monkeypatch):
@@ -658,6 +746,259 @@ def test_a_second_execute_with_the_same_plan_refuses_as_stale(stores, monkeypatc
     with pytest.raises(strip.Refusal) as excinfo:
         _execute(graph, plan)
     assert excinfo.value.token == strip.REFUSE_PLAN_STALE
+
+
+# ── the record leg: the ONE comparison that certifies "the record has it" ───
+
+
+class _FakeCursor:
+    """Answers the two record statements by SHAPE, and records what was executed."""
+
+    def __init__(self, aggregate, rows):
+        self._aggregate = aggregate
+        self._rows = rows
+        self.description: list[tuple[str]] = []
+        self.executed: list[tuple[str, tuple]] = []
+
+    def execute(self, sql, params):
+        self.executed.append((sql, params))
+        if "FILTER (WHERE embedding_vec IS NOT NULL)" in sql:
+            self.description = [("record_readable",), ("record_unreadable",)]
+            self._pending = [self._aggregate]
+        else:
+            self.description = [("node_key",), ("readable",), ("has_payload",)]
+            self._pending = list(self._rows)
+
+    def fetchall(self):
+        return self._pending
+
+
+def _install_record(monkeypatch, aggregate, rows):
+    import tortoise.record_projection as rp
+    import tortoise.record_serve as rs
+
+    cursor = _FakeCursor(aggregate, rows)
+
+    class _Conn:
+        closed = False
+
+        def close(self):
+            _Conn.closed = True
+
+    monkeypatch.setitem(sys.modules, "psycopg2", types.ModuleType("psycopg2"))
+    monkeypatch.setattr(rs, "open_record", lambda dsn: _Conn())
+    monkeypatch.setattr(rp, "scope_connection", lambda conn, org_id: cursor)
+    return cursor, _Conn
+
+
+def test_the_record_leg_is_bounded_to_the_graph_keys_and_never_counts_a_NULL_vec(
+        monkeypatch):
+    """⛔ THE RECORD COMPARISON, PINNED — the one fact that licenses deleting anything.
+
+    Two properties, and both were previously unpinned because every other test replaced
+    this reader wholesale:
+
+    1. **BOUNDED.** The rows that cross the wire are narrowed by `node_key = ANY(...)` to
+       the graph's own key set — never an unbounded full-table fetch. A fake that
+       returned the whole table would have kept every other test green while the real
+       read scanned `public.event` end to end.
+    2. **`embedding_vec` IS THE TEST, not `embedding`.** A row whose payload is present
+       but whose GENERATED `embedding_vec` is NULL answers no dense query, so it is NOT
+       the copy. Mutating `_RECORD_KEYS_SQL` to select `(embedding IS NOT NULL) AS
+       readable` — the exact plausible edit — reds this test and nothing else.
+    """
+    cursor, conn = _install_record(
+        monkeypatch,
+        aggregate=(7, 2),                                    # readable, unreadable
+        rows=[("obj-1", True, True),                         # the copy exists
+              ("obj-2", False, True),                        # payload, NULL vec: NOT it
+              ("obj-3", False, False)])                      # bare row
+    out = parity.read_record_vector_keys(
+        "postgresql://x", "org", "graph", "object", {"obj-1", "obj-2", "obj-3"})
+
+    assert out["readable"] == {"obj-1"}
+    assert out["unreadable"] == 1
+    assert out["record_readable_total"] == 7
+    assert conn.closed is True
+
+    keys_sql, keys_params = cursor.executed[-1]
+    assert "node_key = ANY(%s)" in keys_sql
+    assert keys_params == ("org", "graph", ["obj-1", "obj-2", "obj-3"])
+    # …and no statement fetches the table without that narrowing.
+    for sql, _params in cursor.executed:
+        assert "node_key = ANY(%s)" in sql or "FILTER (WHERE embedding_vec IS NOT NULL)" in sql
+    # The aggregate is ONE row, so RESULTSET_SIZE cannot truncate it.
+    assert "count(*)" in cursor.executed[0][0]
+
+
+def test_the_record_leg_refuses_a_schema_that_moved(monkeypatch):
+    """A missing column is a REFUSAL, never an empty comparison that certifies."""
+    cursor, _conn = _install_record(monkeypatch, aggregate=(0, 0), rows=[])
+    cursor.description = [("something_else",)]
+    import tortoise.record_projection as rp
+    import tortoise.record_serve as rs
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rs, "open_record", lambda dsn: _Conn())
+
+    class _Cursor(_FakeCursor):
+        def execute(self, sql, params):
+            self.executed.append((sql, params))
+            self.description = [("something_else",)]
+            self._pending = [(0, 0)]
+
+    monkeypatch.setattr(rp, "scope_connection", lambda conn, org_id: _Cursor((0, 0), []))
+    with pytest.raises(parity.CensusError, match="did not return"):
+        parity.read_record_vector_keys(
+            "postgresql://x", "org", "graph", "object", {"obj-1"})
+
+
+def test_the_record_leg_refuses_an_unvetted_table_name(monkeypatch):
+    """The table name is interpolated into SQL, so it is allowlisted, not escaped."""
+    with pytest.raises(parity.CensusError, match="not one of this census's record tables"):
+        parity._quote_record_table("object; DROP TABLE point")
+
+
+# ── the census's population statement is the MEASURED one ──────────────────
+
+
+def test_a_narrowed_census_certifies_only_the_labels_it_measured(stores):
+    """⛔ `--label Object` must not read as "all four are at parity".
+
+    `population` is the MEASURED set and the render says so, because a report that named
+    all four while querying one is the "gate reports a pass without having looked" class
+    this module exists to refuse. A mutation back to `[r[1] for r in RETIRED]` reds this.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    report = _census(graph, labels=["Object"])
+    assert report["population"] == ["Object"]
+    assert report["declared_population"] == ["Object", "Subject", "Event", "Source"]
+    assert report["narrowed"] is True
+    text = parity.render(report, "g")
+    assert "every label MEASURED (Object)" in text
+    assert "NARROWED" in text
+    # …and the un-measured labels are NAMED as unmeasured, never silently omitted.
+    narrowed_line = text.split("NARROWED", 1)[1]
+    for absent in ("Event", "Source", "Subject"):
+        assert absent in narrowed_line
+
+
+def test_parity_and_ready_are_two_different_answers(stores, monkeypatch):
+    """Parity is a pure store fact; `ready` also carries the write gate.
+
+    A census reporting only one would either hide the write-gate refusal (a reader
+    ticketing "parity holds, so strip") or let the gate's absence look like a parity
+    failure (a reader backfilling a record that is already complete).
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    report = _census(graph, labels=["Object"])
+    assert report["parity"] is True
+    assert report["ready"] is False          # no write-stop on this tree
+    assert "WRITE GATE" in parity.render(report, "g")
+    monkeypatch.setattr(strip, "write_gate", lambda entity_type: (False, "stopped"))
+    report = strip.parity.census(
+        g=graph, record_dsn="postgresql://x", org_id="org", graph_id="graph",
+        labels=["Object"], strip_readiness=strip.strip_readiness)
+    assert report["ready"] is True
+
+
+# ── the plan is the authority over an exact set ────────────────────────────
+
+
+def test_the_plan_carries_its_keys_and_the_removal_uses_them(stores, monkeypatch):
+    """The approved set, not a set re-read after the check.
+
+    The digest already proves live == plan; stripping the LIVE set instead would let a
+    vector that appeared in the check-to-write window be deleted without ever being in
+    the approved plan.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    for key in ("obj-1", "obj-2"):
+        graph.add("Object", key)
+        record.holds("object", key)
+    plan = _plan(graph, labels=["Object"])
+    assert plan["labels"][0]["keys"] == ["obj-1", "obj-2"]
+    assert sorted(strip.plan_entries(plan)) == [("Object", "obj-1"), ("Object", "obj-2")]
+    _execute(graph, plan, batch=1)
+    stripped = [params["keys"] for _cypher, params in graph.removal_calls]
+    removed_keys = [key for batch in stripped for key in batch]
+    assert sorted(removed_keys) == ["obj-1", "obj-2"]
+
+
+def test_an_edited_plan_cannot_smuggle_an_empty_set_through_the_count(stores,
+                                                                    monkeypatch):
+    """`total_nodes` is a field a hand can edit; the ENTRY list is the authority.
+
+    A plan whose `total_nodes` says 5 while its per-label key lists are empty is the
+    vacuous "finished retirement" `REFUSE_NOTHING_TO_STRIP` exists for. Derived from the
+    entries, the refusal fires.
+    """
+    _ready(monkeypatch)
+    graph, _record = stores
+    plan = _plan(graph, labels=["Object"])
+    plan["labels"] = [{"label": "Object", "keys": [], "nodes": 0,
+                       "unkeyed_nodes_blocking": 0, "strip_ready": True,
+                       "blocked_reason": None}]
+    plan["total_nodes"] = 5
+    plan["digest"] = strip.digest([])
+    assert strip.plan_entries(plan) == []
+    with pytest.raises(strip.Refusal) as excinfo:
+        _execute(graph, plan)
+    assert excinfo.value.token == strip.REFUSE_NOTHING_TO_STRIP
+
+
+def test_execute_refuses_tenant_drift_not_just_a_graph_name_drift(stores, monkeypatch):
+    """A plan is an authority over ONE target — and the target is a TRIPLE.
+
+    `--org-id`/`--graph-id` default from the environment and the graph name is often the
+    `tortoise` default, so checking only the name lets a plan previewed on one tenant be
+    executed against another tenant's record.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    plan = _plan(graph, labels=["Object"])
+    for kwarg in ({"org_id": "other-org"}, {"graph_id": "other-graph"},
+                  {"graph_name": "other-graph"}):
+        with pytest.raises(strip.Refusal) as excinfo:
+            _execute(graph, plan, **kwarg)
+        assert excinfo.value.token == strip.REFUSE_TARGET_DRIFT
+    assert graph.vector_keys("Object") == {"obj-1"}
+
+
+def test_the_digest_cannot_collide_on_a_key_containing_its_separator():
+    """A node key is CALLER-SUPPLIED, so framing is a correctness property.
+
+    Without length framing, the single node `(Object, "a\nSubject\tb")` and the pair
+    `(Object, "a") + (Subject, "b")` digest identically — and this digest IS the authority
+    to delete.
+    """
+    single = strip.digest([("Object", "a\nSubject\tb")])
+    pair = strip.digest([("Object", "a"), ("Subject", "b")])
+    assert single != pair
+    # Length framing also keeps the tab-separated reading of a NORMAL set unchanged.
+    assert strip.digest([("Object", "obj-1")]) == strip.digest([("Object", "obj-1")])
+
+
+# ── the post-write verdict is fail-closed ──────────────────────────────────
+
+
+def test_an_unmeasurable_residual_is_not_exit_zero():
+    """Exit 5 means "may remain"; a verdict that could not be taken must not sum to 0."""
+    assert strip.result_exit_code({"residual_by_label": {"Object": 0}, "empty": False}) == 0
+    assert strip.result_exit_code({"residual_by_label": {"Object": 3}, "empty": False}) == 5
+    assert strip.result_exit_code(
+        {"residual_by_label": {"Object": "UNMEASURED(boom)"}, "empty": False}) == 5
+    assert strip.result_exit_code({"residual_by_label": {}, "empty": True}) == 0
 
 
 # ── the refusals are a closed, published set ────────────────────────────────
