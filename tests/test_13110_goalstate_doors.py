@@ -490,27 +490,27 @@ def test_the_served_schema_advertises_goal_state_on_every_create_door():
     description, so an agent reading `tools/list` could not learn the field
     existed and reached for the keyword that did not exist.
 
-    Every SERVED create door that can carry the field is pinned: the canonical
-    `tortoise_create_entity` and the goal-POINT door (ONTOLOGY §4.1).
-    `tortoise_create_object` is retired from the registry (#13052), so a row for
-    it would assert a door `tools/list` no longer publishes — the assertion
-    would KeyError on the retirement rather than on a missing parameter.
+    Every SERVED create door that can carry the field is pinned. There is exactly
+    ONE of them now — the canonical `tortoise_create_entity` (ONTOLOGY §4.1's goal
+    is a Point, and the container's `type="point"` arm writes it).
+    ⛔ TWO DOORS LEFT THIS LOOP BY RETIRING FROM THE REGISTRY, and both would
+    assert a door `tools/list` no longer publishes — the assertion would KeyError
+    on the retirement rather than on a missing parameter: `tortoise_create_object`
+    in #13052, and `tortoise_create_point` in #11609 lane P1. The point door's
+    FIELD is still reachable (the arm relays `goalState` into `create_point` as a
+    prop, and `tortoise_create_arms.py` pins that on a real graph) — what is gone
+    is the separate SCHEMA, which is the whole point of the consolidation.
     """
     from tortoise import mcp_server
 
     tools = {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
-    for tool_name in (
-        "tortoise_create_entity",
-        "tortoise_create_point",
-    ):
+    for tool_name in ("tortoise_create_entity",):
         spec = tools[tool_name]
         assert "goalState" in spec.parameters["properties"], (tool_name, spec.parameters)
-    # A parameter, NOT a new surface: the doors keep their names and their
-    # required arguments, and the SDK methods behind them are unchanged.
+    # A parameter, NOT a new surface: the door keeps its name and its required
+    # arguments, and the SDK method behind it is unchanged.
     assert tools["tortoise_create_entity"].parameters["required"] == [
         "type", "name"]
-    assert tools["tortoise_create_point"].parameters["required"] == [
-        "kind", "content"]
 
 
 # ── The two doors cannot drift apart ────────────────────────────────────────
