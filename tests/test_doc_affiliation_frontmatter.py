@@ -299,17 +299,21 @@ def _split_comment(raw: str) -> str:
     """
     close = _closing_quote(raw)
     if close == -1:
-        # DEFENSIVE, and UNREACHABLE in practice — said plainly so no reader looks
-        # for the test that owns it and concludes the verdict is untested. `raw[0]`
-        # is a quote and every ` #` sits at `i >= 1`, so
-        # `len(raw[:i].rstrip()) - 1` can never be `-1`: the loop below cannot match
-        # and falls through to the same `return raw`. Deleting this branch leaves
-        # the file at `2 failed, 15 passed` (re-measured at `38df4e93a4`: the 2
-        # pre-existing absence reds and nothing else), so no test CAN pin it. The
-        # caller is unaffected either way — `_quoted_style` re-runs the same parity
-        # scan and reports `malformed` for a value with no close, rather than
-        # trusting `endswith`, since a body whose last character is an ESCAPED
-        # quote ends in the quote char anyway.
+        # ⛔ THE `-1` CASE **IS REACHED** — any never-closing quoted value (`"abc`,
+        # `"a\"`) returns through this branch. Said plainly because an earlier
+        # version called it "UNREACHABLE in practice", which is false in the one
+        # way that matters: a reader acting on it would delete a line that RUNS.
+        # What is unreachable is a different **outcome**. `raw[0]` is a quote and
+        # every ` #` sits at `i >= 1`, so `len(raw[:i].rstrip()) - 1` can never be
+        # `-1`: the loop below cannot match and falls through to the same
+        # `return raw`. So this branch is BEHAVIOURALLY REDUNDANT, not dead code —
+        # deleting it leaves the file at `2 failed, 16 passed` (re-measured at
+        # `dad7aea959`: the 2 pre-existing absence reds and nothing else), which is
+        # why no test CAN pin it, not because the line never executes. The caller
+        # is unaffected either way — `_quoted_style` re-runs the same parity scan
+        # and reports `malformed` for a value with no close, rather than trusting
+        # `endswith`, since a body whose last character is an ESCAPED quote ends in
+        # the quote char anyway.
         return raw
     i = raw.find(" #")
     while i != -1:
@@ -339,12 +343,20 @@ def _unkeepable_quoted(subject: str, style: str) -> str:
     remedies — and one shared sentence gave both the truncation remedy, *"the
     value is TERMINATED there. Remove the inner quote"*. That is true of
     ``broken`` (YAML really does stop at an inner quote) and FALSE of
-    ``malformed``, whose shapes YAML keeps whole: `"x"# note` (a trailing
-    comment with no space before it), a MULTI-LINE quoted scalar, and a scalar
-    that genuinely never closes. For those, *"remove the inner quote"* asks the
-    author to delete a legal character — the same false-remedy class as the
-    `''`-escape finding this PR exists to remove — so the remedy that clears
-    them is named instead. No verdict changes: both arms still refuse the file.
+    ``malformed``, whose members split into two groups the shared sentence damaged
+    in DIFFERENT ways (lumping them was itself a small false claim — a member of
+    this family is a parse error, so "YAML keeps every member whole" is not true):
+
+    * YAML KEEPS THESE WHOLE — `"x"# note` (a trailing comment with no space
+      before it) and a MULTI-LINE quoted scalar. Here *"remove the inner quote"*
+      asks the author to delete a character the value needs: the same
+      false-remedy class as the `''`-escape finding this PR exists to remove.
+    * A scalar that never closes is a PARSE ERROR (`ScannerError`), so YAML keeps
+      NONE of it. The shared sentence was merely INAPPLICABLE there — there is no
+      inner quote to remove — so this member needs the new remedy for a different
+      reason, not because the old one would have destroyed something.
+
+    No verdict changes: both arms still refuse the file.
     """
     if style == "broken":
         return (
@@ -353,8 +365,8 @@ def _unkeepable_quoted(subject: str, style: str) -> str:
             "block scalar."
         )
     return (
-        f"{subject} is malformed — no closing quote on that line. Either the "
-        "scalar is genuinely unterminated, or its closing quote is followed by "
+        f"{subject} is malformed — this arm cannot read where the value closes. "
+        "Either the scalar never closes, or its closing quote is followed by "
         "a comment with no space between (put one space before the `#`); a "
         "quoted scalar continued onto the next line is refused here too. Keep "
         "the whole value on one line inside its quotes, or use a block scalar."
@@ -371,11 +383,15 @@ def _quoted_style(raw: str) -> tuple[str, str | None]:
     still carry an unescaped quote and an earlier order let that truncation through
     green (found in review).
 
-    ``malformed`` is the NO-CLOSE check, a different shape: no quote in the value
-    terminates the scalar (``_closing_quote`` returns ``-1``), so YAML keeps none
-    of it. It is decided by that parity scan, NOT by ``endswith`` — a body whose
-    last character is an ESCAPED quote ends in the quote char yet never closes, and
-    trusting ``endswith`` sent it to ``escaped``, where the comparison is declined
+    ``malformed`` is the no-WHOLE-scalar check, a different shape, and it has TWO
+    conjuncts that are neither interchangeable nor redundant: no quote in the value
+    terminates the scalar (``_closing_quote`` returns ``-1``), **or** the close it
+    finds is not at the END of the splittable text. `"x"# note` has its close at
+    index 2, so only the end-of-text conjunct fires there and YAML keeps the value
+    (`x`); `"a\\"` closes nowhere, so only the parity scan fires and YAML keeps
+    none of it. Deciding wholeness by ``endswith`` ALONE is the historical defect —
+    a body whose last character is an ESCAPED quote ends in the quote char yet
+    never closes, and that sent it to ``escaped``, where the comparison is declined
     (found in review: the shape escaped measurement entirely).
 
     ``escaped`` declines the value comparison (hand de-quoting cannot reproduce
@@ -1076,8 +1092,15 @@ def test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured(
 
     Why it needs its own test: measured with the skip deleted, the sibling
     single-quote test stays GREEN (its escape sits immediately before the
-    `` #``), so the parity half shipped unpinned and a future simplification of
-    ``_closing_quote`` would reintroduce the false block with green CI.
+    `` #``), so the parity half shipped unpinned. ⛔ NOT *"would reintroduce the
+    false block with green CI"* — an earlier version of this paragraph said that,
+    and it is falsified by measurement: with the skip deleted the file is
+    `5 failed, 13 passed` at `dad7aea959`, i.e. this pin AND
+    `test_a_never_closing_quoted_scalar_is_malformed_not_escaped` AND
+    `test_no_GREEN_quoted_verdict_survives_a_parser_refusal` all red (the other 2
+    are the pre-existing absence rows). A future simplification therefore CANNOT
+    land green. This test is the FIRST custodian of the parity skip, not its only
+    one — the same correction the backslash-skip docstring below already carries.
 
     Non-vacuity: with the ``''`` skip removed, ``_quoted_style`` returns
     ``('malformed', None)`` here and the ``style`` assertion below fails.
@@ -1302,9 +1325,12 @@ def test_a_malformed_value_names_a_true_remedy(
     What was wrong was the PRINTED REMEDY, which was the truncation sentence for
     both — *"the value is TERMINATED there. Remove the inner quote"*. For
     `broken` that is true (YAML stops at the unescaped inner quote). For
-    `malformed` it is false, because YAML keeps every member of that family
-    whole, and the sentence tells the author to delete a legal character — the
-    same false-remedy class as the `''`-escape finding this PR exists to remove.
+    `malformed` it is false for the members YAML KEEPS WHOLE — a space-less
+    trailing comment and a continued quoted scalar — where the sentence tells the
+    author to delete a character the value needs: the same false-remedy class as
+    the `''`-escape finding this PR exists to remove. The third member (a scalar
+    that never closes) is a PARSE ERROR, so the sentence was merely inapplicable
+    there; it gets the same new remedy for a different reason.
 
     The whole family is recorded in the plan doc §9 as *recorded, not fixed*,
     with one reason: clearing the VERDICT means a lexer widening (accepting a
@@ -1347,6 +1373,13 @@ def test_a_malformed_value_names_a_true_remedy(
     assert "malformed" in msg, msg
     assert "Remove the inner quote" not in msg, msg
     assert "put one space before the `#`" in msg, msg
+    # The OPENING clause must not contradict the case it is printing for: this
+    # shape HAS a closing quote (index 2), so "no closing quote on that line" was
+    # false in the very sentence that went on to name the space fix. Pinned
+    # because the "Remove the inner quote" / "put one space" assertions above are
+    # both satisfied by a message whose first clause lies.
+    assert "no closing quote on that line" not in msg, msg
+    assert "cannot read where the value closes" in msg, msg
 
     # (b) LEGAL YAML refused as `malformed`: a quoted scalar continued on the
     # next line. The remedy names the one-line form / block scalar.

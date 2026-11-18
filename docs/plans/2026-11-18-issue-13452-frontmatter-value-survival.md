@@ -445,9 +445,15 @@ close-POSITION test alone refuses the wrong split and `_closing_quote`'s `''` sk
 anything — measured: deleting the skip
 left that test GREEN, while a legal mid-body escape under a trailing comment, `'it''s' # comment`,
 regressed from `('single-quoted', "it's")` to `('malformed', None)` (the same *delete a legal
-escape* remedy), with green CI. `test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured`
+escape* remedy). `test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured`
 now pins the parity half: with the skip deleted it reds and the sibling stays green
 (`-k single_quoted` → `1 failed, 1 passed`), so each half names its own falsifier.
+⛔ An earlier version of this paragraph ended that sentence "…, with green CI" — FALSIFIED by
+measurement, and corrected rather than dropped: with the skip deleted the whole file is
+`5 failed, 13 passed` at `dad7aea959`, i.e. **three** pins red (this one,
+`…_never_closing_quoted_scalar_…`, and the class pin `test_no_GREEN_quoted_verdict_survives_a_parser_refusal`)
+plus the 2 pre-existing absence rows. So the parity skip was never un-pinned in the sense that
+mattered: a simplification of `_closing_quote` cannot land green.
 
 **Fixed at this head — the `"` backslash skip had no pin (round-4 review).**
 
