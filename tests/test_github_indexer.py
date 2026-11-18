@@ -550,24 +550,43 @@ def test_a_row_whose_position_the_fold_cannot_resolve_is_never_read_as_open(sdk)
 
 
 def test_a_FALSY_non_boolean_isClosed_does_not_mint_a_close_every_poll(sdk):
-    """#13288 review R2/F1, the half that had no pin: `isClosed=0`.
+    """#13326 (measured on `origin/main` `54682177bc`), the half that had no pin: `isClosed=0`.
+
+    ⚠️ Attribution corrected (#13326 review P3): this half was NOT #13288 round-2 `F1`
+    — that finding is "the position arm shadows the unresolvable guard, and the new
+    comment says it cannot", and no #13288 comment mentions `isClosed=0`, `Integer`,
+    or a falsy non-boolean marker. The closest prior record is #13289's review P3
+    ("a falsy non-boolean `outdated` (`0`, `''`) reads live in Python but terminal in
+    Cypher — RECORDED, NOT FIXED") — the same excluded middle one FIELD over; the
+    `isClosed` field itself was found for #13326.
 
     `create_object(..., isClosed=1)` is documented at the truthy pin BELOW
     (`test_a_truthy_non_boolean_isClosed_does_not_mint_a_close_every_poll`); the
-    FALSY half is reachable through the other door, `update_knowledge(id,
-    isClosed=0)`, which stores the INTEGER `0` (measured on the merged head:
+    FALSY half is reachable through EITHER props door — there is no partition to
+    justify (#13326 review, second lane: `create_object("x", objectKind=
+    "core:issue", isClosed=0)` stores `['x', 0, 'Integer']` too, measured). Every
+    props door stores the marker VERBATIM and none coerces; the `update_knowledge`
+    spelling below is the one this pin uses (measured on the merged head:
     `typeof(o.isClosed)` → `['Integer']`). The two sides then disagree
     irreconcilably: this module reads it by `bool()` (→ live), while the fold's
     live-holder probe compares `coalesce(n.isClosed, false) = false` in Cypher,
     where `0 = false` is FALSE under FalkorDB's strict types (measured:
     `RETURN 0 = false, typeof(0)` → `[False, 'Integer']`; vendor-documented, and
-    `toBoolean(0)` is the explicit coercion). So the row has NO live holder, no
-    fold runs on it, and the marker is never repaired.
+    `toBoolean(0)` is the explicit coercion). So the row has NO live holder, and no
+    CLOSING fold is dispatched for it — the marker is never repaired from the close
+    side. (Trigger-reach is a separate fact and the module docstring states it: a
+    `github.issue.reopened` fold reached by NAME DOES rewrite the marker, which is
+    exactly why the arm keeps a `"closed"` answer wherever the position or a legacy
+    `status` word already records an end.)
 
     Measured pre-fix on the merged head, four polls of a CLOSED issue: mints
     `[1, 1, 1, 1]`, four permanent `-closed` Events, the row byte-identical. The
-    read now answers `None` (unplaceable) for a falsy non-boolean marker on a
-    position that records no end, which gates the transition arm off.
+    read now WITHHOLDS THE `"open"` ANSWER for a falsy non-boolean marker on a
+    position that records no end — it answers `None` where the answer would
+    otherwise be `"open"`, which gates the transition arm off. It does NOT answer
+    `None` everywhere (#13326 review P2): where the position records an end, or a
+    legacy `status` word already says closed, the `"closed"` answer is kept, because
+    that is the reading the reopen fold reaches and REPAIRS.
 
     ⛔ The `[0,0,0,0]` polls alone do NOT test that answer (#13326 F2): the
     reading this arm REJECTS, `"closed"`, mints nothing there either, because
