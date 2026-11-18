@@ -398,9 +398,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    # 47: `#13489`'s review added the `:6938` row (`("Object", ["name"])`, the §2.5 address that
+    # 48: `#13489`'s review added the `:6938` row (`("Object", ["name"])`, the §2.5 address that
     # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6933`/`:6934`/`:6939`
-    # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th).
+    # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th), and row
+    # 13b's Source-writer pin (`sdk.py:21648`) is the same shape added again, for the same reason.
     assert len(_PINS) == 48
 
 
@@ -648,7 +649,7 @@ def test_the_main_head_figures_the_header_names_are_still_counted() -> None:
     head-selecting arm that would actually open it.
     """
     # ⛔ THE POPULATION HAS AN ANTI-SHRINK ARM, and it is the file's own precedent applied to a new
-    # dict (`assert len(_PINS) == 47` above, `declared == pinned` in the sibling pin test). Without
+    # dict (`assert len(_PINS) == 48` above, `declared == pinned` in the sibling pin test). Without
     # it the guard above is defeatable exactly the way an absent pin is not coverage: re-point a
     # `main`-head figure in the document AND delete its row here, and the loop has nothing to check
     # — measured on a copy of this tree at `25b0fd5f` (`:6854-6870` -> `:6855-6871` in the audit doc
