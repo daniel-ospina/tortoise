@@ -45500,13 +45500,53 @@ class TortoiseSDK:
             # caller learns rows were cut, and asking for the extra row costs one
             # slot in a bounded scan. Without it the marker would have to report a
             # full page as complete (the #8447 defect) or an unfilled one as cut.
-            _fatter = enumerate_ended(
-                graph, entity_type=entity_type, kind=kind,
-                kinds=expanded_kinds, limit=limit + 1,
-                # BOUNDED like every other statement this read issues: the
-                # caller's own budget (the capstone's `_elevated_timeout_ms`) or
-                # the shipped read budget, never an unbounded query.
-                timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS))
+            _ended_bound = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
+            try:
+                _fatter = enumerate_ended(
+                    graph, entity_type=entity_type, kind=kind,
+                    kinds=expanded_kinds, limit=limit + 1,
+                    # BOUNDED like every other statement this read issues: the
+                    # caller's own budget (the capstone's `_elevated_timeout_ms`)
+                    # or the shipped read budget, never an unbounded query.
+                    timeout_ms=_ended_bound)
+            except ValueError:
+                # ⛔ NOT a store failure: the door REFUSES a family with no
+                # lifecycle before it ever queries (`ended.py`'s `FAMILIES`
+                # check), and that refusal is the answer — swallowing it here
+                # would serve `ended_scope` on an Event as a degraded empty
+                # population, i.e. "nothing of that family ended", which is the
+                # claim the two must never share. Only the STORE's failure is
+                # degradable; a contract refusal keeps rising.
+                raise
+            except Exception as e:  # noqa: BLE001, RUF100
+                # FAIL-SAFE (#13302 review F1). FalkorDB's `timeout` is a MAXIMUM
+                # QUERY RUNTIME: the server aborts the statement and the client
+                # RAISES. This is the most expensive statement the read issues,
+                # so on a production-sized family it is the arm most likely to
+                # hit the budget — and without this handler a store that could
+                # not answer would throw OUT of a public read whose every
+                # sibling bounded statement degrades (the reachability probe
+                # above, the vector legs, `_read_declaration`). Degrade exactly
+                # as they do: zero rows, a leg entry that says the leg ran and
+                # did NOT answer, and a truncation marker that forbids reading
+                # the empty answer as COMPLETE. Never a raise, and never an
+                # unmarked empty list passed off as "nothing ever ended".
+                _logger.warning(
+                    "ended-scope enumeration did not answer within %s ms (%s) "
+                    "— degraded", _ended_bound, e)
+                # ⛔ APPEND IN PLACE, never rebind: `status_trace` IS the
+                # caller's `leg_trace` whenever no `read_status_out` was asked
+                # for (`45129`), and a rebind to a copy would send this entry to
+                # a list nobody reads — the sibling vector arm above
+                # (`45617`) appends in place for exactly that reason. A
+                # trace-only caller must see that the leg ran and did not
+                # answer, or the one record of the degradation is a throwaway.
+                if status_trace is not None:
+                    status_trace.append(_trace_entry(
+                        "ended", ran=True, degraded=True,
+                        reason="query_failed", count=0))
+                _trunc["incomplete"] = True
+                return _with_read_status([])
             _ended_rows = _fatter[:limit]
             # ``candidates`` is what this read could SEE and it may be BOUNDED
             # (exactly the hosted ``GET /v1/points`` ``limit+1`` probe shape), which

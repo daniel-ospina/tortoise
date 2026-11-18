@@ -1891,3 +1891,125 @@ def test_a_query_less_call_is_not_reported_as_a_corpus_ranking():
     )
     cap._signal_refs(ans, {}, {})
     assert not any("NO-RELATION-TO-QUESTION" in s for s in ans.signals)
+
+
+# ── #13302 review F3: the SCOREBOARD's settled renderings ──────────────────────
+#
+# The board is the artifact a human reads to decide whether the product answered,
+# and the pre-fix inline renderings made an ended-scope enumeration read exactly
+# like a plain default-scope search. The diff replaced them with one builder per
+# rendering; nothing pinned that, so restoring the inline copies kept every pin
+# green and left a human to notice (#13302 review F3).
+
+
+def test_an_ended_scope_call_is_labelled_as_one():
+    """A reader must never have to guess WHICH call produced a row.
+
+    Both renderers spell a call through `_search_label`, so the marker has to live
+    in that one builder. Without it the committed evidence shows a retired object
+    served `status=deprecated` by a lookup that looks like a plain read — the trust
+    failure the scoreboard exists to catch.
+    """
+    label = cap._search_label(
+        {"query": None, "entity_type": "point", "ended_scope": True})
+    plain = cap._search_label({"query": None, "entity_type": "point"})
+
+    assert "ended_scope" in label, (
+        "an ended-scope enumeration must be LABELLED as one — it renders "
+        "identically to a query-less default search otherwise"
+    )
+    assert "ended_scope" not in plain, (
+        "a default-scope read must not claim a scope it did not ask for"
+    )
+    # The detail sections pass `tick=False`; the FLAGS may not depend on that, or
+    # the same call renders two ways in one document.
+    assert label == plain.replace(")", ", ended_scope)")
+    assert "ended_scope" in cap._search_label(
+        {"query": None, "entity_type": "point", "ended_scope": True}, tick=False)
+
+
+def test_every_search_label_comes_from_the_one_builder():
+    """A re-inlined `f"search(…)"` in a renderer is the defect, so scan for it.
+
+    The behavioural pin above cannot see an inline duplicate: it calls the builder
+    directly, which stays correct while a renderer stops using it. This is the
+    AST shape of the same check `test_search_projects_through_the_served_row_helper`
+    applies to the served-row projection.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cap)))
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name == "_search_label":  # the ONE builder, by definition
+            continue
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.JoinedStr):
+                continue
+            head = node.values[0].value if node.values else None
+            if isinstance(head, ast.Constant) and str(head.value).lstrip().startswith(
+                "search("
+            ):
+                offenders.append(f"{fn.name}:{node.lineno}")
+    assert not offenders, (
+        "a `search(...)` label is built inline instead of through "
+        f"`_search_label` (it can drop `ended_scope`): {offenders}"
+    )
+
+
+def test_the_ended_suffix_renders_how_a_row_ended():
+    """The bracket is the reason a row is the answer — and it is not decorative."""
+    suffix = cap._ended_suffix(
+        {"stage": {"slot": "terminal", "outcome": "withdrawn"}, "linkedEvents": []})
+    assert "stage=terminal/withdrawn" in suffix
+    assert "no linked event" in suffix, (
+        "the 'planned and never happened' half must render, or a plan that ended "
+        "and a plan that happened look identical on the board"
+    )
+    assert "successor=Onboarding v2" in cap._ended_suffix(
+        {"successorName": "Onboarding v2"}), "a NAME must render under the name"
+    assert "successor=abc-123" in cap._ended_suffix({"successorId": "abc-123"})
+    assert cap._ended_suffix({"id": "live-1", "status": "live"}) == "", (
+        "a current-scope row carries no ending, so it gains no bracket"
+    )
+
+
+def test_the_ended_signal_states_the_rows_own_ending_and_mints_none():
+    """The signal is the ONE field a reader attributes a failure to.
+
+    `withdrawn record(s)` is a claim the product never made — the ended population
+    is EVERY ending — and a served row's own `status`/`stage.outcome` is where
+    "how" is stated. Both halves are pinned: the wording, and that the word comes
+    from the row rather than from the label.
+    """
+    answer = cap.RECIPES["withdrawn"](_EndedRecordingTarget(), {}, {})
+    signal = next(s for s in answer.signals if "ended record(s)" in s)
+    assert "retracted" in signal, (
+        "the row's OWN ending word must reach the signal — it is the fact the "
+        "reader scores"
+    )
+    assert "withdrawn record" not in signal, (
+        "`withdrawn record(s)` would be a claim the product never made: the ended "
+        "population is every ending, not only withdrawals"
+    )
+
+    class _SupersededTarget(_EndedRecordingTarget):
+        def search(self, query=None, *, entity_type="point", limit=10,
+                   include_terminal=False, ended_scope=False, role=""):
+            call = super().search(query, entity_type=entity_type, limit=limit,
+                                  include_terminal=include_terminal,
+                                  ended_scope=ended_scope, role=role)
+            if ended_scope and entity_type == "point":
+                call.rows = [dict(call.rows[0], status="superseded")]
+            return call
+
+    signal2 = next(
+        s for s in cap.RECIPES["withdrawn"](_SupersededTarget(), {}, {}).signals
+        if "ended record(s)" in s
+    )
+    assert "superseded" in signal2, (
+        "a superseded row must state `superseded`, not inherit the label's word"
+    )

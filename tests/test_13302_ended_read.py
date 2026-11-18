@@ -465,78 +465,6 @@ def test_a_query_beside_ended_scope_is_refused_rather_than_dropped(sdk):
 
 
 @_docker_only
-def test_every_knob_that_would_change_the_rows_or_their_order_is_refused(sdk):
-    """The refusal is a RULE, not the three knobs a first draft thought of.
-
-    A filter this read ignores (a pre-truncation exclusion, a recency ordering, a
-    hop traversal) does not merely go unused: it answers a narrower/differently
-    ordered question with the whole population. One parametrized case per knob, so
-    a knob added to the signature later fails here rather than silently.
-    """
-    knobs = {
-        "threshold": 0.5,
-        "min_confidence": 0.2,
-        "order_by": "confidence",
-        "relationship_filter": "addresses:x",
-        "traversal_path": "Product→Feature",
-        "claim_class": "asserted",
-        "exclude_status": ["live"],
-        "exclude_turn_echo_session": "sess-1",
-        "structural_kind": "decision",
-        "structural_hops": 1,
-        "recency_field": "createdAt",
-        "recency_boost": 0.5,
-        "graph_ranker": object(),
-        # The retrieval-DEPTH and SCORING weights are in the same class: they size or
-        # re-score a candidate set this read never builds, so accepting one would be a
-        # silent drop rather than an answer (the merged refusal list names them all).
-        "pool_size": 200,
-        "fusion_weights": {"vector": 2.0},
-        "fusion_k": 30,
-        "w4_enrich": False,
-        "keep_numeric": True,
-        "search_keys_prf": True,
-        "entity_key_expansion": True,
-        "time_aware": True,
-        "query_date": "2026-11-01",
-    }
-    for knob, value in knobs.items():
-        with pytest.raises(ValueError) as exc:
-            sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
-                                  **{knob: value})
-        assert knob in str(exc.value), f"{knob} was dropped, not refused"
-
-
-@_docker_only
-def test_the_only_keyword_accepted_beside_ended_scope_is_the_one_that_is_a_no_op(sdk):
-    """`include_terminal` is admitted BY CONSTRUCTION, everything else is refused.
-
-    The ended population is already the terminal one, so `include_terminal` can
-    neither add nor remove a row — refusing it would refuse a caller for asking for
-    what they are getting. The retrieval-depth and scoring weights are NOT in that
-    class (they size/re-score a candidate set this read never builds, so dropping
-    them silently is still a silent drop): the merged refusal list names every one
-    of them, which is why the population below must be identical under the admitted
-    flag and the call must still be refused for the rest.
-    """
-    pid = sdk.create_point(kind="statement", content="the venue booked the beach club")
-    sdk.retract_point(pid["id"])
-
-    plain = _ids(_ended(sdk, entity_type="point"))
-    with_flag = _ids(sdk.tortoise_fts_query(
-        None, entity_type="point", ended_scope=True, limit=50, include_terminal=True))
-    assert plain == with_flag
-
-    for knob, value in (("pool_size", 200), ("fusion_weights", {"vector": 2.0}),
-                        ("w4_enrich", False), ("keep_numeric", True),
-                        ("time_aware", True), ("query_date", "2026-11-01")):
-        with pytest.raises(ValueError) as exc:
-            sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
-                                  **{knob: value})
-        assert knob in str(exc.value), f"{knob} was dropped, not refused"
-
-
-@_docker_only
 def test_a_family_without_a_lifecycle_is_refused_not_answered_empty(sdk):
     """`[]` is a factual claim; an Event has no ending this model defines."""
     with pytest.raises(ValueError) as exc:
@@ -550,6 +478,14 @@ def test_a_family_without_a_lifecycle_is_refused_not_answered_empty(sdk):
 #: review F4). One entry per keyword so deleting a line from the refused tuple
 #: reds the row that names it: the previous shape claimed "every retrieval knob"
 #: in a comment while the tuple held eight and the rest were dropped silently.
+#:
+#: ⛔ #13302 review F4 (scope): this parametrized set IS the pin for the refusal
+#: rule, so the two hand-rolled cases that used to re-assert it for a subset of
+#: knobs (`…_that_would_change_the_rows_or_their_order_is_refused` and
+#: `the_only_keyword_accepted_beside_ended_scope_…`) are gone — they added no
+#: discriminating power (every knob they named is in this tuple), and one of them
+#: duplicated the `include_terminal` no-op case that still stands below. Every
+#: keyword either raises here or is that one documented no-op.
 _REFUSED_BESIDE_ENDED_SCOPE = (
     ("query", {"query": "has anything been withdrawn"}),
     ("threshold", {"threshold": 0.5}),
@@ -653,3 +589,197 @@ def test_a_direct_caller_naming_one_kind_is_narrowed_not_given_the_family(sdk):
         "the family — `kind` must narrow the statement, never be accepted and "
         "ignored"
     )
+
+
+# ── the bound, and what a store that overruns it does ──────────────────────────
+#
+# Hermetic (no store): what is pinned here is the PLUMBING and the FAIL-SAFE
+# direction, neither of which a live store can be made to produce on demand — a
+# production-sized family is what actually overruns the budget, so a live test
+# could only be green-by-luck. A fake graph handle records the statement and the
+# bound it was issued with, which is exactly what a mutant breaks.
+
+
+class _ResultSet:
+    def __init__(self, rows=()):
+        self.result_set = list(rows)
+
+
+class _RecordingGraph:
+    """A graph handle that records every statement, its params and its bound.
+
+    ``raise_on_enumerate`` makes the ended-scope statement fail the way an
+    over-budget store fails: FalkorDB's ``timeout`` is a MAXIMUM QUERY RUNTIME,
+    so the server aborts and the driver raises. Only the enumeration raises —
+    the read's reachability probe must keep answering, or the test would pin
+    "a dead store degrades" instead of "a store that cannot answer THIS
+    statement degrades".
+    """
+
+    def __init__(self, *, raise_on_enumerate: BaseException | None = None):
+        self.calls: list[dict] = []
+        self._raise = raise_on_enumerate
+
+    def query(self, cypher, params=None, timeout=None, **kwargs):
+        self.calls.append(
+            {"cypher": cypher, "params": params, "timeout": timeout, **kwargs})
+        if "RETURN 1" in cypher:
+            return _ResultSet()
+        if self._raise is not None:
+            raise self._raise
+        return _ResultSet()
+
+    def enumeration(self) -> dict:
+        """The ended-scope statement — the one that carries ``$limit``."""
+        found = [c for c in self.calls if "$limit" in c["cypher"]]
+        assert len(found) == 1, (
+            f"expected ONE ended-scope statement, got {len(found)} of "
+            f"{[c['cypher'][:40] for c in self.calls]}"
+        )
+        return found[0]
+
+
+def _hermetic_sdk(monkeypatch, graph):
+    """An SDK whose store is ``graph`` — no connection, no store, no skip."""
+    from tortoise.sdk import TortoiseSDK
+
+    class _Projection:
+        def __init__(self, g):
+            self.g = g
+
+    monkeypatch.setattr(TortoiseSDK, "_get_proj",
+                        lambda self: _Projection(graph))
+    return TortoiseSDK(db_path=f"/tmp/never-opened-{uuid.uuid4().hex}.db",
+                       namespace=f"herm13302_{uuid.uuid4().hex[:8]}")
+
+
+def test_the_enumeration_is_issued_with_the_reads_own_bound(monkeypatch):
+    """#13302 review F2: the budget is PLUMBED, and a mutant that drops it reds.
+
+    Two edits leave this suite green without this row: deleting
+    ``timeout_ms=int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)`` at the SDK
+    call site, and reverting the door to ``graph.query(cypher, params=params)``.
+    Both are the unbounded statement the docstring says must never be issued on
+    this path, and neither is observable from the rows a live store returns.
+    """
+    from tortoise.search_engine import VECTOR_LEG_BUDGET_MS
+
+    graph = _RecordingGraph()
+    sdk = _hermetic_sdk(monkeypatch, graph)
+    sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True, limit=5)
+
+    statement = graph.enumeration()
+    assert statement["timeout"] == VECTOR_LEG_BUDGET_MS, (
+        "the ended-scope statement must carry the shipped read budget — an "
+        "unbounded statement hangs on a wedged store instead of degrading"
+    )
+    assert statement["params"]["limit"] == 6, (
+        "the statement asks for ONE row beyond the page (the truncation PROOF); "
+        "a lost `limit + 1` silently turns the proven marker into a guess"
+    )
+
+    # …and the caller's own budget WINS, which is what makes the capstone's
+    # elevated timeout reach the statement it was measured for.
+    graph2 = _RecordingGraph()
+    sdk2 = _hermetic_sdk(monkeypatch, graph2)
+    sdk2.tortoise_fts_query(None, entity_type="point", ended_scope=True, limit=5,
+                            _elevated_timeout_ms=4321)
+    assert graph2.enumeration()["timeout"] == 4321, (
+        "the caller's elevated budget must reach the enumeration, or the read "
+        "times out against the very population the caller raised it for"
+    )
+
+
+def test_a_store_that_overruns_the_budget_degrades_instead_of_raising(monkeypatch):
+    """#13302 review F1: the bound's failure mode is DEGRADED, never a raise.
+
+    The sibling statement on the same path (`_read_declaration`) answers
+    ``unreadable:<type>`` when its own bound is hit, the vector legs return
+    ``[]`` with ``query_failed``, and the reachability probe returns a
+    ``degraded`` status — so an over-budget enumeration that threw out of the
+    public read was the one arm that did not degrade. The empty answer must
+    ALSO be marked incomplete: ``[]`` with ``truncated: False`` claims "nothing
+    of this family ever ended", which is the defect this whole read exists for.
+    """
+    graph = _RecordingGraph(raise_on_enumerate=RuntimeError("Query timed out"))
+    sdk = _hermetic_sdk(monkeypatch, graph)
+    status: dict = {}
+    truncation: dict = {}
+
+    rows = sdk.tortoise_fts_query(
+        None, entity_type="point", ended_scope=True, limit=5,
+        read_status_out=status, _truncation_out=truncation)
+
+    assert rows == [], "a store that could not answer serves no rows"
+    assert status["status"] == "degraded", (
+        "an unanswered enumeration is a DEGRADED read, never `empty`: the store "
+        "was reached and did not establish that nothing ended"
+    )
+    assert truncation["truncated"] is True, (
+        "0 rows over a statement that never answered is not a complete page"
+    )
+    assert truncation.get("_exact") is False
+    assert graph.enumeration()["timeout"] is not None, (
+        "the statement was still issued with a bound"
+    )
+
+
+def test_a_direct_callers_unanswerable_store_still_raises(monkeypatch):
+    """The fail-safe is the READ's, not the door's: `[]` is a factual claim.
+
+    A direct caller of `enumerate_ended` gets the store's error. Returning `[]`
+    there would tell it "nothing of that family ever ended" when in fact nothing
+    was read — the exact claim this module refuses to make. The read path can
+    degrade because it has a vocabulary for "could not answer"; the door has
+    none, so it stays loud.
+    """
+    from tortoise.ended import enumerate_ended
+
+    graph = _RecordingGraph(raise_on_enumerate=RuntimeError("Query timed out"))
+    with pytest.raises(RuntimeError):
+        enumerate_ended(graph, entity_type="point", limit=5, timeout_ms=500)
+
+
+def test_the_degraded_arm_does_not_swallow_the_family_refusal(monkeypatch):
+    """The fail-safe covers the STORE, never the contract refusal.
+
+    `enumerate_ended` refuses a family with no lifecycle (`event`) BEFORE it
+    queries, and that `ValueError` is the answer: an Event has no ended
+    population at all. A blanket `except Exception` around the enumeration turned
+    it into a degraded empty answer — "nothing of that family ended" — which is
+    the one claim that refusal exists to prevent (measured on a live store, not
+    inferred: the first cut of the fail-safe did exactly this). The store here
+    raises on ANY statement, so a handler that did not re-raise the refusal would
+    answer `[]` instead of raising.
+    """
+    graph = _RecordingGraph(raise_on_enumerate=RuntimeError("Query timed out"))
+    sdk = _hermetic_sdk(monkeypatch, graph)
+    with pytest.raises(ValueError) as exc:
+        sdk.tortoise_fts_query(None, entity_type="event", ended_scope=True)
+    assert "event" in str(exc.value).lower()
+
+
+def test_a_trace_only_caller_sees_the_ended_leg_did_not_answer(monkeypatch):
+    """`leg_trace` alone is a caller, and it must receive the degraded leg entry.
+
+    #13302 review (round 3, P3): the fail-safe first appended to a COPY of
+    `status_trace`. With `read_status_out=None` that variable IS the caller's
+    `leg_trace`, so the entry went to a throwaway list and a trace-only caller
+    got an empty answer with no evidence that the enumeration never answered —
+    the sibling vector arm appends IN PLACE for exactly this reason.
+    """
+    graph = _RecordingGraph(raise_on_enumerate=RuntimeError("Query timed out"))
+    sdk = _hermetic_sdk(monkeypatch, graph)
+    trace: list[dict] = []
+
+    rows = sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+                                  limit=5, leg_trace=trace)
+
+    assert rows == []
+    ended_legs = [e for e in trace if e.get("leg") == "ended"]
+    assert ended_legs, (
+        "the caller's own trace must carry the degraded ended leg — appending to "
+        f"a copy leaves it invisible: {trace}"
+    )
+    assert ended_legs[0]["degraded"] is True
+    assert ended_legs[0]["reason"] == "query_failed"

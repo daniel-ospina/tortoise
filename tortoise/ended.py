@@ -279,6 +279,15 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
     path is bounded for exactly this reason — an unbounded one hangs on a wedged
     store instead of degrading.
 
+    A budget that is EXCEEDED is a store that could not answer: the server aborts
+    the statement and the driver raises. This function does not swallow that — a
+    direct caller gets the error rather than an empty list, because ``[]`` is the
+    factual claim "nothing of that family ever ended". The READ PATH, whose
+    answer is a graded status rather than an exception, wraps this call and
+    degrades (zero rows + ``incomplete`` truncation + ``degraded`` status),
+    exactly as it does for every other bounded statement it issues (#13302
+    review F1).
+
     The read is BOUNDED (``LIMIT $limit``) and ordered by the record's own
     ending time, so the caller gets the most recent endings rather than an
     arbitrary page of the population. It returns EXACTLY what it was asked for
