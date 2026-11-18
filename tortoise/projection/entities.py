@@ -5395,7 +5395,33 @@ class _EntityHandlers:
         if not _writable_id(did):
             _log_identity_skip("Document", did, "url (resolved MERGE key)")
             return
-        # Compute embedding from title+content for semantic search (#7845).
+        # #8419 (D10 residual): the embedding derives from the SAME surface the
+        # node actually HOLDS — `_searchText` — and never from `content`.
+        #
+        # `content` is not a graph property post-D10 (ONTOLOGY §4.4: the same
+        # statement `REMOVE`s it and `_DOC_RETIRED_KEYS` denies it on write), so
+        # `title + content` composed the vector from callers-supplied text that
+        # was then DISCARDED: the vector was not reproducible from the node, and
+        # the dense and sparse legs described different text (the `:Source` FTS
+        # index is declared on `_searchText`, built from title+summary+topics).
+        # Measured before this change: a document with `content='long body text'`
+        # stored `_searchText='My doc'` while its vector encoded
+        # `'My doc long body text'`; the same document via the #900 index path
+        # (`suppress_embedding=True`) carried NO vector at all, and a
+        # `--force-re-embed` run silently replaced the vector with the
+        # `_searchText` one (a composition change attributed to the model in
+        # #1349's T16 evidence).
+        # ⛔ #8419's open question — whether the document fold should embed AT
+        # ALL — is NOT decided here: `suppress_embedding` and the unconditional
+        # call below are unchanged. Only the INPUT TEXT is reconciled.
+        topics = ev.get("topics")
+        summary = ev.get("summary")
+        # _searchText computed only when the event carries meaningful text. ONE
+        # computation, read by both the vector and the FTS surface (#8419), so
+        # the two cannot drift apart again.
+        has_text = bool(ev.get("title") or summary or topics)
+        st = (_build_search_text(ev.get("title", ""), summary, topics)
+              if has_text else None)
         # Epic #900 T3 cycle-19: the NEW index path carries a suppress flag in
         # the ev dict (suppress_embedding) — the doc path computes the call
         # UNCONDITIONALLY today (title is always present on new-path docs), an
@@ -5403,26 +5429,30 @@ class _EntityHandlers:
         # repair, and DocumentCreated REPLAY. The legacy branch is unchanged
         # (flag absent → compute as today, SC4).
         embedding = None
-        if not ev.get("suppress_embedding"):
-            doc_content = " ".join(filter(None, [
-                ev.get("title", ""),
-                ev.get("content", ""),
-            ]))
-            if doc_content.strip():
-                # #5008: through the EMBED gate — an identifier-only text earns no vector.
-                try:
-                    from tortoise.embeddings import encode_for_row
-                    # #13224: DERIVED vector — see `_upsert_subject` for the scope.
-                    embedding = encode_for_row(
-                        doc_content, self.required_embedding_dim, bounded=True)
-                except Exception:
-                    pass
+        # Re-cut resolution (#13290 × #13224) — NOT a side pick. This PR's
+        # composition (`st`, the `_searchText` surface) and main's write bound
+        # (`bounded=True`, the #13224 DERIVED-vector scope) are orthogonal and
+        # both are load-bearing:
+        #   * take main's side alone -> discards #8419's whole deliverable (the
+        #     vector and the `_searchText` FTS leg must describe the SAME text);
+        #   * take this PR's side alone -> silently restores an UNBOUNDED embedder
+        #     wait on every document write, repair and `DocumentCreated` replay,
+        #     which is the exact stall #13224/#13229 removed. Nothing in this
+        #     PR's test set would red on that loss, because this PR replaced the
+        #     code path, so no test on either side pins `bounded` on `st`.
+        if not ev.get("suppress_embedding") and st and st.strip():
+            # #5008: through the EMBED gate — an identifier-only text earns no vector.
+            try:
+                from tortoise.embeddings import encode_for_row
+                # #13224: DERIVED vector — see `_upsert_subject` for the scope.
+                embedding = encode_for_row(
+                    st, self.required_embedding_dim, bounded=True)
+            except Exception:
+                pass
         # #125 capture fields — use ev.get(field) with NO default so None →
         # Cypher null, letting coalesce fall through to existing on partial
         # updates. CRITICAL: "" is non-null in Cypher — coalesce("", d.f, ...)
         # returns "" and WIPES existing. Never use "" defaults in SET clauses.
-        topics = ev.get("topics")
-        summary = ev.get("summary")
         sid = ev.get("session_id")
         eid = ev.get("event_id")
         # #133: needs_extraction — explicit signal for --upgrade-all discovery.
@@ -5462,10 +5492,8 @@ class _EntityHandlers:
         # one of them silently no-opping the anchor.
         _ch_snake = ev.get("content_hash")
         ch = _ch_snake if _ch_snake is not None else ev.get("contentHash")
-        # _searchText computed only when the event carries meaningful text
-        has_text = bool(ev.get("title") or summary or topics)
-        st = (_build_search_text(ev.get("title", ""), summary, topics)
-              if has_text else None)
+        # #8419: `_searchText` was computed with the embedding above (ONE
+        # surface, read twice) — see the block before the `#125` fields.
         # #167: sourcePath — coalesce-null sentinel (no "" default) so
         # partial updates preserve existing value
         sp = ev.get("source_path")
@@ -5781,9 +5809,9 @@ class _EntityHandlers:
             # other writer produces. Event has NO vector index — the only vector
             # index is on Point (#8429 is Point-scoped) — so the Event dense leg
             # is always the brute-force scan, where #8316 normalises a
-            # right-width stored List at the READ boundary (a wrong width or a
-            # non-numeric value still aborts the MATCH — #8430). Align with the
-            # Point pattern.
+            # right-width stored List at the READ boundary and #8430 drops a
+            # value that boundary cannot read (a wrong-width or non-numeric
+            # List) instead of aborting the MATCH. Align with the Point pattern.
             event_content = " ".join(filter(None, [
                 inner.get("subject", ""),
                 inner.get("eventKind", ""),
