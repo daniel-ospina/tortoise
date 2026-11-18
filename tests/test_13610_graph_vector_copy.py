@@ -562,6 +562,13 @@ def test_a_verified_verdict_survives_its_ttl_but_an_unverified_one_does_not(
     (an unmeasurable count, a graph hiccup) hand the next read a frozen graph copy
     as if it were the corpus — so the positive verdict stands for the life of the
     process.
+
+    ⛔ BOTH DIRECTIONS ARE DRIVEN, because each one alone passes vacuously (#13610
+    review). The first cut of this case seeded a VERIFIED verdict and asked only
+    that half while its name claimed both — and the expiry clause it was named for
+    (`_cached_coverage`'s `and not verdict.verified`) is the ONLY mechanism by which
+    a deployment that finishes a backfill ever re-verifies, so nothing reddened when
+    it was replaced with `if False:`. Measured then: 54 passed.
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
     record_vector.reset_coverage_cache()
@@ -570,12 +577,40 @@ def test_a_verified_verdict_survives_its_ttl_but_an_unverified_one_does_not(
                         lambda *a, **k: 2, raising=True)
     record_vector.coverage("object", scope, graph_vectors=2)
     assert record_vector.coverage_verified("object", scope) is True
+    # A MUTABLE offset, so the clock can be jumped BETWEEN a seed and a read — the
+    # only shape that exercises an expiry. A fixed jump applied before both makes
+    # the entry's age zero and the pin vacuous in the other direction.
     real_monotonic = record_vector.time.monotonic
+    offset = [0.0]
     monkeypatch.setattr(record_vector.time, "monotonic",
-                        lambda: real_monotonic() + 10_000, raising=True)
+                        lambda: real_monotonic() + offset[0], raising=True)
+    offset[0] = 10_000.0
     assert record_vector.coverage_verified("object", scope) is True, (
         "the verified verdict expired — a later failed count would demote the read "
         "to a frozen graph copy")
+
+    # ── the OTHER direction: an UNVERIFIED verdict EXPIRES ───────────────────
+    # Seeded at the un-jumped clock, then read after the jump — a label the record
+    # does not yet cover (a record/graph deficit) is cached UNVERIFIED, and a
+    # backfill that lands afterwards can only be seen if the entry expires.
+    offset[0] = 0.0
+    counts: list[int] = []
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: counts.append(1) or 1, raising=True)
+    assert record_vector.coverage("point", scope, graph_vectors=4).verified is (
+        False), "the fixture did not seed an UNVERIFIED verdict"
+    assert counts == [1], counts
+    assert record_vector.coverage_verified("point", scope) is False
+    # The backfill lands; the next miss must MEASURE again and believe the answer.
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: counts.append(1) or 9, raising=True)
+    offset[0] = 10_000.0
+    assert record_vector.coverage("point", scope, graph_vectors=4).verified is True, (
+        "the UNVERIFIED verdict did not expire: a deployment that finished its "
+        "backfill would serve the cached short verdict for the life of the process "
+        "and never converge — no label would ever cut over, and nothing says so")
+    assert len(counts) == 2, (
+        f"the expired verdict was served instead of re-measured: counts={counts}")
 
 
 # ── 4b. the cost model: the counts are taken on a MISS, and only then ─────
@@ -685,6 +720,41 @@ def test_the_two_denominators_are_stated_as_a_comparison_and_not_a_membership_pr
     assert "name" in doc and "id" in doc, (
         "the graph-key/record-key asymmetry (id vs name) is the residual that makes "
         "coverage unreachable for a duplicate-name label — it belongs in the docstring")
+
+
+def test_a_cardinality_preserving_mismatch_still_verifies(monkeypatch):
+    """The residual DRIVEN, not just described: equal SIZES verify on their own.
+
+    `Coverage` is a size comparison, so a graph node whose record row is missing,
+    offset by a record row whose graph node is gone, VERIFIES — the count cannot
+    see membership. That is the bound on what step 2 proves, and the alternative (a
+    set difference) is refused deliberately: it would ship every id across the wire
+    on a path that runs inside a dense read.
+
+    ⛔ The sibling case above only reads `Coverage.__doc__` for the words, so its red
+    was an unrelated prose edit while the behaviour the docstring names had no test.
+    This drives that behaviour: the record's count is taken over the record's OWN
+    population, so a row substituted for another node is invisible and the verdict
+    is positive.
+
+    ⚠️ The OTHER stated residual — the graph MERGEs on `id` while the record keys on
+    `name`, so two nodes sharing a name can hold the verdict below what the record
+    can reach — is not pinnable at this layer: it needs a graph with duplicate names
+    and a record that folds them to one row, which is a store-level fixture rather
+    than a property of this function. It stays in the docstring as a residual for
+    that reason, and `chk_object_node_key_is_contract_key` is its schema-side pin.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    record_vector.reset_coverage_cache()
+    scope = record_vector._Scope(*_SCOPE)
+    # Seven record rows, seven graph nodes — and by construction NOT the same seven.
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: 7, raising=True)
+    verdict = record_vector.coverage("object", scope, graph_vectors=7)
+    assert verdict.verified is True, (
+        "a size-equal verdict did not verify; if the gate ever compares MEMBERSHIP "
+        "the cost model changes and `Coverage`'s docstring is wrong")
+    assert verdict.record_vectors == verdict.graph_vectors == 7
 
 
 # ── 5. the folds: no encode, no write ────────────────────────────────────
@@ -862,6 +932,59 @@ def test_the_sdk_door_installs_the_carried_tenant_so_the_mirror_retires_on_the_h
         sdk.close()
 
 
+def test_an_unmeasurable_or_unknown_denominator_is_None_and_never_zero(proj, monkeypatch):
+    """The two fail-CLOSED guards in `_label_vector_count`, which had no assertion.
+
+    ⛔ ``None`` IS NOT ``0``, and this is the method's central safety claim
+    (`record_vector.coverage` treats an unmeasurable denominator as UNVERIFIED and
+    keeps the graph branch and the graph write; `0` would VERIFY coverage on a
+    failed measurement and retire the graph for a store that still needs it). The
+    only exercise was the happy path (`== 3`), so `except Exception: return 0`
+    measured 23 passed. Both arms are driven here:
+
+    * a driver error while counting is ``None``;
+    * an unparseable/absent row is ``None``;
+    * a label that is NOT a known entity type answers ``None`` WITHOUT issuing a
+      statement — `entity_label` capitalises rather than validates, so this branch
+      is the only barrier against a caller-supplied string being spliced into
+      ``MATCH (n:{label})``.
+    """
+    class _Boom:
+        def query(self, sql, params=None, timeout=None):
+            raise RuntimeError("the graph door is gone")
+
+    monkeypatch.setattr(proj, "g", _Boom(), raising=True)
+    assert proj._label_vector_count("object", timeout_ms=500) is None, (
+        "a FAILED graph measurement answered a number — `0` would verify coverage "
+        "on the failure and retire the graph for a store that still needs it")
+
+    class _Empty:
+        def query(self, sql, params=None, timeout=None):
+            return _Result([])
+
+    monkeypatch.setattr(proj, "g", _Empty(), raising=True)
+    assert proj._label_vector_count("object", timeout_ms=500) is None, (
+        "an empty result set answered a number; an absence is not a zero")
+
+    statements: list[str] = []
+
+    class _Recorder:
+        def query(self, sql, params=None, timeout=None):
+            statements.append(sql)
+            return _Result([(3,)])
+
+    monkeypatch.setattr(proj, "g", _Recorder(), raising=True)
+    hostile = "Object`) DETACH DELETE n //"
+    assert proj._label_vector_count(hostile, timeout_ms=500) is None, (
+        "an unknown entity type was measured — `entity_label` capitalises rather "
+        "than validating, so this must answer None, never splice the string")
+    assert statements == [], (
+        f"the label was spliced into a graph statement: {statements}")
+    # …and the known label still measures, so the pin above is about validation
+    # rather than about the door refusing everything.
+    assert proj._label_vector_count("object", timeout_ms=500) == 3
+
+
 def test_the_graph_denominator_is_bounded_by_the_reads_own_budget(proj, monkeypatch):
     """The denominator runs on the dense read path, so it carries the read's budget.
 
@@ -902,8 +1025,20 @@ def test_every_searcher_construction_site_passes_a_graph_population():
         "expected the three shipped construction sites (the fused read, C2's "
         f"expansion pass, the cross-lens pool), found {len(calls)}")
     for call in calls:
-        keywords = {kw.arg for kw in call.keywords}
-        assert "projection" in keywords, ast.unparse(call)
+        keyword = next((kw for kw in call.keywords if kw.arg == "projection"), None)
+        assert keyword is not None, ast.unparse(call)
+        # ⛔ A WIRED SITE, NOT A SPELLED KEYWORD (#13610 review). This pin used to
+        # assert only that the NAME was present, so `projection=None` at any site
+        # left it — and every runtime case — green, while the gated labels declined
+        # for ever and the deployment kept double-storage: the exact failure the
+        # factory's docstring claims the wiring prevents. A literal is never a
+        # wiring; the value must be a real expression (the projection the read
+        # already holds).
+        assert not isinstance(keyword.value, ast.Constant), (
+            f"the call at sdk.py:{call.lineno} passes `projection="
+            f"{ast.unparse(keyword.value)}` — a literal wires nothing, so the "
+            f"graph denominator is never measured and every gated label declines "
+            f"for ever with no test red")
     # …and the factory forwards it, or the wiring above is decorative.
     factory = next(node for node in ast.walk(tree)
                    if isinstance(node, ast.FunctionDef)

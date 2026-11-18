@@ -531,11 +531,24 @@ class Coverage:
     * the two keys are not identical — the graph MERGEs on `id`, the record keys on
       `name` (`chk_object_node_key_is_contract_key`) — so two nodes sharing a name
       can hold the coverage verdict below what the record can ever reach, in which
-      case the deployment double-stores for ever with no defect to point at.
+      case the deployment double-stores for ever with no defect to point at;
+    * for the two labels that are a SUB-kind of another (`operator` ⊂ `point`,
+      `document` ⊂ `source`) the numerator applies the label's KIND predicate while
+      the denominator is the whole graph label (`_label_vector_count` counts every
+      vector-bearing node of `:Source`, which holds BOTH kinds). The comparison is
+      therefore one-sided HARDER for those two, and `record_vectors >= graph_vectors`
+      is UNREACHABLE whenever the other kind carries any embedding — so `document`
+      and `source` may never verify from this count alone and their cut-over is an
+      OPERATOR act (or a later, kind-aware denominator), never something that
+      "happens by itself". `operator` is unaffected in practice because `point`'s
+      other members are not vector-bearing by default, but the shape is the same.
 
-    Neither is introduced by this gate (they are properties of comparing two stores
-    by size) and closing either is a repair sweep or an identity-aware comparison,
-    filed from this change rather than pretended away. What the count DOES prove is
+    Neither of the first two is introduced by this gate (they are properties of
+    comparing two stores by size) and closing either is a repair sweep or an
+    identity-aware comparison, filed from this change rather than pretended away.
+    The third is the price of a one-sided predicate: the graph has no per-kind
+    vector property to count, so the alternative would be a kind-aware denominator
+    that the graph cannot answer today. What the count DOES prove is
     the thing the retirement needs: the record holds at least as many vectors as the
     graph can serve, so retiring the graph's copy loses no row that the record has
     not got.
@@ -756,8 +769,18 @@ def _record_vector_count(label: str, scope: _Scope, *,
     read would then be served from the record with zero rows of that kind while
     reporting `mechanism=pgvector, reason=ok`. One-sided on purpose: the graph
     DENOMINATOR is the whole label (the graph has no per-kind vector property to
-    count), so the comparison for those two labels is deliberately HARDER to pass
-    — the cost is a longer double-storage, never a short answer.
+    count), so the comparison for those two labels is not merely HARDER to pass —
+    for `document`/`source` it is UNREACHABLE whenever the other kind carries an
+    embedding, because one `public.source` table splits into two labels while the
+    graph's `:Source` label holds BOTH kinds and the denominator counts all of it.
+
+    ⛔ SO THE TRANSITION IS NOT AUTOMATIC FOR THOSE TWO, and that is stated rather
+    than implied: a deployment whose only shortfall is the other kind's rows stays
+    UNVERIFIED and keeps double-storing that label until an operator acts (or a
+    kind-aware denominator exists — the graph cannot answer one today). The cost is
+    a longer double-storage and never a short answer, which is the direction this
+    gate is allowed to fail in (`#13610` review; `Coverage`'s docstring carries the
+    same residual).
     """
     table, _id_column, kind_filter = LABEL_SERVED[label][:3]
     try:
@@ -821,27 +844,6 @@ def arm_is_explicit() -> bool:
         return bool(env_flag(ARMING_ENV, False))
     except Exception:  # noqa: BLE001, RUF100 — unreadable is not "explicit"
         return False
-
-
-def record_tenant_available(carried: tuple[str, str] | None = None) -> bool:
-    """Does a record TENANT resolve for this request? (#13610)
-
-    ⚠️ **NOT the third condition of :func:`tortoise.projection.vector_index_retired`
-    any more** (`#13631` removed it from that predicate, and the reason is recorded
-    there): the drop runs at SETUP, before any coverage can exist, and a tenant is
-    REQUEST-scoped while that decision is store-scoped — so a by-value-credential
-    lane would never retire while an ambient-tenant request on the same graph would.
-    The drop now asks :func:`arm_is_explicit` instead.
-
-    What remains here is the predicate itself: a store whose dense read resolves no
-    tenant serves every label from the GRAPH (:func:`searcher` refuses without a
-    scope, and :func:`coverage` cannot be taken).
-
-    ⚠️ Ambient-only by design, and that is the CONSERVATIVE answer: a request that
-    carries its tenant by value (the hosted lane) says ``False``. A caller that
-    needs the request's real answer passes ``carried``.
-    """
-    return _resolve_scope(carried) is not None
 
 
 def coverage_verified(label: str, scope: _Scope | None = None,

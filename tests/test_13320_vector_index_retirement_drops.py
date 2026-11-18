@@ -228,15 +228,13 @@ def test_an_armed_setup_REMOVES_a_real_in_graph_vector_index(monkeypatch, caplog
 
         monkeypatch.setenv(RECORD_DSN_ENV, _RECORD_DSN)
         monkeypatch.setenv(ARMING_ENV, "1")
-        # ⛔ AND A RECORD TENANT (`#13610`, the third condition). Being armed stopped
-        # meaning "the record answers" when the arm became the default: the record has
-        # no backfill, so the gated read declines every served label to the GRAPH until
-        # coverage verifies — and a request that resolves no tenant makes the graph the
-        # answering leg, which must keep its index. The declaration is the documented
-        # single-tenant posture (`record_writer.single_tenant_declared`, #9192).
-        monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
-        monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org_13320")
-        monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", graph)
+        # ⛔ AND AN EXPLICIT ARM — which is the `=1` above and nothing else (#13631).
+        # The RECORD TENANT that used to be set here was the retired condition: being
+        # armed stopped meaning "the record answers" when the arm became the default,
+        # and the DROP runs at setup, before any coverage can exist, so it asks the
+        # store-scoped operator statement (`record_vector.arm_is_explicit`) instead.
+        # A tenant is request-scoped and `vector_index_retired()` reads none — the
+        # lines this comment replaces were inert, and asserted nothing.
         assert vector_index_retired() is True, (
             "the store is not armed, so this pin is not testing the retirement")
 
@@ -408,12 +406,15 @@ def _bare(graph_obj, *, graph: str = "test_13320_bare") -> FalkorProjection:
 
 
 def _arm(monkeypatch):
-    """The ARM-AND-A-TENANT posture `vector_index_retired` asks for (see #13610)."""
+    """The EXPLICIT-ARM posture `vector_index_retired` asks for (see `#13631`).
+
+    ⛔ The tenant triple that used to be set here was INERT: the predicate reads
+    `record_dsn()` and `arm_is_explicit()` and no tenant at all, so those lines
+    asserted nothing while their comment told the next editor they were the
+    third condition. The arm is the `=1`.
+    """
     monkeypatch.setenv(RECORD_DSN_ENV, _RECORD_DSN)
     monkeypatch.setenv(ARMING_ENV, "1")
-    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
-    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "org_13320")
-    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "test_13320")
 
 
 def test_the_retirement_drops_with_the_VECTOR_form(monkeypatch):

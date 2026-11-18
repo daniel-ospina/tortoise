@@ -249,12 +249,24 @@ def test_the_record_leg_is_bound_by_the_reads_own_budget(monkeypatch, armed):
 
     RED if the budget stops being threaded at construction: the door then
     applies its own 15 s, the fake query "runs" 30x past the read's budget, and
-    both the applied-bound assertion and the wall-clock assertion fail. RED if
-    the engine stops falling back on a raised record leg: the answer is not the
-    graph's and the trace carries no `scan_fallback`.
+    both the applied-bound assertion and the wall-clock assertion fail. RED if a
+    post-contract refusal lets the frozen graph answer instead: the hits are empty
+    and the trace must name the failed leg rather than a `scan_fallback`.
+
+    ⛔ AND THE RECORD LEG MUST ACTUALLY RUN (#13610 review). The coverage gate this
+    file's siblings prime (`_verify_coverage`) was left out here, so `coverage()`
+    took the real count, the count is unmeasurable through `_FakeCursor`, the label
+    stayed UNVERIFIED and `searcher` raised `RecordVectorDeclined` before any kNN
+    ran. `applied_ms`, `read_cancelled_after_ms` and `scan_fallback` were then all
+    satisfied by the COVERAGE AGGREGATE issuing the same `set_config` and
+    cancellation — so this case asserted about a leg that never ran, and
+    `timeout_ms=timeout_ms` → `None` on the `vector_search(...)` call (the budget
+    not reaching the door at all) left it green. It is primed now, which is what
+    makes assertions (1)-(3) about the kNN rather than about the count.
     """
     state: dict = {"statements": []}
     _wire_record_door(monkeypatch, state)
+    _verify_coverage(monkeypatch)
 
     searcher = record_vector.searcher(carried=armed, graph_population=_NO_GRAPH_VECTORS, timeout_ms=BUDGET_MS)
     assert searcher is not None, "the leg must be armed for this pin to mean anything"
@@ -285,19 +297,27 @@ def test_the_record_leg_is_bound_by_the_reads_own_budget(monkeypatch, armed):
         f"the read took {elapsed_ms:.0f} ms for a {BUDGET_MS} ms budget: the "
         f"bound is not bounding the caller's wall clock")
 
-    # (3) THE GRAPH ANSWERED, and the trace NAMES the fallback — never a silent
-    #     `timeout` after seconds, and never an empty answer.
-    assert [pid for pid, _score in hits] == [graph.ID], (
-        f"the graph leg's answer did not survive the record leg's cancellation: "
-        f"{hits}")
+    # (3) THE FAILURE IS NAMED AND NOTHING FALLS BACK SILENTLY. ⛔ Post-contract the
+    #     graph is NOT a fallback (#13610): the mirror stopped at the contract, so a
+    #     graph answer would hand over a SMALLER cohort as the answer. The old
+    #     assertion here — "the graph answered with `scan_fallback`" — described the
+    #     PRE-contract leg, which in this design declines at the COVERAGE gate before
+    #     any kNN runs; it only ever passed because the coverage aggregate issued the
+    #     same statement and cancellation. What the read must do now is report the
+    #     leg it could not take.
+    assert hits == [], (
+        f"a partial record leg was answered from the frozen graph copy: {hits}")
+    assert graph.query_calls == [], (
+        f"the graph was queried after the record leg failed post-contract: "
+        f"{graph.query_calls}")
     vector_entries = [e for e in trace if e.get("leg") == "vector"]
     assert vector_entries, f"the read recorded no vector leg at all: {trace}"
     mechanisms = [e.get(search_engine.VECTOR_MECHANISM_KEY) for e in vector_entries]
-    assert MECHANISM_SCAN_FALLBACK in mechanisms, (
-        f"a record leg that did not answer must be reported as the fallback it "
-        f"took (#4999), got mechanisms={mechanisms}")
-    assert all(e.get("reason") != "timeout" for e in vector_entries), (
-        "the leg answered; a `timeout` entry would discard a result it had")
+    assert MECHANISM_SCAN_FALLBACK not in mechanisms, (
+        f"a post-contract read announced a fallback that must not exist: "
+        f"mechanisms={mechanisms}")
+    assert any(e.get("reason") == "query_failed" for e in vector_entries), (
+        f"the refused leg was not declared as a failure: {vector_entries}")
 
 
 def test_a_fused_read_on_a_contracted_tenant_does_not_wait_for_a_slow_record_leg(
@@ -615,6 +635,33 @@ def test_the_sdk_helper_threads_the_budget_it_is_given(monkeypatch):
     # Omitted -> None, which leaves the door's own bound in place.
     assert sdk_mod._record_vector_searcher(_WithTenant())
     assert seen[-1]["timeout_ms"] is None, seen[-1]
+
+    # ⛔ AND A DOUBLE THAT HAS A PROJECTION MUST GET A CALLABLE BACK (#13610
+    # review). `graph_population: None` above is the SAFE answer for a double with
+    # no projection, but on its own it accepts a helper that never wires one at
+    # all — the deployment would keep double-storage for ever with every pin here
+    # green. So the real object is driven: the callable must resolve to
+    # `_label_vector_count` and carry the read's budget.
+    calls: list[tuple[str, int | None]] = []
+
+    class _WithProjection:
+        _record_tenant = ("org_9", "graph_9")
+
+        @staticmethod
+        def _label_vector_count(label, timeout_ms=None):
+            calls.append((label, timeout_ms))
+            return 4
+
+    with_projection = _WithProjection()
+    assert sdk_mod._record_vector_searcher(
+        with_projection, timeout_ms=BUDGET_MS, projection=with_projection)
+    population = seen[-1]["graph_population"]
+    assert callable(population), (
+        f"a projection in hand did not produce a denominator: {population!r} — the "
+        "gated labels then decline for ever and nothing reds")
+    assert population("object") == 4
+    assert calls == [("object", BUDGET_MS)], (
+        f"the denominator did not carry the read's budget: {calls}")
 
 
 def test_every_construction_site_passes_a_budget():

@@ -365,9 +365,10 @@ def _arm_the_record_leg(monkeypatch):
     # (`record_vector.arm_is_explicit`): an unset switch keeps the index and keeps
     # `#4997`'s WARNING, and these pins spell `=1` because that is the posture in
     # which the retirement is authorised at all.
-    monkeypatch.setenv("TORTOISE_RECORD_SINGLE_TENANT", "1")
-    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "test-org")
-    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "test_4997_bare")
+    #
+    # ⛔ AND NOTHING ELSE: the tenant triple that used to be set here was INERT
+    # (`vector_index_retired` reads `record_dsn()` and `arm_is_explicit()` and no
+    # tenant at all), so it asserted nothing while implying a tenant was a condition.
 
 
 def test_the_retirement_is_NOT_authorised_while_the_record_leg_is_off(monkeypatch):

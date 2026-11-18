@@ -751,9 +751,11 @@ _VECTOR_INDEX_DROP_FAILED_LOCK = threading.Lock()
 #:
 #: ⛔ "Live" is not a constant, it is the deployment: :func:`vector_index_retired`
 #: asks whether the RECORD can serve the dense leg, and that is TWO conditions —
-#: a DSN resolves (`record_writer.record_dsn`, the arming SURFACE) **and** the
-#: cutover is armed (`record_vector.cutover_armed` / `TORTOISE_RECORD_VECTOR_LEG`,
-#: the arming DECISION). Round 3 introduced the second condition and left this
+#: a DSN resolves (`record_writer.record_dsn`, the arming SURFACE) **and** this
+#: deployment SPELLED the arm (`record_vector.arm_is_explicit` /
+#: `TORTOISE_RECORD_VECTOR_LEG=1`, the arming DECISION — the cutover itself is
+#: default ON since `#13610`, so `cutover_armed` cannot answer it). Round 3
+#: introduced the second condition and left this
 #: predicate on the first, so the alarm was muted on the posture round 3 makes the
 #: default (#11660 review round 6, P1-3). That split is the honest one, because
 #: the two states are NOT the same fact:
@@ -761,12 +763,14 @@ _VECTOR_INDEX_DROP_FAILED_LOCK = threading.Lock()
 #:   * record ARMED (DSN + cutover on) — the dense leg is Postgres's job, a graph
 #:     full scan is the documented fallback for the labels the record does not
 #:     carry (`object`/`subject`) and for a store between setups. INFO.
-#:   * record NOT ARMED (no DSN, or no cutover, or neither) — nothing serves the
-#:     dense leg from Postgres, the graph has no vector index, and every served
+#:   * record NOT ARMED (no DSN, or no SPELLED arm, or neither) — nothing serves
+#:     the dense leg from Postgres, the graph has no vector index, and every served
 #:     label REALLY DOES full-scan. That is `#4997`'s defect, unchanged, and it
-#:     keeps its WARNING. The cutover defaults ON since `#13610`, but a store with
-#:     a DSN and no resolvable record TENANT is still this lane, which is why the
-#:     retirement asks for a tenant and not only for the arm.
+#:     keeps its WARNING. The cutover defaults ON since `#13610`, so "armed" is not
+#:     the question: a store with a DSN and no SPELLED arm is still this lane, which
+#:     is why the retirement asks `record_vector.arm_is_explicit` and not only for a
+#:     DSN (and why the request's tenant is the wrong question — see
+#:     :func:`vector_index_retired`).
 #:
 #: ⛔ AND IT IS A ROLLBACK SWITCH, WHICH IS TWO HALVES (`#11660` review F9). The
 #: flag is read in TWO places and a rollback needs both: the log LEVEL above, and
@@ -789,12 +793,14 @@ _VECTOR_INDEX_DROP_FAILED_LOCK = threading.Lock()
 #: backfill yet), so a DSN no longer implies a replacement: both
 #: `vector_index_retired()` and the reader must agree, or the #4997 warning is
 #: muted on exactly the store that needs it (#11660 review round 6, P1-3).
-#: For an operator: on a store whose replacement is ARMED the index is retired
-#: on the next setup (and one is never created); an UNARMED store is `main`'s
+#: For an operator: on a store that SPELLS the arm (an explicit truthy
+#: `TORTOISE_RECORD_VECTOR_LEG`) the index is retired
+#: on the next setup (and one is never created); an unspelled store is `main`'s
 #: posture — it keeps an index it has, gains one it lacks, and its dense reads
-#: keep the in-graph ANN leg, so nothing regresses while the leg is dark. Arming
-#: the leg is `TORTOISE_RECORD_VECTOR_LEG=1` WITH a record DSN, and only then is
-#: the index retired (#11660 review round 7, P2-2).
+#: keep the in-graph ANN leg, so nothing regresses while the leg is dark. The arm
+#: is DEFAULT ON since `#13610`, so "armed" is not the question the DROP asks;
+#: `record_vector.arm_is_explicit` is (#13631), and only an explicit truthy value
+#: WITH a record DSN retires the index (#11660 review round 7, P2-2).
 #:
 #: ⚠️ Flipping it is a CODE revert's cheap cousin, not the whole revert: the
 #: record leg stays armed and keeps answering the dense read (`record_vector`),
@@ -817,9 +823,10 @@ def vector_index_retired() -> bool:
     alarm this function exists to keep honest (#11660 review round 6, P1-3).
     Round 3 made the dense leg's cutover a SECOND, stronger condition —
     :data:`tortoise.record_vector.ARMING_ENV`, **default ON since `#13610`**, with an
-    explicit falsy as the ROLLBACK — so a hosted store with a DSN but no resolvable
-    record TENANT is the posture this clause is about (the arm alone no longer names
-    it), and on it:
+    explicit falsy as the ROLLBACK — and that is the round-6 defect's shape: because
+    the arm's default is ON, `DSN ∧ armed` is "a DSN resolves", and a hosted store
+    with a DSN whose dense read has no record to answer from was exactly the store
+    the clause had to name. On it:
 
       * the in-graph index is dropped (the drop is gated on the constant, which
         is the deliberate part), and
@@ -833,21 +840,28 @@ def vector_index_retired() -> bool:
     So both conditions are asked, and they are asked where each lives: the DSN
     in ``record_writer`` (the arming SURFACE, and it raises on a malformed
     value) and the cutover in ``record_vector`` (the arming DECISION). Lazy
-    imports both, for the cycle.
+    imports both, for the cycle. ⛔ Round 3's *first* attempt at the second
+    condition was the request's record TENANT, and it does not survive round 7:
+    see the next paragraph for the arm that replaced it and the block comment
+    below for why a request-scoped fact cannot decide a store-scoped DDL.
 
-    ⛔ AND A THIRD ONE, because `#13610` moved the cutover's default to ON: being
-    ARMED is not the same as the record ANSWERING. The record still has no backfill,
-    so the arm answers every served label from the record only once
-    `record_vector.coverage` has PROVEN the record holds that label's vectors — until
-    then the gated READ declines and the GRAPH is the answering leg. Retiring the
-    graph's index in that state would take the index off the leg that is actually
-    serving, which is `#4997`'s defect with its alarm downgraded — exactly the round-6
-    P1-3 failure this function was written to prevent, reached a different way. So the
-    retirement also requires a record TENANT on this request (`_resolve_scope`): a DSN
-    plus an unset switch is not a store where the record serves the read. On a
-    process that resolves no tenant (a CLI/rebuild box, a request with none bound) the
-    index is KEPT and the warning level stays — the rollback posture, which is the
-    safe direction.
+    ⛔ AND A THIRD ONE, and it is an EXPLICIT ARM (`record_vector.arm_is_explicit`,
+    `#13631`), NOT the request's record tenant. `#13610` moved the cutover's default
+    to ON, which collapsed `DSN ∧ armed` back to "a DSN resolves" — and the drop runs
+    at setup, before any coverage can exist. So the DROP asks the one fact that is
+    knowable then and is an OPERATOR statement: has this deployment SPELLED
+    `TORTOISE_RECORD_VECTOR_LEG=1`? An unset switch is armed for the READ and silent
+    for the DROP: the index is KEPT and `#4997` keeps its WARNING.
+
+    ⚠️ THE RESIDUAL, stated rather than implied: the arm is a deployment-level
+    statement, not a coverage proof, so an EXPLICITLY armed store whose coverage has
+    not verified yet does drop the index while the gated labels still decline to the
+    graph — the backfill then full-scans, and `#4997` reports it at INFO. That is the
+    accepted cost of the arm being an operator's assertion; the review history's
+    alternative (ask the request's tenant) was wrong twice over, see the block comment
+    below: the decision is STORE-scoped and one-shot, a tenant is REQUEST-scoped, and
+    a by-value-credential lane would never retire while an ambient-tenant request on
+    the same graph would.
     """
     if not VECTOR_INDEX_RETIRED:
         return False
@@ -20325,11 +20339,14 @@ class FalkorProjection(
         the graph branch and the graph write. Answering `0` would verify coverage
         on a failed measurement and retire the graph for a store that needs it.
 
-        ⚠️ NOT status-filtered, deliberately: the record's numerator is the whole
-        table's vector-bearing rows (`record_vector._record_vector_count`), so a
-        `#689` terminal cage here would compare two different populations and
+        ⚠️ NOT status-filtered, deliberately: the record's numerator is its
+        vector-bearing rows with only the label's KIND predicate applied
+        (`record_vector._record_vector_count`), so a `#689` terminal cage here would
+        compare two different populations and
         leave a store permanently unverified. Terminal nodes carry vectors too, in
-        both stores.
+        both stores. ⛔ The one-sided KIND predicate has its own consequence for the
+        sub-kind labels (`document`/`source`): see `Coverage`'s docstring — for those
+        two `record >= graph` can be unreachable, so their cut-over is an operator act.
 
         ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET AND IT MUST BE PASSED (#13610
         review). This aggregate runs on the gate's miss path, on the DENSE READ
