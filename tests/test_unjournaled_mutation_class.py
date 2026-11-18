@@ -265,24 +265,38 @@ class TestPropertyMutationRoundTrip:
     # `rename` keeps its own row (`test_a_name_change_is_journaled_and_round_
     # trips`): #3377's producer half landed with #3590, so the withhold that
     # kept it out of this parametrization is GONE.
-    @pytest.mark.parametrize("op,prop,new", [
-        ("restatus", "status", "archived"),
-        ("revise", "objectKind", "risks"),
+    #
+    # ⛔ `new` is what the caller WRITES; `stored` is what the write door keeps.
+    # #11824 S0 (#13143) made `archived`/`retracted` DECLARED SYNONYMS of
+    # `deprecated`, normalised silently at the one lifecycle door
+    # (`tortoise/lifecycle_vocabulary.py`, design §3.1) — so the second row
+    # keeps the write this file has always made and pins what lands, instead of
+    # asserting the pre-door spelling. This file keeps the value in ONE
+    # vocabulary word: the door's own contract is pinned by
+    # `tests/test_3311_multilabel_status_vocab.py`, and every row here owns the
+    # ROUND TRIP, so an exact-equality map is never relaxed to a superset.
+    @pytest.mark.parametrize("op,prop,new,stored", [
+        ("restatus", "status", "deprecated", "deprecated"),
+        ("restatus", "status", "archived", "deprecated"),
+        ("revise", "objectKind", "risks", "risks"),
     ])
-    def test_object_mutation_survives_rebuild(self, env, caplog, op, prop, new):
+    def test_object_mutation_survives_rebuild(self, env, caplog, op, prop, new,
+                                              stored):
         sdk, events = env
         oid = sdk.create_entity("object", name="Original",
                                 objectKind="opportunities")["node"]["id"]
         sdk.update_knowledge(oid, **{prop: new})
-        assert _props(sdk, "Object", oid, prop)[prop] == new
+        assert _props(sdk, "Object", oid, prop)[prop] == stored
 
         recs = [r for r in _mutations(events) if r.get("id") == oid]
         assert [r["op"] for r in recs] == [op]
         assert recs[0]["label"] == "Object"
-        assert recs[0]["state"] == {prop: new}
+        assert recs[0]["state"] == {prop: stored}, (
+            "the journal must carry the STORED word, not the caller's synonym — "
+            "a replay of the synonym re-enters the door only by accident")
 
         _assert_round_trip(sdk, events, caplog)
-        assert _props(sdk, "Object", oid, prop)[prop] == new
+        assert _props(sdk, "Object", oid, prop)[prop] == stored
 
     def test_removal_survives_rebuild(self, env, caplog):
         """The row a ``properties(n)`` SNAPSHOT provably cannot replay.
@@ -342,17 +356,17 @@ class TestPropertyMutationRoundTrip:
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
                                 objectKind="k")["node"]["id"]
-        sdk.update_knowledge(oid, status="archived", confidence=0.9,
+        sdk.update_knowledge(oid, status="deprecated", confidence=0.9,
                           objectKind="k2")
 
         rec = [r for r in _mutations(events) if r.get("id") == oid][-1]
         assert rec["op"] == "restatus", "status outranks the generic revise"
-        assert rec["state"] == {"status": "archived", "confidence": 0.9,
+        assert rec["state"] == {"status": "deprecated", "confidence": 0.9,
                                "objectKind": "k2"}
 
         _assert_round_trip(sdk, events, caplog)
         got = _props(sdk, "Object", oid, "status", "confidence", "objectKind")
-        assert got == {"status": "archived", "confidence": 0.9,
+        assert got == {"status": "deprecated", "confidence": 0.9,
                        "objectKind": "k2"}
 
     def test_non_json_native_value_is_journalled_as_stored(self, env, caplog):
@@ -410,7 +424,7 @@ class TestPropertyMutationRoundTrip:
         `SET o.status='superseded'` and must run after every Object-creation
         event), while `EntityMutated` state folds run INLINE. Without an order
         check the sweep wins over a LATER state op, so live and `apply()` read
-        `archived` while `rebuild_all` reads `superseded` — the exact revert
+        `deprecated` while `rebuild_all` reads `superseded` — the exact revert
         this lane removes, in the very engine it removes it from (and the two
         engines stop agreeing with each other, breaking the #330 parity claim).
         """
@@ -418,8 +432,8 @@ class TestPropertyMutationRoundTrip:
         oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_knowledge(oid, status="archived")
-        assert _props(sdk, "Object", oid, "status")["status"] == "archived"
+        sdk.update_knowledge(oid, status="deprecated")
+        assert _props(sdk, "Object", oid, "status")["status"] == "deprecated"
 
         # Compares ONLY the property under test, not the whole map: the
         # synthetic `_emit_event` above journals the supersede but does not
@@ -430,7 +444,7 @@ class TestPropertyMutationRoundTrip:
         caplog.clear()
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         assert _fold_warnings(caplog) == [], _fold_warnings(caplog)
-        assert _props(sdk, "Object", oid, "status")["status"] == "archived", (
+        assert _props(sdk, "Object", oid, "status")["status"] == "deprecated", (
             "the deferred ObjectSuperseded sweep clobbered a LATER state op — "
             "rebuild_all reverted the mutation")
 
@@ -449,7 +463,7 @@ class TestPropertyMutationRoundTrip:
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
-        sdk.update_knowledge(oid, status="archived")
+        sdk.update_knowledge(oid, status="deprecated")
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -460,22 +474,22 @@ class TestPropertyMutationRoundTrip:
     def test_every_post_supersede_state_op_is_restored(self, env):
         """#4743 review round 2 — the sweep clobbers the WHOLE inline history.
 
-        Round 1 re-applied only the LAST state op, so `sup -> status=archived ->
+        Round 1 re-applied only the LAST state op, so `sup -> status=deprecated ->
         name=New` left `status` clobbered: the terminal event was the rename and
         did not carry `status`, so `rebuild_all` read `superseded` while live and
-        `apply()` read `archived`.
+        `apply()` read `deprecated`.
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_knowledge(oid, status="archived")
+        sdk.update_knowledge(oid, status="deprecated")
         sdk.update_knowledge(oid, objectKind="k2")
-        assert _props(sdk, "Object", oid, "status")["status"] == "archived"
+        assert _props(sdk, "Object", oid, "status")["status"] == "deprecated"
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         got = _props(sdk, "Object", oid, "objectKind", "status")
-        assert got == {"objectKind": "k2", "status": "archived"}, (
+        assert got == {"objectKind": "k2", "status": "deprecated"}, (
             "a post-supersede state op was lost — only the last one was "
             f"replayed: {got}")
 
@@ -500,7 +514,7 @@ class TestPropertyMutationRoundTrip:
         oid = sdk.create_entity("object", name="O", objectKind="k")["node"]["id"]
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_knowledge(oid, status="archived")
+        sdk.update_knowledge(oid, status="deprecated")
         sdk.delete_entity(oid)
 
         caplog.clear()
@@ -518,9 +532,9 @@ class TestPropertyMutationRoundTrip:
                                   objectKind="k")["node"]["id"]
         sdk2._emit_event("ObjectSuperseded", id=oid2, name="O",
                          supersedes_by="other", session_id="s", evidence="e")
-        sdk2.update_knowledge(oid2, status="archived")
+        sdk2.update_knowledge(oid2, status="deprecated")
         sdk2._get_proj().rebuild_all(str(events2), confirm_destructive=True)
-        assert _props(sdk2, "Object", oid2, "status")["status"] == "archived", (
+        assert _props(sdk2, "Object", oid2, "status")["status"] == "deprecated", (
             "control: without the delete the post-supersede op IS restored")
 
     def test_a_name_change_is_journaled_and_round_trips(self, env, caplog):
@@ -592,7 +606,7 @@ class TestPropertyMutationRoundTrip:
                                 objectKind="k")["node"]["id"]
         caplog.clear()
         with caplog.at_level("WARNING"):
-            sdk.update_knowledge(oid, name="B", status="archived",
+            sdk.update_knowledge(oid, name="B", status="deprecated",
                               confidence=0.9)
         assert _props(sdk, "Object", oid,
                       "name")["name"] == "B", "live write still applies"
@@ -600,14 +614,14 @@ class TestPropertyMutationRoundTrip:
         recs = [r for r in _mutations(events) if r.get("id") == oid]
         assert recs, "the write must journal"
         state = recs[-1]["state"]
-        assert state == {"name": "B", "status": "archived",
+        assert state == {"name": "B", "status": "deprecated",
                          "confidence": 0.9, "canonical_name": "b"}, state
         assert recs[-1]["op"] == "rename", recs[-1]["op"]
 
         # The payload of this test: BOTH halves SURVIVE a rebuild.
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
         got = _props(sdk, "Object", oid, "name", "status", "confidence")
-        assert got == {"name": "B", "status": "archived",
+        assert got == {"name": "B", "status": "deprecated",
                        "confidence": 0.9}, (
             "#3312 must hold for a name-BEARING write: " f"{got}")
 
@@ -962,7 +976,7 @@ class TestJournalWriteFailure:
         with caplog.at_level("WARNING"):
             # A JOURNALED op — a `name` change is deliberately withheld now
             # (#3377/#4769), so it would never reach the append this row tests.
-            sdk.update_knowledge(oid, status="archived")
+            sdk.update_knowledge(oid, status="deprecated")
 
         # 1. LOUD — a silently dropped mutation is this class's own defect.
         msgs = [r.getMessage() for r in caplog.records]
@@ -971,7 +985,7 @@ class TestJournalWriteFailure:
         # 2. Fail-OPEN, deliberately: the live SET already committed, so the
         #    SDK must neither raise nor roll back. The price is that THIS write
         #    is not durable — which is exactly why (1) must hold.
-        assert _props(sdk, "Object", oid, "status")["status"] == "archived", \
+        assert _props(sdk, "Object", oid, "status")["status"] == "deprecated", \
             "the live mutation must still have applied (fail-open, not rollback)"
         # 3. ...and the loss is real, so the assertion above is not vacuous.
         assert len(_mutations(events)) == before, \
@@ -1012,7 +1026,7 @@ class TestLegacyJournalShapes:
         sdk, events = env
         oid = sdk.create_entity("object", name="Legacy",
                                 objectKind="k")["node"]["id"]
-        sdk.update_knowledge(oid, status="archived")
+        sdk.update_knowledge(oid, status="deprecated")
         _append_raw(events, type="ObjectSuperseded", id=oid, name="Legacy",
                     supersedes_by="other", session_id="s", evidence="e")
 
@@ -1028,10 +1042,10 @@ class TestLegacyJournalShapes:
                                 objectKind="k")["node"]["id"]
         _append_raw(events, type="ObjectSuperseded", id=oid, name="Legacy",
                     supersedes_by="other", session_id="s", evidence="e")
-        sdk.update_knowledge(oid, status="archived")
+        sdk.update_knowledge(oid, status="deprecated")
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
-        assert _props(sdk, "Object", oid, "status")["status"] == "archived", (
+        assert _props(sdk, "Object", oid, "status")["status"] == "deprecated", (
             "the deferred supersede sweep clobbered a LATER state op")
 
 
