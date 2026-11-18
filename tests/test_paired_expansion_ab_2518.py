@@ -1331,12 +1331,15 @@ def test_a_null_cell_is_distinguishable_from_an_unrecorded_one(tmp_path):
     ⛔ `#13267` review 13 F1: the contrast used to be asserted with
     `assert "no_such_field" not in cell` — the absence of a key *literally named*
     `no_such_field`, a value no mutation of the fix can move, so it read as a
-    presence-vs-absence guard while testing nothing. The contrast is now made where
-    it can fail, in both places it lives: at the DATA level `cell.get(…, "ABSENT")`
-    separates absent / recorded-null / the pre-fix lenient-parsed `nan`, and at the
-    WRITER level a real cell (present, null) is written beside a copy with the field
-    genuinely absent and the two must stay distinguishable in BOTH directions — the
-    writer may neither drop the null (`{k: v for k, v in … if v is not None}` reds
+    presence-vs-absence guard while testing nothing. The replacement then moved the
+    same defect one line up (`assert "mde_paired" not in stripped`, where `stripped`
+    was built by excluding exactly that key) and review 14 F1 removed it too — the
+    absent direction is asserted only where it can fail, at the WRITER level below.
+    The contrast is made where it can fail, in both places it lives: at the DATA
+    level `cell.get(…, "ABSENT")` separates absent / recorded-null / the pre-fix
+    lenient-parsed `nan`, and at the WRITER level a real cell (present, null) is
+    written beside a copy with the field genuinely absent and the two must stay
+    distinguishable in BOTH directions — the writer may neither drop the null (`{k: v for k, v in … if v is not None}` reds
     the first row with `KeyError`) nor manufacture the key for the stripped copy (a
     writer that back-fills known fields reds the third).
     """
@@ -1348,8 +1351,14 @@ def test_a_null_cell_is_distinguishable_from_an_unrecorded_one(tmp_path):
     assert cell.get("mde_paired", "ABSENT") is None
     assert "NOT ESTIMABLE" in cell["mde_note"]
 
+    # ⛔ `#13267` review 14 F1: this used to be followed by
+    # `assert "mde_paired" not in stripped` — `stripped` is built on the line
+    # above to exclude exactly that key, so the assertion was true for ANY cell
+    # and no mutation of the writer could move it. Removed rather than reworded:
+    # the absent direction is proven reachably at the writer level below
+    # (`"mde_paired" not in written["absent"]` reds on a writer that back-fills
+    # a known field), and the recorded-null direction by the `is None` above.
     stripped = {key: value for key, value in cell.items() if key != "mde_paired"}
-    assert "mde_paired" not in stripped      # genuinely ABSENT, not null
     out = tmp_path / "null-vs-absent.json"
     P._write_json(out, {"present_null": cell, "absent": stripped})
     written = _strict_round_trip(out.read_text())
