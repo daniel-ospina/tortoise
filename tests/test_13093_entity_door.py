@@ -804,51 +804,104 @@ def _strip_sql_comments(sql: str) -> str:
     return "".join(out)
 
 
+#: How an `EXECUTE`d literal is recognised: the token immediately before the
+#: opening quote, WITH an identifier boundary. ⛔ The boundary matters even though
+#: an identifier cannot be directly followed by a literal in valid SQL: without it
+#: `xexecute '…'` is read as `EXECUTE` and the mask leaves a string it should
+#: blank (measured — the docstring says "the token", so the code now means it).
+_EXECUTE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_$])execute$", re.IGNORECASE)
+
+#: A dollar-quote opener — `$$`, `$m$`, `$body$` …
+_DOLLAR_TAG_RE = re.compile(r"\$(?P<tag>[A-Za-z0-9_]*)\$")
+
+#: Tokens a BLOCK is introduced by. A dollar-quoted BODY (`DO $$ … $$`,
+#: `CREATE FUNCTION … AS $$ … $$`) is DDL that carries more DDL inside it, so it
+#: is NOT masked — it is scanned recursively, which is what lets a `RAISE NOTICE
+#: $m$…$m$` INSIDE the body still be masked.
+_BODY_INTRODUCERS = frozenset({"do", "as", "return"})
+
+
 def _mask_plain_literals(sql: str) -> str:
-    """Blank the CONTENTS of single-quoted literals that are not `EXECUTE`d DDL.
+    """Blank the CONTENTS of string literals that are not DDL the record runs.
 
     ⛔ A LITERAL THAT MERELY *MENTIONS* THE DDL MUST NOT MOVE THE PREMISE. This
     corpus documents replaced DDL in `COMMENT ON … IS '…'` and `RAISE NOTICE`
-    prose (and writes DDL inside comments as house style), so a literal quoting
-    `DROP CONSTRAINT …` or the OLD `ADD CONSTRAINT … CHECK (…)` is exactly the
-    text a future migration is most likely to carry. Measured before this mask
-    existed: a `COMMENT ON CONSTRAINT … IS 'DROP CONSTRAINT <name>;'` cleared the
-    premise (false RED), and a real `DROP` followed by a `RAISE NOTICE` quoting
-    the historical `ADD CONSTRAINT … CHECK (…)` returned that expression — a
-    false GREEN, the class this whole reader exists for.
+    prose, so a literal quoting `DROP CONSTRAINT …` or the OLD
+    `ADD CONSTRAINT … CHECK (…)` is exactly the text a future migration is most
+    likely to carry. Measured before this mask existed: a `COMMENT ON CONSTRAINT
+    … IS 'DROP CONSTRAINT <name>;'` cleared the premise (false RED), and a real
+    `DROP` followed by a `RAISE NOTICE` quoting the historical
+    `ADD CONSTRAINT … CHECK (…)` returned that expression — a false GREEN, the
+    class this whole reader exists for.
 
-    ⛔ AN `EXECUTE 'ALTER TABLE …'` LITERAL IS KEPT, because that IS the DDL: the
-    house style wraps conditional DDL in `DO $$ … EXECUTE '…' … $$`
-    (`20261025000001_record_tenancy_role_and_guc.sql:113,142`,
-    `20261023000002_blog_author_backfill_atomic.sql:91,109`). The test is the
-    token immediately before the opening quote.
+    WHAT IS KEPT, AND WHY THE TWO CASES CANNOT BE TOLD APART BY TEXT ALONE:
 
-    ⚠️ POSITION-PRESERVING: contents become spaces (newlines kept), the quotes stay,
-    and the length never changes — so a caller can match on the masked text and
-    read the REAL expression back out of the original by the same span. `''`
-    escape pairs are masked as part of the contents, which is what keeps
-    `CHECK (node_key = 'a;b')` matchable and recoverable verbatim.
+      * an `EXECUTE 'ALTER TABLE …'` literal — that IS the DDL, and the house
+        style wraps conditional DDL in `DO $$ … EXECUTE '…' … $$`
+        (`20261025000001_record_tenancy_role_and_guc.sql:113,142`,
+        `20261023000002_blog_author_backfill_atomic.sql:91,109`);
+      * a dollar-quoted BODY (`DO $$ … $$`, `… AS $$ … $$`) — it carries DDL
+        inside it, so it is scanned RECURSIVELY instead of blanked, which is how
+        a `RAISE NOTICE $m$…$m$` inside the body is still masked.
+
+    ⛔ BOTH LITERAL KINDS ARE COVERED. The first cut handled single quotes only
+    and left `$tag$` strings readable, which re-opened the same false green one
+    quote style away (measured: a real `DROP CONSTRAINT` followed by
+    `RAISE NOTICE $m$was: ADD CONSTRAINT … CHECK (…) $m$` returned the
+    historical expression).
+
+    ⚠️ POSITION-PRESERVING: contents become spaces (newlines kept), the quotes and
+    dollar tags stay, and the length never changes — so a caller can match on the
+    masked text and read the REAL expression back out of the original by the same
+    span. `''` escape pairs are masked as part of the contents, which is what
+    keeps `CHECK (node_key = 'a;b')` matchable and recoverable verbatim.
     """
     out = list(sql)
+
+    def blank(start: int, stop: int) -> None:
+        for k in range(start, stop):
+            if out[k] != "\n":
+                out[k] = " "
+
+    def last_token(before: str) -> str:
+        stripped = before.rstrip()
+        return stripped.rsplit(None, 1)[-1].lower() if stripped else ""
+
     i, n = 0, len(sql)
     while i < n:
-        if sql[i] != "'":
-            i += 1
+        ch = sql[i]
+        if ch == "'":
+            end = i + 1
+            while end < n:
+                if sql[end] == "'":
+                    if sql[end + 1:end + 2] == "'":
+                        end += 2
+                        continue
+                    break
+                end += 1
+            if not _EXECUTE_TOKEN_RE.search(sql[:i].rstrip()):
+                blank(i + 1, min(end, n))
+            i = end + 1
             continue
-        end = i + 1
-        while end < n:
-            if sql[end] == "'":
-                if sql[end + 1:end + 2] == "'":
-                    end += 2
+        if ch == "$":
+            opener = _DOLLAR_TAG_RE.match(sql, i)
+            if opener is not None:
+                tag = opener.group(0)
+                close = sql.find(tag, opener.end())
+                if close != -1:
+                    token = last_token(sql[:i])
+                    if token == "execute":
+                        i = close + len(tag)          # the DDL itself — keep
+                        continue
+                    if token in _BODY_INTRODUCERS:
+                        inner = _mask_plain_literals(sql[opener.end():close])
+                        for offset, masked_char in enumerate(inner):
+                            out[opener.end() + offset] = masked_char
+                    else:
+                        blank(opener.end(), close)    # a STRING — blank it
+                    i = close + len(tag)
                     continue
-                break
-            end += 1
-        keep = sql[:i].rstrip().lower().endswith("execute")
-        if not keep:
-            for k in range(i + 1, min(end, n)):
-                if out[k] != "\n":
-                    out[k] = " "
-        i = end + 1
+        i += 1
     return "".join(out)
 
 
@@ -1230,7 +1283,13 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
                  # a comma LIST — the table need not be first. Both measured green
                  # on the historical expression before the patterns accepted them.
                  "\nALTER TABLE public.event DROP node_key CASCADE;\n",
-                 "\nDROP TABLE public.foo, public.event;\n"):
+                 "\nDROP TABLE public.foo, public.event;\n",
+                 # the schema qualifier and `IF EXISTS` are OPTIONAL, and `ONLY`
+                 # is legal — each of these was unpinned before this round.
+                 "\nDROP TABLE event;\n",
+                 "\nDROP TABLE IF EXISTS public.event;\n",
+                 "\nALTER TABLE event DROP node_key CASCADE;\n",
+                 "\nALTER TABLE ONLY public.event DROP COLUMN node_key CASCADE;\n"):
         assert _effective_event_node_key_check(landed + gone) is None, (
             f"`{gone.strip()}` removes the constraint without naming it, and the "
             "reader still reported an expression the record no longer enforces")
@@ -1247,16 +1306,17 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
                   # `COLUMN` is OPTIONAL in PostgreSQL — measured before the
                   # pattern accepted it, this spelling answered the historical
                   # expression (a false green).
-                  "\nALTER TABLE public.event RENAME node_key TO key;\n"):
+                  "\nALTER TABLE public.event RENAME node_key TO key;\n",
+                  "\nALTER TABLE ONLY public.event RENAME TO ev2;\n"):
         with pytest.raises(AssertionError, match="MOVED the premise's owner"):
             _effective_event_node_key_check(landed + moved)
 
-    # 1h-bis. A LITERAL THAT MENTIONS THE DDL IS READ AS DDL — a DECLARED limit,
-    #     pinned here so the next lane meets it as a fact instead of re-deriving
-    #     it. (The DECL body and the comment scanner ARE literal-aware; the
-    #     statement scan is not, because `EXECUTE 'ALTER TABLE …'` must be read.)
-    #     ⛔ IF THIS ARM EVER FAILS, the reader got smarter — delete it and the
-    #     limit bullet it pins; do not "fix" it by narrowing the assertion.
+    # 1h-bis. A LITERAL THAT MENTIONS THE DDL IS INERT. Every statement scan runs
+    #     on `_mask_plain_literals`' output, so a `COMMENT ON … IS '…'`, a
+    #     `RAISE NOTICE '…'` and a `RAISE NOTICE $m$…$m$` quoting the constraint
+    #     cannot move the premise — while an `EXECUTE 'ALTER TABLE …'` literal,
+    #     which IS the DDL, still can. Both directions are measured below:
+    #     "the mention is inert" AND "prose cannot re-install a dropped premise".
     mention = landed + (
         f"\nCOMMENT ON CONSTRAINT {_EVENT_KEY_CONSTRAINT} ON public.event\n"
         f"    IS 'DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};';\n")
@@ -1274,6 +1334,33 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
     assert _effective_event_node_key_check(stale_prose) is None, (
         "prose quoting the OLD expression re-installed the premise after a real "
         "drop — the record enforces nothing there, so the row must NOT stay green")
+    #     ⛔ AND THE SAME IN EVERY LITERAL KIND. The first mask handled single
+    #     quotes only, so `$m$` prose re-opened the false green one quote style
+    #     away (measured). A dollar-quoted BODY (`DO $$ … $$`) is still SCANNED —
+    #     it carries DDL — but the STRING inside it is masked.
+    dollar_stale = landed + (
+        f"\nALTER TABLE public.event DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT};\n"
+        "DO $$ BEGIN RAISE NOTICE $m$was: "
+        f"ADD CONSTRAINT {_EVENT_KEY_CONSTRAINT} CHECK {_EVENT_KEY_CHECK[1:-1]}"
+        "; $m$; END $$;\n")
+    assert _effective_event_node_key_check(dollar_stale) is None, (
+        "a dollar-quoted literal quoting the OLD expression re-installed the "
+        "premise after a real drop — the mask must cover `$tag$` strings too")
+    for prose in ("we no longer run: DROP CONSTRAINT " + _EVENT_KEY_CONSTRAINT,
+                  "old: RENAME CONSTRAINT " + _EVENT_KEY_CONSTRAINT + " TO x"):
+        assert _effective_event_node_key_check(
+            landed + f"\nDO $$ BEGIN RAISE NOTICE $m${prose}; $m$; END $$;\n"
+        ) == _EVENT_KEY_CHECK, (
+            f"a dollar-quoted literal mentioning `{prose}` moved the premise")
+    #     ⛔ AND THE `EXECUTE` TOKEN NEEDS A BOUNDARY: `xexecute '…'` is not
+    #     `EXECUTE`, and a mask that reads it as one leaves a string it should
+    #     blank (measured on the mask directly).
+    assert _strip_sql_comments("SELECT 1") == "SELECT 1"
+    not_execute = landed + (
+        f"\nSELECT xexecute 'DROP CONSTRAINT {_EVENT_KEY_CONSTRAINT}';\n")
+    assert _effective_event_node_key_check(not_execute) == _EVENT_KEY_CHECK, (
+        "an identifier merely ending in `execute` exempted a literal from the "
+        "mask")
 
     #     ⛔ AND AN `EXECUTE`-WRAPPED MOVE MUST NOT SWALLOW THE LITERAL'S CLOSING
     #     QUOTE: the name atom is non-greedy, so a lookahead that omits `'` lets
@@ -1297,6 +1384,12 @@ def test_the_event_key_premise_reader_sees_a_FORWARD_re_key():
             landed + '\nALTER TABLE public.event RENAME TO "Event_V2";\n')
     assert "`Event_V2`" in str(qexc.value) and '"Event_V2' not in str(qexc.value), (
         f"the quoted target kept its quote — {qexc.value}")
+
+    # 1h-ter. THE EMPTY CASE RAISES rather than answering `None` silently: a
+    #     corpus that names the constraint nowhere means the premise's owner was
+    #     renamed or removed, not that the record enforces nothing.
+    with pytest.raises(AssertionError, match="no migration names"):
+        _effective_event_node_key_check("")
 
     # 1i. A `CREATE TABLE` that declares the constraint as its LAST element: the
     #     body must stop at its OWN balanced close, not swallow the table's `)`.
