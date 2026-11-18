@@ -68,9 +68,12 @@ Lifecycle decision table (THE rule):
   ⚠️ The WIDER terms — ``status='outdated'`` and the legacy ``outdated=true`` flag —
   are NOT latched: ``_fold_object_stage``'s set has no ``outdated`` member, the
   CLOSE fold cannot reach such a row (no live holder) while the REOPEN fold can
-  (``_reopen_targets_closed``). Answered from the POSITION where the row HAS one
-  and from the WORD where it has none — ⛔ NOT "the POSITION, per direction",
-  which is one case short. Cases: ``_object_state_to_issue_state``'s docstring.
+  (``_reopen_targets_closed``). Answered from the POSITION where the row has one —
+  and `None` while that position is LIVE — and, where it has NONE, `"closed"`
+  unless the word maps to `open`, which is withheld (a close against a row with no
+  live holder re-fires for ever). ⛔ NOT "the POSITION, per direction", and not
+  "the WORD where it has none" either: both are one case short. The cases are
+  enumerated once, in ``_object_state_to_issue_state``'s docstring.
   ⛔ FAMILIES 1 AND 2 ARE ANSWERED BEFORE THE POLARITY (closed/open) ARMS, on
   purpose: their answer therefore does not depend on ``isClosed``. It must not,
   because ``is_position_ended`` short-circuits on the marker alone and never looks
@@ -1494,7 +1497,9 @@ class GitHubIndexer:
         # `_reopen_targets_closed` and DOES apply. So for these rows this read answers
         # the POSITION where the row has an ENDED one — which is what converges —
         # `None` where it is LIVE (a close could never be dispatched, so it must get no
-        # opinion), and the word's direction where it has no position. Measured on a row
+        # opinion), and where it has NO position, `None` if the word maps to `open` and
+        # `"closed"` otherwise — the opposite of answering with the word, because a
+        # close minted for a row with no live holder re-fires for ever. Measured on a row
         # at `status='outdated'` + closed position, GitHub reopened:
         #
         #   `None` for both directions  -> [0, 0, 0], row stays `done`/`isClosed=true`
