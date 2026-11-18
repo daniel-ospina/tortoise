@@ -431,31 +431,261 @@ def test_the_recency_key_is_the_CASE_not_a_bare_coalesce(schema, point_rows):
 
 # ── the armed/unarmed contract, on a real server ───────────────────────────
 
-def test_an_unserved_label_answers_None_not_empty(schema):
-    """`object`/`subject` answer `None`, so the leg must NOT claim to have looked.
+# ── #13422: object/subject ARE record-served, with the `#689` cage ──────
+#
+# `#13220`'s read half. `object`/`subject` were withheld from `LABEL_SERVED`
+# while their vector had no record column; they were STILL withheld after the
+# column landed, because `search_engine._STATUS_FILTERED_LABELS` drops
+# superseded/deprecated/archived/retracted entities from the dense leg and the
+# record holds no `status` COLUMN for these two labels to filter on. `#13422`
+# pays that cage from the record's OWN fold, so the labels are served and the
+# exclusion is asserted here rather than assumed.
+#
+# ⛔ `journal_event` IS APPEND-ONLY BY TRIGGER, so the events seeded below
+# SURVIVE the `_clean_tenant` sweep (which deletes node/identity/object/subject
+# rows only). Every insert therefore carries a FIXED `seq` and `ON CONFLICT DO
+# NOTHING`, so a second run converges on the same rows instead of colliding on
+# the primary key — the same posture the file's header already demands of a
+# scope another test could write.
+_SEQ_OBJECT_ARCHIVED = 900101
+_SEQ_SUBJECT_RETRACTED = 900102
+_SEQ_OBJECT_POSITION_ENDED = 900103
 
-    ⚠️ The reason is NOT "the record has no column" any more — #13220 gave both
-    tables `embedding` + a generated `embedding_vec` + an HNSW index, so that
-    premise is false at this head. What still keeps them off `LABEL_SERVED` is
-    the `#689` TERMINAL-STATUS CAGE: `search_engine._STATUS_FILTERED_LABELS`
-    drops superseded/deprecated/archived/retracted from both graph branches, while
-    the record holds no `status` for these labels (a projection-owned cache,
-    refused in the props tail) and its procedural fold knows only
-    `live`/`superseded`. Serving them from the record would return entities the
-    graph leg hides. See `record_vector.LABEL_SERVED`.
 
-    `[]` means "served, asked, the filter selects nothing"; the caller takes its
-    graph branch on `None`. Conflating them turns the label's real path (a
-    brute-force graph scan) into an empty dense leg.
+def _seed_semantic(conn, label, key, *, embedding, superseded_by=None):
+    """One `object`/`subject` row plus the `node_identity` row it FKs to.
+
+    ⛔ `node_key = id` and `name IS NOT NULL` at this head
+    (`chk_*_node_key_is_contract_key`, read off the LIVE constraint — the
+    original migration's bare `node_key = name` is not what the deployed schema
+    enforces), so all three are written from `key`. A seed that trusted the
+    migration text over the constraint fails 23514 here, which is why
+    `test_the_two_fingerprints_…` says the same thing at length.
     """
-    scope = record_vector._Scope(org_id=ORG, graph_id=GRAPH)
-    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+    table = label.lower()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.node_identity "
+            "(org_id, graph_id, node_label, node_key) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            (ORG, GRAPH, label, key))
+        cur.execute(
+            f"INSERT INTO public.{table} "
+            "(org_id, graph_id, node_key, id, name, superseded_by, embedding) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)",
+            (ORG, GRAPH, key, key, key, superseded_by, embedding))
 
-    dsn = _app_role_dsn(os.environ[RECORD_DB_ENV])
-    assert record_vector.vector_search(
-        scope, "object", _unit(0), 10, record_dsn=dsn) is None
-    assert record_vector.vector_search(
-        scope, "subject", _unit(0), 10, record_dsn=dsn) is None
+
+def _seed_restatus(conn, *, seq, label, node_id, status):
+    """The journal carrier of a NON-carrier terminal word, as the fold reads it.
+
+    `deprecated`/`archived`/`retracted` are not reachable from any record
+    COLUMN — the record refuses `status` in the props tail and carries no
+    `status` column — so the only place they exist is the journal, written by
+    `update_entity(status=…)` as `EntityMutated` carrying
+    `state.status`. ⛔ The event is FLAT and keyed by `id`+`label`: `_PAYLOAD_EVENT`
+    coalesces `payload -> 'event'` away when it is not an object, and a state op
+    names its target by id (never by name — that is what `#9974`'s narrowing
+    leg exists for).
+    """
+    payload = json.dumps({"id": node_id, "label": label, "state": {"status": status}})
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.journal_event "
+            "(org_id, graph_id, seq, event_type, payload) "
+            "VALUES (%s, %s, %s, 'EntityMutated', %s::jsonb) "
+            "ON CONFLICT DO NOTHING",
+            (ORG, GRAPH, seq, payload))
+
+
+def _seed_stage_fold(conn, *, seq, object_name, event_kind):
+    """The POSITION axis's carrier: a connector event the journal fold replays.
+
+    `github.issue.closed` is a `BUILTIN_CONNECTOR_FOLDS` key mapping to the
+    connector pipeline's `done` stage, whose slot is terminal — so the fold writes
+    `isClosed: true` (and `pipelineSlot: done`) onto the named Object, exactly as
+    a live stage advance does. The event names its Object by NAME (`object`), the
+    connector leg's own coordinate; `event_type` stays `EventRecorded` because
+    that is the row `read_lifecycle_events` admits for a fold event — the KIND
+    lives in the payload.
+    """
+    payload = json.dumps({"eventKind": event_kind, "object": object_name})
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.journal_event "
+            "(org_id, graph_id, seq, event_type, payload) "
+            "VALUES (%s, %s, %s, 'EventRecorded', %s::jsonb) "
+            "ON CONFLICT DO NOTHING",
+            (ORG, GRAPH, seq, payload))
+
+
+def test_a_live_object_is_found_by_a_dense_read_from_the_record(tenant):
+    """⛔ INDICATOR 1, per label. `None` here is the `#13220`-era answer."""
+    _seed_semantic(tenant, "Object", "o_13422_live", embedding=_vec(0))
+    _seed_semantic(tenant, "Object", "o_13422_far", embedding=_vec(1))
+
+    rows = _search_vec("object", hot=0, limit=10)
+    assert rows is not None, (
+        "the record answered `None` for `object` — the label is unserved again")
+    assert [row[0] for row in rows] == ["o_13422_live", "o_13422_far"], rows
+    # distance, not similarity — the caller converts with `1 - d`.
+    assert rows[0][1] == pytest.approx(0.0, abs=1e-6), rows[0]
+
+
+def test_a_live_subject_is_found_by_a_dense_read_from_the_record(tenant):
+    """The Subject twin — `#1423`'s family, and the second half of indicator 1."""
+    _seed_semantic(tenant, "Subject", "s_13422_live", embedding=_vec(2))
+
+    rows = _search_vec("subject", hot=2, limit=10)
+    assert rows is not None, (
+        "the record answered `None` for `subject` — the label is unserved again")
+    assert [row[0] for row in rows] == ["s_13422_live"], rows
+
+
+def test_a_superseded_object_is_excluded_by_the_CARRIER_fold(tenant):
+    """The `superseded` half of the cage, from the record's COLUMN carriers.
+
+    `DERIVED_FROM_RECORD` (via `cache_projection.node_from_row`) folds
+    `superseded_by`/`superseded_at` → `superseded`. Both rows are equally near,
+    so an uncaged leg returns both — the assertion is what distinguishes them.
+    """
+    _seed_semantic(tenant, "Object", "o_13422_super", embedding=_vec(3),
+                   superseded_by="o_13422_live")
+    _seed_semantic(tenant, "Object", "o_13422_current", embedding=_vec(3))
+
+    rows = _search_vec("object", hot=3, limit=10)
+    assert [row[0] for row in rows] == ["o_13422_current"], (
+        "a SUPERSEDED Object was served by the record leg — this is the #689 "
+        f"regression the cage exists to prevent ({rows})")
+    opt_in = _search_vec("object", hot=3, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in opt_in) == [
+        "o_13422_current", "o_13422_super"], opt_in
+
+
+def test_an_archived_object_is_excluded_by_the_records_JOURNAL_fold(tenant):
+    """⛔ THE WORD THE TWO-VALUE SQL VIEW CANNOT EXPRESS (`#13335`).
+
+    `archived` exists only in `journal_event.payload -> 'state' -> 'status'`.
+    The SQL view answers `live` for it; the record's FOLD does not, which is why
+    the leg uses the fold. A leg reading the view here would serve this row and
+    report it as better recall.
+    """
+    _seed_semantic(tenant, "Object", "o_13422_arch", embedding=_vec(4))
+    _seed_semantic(tenant, "Object", "o_13422_arch_live", embedding=_vec(4))
+    _seed_restatus(tenant, seq=_SEQ_OBJECT_ARCHIVED, label="Object",
+                   node_id="o_13422_arch", status="archived")
+
+    rows = _search_vec("object", hot=4, limit=10)
+    assert [row[0] for row in rows] == ["o_13422_arch_live"], (
+        "an ARCHIVED Object was served by the record leg — the fold's four-word "
+        f"vocabulary is not being applied ({rows})")
+    # ⛔ THE VACUITY GUARD: the excluded row must be PROVABLY there and
+    # ANN-visible, or "it was not returned" proves nothing. With the audit opt-in
+    # BOTH come back, so the default read's single row is the CAGE's doing and not
+    # a missing/tiny row.
+    opt_in = _search_vec("object", hot=4, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in opt_in) == [
+        "o_13422_arch", "o_13422_arch_live"], opt_in
+
+
+def test_a_retracted_subject_is_excluded_by_the_records_journal_fold(tenant):
+    """The Subject twin, on a word `SUBJECT_STATUS_VALUES` refuses on WRITE.
+
+    A `retracted` row can exist from a legacy/pre-fix writer, a raw Cypher
+    producer or a JSONL replay, which is why the READ set stays wider than the
+    write door (`#2977`). The cage is a property of what is STORED.
+    """
+    _seed_semantic(tenant, "Subject", "s_13422_retr", embedding=_vec(5))
+    _seed_semantic(tenant, "Subject", "s_13422_retr_live", embedding=_vec(5))
+    _seed_restatus(tenant, seq=_SEQ_SUBJECT_RETRACTED, label="Subject",
+                   node_id="s_13422_retr", status="retracted")
+
+    rows = _search_vec("subject", hot=5, limit=10)
+    assert [row[0] for row in rows] == ["s_13422_retr_live"], (
+        f"a RETRACTED Subject was served by the record leg ({rows})")
+    # The vacuity guard, as in the archived test: both rows exist and are
+    # ANN-visible, so the default read's answer is the cage's.
+    opt_in = _search_vec("subject", hot=5, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in opt_in) == [
+        "s_13422_retr", "s_13422_retr_live"], opt_in
+
+
+def test_an_object_ended_only_by_the_POSITION_axis_is_excluded(tenant):
+    """⛔ THE CAGE IS TWO AXES (`#13034`, design §6) — THIS LEG CAGED ONE.
+
+    `live._terminal_excluded` — the predicate BOTH graph dense branches cage with
+    — excludes a row whose STATUS word is terminal **and** a row the POSITION axis
+    records as ended (`isClosed`, or a `terminal` pipeline slot). Its docstring
+    forbids a reader opting out of the position axis. An `:Object` closed by a
+    connector stage fold carries `status` ABSENT (or `live`) with `isClosed` set,
+    so a status-only cage HIDES it on the graph leg and SERVED it here: the `#689`
+    fail-OPEN direction, silently, and it read as better recall. Both rows below
+    are equally near, so an uncaged leg returns both and the assertion is what
+    distinguishes them.
+
+    ⛔ THE MARKER IS NOT A COLUMN: `public.object` has no `is_closed`, and the
+    value reaches `node.props` through the journal fold — `github.issue.closed`
+    folds to the connector pipeline's `done` stage (`BUILTIN_CONNECTOR_FOLDS`),
+    whose slot is terminal, so `apply_stage_fold` writes `isClosed: true`.
+    """
+    _seed_semantic(tenant, "Object", "o_13422_closed", embedding=_vec(7))
+    _seed_semantic(tenant, "Object", "o_13422_closed_live", embedding=_vec(7))
+    _seed_stage_fold(tenant, seq=_SEQ_OBJECT_POSITION_ENDED,
+                     object_name="o_13422_closed",
+                     event_kind="github.issue.closed")
+
+    rows = _search_vec("object", hot=7, limit=10)
+    assert [row[0] for row in rows] == ["o_13422_closed_live"], (
+        "an Object ended ONLY by the POSITION axis (`isClosed`, status absent) "
+        "was served by the record leg — the graph leg hides it, so this is the "
+        f"#689 fail-open reported as better recall ({rows})")
+    # ⛔ THE VACUITY GUARD, as in the archived/retracted cases: the excluded row
+    # must be PROVABLY there and ANN-visible, or "it was not returned" proves
+    # nothing. With the audit opt-in BOTH come back, so the default read's single
+    # row is the CAGE's doing and not a missing/tiny row.
+    opt_in = _search_vec("object", hot=7, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in opt_in) == [
+        "o_13422_closed", "o_13422_closed_live"], opt_in
+
+
+def test_the_audit_opt_in_returns_terminal_rows_on_the_record_leg(tenant):
+    """`excluded_statuses=()` is the caller's terminal-rows-IN opt, mirrored.
+
+    The graph branches emit NO status clause for it, so a record leg that kept
+    excluding would make the two legs disagree about the same request.
+    """
+    _seed_semantic(tenant, "Object", "o_13422_optin_super", embedding=_vec(6),
+                   superseded_by="o_13422_optin_live")
+    _seed_semantic(tenant, "Object", "o_13422_optin_live", embedding=_vec(6))
+
+    rows = _search_vec("object", hot=6, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in rows) == [
+        "o_13422_optin_live", "o_13422_optin_super"], rows
+
+
+def test_a_caged_short_answer_does_not_raise_a_shortfall(tenant):
+    """The prefetch's `available` is the FOLDED count, not the raw row count.
+
+    The shortfall assertion exists to catch a truncated ANN answer; a row the
+    CAGE removed is not truncation. `_folded_terminal_keys` returns the
+    non-terminal-with-vector count from the same prefetch, so `available` and the
+    returned rows are measured on the same predicate.
+
+    ⛔ THE MUTANT THIS CATCHES IS NOT "a pre-cage `count(*)`" (`#13466` cycle 5,
+    P3 — the earlier docstring named that, and it is UNREACHABLE: on the folded
+    path `available` is always non-None, so the `count(*)` branch in
+    `vector_search` never runs). The reachable mutant is counting a terminal row
+    into `available` — i.e. incrementing it before
+    `_folded_terminal_keys`'s status check's `continue` instead of after — which
+    makes the filter's material figure exceed the rows it returned and raises
+    `VectorShortfall` for a corpus that is complete.
+    """
+    _seed_semantic(tenant, "Object", "o_13422_short_super", embedding=_vec(7),
+                   superseded_by="o_13422_short_live")
+    _seed_semantic(tenant, "Object", "o_13422_short_live", embedding=_vec(7))
+
+    rows = _search_vec("object", hot=7, limit=10)
+    assert [row[0] for row in rows] == ["o_13422_short_live"], rows
 
 
 # ── #13220: object/subject carry their fingerprints, and the index is real ──
@@ -566,3 +796,96 @@ def test_the_two_fingerprints_are_columns_on_object_and_subject(tenant):
                 "        'fp-object-tail', '{\"embedding\": [0.0]}'::jsonb)",
                 (ORG, GRAPH))
         assert "chk_object_props_no_derived" in str(excinfo.value), excinfo.value
+
+
+# ── a parked handle must not outlive a MIGRATION pass ──────────────────────
+#
+# The pool parks the READ door's handle IN TRANSACTION **on purpose** (its reset
+# is at REUSE, not at release — `record_writer._park_connection`), so a parked
+# handle holds an `AccessShareLock` on every record table that read touched until
+# its transaction ends. The bound for that is SERVER-side
+# (`IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`, 60 s) — which does NOT bound a
+# `CREATE POLICY`: the migration's `AccessExclusiveLock` is refused by the parked
+# `AccessShareLock` immediately, and the migration's own connection is the one
+# that waits. `_ensure_record_schema` is that migration pass, and it runs in
+# `test_12894_record_cursor_live.py`'s module fixture AFTER this file has served
+# `object`/`subject` reads — so the two sessions are the SAME test process.
+#
+# MEASURED at `0f153899` (#13466): the `test-record-postgres` leg reds with
+# `psycopg2.errors.DeadlockDetected` at `test_12894_record_cursor_live.py`'s
+# setup for ALL 43 of its tests (CI run 44306051806, and reproduced twice
+# locally on a fresh `pgvector/pgvector:pg16`), while a clean `origin/main` tree
+# on the same image passes 3/3. `origin/main` never reaches this shape because
+# `object`/`subject` answered `None` before any statement ran — this PR is what
+# makes the fold read the record on those labels.
+
+
+def _parked_record_sessions(dsn: str) -> list[int]:
+    """The process's OTHER sessions left `idle in transaction` holding record locks.
+
+    Deliberately keyed on the SERVED state rather than on the pool's internals: a
+    handle is dangerous exactly when the server says it is idle inside a
+    transaction that still holds relation locks, whatever the client thinks.
+    """
+    psycopg2 = pytest.importorskip(
+        "psycopg2", reason="psycopg2-binary is the record's driver")
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT a.pid FROM pg_stat_activity AS a "
+                "  JOIN pg_locks AS l ON l.pid = a.pid "
+                "  JOIN pg_class AS c ON c.oid = l.relation "
+                "  JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+                "WHERE a.pid <> pg_backend_pid() "
+                "  AND a.datname = current_database() "
+                "  AND a.state LIKE 'idle in transaction%' "
+                "  AND l.granted AND l.locktype = 'relation' "
+                "  AND n.nspname = 'public' "
+                "ORDER BY a.pid")
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def test_the_migration_pass_releases_a_parked_handle_before_it_applies_DDL(tenant):
+    """The migration pass must not leave a parked handle holding record locks.
+
+    Non-vacuous by construction: the leading assertion refuses to pass unless the
+    read really left a parked handle, so the pin cannot silently stop witnessing
+    anything if the pool's parking behaviour changes.
+    """
+    from tests.test_9078_record_written_by_production_path import _ensure_record_schema
+
+    _seed_semantic(tenant, "Object", "o_13422_parked", embedding=_vec(7))
+    rows = _search_vec("object", hot=7, limit=10)
+    assert [row[0] for row in rows] == ["o_13422_parked"], rows
+
+    dsn = os.environ[RECORD_DB_ENV]
+    parked = _parked_record_sessions(dsn)
+    assert parked, (
+        "the dense read left NO handle parked idle in transaction, so the "
+        "assertion below cannot witness anything — the pool's parking has "
+        "changed and this pin must be re-derived, not deleted")
+
+    # ⛔ A BOUND ON THE PASS ITSELF, not a wall-clock reading: the parked
+    # handle's transaction is ended by the SERVER after 60 s
+    # (`IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`), so without a `lock_timeout` this
+    # test would merely take a minute and then pass — and a minute of blocking
+    # DDL is the same defect one `deadlock_timeout` away from the `DeadlockDetected`
+    # the leg actually reports. 10 s is far above what an uncontended `CREATE
+    # POLICY` on an empty table costs and far below the 60 s the parked
+    # transaction would otherwise hold.
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute("SET lock_timeout = '10s'")
+    _ensure_record_schema(conn)
+
+    remaining = _parked_record_sessions(dsn)
+    assert not remaining, (
+        "a record read's parked handle survived the migration pass: it still "
+        f"holds AccessShare locks on the record tables (pids {remaining}), and "
+        "the pass's `CREATE POLICY` takes AccessExclusive on those same tables "
+        "— which is the `DeadlockDetected` that reds the whole "
+        "`test_12894_record_cursor_live.py` module (#13466)")
