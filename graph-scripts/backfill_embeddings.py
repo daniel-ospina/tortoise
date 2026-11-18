@@ -46,6 +46,16 @@ node's own ``_searchText``) while the ``Source`` surface sweeps the provenance
 Source (``documentKind`` NULL, text = ``url``, #448). Runs print
 ``Document [:Source]`` so the two are never confused for one another.
 
+⭐ **The WRITE addresses the row's OWN node, not "every node with this key"
+(#12570).** The sweep predicate always carried the surface's ``kind_pred``
+discriminator; the write's ``MATCH`` did not, so one surface could rewrite the
+other's nodes — and a non-unique ``id_prop`` landed one row's vector on every
+node sharing it. ``_write_identity`` is that predicate for the WRITE, and
+``_written_row_count`` counts the write's report per SUBMITTED ROW (its batch
+index), because once each row is addressed individually an id no longer names a
+row. ⛔ Not ``id(n)``: the internal node id is REUSED after a delete, so a row
+collected before a delete can write onto a node created afterwards.
+
 Multi-tenant: --all-tenants queries the registry graph for team IDs and
 iterates org_{org_id} graphs. Per-tenant backfill, one team at a time.
 
@@ -452,6 +462,95 @@ def _row_text(label: str, branch: str, row: tuple) -> str:
     return row[1]
 
 
+def _null_safe_eq(node_expr: str, row_ref: str) -> str:
+    """``node_expr = row_ref`` that is also TRUE when BOTH sides are absent.
+
+    An identity component may legitimately be absent (``Event.object``, an
+    AgentSession's ``keywords``), and an absent value IS part of what identifies
+    a row: ``NULL = NULL`` is NULL-falsy in Cypher, so the plain form would
+    exclude such a row from its own write and report it ``skipped`` — a repair
+    that silently did nothing. ``#11395``-class caution, one layer down.
+    """
+    return (f"(({node_expr} IS NULL AND {row_ref} IS NULL) "
+            f"OR {node_expr} = {row_ref})")
+
+
+def _write_identity(label: str, branch: str) -> list[tuple[str, int]]:
+    """``(node expression, collected-row index)`` pairs naming the row's OWN node.
+
+    ⛔ THE DEFECT THIS EXISTS TO REMOVE (#12570). The write used to address a
+    node by ``{<id_prop>: row.id}`` — a key that is **not unique**. Two measured
+    shapes, both SILENT WRONG WRITES rather than wrong counts:
+
+    1. **Duplicate keys share one vector.** Two ``:Point`` nodes with
+       ``id: 'dup'`` produce two collected rows, and each row's ``MATCH`` found
+       BOTH nodes — so the last row's vector landed on both and one node ended
+       up describing the other's text (measured: 2 nodes, 1 distinct id,
+       ``count(n)`` 2).
+    2. **The write ignored ``kind_pred``.** ``Document`` and ``Source`` are two
+       SURFACES over ONE ``:Source`` label, discriminated by ``documentKind``.
+       The sweep's predicate carried the discriminator; the WRITE's ``MATCH``
+       carried only ``{url: row.id}`` — so a ``Document`` row wrote its vector
+       onto the provenance ``:Source`` sharing that ``url``.
+
+    The fix is to address the row's own node: the components below are the ones
+    the row was COLLECTED by, so a node matches a batch row only if it is the
+    node that row came from (or a node indistinguishable from it — same key, same
+    discriminator, same text — which would legitimately receive the same vector).
+
+    ⛔ **NOT ``id(n)``**, which would be the obvious unique handle: it is REUSED
+    after a delete, so a row collected before a delete can write its vector onto
+    an innocent node created afterwards — measured while scoping #12496, and the
+    reason #12570 forbids it by name.
+
+    Per surface:
+
+    * **every non-Event surface** — the surface's own text expression
+      (``_text_expr``): a PURE function of the node's stored properties, and the
+      value the row was already collected as. A bare property would not do: the
+      Document surface's text is ``coalesce(_searchText, title)`` and the Point
+      surface's is a ``CASE`` over ``embeddingText``/``content``, so the same
+      expression the sweep and the encode use is reused here.
+    * **Event** — there is no stored text expression (the text is COMPOSED in
+      Python by ``_row_text``: a ``subject``/``eventKind``/``object`` join, or
+      ``session_embedding_text`` over name/keywords/topics/summary), so the write
+      compares the collected COMPONENTS instead. That is strictly more
+      discriminating than the composed text and needs no second spelling of the
+      composition to drift from.
+
+    ⚠️ The residual this deliberately accepts: if two nodes are indistinguishable
+    by every component here (same key, same discriminator, same text) they BOTH
+    receive the same vector — and they should, because the vector describes text
+    they both carry identically.
+    """
+    if label == "Event":
+        if branch == "AgentSession":
+            # _row_text: session_embedding_text(row[1], summary(row[4]), row[2],
+            # row[3]) — name, keywords, topics, content_metadata.
+            return [("n.name", 1), ("n.keywords", 2),
+                    ("n.topics", 3), ("n.content_metadata", 4)]
+        # _row_text: " ".join(filter(None, [subject, eventKind, object])).
+        return [("n.subject", 1), ("n.eventKind", 2), ("n.object", 3)]
+    return [(_text_expr(label), 1)]
+
+
+def _write_where(label: str, branch: str) -> str:
+    """The write's ``WHERE``: the row's OWN node, discriminator included.
+
+    One place, so the id key, the surface discriminator (#12570 part 2) and the
+    row identity cannot drift apart one edit at a time — the #5126 "one
+    predicate" rule applied to the WRITE, which was the only place it was missing.
+    """
+    cfg = _require_surface(label)
+    parts = [f"n.{cfg['id_prop']} = row.id"]
+    kind_pred = cfg.get("kind_pred")
+    if kind_pred:
+        parts.append(f"({kind_pred})")
+    for i, (expr, _row_index) in enumerate(_write_identity(label, branch)):
+        parts.append(_null_safe_eq(expr, f"row.k{i}"))
+    return " AND ".join(parts)
+
+
 def _label_branches(label: str, *, force: bool) -> list[tuple[str, str, str]]:
     """Per-label (branch, WHERE, RETURN) query specs for both modes.
 
@@ -791,7 +890,11 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
             # row is declined (text-less, encoder, or the write's MATCH), it is
             # counted in ``skipped`` too.
             unreachable += sum(1 for _branch, row in chunk if row[0] is None)
-            batch: list[dict] = []
+            # #12570: the batch is grouped by BRANCH because the row's own node is
+            # addressed by branch-specific identity components (`_write_identity`).
+            # Only the Event surface has more than one branch, so this is a no-op
+            # for the other five.
+            batches: dict[str, list[dict]] = {}
             for branch, row in chunk:
                 text = _row_text(label, branch, row)
                 if not text.strip():
@@ -803,35 +906,42 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
                 if emb is None:
                     skipped += 1
                     continue
-                batch.append({"id": row[0], "emb": emb})
+                # The row's OWN identity travels WITH the vector, so the write
+                # can address the node this text came from (#12570) instead of
+                # every node sharing the key.
+                entry: dict = {"id": row[0], "emb": emb}
+                for i, (_expr, row_index) in enumerate(
+                        _write_identity(label, branch)):
+                    entry[f"k{i}"] = row[row_index]
+                batches.setdefault(branch, []).append(entry)
                 if label == "Event" and branch == "AgentSession":
                     agent_sessions += 1
                 total += 1
 
-            if batch:
-                # #12496: the count DESCRIBES the write. ``RETURN
-                # collect(...)`` is the write's OWN report of what it matched,
-                # so the marker cannot count a row the MATCH could not find
-                # (the pre-fix ``updated += len(batch)`` counted rows that
-                # were SUBMITTED, not rows that were written). Two properties
-                # are measured, not assumed:
-                #   * ``collect(DISTINCT row.id)`` DROPS a NULL id, and
-                #   * the membership test below is per SUBMITTED ROW, not per
-                #     distinct id: two ``:Point`` nodes sharing one ``id`` are
-                #     BOTH written by a single batch row (measured: 2 nodes,
-                #     1 distinct id, ``count(n)`` 2, both nodes hold the
-                #     vector), so counting distinct ids would UNDER-report a
-                #     repair that did happen.
+            for branch, batch in batches.items():
+                # #12496: the count DESCRIBES the write. ``RETURN`` is the
+                # write's OWN report of what it matched, so the marker cannot
+                # count a row the MATCH could not find (the pre-fix
+                # ``updated += len(batch)`` counted rows SUBMITTED, not written).
+                # ⛔ #12570: what it reports is now the batch ROW INDEX, not the
+                # id. It has to be — once the write addresses each row's own
+                # node, an id is no longer a row: two submitted rows may share
+                # one id, and an id-keyed report would count a row whose own
+                # MATCH found nothing as repaired because its neighbour
+                # matched. ``collect(DISTINCT row.i)`` is exact and per row.
+                for i, entry in enumerate(batch):
+                    entry["i"] = i
                 written = g.query(
                     f"UNWIND $batch AS row "
-                    f"MATCH (n:{cfg['label']} {{{cfg['id_prop']}: row.id}}) "
+                    f"MATCH (n:{cfg['label']}) "
+                    f"WHERE {_write_where(label, branch)} "
                     + clear_then_set_prefix("n", "row.emb")
                     + "SET " + set_embedding_clause("n", "row.emb")
-                    + " RETURN collect(DISTINCT row.id) AS _written",
+                    + " RETURN collect(DISTINCT row.i) AS _written",
                     params={"batch": batch},
                 ).result_set
-                written_ids = written[0][0] if written and written[0] else []
-                n_written = _written_row_count(batch, written_ids)
+                written_indices = written[0][0] if written and written[0] else []
+                n_written = _written_row_count(batch, written_indices)
                 updated += n_written
                 label_updated += n_written
                 # A submitted row the write did not match was NOT repaired, so
@@ -839,7 +949,9 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
                 # only place ``updated`` is decided: a row is batched like any
                 # other, the write declines to match it, and the difference
                 # between what was submitted and what the write reports is what
-                # lands in ``skipped``.
+                # lands in ``skipped``. A row whose node's text CHANGED between
+                # the collect and the write now lands here instead of writing a
+                # stale vector over the new text — the #12570 fix's other half.
                 skipped += len(batch) - n_written
 
             if total and total % 25 == 0:
@@ -852,28 +964,32 @@ def _backfill_graph(db, graph_name: str, labels: list[str],
             "per_label": per_label, "agent_sessions": agent_sessions}
 
 
-def _written_row_count(batch: list[dict], written_ids: list) -> int:
-    """How many SUBMITTED rows the write actually matched (#12496).
+def _written_row_count(batch: list[dict], written_row_indices: list) -> int:
+    """How many SUBMITTED rows the write actually repaired (#12496, #12570).
 
-    ``written_ids`` is the write's OWN ``RETURN collect(DISTINCT row.id)`` —
-    the ids the ``MATCH`` found a node for. Deriving the count from the write's
-    report, rather than from what was handed to it, is the whole point: the
-    pre-fix counter was ``updated += len(batch)``, a count of rows SUBMITTED.
+    ``written_row_indices`` is the write's OWN
+    ``RETURN collect(DISTINCT row.i)`` — the batch rows whose ``MATCH`` found
+    their node. Deriving the count from the write's report, rather than from what
+    was handed to it, is the whole point: the pre-#12496 counter was
+    ``updated += len(batch)``, a count of rows SUBMITTED.
 
-    Two deliberate properties:
+    ⛔ **The unit is the ROW, not the id, and that changed with #12570.** The
+    pre-fix report was ``collect(DISTINCT row.id)``, which worked only because
+    the write was non-unique (one batch row wrote every node sharing its id, so
+    "the id came back" did mean "the row was repaired"). Now that each row
+    addresses its OWN node, two submitted rows may share one id and one of them
+    can legitimately match nothing — so an id-keyed membership test would count
+    it repaired on its neighbour's evidence. The index cannot be shared that way:
+    each submitted row carries its own ``i``.
 
-    * **per SUBMITTED ROW, not per distinct id.** A batch may carry one id
-      twice (two nodes sharing a key), and the write then lands the vector on
-      every node with that id — so BOTH submitted rows did gain a vector.
-      Counting ``len(written_ids)`` would under-report them.
-    * **no ``set()``.** A hand-edited / foreign key value can be an unhashable
-      Cypher list, and building a set from it would raise ``TypeError`` in the
-      middle of an operator sweep. Plain equality costs at most ``batch_size²``
-      comparisons (250,000 at the default 500) per batch, against an embedding
-      pass that dominates the run.
+    **no ``set()``.** A hand-edited / foreign key value can be an unhashable
+    Cypher list, and building a set from it would raise ``TypeError`` in the
+    middle of an operator sweep. The indices are ints, but the batch lookup stays
+    a range check so an out-of-range index a hostile store returns is IGNORED
+    rather than crashing the run or inflating the count.
     """
-    return sum(1 for item in batch
-               if any(item["id"] == got for got in written_ids))
+    return sum(1 for i in written_row_indices
+               if isinstance(i, int) and 0 <= i < len(batch))
 
 
 def _residual_missing(g, label: str) -> tuple[int, int]:
