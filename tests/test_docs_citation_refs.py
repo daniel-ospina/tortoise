@@ -530,8 +530,12 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     next reader is sent to `--refresh`/`main` and not asked to "fix" `main`'s census
     inside a docs PR.
 
-    NON-VACUITY: on the pre-fix document all three legs red — the first on the
-    literal, the other two on their absence.
+    NON-VACUITY, MEASURED: on the pre-fix document **leg (a) reds**
+    (`AssertionError: 05-verify.md asserts '--check` exits 0'`). Legs (b) and (c)
+    already HELD there — the command string and the inherited-red attribution were
+    both present while the false green sat beside them — so they are REGRESSION
+    legs: they keep the reader pointed at the verb and at the inherited-red
+    attribution after the deletion, and an edit that drops either reds here.
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
