@@ -112,6 +112,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6923-6939`", _PI, 6923, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6933`", _PI, 6933, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6934`", _PI, 6934, '("Subject", ["name"])'),
+    # ⛔ The Object half of the same declaration had NO row, and that absence is ISSUE 1 of the
+    # `#13489` review: §2.5's header cited `:6869`, which `:6933`/`:6934`/`:6939` had left 64/65/70
+    # lines behind — and `:6938` is the `("Object", ["name"])` row that had no pin at all, so the
+    # one sibling a reader would actually chase was the uncovered one. An absent pin is not
+    # coverage; the header now names it beside its three siblings and this row resolves it.
+    (_AUDIT, "`:6938`", _PI, 6938, '("Object", ["name"])'),
     (_AUDIT, "`:6939`", _PI, 6939, '("Source", ["_searchText"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
@@ -211,6 +217,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6923-6939`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6933`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6934`'): 1,
+    # 2: `:6938` is BOTH the §1 label-scan table row's own key (already in this document) and the
+    # §2.5 header enumeration's disclosure of THIS tree's Object declaration, added by `#13489` beside
+    # its three siblings. Two sites, one spelling — a single pin resolves the line, and the count is
+    # what stops a third occurrence appearing unannounced.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
@@ -585,67 +596,17 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     )
 
 
-#: The `main`-head figures the header enumerates beside this tree's — one number per moved site, each
-#: re-opened at `ae54df166d`. They are NOT in `_PINS`: a pin resolves against the WORKING TREE, and a
-#: `main`-head address has no working-tree line to resolve to, so `declared == pinned` would force them
-#: out of `_TOKEN_OCCURRENCES` too — which is exactly what happened when this revision re-pointed the
-#: document and took the counts with the old spellings. Measured on `origin/main`: the same figures DID
-#: carry counts (`':6854-6870'`: 1, `'sdk.py:36985'`: 1), so losing them was a REGRESSION in coverage,
-#: not a pre-existing gap. Counting the spelling here restores it without touching the pin contract.
-#:
-#: ⛔ This is a count guard, not a head guard: it catches a re-point that changes how many sites carry
-#: the figure (the `:4549`→`:4552` double-shift, and every `⚠️ CORRECTED` edit that moves one), and
-#: nothing more. Proving each figure OPENS on its content at `ae54df166d` needs a head-selecting arm —
-#: `git show <head>:<path> | sed -n '<N>p'` — which is #13508, deliberately not solved by a test that
-#: would need full history in a shallow CI checkout.
-_MAIN_HEAD_FIGURES: dict[str, int] = {
-    '`:6854-6870`': 1,
-    '`:6864`': 1,
-    '`:6865`': 1,
-    '`:6870`': 1,
-    '`:36985`': 2,
-    '`:37008`': 2,
-    '`:23982`': 1,
-    '`:21668`': 1,
-    '`:21791`': 1,
-    '`:22919`': 2,
-    '`:22731`': 2,
-    '`:33583`': 1,
-}
-
-
-def test_the_main_head_figures_the_header_names_are_still_counted() -> None:
-    """A `main`-head figure cannot be pinned to the tree, so count it — that is what caught it before.
-
-    Every one of these twelve is an address AT `ae54df166d`, written beside this tree's figure for the
-    same site. Re-pointing one while the `main` label stays is this document's core defect (a
-    `⚠️ CORRECTED` marker records that the text changed, never that the change was right), and it moves
-    a count: the token stops appearing where it was, or starts appearing where it was not.
-
-    ⛔ What this does NOT prove: that the figure is the RIGHT line at `ae54df166d`. It proves the figure
-    written is the figure this file last measured. A wrong-but-stable number passes; #13508 carries the
-    head-selecting arm that would actually open it.
-    """
-    # ⛔ THE POPULATION HAS AN ANTI-SHRINK ARM, and it is the file's own precedent applied to a new
-    # dict (`assert len(_PINS) == 47` above, `declared == pinned` in the sibling pin test). Without
-    # it the guard above is defeatable exactly the way an absent pin is not coverage: re-point a
-    # `main`-head figure in the document AND delete its row here, and the loop has nothing to check
-    # — measured on a copy of this tree at `25b0fd5f` (`:6854-6870` -> `:6855-6871` in the audit doc
-    # plus the row deleted) -> `1 passed, 10 deselected`, GREEN over a false correction. With the
-    # row present the same re-point reds. The count is the twelve addresses the header names beside
-    # this tree's figures, and a thirteenth is a re-derivation to make deliberately, not silently.
-    assert len(_MAIN_HEAD_FIGURES) == 12, (
-        f"_MAIN_HEAD_FIGURES carries {len(_MAIN_HEAD_FIGURES)} rows, not 12 — this dict is the only "
-        "reader of the `main`-head figures the audit header names, so a row deleted to make the "
-        "count guard pass is the coverage loss the loop above cannot see. Restore the row (the "
-        "figures are listed beside this tree's in the header) or update this count with the "
-        "re-derivation that justifies it")
-    text = (REPO / _AUDIT).read_text(encoding="utf-8")
-    for token, expected in _MAIN_HEAD_FIGURES.items():
-        actual = text.count(token)
-        assert actual == expected, (
-            f"{_AUDIT} carries `{token}` {actual}x, not {expected}x. These are the `main`-head figures "
-            "(`ae54df166d`); a changed count means one was re-pointed, which is the false correction "
-            "this document is built around. Re-open the site by CONTENT — "
-            "`git show ae54df166d:<path> | sed -n '<N>p'` — and fix the figure, not the count."
-        )
+#: ⛔ THE `main`-HEAD FIGURE COUNT GUARD IS GONE, and its removal is recorded rather than silent.
+#: This revision used to carry `_MAIN_HEAD_FIGURES` — twelve addresses AT `ae54df166d` written BESIDE
+#: this tree's figure for the same site, with a `len(...) == 12` anti-shrink arm. That guard existed
+#: because the branch could not resolve `main`'s own re-derivation, so the header kept a dual-head
+#: narrative. `#13486` (`0186df59`) has since landed that re-derivation on `main` at `main`'s
+#: numbering, and the merged header now states ONE set of figures — every one of them this tree's,
+#: each resolved by a `_PINS` row above. With no `main`-head figure left in the document the dict had
+#: an EMPTY population, so keeping the arm would have meant re-manufacturing the narrative it guarded.
+#: Deleting it therefore removes no coverage that has a subject: the figures it counted (`:6854-6870`,
+#: `:36985`, `:37008`, `:23982`, `:21668`, `:21791`, `:22919`, `:22731`, `:33583`) no longer appear in
+#: the header, and the addresses that REPLACED them (`:6923-6939`, `:37046`/`:37069`, `:24043`,
+#: `:21729`/`:21852`) are pinned to their content by `_PINS`, which is the stronger arm — a pin
+#: resolves the line, a count only counts a spelling. #13508 still owns the head-selecting arm for a
+#: figure that has no working-tree line.
