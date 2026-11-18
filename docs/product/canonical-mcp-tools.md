@@ -235,15 +235,16 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 > advertised) took the live surface 55 → 48**, then **#11609 lane P1 built the POINT and DIARY
 > arms on `create_entity` and took it 48 → 46** by retiring `tortoise_create_point` /
 > `tortoise_diary_write` into them, and then **#11609 P2's confidence arms took it 46 → 44**,
-> and then **#11609 P6's `rest_spec` retirements took it 44 → 42 —
-> which is the live advertised count at this head** (`uv run python tools/surface_manifest.py
-> check` is the live count). Each of those last two moves retires doors by GROWING a container
+> and then **#11609 P6's `rest_spec` retirements took it 44 → 42**, and then **P6's DELETE pair
+> took it 42 → 40 — which is the live advertised count at this head** (`uv run python
+> tools/surface_manifest.py check` is the live count). Each of those last two moves retires doors by GROWING a container
 > rather than by landing one: `tortoise_check_confidence` gained a `recompute=True` arm
 > (absorbing `tortoise_compute_confidence`) and a `recall=True` arm (absorbing
 > `tortoise_recall`), so the two doors' whole argument sets are parameters on a tool that was
 > already advertised and no container row arrives with them. P6 is the other shape: its two
 > doors were held by a SURFACE claim (*the registry row IS the REST route*) that lane P4
-> measured FALSE, so they retire into arms the containers already had.
+> measured FALSE, so they retire into arms the containers already had; its DELETE pair retire
+> into the entry row 18 KEEPS, per the #9660 ruling recorded there.
 > **The five REMOVED tools'** capabilities survive as hand-written REST
 > routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
 > `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
@@ -418,29 +419,43 @@ retired-forward**), so the SERVED population does not move — **108 rows (42 li
 shims)** — and no parameter, schema or SDK method changes. status: unchanged (the surface
 remains the approved one) · principal: daniel-ospina · date: 2026-11-18.
 
+**Amended 2026-11-18** (execution record, #11609 P6 second unit — the DELETE pair):
+`tortoise_delete_point` and `tortoise_delete_entity` retire FORWARD into `tortoise_delete`.
+Their `NO_CONTAINER_YET` reason was *"`delete_knowledge` not live"*, and this document's own
+row 18 states how that row is EXECUTED (#9660, owner ruling 2026-10-25): *"by keeping the
+single entry and widening what it deletes — the absorbed names stay retired-forward entries,
+not new siblings"*. `TortoiseSDK.delete` dispatches by LABEL (Point → `delete_point`, every
+other entity → `delete_entity`), so the kept entry carries both doors' whole capability and
+adds the preview-then-confirm protocol neither had. **No tool is added** (the kept entry is
+already advertised) and no route moves: **42 → 40 advertised**, **66 → 68 retired-forward**,
+served unchanged at **108**. ⛔ The pointer names `dry_run`/`confirmation` deliberately: the
+kept entry's DEFAULT is a preview, so a pointer at a bare `tortoise_delete(id)` would leave a
+migrating caller believing it had deleted something. status: unchanged (the surface remains
+the approved one) · principal: daniel-ospina · date: 2026-11-18.
+
 **Composed at this head — ALL THREE waves.** The records above describe waves that are now on the
 SAME tree, so they COMPOSE rather than replace one another, and no single wave's number is the
 answer (each was measured on its own base). They retire DISJOINT door sets — the READ/QUERY
 wave's nine, the WRITE/MUTATE wave's fourteen and the SOURCES/MINE/SESSION wave's seven share no
 name — so the composed surface is:
 
-- the surface is now **42 advertised tools** with **66** retired-forward entries: the three
+- the surface is now **40 advertised tools** with **68** retired-forward entries: the three
   container waves, the door-retirement wave, the POINT/DIARY wave, the confidence-arms wave and
   the `rest_spec` pair compose on ONE tree — each wave was measured on its own base, so
   (68 − 9 + 5 − 14 + 6 − 7 + 6 = 55, then the door wave's −7 with no container row arriving =
   48, then the POINT/DIARY wave's −2 with no container row arriving = 46, then the confidence-arms
   wave's −2 with no container row arriving = 44, then the P6 wave's −2 with no container row arriving =
-  42, and
-  23 + 9 + 14 + 7 + 7 + 2 + 2 + 2 = 66) over a SERVED population of
-  **108** rows (42 live + 66 shims) — the registry total `tools/bridge_table.py --check` reports
+  42, then the P6-delete wave's −2 with no container row arriving = 40, and
+  23 + 9 + 14 + 7 + 7 + 2 + 2 + 2 + 2 = 68) over a SERVED population of
+  **108** rows (40 live + 68 shims) — the registry total `tools/bridge_table.py --check` reports
   as `current (108 registry tools)` and `tools/mcp_rename_table.py` prints as
-  `served tools: 108` — and `surface_manifest.py check` re-derives the 42/66 split.
+  `served tools: 108` — and `surface_manifest.py check` re-derives the 40/68 split.
   ⛔ The SERVED total is unchanged by those last three waves, which is the property that makes them
-  consolidations: six doors stopped being advertised and started being shims, and the capability
-  each named moved into an arm of a live tool (48 + 60 = 46 + 62 = 44 + 64 = 42 + 66 = 108).
+  consolidations: eight doors stopped being advertised and started being shims, and the capability
+  each named moved into an arm of a live tool (48 + 60 = 46 + 62 = 44 + 64 = 42 + 66 = 40 + 68 = 108).
   ⛔ NOT `config/surface-order.yml`: that file is the ordering / keyword table (its header says
   the lint "must not be satisfiable by editing the rows it checks"), and its `baseline_counts`
-  sum to the **advertised 42**, not the served 108, so it cannot total a served population;
+  sum to the **advertised 40**, not the served 108, so it cannot total a served population;
 - **105 public SDK methods**, composed the same way, on a surface this wave does not touch:
   125 → 120 (#12901 wave 1) → 112 (#11609's READ/QUERY family A, #12951: six containers in,
   fourteen read methods re-privatised) → 111 (lane B: four retired, three delivered) → 110
@@ -457,7 +472,7 @@ Three consequences for readers of the paragraph below, which is left as written 
 the 2026-10-27 ruling, not the current state:
 
 1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
-   **66** now (the composition this document works out below), and it is still 66 of 66 verified —
+   **68** now (the composition this document works out below), and it is still 68 of 68 verified —
    every pointer names a call that resolves.
 2. `tortoise_health` no longer redirects to `tortoise_overview`: that name is itself retired, and
    `RETIRED_USE_INSTEAD` resolves ONE hop (aliases are not transitive — the same limit GitHub's own

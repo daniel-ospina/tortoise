@@ -16,7 +16,7 @@ aboutObjects: [tortoise-mcp, tortoise-sdk]
 ## The vision, in one paragraph
 
 **A developer should be able to read our entire surface in a sitting and know what to call.**
-Today they cannot: the MCP server serves **108 tools** (42 of them advertised, 66 retired shims — the `graph_overview`
+Today they cannot: the MCP server serves **108 tools** (40 of them advertised, 68 retired shims — the `graph_overview`
 container retired five names into one, #4282 Phase 3.2 deleted five `run_onboarding` tools, the
 batch-1 archives of #11609 removed four no-destination tools, #11609 Phase 2's READ/QUERY
 containers retired nine more, its WRITE/MUTATE containers retired fourteen more into six, its
@@ -24,7 +24,7 @@ SOURCES/MINE/SESSION containers retired seven more into six, #11609's door-retir
 retired seven more into containers that were already advertised, and #11609 lane P1 built the
 POINT and DIARY arms on `create_entity` and retired `tortoise_create_point` /
 `tortoise_diary_write` into them, and #11609 P6 retired the two `rest_spec` doors into arms
-their containers already had), and
+their containers already had and its DELETE pair into the kept `tortoise_delete` entry), and
 the SDK **105 methods** (26 surplus names deleted by
 `#4282`, five more retired by `#12901` wave 1, fourteen READ/QUERY re-privatised plus four
 WRITE/MUTATE and seven SOURCES/MINE/SESSION doors retired into containers by `#11609`, sixteen
@@ -76,7 +76,7 @@ leaves the response unchanged is **not** a gate failure, but must be recorded.
 
 ## The reconciliation — MCP 91 → 27
 
-> Every figure below is the MERGED surface (**42 live + 66 retired shims = 108 served**), not either
+> Every figure below is the MERGED surface (**40 live + 68 retired shims = 108 served**), not either
 > wave's own measurement: the vision started at **99**, the five `run_onboarding` deletions removed
 > five (#4282 Phase 3.2, 81 → 76 advertised), the `graph_overview` container added one served name
 > while retiring five (#4282, 76 → 72 advertised), #11609 batch 1 archived four no-destination
@@ -91,15 +91,17 @@ leaves the response unchanged is **not** a gate failure, but must be recorded.
 > 48 − 2 = **46** live and 62 removed-forward; #11609 P2's confidence arms retired two more
 > doors into `tortoise_check_confidence`, which was already advertised and grew a `recompute=` and
 > a `recall=` PARAMETER instead of a row — again no new row, so 46 − 2 = **44** live and 64
-> removed-forward; and #11609 P6 retired the two `rest_spec` doors into
+> removed-forward; #11609 P6 retired the two `rest_spec` doors into
 > `search_knowledge(mode="issue_insight")` / `check_confidence(session=True)`, both arms on
 > containers that were already advertised — again no new row, so 44 − 2 = **42** live and 66
-> removed-forward. ⛔ A retirement never leaves the served
+> removed-forward; and its DELETE pair retired `delete_point` / `delete_entity` into
+> `tortoise_delete` (the entry the #9660 ruling KEEPS, whose `TortoiseSDK.delete` dispatches by
+> label) — again no new row, so 42 − 2 = **40** live and 68 removed-forward. ⛔ A retirement never leaves the served
 > population — the door count falls while the shim count rises by the same number — so only the
 > CONTAINER rows move it: 91 (68 + 23) → 97 (60 + 37) → 103 (59 + 44) → 108 (55 + 53) →
-> **108** (48 + 60) → **108** (46 + 62) → **108** (44 + 64) → **108** (42 + 66).
+> **108** (48 + 60) → **108** (46 + 62) → **108** (44 + 64) → **108** (42 + 66) → **108** (40 + 68).
 > So the served arithmetic is 99 − 5 + 1 − 4 + 6 + 6 + 5 = **108**, and the live arithmetic is
-> 68 − 14 + 6 − 7 + 6 − 9 + 5 − 7 − 2 − 2 − 2 = **42**. The target remains **27**.
+> 68 − 14 + 6 − 7 + 6 − 9 + 5 − 7 − 2 − 2 − 2 − 2 = **40**. The target remains **27**.
 
 **GENERATED — see `docs/product/bridge-table.md`**, produced by
 `uv run python tools/bridge_table.py`.
@@ -131,8 +133,8 @@ the map and the registry disagree — a mismatch is a finding, not something to 
 > rather than a silent drift. The note that used to sit here — that the split had **no generator**
 > and so could not be re-derived without re-bucketing by hand — is false: the generator emits
 > exactly this split.
-> What the counts are OVER: the **served** registry, i.e. the **42** live tools plus the **66**
-> retired-forward names that still answer through the #3883 shim (42 + 66 = the 108 above). Those
+> What the counts are OVER: the **served** registry, i.e. the **40** live tools plus the **68**
+> retired-forward names that still answer through the #3883 shim (40 + 68 = the 108 above). Those
 > two halves are what #11609's door-retirement waves and its confidence-arms wave moved (55 live /
 > 53 retired shims before any of them), so read them from
 > this tree, not from an earlier wave's arithmetic. `Retired: 0` is the no-destination sense
@@ -155,12 +157,12 @@ to 67 live + 30 retired shims (97 served at that wave): the SOURCES/MINE/SESSION
 approved names in and retired SEVEN advertised ones into them (#3883 keeps every retired
 name answering, which is why the served count RISES while the advertised count falls).
 Composed at this head with lane B (#4282's WRITE/MUTATE wave, which landed on `main` first), the
-same population reads **42 live + 66 retired shims = 108 served** — measured off the merged
+same population reads **40 live + 68 retired shims = 108 served** — measured off the merged
 registry, not added by hand (`tools/bridge_table.py --check` reports 108 registry tools). The
 door-retirement waves move the SPLIT only: seven advertised doors left the surface in #13052's
 wave, two more in #11609 lane P1 and two more again in #11609 P2's confidence-arms wave, and
 each kept answering on its retired name, so the served population is unchanged at 108 while the
-split goes 48/60 → 46/62 → 44/64 → 42/66.
+split goes 48/60 → 46/62 → 44/64 → 42/66 → 40/68.
 
 The **Retired** row fell **9 → 4** in #4282 **Phase 3.2** (2026-11-04): five of the nine were
 DELETED from the served registry rather than retired into nothing, because the owner's
@@ -178,7 +180,7 @@ landed — no new row — then #11609 lane P1 built the POINT and DIARY arms on 
 retired `tortoise_create_point` / `tortoise_diary_write` into them, and #11609 P2 retired
 `tortoise_compute_confidence` / `tortoise_recall` into `check_confidence`'s new arms, so all
 three waves move the split and never the population:
-**42 live + 66 retired shims = 108 served** — the figures the table above records, the
+**40 live + 68 retired shims = 108 served** — the figures the table above records, the
 population the MCP server serves today, and the numbers `config/surface-manifest.yml` derives. Every
 capability those five carried survives
 on REST — each route is hand-written in `tortoise/hosted_api.py` — and the two tenant-visible

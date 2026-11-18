@@ -367,9 +367,13 @@ def _mounted_router_names(source: str) -> set[str]:
 
 #: All nine `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
 NO_CONTAINER_DESTINATIONS = {
+    # ⛔ `tortoise_delete_point` / `tortoise_delete_entity` left this map in #11609 lane P6:
+    # the owner's #9660 ruling executes the `delete_knowledge` row by KEEPING
+    # `tortoise_delete` and widening it, so their destination became a live door (the kept
+    # entry) and both retired FORWARD into it. `tortoise_delete` itself stays — it IS the
+    # kept entry — and it is the one member here whose "not a door" claim is about a NAME
+    # (`delete_knowledge`) rather than about the capability.
     "tortoise_delete": "delete_knowledge",
-    "tortoise_delete_point": "delete_knowledge",
-    "tortoise_delete_entity": "delete_knowledge",
     "tortoise_create_edge": "link_entities",
     "tortoise_create_operator": "link_entities",
     "tortoise_events_poll": "poll_events",
@@ -1246,8 +1250,11 @@ def test_the_recorded_destination_is_still_not_an_mcp_door(door, destination):
     """A retirement pointer must name a LIVE tool (`TestEveryPointerResolvesInOneHop`).
 
     So a destination that exists as an SDK method (`delete_knowledge`, `link_entities`,
-    `poll_events`, `list_memory_graphs`) does NOT make the nine retirable — and a
-    `tenancy:`/`sdk:` prefix is a router/SDK path, not a door at all.
+    `poll_events`, `list_memory_graphs`) does NOT make these retirable — and a
+    `tenancy:`/`sdk:` prefix is a router/SDK path, not a door at all. (#11609 lane P6
+    retired two of the original nine — `delete_point` / `delete_entity` — because the
+    #9660 ruling executes the `delete_knowledge` row by KEEPING `tortoise_delete`, which
+    makes that destination a live door under its own name.)
     """
     from tools.bridge_table import DESTINATION
 

@@ -1008,14 +1008,14 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 42
+  tools: 40
   sdk_public_methods: 105
-  retired: 66
+  retired: 68
   keyword_distribution:
     fetch: 9
     create: 8
     update: 5
-    delete: 4
+    delete: 2
     list: 4
     find: 2
     trace: 1
@@ -1085,6 +1085,16 @@ retired:
 - name: tortoise_create_subject
   use_instead: 'tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})'
   sdk_method: create_subject
+  http_policy: true
+  approval: null
+- name: tortoise_delete_entity
+  use_instead: tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)
+  sdk_method: delete_entity
+  http_policy: true
+  approval: null
+- name: tortoise_delete_point
+  use_instead: tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)
+  sdk_method: delete_point_wrapped
   http_policy: true
   approval: null
 - name: tortoise_diary_write
@@ -1582,41 +1592,12 @@ rows:
   recommendation: keep
   basis: observed
   reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: memory
-  proposed: true
+  recommended_family: null
+  proposed: false
   exemption: false
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_delete
-  cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
-- name: tortoise_delete_point
-  served_from: tortoise/mcp_server.py:8449e50d5d6790b4
-  served_attributes: e613762460869509
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: delete_point_wrapped
-  group_source: mapped
-  keyword: delete
-  keyword_rank: 4
-  cluster: delete
-  canonical: false
-  job: Delete a Point. DESTRUCTIVE — requires human confirmation. Cannot be undone. dry_run=True previews the blast
-    radius (the point and every edge that would be removed) and changes nothing.
-  dependency: declares TortoiseSDK.delete_point_wrapped (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_delete` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: memory
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_delete
-  cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_supersede_knowledge
   served_from: tortoise/mcp_server.py:b1b735e7c515c9cd
   served_attributes: 3b483f3ddfc755b7
@@ -1892,34 +1873,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_delete_entity
-  served_from: tortoise/mcp_server.py:72d367c45cf4b38a
-  served_attributes: e353b3f25fb68584
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: delete_entity
-  group_source: mapped
-  keyword: delete
-  keyword_rank: 4
-  cluster: delete
-  canonical: false
-  job: Delete any entity by ID. DESTRUCTIVE — cannot be undone. dry_run=True previews the node(s) and every edge
-    that would be removed and changes nothing.
-  dependency: declares TortoiseSDK.delete_entity (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_delete` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: memory
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_delete
-  cluster_note: group `delete` is split across ['graph', 'memory']; proposed family `memory` — waits for your approval
 - name: tortoise_adjust_relationship
   served_from: tortoise/mcp_server.py:64e520fa73e4c15e
   served_attributes: 9f46e051e33934f2
@@ -3207,11 +3160,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_entity.
-  dependency: 'reached by 1 registered tool(s): tortoise_delete_entity'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_delete_entity (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false
@@ -3299,11 +3252,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_point_wrapped.
-  dependency: 'reached by 1 registered tool(s): tortoise_delete_point'
+  dependency: 'reached by 0 registered tool(s) and 1 retired name(s): tortoise_delete_point (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 0 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false

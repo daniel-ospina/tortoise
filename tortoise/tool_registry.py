@@ -2704,6 +2704,27 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
         'tortoise_search_knowledge(title=..., body=..., repo=..., '
         'mode="issue_insight")',
     "tortoise_session_context": 'tortoise_check_confidence(session=True)',
+    # ── #11609 lane P6 — the two DELETE doors retire into the KEPT single entry ──
+    # These two sat in `NO_CONTAINER_YET` as "`delete_knowledge` not live". That reason is
+    # FALSE on a ruling the owner already recorded: the canonical row 18 is **executed by
+    # keeping the single `tortoise_delete` entry and widening what it deletes** (#9660,
+    # owner ruling 2026-10-25 — *"the absorbed names stay retired-forward entries, not new
+    # siblings"*). `TortoiseSDK.delete` dispatches by LABEL (Point -> `delete_point`, every
+    # other entity -> `delete_entity`), so the kept entry carries both doors' whole
+    # capability, and it adds the preview-then-confirm protocol (#9660) neither door had.
+    #
+    # ⛔ The pointer names `dry_run`/`confirmation` because the container's DEFAULT is a
+    # PREVIEW, not a smaller delete: a migrating caller pointed at `tortoise_delete(id)`
+    # alone would file a token-less call, read the receipt, and believe it had deleted
+    # something. The retired name keeps serving its OLD handler through the #3883 shim, so
+    # an existing caller's immediate-delete behaviour is unchanged — only a caller who
+    # FOLLOWS the pointer meets the confirmation step, which is the point of it.
+    "tortoise_delete_point":
+        'tortoise_delete(id, dry_run=True) for the preview, then '
+        'tortoise_delete(id, confirmation=<token>)',
+    "tortoise_delete_entity":
+        'tortoise_delete(id, dry_run=True) for the preview, then '
+        'tortoise_delete(id, confirmation=<token>)',
     # ── #11609 Phase 2 — the two arms `tortoise_check_confidence` now carries ──
     # These two doors were held live by a reason with an ABSENCE behind it: the
     # container "does not recompute" and "has no recall arm". Both arms LAND here,

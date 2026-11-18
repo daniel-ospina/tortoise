@@ -827,9 +827,12 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # gain a `use_instead` and no container row arrives: 62 + 2 = 64.
     # 64 -> 66: #11609 P6's `rest_spec` pair (`issue_insight`, `session_context`) retires into
     # arms `search_knowledge` / `check_confidence` already carried — again two more rows gain a
-    # `use_instead` and no container row arrives: 64 + 2 = 66, the count `counts.retired` and
-    # Part B's own header state at THIS head.
-    assert len(retired) == 66, f"expected 66 retired rows, got {len(retired)}"
+    # `use_instead` and no container row arrives: 64 + 2 = 66.
+    # 66 -> 68: #11609 P6's DELETE pair (`delete_point`, `delete_entity`) retires into
+    # `tortoise_delete` — the entry the owner's #9660 ruling KEEPS — so again two more rows
+    # gain a `use_instead` and no container row arrives: 66 + 2 = 68, the count
+    # `counts.retired` and Part B's own header state at THIS head.
+    assert len(retired) == 68, f"expected 68 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "

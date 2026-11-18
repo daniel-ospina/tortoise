@@ -164,11 +164,12 @@ class TestRegistryEquivalence:
             48 −  2 + 0 = 46   #11609 lane P1 (the two POINT-shaped doors)
             46 −  2 + 0 = 44   #11609 lane P2 (confidence arms)
             44 −  2 + 0 = 42   #11609 lane P6 (the two `rest_spec` doors)
+            42 −  2 + 0 = 40   #11609 lane P6 (the two DELETE doors)
 
         Retired composes the same way, and it is a UNION — no wave drops another's
         rows: 23 + 7 + 14 = 44 at main, + 9 = **53** after #12951, + 7 = **60** after
         #13052, + 2 = **62** after #11609 lane P1, + 2 = **64** after lane P2, + 2 =
-        **66** after lane P6. Neither door-retirement wave adds a container row: they
+        **66** after lane P6's `rest_spec` pair, + 2 = **68** after its DELETE pair. Neither door-retirement wave adds a container row: they
         remove doors whose containers were already advertised by the three Phase 2
         waves, so each live delta is a bare `− n` with no `+ n` term.
 
@@ -185,20 +186,24 @@ class TestRegistryEquivalence:
         `recall=True` arms — again on a tool that was already live, so again exactly −2
         live and +2 retired-forward, with no container row in either term.
 
-        #11609 lane P6 (THIS PR): `tortoise_issue_insight` and `tortoise_session_context`
+        #11609 lane P6 (THIS PR) does this in TWO units. First `tortoise_issue_insight` and
+        # `tortoise_session_context`
         retire FORWARD into `search_knowledge`'s `mode="issue_insight"` arm and
         `check_confidence`'s `session=True` arm. Their recorded reason was a SURFACE one
         (`rest_spec` — *retiring the registry entry deletes its REST route with it*), and
         lane P4 measured it FALSE: no product module derives a route from a registry row,
         and both routes are hand-written decorators that reach the SDK. So again exactly
-        −2 live, +2 retired-forward, no container row.
+        −2 live, +2 retired-forward, no container row. Then the DELETE pair —
+        `tortoise_delete_point` / `tortoise_delete_entity` — retire into the entry the owner's
+        #9660 ruling KEEPS (`tortoise_delete`, whose `TortoiseSDK.delete` dispatches by label),
+        so again −2 live and +2 retired-forward.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
         # lane C composes on top of lane B (59), then the READ/QUERY wave (55), then the
         # door-retirement wave (48), then lane P1 (46), then lane P2's confidence arms
-        # (44), then lane P6's `rest_spec` pair: 44 - 2 + 0 = 42.
-        assert len(TOOL_REGISTRY) == 42, f"Expected 42, got {len(TOOL_REGISTRY)}"
+        # (44), then lane P6's `rest_spec` pair (42), then its DELETE pair: 42 - 2 + 0 = 40.
+        assert len(TOOL_REGISTRY) == 40, f"Expected 40, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated, the 5 #4282 container members, the 14 #11609 lane B
@@ -206,7 +211,7 @@ class TestRegistryEquivalence:
         # members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
 
-        assert len(retired) == 66, f"Expected 66 retired, got {len(retired)}"
+        assert len(retired) == 68, f"Expected 68 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -2479,9 +2484,14 @@ class TestToolIdentity:
         # `tortoise_diary_write` (both `risk="write"`, absorbed by `create_entity`'s
         # point-shaped arms). Both keep their #3883 shims, so the SERVED census does not
         # move at all: 54 (22 live + 32 retired writer shims) while LIVE falls 24 -> 22.
+        # #11609 lane P6 then retired FOUR more writers in two units: the `rest_spec` pair
+        # (`issue_insight`, `session_context`) are READS and move no writer count, but the
+        # DELETE pair (`tortoise_delete_point` / `tortoise_delete_entity`, both
+        # `risk="destructive"`) does — both keep their #3883 shims, so SERVED stays 54
+        # (20 live + 34 retired writer shims) while LIVE falls 22 -> 20.
         assert len(WRITE_TOOL_NAMES) == 54, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 22, f"live write census moved: {len(live)}"
+        assert len(live) == 20, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.

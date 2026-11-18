@@ -5,7 +5,7 @@
 Every `file:line` in this document is **read from the source at build time**, so it cannot
 drift from the code it cites. The destination map is data in the generator; every count
 below is arithmetic computed against the **served registry** — the live tools plus the
-66 retired names, which still answer through the #3883 warning shim. The generator **fails the build**
+68 retired names, which still answer through the #3883 warning shim. The generator **fails the build**
 if the map and the registry disagree — a mismatch is a finding, not something to reconcile.
 
 **Registry: 108 tools → 105 absorbed into the 27 MCP targets · 1 absorbed into a builder-only SDK method (not on the MCP) · 2 tenancy (SDK/REST only) · 0 retired.**
@@ -52,7 +52,7 @@ something derivable from today's code.
 
 **22 merged targets. 21 of them have a method behind them today.** The other **1** are Phase 2 work, not renames.
 
-## Part B — every served name and its single destination (42 live + 66 retired)
+## Part B — every served name and its single destination (40 live + 68 retired)
 
 **Read-only** is the entry's MCP `readOnlyHint` — what a client uses to auto-approve,
 NOT what a key needs. A `no` here does not mean `graphs:write`: since #4122 the tier is
@@ -172,11 +172,11 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 107 | `tortoise_validate_domain` | `tool_registry.py:348` | **none declared** | yes | `graph_overview` |
 | 108 | `tortoise_write_question` | `tool_registry.py:1837` | `write_question` | no | `write_question` |
 
-**66** of these are RETIRED names (#3883): off the advertised surface, but they
+**68** of these are RETIRED names (#3883): off the advertised surface, but they
 still answer through the warning shim, and each one's `Destination` is the destination of
-the replacement that warning names. The other **42** are live.
+the replacement that warning names. The other **40** are live.
 
-Listed so a reader can tell them apart from the live rows that share their destination: `tortoise_annotate_operator`, `tortoise_assess_source`, `tortoise_audit`, `tortoise_belief_timeline`, `tortoise_checkpoint`, `tortoise_compute_confidence`, `tortoise_create_document`, `tortoise_create_event`, `tortoise_create_object`, `tortoise_create_point`, `tortoise_create_source`, `tortoise_create_subject`, `tortoise_diary_write`, `tortoise_dream`, `tortoise_dream_health`, `tortoise_entity_profile`, `tortoise_file_decision`, `tortoise_file_human_approval`, `tortoise_find_cross_lens_candidates`, `tortoise_get`, `tortoise_get_confidence`, `tortoise_get_events`, `tortoise_get_governance`, `tortoise_get_operator`, `tortoise_get_point`, `tortoise_get_session`, `tortoise_get_source_reliability`, `tortoise_health`, `tortoise_index_files`, `tortoise_index_sessions`, `tortoise_ingest_corpus`, `tortoise_invalidate`, `tortoise_issue_insight`, `tortoise_list_batch`, `tortoise_list_dedup_candidates`, `tortoise_list_pointkinds`, `tortoise_list_sources`, `tortoise_list_tags`, `tortoise_list_topics`, `tortoise_mine_conversations`, `tortoise_mitigate_operator`, `tortoise_onboarding_github_index`, `tortoise_onboarding_session_recording`, `tortoise_operator_action`, `tortoise_overview`, `tortoise_paginated_query`, `tortoise_promote_point`, `tortoise_provenance`, `tortoise_query_points_by_tag`, `tortoise_recall`, `tortoise_retract_point`, `tortoise_review_connections`, `tortoise_session_capture`, `tortoise_session_context`, `tortoise_set_point_baseline`, `tortoise_set_source_tier`, `tortoise_stale`, `tortoise_status`, `tortoise_summarize_structure`, `tortoise_supersede`, `tortoise_taxonomy`, `tortoise_traverse`, `tortoise_update`, `tortoise_update_entity`, `tortoise_update_point`, `tortoise_validate_domain`
+Listed so a reader can tell them apart from the live rows that share their destination: `tortoise_annotate_operator`, `tortoise_assess_source`, `tortoise_audit`, `tortoise_belief_timeline`, `tortoise_checkpoint`, `tortoise_compute_confidence`, `tortoise_create_document`, `tortoise_create_event`, `tortoise_create_object`, `tortoise_create_point`, `tortoise_create_source`, `tortoise_create_subject`, `tortoise_delete_entity`, `tortoise_delete_point`, `tortoise_diary_write`, `tortoise_dream`, `tortoise_dream_health`, `tortoise_entity_profile`, `tortoise_file_decision`, `tortoise_file_human_approval`, `tortoise_find_cross_lens_candidates`, `tortoise_get`, `tortoise_get_confidence`, `tortoise_get_events`, `tortoise_get_governance`, `tortoise_get_operator`, `tortoise_get_point`, `tortoise_get_session`, `tortoise_get_source_reliability`, `tortoise_health`, `tortoise_index_files`, `tortoise_index_sessions`, `tortoise_ingest_corpus`, `tortoise_invalidate`, `tortoise_issue_insight`, `tortoise_list_batch`, `tortoise_list_dedup_candidates`, `tortoise_list_pointkinds`, `tortoise_list_sources`, `tortoise_list_tags`, `tortoise_list_topics`, `tortoise_mine_conversations`, `tortoise_mitigate_operator`, `tortoise_onboarding_github_index`, `tortoise_onboarding_session_recording`, `tortoise_operator_action`, `tortoise_overview`, `tortoise_paginated_query`, `tortoise_promote_point`, `tortoise_provenance`, `tortoise_query_points_by_tag`, `tortoise_recall`, `tortoise_retract_point`, `tortoise_review_connections`, `tortoise_session_capture`, `tortoise_session_context`, `tortoise_set_point_baseline`, `tortoise_set_source_tier`, `tortoise_stale`, `tortoise_status`, `tortoise_summarize_structure`, `tortoise_supersede`, `tortoise_taxonomy`, `tortoise_traverse`, `tortoise_update`, `tortoise_update_entity`, `tortoise_update_point`, `tortoise_validate_domain`
 
 **A `⚠️` after a destination means the sibling SDK rename table**
 **(`docs/product/sdk-rename-table.md` (generated on demand) §C3b, and its C6 fold record) records that**

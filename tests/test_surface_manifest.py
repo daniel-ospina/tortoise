@@ -407,7 +407,7 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # ⛔ ONE CLAUSE PER WAVE, IN ORDER, AND THE LAST ONE IS THE HEAD. The record has grown
     # five times now (the three container waves, then the door wave, then #11609 lane P1's
     # POINT/DIARY wave, then #11609 P2's confidence-arms wave, then #11609 P6's `rest_spec`
-    # pair), and each append left the
+    # pair and its DELETE pair), and each append left the
     # previous clause stating an INTERMEDIATE figure — so binding any single clause to `live`
     # is a false RED on a correct record the next time it grows (measured: P1's `48 − 2 = 46`
     # was bound by name and went stale the moment P2 appended `−2 = 44`). The chain is
@@ -5317,7 +5317,12 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # recorded reason was a SURFACE one (`rest_spec` ⇒ "the row IS the REST route") and lane
     # P4 measured it FALSE — no product module derives a route from a registry row — so again
     # the live delta is exactly −2 with no `+ n` term and no SDK movement.
-    assert live["mcp"] == manifest["counts"]["tools"] == 42
+    # #11609 DELETE PAIR (#11609 P6, second unit): a further 42 -> 40 —
+    # `tortoise_delete_point` / `tortoise_delete_entity` retire into the entry the owner's
+    # #9660 ruling KEEPS (`tortoise_delete`, whose `TortoiseSDK.delete` dispatches by label),
+    # so the destination is live under the kept entry's own name: again −2 live, no `+ n`,
+    # no SDK movement.
+    assert live["mcp"] == manifest["counts"]["tools"] == 40
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

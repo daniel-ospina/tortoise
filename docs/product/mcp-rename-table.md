@@ -40,8 +40,8 @@ not something to reconcile silently.
 | 20 | `tortoise_create_source` | `tool_registry.py:1340` | `tortoise_register_source(url, sourceKind, tier=...)` | `register_source` | warning shim |
 | 21 | `tortoise_create_subject` | `tool_registry.py:1233` | `tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})` | `create_entity` | warning shim |
 | 22 | `tortoise_delete` | `tool_registry.py:1487` | **no replacement** | `delete_knowledge` | absent |
-| 23 | `tortoise_delete_entity` | `tool_registry.py:1413` | **no replacement** | `delete_knowledge` | absent |
-| 24 | `tortoise_delete_point` | `tool_registry.py:808` | **no replacement** | `delete_knowledge` | absent |
+| 23 | `tortoise_delete_entity` | `tool_registry.py:1413` | `tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)` | `delete_knowledge` | warning shim |
+| 24 | `tortoise_delete_point` | `tool_registry.py:808` | `tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)` | `delete_knowledge` | warning shim |
 | 25 | `tortoise_diary_read` | `tool_registry.py:956` | **no replacement** | `list_knowledge` | absent |
 | 26 | `tortoise_diary_write` | `tool_registry.py:947` | `tortoise_create_entity(type="diary", name=<entry>, props={"authoredBy": ..., "topic": ..., "wing": ...})` | `create_entity` | warning shim |
 | 27 | `tortoise_dream` | `tool_registry.py:680` | `tortoise_refresh_confidence(scope="dirty"\|"full", ...)` | `refresh_confidence` | warning shim |
@@ -127,9 +127,9 @@ not something to reconcile silently.
 | 107 | `tortoise_validate_domain` | `tool_registry.py:348` | `tortoise_graph_overview(section="validate_domain", domain=...)` | `graph_overview` | warning shim |
 | 108 | `tortoise_write_question` | `tool_registry.py:1837` | **no replacement** | `write_question` | absent |
 
-**108 served MCP tools, 29 destinations.** 66 retire **with a warning shim**; the other **42** are simply absent — no shim.
+**108 served MCP tools, 29 destinations.** 68 retire **with a warning shim**; the other **40** are simply absent — no shim.
 
-**`Retirement` is today's behaviour, not a forecast.** PR #4031 MERGED as `e3bb78a14` (2026-09-21), so the 66 `warning shim` names are
+**`Retirement` is today's behaviour, not a forecast.** PR #4031 MERGED as `e3bb78a14` (2026-09-21), so the 68 `warning shim` names are
 retired ON `main` and this column is what a caller experiences now. The map is read live from `tortoise.tool_registry.RETIRED_USE_INSTEAD` rather than pinned, so it cannot describe a plan that has since landed differently.
 
 The registry states what retiring a name DOES — quoted verbatim and in full:
@@ -193,7 +193,7 @@ The direction of the `get` retirement is an owner decision, recorded in the regi
 ## Part B — agreement with PR #4031's `RETIRED_USE_INSTEAD`
 
 PR #4031 encodes the *current-surface* redirects. This table encodes the *target-surface*
-destinations. They answer different questions about the same 66 names, and they must not
+destinations. They answer different questions about the same 68 names, and they must not
 contradict each other: a caller who follows a redirect to `tortoise_overview` lands
 on `graph_overview`, so if the 0.1 map sends the ORIGINAL name somewhere else the two
 artifacts disagree about which target absorbs it.
@@ -215,6 +215,8 @@ resolving *which* destination is right is a design decision, not a build step.
 | `tortoise_create_point` | `create_entity` | `tortoise_create_entity(type="point", name=<content>, props={"pointKind": ..., ...})  (a repeat folds by content, as this door did)` | `create_entity` | AGREE |
 | `tortoise_create_source` | `register_source` | `tortoise_register_source(url, sourceKind, tier=...)` | `register_source` | AGREE |
 | `tortoise_create_subject` | `create_entity` | `tortoise_create_entity(type="subject", name=..., props={"subjectKind": ...})` | `create_entity` | AGREE |
+| `tortoise_delete_entity` | `delete_knowledge` | `tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)` | `delete_knowledge` | AGREE |
+| `tortoise_delete_point` | `delete_knowledge` | `tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)` | `delete_knowledge` | AGREE |
 | `tortoise_diary_write` | `create_entity` | `tortoise_create_entity(type="diary", name=<entry>, props={"authoredBy": ..., "topic": ..., "wing": ...})` | `create_entity` | AGREE |
 | `tortoise_dream` | `refresh_confidence` | `tortoise_refresh_confidence(scope="dirty"\|"full", ...)` | `refresh_confidence` | AGREE |
 | `tortoise_dream_health` | `graph_overview` | `tortoise_graph_overview(section="dream_health")` | `graph_overview` | AGREE |
@@ -270,11 +272,11 @@ resolving *which* destination is right is a design decision, not a build step.
 | `tortoise_update_point` | `update_knowledge` | `tortoise_update_knowledge(id, props=...)` | `update_knowledge` | AGREE |
 | `tortoise_validate_domain` | `graph_overview` | `tortoise_graph_overview(section="validate_domain", domain=...)` | `graph_overview` | AGREE |
 
-**66 of 66 agree; 0 disagree.**
+**68 of 68 agree; 0 disagree.**
 
 ### B1 — the disagreements
 
-**None — 0 findings.** The 0.1 map and the redirect agree on the target for all 66 names. This section is kept, not deleted: an explicit empty finding list stays machine-visible, and a section that silently vanished would hide the difference between *no disagreements* and *nobody looked*.
+**None — 0 findings.** The 0.1 map and the redirect agree on the target for all 68 names. This section is kept, not deleted: an explicit empty finding list stays machine-visible, and a section that silently vanished would hide the difference between *no disagreements* and *nobody looked*.
 
 ---
 

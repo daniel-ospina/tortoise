@@ -123,6 +123,14 @@ RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
     # door ran, so a migrating caller keeps the whole call.
     "tortoise_issue_insight": ("search_knowledge", 'mode="issue_insight"'),
     "tortoise_session_context": ("check_confidence", 'session=True'),
+    # #11609 lane P6 — the two DELETE doors. Their `NO_CONTAINER_YET` reason was
+    # "`delete_knowledge` not live", and the owner's #9660 ruling executes that row by
+    # KEEPING the single `tortoise_delete` entry and widening it: `TortoiseSDK.delete`
+    # dispatches by LABEL, so the kept entry carries both doors' capability plus the
+    # preview-then-confirm protocol. The discriminator asserted here is the protocol
+    # selector — a bare `tortoise_delete(id)` is a PREVIEW, not a delete.
+    "tortoise_delete_point": ("delete", 'dry_run=True'),
+    "tortoise_delete_entity": ("delete", 'dry_run=True'),
 }
 
 
@@ -247,9 +255,12 @@ PROTECTED = {
 #: == 25` turns the registry's prose enumeration into a checked POPULATION, so a live
 #: door dropped from either table reds here instead of surviving as a comment.
 NO_CONTAINER_YET = {
+    # ⛔ `tortoise_delete_point` / `tortoise_delete_entity` USED to sit here (held by
+    # ``delete_knowledge not live``) and left in #11609 lane P6: the owner's #9660 ruling
+    # executes that row by KEEPING `tortoise_delete` and widening it, so the destination is
+    # live under the kept entry's own name and both doors retire FORWARD. `tortoise_delete`
+    # itself stays — it IS the kept entry.
     "tortoise_delete": "delete_knowledge not live",
-    "tortoise_delete_point": "delete_knowledge not live",
-    "tortoise_delete_entity": "delete_knowledge not live",
     "tortoise_create_edge": "link_entities not live",
     "tortoise_create_operator": "link_entities not live",
     "tortoise_events_poll": "poll_events not live",
@@ -414,8 +425,8 @@ class TestEveryPointerResolvesInOneHop:
         48 minus 2 minus 2 — because each merged on its own; the pin is the SUM, which is
         what the merged registry actually advertises.
         """
-        assert len(TOOL_REGISTRY) == 42, (
-            f"live surface is {len(TOOL_REGISTRY)}, not 42 — these waves remove doors only "
+        assert len(TOOL_REGISTRY) == 40, (
+            f"live surface is {len(TOOL_REGISTRY)}, not 40 — these waves remove doors only "
             "(each builds ARMS on a container that already existed; no new tool ships), "
             "so the number can only fall")
 
@@ -496,6 +507,59 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
         finally:
             ms._transport_mode.reset(token)
         assert len(reached) == 1, f"one call produced {len(reached)} reads: {reached}"
+
+    def test_the_kept_delete_entry_covers_both_absorbed_kinds(self, monkeypatch):
+        """Lane P6's delete pair: `TortoiseSDK.delete` IS the destination for both doors.
+
+        ⛔ WHY THIS ROW EXISTS. `tortoise_delete_point` / `tortoise_delete_entity` left
+        `NO_CONTAINER_YET` on the owner's #9660 ruling, which executes the `delete_knowledge`
+        row by KEEPING `tortoise_delete` and widening it. That is only truthful if the kept
+        entry really covers BOTH kinds — so the LABEL dispatch is measured here: a Point
+        resolves to `delete_point`, anything else to `delete_entity`. A kept entry that
+        routed every id to one of them would delete the wrong thing (or nothing) for the
+        other door's callers, while the pointer, the registry and the ruling all read fine.
+
+        The MCP door is driven for the token path too, so the pointer's
+        `confirmation=<token>` is proven to reach the same `sdk.delete`.
+        """
+        reached: list[tuple[str, str]] = []
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+
+        for label, method in (("Point", "delete_point"), ("Object", "delete_entity")):
+            monkeypatch.setattr(
+                TortoiseSDK, "_get_proj",
+                lambda _self, _label=label: type(
+                    "P", (),
+                    {"_resolve_entity": staticmethod(
+                        lambda *_a, _l=_label, **_k: [{"label": _l}])})(),
+                raising=True)
+            monkeypatch.setattr(
+                TortoiseSDK, method,
+                lambda _self, _id, _m=method: reached.append((_m, _id)) or True,
+                raising=True)
+            assert TortoiseSDK.delete(sdk, f"id-{label}") is True, label
+
+        assert reached == [("delete_point", "id-Point"),
+                           ("delete_entity", "id-Object")], reached
+
+        # …and the MCP door's confirmation path lands on that same `sdk.delete`.
+        monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
+        monkeypatch.setattr(
+            TortoiseSDK, "delete",
+            lambda _self, _id: reached.append(("delete", _id)) or True, raising=True)
+        monkeypatch.setattr(ms, "_is_dev_mode", lambda: True)
+        token = ms._deletion.issue("id-x")
+        monkeypatch.setattr(ms._deletion, "verify",
+                            lambda *_a, **_k: {"t": "id-x"})
+        # `_safe`'s auth gate refuses when the transport mode is unset (#236) — this
+        # measures DISPATCH, not auth, so name the mode as the sibling rows do.
+        mode = ms._transport_mode.set("stdio")
+        try:
+            assert ms.tortoise_delete("id-x", confirmation=token) == {
+                "deleted": True, "id": "id-x"}
+        finally:
+            ms._transport_mode.reset(mode)
+        assert reached[-1] == ("delete", "id-x"), reached
 
     def test_get_entity_session_reaches_get_session(self, monkeypatch):
         """The MCP door dispatches `type=` through `tortoise_get`, so measure THERE."""
@@ -696,14 +760,14 @@ class TestProtectedDoorsStayLive:
             f"PROTECTED holds {len(PROTECTED)}: the registry block names 10 doors with a "
             "retaining property — if a door gained or lost one, move it in the batch that "
             "changed the code, not to wherever a green run lands")
-        assert len(NO_CONTAINER_YET) == 9, (
-            f"NO_CONTAINER_YET holds {len(NO_CONTAINER_YET)}: nine names are held because "
+        assert len(NO_CONTAINER_YET) == 7, (
+            f"NO_CONTAINER_YET holds {len(NO_CONTAINER_YET)}: seven names are held because "
             "their recorded destination is not live — a container landing moves one")
         both = set(PROTECTED) & set(NO_CONTAINER_YET)
         assert not both, f"a door is in both tables, which is a contradiction: {both}"
         population = set(PROTECTED) | set(NO_CONTAINER_YET)
-        assert len(population) == 19, (
-            f"the two tables cover {len(population)} names, not the 19 live names off the "
+        assert len(population) == 17, (
+            f"the two tables cover {len(population)} names, not the 17 live names off the "
             "27-target that the registry block enumerates — a live door dropped from both "
             "is a door with NO recorded reason to stay live")
         missing = sorted(n for n in population if n not in live)
