@@ -224,19 +224,24 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    match `_KV` not at
    all — so `declared` and `measured` were BOTH empty for such a file and the round-1 tree reported
    all seven arms green over a 57-of-141-character value. Measured, one mutation at a time, tree
-   restored between: round-1 tree GREEN on both, this head RED on both. A wholly indented
-   frontmatter block was the third spelling offered; it is caught one arm earlier, by
-   `frontmatter block does not parse (degraded to {})`, because YAML does not accept it as a
-   top-level mapping at all — measured both ways: keys indented under a column-0 fence, and the
-   whole block including its fences indented; `yaml.safe_load` rejects the latter with
-   `mapping values are not allowed here`, and `parse_frontmatter` returns `{}` for both.
+   restored between: round-1 tree GREEN on both, this head RED on both.
+
+   The **third** spelling — a frontmatter block whose keys are uniformly indented off column 0 —
+   behaves differently from the other two, and getting that wrong is instructive: YAML accepts an
+   indented ROOT node, so the block PARSES (measured: every key of `dossier.md`'s block indented one
+   space still returns all **10** keys from `parse_frontmatter`, `aboutObjects` already truncated to
+   `'… §17.1/§17.2,'`). It therefore reaches (D) — it is NOT caught by the parse arm — and it is
+   closed by the same parsed-derived `declared` line as the other two. Only a block indented
+   **including its `---` fences** degrades to `{}`: `yaml.safe_load` rejects it with `mapping values
+   are not allowed here`, so THAT variant reds one arm earlier. An earlier revision of this
+   paragraph claimed the parse arm caught both; it was wrong, and the error was mine — the mutation
+   I measured had indented the closing fence too, so it was mixed indentation (a parse error) and not
+   the uniform-indent case at all. Round 4 caught it and the record is corrected here.
 
    **Round 3 — the diagnostics, not the checks.** A third fresh review found three messages that
    gave the WRONG remedy or a false diagnosis. None let a defect through; each would have sent a
-   reader to the wrong place, which is the failure mode this whole issue is about. All three
-   verified by measurement before applying, and the fourth finding that review raised was
-   **falsified and not applied** (it claimed the indented block parses and is caught by the new
-   `declared` line — it does not, and it is not; see the paragraph above):
+   reader to the wrong place, which is the failure mode this whole issue is about. All three were
+   verified by measurement before applying:
 
    - (D) said **"Quote the value"** for a pair it can reach only because the KEY is unlexable, and
      quoting cannot clear that. Measured: `aboutObjects : "a, #11395 KEEP, #13220"` parses INTACT
@@ -249,6 +254,23 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
      this issue's defect — while the message said "not a truncation". Both non-string members are
      now one helper that decides from the RAW text: a space-preceded `#` in it means the tail was
      cut, no such character means implicit typing lost nothing.
+
+   **Round 4 — the record, and the third cause.** A fourth fresh review found no fail-open either,
+   and three defects in what round 3 WROTE. All three measured before applying:
+
+   - The **falsification above was itself false** — corrected there, and the reason is the general
+     one: a mutation that is not the construction under test produces a confident measurement of a
+     different thing.
+   - `tests/test_doc_affiliation_frontmatter.py`'s own docstring said a block that degrades to `{}`
+     is red by **(A)/(B)**. It cannot be: the `if not parsed: … continue` above the loop means the
+     PARSE arm reds it and (A)/(B) are never reached. The sentence contradicted the control flow
+     three lines below it.
+   - (D)'s remedy listed **two** of the three key spellings that reach it, and for the missing one —
+     an indented block — the prescribed edit did not clear the red: dedenting the named key alone
+     produces mixed indentation, a parse error with a less useful message. Each spelling now gets
+     its own remedy, decided from the raw block: respell the key, unquote the key, or dedent the
+     whole block. Measured on all three, value fully quoted so only the key differs — every one
+     reds, and each names the edit that actually clears it.
 
    (An earlier draft also listed "an extra item appended" as a mutant; that is a legitimate edit, not a
    truncation, and it correctly stays green — the expectation was wrong, not the arm.)

@@ -490,7 +490,9 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
 
     Non-vacuity: at the pre-fix tree ``docs/research/2026-11-18-13420-vector-
     placement/dossier.md`` opens its ``aboutSubjects`` value with a backtick, so
-    ``parse_frontmatter`` returns ``{}`` and (A)/(B) red it there too.
+    ``parse_frontmatter`` returns ``{}`` and the PARSE arm reds it — on the
+    ``continue`` below, before (A)/(B) are ever reached (review: this line
+    claimed (A)/(B) caught it, which the control flow cannot do).
     """
     from tortoise.file_indexer import parse_frontmatter
 
@@ -650,13 +652,53 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     unmeasured = sorted(declared - measured - UNMEASURED)
 
     def _remedy(rel: str, key: str) -> str:
-        lexable = {k for k, _, _ in _values(_frontmatter(ROOT / rel))}
-        if key not in lexable:
+        """Name the edit that ACTUALLY clears this red, not the one that sounds right.
+
+        (D) reaches a pair in two very different situations, and naming only one
+        of them is how a message tells a reader to do something that cannot work
+        (found in review, twice):
+
+        * the value's STYLE escapes every check (a block scalar, a flow
+          collection) — quoting the value clears it;
+        * the KEY is spelled so `_KV` cannot lex it — quoting the value changes
+          NOTHING, because the pair is unmeasurable while the key is unlexable.
+
+        Three key spellings do that, and each needs its OWN remedy. The third is
+        the surprising one: a frontmatter block indented off column 0 is legal
+        YAML (the root node may be indented) and it PARSES, so it reaches (D)
+        rather than the parse arm — measured: uniformly indenting every key of
+        `dossier.md`'s block still returns all 10 keys from
+        `parse_frontmatter`. Only dedenting the WHOLE block clears it; dedenting
+        the one key instead produces mixed indentation, which is a parse error
+        with a less useful message.
+        """
+        block = _frontmatter(ROOT / rel)
+        if key in {k for k, _, _ in _values(block)}:
             return (
-                f"`{rel}`: `{key}` is declared in a spelling this arm cannot lex "
-                f"(a space before the colon, or a quoted key), so quoting the "
-                f"value will NOT clear this — respell the key as `{key}:` at "
-                f"column 0, no space before the colon"
+                f"`{rel}`: `{key}` quote the value (plain or simply-quoted is "
+                "measured)"
+            )
+        if any(re.match(rf"^[ \t]+{re.escape(key)}[ \t]*:", line) for line in block):
+            return (
+                f"`{rel}`: `{key}` is declared inside an INDENTED frontmatter "
+                "block — YAML accepts an indented root, so the block parses and "
+                "this pair reaches no check; quoting the value will NOT clear "
+                "this. Dedent the whole block to column 0 (dedenting only this "
+                f"key makes the indentation mixed, which is a parse error) and "
+                f"spell the key `{key}:`"
+            )
+        if any(re.match(rf"^{re.escape(key)}[ \t]+:", line) for line in block):
+            return (
+                f"`{rel}`: `{key}` has a SPACE before its colon — legal YAML, "
+                "which this arm's lexer does not accept, and quoting the value "
+                f"will NOT clear this. Respell the key as `{key}:`, no space "
+                "before the colon"
+            )
+        if any(re.match(rf"^[\"']{re.escape(key)}[\"']", line) for line in block):
+            return (
+                f"`{rel}`: `{key}` is a QUOTED key — legal YAML, which this "
+                "arm's lexer does not accept, and quoting the value will NOT "
+                f"clear this. Unquote the key: write `{key}:`"
             )
         return (
             f"`{rel}`: `{key}` quote the value (plain or simply-quoted is "
