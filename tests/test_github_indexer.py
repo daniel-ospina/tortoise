@@ -3209,7 +3209,14 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
 
 
 def _citations_in(module: Path) -> set[tuple[str, int, int]]:
-    """Every `file.py:NNN[-MMM]` citation in ``module``, as (basename, first, last).
+    """Every `file.py:NNN[-MMM]` citation in ``module`` that names one of ``_PINNED_MODULES``.
+
+    ⛔ SCOPE, stated so the gap is not silent: citations to any OTHER module
+    (`pipeline.py` 7, `live.py` 5, `lifecycle_vocabulary.py` 3, `commit_ops.py` 3,
+    `entity_identity.py` 2, `github_map.py` 2, and one test module) are NOT returned
+    and are therefore NOT pinned by this test — **23 of the 41** distinct citations
+    in these two files at the head that added this walker. They are a separate,
+    larger surface (a follow-up), not a claim this pin makes.
 
     A BARE `:NNN` inherits the filename last named on its line — the
     ``entities.py:6256`` / ``:5922`` shape, which is how one round of this review
@@ -3229,8 +3236,10 @@ def _citations_in(module: Path) -> set[tuple[str, int, int]]:
     return {cite for cite in found if cite[0] in _PINNED_MODULES}
 
 
-def test_the_python_citations_in_this_change_are_pinned_to_a_statement():
-    """An address this change writes must be PINNED, not merely well-formed."""
+def test_the_citations_to_the_pinned_modules_are_pinned_to_a_statement():
+    """An address this change writes to `entities.py`/`sdk.py`/`cache_projection.py`
+    must be PINNED, not merely well-formed. (Citations to other modules are out of
+    this pin's scope — see `_citations_in`'s docstring.)"""
     cited = _citations_in(_CITATION_PIN_ROOT / "tortoise/indexer/github_indexer.py")
     cited |= _citations_in(_CITATION_PIN_ROOT / "tests/test_github_indexer.py")
     assert cited, (
