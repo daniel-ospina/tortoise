@@ -1174,9 +1174,12 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
 
     ⛔ This is the one branch of this helper whose loss is a FAIL-OPEN, not a false
     remedy. Measured, with ``if _has_unescaped_dq(body):`` mutated to ``if False:``:
-    THIS test reds and nothing else in the file notices — the only other reds are the
-    pre-existing absence rows, identical on ``origin/main`` — while these two values,
-    both TRUNCATED by the consumer, stop being reported:
+    THIS test reds and so does one other pin
+    (``test_a_malformed_value_names_a_true_remedy``, which asserts ``"broken" in msg``
+    for a shape whose verdict this order decides — re-measured at this head as
+    ``4 failed, 13 passed``: the pre-existing absence rows, identical on
+    ``origin/main``, plus those two) while these two values, both TRUNCATED by the
+    consumer, stop being reported:
 
         `"a, "#1" KEEP"`            yaml -> `'a, '`        head `('broken', None)` -> `('double-quoted', …)`
         `"a\\tb\\" "#1" KEEP"`      yaml -> `'a\\tb" '`     head `('broken', None)` -> `('escaped', None)`
