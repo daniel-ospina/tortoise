@@ -23237,10 +23237,10 @@ class TortoiseSDK:
         # silently MISSING from the index-served Point dense leg (#8429) — the
         # write seam exists so a server-owned vector is always the typed,
         # indexable shape. (#8316 has since normalised a right-width `List` at
-        # the READ boundary, so the "expected Null or Vectorf32 but was List"
-        # abort this comment used to cite no longer happens for the right-width
-        # case; a wrong-width or non-numeric value still aborts the MATCH —
-        # #8430.) That is the #4521 class on the LIVE path
+        # the READ boundary, and #8430 drops a stored value the read cannot
+        # consume — a wrong width or a non-numeric value — instead of aborting
+        # the whole MATCH; a wrong-width TYPED row is its declared residual.)
+        # That is the #4521 class on the LIVE path
         # (#4521 / PR #7740 fixed only the replay's `_revise_point`). The
         # derived vector is SERVER-owned, so it is cast and CLEARED first,
         # exactly like `_revise_point`: `vecf32()` alone is not enough,
