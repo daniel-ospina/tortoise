@@ -7,6 +7,7 @@ constructions appear in tests without being allowlisted.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import gc
 import logging
@@ -16,6 +17,7 @@ import signal as _signal
 import subprocess as _subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -570,10 +572,11 @@ def test_no_new_raw_embedded_constructions():
     # That happened for real: this branch's `#13492` registration and
     # `main`'s own copy are identical strings in a set literal, so the merge
     # kept both with no conflict, and the only guard was ruff's B033 inside
-    # `agent-infra-ci / lint` — NOT a required context. Counted from SOURCE,
-    # since the set cannot hold the duplicate to count.
-    duplicated = [rel for rel in sorted(RAW_EMBEDDED_ALLOWLIST)
-                  if len(_allowlist_entry_tails(rel)) > 1]
+    # `agent-infra-ci / lint` — NOT a required context. Counted from the
+    # LITERAL'S AST ELEMENTS, which preserve duplicates in every insertion
+    # shape (see `_allowlist_elts`): a line-anchored count saw only the
+    # own-line shape and PASSED the same-line one, measured.
+    duplicated = _duplicate_allowlist_entries(_allowlist_source())
     unjustified = [rel for rel in RAW_EMBEDDED_ALLOWLIST
                    if Path(rel).stem not in carve_out
                    and "#" not in _allowlist_line_comment(rel)]
@@ -595,30 +598,106 @@ def test_no_new_raw_embedded_constructions():
 
 
 _EMBEDDED_ALLOWLIST_SRC: str | None = None
+_ALLOWLIST_NAME = "RAW_EMBEDDED_ALLOWLIST"
 
 
-def _allowlist_entry_tails(rel: str) -> list[str]:
-    """The tail of EVERY allowlist entry line naming ``rel``, in source
-    order ('' entries carry no `#` justification).
-
-    Reads RAW_EMBEDDED_ALLOWLIST from SOURCE because the literal is a SET:
-    a duplicated entry is deduped by Python and leaves no runtime trace, so
-    the count must come from the text. More than one tail means the file is
-    listed twice, which `test_no_new_raw_embedded_constructions` reds on."""
+def _allowlist_source() -> str:
+    """This module's own source text, read once."""
     global _EMBEDDED_ALLOWLIST_SRC
     if _EMBEDDED_ALLOWLIST_SRC is None:
         _EMBEDDED_ALLOWLIST_SRC = Path(__file__).read_text()
+    return _EMBEDDED_ALLOWLIST_SRC
+
+
+def _allowlist_elts(source: str) -> list[str]:
+    """Every element of the `RAW_EMBEDDED_ALLOWLIST` set literal, in source
+    order, **duplicates preserved**.
+
+    ⛔ WHY NOT THE RUNTIME OBJECT, AND WHY NOT A LINE REGEX — both were
+    measured on the #13466 duplicate:
+
+      * the runtime object is a `set`, so Python deduped the entry before any
+        check here could see it (ruff's B033 is the only tool that reads the
+        pre-dedup literal, and `agent-infra-ci / lint` is NOT a required
+        context);
+      * a line-ANCHORED regex over the text sees only entries that start a
+        line. The merge-union shape (`"x.py",` alone on its line) was caught;
+        the same literal appended beside another entry on ONE line
+        (`"b.py", "x.py",`) PASSED — measured, with only B033 red.
+
+    `ast.Set.elts` is the literal's element list BEFORE any dedup, in source
+    order, for every insertion shape alike — and because it is the literal,
+    a comment or docstring that merely NAMES a file cannot trip the count.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if (isinstance(value, ast.Set) and any(
+                isinstance(t, ast.Name) and t.id == _ALLOWLIST_NAME
+                for t in targets)):
+            return [e.value for e in value.elts
+                    if isinstance(e, ast.Constant)
+                    and isinstance(e.value, str)]
+    raise AssertionError(
+        f"no `{_ALLOWLIST_NAME} = {{...}}` set literal found in the source "
+        f"this pin was handed — the duplicate check cannot run, so it must "
+        f"not pass")
+
+
+def _duplicate_allowlist_entries(source: str) -> list[str]:
+    """Files the `RAW_EMBEDDED_ALLOWLIST` literal names more than once."""
+    counts = Counter(_allowlist_elts(source))
+    return sorted(rel for rel, n in counts.items() if n > 1)
+
+
+def _allowlist_entry_tails(rel: str) -> list[str]:
+    """The tail of EVERY allowlist entry LINE naming ``rel``, in source
+    order ('' entries carry no `#` justification).
+
+    Used only for the `#`-justification text, which lives in a trailing
+    comment and so is not in the AST. More than one tail means the file is
+    listed twice, which is a RED of its own — `_duplicate_allowlist_entries`,
+    which covers the shapes this regex cannot see."""
     return re.findall(rf'^\s*"{re.escape(rel)}"(.*)$',
-                      _EMBEDDED_ALLOWLIST_SRC, re.M)
+                      _allowlist_source(), re.M)
 
 
 def _allowlist_line_comment(rel: str) -> str:
     """The tail of the allowlist entry's source line ('' when the entry
     carries no `#` justification). FIRST occurrence only, which is correct
     solely because the duplicate pin in
-    `test_no_new_raw_embedded_constructions` forbids a second one."""
+    `test_no_new_raw_embedded_constructions` forbids a second one — on the
+    literal's own elements, so in every insertion shape."""
     tails = _allowlist_entry_tails(rel)
     return tails[0] if tails else ""
+
+
+def test_the_duplicate_pin_sees_every_insertion_shape():
+    """#13466: the duplicate pin must see BOTH shapes a duplicate takes.
+
+    A line-anchored count caught the merge-union shape and PASSED the
+    same-line one (measured against the pre-fix pin: `1 passed`, with only
+    ruff's B033 — a NON-required context — red). This pin is the reason the
+    AST route is not an unverified claim.
+    """
+    own_line = ('RAW_EMBEDDED_ALLOWLIST = {\n'
+                '    "a.py",\n    "b.py",\n    "a.py",\n}\n')
+    same_line = ('RAW_EMBEDDED_ALLOWLIST = {\n'
+                 '    "a.py",\n    "b.py", "a.py",\n}\n')
+    clean = ('RAW_EMBEDDED_ALLOWLIST = {\n'
+             '    "a.py",  # justified on its own line\n    "b.py",\n}\n')
+    prose = ('"""Names a.py here, and a.py again — prose is not an entry."""\n'
+             'RAW_EMBEDDED_ALLOWLIST = {\n    "a.py",\n}\n')
+    assert _duplicate_allowlist_entries(own_line) == ["a.py"]
+    assert _duplicate_allowlist_entries(same_line) == ["a.py"]
+    assert _duplicate_allowlist_entries(clean) == []
+    assert _duplicate_allowlist_entries(prose) == []
+    # The real tree: this file's own literal carries one entry per file.
+    assert _duplicate_allowlist_entries(_allowlist_source()) == []
 
 
 
