@@ -1147,11 +1147,15 @@ def test_comment_stripping_is_what_keeps_a_DOWN_direction_out_of_the_read():
     # the props-ban read, where a real DROP on that line vanished from both the
     # parse and the guard's count (silent green).
     for hostile in ('a--b', 'a;b', "a'b", 'a/*b'):
-        ident = 'ALTER TABLE public.t RENAME COLUMN "' + hostile + '" TO c;\n-- tail\n'
+        # The DDL after the identifier sits on the SAME line, so a `--` (which ends
+        # at the newline) can actually be exercised — round 14 P3 measured that a
+        # next-line-only template stayed green for `--`.
+        ident = ('ALTER TABLE public.t RENAME COLUMN "' + hostile
+                 + '" TO c; ALTER TABLE public.q DROP CONSTRAINT k;\n-- tail\n')
         stripped = rp._strip_sql_comments(ident)
-        assert stripped.startswith("ALTER TABLE public.t RENAME COLUMN"), (
-            f"a double-quoted identifier containing {hostile!r} broke the scanner: "
-            f"{stripped!r}")
+        assert "DROP CONSTRAINT k" in stripped, (
+            f"a double-quoted identifier containing {hostile!r} swallowed real DDL "
+            f"on its own line: {stripped!r}")
         assert "tail" not in stripped, (
             f"the comment after the identifier was not stripped ({hostile!r})")
 

@@ -2744,10 +2744,14 @@ def test_legal_sql_spellings_cannot_false_pass_the_props_ban():
     # the guard's count, i.e. silent green — measured before the scanner skipped
     # them).
     for hostile_ident in ("a--b", "a;b", "a'b", "a/*b"):
+        # ⛔ THE DROP IS ON THE SAME LINE as the identifier, deliberately: a `--`
+        # comment stops at the newline, so a next-line DROP is invisible to the
+        # bug and the vehicle would stay green for `--` (round 14 P3, measured —
+        # a regression limited to `--` alone would have shipped).
         quoted_ident = (
             "ALTER TABLE public.subject ADD CONSTRAINT chk_subject_props_no_derived\n"
             "  CHECK (NOT (props ?| ARRAY['embedding', 'status']::text[]));\n"
-            "ALTER TABLE public.subject RENAME COLUMN \"" + hostile_ident + "\" TO c;\n"
+            "ALTER TABLE public.subject RENAME COLUMN \"" + hostile_ident + "\" TO c; "
             "ALTER TABLE public.subject DROP CONSTRAINT chk_subject_props_no_derived;\n")
         assert props_ban_in_force(quoted_ident, "subject")[0] == "drop", (
             f"a double-quoted identifier containing {hostile_ident!r} swallowed the "
