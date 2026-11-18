@@ -263,6 +263,7 @@ __all__ = [
     "AmbiguousRecordColumn",
     "CacheProjectionError",
     "LifecycleEvent",
+    "LifecycleEventStreamTruncated",
     "PlacementTableUnavailable",
     "ProjectionPlan",
     "ProjectionReport",
@@ -1484,6 +1485,26 @@ class AmbiguousRecordColumn(CacheProjectionError):
 
 class UnprojectableRecord(CacheProjectionError):
     """A record row that cannot be projected (a missing contract key)."""
+
+
+class LifecycleEventStreamTruncated(CacheProjectionError):
+    """A caller-supplied event ``limit`` was reached — the stream may be longer.
+
+    ⛔ RAISED, NOT REPORTED IN THE RETURN VALUE, because the count the caller can
+    see is the wrong count. ``_lifecycle_events`` applies its ``LIMIT`` to the
+    RAW rows and then DROPS rows its parse loop cannot use (a non-int ``seq``, a
+    creation record with no ``node_id``, a payload with no ``eventKind``, ...),
+    so ``len(events)`` under-counts the stream by exactly the number of dropped
+    rows — and a caller that fetches ``budget + 1`` and compares ``len(events) >
+    budget`` therefore cannot witness truncation at all once ONE row is dropped.
+    The ROW count is the only honest witness, and only this function holds it.
+
+    The failure that made this a raise: the caller's guard silently passed, the
+    fold replayed a TRUNCATED stream, terminal folds went unapplied, and the leg
+    SERVED rows the record calls terminal — the `#689` fail-OPEN direction the
+    budget exists to prevent (measured: 50,001 raw rows, one unparseable, 50,000
+    parsed, 10,000 events never seen, guard silent).
+    """
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3142,10 +3163,14 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
     (`record_vector._folded_terminal_keys`, whose prefetch runs an uncancellable
     Python fold over every event it is handed). ``None`` — the DEFAULT, and every
     pre-existing caller — reads the stream whole, byte-identically to before.
-    ⚠️ A caller that passes one MUST detect the overflow (fetch ``budget + 1`` and
-    compare): this function does not report truncation, because a truncated
-    stream folds to the WRONG answer — a terminal fold left unapplied — and a
-    silent short answer is exactly the failure a row bound must not introduce.
+    ⚠️ A caller that passes one MUST handle
+    :class:`LifecycleEventStreamTruncated`, which this function raises when the
+    page came back FULL: a truncated stream folds to the WRONG answer — a
+    terminal fold left unapplied — and a silent short answer is exactly the
+    failure a row bound must not introduce. ⛔ The witness is the ROW count, so
+    this function is the ONLY place it can be taken: the parse loop below drops
+    rows, which makes the count of returned events under-count the stream by the
+    number of drops.
     """
     # ⛔the `LIMIT` is APPENDED, never substituted, and the params tuple is
     # EXTENDED rather than rebuilt: with `limit=None` the statement and its
@@ -3159,6 +3184,21 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
         params = (org_id, graph_id, target, target, target, target_id)
         sql = _LIFECYCLE_EVENTS_FOR_ONE_SQL + " ORDER BY seq" + tail
     rows = _rows(cur, sql, params if limit is None else (*params, int(limit)))
+    # ⛔ THE TRUNCATION WITNESS IS TAKEN HERE, ON THE RAW ROWS, AND NOWHERE ELSE.
+    # `_rows` already applied `LIMIT` to the ROWS; the loop below then DROPS the
+    # rows it cannot parse. So a caller comparing `len(events) > budget` is
+    # comparing a post-drop count against a pre-drop bound: one dropped row in a
+    # `budget + 1` page makes that comparison false, the overflow goes unseen,
+    # and the fold replays a truncated stream (terminal folds unapplied -> the
+    # leg serves rows the record calls terminal, the `#689` fail-OPEN direction).
+    # A FULL page is treated as truncated even when nothing was dropped: with
+    # `LIMIT budget + 1`, "page is full" and "stream continues" are the same
+    # observation, and declining is the safe side of that ambiguity.
+    if limit is not None and len(rows) >= int(limit):
+        raise LifecycleEventStreamTruncated(
+            f"event stream reached the caller's LIMIT of {int(limit)} row(s) "
+            f"({len(rows)} fetched) — the stream may be longer, so this page "
+            "cannot be folded as if it were whole")
     out: list[LifecycleEvent] = []
     for row in rows:
         try:

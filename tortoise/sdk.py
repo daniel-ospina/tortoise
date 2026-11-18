@@ -45717,8 +45717,11 @@ class TortoiseSDK:
         _mark_read_stage(STAGE_RETRIEVAL)
         # #11691: the SAME budget `degradation_chain` gives every leg's
         # `timeout_ms` below, so the RECORD dense leg's statement bound is
-        # `min(record door, a third of this)` instead of the door's 15 s — the
-        # third is `record_vector.record_statement_ms`, which reserves the rest of
+        # `min(record door, a share of this)` instead of the door's 15 s — the
+        # share is `record_vector.record_statement_ms`, the read divided by the
+        # ARM's statement count plus one (a third for a column-filtered label's
+        # two statements, a quarter for a folded label's three), which reserves
+        # the rest of
         # the read for the graph branch after a cancellation. Derived with the
         # identical expression degradation_chain uses (`int(elevated or
         # VECTOR_LEG_BUDGET_MS)`) rather than a second guess at it.

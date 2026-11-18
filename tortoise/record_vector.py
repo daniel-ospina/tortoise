@@ -805,6 +805,7 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
     "exactly at the budget" and "one past it" are distinguishable.
     """
     from .cache_projection import (
+        LifecycleEventStreamTruncated,
         apply_event_stream_folds,
         node_from_row,
         read_lifecycle_events,
@@ -841,12 +842,19 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
     has_vector = {row.get(id_column): bool(row.pop("has_embedding_vec"))
                   for row in rows}
     nodes = [node_from_row(label, row) for row in rows]
-    events = read_lifecycle_events(conn, org_id=scope.org_id,
-                                   graph_id=scope.graph_id,
-                                   limit=_FOLDED_PREFETCH_EVENT_BUDGET + 1)
-    if len(events) > _FOLDED_PREFETCH_EVENT_BUDGET:
+    try:
+        events = read_lifecycle_events(conn, org_id=scope.org_id,
+                                       graph_id=scope.graph_id,
+                                       limit=_FOLDED_PREFETCH_EVENT_BUDGET + 1)
+    except LifecycleEventStreamTruncated:
         # Same bound, same direction: the replay is Python and uncancellable, and
         # a truncated stream would leave terminal folds unapplied.
+        # ⛔ THE OVERFLOW IS THE READER'S TO REPORT, and it has to be: the LIMIT
+        # bounds ROWS while the parse loop DROPS rows, so `len(events)`
+        # under-counts the stream by the number of drops and a comparison HERE
+        # cannot witness truncation once one row is skipped (measured: 50,001
+        # raw rows + one unparseable => 50,000 events => guard silent, 10,000
+        # events never seen). Comparing the count here was the fail-OPEN bug.
         return None
     folded = apply_event_stream_folds(nodes, events)
     vocabulary, _include_outdated = _status_vocab_for(label)
@@ -1095,27 +1103,40 @@ def vector_search(
 
     ⛔ THREE STATEMENTS AT MOST, NAMED RATHER THAN IMPLIED — and WHICH THREE
     depends on the label. ``statement_timeout`` bounds each statement, so the
-    read's budget is split into :data:`RECORD_LEG_STATEMENTS_PER_READ` shares
-    instead of being applied whole; the last third is what the graph branch
-    answers from after a cancellation — bounded there by
-    ``search_engine.remaining_read_ms``, so the reserve is spent by the graph
-    branch rather than merely left unclaimed (#11691 review P2).
+    read's budget is divided into shares instead of being applied whole, and the
+    DIVISOR is one more than the arm issues (:func:`record_statement_ms`), so the
+    share the arm does not spend is what the graph branch answers from after a
+    cancellation — bounded there by ``search_engine.remaining_read_ms``, so the
+    reserve is spent by the graph branch rather than merely left unclaimed
+    (#11691 review P2).
 
     * a **column-filtered** label (`point`, `operator`, `source`, `document`,
       `event`) issues the kNN read and — on the SHORT path only — the shortfall
-      ``count(*)``: two of the three shares;
+      ``count(*)``: at most two statements, so it divides by
+      :data:`RECORD_LEG_STATEMENTS_PER_READ` (three) and the graph keeps the
+      remaining THIRD;
     * a **folded-status** label (`object`, `subject`, `#13422`) issues the fold's
       prefetch (its rows, then the tenant's status-bearing journal events) and
-      then the kNN read: three of three. It spends NOTHING on a ``count(*)``
+      then the kNN read: three statements, so it divides by
+      :data:`FOLD_ARM_DIVISOR` (four) and the graph keeps the remaining QUARTER.
+      It spends NOTHING on a ``count(*)``
       because the prefetch already returns the exact `available` figure, which is
       why the cage does not push it to four.
 
-    ⚠️ That third share is not slack — a folded label has none left. A record
+    ⚠️ That reserve is not slack, and how MUCH of it exists depends on the arm: a
+    column-filtered label keeps a third, a folded one keeps a quarter — it does
+    NOT have none left (dividing by
+    :data:`RECORD_LEG_STATEMENTS_PER_READ` for a three-statement arm is exactly
+    the bug `#13466` cycle 4 fixed, since a floored ``1 ms`` is no reserve at
+    all). A record
     read that overruns its share is CANCELLED and falls through to the graph
     branch as the named ``scan_fallback``, which is correct-but-slower rather
     than wrong; the cost is real and it is named here so a lane reading a
     `scan_fallback` trace for these two labels knows which prefetch to look at
-    before concluding the record is broken. Reducing the leg to fewer statements
+    before concluding the record is broken — and can size the bound from the
+    arm's OWN divisor (budget / 4 here, budget / 3 for the column arm) rather
+    than from a single figure that is wrong for one of them. Reducing the leg to
+    fewer statements
     is not available — the shortfall assertion is what stops a truncated kNN
     answer being rendered as a small corpus (§6.1) — so it is bounded by
     arithmetic rather than removed.

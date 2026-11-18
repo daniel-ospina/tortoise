@@ -366,11 +366,17 @@ wrong in ways that only a reviewer could see (`#13466`):
 
 ⛔ **The residual that is still true, and the reason this is a read half rather than the whole answer** — restated,
 because the first version of this paragraph named the wrong mechanism (`#13466` cycle 2, P3): the fold's Python work
-costs ~0.14 s on 8,000 nodes and is bounded by **nothing in the leg** — `statement_timeout` bounds STATEMENTS, and no
-arithmetic in `record_vector` bounds the work BETWEEN them. At the measured 0.19 s inside a 500 ms read the leg
-ANSWERS; a tenant large enough for the fold to overrun what is left of the read does not get a `scan_fallback` but the
+costs ~0.14 s on 8,000 nodes and is bounded by **no CLOCK in the leg** — `statement_timeout` bounds STATEMENTS, and
+nothing in `record_vector` divides the work BETWEEN them by time. What bounds it is COUNT: past
+`_FOLDED_PREFETCH_ROW_BUDGET` rows or `_FOLDED_PREFETCH_EVENT_BUDGET` journal events the leg DECLINES
+(`RecordVectorDeclined`, a NAMED `scan_fallback`) rather than folding a truncated stream, so an overrun has **two**
+observables and the count bound is the first of them — naming only the collector's `timeout` is how a diagnoser is
+sent looking for a trace they will never see. At the measured 0.19 s inside a 500 ms read the leg ANSWERS, well
+inside both counts; a tenant large enough for the fold to overrun what is left of the read while staying UNDER the
+counts does not get a `scan_fallback` but the
 fused read's collector expiring on its own deadline and DISCARDING the rows as `timeout` — the `#11691` outcome, one
-layer up. The cost is removed by materialising the fold; narrowing the node read per target is exactly where a missed
+layer up. That second, count-under sub-case is the residual. The cost is removed by materialising the fold; narrowing
+the node read per target is exactly where a missed
 path becomes a `#689` leak, so it is filed rather than attempted.
 
 **What did NOT change, and must not be read as changed.** `cutover_armed()` is still OFF by default, so **the graph

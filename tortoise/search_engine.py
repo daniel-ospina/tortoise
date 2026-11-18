@@ -3764,8 +3764,10 @@ def run_vector_query(
     one shape for both legs is what makes the single ordering pass
     ranking-identical between them. So the budget reaches the record's
     ``statement_timeout`` as ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``, where
-    the quotient is ``record_vector.record_statement_ms`` — a THIRD of the read
-    per statement, because the leg may issue two of them and this collector takes
+    the quotient is ``record_vector.record_statement_ms`` — the read divided by
+    the ARM's statement count plus one (two statements for a column-filtered
+    label, three for a folded one, so a third or a quarter of the read per
+    statement) — and this collector takes
     only futures that are already done when its deadline expires. That leaves the
     graph branch a reserve to answer from after a cancellation, so a record query
     slower than the read is cancelled INSIDE the read, the graph answers, and the

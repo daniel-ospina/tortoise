@@ -619,7 +619,11 @@ def test_the_prefetch_event_budget_declines_and_bounds_the_event_read(monkeypatc
 
     def _events(conn, **kwargs):
         asked.update(kwargs)
-        return tuple(range(budget + 1))
+        # ⛔ The READER owns the overflow verdict — see the pin below. The LIMIT
+        # bounds ROWS while the parse loop DROPS rows, so a count the caller can
+        # take would under-count the stream by the number of drops. Returning a
+        # `budget + 1`-long tuple here (the previous pin) could not see that gap.
+        raise cp.LifecycleEventStreamTruncated(budget + 1)
 
     # The ROWS half of the prefetch is replaced rather than faked column by
     # column: its SELECT is `_fold_prefetch_select`'s business (pinned above) and
@@ -643,6 +647,66 @@ def test_the_prefetch_event_budget_declines_and_bounds_the_event_read(monkeypatc
         "an over-budget journal prefetch must decline, never fold a TRUNCATED "
         "event stream (an unapplied terminal fold serves the row)")
     assert asked.get("limit") == budget + 1, asked
+
+
+def test_a_dropped_row_cannot_hide_an_over_budget_event_stream():
+    """⛔ THE WITNESS IS THE ROW COUNT, NOT THE EVENT COUNT (`#13466` review P2).
+
+    `_lifecycle_events` applies its `LIMIT` to RAW rows and then DROPS the rows
+    its parse loop cannot use (a non-int `seq`, a creation record with no
+    `node_id`, a payload with no `eventKind`). So `len(events)` under-counts the
+    stream by exactly the number of drops, and a caller that fetches `budget + 1`
+    and compares `len(events) > budget` CANNOT see truncation once one row is
+    dropped: the guard passes, the fold replays a truncated stream, terminal
+    folds go unapplied, and the leg SERVES rows the record calls terminal — the
+    `#689` fail-OPEN direction the budget exists to prevent.
+
+    This drives the REAL reader over a fake cursor: `budget + 1` raw rows of
+    which exactly ONE is unparseable. Reproduced before the fix as 50,001 raw
+    rows -> 50,000 parsed events -> `len(events) > 50_000` false -> no decline,
+    with 10,000 events never seen.
+    """
+    import tortoise.cache_projection as cp
+
+    budget = record_vector._FOLDED_PREFETCH_EVENT_BUDGET
+    assert isinstance(budget, int) and budget > 0
+
+    rows = [{"seq": i, "event_type": "EntityRecorded",
+             "event_kind": "EntityRecorded", "restatus_status": None,
+             "node_id": f"n_{i}", "label": "Object"}
+            for i in range(budget + 1)]
+    # ONE row the parse loop drops: `int(row.get("seq"))` raises -> `continue`.
+    rows[7]["seq"] = "not-an-int"
+
+    class _Cur:
+        """Only `execute`/`fetchall` are reached — dict rows bypass `description`."""
+
+        def execute(self, sql, params=None):
+            self.sql, self.params = sql, tuple(params or ())
+
+        def fetchall(self):
+            return rows
+
+    cur = _Cur()
+    with pytest.raises(cp.LifecycleEventStreamTruncated):
+        cp._lifecycle_events(cur, org_id="org", graph_id="graph",
+                             limit=budget + 1)
+    assert cur.params[-1] == budget + 1, cur.params
+
+    # Control: the same corpus with the skip repaired still raises. A FULL page
+    # is the verdict — `LIMIT budget + 1` cannot tell "exactly at" from "one
+    # past", and declining is the safe side of that ambiguity. This half keeps
+    # the pin honest about WHAT it is testing (the witness), rather than turning
+    # one malformed row into a special case.
+    rows[7]["seq"] = 7
+    with pytest.raises(cp.LifecycleEventStreamTruncated):
+        cp._lifecycle_events(_Cur(), org_id="org", graph_id="graph",
+                             limit=budget + 1)
+
+    # And an UNDER-budget page does NOT raise: the bound must not decline the
+    # ordinary small-tenant read the leg exists to serve.
+    assert cp._lifecycle_events(_Cur(), org_id="org", graph_id="graph",
+                                limit=budget + 2)[0].seq == 0
 
 
 def test_an_over_budget_prefetch_raises_the_NAMED_decline(monkeypatch):

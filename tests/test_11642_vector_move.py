@@ -82,8 +82,10 @@ def test_an_unserved_label_answers_None_not_empty():
     docstring advertises "what an unserved label does" as pinned without a
     database, and the test that did it —
     `test_an_unserved_label_answers_None_not_empty`, deleted when `object`/
-    `subject` became served — left the `mapping is None` arm
-    (`record_vector.py:1105-1110`) with ZERO witnesses. `LABEL_SERVED` is now
+    `subject` became served — left `vector_search`'s `mapping is None` arm
+    (cited by SYMBOL, not a line range: the range this pin first named had
+    already moved twice — once by `fbfb6f6a98` itself — and landed on prose)
+    with ZERO witnesses. `LABEL_SERVED` is now
     exactly the seven `security.VALID_ENTITY_TYPES`, so `None` is reachable only
     for a label OUTSIDE that set — which is what this asks for.
 
