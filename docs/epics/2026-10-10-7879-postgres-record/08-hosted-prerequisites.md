@@ -67,15 +67,16 @@ item below implying either has found a defect in this document, not a proposal.
 
 ### 0.1 Contradiction test — run first, and its result
 
-Two of the three items a naive prerequisite list would contain **would each reverse a recorded decision**, and the
-third was **a decision rather than a prerequisite** — which §12.1c now ADOPTS (2026-11-07). All three are therefore
-excluded as prerequisites, and recorded as such:
+Of the three items a naive prerequisite list would contain, **one would reverse a recorded decision** and **two are
+DECISIONS the owner has taken rather than prerequisites** — the vector move (§12.1c, ADOPTED 2026-11-07) and the
+anchored-read cutover (*armed*, the deferral rescinded 2026-11-18). None of the three is a prerequisite here, and the
+reason differs per row:
 
-| candidate prerequisite | the decision it would contradict | verdict |
+| candidate prerequisite | the decision it meets | verdict |
 |---|---|---|
-| **"serve reads from Postgres / cut over the read path"** | §2.0, verbatim: *"we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."* | **Deferred by the ruling** — `#7970` is **CLOSED COMPLETED (2026-10-25)** and its *CUTOVER* is what stays *"DEFERRED by §2.0"*. Not a first-customer gate. |
+| **"serve reads from Postgres / cut over the read path"** | **§2.0 as it stands: the cutover is ARMED.** `TORTOISE_RECORD_SERVE` selects `off` / `prefer` / `record` on the ordinary point read, `prefer` is armed in production and is the mode that measures the migration. ⚠️ **The deferral this row used to quote was rescinded by the owner on 2026-11-18** (`#7970` comment [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268)), because the constraint it protected — *not forcing the ordinary read path to parse both stores* — is satisfied by the built cutover itself. | **A decision the owner has taken, and a capability already in the tree** — `#7970` is CLOSED COMPLETED (2026-10-25). It stays **off this epic's critical path** (N1), which is a SEQUENCING statement and no longer a deferral. |
 | **"put embeddings in pgvector"** | §12.1c **ADOPTS it** (decided 2026-11-07: *"the vector index does NOT live in FalkorDB"*) — so there is no contradiction left; what remains is **sequencing**, not a reversed decision. | **A decision, not a prerequisite — and now DECIDED, in favour.** It is off this epic's critical path (N2), and embeddings are already durable without it (item A5). |
-| **"backfill the existing FalkorDB graph into Postgres"** | Owner scope ruling 2026-10-10: *"there are no existing customers. No migration-safety apparatus is designed or claimed here."* | **Not designed, on purpose.** The dual-write already exists by construction (§3/§17.1; item R1 arms it); a backfill is not it. |
+| **"backfill the existing FalkorDB graph into Postgres"** | Owner scope ruling 2026-10-10: *"there are no existing customers. No migration-safety apparatus is designed or claimed here."* | **Not designed, on purpose** — the one genuine contradiction, and it stands. The dual-write already exists by construction (§3/§17.1; item R1 arms it); a backfill is not it. |
 
 ---
 
@@ -970,7 +971,7 @@ calibrates after beta from measured consumption.
 
 | # | what | why it is not on the list |
 |---|---|---|
-| **N1** | **The read path and its cutover** (`#7970` — **CLOSED COMPLETED 2026-10-25**; the *cutover* is what is deferred) | §2.0 defers the cutover in the owner's own words (§0.1). The instruments exist and are off (`TORTOISE_RECORD_SERVE` unset). |
+| **N1** | **The read path and its cutover** (`#7970` — **CLOSED COMPLETED 2026-10-25**) | **In the tree, and ARMED** — `prefer` is the production mode, so this is not remaining work here. It stays off this epic's critical path as SEQUENCING: arming `record` follows the mode that measures the migration (§2.0's marker). |
 | **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **DECIDED 2026-11-07 — ADOPTED** (`docs/architecture/SEARCH-ARCHITECTURE.md`): the vector index and its payload move to Postgres (`pgvector`). What is not decided is WHEN — not on this epic's critical path. Embeddings are already durable as `jsonb` (A5). Note the settled blocker now that it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
 | **N3** | **A FalkorDB → Postgres backfill / migration-safety apparatus** | Owner scope ruling 2026-10-10: no customers, no apparatus designed. The dual-write is journal-first by construction (§3/§17.1). |
 | **N4** | **Journal completeness** (`#5089`) | A **precondition owned by another epic** (this epic's *blocked-by (soft)*) — ⚠️ **and that epic CLOSED COMPLETED on 2026-10-12**, so the soft block is discharged *as a ticket*. What is not discharged is the measurement: §17.1's surface (**387 mutating sites / 211 functions / 32 files**) is quoted here, not re-verified by this lane. Named, not re-filed: a projection replayed from an unfaithful journal is faithfully wrong. |
