@@ -3799,8 +3799,19 @@ def test_every_positional_changelog_pointer_lands_on_a_release_header() -> None:
     """
     source = Path(__file__).read_text(encoding="utf-8")
     changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8").splitlines()
+    pointers = _CHANGELOG_LINE_POINTER_RE.findall(source)
+    # ⛔ A SWEEP THAT CAN FIND NOTHING MUST NOT PASS. `bad == []` is also what a
+    # module with NO positional pointer produces, so deleting the last guarded
+    # pointer would leave this pin green with nothing checked — and this very PR
+    # converts pointers away from the positional form, which is the edit that
+    # reaches that state. Fail closed instead, and name the alternative.
+    assert pointers, (
+        "no `docs/ONTOLOGY-CHANGELOG.md:<line>` pointer is left in this module, "
+        "so this pin checks nothing. Restate the claim by release or permalink "
+        "AND keep one positional pointer for a block's identity (the SCOPE pin "
+        "above needs one), or delete this pin deliberately.")
     bad = []
-    for pointer in _CHANGELOG_LINE_POINTER_RE.findall(source):
+    for pointer in pointers:
         line_no = int(pointer)
         text = (changelog[line_no - 1]
                 if 0 < line_no <= len(changelog) else "")
