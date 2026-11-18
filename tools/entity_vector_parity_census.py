@@ -115,6 +115,7 @@ import argparse
 import contextlib
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -158,6 +159,9 @@ NOT_IN_SCOPE: tuple[str, ...] = ("Point",)
 #: short page set is not an error to FalkorDB, so without that cross-check a truncated
 #: read would report a graph-only node as absent from the graph and licence its strip
 #: (the `#5062`/`#4233` truncation class `turn_parity_census` already guards).
+#: "not supplied" — distinct from an explicit ``None`` (= "do not evaluate it").
+_UNEQUIPPED = object()
+
 GRAPH_PAGE_SIZE = 1000
 
 #: The graph leg's count query — ONE row, so `RESULTSET_SIZE` cannot truncate it.
@@ -324,30 +328,53 @@ def read_graph_vector_keys(g: Any, label: str, key_prop: str) -> dict:
     return {"count": total, "keys": keys, "unkeyed": unkeyed}
 
 
-#: The record leg for one table. `node_key` is the record's one identity column
+#: The record leg's TWO statements. `node_key` is the record's one identity column
 #: (`NodeSnapshot`'s key, and the column the `chk_*_node_key_is_contract_key`
-#: constraints pin), so one statement serves all four labels.
-_RECORD_SQL = (
-    "SELECT node_key, (embedding_vec IS NOT NULL) AS readable, "
-    "       (embedding IS NOT NULL) AS has_payload "
+#: constraints pin), so the same pair serves all four labels.
+#:
+#: ⛔ NEITHER IS AN UNBOUNDED FULL-TABLE FETCH, and that is a correctness property, not
+#: a performance one. The first statement is ONE aggregate row (counts only); the second
+#: is narrowed to the graph's OWN key set via `node_key = ANY(...)`, so the rows that
+#: cross the wire can never exceed the population this census is about. A whole-table
+#: `fetchall()` on `public.event`/`public.point`-scale tenants would either time out at
+#: `open_record`'s ceiling (an exit-3 refusal — safe but unusable) or exhaust an
+#: operator box; worse, a full fetch whose result was silently short would look like a
+#: record that holds FEWER vectors, which is the refusal direction, and one whose result
+#: was silently *reordered* would look like nothing at all.
+_RECORD_AGGREGATE_SQL = (
+    "SELECT count(*) FILTER (WHERE embedding_vec IS NOT NULL), "
+    "       count(*) FILTER (WHERE embedding_vec IS NULL AND embedding IS NOT NULL) "
     "FROM public.{table} WHERE org_id = %s AND graph_id = %s"
 )
 
-#: The columns the record read depends on, asserted from the cursor's own description
-#: so a renamed/dropped column is a REFUSAL rather than an empty comparison that
-#: certifies parity vacuously (the `#10024` shape arriving through the schema).
-_RECORD_COLUMNS = ("node_key", "readable", "has_payload")
+_RECORD_KEYS_SQL = (
+    "SELECT node_key, (embedding_vec IS NOT NULL) AS readable, "
+    "       (embedding IS NOT NULL) AS has_payload "
+    "FROM public.{table} WHERE org_id = %s AND graph_id = %s "
+    "AND node_key = ANY(%s)"
+)
+
+#: The columns the record legs depend on, asserted from the cursor's own description so
+#: a renamed/dropped column is a REFUSAL rather than an empty comparison that certifies
+#: parity vacuously (the `#10024` shape arriving through the schema).
+_RECORD_AGGREGATE_COLUMNS = ("record_readable", "record_unreadable")
+_RECORD_KEYS_COLUMNS = ("node_key", "readable", "has_payload")
 
 
 def read_record_vector_keys(record_dsn: str, org_id: str, graph_id: str,
-                           table: str) -> dict:
-    """The record leg for ONE label: keyed by `node_key`, read under tenant scope.
+                           table: str, keys: Iterable[str]) -> dict:
+    """The record leg for ONE label, narrowed to ``keys`` (the graph's vector keys).
 
     The connection goes through the repo's own doors — `record_serve.open_record`
     (bounded, `statement_timeout`) then `record_projection.scope_connection` (the R6
     tenant prologue that verifies the GUC stuck and REFUSES a role that can bypass
     RLS). An unscoped read returns ZERO rows and would certify vacuously; this leg
     cannot take that shape, because the scope either holds or the census exits 3.
+
+    Returns ``{"readable": set, "unreadable": int, "record_readable_total": int,
+    "rows": int}`` where ``record_readable_total`` is the whole table's readable count
+    (one aggregate row) so the caller can report how far AHEAD the record is without
+    fetching the rows that make it ahead.
     """
     try:
         import psycopg2  # noqa: F401 - availability probe, the record's own driver
@@ -368,12 +395,21 @@ def read_record_vector_keys(record_dsn: str, org_id: str, graph_id: str,
         raise CensusError(
             f"the record could not be opened ({type(exc).__name__}: {exc}) — an "
             "absence is NOT established") from exc
+    wanted = sorted({str(k) for k in keys})
     try:
         cursor = record_projection.scope_connection(conn, org_id)
-        cursor.execute(_RECORD_SQL.format(table=_quote_record_table(table)),
+        cursor.execute(_RECORD_AGGREGATE_SQL.format(table=_quote_record_table(table)),
                        (org_id, graph_id))
-        columns = [d[0] for d in cursor.description]
-        rows = cursor.fetchall()
+        agg_columns = [d[0] for d in cursor.description]
+        agg_rows = cursor.fetchall()
+        key_columns: list[str] = list(_RECORD_KEYS_COLUMNS)
+        rows: list[tuple] = []
+        if wanted:
+            cursor.execute(
+                _RECORD_KEYS_SQL.format(table=_quote_record_table(table)),
+                (org_id, graph_id, wanted))
+            key_columns = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
     except CensusError:
         raise
     except Exception as exc:
@@ -384,17 +420,28 @@ def read_record_vector_keys(record_dsn: str, org_id: str, graph_id: str,
         with contextlib.suppress(Exception):  # best-effort close
             conn.close()
 
-    missing = [c for c in _RECORD_COLUMNS if c not in columns]
+    missing = [c for c in _RECORD_AGGREGATE_COLUMNS if c not in agg_columns]
     if missing:
         raise CensusError(
-            f"the `public.{table}` read did not return {', '.join(missing)} — the "
-            "record schema this census depends on has moved, so an absence is NOT "
-            f"established (got: {', '.join(str(c) for c in columns)})")
+            f"the `public.{table}` aggregate read did not return "
+            f"{', '.join(missing)} — the record schema this census depends on has "
+            f"moved, so an absence is NOT established (got: "
+            f"{', '.join(str(c) for c in agg_columns)})")
+    if wanted:
+        missing = [c for c in _RECORD_KEYS_COLUMNS if c not in key_columns]
+        if missing:
+            raise CensusError(
+                f"the `public.{table}` keyed read did not return "
+                f"{', '.join(missing)} — the record schema this census depends on has "
+                f"moved, so an absence is NOT established (got: "
+                f"{', '.join(str(c) for c in key_columns)})")
 
+    aggregate = dict(zip(agg_columns, agg_rows[0] if agg_rows else (0, 0),
+                         strict=False))
     readable: set[str] = set()
     unreadable = 0
     for row in rows:
-        rec = dict(zip(columns, row, strict=False))
+        rec = dict(zip(key_columns, row, strict=False))
         key = rec.get("node_key")
         if not isinstance(key, str) or not key:
             # A row with no identity cannot be joined to the graph, so it can never
@@ -404,7 +451,12 @@ def read_record_vector_keys(record_dsn: str, org_id: str, graph_id: str,
             readable.add(key)
         elif rec.get("has_payload"):
             unreadable += 1
-    return {"keys": readable, "unreadable": unreadable, "rows": len(rows)}
+    return {
+        "readable": readable,
+        "unreadable": unreadable,
+        "record_readable_total": int(aggregate.get("record_readable") or 0),
+        "rows": len(rows),
+    }
 
 
 def _quote_record_table(table: str) -> str:
@@ -423,16 +475,50 @@ def _quote_record_table(table: str) -> str:
     return table
 
 
+def _write_gate() -> Any:
+    """The stripper's own gate, imported lazily so the two tools share ONE answer.
+
+    The stripper imports this module, so the import runs the other way only at call
+    time. An import that fails is NOT smoothed over into "closed": it returns ``None``,
+    which ``census`` records as "not evaluated" and folds to ``ready=False``.
+    """
+    try:
+        import strip_graph_entity_vectors as strip_mod
+
+        return strip_mod.strip_readiness
+    except Exception:
+        return None
+
+
 def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
            labels: list[str] | None = None,
-           strip_readiness: Any = None) -> dict:
+           strip_readiness: Any = _UNEQUIPPED) -> dict:
     """Both legs, per label, joined on the node's identity.
 
     ``g`` is the bound graph handle (so a destructive caller compares the store it is
     about to write to, rather than a second connection it hopes addresses the same
-    one); ``strip_readiness`` is an optional ``label -> (ready, reason)`` callable the
-    STRIPPER supplies so its write-gate precondition is recorded in the very plan a
-    human approves. The census itself never consults it for a verdict.
+    one); ``strip_readiness`` is a ``label -> (ready, reason)`` callable, and it has NO
+    default — omitting it is recorded as "not evaluated", which sets ``ready`` **False**.
+    An explicit ``None`` says the same thing in words. Both CLIs pass the stripper's own
+    ``strip_readiness``, so the two tools cannot disagree about why a label is blocked.
+
+    ⛔ AN UNEVALUATED WRITE GATE IS NOT A PASS. ``ready`` means "parity holds AND no
+    writer will re-add what we remove"; a caller that skipped the second half has not
+    answered the question, and a census whose ``ready`` defaulted to *true* when nobody
+    looked would license exactly the strip-into-a-race this gate exists to prevent.
+
+    ⛔ TWO VERDICTS, and they are not the same question — which is why both are carried:
+    ``parity`` answers *"does the record hold a readable copy of every graph vector we
+    MEASURED?"* and is a pure function of the two stores; ``ready`` additionally folds
+    in ``strip_readiness``' answer. A census that reported only one would either hide
+    the write-gate refusal (a reader ticketing "parity holds, so strip") or let the
+    write gate's absence look like a parity failure (a reader backfilling a record that
+    is already complete).
+
+    ⛔ AND ``population`` IS THE MEASURED SET, never the declared one. A `--label Object`
+    run certifies Object and NOTHING ELSE; reporting the declared four while querying
+    one is the "a gate reports a pass without having looked" class this module exists
+    to refuse (`#11112`).
     """
     wanted = [row for row in RETIRED
               if labels is None or row[1] in set(labels)]
@@ -441,36 +527,75 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
             f"unknown --label value(s): {sorted(set(labels) - {r[1] for r in RETIRED})} "
             f"— this census covers {[r[1] for r in RETIRED]}")
     rows: list[LabelCensus] = []
+    keys_by_label: dict[str, list[str]] = {}
     for table, label, key_prop in wanted:
         graph = read_graph_vector_keys(g, label, key_prop)
-        record = read_record_vector_keys(record_dsn, org_id, graph_id, table)
+        keys_by_label[label] = sorted(graph["keys"])
+        record = read_record_vector_keys(record_dsn, org_id, graph_id, table,
+                                         graph["keys"])
         row = LabelCensus(
             label=label,
             table=table,
             entity_types=affected_entity_types(label),
             graph_vectors=graph["count"],
-            record_vectors=len(record["keys"]),
+            record_vectors=len(record["readable"]),
             unkeyed_graph_nodes=graph["unkeyed"],
             record_unreadable_vector=record["unreadable"],
-            record_only=len(record["keys"] - set(graph["keys"])),
+            # The record being AHEAD is the direction the cutover wants, and it is
+            # computed from one aggregate row rather than by fetching the extra rows.
+            record_only=max(0, record["record_readable_total"] - len(record["readable"])),
         )
-        keyed_graph_only = sorted(set(graph["keys"]) - record["keys"])
+        keyed_graph_only = sorted(set(graph["keys"]) - record["readable"])
         row.graph_only = len(keyed_graph_only) + graph["unkeyed"]
         row.graph_only_sample = keyed_graph_only[:5]
-        if strip_readiness is not None:
-            ready, reason = strip_readiness(label)
-            row.blocked_reason = None if ready else reason
-        if not row.at_parity and row.blocked_reason is None:
-            row.blocked_reason = (
+        blocks: list[str] = []
+        # ⛔ EVERY BLOCK, NOT JUST THE FIRST: these two are independent, and a reason
+        # that named only one would send the operator to fix the other's problem. The
+        # graph-only block is listed FIRST because it is the non-negotiable one —
+        # deleting that vector destroys the only readable copy — while the write gate
+        # is a race that a later change can close.
+        if not row.at_parity:
+            blocks.append(
                 f"{row.graph_only} graph node(s) carry a vector the record cannot "
                 "answer with (graph-only) — the graph is the ONLY readable copy for "
                 "them. Backfill the record (#13430's repair path), never a delete")
+        if strip_readiness is _UNEQUIPPED:
+            blocks.append(
+                "the write gate was NOT evaluated (census called without "
+                "strip_readiness) — 'ready to strip' is unanswered, which is not the "
+                "same as yes")
+        elif strip_readiness is None:
+            blocks.append(
+                "the caller asked this census NOT to evaluate the write gate, so "
+                "'ready' is unanswered — pass strip_readiness to answer it")
+        else:
+            try:
+                ready, reason = strip_readiness(label)
+            except Exception as exc:          # never let an unreadable gate pass
+                ready, reason = False, (
+                    f"the write gate raised {type(exc).__name__}: {exc} — an "
+                    "unreadable gate is not a closed one")
+            if not ready:
+                blocks.append(reason)
+        row.blocked_reason = "; ".join(blocks) or None
         rows.append(row)
+    measured = [r.label for r in rows]
     return {
         "at": datetime.now(UTC).isoformat(timespec="seconds"),
         "labels": [r.as_dict() for r in rows],
+        #: Graph identity keys per label — the exact population a strip would touch.
+        #: Carried OUT of the census so the stripper's plan and its execution compare
+        #: the same set rather than two independent reads of a moving table.
+        "keys_by_label": keys_by_label,
+        #: Parity alone: does the record hold a readable copy of every MEASURED graph
+        #: vector? A pure function of the two stores.
+        "parity": all(r.at_parity for r in rows),
+        #: Parity AND the write gate. The strip precondition.
         "ready": all(r.at_parity and r.blocked_reason is None for r in rows),
-        "population": [r[1] for r in RETIRED],
+        #: The MEASURED population — never the declared one.
+        "population": measured,
+        "declared_population": [r[1] for r in RETIRED],
+        "narrowed": sorted(measured) != sorted(r[1] for r in RETIRED),
         "graph_page_size": GRAPH_PAGE_SIZE,
     }
 
@@ -498,11 +623,28 @@ def render(report: dict, graph_name: str) -> str:
                 f"   {row['label']} graph-only sample: "
                 f"{', '.join(row['graph_only_sample'])}")
     lines.append("")
-    lines.append(
-        "VERDICT: PARITY on every label — the record holds a readable vector for "
-        "every graph node's vector" if report["ready"] else
-        "VERDICT: NOT AT PARITY — do NOT strip. A graph-only vector is the only "
-        "readable copy of that fingerprint; the answer is a backfill, never a delete")
+    measured = report.get("population") or [r["label"] for r in report["labels"]]
+    declared = report.get("declared_population") or measured
+    scope = ("every label MEASURED (" + ", ".join(measured) + ")"
+             if report.get("narrowed") else "every label")
+    if not report.get("parity", report["ready"]):
+        lines.append(
+            f"VERDICT: NOT AT PARITY on {scope} — do NOT strip. A graph-only vector is "
+            "the only readable copy of that fingerprint; the answer is a backfill, "
+            "never a delete")
+    elif not report["ready"]:
+        lines.append(
+            f"VERDICT: PARITY holds on {scope}, but a strip is still REFUSED by the "
+            "WRITE GATE (see the blocked lines above): the graph fold still writes "
+            "some of these labels, so a strip would be undone by the next write")
+    else:
+        lines.append(
+            f"VERDICT: PARITY on {scope} — the record holds a readable vector for "
+            "every graph node's vector measured")
+    if report.get("narrowed"):
+        lines.append(
+            f"⚠️ NARROWED: {len(measured)} of {len(declared)} label(s) were MEASURED. "
+            f"This run says NOTHING about {', '.join(sorted(set(declared) - set(measured)))}.")
     lines.append(
         "(`record_only` is informational: the record being AHEAD is the direction the "
         "cutover wants and blocks nothing.)")
@@ -528,6 +670,9 @@ def main(argv: list[str] | None = None) -> int:
                         choices=[label for _, label, _ in RETIRED],
                         help="census only this label (repeatable); default: all four")
     parser.add_argument("--json", default=None, help="write the full report here")
+    parser.add_argument("--require-ready", action="store_true",
+                        help="exit 4 unless the graph is at parity AND every label's "
+                             "write gate is closed (the strip precondition)")
     parser.add_argument("--require-parity", action="store_true",
                         help="exit 4 when any label is not at parity, so a caller "
                              "gates on the verdict instead of parsing text")
@@ -570,7 +715,8 @@ def main(argv: list[str] | None = None) -> int:
         census_mod._refuse_unless_graph_present(proj, graph_name)
         report = census(
             g=proj.g, record_dsn=record_dsn,
-            org_id=args.org_id, graph_id=args.graph_id, labels=args.label)
+            org_id=args.org_id, graph_id=args.graph_id, labels=args.label,
+            strip_readiness=_write_gate())
         report["graph"] = graph_name
         report["graph_uri"] = args.uri or args.db_path
     except CensusError as exc:
@@ -587,7 +733,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
         print(f"\nreport written to {args.json}")
-    if args.require_parity and not report["ready"]:
+    # ⛔ THE TWO FLAGS ARE TWO QUESTIONS, and `--require-parity` answers only its own.
+    # A strip needs both, so `--require-ready` exists separately: folding the write gate
+    # into a flag named "parity" makes a parity PASS report as a parity FAILURE whenever
+    # the write-stop has not landed, which is the reading that sends an operator hunting
+    # a missing record copy that is actually present.
+    if args.require_parity and not report["parity"]:
+        return 4
+    if args.require_ready and not report["ready"]:
         return 4
     return 0
 
