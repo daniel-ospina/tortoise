@@ -1225,8 +1225,9 @@ class TestStdioEntrypointToolRegistration:
             #   48 -  2 + 0 = 46   (THIS PR, #11609 P2's confidence arms: two doors
             #                       retired into `tortoise_check_confidence`, which
             #                       was already live and grew PARAMETERS, not a row)
-            # ⛔ Not the HTTP-filtered view: that one is 43 at this head
-            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it), and
+            # ⛔ Not the HTTP-filtered view: that one is 41 at this head
+            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 41
+            # and 38 respectively), and
             # the two differ by the five `http_policy=False` rows. Writing one view's
             # base with the other's head lands on a number no population has.
             assert len(names) >= 46, f"expected >=46 tools, got {len(names)}"

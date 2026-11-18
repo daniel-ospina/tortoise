@@ -218,15 +218,6 @@ family_rank:
 # six keywords are unmoved because NO container row arrived here — this wave removes doors
 # only. Recorded deliberately, per the note above: the ten rows are the check's own output
 # against the merged registry, not a hand-arithmetic guess.
-# #11609 DOOR RETIREMENT (lane E): 55 -> 48 advertised, and FOUR keyword counts moved with
-# the seven doors that left: `create` 14 -> 10 (`create_subject`/`create_object`/
-# `create_event`/`create_document`, all absorbed by `create_entity`),
-# `fetch` 11 -> 10 (`get_session` -> `get_entity(type="session")`), `list` 5 -> 4
-# (`list_batch` -> `list_knowledge(kind="batch")`), `find` 4 -> 3
-# (`find_cross_lens_candidates` -> `review_link_candidates(kind="cross_lens")`). The other
-# six keywords are unmoved because NO container row arrived here — this wave removes doors
-# only. Recorded deliberately, per the note above: the ten rows are the check's own output
-# against the merged registry, not a hand-arithmetic guess.
 # #11609 CONFIDENCE ARMS (P2): 48 -> 46 advertised, and TWO counts moved with the two doors
 # that left: `fetch` 10 -> 9 (`recall` -> `check_confidence(recall=True, ...)`) and
 # `check` 6 -> 5 (`compute_confidence` -> `check_confidence(recompute=True, ...)`). Again no
