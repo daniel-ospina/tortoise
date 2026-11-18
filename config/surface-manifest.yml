@@ -146,7 +146,7 @@
 # only asks that question calls it fine — which is why this record also asks about ancestry).
 manifest_version: 1
 issue: 3863
-cut_at_commit: 9e9fc23276186749e36e9e9caf4a3ba75dd803b0
+cut_at_commit: 4ec1eb80fc6c53024660316a5f08a64c72098928
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1838,7 +1838,7 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_get_entity
 - name: tortoise_create_entity
-  served_from: tortoise/mcp_server.py:874f2a0fc65eba5a
+  served_from: tortoise/mcp_server.py:f3d0225938bb18bd
   served_attributes: 93b456ed38374aa3
   family: graph
   family_rank: 2
@@ -2980,11 +2980,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.create_direct_edge.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
+  dependency: 'reached by no registered MCP tool; caller categories: documentation, engine, other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, other-tooling'
+  reason: 'no MCP tool binds it; callers: documentation, engine, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
