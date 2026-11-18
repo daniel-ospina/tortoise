@@ -15,7 +15,7 @@ aboutObjects: "issue #7953, epic #7879, interface D, residency router, sufficien
 > **Interface D, part 2.** The marker (W6b, `#7952`) is the router's INPUT; this
 > is the router. The cache projection (W10, `#7971`) is what makes the
 > declaration partial. The record read path (W8, `#7970`) is the consumer that
-> performs the fetch — **deferred by §2.0, P2**.
+> performs the fetch — **ARMED** since the §2.0 deferral was rescinded (2026-11-18); SEQUENCED, P2.
 > **Architecture of record:** `docs/architecture/STORAGE-ARCHITECTURE.md` §17.3
 > (the rule and the two-router table), §12.3 (the completeness assumption),
 > §12.4 (the sufficiency router). **Surfaces:** S4, S5 (`01-test-design.md`).
@@ -126,7 +126,9 @@ set-level polarity — so the default deployment is byte-identical.
 ⚠️ **Recorded, not hidden.** No *existing* production caller names a single node
 coordinate on this read path: `tortoise_fts_query` and `recall_state` are set
 reads, and `GET /v1/search` takes only `q`/`limit`. The node-naming read that
-will drive the per-key branch in production is `#7970`'s (deferred by §2.0). The
+will drive the per-key branch in production is `#7970`'s — the point read `record_serve.serve_point`,
+under `TORTOISE_RECORD_SERVE`, ARMED since the 2026-11-18 rescission (`STORAGE-ARCHITECTURE.md` §17.3
+states the same sentence). The
 seam and its test exist now so that path has one place to pass a coordinate and
 one router to consume it.
 
@@ -161,7 +163,7 @@ a status term.
 ## 8. Out of scope (stated, not absorbed)
 
 * **the record read path** (`#7970`) — it performs the `fetch-record` repair;
-  **deferred by §2.0, P2**, and no P0 unit may wait on it;
+  **ARMED** since the §2.0 deferral was rescinded (2026-11-18) but SEQUENCED (P2), and no P0 unit may wait on it;
 * **the sufficiency router itself** (§12.4 §12.8 item 3) — a separate artifact;
   this router routes *to* it, and never makes the depth decision;
 * **the declaration's authoritative home** — control-plane residency metadata
