@@ -6808,6 +6808,105 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "correct it in the same commit that changes the record, not by carrying this head's "
         "number into it")
 
+    # ⛔ THE RETRACTED `sdk.py:25127` CLAIM, RE-MEASURED (#13489 review, finding 2 — MEASURED).
+    # D5 stated that "this PR re-derived [the content-review filter cite] to `sdk.py:25127`",
+    # and described `:25127` as "`limit: int = 50) -> list[dict]:`, the signature line of
+    # `list_dedup_candidates`". Both halves were false at the head they were written for:
+    # `:25127` is a comment line, the signature lives ~2.8k lines below it, and the symbol
+    # carries a LEADING UNDERSCORE (`_list_dedup_candidates`) — so the sentence was wrong
+    # about the number, the name, and (in its "this PR re-derived it to" half) about what
+    # this PR did. No arm read it: `_pin_row_failures` scopes to a markdown LINE and D5 IS
+    # one line carrying ~50 numbers, so every row passes on some other number on it — the
+    # same blindness the `_honours` clause pin above was written for, one clause over.
+    # The clause is read here and its numbers are RE-MEASURED, so the retraction cannot rot
+    # into the defect it retracts: a stale quote, a re-pointed signature line, or a
+    # re-asserted number all red here.
+    _d5_25127 = re.findall(
+        r"`sed -n '(\d+)p' tortoise/sdk\.py` is `(# then resolved to the row it replaced\.)`",
+        _d5)
+    assert len(_d5_25127) == 1, (
+        "05-verify.md D5 should carry the `sdk.py:25127` retraction exactly once, quoting the "
+        "line it opens on as `sed -n '<n>p' tortoise/sdk.py` …; this reads "
+        f"{_d5_25127!r} — re-wording the clause is fine, dropping the re-measured quote is not, "
+        "because that is what made the original claim unfalsifiable")
+    _sdk_src = _EPIC_CITE_SOURCES["sdk"].read_text(encoding="utf-8").splitlines()
+    _retracted_no, _retracted_text = _d5_25127[0]
+    assert _sdk_src[int(_retracted_no) - 1].strip() == _retracted_text, (
+        f"05-verify.md D5 quotes `sdk.py:{_retracted_no}` as {_retracted_text!r}, and that line "
+        f"reads {_sdk_src[int(_retracted_no) - 1].strip()!r} — the retraction's own quote has "
+        "rotted, which is the defect it was written to close")
+    _d5_signature = re.findall(
+        r"the signature line is `:(\d+)`, under `def (_list_dedup_candidates)\(` "
+        r"\(underscore, `:(\d+)`\)", _d5)
+    assert len(_d5_signature) == 1, (
+        "05-verify.md D5 should state the dedup-candidate signature line once, WITH the "
+        f"underscore-prefixed symbol it belongs to; this reads {_d5_signature!r} — the "
+        "pre-review clause named the symbol without its underscore, which is a second way "
+        "the same sentence misdirected a reader")
+    _sig_no, _sig_symbol, _def_no = _d5_signature[0]
+    assert _sdk_src[int(_sig_no) - 1].strip() == "limit: int = 50) -> list[dict]:", (
+        f"05-verify.md D5 says the signature line is `sdk.py:{_sig_no}`, and that line reads "
+        f"{_sdk_src[int(_sig_no) - 1].strip()!r} — re-derive it rather than carrying the number")
+    assert _sdk_src[int(_def_no) - 1].lstrip().startswith(f"def {_sig_symbol}("), (
+        f"05-verify.md D5 says `def {_sig_symbol}(` opens at `sdk.py:{_def_no}`, and that line "
+        f"reads {_sdk_src[int(_def_no) - 1].strip()!r} — the continuation line belongs to that "
+        "definition, so both numbers move together")
+    # …and the filter the paragraph is ABOUT: the clause claims the file's ONLY occurrence, so
+    # the invariant is exact and the number is re-derived rather than carried.
+    _filter_stated = set(re.findall(
+        r"`dedup_reviewed IS NULL`(?:,)? (?:at|sits at) `(?::|sdk\.py:)(\d+)`", _d5))
+    _filter_stated |= set(re.findall(
+        r"`:(\d+)` is the file's ONLY occurrence of `dedup_reviewed IS NULL`", _d5))
+    _filter_measured = [n for n, _ln in enumerate(_sdk_src, 1)
+                        if "dedup_reviewed IS NULL" in _ln]
+    assert len(_filter_measured) == 1, (
+        "`dedup_reviewed IS NULL` occurs "
+        f"{len(_filter_measured)} time(s) in `sdk.py` ({_filter_measured!r}) — D5's clause is "
+        "only meaningful while it is the file's ONLY occurrence, so re-word the claim")
+    assert _filter_stated == {str(_filter_measured[0])}, (
+        f"05-verify.md D5 states {sorted(_filter_stated)} for the content-review filter, but "
+        f"`dedup_reviewed IS NULL` is at `sdk.py:{_filter_measured[0]}` — every statement of a "
+        "hit moves together, and a number stated for the filter must open on the filter")
+
+    # ⛔ THE SAME DEFECT CLASS, ONE ROW OVER — the one `#13489` finding that is not a
+    # `05-verify.md` claim (finding 4 — MEASURED). `docs/00_index.md`'s `#13436` write-path-cost
+    # row stated "one deliberate pre-check read at `hosted_api.py:23946`, which does not rescan
+    # at `:23976`". At every head this tree can open, `:23946` is BLANK and `:23976` is a
+    # comment about the boundary clause — so both numbers named nothing, and the guard that
+    # `docs/` citations already have could not see it: `tests/test_docs_citation_refs.py` is
+    # line PRESENCE, and a blank line is present (that file says so about itself). This row is
+    # not this bundle's, and no guard content-checks a `docs/00_index.md` cite — `_pin_row_failures`
+    # scopes to the `#7949` documents, and the census verb that does read `hosted_api.py` cites is
+    # red on `main` for other statements. So the re-pointed numbers are read HERE, beside the
+    # re-point: each one must open on the thing the row says it opens on, and a drift back onto
+    # a blank line or a comment reds.
+    _index_text = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+    _index_cites = re.findall(
+        r"pre-check read per request.{0,200}?`hosted_api\.py:(\d+)`"
+        r".{0,200}?the kind refusal at `:(\d+)`"
+        r".{0,200}?its own docstring at `:(\d+)`", _index_text, re.S)
+    assert len(_index_cites) == 1, (
+        "docs/00_index.md's `#13436` row should state the pre-check read, the kind refusal and "
+        f"the docstring that rules out a rescan as three cites; this reads {_index_cites!r} — the "
+        "row is re-worded or its cites were moved, so this arm no longer reads the claim it "
+        "was written for")
+    _pre, _refusal, _docstring = _index_cites[0]
+    for _no, _needle, _what in (
+        (_pre, "installed = graph_installed_namespaces(sdk)",
+         "the one deliberate pre-check read"),
+        (_refusal, "_refusal = sdk._unapproved_kind_refusal(_prop, _entity.kind, _gate_ns)",
+         "the kind refusal that REUSES the set instead of rescanning"),
+        (_docstring, "call would be a second whole-graph scan AND a second answer.",
+         "the docstring that states a second call would be a second scan"),
+    ):
+        _line = _EPIC_CITE_SOURCES["hosted_api"].read_text(
+            encoding="utf-8").splitlines()[int(_no) - 1].strip()
+        assert _line == _needle, (
+            f"docs/00_index.md's `#13436` row says `hosted_api.py:{_no}` is {_what}, and that "
+            f"line reads {_line!r} — re-derive the number from the call it names; the pair this "
+            "row carried (`:23946`/`:23976`) opened on a blank line and a comment, which is the "
+            "citation defect this PR exists to close, one document over")
+
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, RE-DERIVED for `#13363`).
     # The sentence cites `hosted_api.py:15225-15302`, and the END of that range is a BLANK
     # line — so the row above can only anchor the start, and a range that drifts by a line
