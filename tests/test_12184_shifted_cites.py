@@ -503,6 +503,17 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
     discriminating: `:2433`, `:2490` and `:2715` DO appear later in the document (row 13, §2.5), so an
     unbounded `in text` check would pass on the broken file.
     """
+    # ⛔ THE POPULATION HAS AN ANTI-SHRINK ARM (#13509), the mirror of the one the sibling
+    # `_MAIN_HEAD_FIGURES` guard carries. BOTH use sites below ITERATE this tuple, so a row deleted to
+    # silence a re-point red simply stops existing in both: its content pin and the "the header names
+    # it" assertion vanish together and nothing reds — the false PASS the sibling arm was added for,
+    # one table over. Fourteen is the `main`-set group the `#13124` review measured; a fifteenth is a
+    # re-derivation to make deliberately, not silently.
+    assert len(_MAIN_SET_MISSED) == 14, (
+        f"_MAIN_SET_MISSED carries {len(_MAIN_SET_MISSED)} rows, not 14 — both use sites iterate this "
+        "tuple, so a row deleted to make a re-point pass is the coverage loss neither arm below can "
+        "see. Restore the row (the addresses are enumerated in the audit header's `main` set) or "
+        "update this count with the re-derivation that justifies it")
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     header = text.split("## 1. The population", 1)[0]
 
@@ -631,7 +642,7 @@ def test_the_main_head_figures_the_header_names_are_still_counted() -> None:
     head-selecting arm that would actually open it.
     """
     # ⛔ THE POPULATION HAS AN ANTI-SHRINK ARM, and it is the file's own precedent applied to a new
-    # dict (`assert len(_PINS) == 47` below, `declared == pinned` in the sibling pin test). Without
+    # dict (`assert len(_PINS) == 47` above, `declared == pinned` in the sibling pin test). Without
     # it the guard above is defeatable exactly the way an absent pin is not coverage: re-point a
     # `main`-head figure in the document AND delete its row here, and the loop has nothing to check
     # — measured on a copy of this tree at `25b0fd5f` (`:6854-6870` -> `:6855-6871` in the audit doc
