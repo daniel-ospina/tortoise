@@ -304,8 +304,10 @@ with `#9556`'s `record-restore` verb, which is an operator action and not a sche
 `#9189`** (the trigger, OPEN until a schedule runs it), **`#9276`** (the scheduled sweep),
 **`#7951`** (the chokepoint the reconciliation is evidence for) and **`#7970`** (the record read
 path — **CLOSED COMPLETED (2026-10-25)**, and ARMED since the §2.0 deferral was rescinded on 2026-11-18;
-⚠️ this row read *"OPEN"* and treated the cutover as still deferred when the census was taken; both halves were stale). The comparison rule for vector-valued properties is **CLOSED** on
-**`#8615`**.
+⚠️ this row's *"OPEN"* half was **already stale** when the census was taken (`#7970` closed 2026-10-25,
+23 days earlier), while its deferral half was **current then** and became stale only with the 2026-11-18
+rescission — so the row records the 2026-11-17 read, not the current status). The comparison rule for
+vector-valued properties is **CLOSED** on **`#8615`**.
 
 ---
 
