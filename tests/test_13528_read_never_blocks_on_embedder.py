@@ -53,6 +53,7 @@ import contextlib
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -282,8 +283,17 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     still be able to say which half it died in), and on the cold path NEITHER
     may hold the load: the read declines instead of waiting, so ``embed_get``
     is a fast decision rather than a stall, and ``embed_encode`` never opens at
-    all. ``pre_handler`` must stay small too — the 7.2–9.3 s it published in
-    production was reads QUEUED behind workers parked in the load.
+    all.
+
+    ⛔ ``pre_handler`` IS DELIBERATELY NOT ASSERTED HERE (#13535 review finding
+    1). It is charged from the timeline's start to the FIRST mark, and the first
+    mark is ``embed_get`` — emitted BEFORE the acquire (``sdk.py``) — so in a
+    single-threaded read it holds argument validation and nothing else: it is
+    structurally sub-millisecond, passes on the pre-change tree, and no mutation
+    of this diff can redden it. The production 7.2–9.3 s was a QUEUE of reads
+    waiting for a worker slot, which this harness cannot construct; the shape is
+    built for real in
+    ``test_a_read_queued_behind_loaders_does_not_breach_pre_handler`` below.
     """
     timeline = begin()
     with request_stages(timeline):
@@ -298,15 +308,81 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
         f"embed_get took {spent[STAGE_EMBED_GET]} ms of a {_LOAD_S * 1000:.0f} ms "
         f"load — the read is waiting on it again instead of declining inside its "
         f"{READ_EMBED_BUDGET_S * 1000:.0f} ms budget (measured pre-fix: 7857.3 ms)")
-    # ⛔ ``spent_ms()`` IS MILLISECONDS (``read_stages.Timeline.spent_ms``), so
-    # the bar needs the same ``* 1000.0`` the frame above it carries. Without it
-    # this compares against 4 ms rather than 4 000 ms — a bar the message two
-    # lines down says is the wrong number, and a flake door on the contended
-    # 4-worker carve-out lane (#13528 review F2, pre-existing).
+
+
+# ── the QUEUE: production's `pre_handler` breach, built for real ──────────
+
+#: Worker slots in the simulated read lane. Production is 8
+#: (``monitoring.CONTROL_PLANE_READ_WORKERS``); two is the smallest pool that
+#: can hold a queue at all, and the property under test — "a read waiting for a
+#: slot does not inherit the load" — does not get truer with more slots.
+_READ_LANE_WORKERS = 2
+
+
+def _read_with(timeline, sdk):
+    """One read with ``timeline`` bound, the way the transport seam binds it.
+
+    The seam constructs the timeline on the request's own thread and binds it
+    around the handler; the executor thread is this harness's stand-in for that
+    handler, so the bind happens HERE and not at submit time.
+    """
+    with request_stages(timeline):
+        _read(sdk)
+
+
+def test_a_read_queued_behind_loaders_does_not_breach_pre_handler(
+        sdk, cold_embedder):
+    """Indicator 4 — the half a single-threaded read structurally cannot show.
+
+    Production's ``pre_handler`` breach (7.2–9.3 s) was not middleware: the read
+    lane is 8 daemon workers and every worker that entered ``get()`` parked in
+    the load, so reads that had ARRIVED but not yet started waited for a slot.
+    ``pre_handler`` is measured from the request's ARRIVAL to its first stage
+    mark (``read_stages.ReadStages.mark``), so the queue wait lands there and
+    nowhere else.
+
+    So the shape is BUILT, not assumed: ``_READ_LANE_WORKERS`` reads occupy the
+    pool while the load is in flight, and a THIRD is submitted behind them with
+    its timeline anchored at its own submit time — ``begin(started_at=…)``, the
+    parameter that exists for exactly this, so the wait for a slot is charged to
+    ``pre_handler`` rather than silently dropped.
+
+    ⛔ IT MUST REDDEN ON THE PRE-CHANGE CODE (#13528 indicator 4). With the
+    blocking acquire restored the two occupying reads sit in ``get()`` for the
+    whole ``_LOAD_S`` load, so the third starts only after the load and its
+    ``pre_handler`` is ≈ the load. The pre-change path is reproduced exactly by
+    answering ``None`` from ``await_read_ready_reason`` (``None`` is precisely
+    "acquire it, the old way" — the arm the warm-up opt-out already takes), and
+    the measured mutation is recorded in the commit that added this row.
+
+    Post-fix each occupying read declines inside ``READ_EMBED_BUDGET_S``, so the
+    third starts after about one budget — three orders of magnitude under the
+    bar.
+    """
+    lane = ThreadPoolExecutor(max_workers=_READ_LANE_WORKERS,
+                             thread_name_prefix="read13528")
+    try:
+        for _ in range(_READ_LANE_WORKERS):
+            lane.submit(_read, sdk)
+        arrival = time.monotonic()
+        timeline = begin(started_at=arrival)
+        queued = lane.submit(_read_with, timeline, sdk)
+        queued.result(timeout=_LOAD_S + 10)
+    finally:
+        lane.shutdown(wait=True)
+
+    elapsed = time.monotonic() - arrival
+    spent = timeline.spent_ms()
     assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
-        f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms of a "
-        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a read must not "
-        f"queue behind workers parked in the embedder load")
+        f"the queued read accrued {spent.get(STAGE_PRE_HANDLER, 0.0)} ms of "
+        f"pre_handler against a {_LOAD_S / 2 * 1000:.0f} ms bar — a read waiting "
+        f"for a worker slot is paying the LOAD before it starts (production: "
+        f"pre_handler 7.2–9.3 s; pre-change this row measures ≈ the load)")
+    assert elapsed < _LOAD_S / 2, (
+        f"a read queued behind {_READ_LANE_WORKERS} loaders took {elapsed:.2f}s "
+        f"(bar: {_LOAD_S / 2:.1f}s) — each read it queues behind must decline "
+        f"inside its {READ_EMBED_BUDGET_S * 1000:.0f} ms budget instead of "
+        f"parking in the load")
 
 
 # ── the counter-tests: the fix may not become "stop embedding" ────────────
