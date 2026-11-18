@@ -13403,8 +13403,10 @@ class FalkorProjection(
         elif t == "SubjectAdded":
             # #12943: NOT marked. `_upsert_subject` returns None (it early-returns
             # on an unwritable id/name), so there is no count to test — a falsy
-            # check here would skip EVERY write. Over-reports a no-statement arm,
-            # never under-reports a landed one; see `_skip`'s bound.
+            # check here would skip EVERY write. This over-reports a no-statement
+            # arm; the one shape it under-reports is the interrupted fold
+            # `_skip`'s bound names (a raise after the first statement), never a
+            # fold that RETURNED.
             self._upsert_subject(ev)
         elif t == "ObjectSuperseded":
             # #1350: fold the client-derived supersession into Object.status
@@ -13507,7 +13509,8 @@ class FalkorProjection(
             return
         elif t == "ObjectRegistered":
             # #12943: NOT marked — `_upsert_object` returns None (same reason as
-            # `SubjectAdded`); over-reports, never under-reports.
+            # `SubjectAdded`); this over-reports a no-statement arm, and the only
+            # under-report is the interrupted-fold shape `_skip`'s bound names.
             self._upsert_object(ev)
         elif t == "DocumentCreated":
             # #12943: NOT marked — `_upsert_document` returns None.

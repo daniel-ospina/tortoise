@@ -124,7 +124,10 @@ CACHE_TARGET_OVERFLOW = "(other targets)"
 #: the signal that this process is past the registry's resolution.
 _TARGETS_CAP = 16
 
-#: ``{"<store>|<graph>": live write attempts}`` for THIS process, and its lock.
+#: ``{"<store>|<graph>": counted live-write lane operations}`` for THIS process,
+#: and its lock. Not an attempt count and not a row count — see
+#: :func:`note_cache_write_target`'s own paragraph for what it does and does not
+#: bound.
 #: Written by :func:`note_cache_write_target` from the seven live lanes — the fold,
 #: the structural-edge mint, three declared gateways, and two hosted
 #: session-delete sweeps — so the UNIT is one lane operation (a fold, a mint, a
@@ -234,8 +237,9 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     so the endpoint resolution has a single owner.
 
     * ``FalkorProjection.apply`` — the fold every door passes (SDK, REST, MCP,
-      capture, the metadata lanes), counted once per fold that LANDED (a fold that
-      provably wrote nothing is not a write);
+      capture, the metadata lanes), counted once per fold that RETURNED having
+      written (a fold that provably wrote nothing is not counted; one that a
+      raise interrupted is not counted either — the exception is stated below);
     * ``_record_structural_edges`` — ``create_edge`` and the about-lane mint
       their edges with a raw ``MERGE`` under ``_structural_edge_write_scope`` and
       never pass ``apply``, so without that hook a process whose writes are edges
@@ -290,16 +294,23 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
 
     A COUNT IS NOT A VERDICT, AND IT IS NOT A WRITE COUNT. The unit is one lane
     operation — a fold, a mint, a gateway statement — so it answers WHERE a
-    process writes, which is the question the split turns on; an arm whose fold
-    returns no count is still counted when its statement matched 0 rows (see
-    `FalkorProjection._apply_event`'s `_skip` bound), so the number is an upper
-    bound on ATTEMPTED lane operations, deliberately erring that way rather than
-    under-reporting. ⛔ ONE EXCEPTION, stated rather than left to the reference:
-    the hook runs on the fold's RETURN, so a fold that issues a statement and
-    then RAISES — `_upsert` writes props and THEN edges; `_fold_session_deleted`
+    process writes, which is the question the split turns on.
+
+    ⛔ WHAT IT DOES NOT COUNT, stated because "bound" invites the wrong reading in
+    both directions. It is NOT an attempt count: a `_skip()`-marked fold was
+    STARTED and is deliberately not counted — counting starts is the wrong
+    direction (`FalkorProjection._apply_event`'s `_skip` bound says why) — so
+    attempts outnumber this number. It is NOT a row count either: an arm whose
+    fold returns no count is still counted when its statement matched 0 rows, so
+    it can exceed the rows written. And a fold that issues a statement and then
+    RAISES — `_upsert` writes props and THEN edges; `_fold_session_deleted`
     deletes the Source and THEN the Session — is a landed write this registry
-    does not count at all. The bound is therefore "no under-report for a fold
-    that RETURNED", not an absolute. Two targets
+    does not count at all, because the hook runs on the fold's RETURN.
+
+    The one claim that holds in the direction that matters: **no under-report for
+    a fold that RETURNED** (and none for a documented no-write arm, since those
+    are marked). The interrupted shape is the named residual, and closing it
+    belongs at the fold's own statement boundary, not here. Two targets
     in one process is normal for a deployment that writes the registry graph as
     well as tenant graphs. What is pathological is the TENANT's target absent
     from this list — or present under a store the deployment does not read.
