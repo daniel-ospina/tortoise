@@ -1696,6 +1696,71 @@ class TestAMentionIsNotAnOccurrence:
         assert plan["id"] not in {r["id"]
                                  for r in PO.planned_without_occurrence(g)}
 
+    def test_a_LYING_SUBCLASS_STAGE_cannot_settle_a_plan_at_held(self, sdk):
+        """``settle_plan``'s ``stage not in (…)`` is an ``__eq__`` test too.
+
+        Membership is ``any(x is e or x == e for e in …)``, so a ``str``
+        subclass whose ``__eq__`` returns True is CONTAINED and the refusal does
+        not fire. The value then reaches ``advance_stage``, whose ``resolve`` does
+        ``ref.strip()`` — an exact ``str`` on a subclass — so ``held`` resolves
+        and the terminal move APPLIES: a plan reading as held with no occurrence
+        ``:Event``, which is the inversion ``settle_plan``'s refusal exists to
+        make unrepresentable (#13586 review, finding 1). A refusal that fires
+        late leaves the same wreckage, so the three post-conditions are the same
+        ones the plain-``str`` case uses.
+        """
+
+        class _AlwaysEqual(str):
+            """Lies TOWARDS membership: every ``in`` test finds it."""
+
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+            __hash__ = str.__hash__
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Held through the twin door")
+        with pytest.raises(ValueError) as exc:
+            PO.settle_plan(sdk, plan["id"], _AlwaysEqual(PO.STAGE_HELD))
+        message = str(exc.value)
+        assert "not a no-occurrence ending" in message, message
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+        cur = _stage(sdk, plan["id"])
+        assert cur["stageId"] == PO.STAGE_SCHEDULED
+        assert cur["isClosed"] is False
+        assert plan["id"] in {r["id"] for r in PO.planned_without_occurrence(g)}
+
+    def test_a_SUBCLASS_stage_that_IS_a_no_occurrence_ending_still_settles(
+            self, sdk):
+        """The positive control: normalising must not become a blanket refusal.
+
+        A ``str`` subclass that compares TRUTHFULLY is still the ending it names —
+        the fix flattens the TYPE, it does not reject the caller's object. This
+        row passes on the pre-fix code too, which is why it is the control rather
+        than the discriminator: without it, a mutant that refused every stage
+        value would redden only negatives.
+        """
+
+        class _Ending(str):
+            """A ``str`` subclass with no lying comparison — only a new type."""
+
+        g = sdk._get_proj().g
+        plan = PO.create_plan(sdk, "Missed through a subclass")
+        settled = PO.settle_plan(sdk, plan["id"], _Ending(PO.STAGE_MISSED))
+        assert settled["move"].applied is True
+        cur = _stage(sdk, plan["id"])
+        assert cur["stageId"] == PO.STAGE_MISSED
+        assert cur["outcome"] == "lost"
+        assert cur["isClosed"] is True
+        assert g.query(
+            "MATCH (:Event)-[:aboutObject]->(:Object {id:$p}) RETURN count(*)",
+            params={"p": plan["id"]}).result_set[0][0] == 0
+
     def test_the_explicit_occurrence_kind_is_accepted(self, sdk):
         g = sdk._get_proj().g
         plan = PO.create_plan(sdk, "Held, kind stated")

@@ -657,11 +657,13 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     # this guard exists to make unrepresentable: the plan advances to terminal
     # `held` and the read serves it as *planned and never happened*, with nothing
     # raising. That is the same rule `is_plan_kind` (:176) and
-    # `lifecycle_props_by_rendering` (:722) already follow, and this was the only
-    # caller-supplied-`str` comparison in this file that still trusted `__eq__`
-    # (#13578 review, finding 1). Normalising ONCE means the value WRITTEN is the
-    # same value CHECKED — otherwise the guard compares one kind and the store
-    # keeps another.
+    # `lifecycle_props_by_rendering` (:722) already follow (#13578 review,
+    # finding 1). ⛔ Its TWIN DOOR is `settle_plan`'s `stage not in (…)` below — a
+    # caller-supplied-`str` comparison that trusted `__eq__` the same way, and
+    # it is repaired in this same change (#13586 review, finding 1): closing one
+    # door and stating the class is shut is how the other one stays open.
+    # Normalising ONCE means the value WRITTEN is the same value CHECKED —
+    # otherwise the guard compares one kind and the store keeps another.
     kind = (str.__str__(event_kind) if isinstance(event_kind, str)
             else event_kind)
     # ⛔ BEFORE the resolve and before ANY write: a refused call leaves nothing
@@ -775,6 +777,19 @@ def settle_plan(sdk, plan_ref: str, stage: str, *, at: str | None = None,
     """
     from . import pipeline
 
+    # ⛔ THE RENDERING, not `__eq__` — the same rule (and the same measured
+    # bypass) as `record_occurrence` above. `stage not in (…)` IS an `__eq__`
+    # test, so a `str` subclass whose `__eq__` returns True is CONTAINED and this
+    # refusal does not fire; the value then reaches `advance_stage`, whose
+    # `resolve` does `ref.strip()` — and `str.strip()` on a subclass returns an
+    # exact `str` — so `held` resolves and the terminal move APPLIES: the plan
+    # ends as held with no :Event recording it, and
+    # :func:`planned_without_occurrence` serves it as *planned and never
+    # happened*. That is the unrecoverable direction this module names
+    # (:648-651) and the exact inversion this refusal exists to make
+    # unrepresentable (#13586 review, finding 1). Normalising ONCE means the
+    # value CHECKED is the value MOVED.
+    stage = str.__str__(stage) if isinstance(stage, str) else stage
     if stage not in (STAGE_MISSED, STAGE_CANCELLED):
         raise ValueError(
             f"Refused: {stage!r} is not a no-occurrence ending. WHAT TO DO: use "
