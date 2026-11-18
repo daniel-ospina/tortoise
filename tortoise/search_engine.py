@@ -2581,7 +2581,9 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     Returns the marker dict when the trace shows a TEXT read whose vector
     leg did not run (``ran=False``) or ran degraded (``degraded=True`` — e.g.
     ``no_embedder``, ``encode_failed``, ``breaker_open``, ``query_failed``,
-    ``index_missing``, ``no_embeddings``, ``timeout``), else ``None``.
+    ``index_missing``, ``no_embeddings``, ``timeout``, ``load_in_flight`` — a
+    load that was still RUNNING when the read declined to wait for it, #13528),
+    else ``None``.
     A leg the read never asked — ``no_query_vector``, recorded
     ``ran=False``/``degraded=False`` (#5412) — is also declared: it
     contributed no semantic rows, and the ``reason`` names that instead of
