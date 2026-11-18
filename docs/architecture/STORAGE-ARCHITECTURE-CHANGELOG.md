@@ -2523,7 +2523,13 @@ replaced by the target state:
   `#13093`) — with the third read the registry marks `SERVED` while nothing in production consumes it named as exactly
   that (`node-by-key`), and why `prefer` is the mode armed in production: it is the
   one that MEASURES the migration, since every answer names the store that produced it (`servedFrom` /
-  `fallbackReason`). **`record` follows that count, never a date.** The paragraph carries the **`OVERRIDES:`** line.
+  `fallbackReason`). **`record` follows that count, never a date.** The `OVERRIDES:` line itself lives on the issue —
+  `#7970` comment [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268), where
+  AGENTS.md's rule puts it — and §2.0 carries a one-line pointer to it rather than a second copy. ⚠️ **§2.0 does
+  carry ONE bold `**OVERRIDES:**` line, and it is NOT this one:** it marks the *"keep the limit in falkor high"* clause
+  below, a different departure, which is why `grep -n "OVERRIDES:" docs/architecture/STORAGE-ARCHITECTURE.md` returns
+  several hits and cannot be used to check this. What is gone is the seven-line supersession essay and its quotation of
+  the retired sentence, because a dated *"was deferred, now it isn't"* re-telling is the narration the owner ruled out.
 - **§14.2's split marker** — the same status, stated there because that marker is where the engine's-role question is
   answered and it had restated the deferral.
 - **§17.3's reader paragraph** — *"the node-naming read that will drive this in production is deferred by §2.0"* was
@@ -2557,16 +2563,20 @@ completeness through private-beta (bounded after the search doc's M2), self-host
 opposed to its measurement). None of them is this cutover, and collapsing them into one status would be the opposite
 of the fix.
 
-**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (16) — the class guard that scans the design
-documents for issue-state claims, change narration and delivery state, **plus a pin of its own for this claim, because
-the class guard does not cover it**: measured at `f392d5135`, restoring §2.0's *"stays DEFERRED by §2.0"* sentence left
-all 15 green — `DEFERRED` is in neither `_STATUS_WORDS` nor `_STATUS_LOWER`, and *"stays DEFERRED"* is none of
-`_CHANGE_NARRATION`'s spellings. `test_the_design_documents_do_not_re_defer_the_anchored_read_cutover` is that pin: it
-reds on the three pre-fix sites **and on a rewording that spells none of them**, it does not fire on this entry's
-`OVERRIDES:` marker or on the deferrals that are about something else (§12.2b lever 5, the stored-vs-derived edges),
-and it asserts §2.0 still states the mechanism, so deleting the answer is not a way to pass.
+**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (16) — the class guard that scans
+`STORAGE-ARCHITECTURE.md` for issue-state claims, change narration and delivery state. ⚠️ **Read its coverage
+exactly: that vocabulary does NOT include a bare *"stays DEFERRED"*.** `DEFERRED` is deliberately outside
+`_STATUS_WORDS`/`_STATUS_LOWER` because this document legitimately defers two other things (the stored-vs-derived
+edge question, owner ruling 2026-09-23; and `#9213`'s restore-reason lane), so a `DEFERRED` arm would red on correct
+content — and the class check's arms are per-line, while the retired sentence wrapped. What pins this shape is
+therefore a separate subject-scoped arm, added by this change:
+`::test_the_storage_document_does_not_defer_the_anchored_read_cutover`, which ties `DEFERRED` to *this* cutover in
+both word orders and carries a non-vacuity fixture on the retired sentence. **It reds on the pre-fix text — measured
+at 2 hits on `origin/main` before this branch, and at 2 on this branch's own first commit `f392d513` — and is green
+here, so this shape is now guarded rather than merely absent.**
 `tests/test_extractor_v4_doc_citations.py` and
-`tests/test_extractor_v4_step_list_consistency.py` (37 together with the above), and the ten doc-cite files that read
+`tests/test_extractor_v4_step_list_consistency.py` (38 together with the above — 16 + 2 + 20, measured), and the ten
+doc-cite files that read
 this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pin.py`,
 `tests/test_10853_session_source_prose.py`, `tests/test_7948_about_object_read_sites.py`,
 `tests/test_10000_source_prose.py`, `tests/test_10122_point_name_not_indexed.py`,
