@@ -3337,8 +3337,10 @@ def _sdk_boolean_levers() -> tuple[str, ...]:
 
     Derived from the source instead of restated, so the day a boolean lever is
     added to the read, it is inside this pin: a divergence at one site alone then
-    reds `mirror == reference`, and a NAME at either site that is neither a lever
-    nor a site coordinate reds `_SITE_SPECIFIC`.
+    reds `mirror == reference`, a NAME at either site that is neither a lever nor
+    a site coordinate reds `_SITE_SPECIFIC`, and a lever handed over UNNAMED
+    (`**mapping`) reds the splat assertion below — the one route by which a name
+    could otherwise reach the read without this pin ever seeing it.
 
     The rule is the parameter's FORM, not its annotation: a keyword-only argument
     whose default is a literal `True`/`False`. That also picks up
@@ -3365,9 +3367,10 @@ def _sdk_boolean_levers() -> tuple[str, ...]:
 #: reference, because they are the site's own coordinates rather than part of the
 #: leg's shape: the leg selector (`kind` / `entity_type`), the width (`k` /
 #: `limit`), and the trace list the mirror collects for its own accounting. Every
-#: OTHER name at either call site must be one of the SDK's boolean levers — that is
-#: the whole of what this pin claims, and it now checks the claim in both
-#: directions instead of only over a hand-written subset.
+#: OTHER name at either call site must be one of the SDK's boolean levers, and no
+#: lever may be handed over UNNAMED (`**mapping`) at the mirror — that is the whole
+#: of what this pin claims, and it checks the claim in both directions instead of
+#: only over a hand-written subset.
 _SITE_SPECIFIC = frozenset({"entity_type", "limit", "leg_trace"})
 
 
@@ -3396,14 +3399,21 @@ def _expr_form(node: ast.expr) -> tuple[str, str]:
     return ("expr", ast.dump(_Abstract().visit(tree.body)))
 
 
-def _call_keywords(path: Path, func: str) -> dict[str, ast.expr]:
-    """`{keyword: value node}` for the ONE `tortoise_fts_query` call in `func`.
+def _call_keywords(path: Path, func: str) -> tuple[dict[str, ast.expr], tuple[str, ...]]:
+    """`({keyword: value node}, (splat forms))` for the ONE `tortoise_fts_query`
+    call in `func`.
 
-    A `**mapping` keyword carries `arg=None` and is NOT a name this can read —
-    the reference's `**extra` (`#4509`'s per-session `exclude_turn_echo_session`,
-    built conditionally) is exactly that, and it is deliberately outside this
-    pin's claim: it is runtime capture state, not a corpus lever, so it is named
-    here rather than silently dropped.
+    A `**mapping` keyword carries `arg=None`, so its names are NOT visible to a
+    name-by-name pin. It is therefore returned SEPARATELY rather than skipped: a
+    skip is exactly how a lever escapes this pin, and it was measured at #13495
+    on the first draft of this helper — `**_LEG_SPLAT` at the mirror with
+    `_LEG_SPLAT = {"ended_scope": True}` left the pin GREEN while the mirror
+    really did read the ENDED population, i.e. a different population than the leg
+    it claims to mirror, silently. The caller asserts no splat at the mirror and
+    exactly one, by name, at the reference: `**extra` is `#4509`'s conditional
+    per-session `exclude_turn_echo_session`, runtime capture state rather than a
+    corpus lever, so it is pinned BY NAME here instead of being claimed as
+    covered.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     owners = [n for n in ast.walk(tree)
@@ -3414,7 +3424,10 @@ def _call_keywords(path: Path, func: str) -> dict[str, ast.expr]:
              if isinstance(n, ast.Call)
              and getattr(n.func, "attr", None) == "tortoise_fts_query"]
     assert len(calls) == 1, (path, func, f"expected one call, found {len(calls)}")
-    return {kw.arg: kw.value for kw in calls[0].keywords if kw.arg is not None}
+    named = {kw.arg: kw.value for kw in calls[0].keywords if kw.arg is not None}
+    splats = tuple(ast.unparse(kw.value)
+                   for kw in calls[0].keywords if kw.arg is None)
+    return named, splats
 
 
 def _flag_values(keywords: dict[str, ast.expr],
@@ -3459,6 +3472,11 @@ def test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does():
     mirror alone starts passing it, and so does a row filter outside the lever set
     (`exclude_status`), because both sites are held to "levers plus the three site
     coordinates" in BOTH directions.
+
+    A `**mapping` at either site is held to the same standard STRUCTURALLY: the
+    mirror may pass none (a splat would put a lever beyond this pin's read), and
+    the reference's single `**extra` is pinned by name. Without that, the
+    both-directions claim was true only for keywords the parser could see.
     """
     flags = _sdk_boolean_levers()
     # Anti-vacuity, because a derivation that silently returned nothing (a moved
@@ -3466,8 +3484,28 @@ def test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does():
     # true: the levers this pin EXISTS for must be in it.
     assert {"include_terminal", "_record_reads", "_valid_time_rerank",
             "_rerank_candidates"} <= set(flags), flags
-    mirror_kw = _call_keywords(ROOT / "tools" / "window_quality_m2.py", "query")
-    reference_kw = _call_keywords(ROOT / "tortoise" / "extractor_v2.py", "_fts_rows")
+    mirror_kw, mirror_splats = _call_keywords(
+        ROOT / "tools" / "window_quality_m2.py", "query")
+    reference_kw, reference_splats = _call_keywords(
+        ROOT / "tortoise" / "extractor_v2.py", "_fts_rows")
+    # A `**mapping` hands the read names this pin cannot read, so the MIRROR — the
+    # site under guard — must pass none: every lever it passes is then named, and
+    # therefore compared. (Measured at #13495: `**_LEG_SPLAT` = {"ended_scope":
+    # True} at the mirror was GREEN before this assertion existed.)
+    assert not mirror_splats, (
+        "tools/window_quality_m2.py::query() splats "
+        f"{list(mirror_splats)} into the read, so whatever names that mapping "
+        "carries are invisible to this pin — pass the keyword(s) by name here, "
+        "so the mirror's flag set stays readable and compared")
+    # The reference's one splat is the documented #4509 capture-state mapping
+    # (`_call_keywords`'s docstring). Pinned by NAME so a second one cannot arrive
+    # unnoticed; its CONTENT is runtime state, not a corpus lever, and is not
+    # claimed as covered.
+    assert reference_splats == ("extra",), (
+        f"tortoise/extractor_v2.py::_fts_rows splats {list(reference_splats)}; "
+        "the only splat this pin knows is `**extra` (#4509's per-session "
+        "`exclude_turn_echo_session`) — record any other in this pin and in "
+        "`_call_keywords`'s docstring before relying on it")
     allowed = set(flags) | _SITE_SPECIFIC
     for label, kw in (("mirror", mirror_kw), ("reference", reference_kw)):
         unexpected = sorted(set(kw) - allowed)
