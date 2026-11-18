@@ -246,11 +246,14 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
     no second connection. ``kinds`` is the caller's kind EXPANDED the way the
     read filters expand one (``sdk._read_filter_kinds``) — an unexpanded kind
     here would miss the descendants a caller's own filter would have matched.
-    ``kind`` is the UNEXPANDED singular form and NARROWS the population too: a
-    keyword the statement cannot apply is refused rather than dropped, and a
-    direct caller passing only ``kind`` must get that kind's records, never the
-    whole family (the read path always passes both, because
-    ``_read_filter_kinds(kind)`` contains ``kind`` itself, so the two agree).
+    ``kind`` is the UNEXPANDED singular form and NARROWS the population too. It is
+    NARROWED ON, never ignored — the defect class here is a keyword accepted and
+    then dropped in silence, which serves a whole family as the answer to a
+    narrowed question — so a direct caller passing only ``kind`` gets that kind's
+    records and never the whole family. When BOTH are passed, ``kinds`` (the
+    EXPANDED form) wins: it is the set the read path's own filter would have
+    matched, and ``_read_filter_kinds(kind)`` always contains ``kind`` itself, so
+    the two agree rather than conflict for every SDK caller.
 
     The read is BOUNDED (``LIMIT $limit``) and ordered by the record's own
     ending time, so the caller gets the most recent endings rather than an

@@ -44784,16 +44784,22 @@ class TortoiseSDK:
         `linkedEvents`.
         ⛔ A `query` beside it is REFUSED, not ignored: a state enumeration that
         silently dropped the caller's words would serve a whole population as if
-        it were their answer. The refusal is a CLOSED LIST, and it names every
-        retrieval keyword that could change or shrink the served rows:
-        `query`, `threshold`, `min_confidence`, `order_by`,
-        `relationship_filter`, `traversal_path`, `claim_class`,
-        `exclude_status` and `exclude_turn_echo_session` (the last would have
-        excluded rows the caller asked to exclude, in silence). A knob not on
-        that list is not applied either — the list is the contract, so a new
-        retrieval keyword must be classified in it rather than assumed covered
-        by "every retrieval knob". `entity_type` (point/object/subject — the
-        kinds with a lifecycle), `kind` and `limit` scope and bound it.
+        it were their answer. The refusal is a CLOSED LIST, and it names EVERY
+        retrieval keyword the normal path uses to shrink, expand, re-rank,
+        re-weight, time-scope or enrich the row set: `query`, `threshold`,
+        `min_confidence`, `order_by`, `relationship_filter`, `traversal_path`,
+        `claim_class`, `exclude_status`, `exclude_turn_echo_session`, `graph_ranker`,
+        `structural_kind`, `structural_hops`, `pool_size`, `fusion_weights`,
+        `fusion_k`, `recency_field`, `recency_boost`, `query_date`, `time_aware`,
+        `keep_numeric`, `search_keys_prf`, `entity_key_expansion` and `w4_enrich`
+        (`exclude_turn_echo_session` would have returned rows the caller asked to
+        exclude, in silence — the failure the sentence above cites). A new
+        retrieval keyword must be classified in that list, because the list IS the
+        contract. `include_terminal` is the one keyword accepted beside it and it
+        is a NO-OP here rather than a drop: the ended population is already the
+        terminal one, so that flag can neither add nor remove a row. `entity_type`
+        (point/object/subject — the kinds with a lifecycle), `kind` and `limit`
+        scope and bound it.
         `ended_scope` is not a visibility field on the record and adds no word
         to the model: it is design §6's "option on the call", and the default
         keeps every existing surface answering exactly what it answered before.
@@ -45058,13 +45064,26 @@ class TortoiseSDK:
         # floor was not applied. ``limit`` (the page bound), ``entity_type`` and
         # ``kind`` (the population's scope) DO apply and stay served.
         #
-        # ⛔ THE REFUSED SET IS CLOSED AND EVERY MEMBER IS NAMED BELOW. A knob
-        # this block does not name is dropped silently, so a candidate is admitted
-        # only when dropping it cannot change the SERVED ROWS in a direction the
-        # caller would not expect — ``exclude_turn_echo_session`` is therefore
-        # here (it SHRINKS the rows and the caller passed it to exclude them).
-        # Any new retrieval keyword must be classified here or in the docstring;
-        # "every retrieval knob" is a claim only the list can keep true.
+        # ⛔ THE REFUSED SET IS CLOSED AND EVERY MEMBER IS NAMED BELOW. A knob that
+        # is not named here is NOT reached by this arm either, so it may only be
+        # admitted when dropping it cannot change which rows a caller receives. A
+        # knob the normal path uses to SHRINK, EXPAND, RE-RANK, RE-WEIGHT, TIME-SCOPE
+        # or ENRICH the row set is refused: silently dropping it serves a state
+        # population as if the caller's scope had been applied, which is the
+        # failure the comment above cites for ``query``. That is why the whole
+        # retrieval vocabulary is here and not just the eight filters first
+        # listed (#13416 review F4: ``structural_hops``/``structural_kind``/
+        # ``graph_ranker``/``pool_size``/``fusion_*``/``recency_*``/``query_date``/
+        # ``time_aware``/``keep_numeric``/``search_keys_prf``/
+        # ``entity_key_expansion``/``w4_enrich`` were dropped in silence).
+        # ⛔ ``include_terminal`` is deliberately NOT refused and is the ONE
+        # exception, by construction rather than by omission: the ended population
+        # is already the terminal one, so the flag can neither add nor remove a
+        # row here — refusing it would refuse a caller for asking for what they
+        # are getting. ``limit``, ``entity_type`` and ``kind`` scope and bound the
+        # read and stay served; the sink/plumbing keywords (``leg_trace``,
+        # ``read_status_out``, ``_truncation_out``, ``_elevated_timeout_ms``) are
+        # how the caller receives or times the answer, not what it contains.
         if ended_scope:
             _refused_ended = sorted(
                 name for name, _supplied in (
@@ -45078,6 +45097,20 @@ class TortoiseSDK:
                     ("exclude_status", bool(exclude_status)),
                     ("exclude_turn_echo_session",
                      exclude_turn_echo_session is not None),
+                    ("graph_ranker", graph_ranker is not None),
+                    ("structural_kind", structural_kind is not None),
+                    ("structural_hops", structural_hops not in (0, None)),
+                    ("pool_size", pool_size is not None),
+                    ("fusion_weights", fusion_weights is not None),
+                    ("fusion_k", fusion_k != 60),
+                    ("recency_field", recency_field is not None),
+                    ("recency_boost", recency_boost not in (0.0, 0)),
+                    ("query_date", query_date is not None),
+                    ("time_aware", bool(time_aware)),
+                    ("keep_numeric", bool(keep_numeric)),
+                    ("search_keys_prf", bool(search_keys_prf)),
+                    ("entity_key_expansion", bool(entity_key_expansion)),
+                    ("w4_enrich", w4_enrich is not True),
                 ) if _supplied
             )
             if _refused_ended:

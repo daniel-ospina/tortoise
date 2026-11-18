@@ -268,6 +268,7 @@ def test_the_ending_time_prefers_the_window_end_over_the_ingestion_stamp():
     )
 
 
+@_docker_only
 def test_the_snake_successor_spelling_is_read_too(sdk):
     """`superseded_by` is a SECOND spelling a tree can carry — and is read.
 
@@ -413,18 +414,87 @@ def test_a_family_without_a_lifecycle_is_refused_not_answered_empty(sdk):
     assert "event" in str(exc.value).lower()
 
 
-@_docker_only
-def test_a_turn_echo_exclusion_beside_ended_scope_is_refused_rather_than_dropped(sdk):
-    """#13302 review F4: the refusal is a CLOSED list, and this knob SHRINKS rows.
+#: Every retrieval keyword the normal path uses to shrink, expand, re-rank,
+#: re-weight, time-scope or enrich the row set — and therefore every one that
+#: must be REFUSED beside ``ended_scope`` rather than dropped in silence (#13302
+#: review F4). One entry per keyword so deleting a line from the refused tuple
+#: reds the row that names it: the previous shape claimed "every retrieval knob"
+#: in a comment while the tuple held eight and the rest were dropped silently.
+_REFUSED_BESIDE_ENDED_SCOPE = (
+    ("query", {"query": "has anything been withdrawn"}),
+    ("threshold", {"threshold": 0.5}),
+    ("min_confidence", {"min_confidence": 0.5}),
+    ("order_by", {"order_by": "confidence"}),
+    ("relationship_filter", {"relationship_filter": "mitigates"}),
+    ("traversal_path", {"traversal_path": "Point"}),
+    ("claim_class", {"claim_class": "asserted"}),
+    ("exclude_status", {"exclude_status": ["retracted"]}),
+    ("exclude_turn_echo_session", {"exclude_turn_echo_session": "sess-1"}),
+    ("graph_ranker", {"graph_ranker": "pointrank"}),
+    ("structural_kind", {"structural_kind": "statement"}),
+    ("structural_hops", {"structural_hops": 2}),
+    ("pool_size", {"pool_size": 40}),
+    ("fusion_weights", {"fusion_weights": {"rrf": 1.0}}),
+    ("fusion_k", {"fusion_k": 40}),
+    ("recency_field", {"recency_field": "updatedAt"}),
+    ("recency_boost", {"recency_boost": 0.3}),
+    ("query_date", {"query_date": "2026-01-01"}),
+    ("time_aware", {"time_aware": True}),
+    ("keep_numeric", {"keep_numeric": True}),
+    ("search_keys_prf", {"search_keys_prf": True}),
+    ("entity_key_expansion", {"entity_key_expansion": True}),
+    ("w4_enrich", {"w4_enrich": False}),
+)
 
-    `exclude_turn_echo_session` returns FEWER rows on purpose, so a silent drop
-    serves rows the caller explicitly asked to exclude — the very failure the
-    refusal block's own comment cites for `query`.
+
+@_docker_only
+@pytest.mark.parametrize("knob, kwargs", _REFUSED_BESIDE_ENDED_SCOPE,
+                         ids=[n for n, _ in _REFUSED_BESIDE_ENDED_SCOPE])
+def test_every_retrieval_knob_beside_ended_scope_is_refused(sdk, knob, kwargs):
+    """The refusal is a CLOSED LIST, and this test IS the list (#13302 review F4).
+
+    A silently dropped knob serves a state population as if the caller's scope had
+    been applied — `exclude_turn_echo_session` returns rows a caller asked to
+    EXCLUDE, `structural_hops` expands, `order_by`/`fusion_*`/`recency_*` re-rank,
+    `query_date`/`time_aware` time-scope. Each one raises naming itself, so the
+    caller learns the arm cannot record what they asked for.
     """
+    call = dict(kwargs)
+    query = call.pop("query", None)
     with pytest.raises(ValueError) as exc:
-        sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
-                               exclude_turn_echo_session="sess-1")
-    assert "exclude_turn_echo_session" in str(exc.value)
+        sdk.tortoise_fts_query(query, entity_type="point", ended_scope=True, **call)
+    message = str(exc.value)
+    assert "ended_scope" in message
+    assert knob in message, (
+        f"the refusal must name the keyword it cannot apply: {knob!r} not in {message!r}"
+    )
+
+
+@_docker_only
+def test_include_terminal_beside_ended_scope_is_a_no_op_not_a_refusal(sdk):
+    """`include_terminal` is the ONE accepted knob, and it cannot change the rows.
+
+    #13302 review F4/F5: the ended population is the terminal one by construction,
+    so the flag neither adds nor removes a row here. Refusing it would refuse a
+    caller for asking for what they are already getting; honouring it as a
+    retrieval knob would mean a live record could enter a state enumeration.
+    """
+    keep = sdk.create_point(kind="statement", content="the venue is booked")
+    dead = sdk.create_point(kind="statement", content="the club withdrew the booking")
+    sdk.retract_point(dead["id"])
+
+    with_flag = _ids(sdk.tortoise_fts_query(None, entity_type="point", limit=50,
+                                            ended_scope=True, include_terminal=True))
+    without = _ids(sdk.tortoise_fts_query(None, entity_type="point", limit=50,
+                                          ended_scope=True))
+    assert with_flag == without, (
+        "include_terminal must not change the ended population — the flag is a "
+        "no-op here, not a scope"
+    )
+    assert dead["id"] in with_flag
+    assert keep["id"] not in with_flag, (
+        "a LIVE record must never enter the ended population, flag or no flag"
+    )
 
 
 @_docker_only
