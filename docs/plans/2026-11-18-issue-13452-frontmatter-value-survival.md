@@ -380,11 +380,14 @@ population claim, round 3 found (D) inert for block/flow plus three over-blocks 
 measurement, fixed, and covered by the matrix. Because the cap is spent, the *diff* then went to the
 **head-bound code review**, which found two more real defects — **(B) tautological** and **(C)
 unreachable behind the escape branch** — both verified by measurement, fixed, and now covered by M1 and
-M16 / M18. The attestation for #13476 is recorded at its FINAL head (`9f25dc79c9` — not an object in
-this clone, so a reader here cannot open it; it resolves on the remote,
-`gh api repos/daniel-ospina/tortoise/commits/9f25dc79c9`, and #13476's merged state on `main` is the
-squash `a5f1e7db46`. Cited by sha because that is the head the record is bound to, with the two
-resolvable pointers named beside it), and that record
+M16 / M18. The attestation for #13476 is recorded at its FINAL head (`9f25dc79c9` — present in this
+clone, so `git show 9f25dc79c9` opens it, though it is **not an ancestor of `main`**
+(`git merge-base --is-ancestor 9f25dc79c9 origin/main` exits 1); #13476's merged state on `main` is
+the squash `a5f1e7db46`. Cited by sha because that is the head the record is bound to, with the two
+resolvable pointers named beside it. ⛔ This said *"not an object in this clone, so a reader here
+cannot open it"* until review round 5: `git cat-file -t 9f25dc79c9` answers `commit` — true only
+that it is not on `main`, and the wrong half sent a reader to a remote API for evidence already
+here), and that record
 is `not-clean` with two findings — the escape one fixed in #13484, and the counter residuals now
 listed in §9. #13484's own attestation is minted at its own final head, after this section.
 
