@@ -287,7 +287,7 @@ its own scope (it decided nothing and created no index). The work the ruling ord
 the record-served dense leg through `record_vector.LABEL_SERVED`, the retirements, the arming — is
 `#13220`'s and is not this document's narration.
 
-## 2026-11-17 — the KEEP ruling's *status* words restated: its prohibition is today's operative rule, and the GRAPH-COPY reopen is recorded as the ruling that governs removal (`#13350`)
+## `#13350` — 2026-11-17: the KEEP ruling's *status* words restated: its prohibition is today's operative rule, and the GRAPH-COPY reopen is recorded as the ruling that governs removal
 
 Applies an owner instruction of 2026-11-17: the **INDEX** half stays *decided, implementation in flight — `#13220`*,
 and the 2026-11-10 KEEP ruling's prohibition — `:Object`/`:Subject` keep their stored embedding, and no pass may
