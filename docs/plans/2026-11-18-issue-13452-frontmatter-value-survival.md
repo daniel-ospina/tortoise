@@ -61,9 +61,15 @@ value is reverted from quoted to unquoted plain, the design is wrong and the arm
 | D | Extend `tortoise/frontmatter_validator.py` (the existing quality gate) to detect truncation | Rejected: it is `warn-only` **and** gated OFF behind `TORTOISE_VALIDATE_FRONTMATTER`, so it can never redden CI — the exact false-PASS shape this issue is about. Adding a check there would add a second, non-enforcing instrument. |
 | E | Add a lint rule to `scripts/check-doc-affiliation.cjs` | Deferred, not rejected: that script is **not wired into CI** (the arm's own docstring says so), so it is a second advisory instrument, not the enforcement. Filed as a follow-up if it recurs; A already closes the class on the CI path. |
 
-**Re-derivation note (PLAN-VERIFY round 1, P3):** the deferred `config/ci-surfaces.yml` rationale
-lives at **`:13139`**, not `:13061` (line 13061 is a different module's cost note — the issue body's
-citation is wrong and this plan inherited it; corrected here).
+**Re-derivation note (PLAN-VERIFY round 1, P3; citation corrected in review):** the deferred
+`config/ci-surfaces.yml` rationale is the `test_doc_affiliation_frontmatter.py: 0.1  # #8738 review
+P2: six frontmatter-block reads + one directory glob; …` line in that file's timing-cost region —
+`grep -n 'test_doc_affiliation_frontmatter.py: 0.1' config/ci-surfaces.yml` finds it. Measured at head
+(`b0940c7a4ffc`) that is line **`:13167`**; it is cited by its KEY, not by a bare line number,
+because `ci_timing.py --refresh-durations` rewrites the region and the number moves with every
+refresh. An earlier correction of this note said `:13139`, which is itself off by 28 lines (that line
+is `test_pack_shipping.py`), and the issue body's `:13061` is a different module's cost note
+(`test_invites_email_http.py`) — the citation drifted at every hand, which is the reason for the key.
 
 ## 3. Complexity + domains
 
@@ -322,7 +328,10 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
   unescaped quote through green (M16 now reds). Scoped honestly: truncation-at-a-quote, NOT a
   character typo (M6 green, stated).
 - **R4** **scope creep** (the 2 absence reds or the consumer get "fixed") → identical before/after
-  failure sets + `git diff --stat` naming exactly 9 modified files + 1 new plan doc.
+  failure sets + `git diff --stat` vs `main` = **2 files** (this plan doc + the test file), with the
+  plan doc MODIFIED rather than new — it already exists on `origin/main`. The `9 files + 1 plan doc`
+  figure this line carried was #13476's tree, measured at THAT head, and is false here (§7 item 2
+  records the same correction against the sibling claim).
 
 **Review budget disclosure.** PLAN-VERIFY spent its **3** cycles (the standard cap); round 1 found an
 `isinstance(str)` fail-open that skipped a 100 %-lost value, round 2 found R3 unreachable and a false
@@ -340,7 +349,9 @@ listed in §9. #13484's own attestation is minted at its own final head, after t
   evidence bundles `docs/evidence/13038-capstone/README.md` +
   `docs/evidence/13436-write-path-costs/README.md`, the latter landed by `#13436` after this plan) —
   separate defect, explicitly excluded by the issue;
-- `config/ci-surfaces.yml:13139` rationale drift (category B, no behavioural consequence);
+- `config/ci-surfaces.yml` timing-cost rationale for `test_doc_affiliation_frontmatter.py` (cited by
+  its key: line `:13167` at head `b0940c7a4ffc`, moved by `ci_timing.py --refresh-durations`) —
+  rationale drift (category B, no behavioural consequence);
 - other directories' unquoted-plain-scalar hazard (unmeasured here — stated as a gap);
 - the 7 sibling `aboutSubjects` in these files that are plain-but-parse-correctly (quoting them is
   not this task and would inflate the diff);
