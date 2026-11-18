@@ -315,8 +315,8 @@ a mint. The ninth is #13447's `tortoise/derived_embedding.py:3` — the seam
 module's opening paragraph names `:Object`/`:Subject`/`:Event`/`:Document`/`:Source`
 to say which labels the one derive-and-encode rule spans, i.e. prose that names
 the retired label to state a rule about it, in a file this population had not
-previously reached (so it lifts the FILE count as well as the line count, like
-#10976 and #11729 before it). All nine are the point
+previously reached, so it lifts the FILE count as well as the line count
+(like #10976 and #11729 before it). All nine are the point
 rather than an accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
