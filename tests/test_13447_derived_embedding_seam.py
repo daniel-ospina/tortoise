@@ -510,3 +510,49 @@ def test_the_state_the_restore_CREATES_is_not_reported_divergent():
     assert divergent.graph_only == (), divergent.graph_only
     assert divergent.report.field_mismatches == 1, divergent.report.render()
     assert divergent.verdict() == rr.VERDICT_DIVERGENT, divergent.report.render()
+
+
+def test_the_citations_this_move_rotated_name_the_module_that_holds_the_helpers():
+    """The `@ed1caed` P3 finding, kept honest: three architecture-doc sentences went
+    on naming `record_writer._…_parts` after this PR moved the helpers into
+    `derived_embedding`.
+
+    Citing by NAME is the recorded convention (`docs/architecture/S2-DECISION-SEAM.md`
+    — "assertions by NAME — never by line number"), and a name is only an assertion
+    if it RESOLVES: `record_writer` has no module-level `__getattr__`, so a stale
+    spelling sends the reader to a module where the attribute is simply gone.
+
+    Non-vacuous by construction: run against the PRE-FIX docs this reds on the three
+    stale spellings it lists, and it also reds if a future move relocates the helpers
+    again without re-pointing. The `hasattr` pair is measured in both directions, so a
+    move BACK to `record_writer` reds here too rather than rotting the docs silently.
+    """
+    from pathlib import Path
+
+    from tortoise import derived_embedding, record_writer
+
+    for name in ("_document_embedding_parts", "_source_embedding_parts"):
+        assert hasattr(derived_embedding, name), f"derived_embedding must own {name}"
+        assert not hasattr(record_writer, name), (
+            f"record_writer must NOT own {name} — the seam moved it; if it moves back, "
+            "re-point the citations this test checks rather than deleting this guard")
+
+    docs_root = Path(__file__).resolve().parent.parent / "docs"
+    names = ("_document_embedding_parts", "_source_embedding_parts")
+    stale = []
+    for doc in sorted(docs_root.rglob("*.md")):
+        text = doc.read_text(encoding="utf-8")
+        for name in names:
+            if f"record_writer.{name}" in text:
+                stale.append(f"{doc.relative_to(docs_root)}: record_writer.{name}")
+    assert not stale, (
+        "these citations name a module where the helper no longer exists "
+        "(`record_writer` defines no module-level `__getattr__`):\n  " + "\n  ".join(stale))
+
+    # The re-point must MOVE each citation, not delete it — a doc that names neither
+    # helper through `derived_embedding` lost the pointer instead of fixing it.
+    for doc_name in ("architecture/SEARCH-ARCHITECTURE.md", "architecture/STORAGE-ARCHITECTURE.md"):
+        text = (docs_root / doc_name).read_text(encoding="utf-8")
+        assert any(f"derived_embedding.{name}" in text for name in names), (
+            f"{doc_name} names neither helper through `derived_embedding` — the "
+            "citation was dropped rather than re-pointed")
