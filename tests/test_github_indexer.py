@@ -18,10 +18,12 @@ targets of the plan:
 from __future__ import annotations
 
 import os
+import re
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 from datetime import UTC
+from pathlib import Path
 
 import httpx
 import pytest
@@ -919,7 +921,7 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
             # ⚠️ NOT a fold REFUSAL: `outdated` is absent from the fold's set
             # (`commit_ops.OBJECT_TERMINAL_STATUSES`), so the fold does not refuse
             # this row — the CLOSE fold is never DISPATCHED for it (no live holder,
-            # read at `entities.py:6134-6135`). It belongs in this dict because the read must
+            # read at `entities.py:6162-6163`). It belongs in this dict because the read must
             # not call it OPEN, which is the dict's real contract.
             "SET o.outdated=true, o.pipelineStageId='in_progress', "
             "o.pipelineSlot='active', o.isClosed=false"),
@@ -976,7 +978,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
 
     The mirror of the pin above. `_fold_object_stage` returns BEFORE
     `apply_stage_fold` when the Object's `status` is in the fold's OWN latch set
-    (`entities.py:6228`, `excluded = _terminal_object_statuses()` at `:5894` =
+    (`entities.py:6256`, `excluded = _terminal_object_statuses()` at `:5922` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
     coherent un-supersede does clear `superseded` (`sdk.py:54063-54072`), and this
@@ -1101,7 +1103,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     `sdk.py:54063-54072`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
-    (`entities.py:6228`).
+    (`entities.py:6256`).
 
     A LATCHED row now answers `None` — this module's "no opinion" — so no
     transition is minted in EITHER direction, the only stable answer while the
@@ -1173,7 +1175,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
     """#13289 round-4 finding 2: the two folds refuse ASYMMETRICALLY on `outdated`.
 
     `_fold_object_stage`'s latch is `commit_ops.OBJECT_TERMINAL_STATUSES`
-    (`projection/entities.py:6228`), which has no `outdated` member — but the two
+    (`projection/entities.py:6256`), which has no `outdated` member — but the two
     folds that consume these transitions are dispatched under DIFFERENT rules, so
     neither single answer serves both directions:
 
@@ -1182,7 +1184,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
       (`live.py` `TERMINAL_EXCLUDED_STATUSES` + the flag conjunct), so such a row has
       NO live holder and the close fold is NEVER dispatched. Nothing can close it, so
       any state this read answers about it re-fires once per poll, without bound;
-    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6159-6162`), which
+    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6187-6190`), which
       bypasses the live-holder requirement for a single registered incarnation — so it
       IS dispatched, and it APPLIES, because the latch is that narrower set.
 
@@ -1266,7 +1268,7 @@ def test_a_POSITIONLESS_wide_term_row_answers_one_direction_only(sdk):
     the read fell through to `_STATUS_TO_STATE` and answered `"open"`, so a GitHub
     close minted `-closed` on every poll against a row whose close fold can never be
     dispatched (no live holder — `resolve_fold_name` → `live._terminal_excluded`,
-    which carries the `outdated` conjunct; `entities.py:6157-6160`).
+    which carries the `outdated` conjunct; `entities.py:6186-6190`).
 
     The rule is per-direction. Withhold ONLY where the word says `open`; any other
     word — including one OUTSIDE `_STATUS_TO_STATE` (`outdated`, or a NULL status
@@ -3137,3 +3139,147 @@ def test_7951_registration_probe_failure_fails_open(tmp_path, monkeypatch):
             "the fail-open path did not journal the Object (#7951 P2-b)")
     finally:
         sdk.close()
+
+
+# ── #13289 round 11 (P2): the `file:line` citations this change WRITES must
+# resolve to the statement they NAME — at the MERGE RESULT, not at the branch
+# head where they were typed.
+#
+# ⛔ WHY THIS EXISTS. The defect class this whole PR removes is "a citation that
+# points at the wrong statement", and it has a mechanical cause: `main` added 28
+# lines to `entities.py` after this branch's base, so every address above the
+# insertion moved by 28 — and the citations then resolved to an import list, a
+# blank line, and docstring prose. ⛔ No existing gate sees it: the census pins are
+# SCALARS, `tests/test_docs_citation_refs.py` resolves markdown-to-markdown and
+# states its own limit as line PRESENCE rather than semantic correctness, and the
+# `file.py:NNNN` resolver in `tests/test_extractor_v4_citation_rot.py` is scoped
+# to a fixed set of design documents. So a wrong-but-present line ships silently.
+#
+# The pin is by TEXT: an address with no pin FAILS rather than passing quietly,
+# which is what makes the next `main`-move a RED test instead of a re-read.
+
+_CITATION_PIN_ROOT = Path(__file__).resolve().parent.parent
+
+# the modules whose citations this change makes claims about, and where they live
+_PINNED_MODULES = {
+    "entities.py": Path("tortoise/projection/entities.py"),
+    "cache_projection.py": Path("tortoise/cache_projection.py"),
+    "sdk.py": Path("tortoise/sdk.py"),
+}
+
+# (module basename, first line, last line) -> (text required ON the first line,
+# text required ON the last line; None when the citation is a single line)
+_CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
+    # entities.py — the status latch, its two refusals, and the by-name reopen reach
+    ("entities.py", 5128, 5130): (
+        '"st": ev.get("status"),  # #1350: status ON CREATE only —',
+        "# re-mention cannot reset superseded→live)."),
+    ("entities.py", 5922, 5922): ("excluded = _terminal_object_statuses()", None),
+    ("entities.py", 6004, 6005): (
+        "pipeline_key=target_kind,", "decl=index.pipeline_for(target_kind),"),
+    ("entities.py", 6162, 6163): (
+        "_live_holders = _live_holders_same_entity(", 'self.g, "Object", name)[0]'),
+    ("entities.py", 6186, 6190): (
+        "_reopen_targets_closed = (", "and isinstance(_held[0], str))"),
+    ("entities.py", 6186, 6191): (
+        "_reopen_targets_closed = (", "if _reopen_targets_closed:"),
+    ("entities.py", 6186, 6192): (
+        "_reopen_targets_closed = (", "object_id = _held[0]"),
+    ("entities.py", 6187, 6190): (
+        "bool(builtin_fold_reopens(event_kind))", "and isinstance(_held[0], str))"),
+    ("entities.py", 6194, 6196): (
+        "object_id = resolve_fold_name(",
+        "mention=bool(_held) and not _live_holders)"),
+    ("entities.py", 6215, 6215): ("declared_kinds=sorted(index.kind_forms))", None),
+    ("entities.py", 6247, 6252): ("row = self.g.query(", ").result_set"),
+    ("entities.py", 6256, 6256): (
+        "if status is not None and status in excluded:", None),
+    ("entities.py", 6267, 6269): (
+        "if (declared_kinds is not None and object_kind is not None", "return False"),
+    # cache_projection.py — the NOT MONOTONE bullet the superseded claim rests on
+    ("cache_projection.py", 807, 807): (
+        "NOT MONOTONE — the carriers CAN be cleared", None),
+    # sdk.py — the non-scalar refusal and the coherent un-supersede admission arm
+    ("sdk.py", 53911, 53913): (
+        "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
+    ("sdk.py", 54063, 54072): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 22388, 22563): ("def update_knowledge(", None),
+    ("sdk.py", 54512, 54512): ("SET n += $props", None),
+}
+
+
+def _citations_in(module: Path) -> set[tuple[str, int, int]]:
+    """Every `file.py:NNN[-MMM]` citation in ``module``, as (basename, first, last).
+
+    A BARE `:NNN` inherits the filename last named on its line — the
+    ``entities.py:6256`` / ``:5922`` shape, which is how one round of this review
+    wrote a second address two words after the first.
+    """
+    found: set[tuple[str, int, int]] = set()
+    for line in module.read_text(encoding="utf-8").splitlines():
+        named = [
+            (m.group(1).rsplit("/", 1)[-1], int(m.group(2)), int(m.group(3) or m.group(2)))
+            for m in re.finditer(r"([A-Za-z0-9_./]+\.py):(\d+)(?:-(\d+))?", line)
+        ]
+        found.update(named)
+        if named:
+            carried = named[-1][0]
+            for m in re.finditer(r"`:(\d+)(?:-(\d+))?`", line):
+                found.add((carried, int(m.group(1)), int(m.group(2) or m.group(1))))
+    return {cite for cite in found if cite[0] in _PINNED_MODULES}
+
+
+def test_the_python_citations_in_this_change_are_pinned_to_a_statement():
+    """An address this change writes must be PINNED, not merely well-formed."""
+    cited = _citations_in(_CITATION_PIN_ROOT / "tortoise/indexer/github_indexer.py")
+    cited |= _citations_in(_CITATION_PIN_ROOT / "tests/test_github_indexer.py")
+    assert cited, (
+        "the citation walker matched NOTHING — this pin would be inert, so it is "
+        "failing rather than passing (an inert verifier is not a verifier)")
+
+    unpinned = sorted(c for c in cited if c not in _CITATION_PINS)
+    assert not unpinned, (
+        "a citation to a pinned module has no statement pin: "
+        f"{[f'{b}:{a}-{z}' for b, a, z in unpinned]}. Re-derive it at THIS tree "
+        "(`grep -n` the statement it names) and pin it — an address inherited from "
+        "another base is how these rotted when `main` moved `entities.py` (#13289).")
+
+    # The specific failure mode: an address that lands on a blank line, a comment,
+    # or an import list instead of the statement it names.
+    shapes: list[str] = []
+    src = (_CITATION_PIN_ROOT / _PINNED_MODULES["entities.py"]).read_text(
+        encoding="utf-8").splitlines()
+    for base, a, _last in sorted(cited):
+        if base != "entities.py":
+            continue
+        text = src[a - 1]
+        if not text.strip():
+            shapes.append(f"entities.py:{a} is a BLANK line")
+        elif text.lstrip().startswith("#"):
+            shapes.append(f"entities.py:{a} is a COMMENT: {text.strip()[:60]!r}")
+        elif re.match(r"\s*(?:from|import)\s", text):
+            shapes.append(f"entities.py:{a} is an IMPORT: {text.strip()[:60]!r}")
+    assert not shapes, (
+        "a cited `entities.py` address does not point at code: " + "; ".join(shapes))
+
+
+def test_every_pinned_citation_still_names_the_statement_it_is_cited_for():
+    """The `entities.py` line numbers are a MEASUREMENT — re-derive, never copy."""
+    problems: list[str] = []
+    for (base, first, last), (want_first, want_last) in sorted(_CITATION_PINS.items()):
+        src = (_CITATION_PIN_ROOT / _PINNED_MODULES[base]).read_text(
+            encoding="utf-8").splitlines()
+        got_first = src[first - 1] if first <= len(src) else "<BEYOND EOF>"
+        if want_first not in got_first:
+            problems.append(
+                f"{base}:{first} should carry {want_first!r}, holds {got_first.strip()[:70]!r}")
+        if want_last is not None:
+            got_last = src[last - 1] if last <= len(src) else "<BEYOND EOF>"
+            if want_last not in got_last:
+                problems.append(
+                    f"{base}:{last} should carry {want_last!r}, "
+                    f"holds {got_last.strip()[:70]!r}")
+    assert not problems, (
+        "a pinned citation no longer resolves to the statement it names — the file "
+        "moved under this change, so re-derive EVERY address this change writes at "
+        "the CURRENT tree: " + "; ".join(problems))
