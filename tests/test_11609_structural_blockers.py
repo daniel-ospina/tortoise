@@ -23,7 +23,7 @@ WHAT IS PINNED, AND WHAT IS DELIBERATELY NOT
     `PROTECTED` would be reversing a decision rather than recording a changed fact;
   · the union form does carry the envelope, so the design in the plan is actually available;
   · the union DOES re-wrap an existing dict arm (the cost that gates S1 on approval);
-  · `-> dict` cannot be the answer (it refuses a list at the SDK boundary);
+  · `-> dict` cannot be the answer (FastMCP refuses a list return);
   · the three REST routes are derived from the registry row, so retiring the row deletes
     the route — the property the `rest_spec` half of the plan must remove;
   · the nine `NO_CONTAINER_YET` destinations are still not MCP doors.
@@ -40,6 +40,7 @@ from typing import Any
 
 import pytest
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from tortoise import mcp_server as ms
 from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter
@@ -94,9 +95,18 @@ def _live() -> dict:
 
 
 def _schema(name: str) -> dict | None:
-    """The tool's advertised `output_schema`, read from the LIVE server."""
+    """The tool's advertised `output_schema`, read from the LIVE server.
+
+    ⛔ `get_tool` returns **`None`** for a name the server does not serve (measured) — it
+    does not raise. So an unknown name must be a NAMED failure here, not `None`: otherwise
+    "the container still has no envelope" and "the container was renamed away" read
+    identically, and the pin goes vacuously green on the drift it exists to catch.
+    """
     async def _get():
         tool = await ms.mcp.get_tool(name)
+        assert tool is not None, (
+            f"{name} is not served by the MCP server at all (get_tool returned None) — a "
+            "container this table pins cannot be measured, which is drift, not a pass")
         return getattr(tool, "output_schema", None)
 
     return asyncio.run(_get())
@@ -121,10 +131,33 @@ def test_the_container_still_advertises_no_envelope(name):
     A non-`None` schema here means S1 landed. That is not a failure — it is the signal
     that the eight doors above became retirable, and this pin is where that is noticed.
     """
-    assert _schema(name) is None, (
-        f"{name} now advertises an output schema ({_schema(name)!r}) — the container has "
+    advertised = _schema(name)
+    assert advertised is None, (
+        f"{name} now advertises an output schema ({advertised!r}) — the container has "
         "gained an envelope, so the eight `PROTECTED` envelope doors may now be retired "
         "(and their callers' `structuredContent` has moved one level down — see S1)")
+
+
+def test_every_envelope_door_destination_is_one_of_the_six_containers():
+    """S1's SUFFICIENCY: annotating these six unblocks exactly those eight doors.
+
+    Without this edge, the two populations are pinned independently and nothing notices a
+    door re-pointed at a container outside S1's six — the door would keep its `list[dict]`,
+    that other container would keep its `None` schema, and S1 would silently stop
+    unblocking it while every pin stayed green. `tools/bridge_table.py`'s `DESTINATION` is
+    the map that decides it, so it is read rather than restated.
+    """
+    from tools.bridge_table import DESTINATION
+
+    for door in ENVELOPE_DOORS:
+        destination = DESTINATION.get(door)
+        # `DESTINATION` records the bare method name (`search_knowledge`); S1's list is door
+        # names. Normalise rather than keeping a second bare-name list that can drift.
+        container = f"tortoise_{destination}" if destination else None
+        assert container in LIST_CONTAINERS, (
+            f"{door} is recorded as landing on {destination!r}, which is not one of the "
+            f"containers S1 annotates ({sorted(LIST_CONTAINERS)}) — S1 would not unblock "
+            "it, and the plan's per-door consequence is wrong")
 
 
 # ── the design is available, and it costs what the plan says ─────────────────
@@ -148,10 +181,9 @@ def _probe(annotation) -> dict[tuple[str, str], object]:
     out: dict[tuple[str, str], object] = {}
     for arm in ("namespace", "claim"):
         result = asyncio.run(server.call_tool("envelope_probe", {"kind": arm}))
-        structured = getattr(result, "structuredContent", None)
-        if structured is None:
-            structured = getattr(result, "structured_content", None)
-        out[(arm, "structured")] = structured
+        # `ToolResult` exposes `structured_content` only — there is no `structuredContent`
+        # alias on it (measured), so a camelCase fallback here would read as if one existed.
+        out[(arm, "structured")] = getattr(result, "structured_content", None)
     tool_obj = asyncio.run(server.get_tool("envelope_probe"))
     out[("schema", "output")] = tool_obj.output_schema
     return out
@@ -210,13 +242,14 @@ def test_the_list_arm_does_not_change_for_a_migrating_caller():
 
 
 def test_a_dict_annotation_cannot_be_the_answer():
-    """`-> dict` deletes the wrap marker and then REFUSES a list return at the SDK boundary.
+    """`-> dict` deletes the wrap marker and then REFUSES a list return in FastMCP's own
+    result validation (`fastmcp/tools/base.py:357`, surfaced as a `ToolError`).
 
-    Measured, so the plan's rejection of `-> dict` is not a preference: FastMCP raises
-    `structured_content must be a dict or None` for the list arm, i.e. the container would
-    crash on `kind="namespace"` rather than degrade.
+    Measured, so the plan's rejection of `-> dict` is not a preference: the container would
+    crash on `kind="namespace"` rather than degrade. The refusal is FastMCP's, NOT the
+    Tortoise SDK's — `tortoise/sdk.py` raises nothing of the kind.
     """
-    with pytest.raises(Exception, match="structured_content must be a dict or None"):
+    with pytest.raises(ToolError, match="structured_content must be a dict or None"):
         _probe(dict)
 
 
@@ -247,22 +280,49 @@ def test_the_route_is_derived_from_the_registry_row(door, route):
         "that is the S3-S5 change, and this pin should be updated with it")
     assert (entries[0].rest_spec.method, entries[0].rest_spec.path) == (method, path), (
         f"{door} moved its route: {entries[0].rest_spec.method} {entries[0].rest_spec.path}")
-    assert inspect.signature(getattr(ms, door), eval_str=True) is not None  # door exists
+    assert hasattr(ms, door), f"{door} is a registry row with no MCP door on the server"
 
     with_row = _RecordingRouter()
     FastAPIRouterAdapter(with_row).register_all(entries, {door: lambda: None})
     assert any(p == path and m == (method,) for p, m, _ in with_row.routes), with_row.routes
 
-    # …the same handler, with the row removed: the route is gone. This is the property the
-    # `rest_spec` half of the plan must remove, and the reason the door is PROTECTED.
+    # …the SAME registry minus THIS row, with a handler for EVERY route-bearing row: every
+    # other route still registers and EXACTLY this one is gone. (An empty/short handler map
+    # would register nothing at all and so would not measure the removal.)
+    all_handlers = {e.name: (lambda: None) for e in TOOL_REGISTRY if e.rest_spec is not None}
+    survivors = [e for e in TOOL_REGISTRY if e.name != door]
+    assert len(survivors) == len(TOOL_REGISTRY) - 1
+
+    full = _RecordingRouter()
+    FastAPIRouterAdapter(full).register_all(TOOL_REGISTRY, all_handlers)
+    assert any(p == path for p, _, _ in full.routes), full.routes
+
     without_row = _RecordingRouter()
-    FastAPIRouterAdapter(without_row).register_all([], {door: lambda: None})
-    assert not without_row.routes, without_row.routes
+    FastAPIRouterAdapter(without_row).register_all(survivors, all_handlers)
+    assert not any(p == path for p, _, _ in without_row.routes), without_row.routes
+    assert len(without_row.routes) == len(full.routes) - 1, (
+        "removing one row changed the route count by "
+        f"{len(full.routes) - len(without_row.routes)}, not 1 — the route set is not a "
+        "one-to-one function of the rows")
 
     # …and a row with no handler registers nothing either.
     no_handler = _RecordingRouter()
     FastAPIRouterAdapter(no_handler).register_all(entries, {})
     assert not no_handler.routes, no_handler.routes
+
+
+def test_two_rows_on_one_path_double_register():
+    """§2.2's hazard: the re-home must RETIRE the leaf, not merely duplicate the route.
+
+    `register_all` does not dedupe (measured), so re-homing the `rest_spec` onto the
+    container while the leaf still holds one produces two identical routes — which FastAPI
+    serves by first-match, i.e. the retirement silently does nothing.
+    """
+    entries = [e for e in TOOL_REGISTRY if e.name == "tortoise_search"]
+    assert entries, "tortoise_search left TOOL_REGISTRY — re-derive this pin"
+    doubled = _RecordingRouter()
+    FastAPIRouterAdapter(doubled).register_all(entries * 2, {"tortoise_search": lambda: None})
+    assert [p for p, _, _ in doubled.routes].count("/v1/search") == 2, doubled.routes
 
 
 def test_the_search_door_carries_both_blockers():
@@ -296,8 +356,17 @@ def test_the_recorded_destination_is_still_not_an_mcp_door(door, destination):
     live = _live()
     assert door in live, f"{door} is not live, so it is not a `NO_CONTAINER_YET` member"
 
-    if ":" in destination:   # tenancy:/sdk: — never a tool name
-        assert not any(n == f"tortoise_{destination}" for n in live)
+    if ":" in destination:   # tenancy:/sdk: — a router/SDK path, never a tool name
+        prefix, rest = destination.split(":", 1)
+        assert prefix in {"tenancy", "sdk"}, (
+            f"{door}'s destination {destination!r} uses an undeclared prefix {prefix!r} — "
+            "the only declared non-door prefixes are `tenancy:` and `sdk:`")
+        # ⛔ Assert the thing that MATTERS, not a name shape no tool can have: no live tool
+        # name contains `:` (measured), so `f"tortoise_{destination}" not in live` is
+        # unconditionally true and would pass even if `rest` named a real live door.
+        assert rest not in live, (
+            f"{door}'s destination suffix {rest!r} IS a live MCP door — {door} became "
+            "retirable in the batch that landed it")
         return
     assert destination not in live, (
         f"{destination} IS now a live MCP door — {door} became retirable in the batch that "

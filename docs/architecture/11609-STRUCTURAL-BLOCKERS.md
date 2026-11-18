@@ -14,9 +14,13 @@ reason rather than a missing arm:
 | 3 | the paged destination of two already-retired pointers | `query` |
 
 8 + 3 + 1 distinct names = **12** (`tortoise_search` carries reasons 1 and 2 at once).
-The other 4 `PROTECTED` names are the "no arm on the container" class and the 9
-`NO_CONTAINER_YET` are a separate population; both are measured below because the brief
-asks for the 9, and because a stale reason in either is the same defect.
+The other 4 `PROTECTED` names are the "no arm on the container" class, and the 9
+`NO_CONTAINER_YET` are a separate population; the 9 are measured in §1.4 because the brief
+asks for them, and the 4 no-arm names are already measured by
+`tests/test_11609_door_retirement.py::TestProtectedDoorsStayLive`
+(`test_create_entity_still_has_no_arm_for_the_write`,
+`test_the_recorded_container_still_has_no_arm_for_it`), which drives the container rather than
+reading a comment — this document does not restate them.
 
 ---
 
@@ -25,9 +29,11 @@ asks for the 9, and because a stale reason in either is the same defect.
 ### 1.1 The #8482 envelope — question (a)
 
 The envelope is **not added by the tool**. FastMCP derives it from the return annotation.
-Two independent reads agree — the vendored source and a live probe.
+Two independent reads agree — the pinned FastMCP source and a live probe.
 
-`fastmcp/tools/base.py:355-369`:
+`fastmcp` is a **pinned dependency**, not vendored (`pyproject.toml:47`, `fastmcp==3.4.6`), so
+this citation is version-scoped and will drift on a bump;
+`.venv/lib/python3.12/site-packages/fastmcp/tools/base.py:355-369`:
 
 ```python
 if self.output_schema is None:            # <- `-> Any` lands here
@@ -53,13 +59,16 @@ Probe (`FastMCP("p").add_tool` + `call_tool`, a fake arm returning a list and a 
 | `dict` | object schema, **no** wrap marker | **raises** `structured_content must be a dict or None` | the dict itself |
 
 **Answer to (a).** The envelope adds exactly three wire facts: (i) `structuredContent`
-becomes `{"result": <value>}`, (ii) `result` is in `required`, (iii) for a single-type
-annotation `result` carries a declared `type`. A container **can** return a pageable shape
+becomes `{"result": <value>}`, (ii) `result` is in `required`, and (iii) where the annotation
+is **concrete** — `list[dict]`, `dict`, `bool` — `result` also carries a declared `type`. An
+annotation with nothing to declare (`object`, or a union) publishes no `type` on `result`,
+which is precisely why `_violates_wrap_envelope` is type-blind for it. A container **can**
+return a pageable shape
 while preserving the envelope — `list[dict] | dict` does it, which is the shape
 `tortoise_query` has shipped since #11057 — **but no annotation can preserve the envelope
 without re-wrapping the payload**, because the wrap is selected by the annotation and not by
 the call. `-> dict` is not an option: it deletes the wrap marker and then *refuses* a list
-return at the SDK boundary (measured).
+return in FastMCP's result validation (measured).
 
 Two consequences the decision turns on:
 
@@ -68,8 +77,8 @@ Two consequences the decision turns on:
   refusal repair.
 - A dict `result` is only a violation under a **declared `type: array`**; under `anyOf` it is
   admissible (`:2144-2150`). So under a union, a `_safe` failure payload **stops** being
-  repaired by #8482 and is left to **#11153** (`_payload_refusal_result`, `:3287`), which flips
-  `isError` and keeps the payload byte-identical. That is the protocol-correct verdict channel
+  repaired by #8482 and is left to **#11153** (`_payload_refusal_result`, defined `:2420`,
+  applied `:3290`), which flips `isError` and keeps the payload byte-identical. That is the protocol-correct verdict channel
   (`isError` is the only failure signal uniform across clients), but it is *weaker* than the
   array envelope, which makes the failure unreadable as data at all.
 
@@ -99,9 +108,10 @@ tortoise_issue_insight   tool_registry.py:1054  GET /v1/issue-insight  (-> dict)
 Paged destination: `tortoise_query`, `mcp_server.py:4437`, `-> list[dict] | dict` — the only
 container-shaped door on main that already carries a pageable union.
 
-Containers, measured: `search_knowledge`, `list_knowledge`, `check_confidence`,
-`graph_overview` (and `overview`, `explore_connections`, `review_link_candidates`) are all
-`typing.Any` ⇒ **no `output_schema` ⇒ no envelope at all**.
+Containers, measured: the served tools whose `output_schema` is `None` — `get_entity`,
+`graph_overview`, `search_knowledge`, `list_knowledge`, `check_confidence`,
+`explore_connections`, `review_link_candidates` — i.e. **no envelope at all**.
+(`tortoise_overview` is a retired **alias** of `graph_overview`, not a second container.)
 
 ### 1.3 Why the containers are `Any` — it is not laziness
 
@@ -165,17 +175,21 @@ REST twin."*
 ### 2.1 Envelope doors — declare the list containers `list[dict] | dict`
 
 One design, applied to every list container. It is not invented here: it is
-`tortoise_query`'s shipped shape (`mcp_server.py:4437`), and **migrating callers see no
-change at all** — a door that retires was already `list[dict]`, so it already answered
-`{"result": [...]}`; the container's list arm under the union answers `{"result": [...]}` —
-byte-identical. That is the property that makes this the *smallest* change.
+`tortoise_query`'s shipped shape (`mcp_server.py:4437`). The property that makes it the
+*smallest* change is precise, and it is narrower than "nothing changes": **for the list arms,
+the migrated caller's `structuredContent` envelope is byte-identical** — a retiring door was
+already `list[dict]`, so it already answered `{"result": [...]}`, and the container's list arm
+under the union answers the same bytes. Three things still change for a migrating caller and
+are not claimed away: the tool **name**, the argument **names** (the container's `mode=`/
+`kind=` discriminator), and the advertised schema (`result` becomes `anyOf[array, object]`).
 
 Why the alternatives lose:
 
 - **`-> object`** — same envelope, unconstrained `result`; weaker than the union (it does not
   name the array arm) and identical cost. Rejected as strictly less precise.
-- **`-> dict`** — deletes the wrap marker and then *refuses* the list arms at the SDK boundary
-  (measured `ToolError: structured_content must be a dict or None`). Invalid.
+- **`-> dict`** — deletes the wrap marker and then *refuses* the list arms in FastMCP's own
+  result validation (measured `ToolError: structured_content must be a dict or None`; the
+  refusal is FastMCP's, not the Tortoise SDK's). Invalid.
 - **Keep the doors live** — settles nothing; the status quo this lane exists to end.
 - **A second tool per shape** — forbidden by the brief and by #4282's one-container direction.
 
