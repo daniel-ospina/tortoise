@@ -8,8 +8,10 @@ the model:
     update_point(id, status='live')   -> ACCEPTED, lands ['live', outdated=true]
     update_entity(id, status='live')  -> REFUSED  ("already terminal (outdated)")
 
-§5's ``outdated`` row states the rule the promote arm was not reading —
-*"Terminal on every read surface and for every lifecycle transition"* — and
+§5's read-side-legacy note states the rule the promote arm was not reading —
+the ``outdated`` flag "remains a second, flag-based dead marker (#2498) that
+readers — including EP's currency predicate — must continue to honour", i.e. it
+is terminal on every read surface and for every lifecycle transition — and
 ``update_entity``'s guard already applied it, so the promote arm was the one
 door that produced a claim reading **terminal to every reader** while carrying
 ``status='live'``: the two-facts-disagree state the guard exists to prevent.

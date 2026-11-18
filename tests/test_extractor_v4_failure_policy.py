@@ -43,13 +43,19 @@ WHAT THIS PINS
 
 Non-vacuity: the pre-fix document has no `### 4.4` heading, so check 1 fails.
 
-Static, stdlib-only, no network / DB / graph.
+Static, stdlib-only, no network / DB / graph. One optional `git show` of the
+pinned revision (`test_the_transition_map_cites_resolve_at_the_pins_revision`),
+which SKIPS loudly when git cannot answer rather than passing unverified.
 """
 
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
@@ -697,3 +703,143 @@ def test_the_relocation_subsection_citations_name_their_revision_pin():
         "resolves to nothing (#8600). Name the measurement revision in the "
         "passage AND in the header's exception list."
     )
+
+
+#: The `sdk.py:NNNN` / `:NNNN` citation form, with the file prefix OPTIONAL because
+#: this passage writes the second cite as a bare `:NNNN` that inherits the file
+#: named before it (`_ALLOWED_TRANSITIONS` (`sdk.py:2942`) … the `:2955` entry).
+#: `re.split` on the SENTENCE is what scopes the guard: the subsection also cites
+#: `sdk.py` for an unrelated table row, and a guard that demanded the whole
+#: subsection's cites be map lines would red a correct passage.
+_SDK_OR_BARE_CITE = re.compile(r"`?([A-Za-z0-9_./-]+\.py)?:(\d+)")
+#: The definition line's never-split head, so a wrap or an annotation change does
+#: not silently turn the anchor into a miss.
+_TRANSITION_MAP_HEAD = "_ALLOWED_TRANSITIONS:"
+#: The comment the passage QUOTES for the `archived` entry, copied from the
+#: sentence itself (the quote is asserted present in the DOC first, so this pin
+#: cannot outlive the claim it verifies).
+_RESERVED_ENTRY_QUOTE = "terminal (reserved — no v1 write path)"
+
+
+def _map_claim_cites(section: str) -> list[int]:
+    """The `sdk.py` lines cited in the sentence that quotes the entry's comment.
+
+    File inheritance is resolved left to right: a bare `:NNNN` belongs to the
+    file named before it in the same sentence. Cites naming any other file are
+    dropped, so only the claim under guard contributes numbers.
+    """
+    cites: list[int] = []
+    for sentence in re.split(r"(?<=\.)\s+", section):
+        if _RESERVED_ENTRY_QUOTE not in sentence:
+            continue
+        current: str | None = None
+        for match in _SDK_OR_BARE_CITE.finditer(sentence):
+            if match.group(1):
+                current = match.group(1)
+            if current == "sdk.py":
+                cites.append(int(match.group(2)))
+    return cites
+
+
+def _sdk_at_pin() -> list[str] | None:
+    """`tortoise/sdk.py` at `G5_DESTRUCTIVE_PIN`, or None when git cannot answer.
+
+    ⛔ EVERY git call is bounded: on a promisor/partial clone an ABSENT object
+    makes git spawn a lazy fetch whose negotiation can burn minutes
+    (MEMORY.md `[git-exit-code-is-not-proof]`). A timeout, a missing `git`, a
+    checkout with no `.git`, and an object this clone cannot see are ALL "could
+    not answer" — the caller SKIPS loudly instead of passing, because a skip is
+    not a pass and a silent green would be the no-op gate this guard exists to
+    avoid.
+    """
+    if not (ROOT / ".git").exists() or not shutil.which("git"):
+        return None
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "show",
+             f"{G5_DESTRUCTIVE_PIN}:tortoise/sdk.py"],
+            capture_output=True, text=True, timeout=20)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if done.returncode != 0:
+        return None
+    return done.stdout.splitlines()
+
+
+def test_the_transition_map_cites_resolve_at_the_pins_revision():
+    """The subsection's two `sdk.py` cites name the map AT THE PIN THEY DECLARE.
+
+    The passage claims *"`_ALLOWED_TRANSITIONS` (`sdk.py:NNNN`) declares it
+    terminal and the `:NNNN` entry records 'terminal (reserved — no v1 write
+    path)'"*. A reader resolves those two numbers at `G5_DESTRUCTIVE_PIN` — the
+    revision the subsection pins for every `file.py:NNNN` below its heading — so
+    each cite must land INSIDE that map, and the two CLAIMS must each be met by
+    one of them: one line opening the map, one line an `archived` entry carrying
+    the quoted comment.
+
+    NON-VACUOUS, measured by mutation at this head: restoring the pre-fix numbers
+    (`sdk.py:4622`, `:4690`) reds this — at `G5_DESTRUCTIVE_PIN` line 4622 reads
+    `_logger.warning(` inside `create_entity`, 4690 sits in a retry-message list,
+    and the map spans 2942-2956. ⚠️ The sibling pin guard above passes on that
+    same text, which is why this one exists: it verified that the revision was
+    NAMED, never that a number holds at it. ⛔ SCOPED to the ONE sentence that
+    quotes the entry's comment: the subsection's table also cites `sdk.py` (the op
+    classifier, line 33029 at this pin) and that cite is correct — a guard over
+    every cite in the subsection would red a correct passage.
+    """
+    section = _g5_destructive_half()
+    assert _RESERVED_ENTRY_QUOTE in section, (
+        f"the passage no longer quotes {_RESERVED_ENTRY_QUOTE!r}, so the entry "
+        "claim this guard verifies is gone — re-read §4.3's relocation "
+        "subsection and re-point this guard (#5333)")
+    cites = sorted(set(_map_claim_cites(section)))
+    assert cites, (
+        "the sentence that quotes the map entry's comment cites no `sdk.py` "
+        "line, so this guard is vacuous — it exists to resolve the map lines "
+        "that sentence names (#5333)")
+    lines = _sdk_at_pin()
+    if lines is None:
+        pytest.skip(
+            f"`{G5_DESTRUCTIVE_PIN}:tortoise/sdk.py` is not readable in this "
+            "checkout (no git, a shallow/partial clone, or a timeout) — the "
+            "subsection's line cites are UNVERIFIED here, not verified")
+    head = next((number for number, text in enumerate(lines, 1)
+                 if text.lstrip().startswith(_TRANSITION_MAP_HEAD)), None)
+    assert head is not None, (
+        f"`{_TRANSITION_MAP_HEAD}` is not in `tortoise/sdk.py` at "
+        f"`{G5_DESTRUCTIVE_PIN}` — the map the passage cites moved, so re-point "
+        "the PASSAGE rather than the number (#10226)")
+    tail = next((number for number in range(head + 1, len(lines) + 1)
+                 if lines[number - 1].strip() == "}"), None)
+    assert tail is not None, (
+        f"the map that opens at `{G5_DESTRUCTIVE_PIN}:tortoise/sdk.py:{head}` has "
+        "no closing `}` — the pin's snapshot cannot be parsed, so the block "
+        "bounds below would be wrong (#10226)")
+    outside = [
+        (number, lines[number - 1].strip()[:100] if number <= len(lines)
+         else "<past end of file>")
+        for number in cites if not head <= number <= tail]
+    assert not outside, (
+        f"§4.3's relocation subsection cites `tortoise/sdk.py` at "
+        f"`{G5_DESTRUCTIVE_PIN}`, where `_ALLOWED_TRANSITIONS` spans "
+        f"{head}-{tail}; these cites land OUTSIDE it: "
+        + "; ".join(f"sdk.py:{number} reads {text!r}" for number, text in outside)
+        + " — re-point them to the lines the block occupies at that pin (the "
+        "passage's numbers are read against the pin it names, not against "
+        "`main`)")
+    assert any(lines[number - 1].lstrip().startswith(_TRANSITION_MAP_HEAD)
+               for number in cites), (
+        "no cited line OPENS `_ALLOWED_TRANSITIONS` at "
+        f"`{G5_DESTRUCTIVE_PIN}` (the block starts at {head}) — the passage "
+        "claims a cite names the map's definition, and a cite that merely lands "
+        "somewhere inside it does not")
+    assert any('"archived": frozenset()' in lines[number - 1]
+               for number in cites), (
+        "no cited line is the `archived` entry at "
+        f"`{G5_DESTRUCTIVE_PIN}` — the passage claims a cite names the entry "
+        "that records the quoted comment, and none of "
+        f"{[f'sdk.py:{n}' for n in cites]} is that row")
+    assert any(_RESERVED_ENTRY_QUOTE in lines[number - 1] for number in cites), (
+        f"the quote {_RESERVED_ENTRY_QUOTE!r} is not on any cited line at "
+        f"`{G5_DESTRUCTIVE_PIN}` — the passage attributes it to a specific "
+        "entry, so the cite must be the line that CARRIES it, not one near it")

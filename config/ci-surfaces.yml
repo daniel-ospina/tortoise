@@ -5779,6 +5779,18 @@ surfaces:
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
   - test_session_schema_3554.py
+  # #13486: §5's *Point Status Vocabulary* table vs `POINT_STATUS_VALUES` — the
+  # doc↔code pin ONTOLOGY v3.37 exists to keep from drifting again. Registered here
+  # AND under `api` (line ~1249) for the reason this manifest states for
+  # test_bridge_table.py / test_sdk_surface_declaration.py / test_registry_integrity.py:
+  # the file it guards is `docs/ONTOLOGY.md`, a non-python prefix, so a docs-only
+  # §5 edit selects `core` — and `api` alone would run the guard only when CODE
+  # moved, i.e. never on the drift it was written for. Measured with this branch's
+  # own selector before adding this row: `select(['docs/ONTOLOGY.md'],
+  # 'pull_request')` returned ['core'] and its test_files did NOT contain
+  # test_claim_lifecycle. No `durations` change is owed: the api row already
+  # carries one (2.5 s).
+  - test_claim_lifecycle.py
   # #2006 (W11): onboarding funnel telemetry (seed/decide events gated on the
   # COMPLETED_STEP edge's new creation). Registered under `core` for the
   # `tortoise/analytics.py` seam, which matches no SOURCE_PATTERNS entry — and
