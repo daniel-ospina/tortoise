@@ -10294,6 +10294,11 @@ ROWED_BY_THIS_FOLD = (
     # reported it — the same defect `#13110`'s own comment records surviving a round, which is
     # the reason this ENTRY-RULE tuple is explicit rather than derived.
     "test_13422_object_subject_dense_leg.py",
+    # #13610 — the fold that retires the graph-stored `:Object`/`:Subject` copy per deployment,
+    # once the record's coverage count proves it. A file this fold ADDED and registered on
+    # `core` for the same reason as the row above: `tortoise/record_vector.py`,
+    # `tortoise/search_engine.py` and `tortoise/projection/` collect on no other surface.
+    "test_13610_graph_vector_copy.py",
 )
 
 
