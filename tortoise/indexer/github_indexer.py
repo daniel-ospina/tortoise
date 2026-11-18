@@ -99,7 +99,7 @@ Lifecycle decision table (THE rule):
   a row a PACK fold keyed. ``_fold_object_stage`` carries a SECOND silent refusal
   this reader does not model — the kind-OWNERSHIP guard (``declared_kinds``, passed
   at ``projection/entities.py:6215``, applied at ``:6267-6269``) — and the query
-  below does not even fetch ``o.objectKind`` (``:1288-1293``). So the moment a pack
+  below does not even fetch ``o.objectKind`` (``:1349-1354``). So the moment a pack
   DECLARES state on ``pm:issue`` (a ``statuses:``/``pipeline:`` block on
   ``kindDefs.issue``, which ``packs/*/manifest.yaml`` does not have today), the
   built-in fold returns ``False`` for EVERY indexed issue row while this read
@@ -1315,8 +1315,10 @@ class GitHubIndexer:
         axis, OR one of the guards below applies — a latched word (always), an
         unplaceable position, or a WIDE (`outdated`) term. ⚠️ The WIDE term is the
         per-direction case, not a blanket `None`: its CLOSE fold is never dispatched
-        (no live holder), so it answers the POSITION where the row HAS one, the WORD
-        where it has none, and `None` only where that position is live (`_project_issue`).
+        (no live holder), so a row that HAS a position answers `None` (a GitHub `open`
+        could never reconcile a close that is never dispatched), a position-less row
+        answers the WORD only where that word says `"closed"` and `None` where it says
+        `"open"`, and `_project_issue` mints nothing on `None`.
 
         ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
         the connector folds off that axis — a close now folds the terminal STAGE
