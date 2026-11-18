@@ -579,6 +579,13 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # a MOCKED non-local host (the probe is stubbed)
         "docker://:falkordb@test-host:6379/tortoise_test",
     ],
+    "tests/test_13320_vector_index_retirement_drops.py": [
+        # a MOCKED production-shaped pool, never dialled: `_bare()` builds the
+        # projection with `object.__new__` over a fake engine, and
+        # `connection_kwargs` exists ONLY so `_stable_endpoint()` has an identity
+        # to resolve. Nothing constructs a client from it (#13330).
+        'connection_kwargs={"host": "test-host", "port": 6379}',
+    ],
     "tests/test_redirect_seam.py": [
         # is_loopback_uri() classification inputs — pure string predicates
         "docker://:pw@db.internal.example.com:6379",

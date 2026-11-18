@@ -310,9 +310,9 @@ folded into a change about store SELECTION.
 
 ---
 
-# The reopening, measured PER DOOR (2026-11-17)
+## The reopening, measured PER DOOR (2026-11-17)
 
-#12950 fixed a DOOR. The reopening's evidence was door-specific (REST reaches the
+\#12950 fixed a DOOR. The reopening's evidence was door-specific (REST reaches the
 cache, the in-process writer does not), so the question was re-asked per door with
 `door_matrix.py`, and answered in every graph the write could have landed in —
 because a "0 in `org_<org>_<gid>`" is only evidence of a lost write if the write
