@@ -2234,7 +2234,9 @@ question of whether `:Object`/`:Event` ever carry embeddings (§14.3 **V3**). **
 not reversed: its *"keep the limit in falkor high"* clause is narrowed to *complete through private-beta,
 windowed after M2*, and carries an `OVERRIDES:` line; its *"so we don't need to rush with enabling our queries
 to parse both falkor and postgres"* clause is what makes the dual-store **search** path adoptable. ⚠️ **`#7970`'s
-anchored-read cutover stays DEFERRED by §2.0** — the split does not sanction it.
+anchored-read cutover stays DEFERRED by §2.0** — the split does not sanction it. → **⛔ SUPERSEDED 2026-11-18: the owner
+rescinded that deferral; the cutover is ARMED. See this file's 2026-11-18 entry. The line above stands as the record of
+what that day's split concluded, not as the current status.**
 
 **The canonical document is `docs/architecture/SEARCH-ARCHITECTURE.md`**, registered in `docs/00_index.md`,
 which holds the method ruling, the executing surface of the move, the window policy and the five measurements
@@ -2571,3 +2573,89 @@ record-first sequencing and its release boundary are untouched (§12.1c's DECIDE
 stating a conclusion its own measurements contradict — and the `#13395` review found it as a P2 **after** the sibling
 finding (§14.3's lead omitting the SERVING half, `#13422`) had already been fixed on main. The same shape recurred one
 sentence below the fixed one, from the other side; the record of that is the point.
+
+## 2026-11-18 — the anchored-read cutover's deferral is RESCINDED, and §2.0 states the armed cutover (`#7970`, `#8542`)
+
+**The decision.** The owner rescinded the deferral of `#7970`'s anchored-read cutover on 2026-11-18 (`#7970` comment
+[`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268)), which carries the
+`OVERRIDES:` line for the 2026-11-07 reading recorded in this file under *"2026-11-07 — V1 RESOLVED…"*. Its stated
+reason: the deferral existed for one constraint — the dual-store **search** path had to be adoptable *"without forcing
+the ordinary read path to parse both stores"* — and the built cutover satisfies that constraint itself, so the deferral
+now protects nothing. **The destination is unchanged** (2026-10-08: Postgres is the system of record, FalkorDB a derived
+hot cache); only the *timing* moves, and it moves the direction that ruling already chose — *the split happens BEFORE
+the first customer, because migration cost scales with customer count*.
+
+**What the design document now states, and where.** The deferral is gone as a status claim from three sites, each
+replaced by the target state:
+
+- **§2.0's marker** — the SPLIT block's third paragraph now states the cutover as ARMED, names the switch
+  (`TORTOISE_RECORD_SERVE` → `off` / `prefer` / `record`, `record_serve.MODES`), the one place its mode is parsed
+  (`tortoise/record_serve.py::serve_mode`) and the **two** doors that serve an anchored read today — the typed point read
+  (`record_serve.serve_point`, reached by `hosted_api.get_point`, by the MCP `tortoise_get_entity(id, type="point")`
+  door and by the SDK's `get_point(served_out=…)`) and the bare by-id entity union (`record_serve.serve_entity`,
+  `#13093`) — with the third read the registry marks `SERVED` while nothing in production consumes it named as exactly
+  that (`node-by-key`), and why `prefer` is the mode armed in production: it is the
+  one that MEASURES the migration, since every answer names the store that produced it (`servedFrom` /
+  `fallbackReason`). **`record` follows that count, never a date.** The `OVERRIDES:` line itself lives on the issue —
+  `#7970` comment [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268), where
+  AGENTS.md's rule puts it — and §2.0 carries a one-line pointer to it rather than a second copy. ⚠️ **§2.0 does
+  carry ONE bold `**OVERRIDES:**` line, and it is NOT this one:** it marks the *"keep the limit in falkor high"* clause
+  below, a different departure, which is why `grep -n "OVERRIDES:" docs/architecture/STORAGE-ARCHITECTURE.md` returns
+  several hits and cannot be used to check this. What is gone is the seven-line supersession essay and its quotation of
+  the retired sentence, because a dated *"was deferred, now it isn't"* re-telling is the narration the owner ruled out.
+- **§14.2's split marker** — the same status, stated there because that marker is where the engine's-role question is
+  answered and it had restated the deferral.
+- **§17.3's reader paragraph** — *"the node-naming read that will drive this in production is deferred by §2.0"* was
+  the stale twin of the same claim; the node-naming read IS `record_serve.serve_point` under the switch.
+
+**The state this records is not an intention.** `TORTOISE_RECORD_SERVE` is a live Fly secret armed `prefer`
+out-of-band (`.github/scripts/fly-managed-secrets.txt` → `fly-only:#13209`, whose ruling is on the issue and whose
+operating procedure is `docs/infra-runbook.md` §"Arming the READ path"). `off` is the shipped default and is
+byte-identical to the pre-`#7970` path; `record` answers from the record alone and raises on an unreachable record
+rather than reading an outage as an absence. Arming is an OWNER action — nothing in the code arms it and no deploy sets
+it — so this entry records a status the operator set, not code that ships a mode.
+
+**The three other documents that restated the deferral, and what each now says.** A contradiction across these is the
+thing this workstream exists to end, so each was reconciled explicitly rather than left to drift:
+
+- `docs/architecture/STORAGE-PICTURE-2026-11-17.md` — a **dated** picture (`d1bfef778f`, 2026-11-17), which keeps its
+  date and now carries a header note stating that one cell it reads has since moved, plus the two affected rows (the
+  read-doors row, and **D6**). D6 is the interesting one: *"point the read path at Postgres now"* is now **half
+  ORDERED and half refused** — the read path's move to the record IS the design; *"one store"*, i.e. dropping the cache,
+  still contradicts §2.0/§14.2, because FalkorDB is demoted, never dropped.
+- `docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` — §0.1's contradiction-test table and item
+  **N1**. The candidate *"serve reads from Postgres / cut over the read path"* is no longer excluded **by** a decision
+  it would reverse; it is a decision the owner has taken and a capability in the tree. N1 stays off the epic's critical
+  path as a SEQUENCING statement (arming `record` follows the measuring mode), and no longer as a deferral.
+- **This file's 2026-11-07 entry** — carries a forward pointer, not a rewrite: a changelog records what a day
+  concluded, so the sentence stays as that day's conclusion and is marked superseded rather than edited away.
+
+**What was deliberately NOT touched.** The deferrals that are about something else keep their words: the cache's
+completeness through private-beta (bounded after the search doc's M2), self-hosting as a cache-tier ops question
+(§12.2b lever 5, §15 M4), the stored-vs-derived edge question (owner 2026-09-23), and §15 M6's retention *goal* (as
+opposed to its measurement). None of them is this cutover, and collapsing them into one status would be the opposite
+of the fix.
+
+**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (16) — the class guard that scans
+`STORAGE-ARCHITECTURE.md` for issue-state claims, change narration and delivery state. ⚠️ **Read its coverage
+exactly: that vocabulary does NOT include a bare *"stays DEFERRED"*.** `DEFERRED` is deliberately outside
+`_STATUS_WORDS`/`_STATUS_LOWER` because this document legitimately defers two other things (the stored-vs-derived
+edge question, owner ruling 2026-09-23; and `#9213`'s restore-reason lane), so a `DEFERRED` arm would red on correct
+content — and the class check's arms are per-line, while the retired sentence wrapped. What pins this shape is
+therefore TWO arms, added by this change, in the one test
+`::test_the_storage_document_does_not_defer_the_anchored_read_cutover`: a **subject-scoped** arm that ties `DEFERRED`
+to *this* cutover in both word orders, and an **attribution-scoped** arm (`deferred BY §2.0`, `§2.0's deferral`) for
+the shape the third pre-fix site used — §17.3 named the read only by DESCRIPTION (*"the node-naming read that will
+drive this in production is deferred by §2.0"*), so the subject arm provably cannot see it. Both directions are
+fixtures in the test rather than prose: the subject arm is asserted NOT to match that sentence and the attribution arm
+is asserted to, and a bare `§2.0` was refused as a token because §12.2b's lever-5 sentence sits within 80 characters
+of one (also a fixture). **Measured on the pre-fix text (`origin/main` at `f462ad3a`): 3 sites — the subject arm sees 2
+of them, the attribution arm adds the third — and green here, so this shape is now guarded rather than merely absent.**
+`tests/test_extractor_v4_doc_citations.py` and
+`tests/test_extractor_v4_step_list_consistency.py` (38 together with the above — 16 + 2 + 20, measured), and the ten
+doc-cite files that read
+this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pin.py`,
+`tests/test_10853_session_source_prose.py`, `tests/test_7948_about_object_read_sites.py`,
+`tests/test_10000_source_prose.py`, `tests/test_10122_point_name_not_indexed.py`,
+`tests/test_11821_journal_vector_width.py`, `tests/test_7951_create_point_outbox.py`,
+`tests/test_7951_delete_point_outbox.py`, `tests/_about_call_time_census.py`).

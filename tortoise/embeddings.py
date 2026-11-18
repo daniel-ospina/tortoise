@@ -1843,9 +1843,13 @@ def encode_for_row(
     (`record_writer.derived_embedding_columns`, #13220) leaves the RECORD's
     `embedding` column NULL, and that tool reads graph nodes — it would report
     zero residual over this population. The seam also cannot see whether the row
-    already held a vector, so `graph_fold` counts a cold RE-write that lost
-    nothing; `monitoring.DERIVED_EMBED_DECLINE_COUNT` states both limits and the
-    repair that reconciles exactly.
+    already held a vector, so `graph_fold` counts a cold RE-write that stored the
+    SAME text and lost nothing — and, for `Event`/`Document` (whose folds rewrite
+    their text on match), a re-write of CHANGED text leaves a STALE vector that
+    the null-only repair reads CLEAN over (#13451).
+    `monitoring.DERIVED_EMBED_DECLINE_COUNT` states both limits; its repair
+    reading is exact for `embedding IS NULL`, and is NOT a proof of "no
+    divergence here".
 
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
@@ -1888,7 +1892,9 @@ def encode_for_row(
             # that stored no vector — the LEG and the cause, on
             # `monitoring.metrics()`, and an UPPER BOUND on rows the dense leg is
             # missing rather than a row count (a cold re-write of an
-            # already-embedded row counts and loses nothing); and
+            # already-embedded row with the SAME text counts and loses nothing;
+            # a changed-text re-write leaves a stale vector the null-only repair
+            # reads clean over — #13451); and
             # the line below explains once per process PER CAUSE what the two
             # numbers mean — a bulk write must not storm the log with one line
             # per row, and the cause travels with the line so the one entry an
