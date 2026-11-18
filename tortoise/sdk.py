@@ -4859,6 +4859,15 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "archived": frozenset(),
 }
 
+#: ``live``'s declared target set, RENDERED for the refusal messages that must
+#: state it. ⛔ DERIVED from the map ON PURPOSE (v3.37 review): the reviewers found
+#: THREE hand-written copies of this set in this one function, and two of them had
+#: already gone stale — one still said ``{retracted, superseded}`` and told a
+#: caller `archived` was "REFUSED as reserved" on a Point, which both the map and
+#: the synonym normalisation refute. A message may NAME a set; it may not keep a
+#: second copy of one.
+_LIVE_DECLARED_TEXT = "{" + ", ".join(sorted(_ALLOWED_TRANSITIONS["live"])) + "}"
+
 
 def _lifecycle_meaning(word: str) -> str:
     """The lifecycle word a stored/echoed spelling MEANS (#11824 S0).
@@ -6670,7 +6679,7 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     "status='archived' on an Object/Subject goal, or "
                     "status='deprecated' on a :Point goal (the transitions this "
                     "door DECLARES from a live state are "
-                    "{deprecated, superseded}; 'retracted' and 'archived' are "
+                    f"{_LIVE_DECLARED_TEXT}; 'retracted' and 'archived' are "
                     "the spellings that normalise to it, so either lands "
                     "the same ending) — and set BOTH fields: the word ends the "
                     "goal and `goalState` never ends it alone (#13035)")
@@ -6711,7 +6720,7 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 f"goalState='abandoned' with a status that ENDS it on the door "
                 f"you are using: status='deprecated' on a :Point goal (the "
                 f"transitions this door DECLARES from a live state are "
-                f"{{deprecated, superseded}}; 'retracted' is the legacy spelling "
+                f"{_LIVE_DECLARED_TEXT}; 'retracted' is the legacy spelling "
                 f"that normalises to it, and 'archived' likewise), or "
                 f"status='archived' on an "
                 f"Object/Subject goal. ⛔ Set BOTH fields: the word ends the "
