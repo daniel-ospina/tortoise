@@ -127,6 +127,22 @@ under-reports in a different direction:
 | `tortoise_issue_insight` | `GET /v1/issue-insight` | `point` | its SDK method calls the leg with a fixed `entity_type` | no — `:Point` is the one indexed label |
 | `tortoise_suggest_entry_points` | MCP only | `point` (the SDK default, no kwarg) | its SDK method calls the leg without `entity_type` | no — same reason |
 
+> ⛔ **THESE ROWS ARE THE 2026-11-06 DERIVATION, AND FOUR OF ITS ENTRANTS HAVE SINCE MOVED (#11609
+> Phase 2 — measured at `bf3c2efcfb`).** The measurement is kept as taken: §7 records that this census
+> is a dated measurement and is deliberately **not** retro-edited. But an ENTRANT is not a measurement,
+> it is the live surface, so a row's `tool` must never be read as current: `vector_leg_surface()`, which
+> is derived from `TOOL_REGISTRY` by design, now names **`tortoise_check_confidence`** (the container
+> `tortoise_recall` retired FORWARD into — it carries the `recall=True` arm that dispatches to
+> `recall_state`, so the `:Object` reach and the row's `yes` verdict move with it),
+> **`tortoise_search_knowledge`** (for `tortoise_search_sessions`; asks `event`, plus a non-literal
+> argument, so its consequence prints `UNMEASURED(…)` rather than `yes`),
+> **`tortoise_review_link_candidates`** (for `tortoise_review_connections`; `point`, still reached
+> through `_review_add`/`_review_prune` → `_review_pool`, verdict still no) and
+> **`tortoise_explore_connections`** (for `tortoise_suggest_entry_points`; `point`, verdict still no).
+> The retired names are not on the advertised surface (`RETIRED_USE_INSTEAD`), which is exactly why a
+> derivation from `TOOL_REGISTRY` stopped naming them — and why the pin named below now asserts their
+> ABSENCE. Read the live set from `vector_leg_surface()`; do not carry a row's name forward.
+
 The census computes that last column per tool (`surface_consequence.surface[].reaches_affected_labels`)
 from the measured set, so "which tools change" is an answer rather than a reading — and a tool that is
 an entrant **without** a consequence is named with `[]` rather than dropped: dropping it would hide a
@@ -135,9 +151,12 @@ future consequence behind a name that was never printed.
 ⚠️ **The binding-only derivation under-reports, and under-reporting is the dangerous direction here:**
 it states a smaller consequence for a surface change than the change actually has. `tortoise_query`
 binds `paginated_query` (its structural arm) and still forwards a `text=` argument to
-`tortoise_fts_query(entity_type=…)`; and `tortoise_recall` forwards nothing at all while reaching
-`:Object` on its default path. Each source is what makes the next tool appear — pinned by
-`test_the_surface_named_is_the_one_that_can_pass_entity_type` and
+`tortoise_fts_query(entity_type=…)`; and the confidence container forwards nothing either while its
+`recall=True` arm reaches `:Object` — the `tortoise_recall` row above names the door that reach used to
+arrive through. Each source is what makes the next tool appear — pinned by
+`test_the_surface_named_is_the_one_that_can_pass_entity_type` — which asserts the CONTAINER is the
+entrant **and** that the retired `tortoise_recall` is absent from the surface (so a door that left
+without its reach moving cannot read as a surface with nothing to say) — and
 `test_a_tool_whose_SDK_method_fixes_entity_type_is_named`.
 
 **The path, in full:**
@@ -321,11 +340,11 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 281 collected
+                                 # this tree: 282 collected
                                  # (docker lane: 280 passed, 1 skipped)
 ```
 
-(115 collected before #11088's round 7; the file collects **281 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **282 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -437,7 +456,12 @@ same cycle's P3 (`test_every_aliasable_name_has_a_canonical_order_entry` — enr
 in `_ALIASABLE_CALL_NAMES` without an `_ALIAS_CANONICAL_ORDER` entry falsified that tuple's own
 "every aliasable name is in it" premise and left `_alias_preference`'s `except ValueError` arm
 `# pragma: no cover` over live code)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 12 + 4 + 1 + 1 + 7 + 1 + 3 + 1 = 281`).
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 + 1 + 1 + 3 + 4 + 27 + 1 + 36 + 12 + 4 + 1 + 1 + 7 + 1 + 3 + 1 + 1 = 282`).
+The last `+ 1` is `test_the_census_doc_names_every_entrant_the_derivation_currently_names`
+(`#13595`'s fresh review, P2: the §3 entrant table named four doors #11609 Phase 2 had
+retired or renamed and NO tool the derivation names, so nothing redded on a table that
+described a surface no longer shipping) — the total is RE-DERIVED here, never re-added,
+which is why a new test gets its own term rather than a bumped sum.
 The final `4` are `#12902`'s NOT-ARMED-half falsifiers — the SAME defect class as `#12549`
 defect 1 ("a bucket label naming a cause it did not measure"), found by a fresh review on
 the state `defect 2` ADDS: a `DISAGREE` file is in NEITHER `silent` nor `armed`, so row
@@ -542,7 +566,7 @@ under
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies, so the
 LASTING statement is the invariant rather than either figure: the carve-out lane reads one more
 skip and one fewer pass than the docker lane, and at any one tree the two splits add to that tree's
-collected count — `280 passed, 1 skipped` and `279 passed, 2 skipped` here, both adding to the same `281` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
+collected count — `281 passed, 1 skipped` and `280 passed, 2 skipped` here, both adding to the same `282` the pin re-derives, while the `eee465029a` pair quoted above (`185/1` and `184/2`) adds to the
 `186` THAT tree collects. Neither figure is therefore stale: a carve-out run that
 "corrects" 186/1 to 185/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch

@@ -420,6 +420,15 @@ class TestDe2e6ReviewFixes:
         assert len(timeline) >= 2, f"superseded prior must remain visible: {timeline}"
         corr = [t for t in timeline if t["linked_by"] == "CORRECTS"]
         assert corr, f"timeline must show the CORRECTS link: {timeline}"
+        # The re-attached prior must ALSO carry the `outdated` flag, not just be
+        # present. This is the only read surface that re-attaches a superseded
+        # prior, and `belief_timeline` emits `outdated: True` for it off
+        # `old.outdated` (`sdk.py:27888-27889`). Without this assertion NOTHING
+        # pins that emission — deleting the two lines left every test green —
+        # and the docs page states the emission as a fact readers rely on.
+        assert any(t.get("outdated") is True for t in timeline), (
+            f"the superseded prior reaches the timeline only via the CORRECTS "
+            f"re-attachment and must be marked `outdated`: {timeline}")
 
     def test_timeline_limit_keeps_newest(self, sdk):
         """P2 (round 2) + #7293: the cap applies from the NEWEST end — the
