@@ -255,6 +255,14 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: backfilled FIRST, not after.
 ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 
+#: How many data statements the COLUMN-FILTERED arm actually ISSUES — the kNN
+#: read, and on the SHORT path the shortfall ``count(*)``.
+#: ⛔ A WRITTEN LITERAL ON PURPOSE, for the reason :data:`FOLD_ARM_STATEMENTS`
+#: gives below: the dependency runs FROM this count TO the divisor, never the
+#: other way, so a pin can red when the two drift instead of deriving both from
+#: one declaration (``#13466`` cycle 5, P2).
+COLUMN_ARM_STATEMENTS = 2
+
 #: How many SHARES the COLUMN-FILTERED arm divides the read's budget into — its
 #: TWO data statements (the kNN read, and on the SHORT path the shortfall
 #: ``count(*)``) plus the ONE share left behind for the graph branch — and
@@ -313,19 +321,6 @@ ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 #: sent to the unfloored form (#11691 review, P2). That bound is computable from
 #: the read's configured budget, and it is NOT recorded in the trace today — that
 #: gap is named here rather than implied to be observable.
-#: How many data statements the COLUMN-FILTERED arm actually ISSUES — the kNN
-#: read, and on the SHORT path the shortfall ``count(*)``.
-#: ⛔ A WRITTEN LITERAL ON PURPOSE, for the reason :data:`FOLD_ARM_STATEMENTS`
-#: gives below: the dependency runs FROM this count TO the divisor, never the
-#: other way, so a pin can red when the two drift instead of deriving both from
-#: one declaration (``#13466`` cycle 5, P2).
-COLUMN_ARM_STATEMENTS = 2
-
-#: How many SHARES the COLUMN-FILTERED arm divides the read's budget into — its
-#: :data:`COLUMN_ARM_STATEMENTS` data statements plus the ONE share left behind for
-#: the graph branch. ⛔ NOT the statement count: this arm ISSUES two and divides by
-#: THREE, exactly as the folded arm issues :data:`FOLD_ARM_STATEMENTS` (three) and
-#: divides by :data:`FOLD_ARM_DIVISOR` (four).
 RECORD_LEG_STATEMENTS_PER_READ = COLUMN_ARM_STATEMENTS + 1
 
 #: How many data statements the folded arm actually ISSUES — its two prefetches
