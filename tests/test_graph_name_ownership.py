@@ -124,14 +124,17 @@ def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
     decl = decls[0]
     assert isinstance(decl.value, ast.Tuple), (
         "the sweep's journal vocabulary is no longer a tuple literal")
-    unpacked = [e.value.id for e in decl.value.elts
-                if isinstance(e, ast.Starred) and isinstance(e.value, ast.Name)]
+    starred = [e.value for e in decl.value.elts if isinstance(e, ast.Starred)]
+    unpacked = [v.id for v in starred if isinstance(v, ast.Name)]
     assert unpacked == ["_TENANT_GRAPH_PREFIXES"], (
         "the tenant half of _SWEEP_OWNED_PREFIXES must UNPACK "
         "`_TENANT_GRAPH_PREFIXES`, not restate its spelling — a restated tuple "
         "is the drift the alias exists to prevent, and it would let the sweep "
-        "keep a prefix the composer dropped. Found starred element(s): "
-        f"{unpacked}")
+        "keep a prefix the composer dropped. Report EVERY starred element, not "
+        "only the bare-name ones: a qualified `*sdk._TENANT_GRAPH_PREFIXES` is "
+        "still one declaration, so a message that printed `[]` would describe "
+        "the source wrongly. Found starred element(s): "
+        f"{[ast.unparse(v) for v in starred]}")
 
     # And the composed value must still be what the sweep documents it accepts.
     assert _SWEEP_OWNED_PREFIXES[:2] == ("test_", "tortoise_test")

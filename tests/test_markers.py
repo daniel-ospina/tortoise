@@ -53,10 +53,6 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 #   "assertion"        — the test ASSERTS the SDK's namespace→graph mapping
 #                        (test_namespace_uri_mode, test_sdk_legacy_coverage);
 #                        the literal must stay byte-for-byte.
-#   "synthetic-source" — the literal rides a SOURCE STRING handed to
-#                        `ast.parse` (or the explanation around it), never a
-#                        construction; there is nothing to rename and nothing
-#                        for the redirect to resolve.
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
@@ -711,6 +707,36 @@ def test_a_call_spelling_inside_a_string_is_not_a_construction():
         '    return sdk\n'
     )
     assert list(_namespace_literals_in_source(src)) == [(4, "orgA")]
+
+
+@pytest.mark.parametrize("separator", ["\f", "\x85", "\u2028", "\u2029"])
+def test_the_span_table_counts_newlines_only_like_the_tokenizer_does(separator):
+    """#13490 follow-up: `splitlines()` is NOT the tokenizer's line count.
+
+    `str.splitlines()` additionally breaks on `\f`, `\x85`, `\u2028`/`\u2029`
+    (`\v` and `\x1c`-`\x1e` too, but the tokenizer refuses those outright), while
+    `tokenize` numbers physical lines by `\n` alone. One such character inserts a
+    phantom row in the offset table, and every span AFTER it is attributed at
+    least one character too EARLY. This helper's whole job is removing phantom
+    attributions, so its arithmetic must agree with the tokenizer rather than
+    with a wider notion of "line".
+
+    DISCRIMINATING: on this source the `splitlines()` table yields
+    `["'A'", " 'B", "'B'"]` — a span that starts one character early and a
+    second that names the WRONG literal — so the spans are re-sliced to prove
+    each one names the token it claims, not merely counted.
+    """
+    src = (
+        "row = 1\n"
+        "marker = 'A'\n"
+        f"{separator}\n"
+        "late = 'B'\n"
+        "tail = 'C'\n"
+    )
+    spans = _string_and_comment_spans(src)
+    assert [src[a:b] for a, b in spans] == ["'A'", "'B'", "'C'"], (
+        f"span table disagrees with the tokenizer after {separator!r}: "
+        f"{[(a, b, src[a:b]) for a, b in spans]}")
 
 
 def test_namespace_literals_guard_passing_or_routed():
