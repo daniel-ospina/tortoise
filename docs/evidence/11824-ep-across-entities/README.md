@@ -249,11 +249,11 @@ Listed so the owner can see what was examined rather than assumed:
 |---|---|---|
 | §2 Epistemic row, L68 | Operators connect `:Point`/`:Subject`/`:Object`/`:Event`; the write path admits all four | **correct** — **⟨measured⟩** all four writable in both slots; **⟨code⟩** `live.py:667` |
 | §3.1 operator rows, L117-118 (`IMPL`/`NAND` from/to all four labels), L225 (§3.8) | same, plus the four-value direction vocabulary | **correct** |
-| §8 Reification rule, L1297-1298 | "The operator node itself is always a `:Point {is_operator:true}`; its children/targets may carry any of the four labels" | **correct** — **⟨measured⟩** every operator minted over an Object/Event/Subject endpoint is `['Point'], is_operator=true` |
-| §8 operator-less propagation, L1324-1326 | a direct `IMPL`/`NAND` between any two plain epistemic nodes propagates | **correct, in the strong sense** — the direct-edge leg reads **both** currency axes: **⟨measured⟩** it dropped an `isClosed` and a `terminal`-slot endpoint |
-| §8 `OVERRIDES`, L1301-1304 | pre-#7813 "write-only" rule is reversed; an Event target is epistemic and propagates | **correct** — **⟨measured⟩** an Event source *and* an Event target both received a posterior |
+| §8 Reification rule, L1302-1303 | "The operator node itself is always a `:Point {is_operator:true}`; its children/targets may carry any of the four labels" | **correct** — **⟨measured⟩** every operator minted over an Object/Event/Subject endpoint is `['Point'], is_operator=true` |
+| §8 operator-less propagation, L1329-1331 | a direct `IMPL`/`NAND` between any two plain epistemic nodes propagates | **correct, in the strong sense** — the direct-edge leg reads **both** currency axes: **⟨measured⟩** it dropped an `isClosed` and a `terminal`-slot endpoint |
+| §8 `OVERRIDES`, L1306-1309 | pre-#7813 "write-only" rule is reversed; an Event target is epistemic and propagates | **correct** — **⟨measured⟩** an Event source *and* an Event target both received a posterior |
 | §11, L1537-1553 | reputation is `Subject -[:performs]-> Event -[:IMPL]-> Point`, derived not stored, Point-only | **correct** — **⟨code⟩** `sdk.py:59698`, `MATCH (e)-[:IMPL]->(p:Point)` |
-| §10, L1462-1474 | recency modulation of inherited priors; no blunt time decay | **no contradiction found** with the table |
+| §10, L1467-1474 | recency modulation of inherited priors; no blunt time decay | **no contradiction found** with the table |
 
 ---
 
