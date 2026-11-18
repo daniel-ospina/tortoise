@@ -358,23 +358,45 @@ def test_a_read_queued_behind_loaders_does_not_breach_pre_handler(
     Post-fix each occupying read declines inside ``READ_EMBED_BUDGET_S``, so the
     third starts after about one budget — three orders of magnitude under the
     bar.
+
+    ⛔ THE ROW MUST ALSO PROVE THE QUEUE FORMED, not just that it was cheap
+    (#13540 review P2). ``spent_ms()`` OMITS a stage that accrued no time
+    (``read_stages.ReadStages.spent_ms``), so ``spent.get(STAGE_PRE_HANDLER, 0.0)``
+    answers ``0.0`` for "waited 0 ms" AND for "nothing was ever marked" — and
+    the upper bar alone passes on the second. With the occupiers' futures
+    discarded, two reads that RAISED would free the pool instantly and this row
+    would silently degenerate into the inert guard it replaces. So the
+    occupiers are collected (a raise is a red, not a free pass) and the LOWER
+    side is pinned: ``pre_handler`` must be PRESENT and must carry the wait the
+    fix leaves it (one ``READ_EMBED_BUDGET_S`` decline, halved for headroom;
+    measured post-fix: 261.2 ms against the 125 ms floor).
     """
     lane = ThreadPoolExecutor(max_workers=_READ_LANE_WORKERS,
                              thread_name_prefix="read13528")
     try:
-        for _ in range(_READ_LANE_WORKERS):
-            lane.submit(_read, sdk)
+        occupiers = [lane.submit(_read, sdk) for _ in range(_READ_LANE_WORKERS)]
         arrival = time.monotonic()
         timeline = begin(started_at=arrival)
         queued = lane.submit(_read_with, timeline, sdk)
         queued.result(timeout=_LOAD_S + 10)
+        for occupier in occupiers:
+            occupier.result(timeout=_LOAD_S + 10)
     finally:
         lane.shutdown(wait=True)
 
     elapsed = time.monotonic() - arrival
     spent = timeline.spent_ms()
-    assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
-        f"the queued read accrued {spent.get(STAGE_PRE_HANDLER, 0.0)} ms of "
+    assert STAGE_PRE_HANDLER in spent, (
+        f"the queued read never marked {STAGE_PRE_HANDLER}, got {spent!r} — the "
+        f"queue was not built, so the upper bar below would pass vacuously")
+    assert spent[STAGE_PRE_HANDLER] >= READ_EMBED_BUDGET_S * 1000.0 * 0.5, (
+        f"the queued read accrued only {spent[STAGE_PRE_HANDLER]} ms of "
+        f"pre_handler, under the "
+        f"{READ_EMBED_BUDGET_S * 1000.0 * 0.5:.0f} ms floor — the third read did "
+        f"not wait for a worker slot, so this row proves nothing (post-fix "
+        f"measured 261.2 ms: one budgeted decline of the read ahead of it)")
+    assert spent[STAGE_PRE_HANDLER] < _LOAD_S / 2 * 1000.0, (
+        f"the queued read accrued {spent[STAGE_PRE_HANDLER]} ms of "
         f"pre_handler against a {_LOAD_S / 2 * 1000:.0f} ms bar — a read waiting "
         f"for a worker slot is paying the LOAD before it starts (production: "
         f"pre_handler 7.2–9.3 s; pre-change this row measures ≈ the load)")
