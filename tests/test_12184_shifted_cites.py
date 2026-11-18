@@ -482,14 +482,27 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
 #: spelling and counts once, at its START line (`(\d+)` stops there); the two-code-span form the header
 #: describes is deliberately NOT matched, exactly as the header says it is resolved but not counted.
 _SPELLING = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py):(\d+)")
-#: ⛔ `\**` on every number: the header bolds the spelling and collision counts (`dedupes the **327** …
-#: — **113**`), and a regex that only tolerated bare digits silently found nothing — turning this arm into
-#: a no-op `return ["the header no longer publishes …"]` that reads like a finding on CORRECT text.
-_TRIPLE = re.compile(r"dedupes the \*{0,2}(\d+)\*{0,2} as-written spellings to \*{0,2}(\d+)\*{0,2} — \*{0,2}(\d+)\*{0,2}")
+#: ⛔ The figures are matched with the header's EMPHASIS STRIPPED, never against one rendering of them.
+#: `main` bolds the spelling and collision counts (`dedupes the **327** … — **113**`) and not the ratio's
+#: three mentions, and which numbers it emphasises is an EDITORIAL choice that has already moved twice —
+#: the patterns before this one were written against an un-bolded edition, found nothing on the merged tree,
+#: and turned the comparator into an early `return ["the header no longer publishes …"]` that read like a
+#: finding on CORRECT text (`#13599` review, finding 1). Tolerating the markers number-by-number fixes the
+#: instance; stripping them fixes the class — the ratio patterns below carried the SAME coupling and would
+#: have false-redded the day the sentence dropped its bold. Emphasis is presentation; the FIGURES are the
+#: claim. (The exact shipped rendering is still pinned, by the revert guard
+#: `test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_ones` — which is where a
+#: rendering belongs. This is a comparator, and it must not confuse the two.)
+def _unbolded(text: str) -> str:
+    """*text* with markdown bold markers removed, so a published figure matches whatever its emphasis."""
+    return text.replace("**", "")
+
+
+_TRIPLE = re.compile(r"dedupes the (\d+) as-written spellings to (\d+) — (\d+)")
 _QUADRUPLE = re.compile(
     r"(\d+) written spellings → (\d+) pairs → (\d+) collisions → (\d+) drifters of the (\d+)(?: comparable)?"
 )
-_ALT_BASIS = re.compile(r"counting that form gives \*\*(\d+) pairs and (\d+) drifters\*\*")
+_ALT_BASIS = re.compile(r"counting that form gives (\d+) pairs and (\d+) drifters")
 
 
 def _resolved_pairs(text: str, repo: Path = REPO) -> tuple[int, set[tuple[str, int]]]:
@@ -531,13 +544,17 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     problems: list[str] = []
     spellings, pairs = _resolved_pairs(text, repo)
     collisions = spellings - len(pairs)
-    triple = _TRIPLE.search(text)
-    quadruple = _QUADRUPLE.search(text)
+    # Matched on the unbolded body: see `_unbolded` — a bold marker between a word and its figure is not a
+    # disagreement about the figure.
+    body = _unbolded(text)
+    triple = _TRIPLE.search(body)
+    quadruple = _QUADRUPLE.search(body)
     if not triple:
-        return ["the header no longer publishes `dedupes the N as-written spellings to P — C`"]
+        return ["the header no longer publishes `dedupes the N as-written spellings to P — C` (matched with "
+                "emphasis stripped)"]
     if not quadruple:
         return ["the header no longer publishes the `N written spellings → P pairs → C collisions → D drifters` "
-                "sentence"]
+                "sentence (matched with emphasis stripped)"]
     if tuple(map(int, triple.groups())) != (spellings, len(pairs), collisions):
         problems.append(
             f"the header publishes spellings/pairs/collisions {triple.groups()}, but this file MEASURES "
@@ -562,16 +579,16 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         )
     if comparable != published_pairs:
         problems.append(
-            f"the sentence says `of the {comparable} comparable` while the denominator is "
+            f"the sentence says `of the {comparable}` while the denominator is "
             f"{published_pairs} — the ratio has to name its own denominator"
         )
     if not 0 < drifters <= published_pairs:
         problems.append(f"{drifters} drifters is not a numerator over {published_pairs} pairs")
     for pattern, what in (
-        (re.compile(r"\*\*(\d+) of this document's (\d+)\*\*"), "the `N of this document's M` header line"),
-        (re.compile(r"\*\*The drift is (\d+) of those (\d+)\.\*\*"), "the `The drift is N of those M` restatement"),
+        (re.compile(r"(\d+) of this document's (\d+)"), "the `N of this document's M` header line"),
+        (re.compile(r"The drift is (\d+) of those (\d+)\."), "the `The drift is N of those M` restatement"),
     ):
-        found = pattern.search(text)
+        found = pattern.search(body)
         if not found:
             problems.append(f"{what} is gone — the ratio is published in three places on purpose")
         elif tuple(map(int, found.groups())) != (drifters, published_pairs):
@@ -579,7 +596,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
                 f"{what} reads {found.groups()} while the figures sentence reads "
                 f"{(drifters, published_pairs)} — they are one measurement"
             )
-    alt = _ALT_BASIS.search(text)
+    alt = _ALT_BASIS.search(body)
     if not alt:
         problems.append("the header no longer states the alternative counting basis")
     else:
@@ -628,42 +645,101 @@ def test_the_published_denominator_is_the_count_of_this_file() -> None:
 
 
 def test_a_carried_forward_figure_is_reported() -> None:
-    """The comparator's negative case, reachable: a stale triple and a broken arithmetic relation red."""
-    text = (REPO / _AUDIT).read_text(encoding="utf-8")
-    assert _figure_problems(text) == [], "the shipped document must measure clean before it is mutated here"
-    quadruple = "327 written spellings → 214 pairs → 113 collisions → 122 drifters of the 214"
-    for source, stale, why in (
+    """The comparator's negative case, reachable: a stale triple and a broken arithmetic relation red.
+
+    ⛔ Every mutation below is DERIVED FROM THE SHIPPED SENTENCE, never written as a literal. This control
+    has now had to be re-pointed TWICE: it was written against `326`/`215`/`111`/`123`, and the merge that
+    took `main`'s `#13551` edition replaced every one of those sources — so all five `assert mutated != text`
+    fired FIRST, and the control reported "the string was not found" without ever reaching the comparator it
+    exists to exercise (`#13599` review, finding 2: the exact unreachability it was written to prevent, one
+    level up). Re-pointing the five literals at `327`/`214`/`113`/`122` fixes this head and schedules the
+    same failure for the next re-measurement, which is the one thing this file must not do: a figure quoted
+    from the document it guards rots the moment the document is re-measured.
+
+    What cannot rot is the RELATION each mutant breaks: a pair count one under the measured one, an
+    arithmetic figure that stops following its pair count, a ratio naming a denominator it does not carry,
+    one of the three mentions of the ratio disagreeing with the others, and an alternative basis level with
+    the primary. Each is applied to the sentence AS SHIPPED, by capture-group position.
+    """
+    raw = (REPO / _AUDIT).read_text(encoding="utf-8")
+    assert _figure_problems(raw) == [], "the shipped document must measure clean before it is mutated here"
+    text = _unbolded(raw)
+    triple = _TRIPLE.search(text)
+    quadruple = _QUADRUPLE.search(text)
+    ratio = re.search(r"(\d+) of this document's (\d+)", text)
+    alt = _ALT_BASIS.search(text)
+    for found, what in ((triple, "triple"), (quadruple, "figures sentence"), (ratio, "`N of this document's M`"),
+                        (alt, "alternative basis")):
+        assert found is not None, (
+            f"the shipped document no longer carries the {what}, so this control has nothing to mutate — "
+            "re-point `_TRIPLE`/`_QUADRUPLE`/`_ALT_BASIS` at how it is published now"
+        )
+
+    def _mutate(match: re.Match[str], overrides: dict[int, int]) -> str:
+        """The matched sentence with capture group *k* replaced by `overrides[k]`, positionally.
+
+        Splitting the SENTENCE on its digits is what makes this positional: `214` occurs twice in the
+        figures sentence (the pair count and the ratio's own denominator) and `327` again in the header
+        line, so a `str.replace` would carry the same edit into a group nobody meant to touch and prove
+        nothing about either.
+        """
+        parts = re.split(r"(\d+)", match.group(0))
+        for index in range(1, len(parts), 2):
+            group = index // 2 + 1
+            if group in overrides:
+                parts[index] = str(overrides[group])
+        return "".join(parts)
+
+    triple_pairs, triple_collisions = map(int, triple.groups()[1:])
+    written, pairs, collisions, drifters, comparable = map(int, quadruple.groups())
+    ratio_drifters, ratio_pairs = map(int, ratio.groups())
+    alt_pairs, _alt_drifters = map(int, alt.groups())
+
+    for match, overrides, why in (
         (
-            "dedupes the **327** as-written spellings to 214 — **113**",
-            "dedupes the **326** as-written spellings to 215 — **111**",
+            triple,
+            {2: triple_pairs - 1, 3: triple_collisions - 1},
             "the state this repair inherited: a pair count and its collision arithmetic one edition behind",
         ),
         (
             quadruple,
-            "327 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214",
+            {3: collisions + 1},
             "collisions stops following the pair count it is arithmetic on",
         ),
         (
             quadruple,
-            "327 written spellings → 214 pairs → 113 collisions → 122 drifters of the 213",
+            {5: comparable - 1},
             "the ratio names a denominator it does not carry",
         ),
         (
-            "**122 of this document's 214**",
-            "**123 of this document's 214**",
+            ratio,
+            {1: ratio_drifters - 1},
             "one of the three mentions of the ratio disagrees with the others",
         ),
         (
-            "counting that form gives **215 pairs and 123 drifters**",
-            "counting that form gives **214 pairs and 123 drifters**",
+            alt,
+            {1: alt_pairs - 1},
             "the alternative basis is one pair over the primary, not level with it",
         ),
     ):
-        mutated = text.replace(source, stale)
+        stale = _mutate(match, overrides)
+        assert stale != match.group(0), f"the negative control for {why!r} did not change the figures"
+        mutated = text.replace(match.group(0), stale, 1)
         assert mutated != text, f"the negative control for {why!r} did not change the text"
         assert _figure_problems(mutated) != [], (
             f"a document carrying {stale!r} ({why}) reported no problem — the comparator is decoration"
         )
+    assert triple.groups()[0] == str(written) and triple_pairs == pairs, (
+        "the two sentences already disagree on the denominator at the shipped head — this control assumes "
+        "they agree, and `test_the_published_denominator_is_the_count_of_this_file` is the arm that says "
+        "whether they are RIGHT"
+    )
+    assert ratio_pairs == comparable == pairs, (
+        "the ratio's denominator and the figures sentence's disagree at the shipped head"
+    )
+    assert ratio_drifters == drifters, (
+        "the ratio's numerator and the figures sentence's disagree at the shipped head"
+    )
 
 
 def _resolve(pins, repo: Path = REPO) -> list[str]:
