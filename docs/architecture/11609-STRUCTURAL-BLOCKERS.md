@@ -1,3 +1,14 @@
+---
+title: "#11609 — the three structural blockers that hold twelve protected doors"
+type: engineering
+domain: platform
+doc_status: live
+created: 2026-11-18
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph, MCP tool surface
+aboutObjects: "#11609, TOOL_REGISTRY, PROTECTED, NO_CONTAINER_YET, FastAPIRouterAdapter, tools/bridge_table.py, mcp_server.py"
+---
+
 # #11609 — the three structural blockers that hold twelve protected doors
 
 **Status:** PLAN + PIN. Nothing in this change retires a door or alters a wire shape.
@@ -71,7 +82,8 @@ Probe (`FastMCP("p").add_tool` + `call_tool`, a fake arm returning a list and a 
 becomes `{"result": <value>}`, (ii) `result` is in `required`, and (iii) where a **wrapped**
 annotation declares one, `result` also carries a `type` — `array` for `list[dict]`, and
 NOTHING for the `object`-annotated form, whose `result` is `{}` (the `type: object` in that
-row is the schema's own top level, not `result`'s). A UNION declares `anyOf` and no `type` regardless of its
+schema — which the table's compressed rendering omits — is the schema's own top level, not
+`result`'s). A UNION declares `anyOf` and no `type` regardless of its
 members (`list[dict] | dict` and `dict | bool` alike), and `object` declares `{}` and no
 `type` — which is precisely why `_violates_wrap_envelope` is type-blind for both. A container
 **can** return a pageable shape
