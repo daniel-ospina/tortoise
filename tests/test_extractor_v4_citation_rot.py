@@ -1367,6 +1367,134 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         assert not flagged(line), f"the class check is a false positive on: {line!r}"
 
 
+#: The anchored-read CUTOVER, named in the three ways the design documents name
+#: it. The owner RESCINDED its deferral on 2026-11-18 (`#7970` comment
+#: `6965853268`, which carries the `OVERRIDES:` line), so a design document
+#: asserting it as still deferred states a status the tree contradicts — the
+#: class #8542 exists to end.
+_CUTOVER = r"(?:anchored-?read|cutover|#7970)"
+#: The deferral asserted as CURRENT state. ⛔ `deferral` is deliberately NOT in
+#: this vocabulary: the `OVERRIDES:` marker has to be able to name the departure
+#: it records (*"the 2026-11-07 split's deferral of this cutover, rescinded …"*),
+#: and a word that appears only there would make the guard fire on the one line
+#: that is correct. `deferred` / `DEFERRED` / `postponed` are the ASSERTION forms;
+#: a marker naming what it rescinds uses the noun.
+_DEFERRED = r"(?:DEFERRED|deferred|postponed)"
+_CUTOVER_DEFERRAL = re.compile(
+    _CUTOVER + r"[^.\n]{0,80}?\b" + _DEFERRED + r"\b"
+    r"|\b" + _DEFERRED + r"\b[^.\n]{0,80}?" + _CUTOVER,
+)
+
+#: The same claim attributed to the RULING rather than naming the read. The third
+#: pre-fix site said neither *anchored-read* nor *cutover* — only *"the node-naming
+#: read that will drive this in production is deferred by §2.0"* — so the arm above
+#: cannot see it. `§2.0` on its own is NOT a token there: §12.2b's *"Lever 5 … is
+#: deferred until there are users"* sits 80 characters from a `§2.0` and is a
+#: different ruling, so the arm is on the ATTRIBUTION (`deferred BY §2.0`) and on
+#: the section's own deferral being spoken of as standing.
+_DEFERRAL_BY_RULING = re.compile(
+    r"\b" + _DEFERRED + r"\s+by\s+§2\.0|§2\.0'?s?\s+deferral\b",
+    re.IGNORECASE,
+)
+
+
+def test_the_design_documents_do_not_re_defer_the_anchored_read_cutover():
+    """A deferral the owner rescinded must not be re-asserted in a design document.
+
+    `#8542`'s remaining indicator was a **status claim the tree contradicts**: at
+    three sites `STORAGE-ARCHITECTURE.md` said `#7970`'s anchored-read cutover
+    *"stays DEFERRED by §2.0"* while `record_serve.MODES` shipped
+    `off`/`prefer`/`record` and `prefer` was armed in production. The class check
+    above is generic by design and does NOT cover this shape — measured at
+    `f392d5135`, replacing §2.0's armed sentence with the stale one left all 15
+    tests green, because `DEFERRED` is in neither `_STATUS_WORDS` nor
+    `_STATUS_LOWER` and "stays DEFERRED" is not one of `_CHANGE_NARRATION`'s
+    spellings. That is why this is a pin of its own rather than a fourth arm:
+    the claim can be reintroduced as ordinary prose and the generic guard reads
+    it as prose.
+
+    Both directions are asserted here, because a narrow pin is exactly the shape
+    that goes vacuous — three rows are the PRE-FIX text from `main`, verbatim, so
+    the pin is measured against what it was written to catch:
+
+    * **It must fire** on the assertion (either order, and on a rewording that
+      spells none of the three pre-fix sentences).
+    * **It must NOT fire** on the `OVERRIDES:` marker that records the
+      rescission, nor on the OTHER deferrals this document legitimately carries
+      (*"the stored-vs-derived question is DEFERRED to post-launch"*, the cache
+      limit *"held high precisely so this is deferred"*). Those are different
+      rulings; collapsing them into one status is the opposite of the fix.
+
+    Scope, stated rather than implied: it polices `DESIGN_DOCS` only. A DATED
+    record (`STORAGE-PICTURE-2026-11-17.md`) and the changelog are where the
+    was-now narration belongs, so a deferral stated there is the ADR-correct
+    shape and is out of this pin's reach — as is the docs index, which is a
+    pointer file rather than a design document.
+    """
+    def flagged(line: str) -> bool:
+        return bool(_CUTOVER_DEFERRAL.search(line) or _DEFERRAL_BY_RULING.search(line))
+
+    must_flag = [
+        # The three sites this PR removed, verbatim from `main` at `340d500491c6`.
+        "ordinary read path to parse both stores. \u26a0\ufe0f **`#7970`'s anchored-read cutover therefore "
+        "stays DEFERRED by \u00a72.0** (the epic's",
+        "> anchored-read cutover \u2014 serving the ordinary read path from Postgres \u2014 stays DEFERRED by "
+        "\u00a72.0.**",
+        "the set-level polarity is unchanged, and the node-naming read that will drive this in production "
+        "is deferred by \u00a72.0.",
+        # Rewordings that spell none of the three sentences above: the pin is on
+        # the claim, not on the three strings #8542 happened to delete.
+        "The anchored-read cutover remains deferred until the search path lands.",
+        "`#7970`'s cutover is still deferred by \u00a72.0.",
+    ]
+    must_not_flag = [
+        # The armed state, as §2.0 and §14.2 now state it.
+        "**The anchored-read cutover is ARMED, and it is this ruling's second half:**",
+        "**The anchored-read cutover \u2014 the ordinary point read served from Postgres \u2014 is ARMED**, and it "
+        "is not a third thing:",
+        # ⛔ THE MARKER. It names the departure it records with the NOUN, and must
+        # never be read as the assertion the pin exists to catch — otherwise the
+        # only correct way to write the rescission reds the guard that enforces it.
+        "> **OVERRIDES:** the 2026-11-07 split's deferral of this cutover, rescinded by the owner on "
+        "2026-11-18 (`#7970` comment",
+        # The OTHER deferrals, which stay: different rulings, same word.
+        "**What is genuinely deferred:** nothing about *which store records what*.",
+        "**\u2705 OWNER RULING 2026-09-23: KEEP the stored edges \u2014 and the stored-vs-derived question is "
+        "DEFERRED to post-launch, not left open.**",
+        "the limit is held high precisely so this is **deferred**, not absent.",
+        "`#7970` performs the fetch, and \u00a712.4's router owns the depth decision.",
+    ]
+    for line in must_flag:
+        assert flagged(line), f"the cutover pin no longer fires on: {line!r}"
+    for line in must_not_flag:
+        assert not flagged(line), f"the cutover pin is a false positive on: {line!r}"
+
+    offenders = [
+        f"{path.name}:{number}: cutover re-deferred: {line.strip()[:160]}"
+        for path in DESIGN_DOCS
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if flagged(line)
+    ]
+    assert not offenders, (
+        "the owner rescinded this deferral on 2026-11-18 (`#7970` comment `6965853268`), so a "
+        "design document that states it again asserts a status the tree contradicts "
+        "(`record_serve.MODES`, `prefer` armed in production). State the armed cutover; the "
+        "record of what changed belongs in `STORAGE-ARCHITECTURE-CHANGELOG.md`:\n  - "
+        + "\n  - ".join(offenders)
+    )
+
+    # ⛔ The negative pin alone is satisfied by DELETING the paragraph. The state
+    # the document is required to carry is asserted positively too, in the section
+    # the ruling lives in, so removing the answer is not a way to pass.
+    body = _section_body(STORAGE, "2.0")
+    for required in ("TORTOISE_RECORD_SERVE", "serve_mode", "record_serve.ANCHORED_READS"):
+        assert required in body, (
+            f"§2.0 no longer states the armed cutover's mechanism ({required} is missing): a "
+            "deferral does not come back by adding a sentence alone — it also comes back by "
+            "deleting the one that answers it"
+        )
+
+
 CHANGELOG = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE-CHANGELOG.md"
 
 

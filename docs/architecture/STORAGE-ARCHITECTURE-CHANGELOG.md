@@ -2516,8 +2516,11 @@ replaced by the target state:
 
 - **§2.0's marker** — the SPLIT block's third paragraph now states the cutover as ARMED, names the switch
   (`TORTOISE_RECORD_SERVE` → `off` / `prefer` / `record`, `record_serve.MODES`), the one place its mode is parsed
-  (`tortoise/record_serve.py::serve_mode`) and the three doors that serve a point through `record_serve.serve_point`
-  (`hosted_api.get_point`, the MCP point read, the SDK's), and why `prefer` is the mode armed in production: it is the
+  (`tortoise/record_serve.py::serve_mode`) and the **two** doors that serve an anchored read today — the typed point read
+  (`record_serve.serve_point`, reached by `hosted_api.get_point`, by the MCP `tortoise_get_entity(id, type="point")`
+  door and by the SDK's `get_point(served_out=…)`) and the bare by-id entity union (`record_serve.serve_entity`,
+  `#13093`) — with the third read the registry marks `SERVED` while nothing in production consumes it named as exactly
+  that (`node-by-key`), and why `prefer` is the mode armed in production: it is the
   one that MEASURES the migration, since every answer names the store that produced it (`servedFrom` /
   `fallbackReason`). **`record` follows that count, never a date.** The paragraph carries the **`OVERRIDES:`** line.
 - **§14.2's split marker** — the same status, stated there because that marker is where the engine's-role question is
@@ -2553,9 +2556,15 @@ completeness through private-beta (bounded after the search doc's M2), self-host
 opposed to its measurement). None of them is this cutover, and collapsing them into one status would be the opposite
 of the fix.
 
-**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (15) — the class guard that now scans
-`STORAGE-ARCHITECTURE.md` for issue-state claims, change narration and delivery state, so a reintroduced
-*"stays DEFERRED"* reds rather than reading as prose. `tests/test_extractor_v4_doc_citations.py` and
+**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (16) — the class guard that scans the design
+documents for issue-state claims, change narration and delivery state, **plus a pin of its own for this claim, because
+the class guard does not cover it**: measured at `f392d5135`, restoring §2.0's *"stays DEFERRED by §2.0"* sentence left
+all 15 green — `DEFERRED` is in neither `_STATUS_WORDS` nor `_STATUS_LOWER`, and *"stays DEFERRED"* is none of
+`_CHANGE_NARRATION`'s spellings. `test_the_design_documents_do_not_re_defer_the_anchored_read_cutover` is that pin: it
+reds on the three pre-fix sites **and on a rewording that spells none of them**, it does not fire on this entry's
+`OVERRIDES:` marker or on the deferrals that are about something else (§12.2b lever 5, the stored-vs-derived edges),
+and it asserts §2.0 still states the mechanism, so deleting the answer is not a way to pass.
+`tests/test_extractor_v4_doc_citations.py` and
 `tests/test_extractor_v4_step_list_consistency.py` (37 together with the above), and the ten doc-cite files that read
 this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pin.py`,
 `tests/test_10853_session_source_prose.py`, `tests/test_7948_about_object_read_sites.py`,
