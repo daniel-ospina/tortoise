@@ -1103,17 +1103,23 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
 
     ⛔ This is the one branch of this helper whose loss is a FAIL-OPEN, not a false
     remedy. Measured, with ``if _has_unescaped_dq(body):`` mutated to ``if False:``:
-    the WHOLE FILE stays green (``2 failed, 11 passed``, the same two pre-existing
-    absence reds) while these two values — both TRUNCATED by the consumer — stop being
-    reported:
+    THIS test reds and nothing else in the file notices — the only other reds are the
+    pre-existing absence rows, identical on ``origin/main`` — while these two values,
+    both TRUNCATED by the consumer, stop being reported:
 
         `"a, "#1" KEEP"`            yaml -> `'a, '`        head `('broken', None)` -> `('double-quoted', …)`
         `"a\\tb\\" "#1" KEEP"`      yaml -> `'a\\tb" '`     head `('broken', None)` -> `('escaped', None)`
 
     i.e. a value is silently NOT compared, which is exactly the #13452 defect this
-    guard exists to prevent, shipping behind green CI. The two assertions below are
-    the only thing that notices; end-to-end, a `docs/research` dossier carrying either
-    value passes the arm under that mutant and reds it at this head.
+    guard exists to prevent. The two assertions below are the only thing that notices;
+    end-to-end, a `docs/research` dossier carrying either value passes the arm under
+    that mutant and reds it at this head.
+
+    Before this pin existed the same mutant left the WHOLE FILE green apart from the two
+    pre-existing absence rows — measured at ``3b8de63b8a``, when the file held one test
+    fewer — which is exactly why this test exists. That measurement is quoted WITH its
+    head, and no file-wide pass count is stated for this head: it moves whenever another
+    test is appended, and a count printed here has gone stale twice already.
     """
     # An unescaped inner quote, with no escape anywhere in the body.
     assert _quoted_style('"a, "#1" KEEP"') == ("broken", None), (
