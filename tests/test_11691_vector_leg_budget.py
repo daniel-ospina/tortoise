@@ -563,7 +563,7 @@ def test_every_construction_site_passes_a_budget():
     `timeout_ms=15000` at any site — or a mutation of `_budget_ms =
     VECTOR_LEG_BUDGET_MS` to `_budget_ms = 15000` — left every arm in this file
     GREEN. Measured at `f0da22b90f`: with `timeout_ms=15000` at the
-    `_cross_lens_pairs` site (`sdk.py:35507`), all 12 tests here passed. The
+    `_cross_lens_pairs` site (`sdk.py:35512`), all 12 tests here passed. The
     sibling pins cannot see it either: `test_the_dense_pass_default_…` pins a
     different function's DEFAULT, `test_the_expansion_pass_…` pins the OTHER
     end of the budget, and `test_no_leg_in_the_fused_read_…` pins a different
