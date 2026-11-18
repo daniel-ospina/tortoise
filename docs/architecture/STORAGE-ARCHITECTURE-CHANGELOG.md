@@ -2434,7 +2434,8 @@ storage is decided"* — appear nowhere in `#13350`'s base (`git grep -F <phrase
 → 0 hits each — that commit is the merge of this PR, so its first parent is the base); an intermediate revision of
 this PR wrote them. The §14.3 heading's *"in force today"* is the same phrase as the six sites' uppercase *"IN FORCE
 TODAY"* in the other casing, absent from the base for the same reason (it entered the file at `d392ac79aa` itself:
-`git log -S "in force today"` → that commit), so the two casings are counted once — which is why this reads **four**.
+`git log -S "in force today" -- docs/architecture/STORAGE-ARCHITECTURE.md` → that commit), so the two casings are
+counted once — which is why this reads **four**.
 ⚠️ Run the same grep against the merged `origin/main` and the last of the four now hits, because
 the merge itself put it there — which is why the ref is named here instead of the branch name. What the net change
 corrects is the result, and one of the corrections below is **content, not wording**:
