@@ -219,8 +219,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21668'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21791`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22919'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22731`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22919'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22731`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33583`'): 1,
 }
 
@@ -255,7 +255,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """REVERT GUARD, not a re-measurement — say what this does NOT prove.
 
     The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
-    the counts still read `322`/`216`/`106` for a file that measures `326`/`215`/`111`, and the pin-side
+    the counts still read `322`/`216`/`106` for a file that measures `326`/`214`/`112`, and the pin-side
     prose described `:3735` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; `:3735`
     is `for prop in sorted(STORED_VECTOR_PROPS):`) and `:2715` as `placement_spellings()` (that function is
     the pin's `:1798`; `:2715` is `if k not in tail_denied})`). Nothing asserted them, so both could revert
@@ -267,9 +267,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "123 of this document's 215",
-        "dedupes the 326 as-written spellings to 215 — 111",
-        "326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215 comparable",
+        "122 of this document's 214",
+        "dedupes the 326 as-written spellings to 214 — 112",
+        "326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable",
         "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
