@@ -1413,10 +1413,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_13098_cypher_inventory.py": [
         r'^monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"\s*,\s*'
         r'"docker://:pw@127\.0\.0\.1:6379"\s*\)$'],
-    # ── test_verbatim_index_cohort_8429.py — DELIBERATE_URI, four literal sites
+    # ── test_verbatim_index_cohort_8429.py — DELIBERATE_URI, FIVE literal sites
     # #13290/#8429: the module landed with its five mutation sites untriaged, so
-    # this register reds on them (`test_verbatim_index_cohort_8429.py:101/103/435/
-    # 440/442`). The intent is DELIBERATE_URI — the test PINS ITS OWN SERVER
+    # this register reds on them (`test_verbatim_index_cohort_8429.py:129/131/463/
+    # 468/470`, four `^`…`$` patterns covering five lines). The intent is
+    # DELIBERATE_URI — the test PINS ITS OWN SERVER
     # TARGET on purpose, because the defect it measures (a VERBATIM plain-`List`
     # embedding is invisible to the `Point` HNSW index) cannot occur on the
     # embedded lane at all: a store with no index would certify the fix by
