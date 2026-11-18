@@ -99,8 +99,9 @@ population digest **only in the new artifact schema** — the two committed arti
    the corpus grew, which is the benign direction and still a different condition.
 2. **The sample is redrawn per run.** `#13118` recorded the population digest differing in *all five* of
    its runs (`2323ddf7…` / `7c08a430…` / `eec5fcf1…` / `81c6ff3d…` / `cd275d71…`) — "a count identity is
-   not a member identity" — and that pairing was impossible because *"pairing needs the sampled population
-   written out (`--population-file`), which this harness does not do"*. **That file is this tool's job.**
+   not a member identity". The reason a paired re-run was impossible is **`#11901`**'s finding, not
+   `#13118`'s: *"pairing needs the sampled population written out (`--population-file`), which this
+   harness does not do"*. **That file is this tool's job.**
 3. **Load moves the dense leg.** `#13108` measured 45 % of eval windows losing the dense leg under load
    (`window_modes {hybrid: 2371, keyword_only: 1973}`), so two runs at load 124 and load 100 are two
    different retrieval systems.
