@@ -87,7 +87,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "search_engine.py:4123", _SE, 4123, "CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit"),
     (_AUDIT, "search_engine.py:3003", _SE, 3003, 'label = "Source" if entity_type == "document"'),
     (_AUDIT, "`:3070`", _SE, 3070, "the fulltext index is on Source._searchText"),
-    (_AUDIT, "cache_projection.py:2653-2660", _CP, 2653, "it is the ONLY field the Source FTS index"),
+    (_AUDIT, "cache_projection.py:2651-2662", _CP, 2651, "# \u26d4 PROVENANCE, PER ROW (#10965)"),
     (_AUDIT, "cache_projection.py:2663-2665", _CP, 2663, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     # Row 387's bare range, quoting "un-indexes a restored session". Its sibling pins (`2660-2662`,
     # `2650-2657`) are different ranges and do not reach this one. NON-VACUOUS: the pre-fix document
@@ -158,7 +158,9 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":3735", _CP, 3735, 'if table == "point"'),
     (":5646", _ENT, 5646, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
-    # sent readers to the pin, where every one of them is a comment.
+    # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:23982` is a DELETE
+    # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
+    # all of them; it is a comment for most, and unrelated CODE for the two that matter most here.
     ("sdk.py:23982", _SDK, 23982, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:6721", _SE, 6721, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:21668", _SDK, 21668, "s.summary=CASE WHEN $sum"),
@@ -188,7 +190,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4123'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3003'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3070`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2653-2660'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2651-2662'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2663-2665'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2653-2654`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2715'): 2,
@@ -270,7 +272,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         "122 of this document's 214",
         "dedupes the 326 as-written spellings to 214 — 112",
         "326 written spellings → 214 pairs → 112 collisions → 122 drifters of the 214 comparable",
-        "f462ad3acb",
+        # ⛔ The RULE, not the bare sha: `f462ad3acb` occurs 8x in the file, so asserting the string let a
+        # revert of the reader-rule sentence alone (back to `340d500491`) pass green.
+        "an address in it opens at `main` `f462ad3acb`",
         "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
