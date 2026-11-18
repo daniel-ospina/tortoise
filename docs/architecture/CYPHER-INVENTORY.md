@@ -474,7 +474,7 @@ read. All three are the same defect — a count taken off the wrong unit, off a 
 moved, or off an unnamed metric — which is why the figure above names its base and its command.)
 
 ⛔ **AND IT MOVED AGAIN BEFORE THIS PR COULD MERGE — measured at `origin/main` `31bddb1dd9`, the base this
-append is re-cut on.** The appendix `main` carries there is stale in **96 of its 1,311 rows over
+appendix is re-cut on.** The appendix `main` carries there is stale in **96 of its 1,311 rows over
 exactly two files**, and the symmetric difference of the row sets **keyed by `(fn, shape, statement)`**
 is again **zero** — the same 1,311 statements, only `file:line` moved (unkeyed, the 96 moved
 coordinates count as 192 changed rows, 96 each side; the key is stated because the two numbers are
