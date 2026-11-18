@@ -1107,8 +1107,10 @@ def _same_cell(recorded, recomputed) -> bool:
 
     The RECORDED side carries `null` for a value that is not estimable, because the
     artifact has to be valid JSON (`#13267` review 12 F1): RFC 8259 has no `NaN` in
-    its number grammar, so a non-finite float is written as `null` and the `mde_note`
-    beside it says which null it is. The RECOMPUTED side still RETURNS NaN for that
+    its number grammar, so a non-finite float is written as `null`, and what says which
+    null it is DIFFERS by cell: an MDE's `mde_note` names its reason, while a
+    `correlation` block carries no note and is separated from an unrecorded one by key
+    PRESENCE (both keys are always written — see its own test). The RECOMPUTED side still RETURNS NaN for that
     cell — that is the value `analyze` computes — so this helper is the bridge
     between the two encodings of one value.
 
@@ -1116,9 +1118,12 @@ def _same_cell(recorded, recomputed) -> bool:
     recomputed NaN, so nulling out a cell that has a finite recomputation still
     reds.
     """
-    if recorded is None and isinstance(recomputed, float) \
-            and math.isnan(recomputed):
-        return True
+    if recorded is None:
+        # ⛔ "a recorded null matches only a recomputed NaN" — EXECUTABLE, not
+        # prose: a null matches nothing else, so a cell nulled out over a finite
+        # OR an already-None recomputation still reds (the fallback `==` below
+        # would have said True for None/None and quietly certified it).
+        return isinstance(recomputed, float) and math.isnan(recomputed)
     if isinstance(recorded, float) and isinstance(recomputed, float):
         if math.isnan(recorded) and math.isnan(recomputed):
             # a lenient re-read (or an in-memory `analyze` dict) can still carry
@@ -1356,6 +1361,21 @@ def test_a_null_cell_is_distinguishable_from_an_unrecorded_one(tmp_path):
     finite = point["arms"]["point"]["per_k"]["k=15"]
     assert isinstance(finite["mde_paired"], float) and finite["mde_paired"] > 0
     assert finite["mde_note"] == ""
+
+    # ⛔ The `correlation` block's nulls are the OTHER carrier: no note sits
+    # beside them (the brief says so), so what separates "recorded, not
+    # estimable" from "never recorded" is key PRESENCE. Pin that separation
+    # where it is load-bearing, for the control and a point artifact alike —
+    # a dropped key reds the key-set assertion, a restored `NaN` reds the
+    # `is None` one (measured: every committed correlation null is the
+    # zero-variance case, e.g. the pair artifacts' off-arm hits are all 0).
+    for art, arm in ((control, "object"), (point, "point")):
+        corr = art["arms"][arm]["per_k"]["k=15"]["correlation"]
+        assert set(corr) == {"rho", "se_reduction"}, (
+            f"{arm}: the correlation block is {sorted(corr)}, so a null rho is "
+            "not distinguishable from an unrecorded one by key presence")
+        assert corr.get("rho", "ABSENT") is None
+        assert corr.get("se_reduction", "ABSENT") is None
 
 
 def test_json_safe_maps_only_non_finite_floats_to_null():

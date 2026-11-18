@@ -440,8 +440,14 @@ grammar, so the committed evidence could not be loaded by any strict parser at a
 rejected the whole file) and the tolerant ones mapped the token to `null` — the same cell an unrecorded
 field occupies (`#13267` review 12, P2). They were re-encoded with the tool's own writer (`_write_json`
 → `_json_safe`), which maps every non-finite float to `null`; **it changes no other byte, adds no field
-and loses no information** — the value a `NaN` stood for is carried by the `mde_note` that sits beside it
-("NOT ESTIMABLE: no discordant pair was observed …"). So the count above stays SIX annotation FIELD
+and loses no information** — but the carrier differs by cell, and the earlier wording here said
+otherwise. The MDE's null is carried by the `mde_note` beside it ("NOT ESTIMABLE: no discordant pair was
+observed …"). The `correlation` block's `rho`/`se_reduction` nulls carry **no note**: both keys are
+always written, so key PRESENCE is what separates "recorded, not estimable" from "never recorded", and
+the reason is `outcome_correlation`'s documented one — one or both arms have zero outcome variance
+(measured: every committed correlation null is that case; the point artifacts' off-arm hits are all 0).
+The suite pins that key-presence separation for the control and a point artifact. So the count above
+stays SIX annotation FIELD
 groups: this is a re-encoding of run output, not an annotation of it, and a reader can verify it by
 diffing the three files against the run that produced them.
 

@@ -199,12 +199,17 @@ def _json_safe(obj):
     ``identity_measured: false`` + ``identity_note`` exist so a null count cannot
     read as a measured one).
 
-    ⛔ No information is lost, because the value a ``NaN`` stands for already has
-    its prose carrier: `analyze` writes ``mde_note`` = "NOT ESTIMABLE: no
-    discordant pair was observed …" beside an undefined MDE, and the correlation
-    block's ``rho`` is undefined for the same documented reason. So the cell
-    encodes "not estimable" as ``null`` and the note beside it says which of the
-    two nulls it is.
+    ⛔ No information is lost, and the two kinds of null stay distinguishable —
+    but by TWO DIFFERENT carriers, and this docstring must not read as one. The
+    MDE's null carries its reason in ``mde_note`` beside it ("NOT ESTIMABLE: no
+    discordant pair was observed …"). The ``correlation`` block's ``rho`` and
+    ``se_reduction`` nulls carry NO note: both keys are always written, so it is
+    key PRESENCE that separates "recorded, not estimable" from "never recorded",
+    and the reason is `outcome_correlation`'s own documented one — one or both
+    arms have zero outcome variance (measured at `#13267`: every committed
+    correlation null is that case, e.g. the point artifacts' off-arm hits are
+    all 0). A consumer must not read the block's absent note as an absent
+    measurement; the suite pins the key-presence separation.
 
     Convention taken from this repo's sibling artifact writer,
     `tools/longmem_eval/report.py::_json_safe` (``#1747`` rounds 11-15, pinned by
