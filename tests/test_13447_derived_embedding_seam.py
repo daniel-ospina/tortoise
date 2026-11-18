@@ -266,6 +266,41 @@ def test_the_rebuild_does_not_ask_the_write_bound(monkeypatch, model_calls):
     assert filled.props.get("embedding") == [0.5] * _DIM
 
 
+def test_an_ARMED_but_unavailable_embedder_does_not_abort_the_restore(monkeypatch):
+    """#13447 review cycle 3, issue 4 — a derivation that RAISES is skipped.
+
+    This is the seam's one encode call site that used to be unguarded. Nothing in
+    the chain declines quietly when the embedder is ARMED BUT UNAVAILABLE:
+    `EmbeddingModel.get()` raises `EmbedderUnavailableError` when
+    `TORTOISE_EMBEDDING_MODEL_REQUIRED` is truthy and the model cannot load, and
+    `compute_embeddings` calls it OUTSIDE every `try`. Unguarded, that made
+    `rebuild_from_record` — and so `python -m tortoise record-restore` — FAIL in
+    exactly the state the flag exists to make loud, where the pre-fix path performed
+    no encode at all and completed.
+
+    Non-vacuity: with the `try` removed this test reds by RAISING out of
+    `fill_missing_row_vectors`; the sibling arms (`record_writer`'s `skipped`, the four
+    folds' `except Exception: pass`) are the shape being mirrored.
+    """
+    from tortoise.exceptions import EmbedderUnavailableError
+
+    def _unavailable(cls, *args, **kwargs):
+        raise EmbedderUnavailableError(
+            failure_kind="not_installed", model="bge-small-en-v1.5",
+            last_error="Explicitly required but unavailable",
+            context="compute_embeddings")
+
+    monkeypatch.setattr(emb.EmbeddingModel, "get", classmethod(_unavailable))
+    node = node_from_row("Object", _row("Object"))
+    assert node.props.get("embedding") is None
+    # The rebuild must COMPLETE (a shipped repair path), leaving the row vectorless
+    # rather than aborting the whole restore.
+    (filled,) = fill_missing_row_vectors((node,), width=None)
+    assert filled.props.get("embedding") is None, (
+        "a raising embedder produced a vector — impossible, so this arm is not "
+        "measuring what it claims")
+
+
 def test_a_label_with_no_row_text_rule_is_never_invented(model_calls):
     """The scope stays where the gap was: `source`/`event` are not derived here.
 

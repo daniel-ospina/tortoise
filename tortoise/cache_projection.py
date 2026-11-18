@@ -213,6 +213,7 @@ WHAT THIS MODULE DELIBERATELY IS NOT
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -241,6 +242,8 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 #: `read_record_view` / `record_serve.read_node` both do `SELECT *` — so EVERY
 #: record row read would raise on the first row after the migration applied.
 _GENERATED_COLUMNS = _rp.GENERATED_COLUMNS
+
+_logger = logging.getLogger(__name__)
 #: The same object under its public name, so a caller outside this module reads
 #: the ONE declaration rather than a copy (`tests/test_cache_projection.py`'s
 #: unclassified-column pin reads it, and `__all__` re-exports it).
@@ -4054,6 +4057,25 @@ def fill_missing_row_vectors(
     (`embeddings.encode_for_row`'s note; #5004 is unaffected either way because
     these are DERIVED rows, never a `Point`'s record-TRUTH vector).
 
+    ⛔ A DERIVATION THAT RAISES IS SKIPPED, NOT PROPAGATED (#13447 review cycle 3,
+    issue 4). This is the ONE encode call site in the seam that used to be unguarded,
+    and nothing in the chain declines quietly when the embedder is ARMED BUT
+    UNAVAILABLE: `EmbeddingModel.get()` raises `EmbedderUnavailableError` whenever
+    `TORTOISE_EMBEDDING_MODEL_REQUIRED` is truthy and the model cannot load, and it
+    raises from `compute_embeddings`, outside any `try`. Unguarded, that made
+    `rebuild_from_record` — and therefore `python -m tortoise record-restore` — FAIL
+    in exactly the state the flag exists to make loud, where pre-fix the same path
+    performed no encode at all, succeeded, and landed these two labels vectorless.
+    That is an availability regression on a shipped REPAIR path, so this arm mirrors
+    its siblings (`record_writer.derived_embedding_columns` → `skipped=…`; the four
+    folds → `except Exception: pass`): the row keeps no vector, and the run completes.
+
+    ⚠️ The skip is LOGGED rather than silent — a restore that leaves a row
+    vectorless is exactly the state `#11747` says must be reported, and a caller
+    reading `dropped_vectors` would not see it (this is an un-put-back, not a drop).
+    The log names the label, the key and the exception class so an operator can tell
+    an armed-but-unloaded embedder from a genuine encode fault.
+
     ⚠️ SCOPED to the labels in :data:`derived_embedding.ROW_TEXT_PARTS` —
     `Object`/`Subject` — the two whose vector the restore could not put back at
     all. `event`/`source` already PROJECT their `embedding` column, so a row that
@@ -4073,7 +4095,23 @@ def fill_missing_row_vectors(
             # `props` carries the same `name` the ROW does — it is a PRIMARY
             # column, projected under its own name — so the row-shaped text rule
             # reads this map directly.
-            vector = derived_embedding.derive_row(node.label, props, width=width)
+            #
+            # ⛔ GUARDED: this is the one encode call site in the seam that used to
+            # propagate, and an armed-but-unavailable embedder raises
+            # `EmbedderUnavailableError` straight out of `EmbeddingModel.get()`. Above
+            # `rebuild_from_record`'s guards that aborted a shipped repair path
+            # (`record-restore`) which pre-fix completed without encoding at all.
+            # Skipping mirrors `record_writer.derived_embedding_columns` and the four
+            # folds; the cost is a vectorless node, which is the pre-fix state, and it
+            # is LOGGED rather than silent (see the docstring).
+            try:
+                vector = derived_embedding.derive_row(node.label, props, width=width)
+            except Exception as exc:  # noqa: BLE001, RUF100 — the siblings' contract
+                _logger.warning(
+                    "rebuild: could not derive the vector for :%s %r (width=%r) — "
+                    "the node lands VECTORLESS and this is not a record drop: %s: %s",
+                    node.label, node.key, width, type(exc).__name__, exc)
+                vector = None
             if vector:
                 props["embedding"] = list(vector)
         out.append(node if props == dict(node.props) else replace(node, props=props))

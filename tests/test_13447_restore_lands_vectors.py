@@ -135,6 +135,31 @@ def test_the_restore_lands_the_vector_the_row_holds(encoder):
         f"row without a stored vector may be encoded (#13447)")
 
 
+def test_a_refused_rebuild_pays_NO_model_call(encoder):
+    """#13447 review cycle 3, issue 3 — the derived fill sits BELOW the guards.
+
+    `fill_missing_row_vectors` is not a pure projection: for every `Object`/`Subject`
+    node whose row holds no vector it pays ONE MODEL CALL. Above both destructive
+    guards, a REFUSED rebuild — `confirm_destructive` not passed, or the `test_*`
+    L2 guard — paid that per row and then refused, where the pre-fix path cost zero
+    model calls. It also contradicted this method's own `#11747` note, which was moved
+    post-write precisely so a refused rebuild would DO and ASSERT nothing.
+
+    Non-vacuity: pre-fix this reds on `encoder == ["Beta Ltd"]` — the `o-null` row is
+    encoded before the guard raises.
+    """
+    proj = _projection()
+    view = _view()
+    with pytest.raises(RuntimeError, match="confirm_destructive=True"):
+        proj.rebuild_from_record(view, confirm_destructive=False)
+    assert encoder == [], (
+        f"a REFUSED rebuild paid {len(encoder)} model call(s) {encoder} before it "
+        f"refused — the derived fill runs above the destructive guards (#13447)")
+    # …and nothing was written: the refusal happens before the wipe, so the graph is
+    # exactly what `_projection()` left (empty).
+    assert proj.query("MATCH (n) RETURN count(n)").result_set[0][0] == 0
+
+
 def test_a_second_restore_of_the_same_view_is_byte_identical(encoder):
     """§2.0's determinism, on the restore path: same view ⇒ same graph.
 

@@ -1787,16 +1787,31 @@ def derived_embedding_columns(
     `required_embedding_dim` threaded through the write seam; that is a follow-up,
     not something this docstring may claim.
 
-    ⛔ COST, DISCLOSED: this derivation encodes the SAME text the graph fold then
-    encodes again (`projection/entities.py::_upsert_object`/`_upsert_subject`
-    call `encode_for_row(name)` for the same row, and `_upsert_document` /
-    `_upsert_event` do the same for theirs), and `encode_for_row` memoises
-    nothing (`tortoise/embeddings.py` — gate check, then `encode_for_store`). So
-    on an ARMED record every live `ObjectRegistered`/`SubjectAdded`/
-    `EventRecorded`/`DocumentCreated` write pays TWO model calls for one text.
-    Sharing one encode across the record writer and the graph fold is a
-    follow-up; nothing here measures or mitigates it, and no cost figure is
-    quoted — the record write path's own per-record cost lives in
+    ⛔ COST, DISCLOSED — and this paragraph is the POST-FIX state (#13447), because the
+    pre-fix claim that stood here is now false and would send the next lane to re-do
+    landed work. Before #13447 this derivation encoded the SAME text the graph fold then
+    encoded again (`projection/entities.py::_upsert_object`/`_upsert_subject` call
+    `encode_for_row(name)` for the same row, `_upsert_document`/`_upsert_event` the same
+    for theirs) and `encode_for_row` memoises nothing, so on an ARMED record every live
+    `ObjectRegistered`/`SubjectAdded`/`EventRecorded`/`DocumentCreated` write paid TWO
+    model calls for one text.
+
+    That sharing now exists and it is ONE seam, not a follow-up: this column encodes
+    through `derived_embedding.encode` (see the call below), the folds encode through
+    the same seam, and the four live doors (`EventAPI._emit`,
+    `ConversationMiner._emit_event`, `TortoiseSDK._apply_and_journal`,
+    `TortoiseSDK._create_entity`) hold `derived_embedding.write_scope()` across the
+    record write AND its fold. The memo is keyed on the TEXT, so the fold's second
+    encode of the same text is served from it at ZERO model calls — one paid encode per
+    live write.
+
+    Two residuals, stated rather than implied: a `DocumentCreated` write still pays TWO
+    calls, because the fold composes `_build_search_text(title, summary, topics)` (#8419)
+    while this column composes `title`+`content` — a text divergence `#13412` owns, and
+    the memo cannot dedupe two different strings (its fix dedupes documents for free);
+    and a live door that does NOT carry `write_scope` pays the pre-#13447 second call.
+    That last one is the fail-open direction on COST only — never a wrong vector. No
+    cost figure is quoted here — the record write path's own per-record cost lives in
     `docs/evidence/9558-record-write-cost/` and an encode dominates it.
 
     ⛔ AND WHAT THIS DOES **NOT** REACH: a `record_projection.replay()` that is

@@ -19468,15 +19468,28 @@ class FalkorProjection(
         # legitimately computes what the live write would have. A node whose row
         # already HOLDS its vector was filled by the record-held door in
         # `_props_from_row`, and this pass leaves it untouched.
+        #
+        # ⛔ BELOW BOTH DESTRUCTIVE GUARDS (#13447 review cycle 3, issue 3). The fill
+        # is not a pure projection: for every `Object`/`Subject` node whose row holds
+        # no vector it pays ONE MODEL CALL (`derived_embedding.derive_row` →
+        # `encode_for_row(bounded=False)`). Above the guards, a REFUSED rebuild — every
+        # production `org_<org>` name is refused by the L2 guard — paid that per row
+        # and then refused, where the pre-fix path cost zero model calls. It also
+        # contradicted this method's own `#11747` note below, which was moved
+        # post-write precisely so a refused rebuild would DO and ASSERT nothing.
+        # The plan still precedes the wipe (it must not raise after it); only the
+        # guards move above it. The `limit`-bounded path is unaffected (truncation
+        # runs first, above).
+        self._assert_destructive_confirmed(confirm_destructive,
+                                          "rebuild_from_record")
+        self._assert_test_graph(
+            "REFUSING to run bulk DETACH DELETE on non-test graph")
+
         from tortoise.cache_projection import fill_missing_row_vectors
         nodes = fill_missing_row_vectors(
             nodes, width=getattr(self, "required_embedding_dim", None))
         plan = record_plan(nodes, relations)  # raises BEFORE any wipe
 
-        self._assert_destructive_confirmed(confirm_destructive,
-                                          "rebuild_from_record")
-        self._assert_test_graph(
-            "REFUSING to run bulk DETACH DELETE on non-test graph")
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_from_record")
         # ⛔ Everything from here to the declaration write is POST-WIPE, and a
