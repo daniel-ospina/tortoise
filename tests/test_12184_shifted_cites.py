@@ -151,6 +151,117 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 )
 
 
+#: How many times each pinned token must appear in its document. `_resolve`'s token arm is an EXISTENCE
+#: test over the whole file, so a token occurring twice survives a re-point at ONE site: the sibling
+#: keeps the arm green, and the content arm still passes because it opens the TARGET file, which such an
+#: edit does not touch. Measured on the row this test was written for — `cache_projection.py:3735` occurs
+#: 3x, and re-pointing one occurrence to `:3738` red 0 of 7 tests. Counts make every SITE load-bearing
+#: instead of every STRING; the `#13083` review that found it named 15 shared tokens, which is why this
+#: is a set of counts and not another context-bearing token.
+_TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3735'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4780-4784'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6667'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7026'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7028'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7025-7028`'): 4,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7031-7044`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3098'): 5,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4708-4710` |'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4123'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3003'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3070`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2653-2660'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2663-2665'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2653-2654`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2715'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2876`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:36985`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37008`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5089`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5529`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8034`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6854-6870`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6864`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6865`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6870`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:461'): 3,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3449'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3447`'): 1,
+    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2886'): 1,
+    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2728'): 1,
+    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4904'): 1,
+    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4823`'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3079-3094'): 1,
+    ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
+}
+
+
+def test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence() -> None:
+    """A re-pointed SITE must red even when the same string occurs elsewhere in the document."""
+    texts: dict[str, str] = {}
+    for doc, token, _path, _line, _fragment in _PINS:
+        key = (doc, token)
+        assert key in _TOKEN_OCCURRENCES, (
+            f"{token!r} in {doc} has no declared occurrence count — a new pin row needs one, or a "
+            "re-point at one of its sites is invisible to this file."
+        )
+        if doc not in texts:
+            texts[doc] = (REPO / doc).read_text(encoding="utf-8")
+        actual = texts[doc].count(token)
+        assert actual == _TOKEN_OCCURRENCES[key], (
+            f"{doc} carries `{token}` {actual}x, not {_TOKEN_OCCURRENCES[key]}x — one SITE was "
+            "re-pointed while a sibling kept the string, which is how the label-scan table row was "
+            "re-pointed with nothing going red. Re-derive the site by CONTENT and update the count to "
+            "match, rather than deleting the occurrence."
+        )
+    declared = set(_TOKEN_OCCURRENCES)
+    pinned = {(doc, token) for doc, token, _p, _l, _f in _PINS}
+    assert declared == pinned, (
+        f"_TOKEN_OCCURRENCES and _PINS disagree: {sorted(declared - pinned)} is declared with no pin; "
+        f"{sorted(pinned - declared)} is pinned with no count."
+    )
+
+
+def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_ones() -> None:
+    """REVERT GUARD, not a re-measurement — say what this does NOT prove.
+
+    The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
+    the counts still read `322`/`216`/`106` for a file that measures `314`/`211`/`103`, and the pin-side
+    prose described `:3735` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; `:3735`
+    is `for prop in sorted(STORED_VECTOR_PROPS):`) and `:2715` as `placement_spellings()` (that function is
+    the pin's `:1798`; `:2715` is `if k not in tail_denied})`). Nothing asserted them, so both could revert
+    silently — that is what this test stops.
+
+    ⛔ It does NOT prove the figures are CURRENT: a figure goes stale the moment this file gains or loses a
+    cite, and this test would happily pass over a newly-wrong number. Re-measuring is the header's own
+    instruction, and the rule it states is reproducible with `git show <head>:<path> | sed -n '<N>p'`.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    for claimed in (
+        "124 of this document's 211",
+        "dedupes the 314 as-written spellings to 211 — 103",
+        "the pin's `:3735` is",
+        "for prop in sorted(STORED_VECTOR_PROPS):",
+    ):
+        assert claimed in text, (
+            f"the header no longer carries {claimed!r}. If the FILE changed, re-measure the figures by the "
+            "rule the header states and update both the claim and its cross-reference; do not restore an "
+            "older number."
+        )
+    for falsified in (
+        "`placement_spellings()` at the pin",
+        "`MERGE (n:…) SET n += $props` at the pin",
+    ):
+        assert falsified not in text, (
+            f"the header again describes an address by content it does not carry at the pin ({falsified!r}) "
+            "— open the pin's line before describing it."
+        )
+
+
 def _resolve(pins, repo: Path = REPO) -> list[str]:
     """Every reason the *pins* do not hold at *repo*'s tree (empty list = they all hold)."""
     errors: list[str] = []
@@ -307,8 +418,9 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     assert "cache_projection.py" in header, (
         "the header's `main` set names no `cache_projection.py` address, but that module carries eight "
-        "cites in this document that open at `main` and NOT at the pin (`:3735` is a `MERGE … SET n += "
-        "$props` at `ccb49741b2ec`). An enumeration that omits them is not the set it claims to be."
+        "cites in this document that open at `main` and NOT at the pin (the pin's `:3735` is "
+        "`for prop in sorted(STORED_VECTOR_PROPS):`; the `MERGE … SET n += $props` this document "
+        "quotes is the pin's `:3732`). An enumeration that omits them is not the set it claims to be."
     )
     for token, _path, _line, _fragment in _MAIN_SET_MISSED:
         assert f"`{token}`" in header, (
@@ -317,7 +429,6 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
         )
 
     for stale, why in (
-        ("mechanical and complete", "the rule is exact only for the addresses IN the enumeration"),
         ("the WHOLE of the `main` set", "eight addresses open at `main` and sat outside it"),
         ("pin-written remainder", "its own population counts the `main`-set addresses too"),
     ):

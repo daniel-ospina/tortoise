@@ -73,7 +73,7 @@ measurement of the pin's own remainder — a label its own population contradict
 this header assigns to `main` are counted in it. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
-**124 of this document's 216** `file:line` pairs name a different line at `main` `340d500491` — the same
+**124 of this document's 211** `file:line` pairs name a different line at `main` `340d500491` — the same
 head the enumeration above names, so the figure and the list describe one comparison rather than two
 (counted as the
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
@@ -83,11 +83,16 @@ otherwise — `edges.py` is `tortoise/projection/edges.py`, `propagation.py` is
 restored, so `projection/__init__.py` is `tortoise/projection/__init__.py` — **skipping that step is what
 produced the `96 of 218` this header carried before the `#13124` review**, which reported **31 pairs as
 naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
-understated the drift by 15; a range cite counts once, by its **start** line), which dedupes the 322 as-written spellings to 216 — 106
+understated the drift by 15; a range cite counts once, by its **start** line), which dedupes the 314 as-written spellings to 211 — 103
+⚠️ **The PAIR denominator moves by ±5 with one counting decision, and the figure says which one it takes**:
+a path and its line written in TWO code spans (`` `cache_projection.py` `:2433` ``) is not an
+as-written `path.py:NNNN` spelling, so it is resolved but not counted; counting those instead gives
+216 pairs. **The drift NUMERATOR does not move — it is 124 under either basis**, which is why the
+numerator, not the denominator, is what a later head should compare itself against.
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
-text; **all 216 are comparable at BOTH heads** — every written path resolves to a module that exists at
+text; **all 211 are comparable at BOTH heads** — every written path resolves to a module that exists at
 `ccb49741b2ec`, so **no pair sits outside the ratio** — and **none of
-the 216 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
+the 211 falls past the end of its file**: the lines moved, the files did not shrink under them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 ⚠️ **The pin promise was RE-CHECKED, not assumed, in the `#13083` follow-up — and it did not hold.**
 Sixteen superseded line-addresses did not open on the line their row quotes at `ccb49741b2ec`. ⚠️ **The
@@ -112,9 +117,11 @@ above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
 `cache_projection.py` `:2433`, `:2490`, `:2653-2660`, `:2653-2654`, `:2663-2665`, `:2715`, `:3735` and
 `projection/entities.py` `:5646` — **eight addresses that open at `main` and not at the pin** (measured,
-`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `340d500491`: `:3735` is a
-`MERGE (n:…) SET n += $props` at the pin and the `cache_tier` arm at `main`; `:2715` is
-`placement_spellings()` at the pin and `tail_denied = forbidden | {` at `main`; `projection/entities.py`
+`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `340d500491`: the pin's `:3735` is
+`for prop in sorted(STORED_VECTOR_PROPS):` — the `MERGE (n:…) SET n += $props` this document quotes is the
+pin's `:3732` — and `:3735` carries the `cache_tier` arm at `main`; the pin's `:2715` is
+`if k not in tail_denied})` — the `tail_denied = forbidden | {` this document quotes is the pin's `:2710` —
+and `:2715` carries `tail_denied = forbidden | {` at `main`; `projection/entities.py`
 `:5646` is a comment at the pin and the `s.summary=coalesce($summary, s.summary, '')` write at `main`).
 Five of the eight are already asserted at `main` by `_PINS` in `tests/test_12184_shifted_cites.py`, and the
 test beside this paragraph pins all eight to the content they quote. They are listed here now. ⚠️ **So the
