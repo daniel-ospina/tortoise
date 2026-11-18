@@ -273,6 +273,11 @@ def _ontology_status_section() -> str:
     return tail if end is None else tail[: end.start()]
 
 
+#: The markdown BLOCK STARTS that end a lazy paragraph continuation (CommonMark).
+#: Prose that merely begins with a word — or with a code span — keeps continuing.
+_BLOCK_START_RE = re.compile(r"^(?:[#>|]|[-*+]\s|\d+[.)]\s|=+\s*$)")
+
+
 def _unwrap(text: str) -> str:
     """A blockquote paragraph as COMPARABLE text: `>` markers off, whitespace flat.
 
@@ -299,13 +304,13 @@ def _read_side_legacy_note(section: str | None = None) -> str:
     admits the tombstone contract (and any word a later edit puts there) as if it
     were the disclosure. A bare `>` is therefore the break.
 
-    Reads the paragraph's `>` continuation lines with it: a rewrap changes nothing
-    semantic and must not redden a content pin — ⛔ WHICH IS WHY THE ANCHOR AND THE
-    WORDS ARE MATCHED UNWRAPPED. The comparison text is the paragraph with its `>`
-    markers stripped and its whitespace collapsed (`_unwrap`), so a rewrap that
-    splits `read-side legacy` (or `` `archived` ``) across two lines still matches;
-    matching the RAW lines made the promise above false and reddened with a message
-    claiming the disclosure was missing (v3.37 review, rounds 2 and 3).
+    Reads the paragraph's `>` continuation lines with it — and a CommonMark LAZY
+    continuation too (a wrapped line may omit the `>` marker; the softbreak renders
+    as a space, so the sentence is unchanged). ⛔ WHICH IS WHY THE ANCHOR AND THE
+    WORDS ARE MATCHED UNWRAPPED: the comparison text is the paragraph with its `>`
+    markers stripped and its whitespace collapsed (`_unwrap`). Matching the RAW lines
+    made the promise above false and reddened a pure rewrap with a message claiming
+    the disclosure was MISSING (v3.37 review, rounds 2-4).
 
     ⛔ AND TWO NOTES ARE REFUSED, NOT JOINED. The paragraph break above replaced a
     blank-line split whose uniqueness assert (``§5 has 2 blockquote paragraph(s)
@@ -324,8 +329,20 @@ def _read_side_legacy_note(section: str | None = None) -> str:
     current: list[str] = []
     for line in (_ontology_status_section() if section is None else section).splitlines():
         stripped = line.lstrip()
-        quoted = stripped.startswith(">")
-        if not quoted or not stripped[1:].strip():  # not a quote / a bare `>` break
+        if not stripped.startswith(">"):
+            # ⛔ A LAZY CONTINUATION STILL BELONGS TO THE PARAGRAPH (CommonMark): an
+            # unquoted line that does not START a new block continues the open
+            # paragraph, and its softbreak renders as a space. Only a blank line, a
+            # bare `>`, or a real block start ends it — otherwise a rewrap that drops
+            # the marker would red as "the disclosure is missing".
+            if current and stripped and not _BLOCK_START_RE.match(stripped):
+                current.append(stripped)
+                continue
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+        if not stripped[1:].strip():  # a bare `>` is the MD028 paragraph break
             if current:
                 paragraphs.append(current)
                 current = []

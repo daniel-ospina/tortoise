@@ -1861,17 +1861,28 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     # `_ALLOWED_TRANSITIONS['live']` declares (measured: `{deprecated, superseded}`)
     assert "status='deprecated'" in msg, msg
     # ...and it discloses that the retired spellings normalise to it, instead of
-    # repeating the "`archived` is reserved on Points" §5 row v3.37 deleted
-    assert "normalise" in msg, msg
+    # repeating the "`archived` is reserved on Points" §5 row v3.37 deleted.
+    # ⛔ THE WHOLE CLAUSE, not the bare word `normalise`: a one-token pin is
+    # satisfied by "…do NOT normalise to it" (v3.37 review, round 4).
+    assert "'retracted' and 'archived' are the spellings that normalise" in msg, msg
     # ⛔ the pre-fix prescription, PERFORMED, is refused — this is the circle
     with pytest.raises(ValueError) as refused:
         sdk.update_knowledge(goal["id"], status="archived")
     assert "archived" in str(refused.value), refused.value
-    # ⛔ and the prescription the message now names LANDS, in ONE write
-    sdk.update_knowledge(goal["id"], goalState="abandoned", status="retracted")
+    # ⛔ and the prescription the message now names LANDS, in ONE write — the word
+    # the message NAMES (`deprecated`), not its synonym: pinning the synonym would
+    # stay green if `deprecated` were refused from `live` (v3.37 review, round 4).
+    sdk.update_knowledge(goal["id"], goalState="abandoned", status="deprecated")
     node = sdk.get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
     assert node["status"] == _CANONICAL_ENDED, node
+    # ...and the synonym the message DISCLOSES lands the same ending, so the
+    # disclosure is true rather than decorative
+    goal_legacy = sdk.create_point("goal", "GOAL - abandoned repair [legacy]",
+                                  goalState="active")
+    sdk.update_knowledge(goal_legacy["id"], goalState="abandoned", status="retracted")
+    legacy_node = sdk.get_point(goal_legacy["id"])
+    assert legacy_node["status"] == _CANONICAL_ENDED, legacy_node
     # both surfaces agree the goal is over — the rule the message serves
     assert (node["goalState"] in RETIRED_GOAL_STATES,
             not live.is_terminal_status(node.get("status"),
