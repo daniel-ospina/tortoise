@@ -626,8 +626,6 @@ def _namespace_literals_in_source(src: str):
         if not nm:
             continue
         line = src.count("\n", 0, m.start()) + 1
-        if src.split("\n")[line - 1].strip().startswith("#"):
-            continue  # comment/docstring sample — not a construction
         yield line, nm.group(2)
 
 

@@ -1360,8 +1360,12 @@ def _created_since_last_wipe() -> set[str]:
 # ── Graph-name ownership vocabulary (#3634) ────────────────────────────────
 # ONE declaration. Each set states its INPUT, because that is what makes it
 # safe: a prefix is not ownership; a journal record is.
-#   input: the JOURNAL (an ownership record). May include product families.
-_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")
+#   input: the JOURNAL (an ownership record). May include product families —
+#   and the TENANT half of it is COMPOSED from the composer's own list rather
+#   than restated, so this set cannot keep a spelling `_TENANT_GRAPH_PREFIXES`
+#   has dropped (a leftover spelling here would let the journal pass authorise
+#   a family the composer no longer mints).
+_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", *_TENANT_GRAPH_PREFIXES)
 #   input: GRAPH.LIST (no attribution). Deliberately a SUBSET (#7795).
 _SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
 #   input: opt-in via `_sweep_team_strays`; these are REAL tenant graphs (the
@@ -1374,6 +1378,18 @@ _SERVER_WIPE_PREFIXES = ("test_", "tortoise_test")
 # opt-in predicate read better as "the product's graphs" than as the composer's
 # spelling list — and registered as such, so the drift guard still demands a
 # reason for every member of the family.
+#
+# ⚠️ THE COUPLING RUNS IN THE EXPENSIVE DIRECTION, and it is stated here because
+# it cannot be stated at the constant without shifting every pinned cite below
+# it: `_TENANT_GRAPH_PREFIXES` was a STRIPPER's list ("never to mint a name",
+# `sdk.py`), and it now also authorises an IRREVERSIBLE delete family — this
+# set gates `_sweep_team_strays`, an opt-in `DETACH DELETE` + `GRAPH.DELETE`.
+# So widening the composer's list does not merely strip one more prefix; it
+# widens what a sweep is permitted to destroy. That is a deliberate acceptance
+# (one declaration beats two that can drift), and it is recorded here rather
+# than left to be discovered: an editor of `sdk.py::_TENANT_GRAPH_PREFIXES` is
+# editing a delete gate too. Add a prefix only for a family the composer both
+# mints and strips.
 _PRODUCT_GRAPH_PREFIXES = _TENANT_GRAPH_PREFIXES
 #   input: GRAPH.LIST, OPT-IN ONLY. THE #3634 CENSUS COHORT, as recorded on
 #   issue #3634: each entry below is a name verified present in that census,
