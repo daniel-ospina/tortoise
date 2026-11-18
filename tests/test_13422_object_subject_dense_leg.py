@@ -22,13 +22,14 @@ WHAT THIS FILE PINS (DB-FREE — the live arm is
    (the ONE dispatcher) rather than carrying a list of its own, and it reads the
    fold from `cache_projection` rather than restating it;
 4. the over-budget bounds decline the RECORD's turn and never degrade the
-   answer — they return `None`, which the caller answers from the graph. There
-   are three of them: the terminal-key BIND budget, and the two prefetch
-   budgets (rows, journal events) that bound the part of the fold
-   `statement_timeout` cannot reach, because it runs in Python;
-5. the folded arm is WIRED — `vector_search` asks the fold and its keys reach
-   the statement — so a `if False:` on the folded-arm branch cannot leave this
-   file green (`ast` pins alone cannot see that).
+   answer — they RAISE `RecordVectorDeclined`, so the caller NAMES the fallback
+   (`#4999`) and hands the graph only what is left of the read (`#11691`). There
+   are three of them: the terminal-key BIND budget, and the two prefetch budgets
+   (rows, journal events) that bound the part of the fold `statement_timeout`
+   cannot reach, because it runs in Python;
+5. the folded arm is WIRED — `vector_search` asks the fold and its keys reach the
+   statement — so a `if False:` on the folded-arm branch cannot leave this file
+   green (`ast` pins alone cannot see that).
 """
 from __future__ import annotations
 
@@ -224,13 +225,17 @@ def test_the_audit_opt_in_reaches_the_folded_arm_and_emits_no_clause(monkeypatch
 def test_the_folded_keys_are_the_columns_the_leg_returns():
     """⛔ THE KEY COORDINATE. The exclusion list must name what the SELECT emits.
 
-    For `object`/`subject` the record's ``node_key`` is the ``name``, while the
-    leg SELECTs ``id`` and `node_from_row` folds by `id`
-    (`cache_projection.KEY_PROPERTY`). A list built from ``node_key`` would
-    exclude nothing — every terminal row would still be served — and nothing
-    would error, which is the silent-`#689` shape this whole change is about.
-    Pinned textually because the mistake is a column NAME, and the live arm can
-    only catch it once a row exists.
+    ⛔ This docstring used to say the record's ``node_key`` is the ``name``, which
+    is FALSE at this head — `20261027000001`'s `chk_*_node_key_is_contract_key`
+    forces ``node_key = id``, and `cache_projection.KEY_PROPERTY` is `id` for both
+    labels. The claim is corrected here rather than left, because a lane following
+    it would build the exclusion from the wrong column and that sentence is what
+    would have told them to. What matters is narrower and is what this pins: the
+    exclusion must use ``LABEL_SERVED[...][1]`` — the column the SELECT returns —
+    and `test_the_fold_key_coordinate_is_the_legs_id_column` below pins the other
+    half, that `node_from_row(...).key` IS that column. The mistake is a column
+    NAME, so it is pinned textually; the live arm cannot catch it because every
+    seeded row satisfies `id == name == node_key` by constraint.
     """
     tree = ast.parse(MODULE.read_text())
     func = next(node for node in ast.walk(tree)
@@ -407,10 +412,18 @@ def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
         "the column arm's two statements must fit strictly inside the read")
     folded_share = record_vector.record_statement_ms(
         budget, record_vector.RECORD_LEG_STATEMENTS_PER_READ + 1)
-    assert folded_share * 3 < budget, (
-        f"the folded arm's three statements must also leave a reserve "
-        f"({folded_share} x 3 >= {budget}) — otherwise the graph branch is handed "
-        "a floored timeout and the label's real path returns nothing")
+    # ⛔ THE RESERVE'S SIZE, not merely that it is positive (`#13466` cycle 3, P3):
+    # `folded_share * 3 < budget` is TRUE at the FAILING divisor too
+    # (`record_statement_ms(500, 3) == 166`, and 498 < 500) — so it measured
+    # nothing. What the `#11691` guarantee actually is, is that at least ONE FULL
+    # statement share is left for the graph branch: at the failing divisor that is
+    # 500 - 498 = 2 ms, which is the empty-result path this pin exists to prevent.
+    reserve = budget - folded_share * 3
+    assert reserve >= folded_share, (
+        f"the folded arm leaves only {reserve} ms of a {budget} ms read for the "
+        f"graph branch after three {folded_share} ms statements — less than one "
+        "full share, so a cancelled kNN hands the label's real path a floored "
+        "timeout and it returns nothing")
     # …and the divisor really is one more where it is decided.
     tree = ast.parse(MODULE.read_text())
     func = next(node for node in ast.walk(tree)
@@ -423,13 +436,32 @@ def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
 def test_the_prefetch_does_not_select_the_payload_columns():
     """⛔ `SELECT *` ON THE PREFETCH IS A MEASURED 2.0 s -> 27 ms (`#13466` P2).
 
-    The fold reads no vector and no jsonb, but `SELECT *` materialises
-    `embedding` (jsonb, ~2.5 KB/row) and the generated `embedding_vec` (~7 KB/row)
-    for every row of the label. Measured on 8,000 rows: ~2.0 s with the payload,
-    ~27 ms without — i.e. at a 166 ms statement share the leg could never answer on
-    any tenant of realistic size, while claiming a bound it could not reach.
+    The fold reads no vector and no jsonb, but `SELECT *` materialises both for
+    every row of the label. Per-row sizes, measured with `pg_column_size` on
+    `pgvector/pgvector:pg16`: `embedding_vec` is a FIXED `vector(384)` =
+    **1,544 B** (fixed-width, so it cannot be larger), and `embedding` jsonb for a
+    384-element array is **4.6–7.7 KB** depending on whether the floats are
+    short-repr or full-precision. Measured on 8,000 rows: **~2.0 s** with the
+    payload, **~0.19 s** without, against the **125 ms** per-statement share a
+    500 ms read gives three folded statements plus the graph's reserve.
+
+    ⚠️ The first version of this docstring carried the two figures REVERSED
+    ("jsonb ~2.5 KB, `embedding_vec` ~7 KB") and the COLUMN arm's 166 ms share
+    (`#13466` cycle 3, P3). Both are corrected here rather than left, because this
+    is the test that defends the narrowing and a wrong cost model here is how the
+    next lane re-derives the wrong fix.
     """
+    from tortoise.cache_projection import GENERATED_COLUMNS
     from tortoise.record_projection import table_columns
+    from tortoise.stored_form import STORED_VECTOR_PROPS
+
+    # ⛔ The dropped set comes from the DECLARED homes, not a literal in this test
+    # either (`#13466` cycle 2, P3): the first cut hardcoded the two names while its
+    # docstring claimed to read those declarations.
+    assert record_vector._fold_prefetch_dropped() == (
+        frozenset(STORED_VECTOR_PROPS) | frozenset(GENERATED_COLUMNS))
+    assert "embedding" in STORED_VECTOR_PROPS
+    assert "embedding_vec" in GENERATED_COLUMNS
 
     columns = table_columns()
     for table in ("object", "subject"):
@@ -438,7 +470,7 @@ def test_the_prefetch_does_not_select_the_payload_columns():
         assert "embedding_vec" not in rendered, rendered
         # …and it is the census minus exactly the two payload columns, so a
         # migration that adds a column is read without an edit here.
-        expected = set(columns[table]) - {"embedding", "embedding_vec"}
+        expected = set(columns[table]) - record_vector._fold_prefetch_dropped()
         named = {part.strip().removeprefix("t.") for part in rendered.split(",")}
         assert named == expected, (sorted(expected - named), sorted(named - expected))
 # ── 6. the prefetch's PYTHON half is bounded, and the decline is NAMED ────
