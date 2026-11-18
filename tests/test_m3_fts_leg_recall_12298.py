@@ -1367,30 +1367,25 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # `run_vector_query`, which moves every row below: +25 for the rows above that
     # function's body, +55 for the rows after it. Re-derived against the live file
     # again — the pin caught it, which is what it is for.
-    #
-    # #13399/#13363/#13395 moved both files below and the drift is NOT one
-    # constant — measured across the seven rows, +20 for the three EARLY
-    # `search_engine.py` rows, +197 for the rank loop below them, and +421/+436
-    # across `projection/__init__.py`. That is why every row here is re-derived
-    # from the live file (`sed -n "<n>p" <file>`) and never nudged by a delta:
-    # a constant copied off the row above is wrong for four of these seven.
-    ("tortoise/search_engine.py", 2886, "def run_fts_query(",
-     "`tortoise/search_engine.py:2886`"),
+    ("tortoise/search_engine.py", 2888, "def run_fts_query(",
+     "`tortoise/search_engine.py:2888`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
-    # moves the two LATE rows and only them: the FTS call +1 and the rank loop
-    # +2. Re-derived against the live file after the forward-merge, not nudged
-    # by a constant. ⛔ Name NO line number in THIS comment (#12731): a number
-    # here drifts with every edit and reads as authoritative, and the tuples
-    # below are the only place this block may state one — the historical
-    # numbers in the rows ABOVE are the record of a drift, not a locator to
-    # trust.
-    ("tortoise/search_engine.py", 3098, "CALL db.idx.fulltext.queryNodes",
-     "`:3098-3107`"),
-    ("tortoise/search_engine.py", 2728, "def recency_tie_clause(",
-     "`search_engine.py:2728`"),
-    ("tortoise/search_engine.py", 4904,
+    # moves the two LATE rows and only them: the FTS call and the rank loop.
+    # Re-derived against the live file after the forward-merge, not nudged by a
+    # constant. ⛔ Name NO line number in THIS comment (#12731): a number here
+    # drifts with every edit and reads as authoritative, and the tuples below
+    # are the only place this block may state one — the historical numbers in
+    # the rows ABOVE are the record of a drift, not a locator to trust.
+    ("tortoise/search_engine.py", 3100, "CALL db.idx.fulltext.queryNodes",
+     "`:3100-3109`"),
+    ("tortoise/search_engine.py", 2730, "def recency_tie_clause(",
+     "`search_engine.py:2730`"),
+    # #13422 (PR #13466) inserts inside `search_engine.py` above this loop, so the
+    # row is +15 against `main`'s own re-derived value. Measured on the MERGE tree,
+    # not nudged by a constant.
+    ("tortoise/search_engine.py", 4921,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4904`"),
+     "`tortoise/search_engine.py:4921`"),
     # The three `projection/__init__.py` rows were stale on `main` too (both the
     # brief and this pin still named the pre-#13290 lines), and this branch's own
     # seam work moves them a further +23. Re-derived against the live file, so

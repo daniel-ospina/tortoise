@@ -68,43 +68,43 @@ _GJ = "tortoise/goal_judgement.py"
 #: (document, cite token the document must still carry, target file, 1-based line, fragment at that line)
 _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md (search_engine.py +3, cache_projection.py +2)
-    (_AUDIT, "cache_projection.py:3778", _CP, 3778, 'if table == "point"'),
-    (_AUDIT, "search_engine.py:4782-4786", _SE, 4786, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)"),
-    (_AUDIT, "search_engine.py:6669", _SE, 6669, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
-    (_AUDIT, "search_engine.py:7028", _SE, 7028, "(n:Point)-[r:aboutSubject]->(:Subject)"),
-    (_AUDIT, "search_engine.py:7030", _SE, 7030, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
+    (_AUDIT, "cache_projection.py:3841", _CP, 3841, 'if table == "point"'),
+    (_AUDIT, "search_engine.py:4797-4801", _SE, 4801, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)"),
+    (_AUDIT, "search_engine.py:6684", _SE, 6684, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
+    (_AUDIT, "search_engine.py:7043", _SE, 7043, "(n:Point)-[r:aboutSubject]->(:Subject)"),
+    (_AUDIT, "search_engine.py:7045", _SE, 7045, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
     # Row 149's TWO BARE range cites carry no `search_engine.py` prefix, so the token-level pins for
     # `6659`/`6661` above do not reach them — they are the only shifted mentions in this document the
     # first pin set missed. Both were already correct at the pre-fix head, so these two are
     # COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this class (`:4549`
     # re-pointed to `:4552`), which is the failure the whole file exists for.
-    (_AUDIT, "`:7027-7030`", _SE, 7027, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
-    (_AUDIT, "`:7033-7046`", _SE, 7033, "def subject_binding_available"),
+    (_AUDIT, "`:7042-7045`", _SE, 7042, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
+    (_AUDIT, "`:7048-7061`", _SE, 7048, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3100", _SE, 3100, "CALL db.idx.fulltext.queryNodes"),
-    (_AUDIT, "| `tortoise/search_engine.py:4710-4712` |", _SE, 4710, "MATCH (n:{label_str})"),
+    (_AUDIT, "| `tortoise/search_engine.py:4725-4727` |", _SE, 4725, "MATCH (n:{label_str})"),
     # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4708-4710` is a
     # SUBSTRING of §2.1's verdict token (`` `none`: `search_engine.py:4708-4710` ``), so the verdict row
     # satisfies this one and the TABLE row can be re-pointed alone without reddening anything — measured:
     # mutate the table to `:4511-4513` with the bare token -> 0 red, with the table-context token -> 1 red.
-    (_AUDIT, "search_engine.py:4125", _SE, 4125, "CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit"),
+    (_AUDIT, "search_engine.py:4140", _SE, 4140, "CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit"),
     (_AUDIT, "search_engine.py:3005", _SE, 3005, 'label = "Source" if entity_type == "document"'),
     (_AUDIT, "`:3072`", _SE, 3072, "the fulltext index is on Source._searchText"),
-    (_AUDIT, "cache_projection.py:2691-2702", _CP, 2691, "# \u26d4 PROVENANCE, PER ROW (#10965)"),
-    (_AUDIT, "cache_projection.py:2703-2705", _CP, 2703, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
+    (_AUDIT, "cache_projection.py:2712-2723", _CP, 2712, "# \u26d4 PROVENANCE, PER ROW (#10965)"),
+    (_AUDIT, "cache_projection.py:2724-2726", _CP, 2724, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     # Row 387's bare range, quoting "un-indexes a restored session". Its sibling pins (`2660-2662`,
     # `2650-2657`) are different ranges and do not reach this one. NON-VACUOUS: the pre-fix document
     # carried `:2648-2649` here, so the cite-token arm fires on that tree (measured).
-    (_AUDIT, "`:2693-2694`", _CP, 2694, "un-indexes a restored session"),
-    (_AUDIT, "cache_projection.py:2755", _CP, 2755, "tail_denied = forbidden | {"),
+    (_AUDIT, "`:2714-2715`", _CP, 2715, "un-indexes a restored session"),
+    (_AUDIT, "cache_projection.py:2776", _CP, 2776, "tail_denied = forbidden | {"),
     # --- the rest of the header's enumerated `main` set, pinned by CONTENT like every other row.
     # `_MAIN_SET_MISSED` below pins the EIGHT the header was missing; these are the entries the header
     # already named. Without them the enumeration is a promise: `#13290` moved every `search_engine.py`
     # entry in it and NOTHING red — the document went on naming held addresses over a tree that had
     # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
     # the list into a guard.
-    (_AUDIT, "`:2877`", _SDK, 2877, "SET s.capture_redactions=$redactions"),
-    (_AUDIT, "`sdk.py:37062`", _SDK, 37062, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
-    (_AUDIT, "`:37085`", _SDK, 37085, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "`:2882`", _SDK, 2882, "SET s.capture_redactions=$redactions"),
+    (_AUDIT, "`sdk.py:37067`", _SDK, 37067, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    (_AUDIT, "`:37090`", _SDK, 37090, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -124,16 +124,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6938`", _PI, 6938, '("Object", ["name"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
-    (_AUDIT, "sdk.py:24059", _SDK, 24059, "(n:Point {id:$id})-[:TAGGED]->()"),
-    (_AUDIT, "search_engine.py:6723", _SE, 6723, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
+    (_AUDIT, "sdk.py:24064", _SDK, 24064, "(n:Point {id:$id})-[:TAGGED]->()"),
+    (_AUDIT, "search_engine.py:6738", _SE, 6738, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3451", _SE, 3451, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3449`", _SE, 3449, "# #11682: the corpus join is PER FAMILY"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2888", _SE, 2888, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2730", _SE, 2730, "def recency_tie_clause"),
-    (_M3_BRIEF, "tortoise/search_engine.py:4906", _SE, 4906, "for rank, (pid, _score) in enumerate(ranked)"),
-    (_M3_BRIEF, "`search_engine.py:4825`", _SE, 4825, "def rrf_fusion("),
+    (_M3_BRIEF, "tortoise/search_engine.py:4921", _SE, 4921, "for rank, (pid, _score) in enumerate(ranked)"),
+    (_M3_BRIEF, "`search_engine.py:4840`", _SE, 4840, "def rrf_fusion("),
     # --- docs/architecture/ENTITY-VERDICT-BANDS.md — the D-1 row "the retrieval filter is status-only"
     # ⚠️ This row is a SECOND false correction, of the same class this file exists for. The document
     # cited `search_engine.py:2973-2997`; other PRs' inserts had already moved the status filter to
@@ -142,25 +142,25 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # and `2976-3000` is the `build_or_query` byte-identity comment block, not the filter. The pin below
     # is anchored on the line that IS the filter, so the next offset-only edit reds instead of shipping.
     (_EVIDENCE, "search_engine.py:3081-3096", _SE, 3081, "if label in _STATUS_FILTERED_LABELS"),
-    # --- the D-1 dedup filter, in BOTH documents that promise to carry the SAME address.
-    # ⛔ `#13345`'s re-derivation moved these to `27866` / left them at `27861` by adding a line delta,
-    # and the pair then named two different lines, neither of which was the filter (measured at
-    # `d1bfef778f` and at every later head: `27866` is prose and `27861` is the PRE-`#13290` value).
-    # The row above is what makes "carries the same number" a fact instead of a promise; these two are
-    # what make the NUMBER the live site rather than merely a matching one.
-    (_EVIDENCE, "sdk.py:28014", _SDK, 28014, "n.dedup_reviewed IS NULL"),
-    (_INDEX, "sdk.py:28014", _SDK, 28014, "n.dedup_reviewed IS NULL"),
     # --- docs/evidence/13083-capability-census/README.md
-    (_CENSUS, "cache_projection.py:2755", _CP, 2755, "tail_denied = forbidden | {"),
-    (_AUDIT, 'sdk.py:21745', 'tortoise/sdk.py', 21745, 's.summary=CASE WHEN $sum'),
-    (_AUDIT, '`:21868`', 'tortoise/sdk.py', 21868, 's.summary, s.topics, s.'),
-    # ⚠️ Row 13b's Source-writer cite, added because the site had NO pin at all.
-    # Main added it at `:21692`; RE-DERIVED here by content at the merged tree —
-    #   grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py
-    # -> 21703, one line: the capture writer's actual `_searchText` assignment
-    # (the `#3518` contract), not the comment above it and not the
-    # `sessionCaptured` provenance block this pin sat on before.
-    (_AUDIT, 'sdk.py:21703', _SDK, 21703, 'search_text = _source_search_text(topics=topics)'),
+    (_CENSUS, "cache_projection.py:2776", _CP, 2776, "tail_denied = forbidden | {"),
+    # ⚠️ Row 13b's Source-writer cite, added because the site had NO pin at all — the same shape
+    # the `:6938` row above was added for. It sat at `:19637` (a comment about provenance loss in
+    # the `sessionCaptured` stamp block) for merges without a red, because
+    # `rg -n '19637' docs/ tests/ tools/ config/` reached this one row and no `_PINS` /
+    # `_TOKEN_OCCURRENCES` entry covered it. ⛔ `#13486` moved the writer under this row, so it is
+    # re-derived here to the line that actually carries `search_text = _source_search_text(`
+    # (`grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py`), not carried.
+    (_AUDIT, "sdk.py:21708", _SDK, 21708, "search_text = _source_search_text(topics=topics)"),
+    (_AUDIT, "sdk.py:21750", _SDK, 21750, "s.summary=CASE WHEN $sum"),
+    (_AUDIT, "`:21873`", _SDK, 21873, "s.summary, s.topics, s."),
+    # --- the D-1 dedup filter, in BOTH documents that promise to carry the SAME address (#13345).
+    # `docs/00_index.md`'s D-1 row says in as many words that the filter is at `sdk.py:<n>` "at this
+    # head, and `ENTITY-VERDICT-BANDS.md` carries the same number", so the pair is ONE claim in TWO
+    # documents: two pins, and the cross-document arm that reads both by regex. Re-derived at THIS
+    # head (`grep -n 'n.dedup_reviewed IS NULL' tortoise/sdk.py` -> one hit), not delta-shifted.
+    (_EVIDENCE, "sdk.py:28019", _SDK, 28019, "n.dedup_reviewed IS NULL"),
+    (_INDEX, "sdk.py:28019", _SDK, 28019, "n.dedup_reviewed IS NULL"),
     (_AUDIT, 'hosted_api.py:22925', 'tortoise/hosted_api.py', 22925, 'MERGE (s:Source {url:$did})'),
     (_AUDIT, '`:22737`', 'tortoise/hosted_api.py', 22737, 'def _execute_commit_writes'),
     # ⛔ The document carries TWO addresses for this one statement on purpose: `:33583` is the number
@@ -178,26 +178,22 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
 _ENT = "tortoise/projection/entities.py"
 _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
-    (":2464", _CP, 2464, "def _episodic_source_search_text_is_the_lexicon"),
-    (":2521", _CP, 2521, 'return summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"'),
-    (":2693-2700", _CP, 2693, "it is the ONLY field the Source FTS index"),
-    (":2693-2694", _CP, 2694, "un-indexes a restored session"),
-    (":2703-2705", _CP, 2703, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
-    (":2755", _CP, 2755, "tail_denied = forbidden | {"),
-    (":3778", _CP, 3778, 'if table == "point"'),
+    (":2485", _CP, 2485, "def _episodic_source_search_text_is_the_lexicon"),
+    (":2542", _CP, 2542, 'return summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"'),
+    (":2714", _CP, 2714, "it is the ONLY field the Source FTS index"),
+    (":2714-2715", _CP, 2715, "un-indexes a restored session"),
+    (":2724-2726", _CP, 2724, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
+    (":2776", _CP, 2776, "tail_denied = forbidden | {"),
+    (":3841", _CP, 3841, 'if table == "point"'),
     (":5666", _ENT, 5666, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
-    # sent readers to the pin. ⛔ The pin is wrong for all six, and BOTH readings of HOW were
-    # measured at `ccb49741b2ec`, so they are reconciled here rather than one displacing the
-    # other: the pin DOES hold a DELETE at `sdk.py:23982` (`... DELETE r"`), which is why
-    # "every one is a comment" is false — but `sdk.py:24010` is `# creates a PARALLEL edge on
-    # attribute change; the two-` and there is NO `DELETE` in 23990-24040, so a DELETE elsewhere
-    # in the file is not a DELETE in this region. `hosted_api.py:22919` IS
-    # `if is_subject_kind(_ekind or ""):` and `:22925` is the `)` closing `create_entity(...)`.
-    ("sdk.py:24059", _SDK, 24059, "(n:Point {id:$id})-[:TAGGED]->()"),
-    ("search_engine.py:6723", _SE, 6723, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
-    ("sdk.py:21745", _SDK, 21745, "s.summary=CASE WHEN $sum"),
-    (":21868", _SDK, 21868, "s.summary, s.topics, s."),
+    # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:23982` is a DELETE
+    # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
+    # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
+    ("sdk.py:24064", _SDK, 24064, "(n:Point {id:$id})-[:TAGGED]->()"),
+    ("search_engine.py:6738", _SE, 6738, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
+    ("sdk.py:21750", _SDK, 21750, "s.summary=CASE WHEN $sum"),
+    (":21873", _SDK, 21873, "s.summary, s.topics, s."),
     ("hosted_api.py:22925", "tortoise/hosted_api.py", 22925, "MERGE (s:Source {url:$did})"),
     (":22737", "tortoise/hosted_api.py", 22737, "def _execute_commit_writes"),
 )
@@ -211,25 +207,27 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 #: instead of every STRING; the `#13083` review that found it named 15 shared tokens, which is why this
 #: is a set of counts and not another context-bearing token.
 _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3778'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4782-4786'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6669'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7028'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7030'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7027-7030`'): 4,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7033-7046`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4797-4801'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6684'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7043'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7045'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7042-7045`'): 4,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7048-7061`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3100'): 5,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4710-4712` |'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4125'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4725-4727` |'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4140'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3005'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3072`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2691-2702'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2703-2705'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2693-2694`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2755'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2877`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37062`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37085`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2712-2723'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28019'): 1,
+    ('docs/00_index.md', 'sdk.py:28019'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2882`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37067`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37090`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
@@ -240,27 +238,22 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6933`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6934`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24059'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6723'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24064'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6738'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3451'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3449`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2888'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2730'): 1,
-    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4906'): 1,
-    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4825`'): 1,
+    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4921'): 1,
+    ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4840`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3081-3096'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28014'): 1,
-    ('docs/00_index.md', 'sdk.py:28014'): 1,
-    ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2755'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21703'): 1,
-    # §1's enumeration keeps `:6869` as HISTORY (it is `("Object", ["name"])` at `main`
-    # `ae54df166d`) while §2.5 row 8 carries the live `:6938`; the two mentions are the
-    # measured count, so a half-repoint (one site moved, the other left) reds here.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21745'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21868`'): 2,
+    ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21708'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21750'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21873`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22925'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22737`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33601`'): 1,
@@ -352,10 +345,12 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
 
     The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
     the counts still read `322`/`216`/`106` for a file that measures `326`/`214`/`112`, and the pin-side
-    prose described `:3778` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; `:3778`
-    is `for prop in sorted(STORED_VECTOR_PROPS):`) and `:2755` as `placement_spellings()` (that function is
-    the pin's `:1798`; `:2755` is `if k not in tail_denied})`). Nothing asserted them, so both could revert
-    silently — that is what this test stops.
+    prose described `:3778` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; the
+    `for prop in sorted(STORED_VECTOR_PROPS):` line is the pin's `:3735`, and `:3778` names neither — ⛔
+    measured with `grep -n` on `ccb49741b2ec`, because the `:3778` in this sentence is the address the
+    prose used to name, not the statement it claimed sat there) and `:2755` as `placement_spellings()`
+    (that function is the pin's `:1798`; `:2755` is `if k not in tail_denied})`). Nothing asserted them, so
+    both could revert silently — that is what this test stops.
 
     ⛔ It does NOT prove the figures are CURRENT: a figure goes stale the moment this file gains or loses a
     cite, and this test would happily pass over a newly-wrong number. Re-measuring is the header's own
@@ -369,7 +364,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
-        "the pin's `:3778` is",
+        "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
         assert claimed in text, (
@@ -436,7 +431,7 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
 
 
 def test_the_resolver_reds_on_a_double_applied_offset() -> None:
-    """Negative control — the exact defect: the pre-fix `+3` pointed the loop's cite at the `#7704` note.
+    """Negative control — the exact defect: 4921 + 3 = 4924 is the `#7704` note, not the loop.
 
     Reachable: it is the shipped pre-fix state of the m3 brief, reintroduced here by mutating a COPY of
     the shipped row with the cite token LEFT INTACT, so the failure is reported by the CONTENT arm and
@@ -446,18 +441,11 @@ def test_the_resolver_reds_on_a_double_applied_offset() -> None:
     since this control was written, and a hardcoded `4907` rotted into a line that no longer holds the
     note — the do-nothing control then failed for the wrong reason (the note check, not the content arm).
     """
-    loop_line = 4906
-    note_line = next(
-        i + 1
-        for i, line in enumerate((REPO / _SE).read_text(encoding="utf-8").splitlines())
-        if "#7704 (MEASURED MECHANISM" in line
-    )
-    assert note_line > loop_line, "the `#7704` note must sit BELOW the loop it annotates"
-    row = (_M3_BRIEF, "tortoise/search_engine.py:4906", _SE, loop_line, "for rank, (pid, _score) in enumerate(ranked)")
-    doubled = (row[0], row[1], row[2], note_line, row[4])
+    row = (_M3_BRIEF, "tortoise/search_engine.py:4921", _SE, 4921, "for rank, (pid, _score) in enumerate(ranked)")
+    doubled = (row[0], row[1], row[2], 4924, row[4])
     errors = _resolve((doubled,))
     assert errors, "a spurious +3 must red the resolver"
-    assert f":{note_line}" in errors[0] and "#7704" in errors[0]
+    assert ":4924" in errors[0] and "#7704" in errors[0]
     assert "is gone" not in errors[0], "the content arm must be the one that fires"
 
 
@@ -567,8 +555,8 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     `#13124`'s header said the enumeration was "the WHOLE of the `main` set" and that every other
     `file:line` "is at the pin `ccb49741b2ec`". The `#13124` REVIEW measured both false: eight addresses
-    open at `main` and are named in neither list — `cache_projection.py` `:2464`, `:2521`, `:2693-2700`,
-    `:2693-2694`, `:2703-2705`, `:2755`, `:3778` and `projection/entities.py`:5666. `:3778` is a
+    open at `main` and are named in neither list — `cache_projection.py` `:2464`, `:2521`, `:2693-2660`,
+    `:2714-2715`, `:2724-2726`, `:2776`, `:3841` and `projection/entities.py`:5666. `:3778` is a
     `MERGE (n:…) SET n += $props` at the pin and the `cache_tier` arm at `main`, so a reader who followed
     the rule opened the pin and landed on a statement their row does not quote: "cite rotated, reader
     confidently opens the wrong line" — this document's own failure class, inverted.
@@ -601,7 +589,7 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     assert "cache_projection.py" in header, (
         "the header's `main` set names no `cache_projection.py` address, but that module carries eight "
-        "cites in this document that open at `main` and NOT at the pin (the pin's `:3778` is "
+        "cites in this document that open at `main` and NOT at the pin (the pin's `:3735` is "
         "`for prop in sorted(STORED_VECTOR_PROPS):`; the `MERGE … SET n += $props` this document "
         "quotes is the pin's `:3732`). An enumeration that omits them is not the set it claims to be."
     )
