@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1319** | **100** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,082** | **827** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,086** | **831** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,084 / 9,086 here, and only the last reproduces at this tree (`files_scanned` **2,418**); the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -141,7 +141,7 @@ example INSIDE a docstring, which is why the tool's verb total is an upper bound
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
 number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 300
 `.py` files the same two predicates read **2,068** and **2,338**; with `-t py` and the test-module
-exclusion dropped they read **2,071** and **2,341**. The 69-occurrence 2,341→2,410 gap is entirely
+exclusion dropped they read **2,070** and **2,341**. The 69-occurrence 2,341→2,410 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
 `tortoise/pi-hooks/tortoise-capture.test.ts` 14, `tortoise/pi-hooks/store-sync.test.mjs` 3,
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
@@ -240,7 +240,7 @@ where the folded part was.
 
 | sites | file |
 |---|---|
-| 384 | `tortoise/sdk.py` |
+| 389 | `tortoise/sdk.py` |
 | 240 | `tortoise/hosted_api.py` |
 | 92 | `tortoise/projection/__init__.py` |
 | 54 | `tortoise/projection/entities.py` |
