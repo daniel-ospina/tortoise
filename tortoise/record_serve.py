@@ -41,8 +41,11 @@ consumer must NOT hard-code this list):
   UNION over the five labels a bare value can name in the cache
   (``ENTITY_UNION_JURISDICTION``), so it has no ONE coordinate — and it is served
   only for ``ENTITY_UNION_LABELS`` (the labels whose record row reproduces the
-  cache node), abstaining with ``residency: "not-hot"`` for the rest through
-  :func:`entity_absent_wire`'s coverage rule. Its absence verdict is therefore
+  cache node), abstaining with ``residency: "not-hot"`` rather than claiming an
+  absence it cannot establish (:func:`entity_absent_wire`'s coverage rule is the
+  one home of that decision — ⚠️ it asks with NO label, so the abstention is the
+  DOOR's, not a partition over labels: today every absent NAMED id abstains,
+  including a miss on a label that IS served). Its absence verdict is therefore
   CONSERVATIVE on purpose: see :data:`ENTITY_UNION_ADDRESS_RESIDUALS`.
 
 **Not served, with the reason** — a decision that does not name its exclusions
@@ -520,11 +523,11 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "`{}`). Served for the labels whose row reproduces the cache "
                "answer — :data:`ENTITY_UNION_LABELS`, i.e. the labels #9634's "
                "`FOLD_ON_CREATE_DEFAULTS` covers, plus `Point` — and ABSTAINS "
-               "(`residency: \"not-hot\"`) for the rest rather than answering "
+               "(`residency: \"not-hot\"`) rather than answering "
                "an absence it cannot establish: `Event` and `Source` carry the "
                "OPEN parity gap in #9721 (a served `:Event` would lose the "
                "fold-written keys its row does not carry — per column, so the "
-               "count rides the row: up to eight, seven of them measured), and "
+               "count rides the row: up to eight), and "
                "`Source` ALSO sits in "
                ":data:`ENTITY_UNION_ADDRESS_RESIDUALS` (its record key is `url`, "
                "while the cache resolves one by `id` too — so a bare Source id "
@@ -1327,7 +1330,7 @@ def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,
     per-label addressing is measured — and it deliberately does NOT re-check
     parity: a caller that names ``Event`` gets the Event ROW, which is missing the
     fold-written keys ITS COLUMNS do not carry — per column, never a fixed count
-    (measured over every column subset: all optional columns NULL → 8 lost,
+    (measured: all optional columns NULL → 8 lost,
     ``event_kind`` set and the rest NULL → the seven #9721 measured, every column
     set → 0). See this module's ``Event`` bullet for why the count rides the row.
     Only :func:`serve_entity` decides what may be SERVED, and it
