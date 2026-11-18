@@ -1,3 +1,14 @@
+---
+title: "Capstone #13038 — the state model measured by customer value"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-17
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#11824, #13038, #12855, docs/plans/2026-11-15-state-lifecycle-and-pipelines.md"
+---
+
 # Capstone #13038 — the state model measured by customer value
 
 **Parent:** #11824 · **Design of record:** `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`
@@ -197,6 +208,13 @@ produced is asserted beyond that:
   name the successor from the replaced record's own structure" would fail Q3; the question as a
   customer asks it is satisfied. This is recorded as an observation, not used to move the verdict —
   and it is why Q3 is the row to re-read first when "change is legible" is next claimed.
+  ⚠️ **The wording above is the record of THAT run, not the signal's current text:**
+  `names-its-successor` read `bool(supersededBy)` on a Point, whose successor is the `CORRECTS`
+  edge, so it printed `False` for every superseded Point — a `False` that meant "not looked for".
+  The signal now reads the carrier the FAMILY uses (the id carrier when the read serves one, the
+  `supersededBy` name, else the successor's own `supersedes` row) and says which answered, so a
+  re-run prints the true fact on this row. The committed boards are left as they were produced —
+  they are a record of a past run, not a claim about the current instrument.
 
 ---
 

@@ -775,9 +775,12 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
-                # `strict=True` because the guard above already established the
-                # lengths agree: a mismatch `continue`d before this loop, so a
-                # truncation here would mean the guard itself was bypassed.
+                # `strict=True` on both sides of the merge (this branch and
+                # `origin/main` added it independently, for the same reason): the
+                # length equality above already `continue`s when the lists differ,
+                # so a mismatch here would mean the guard itself was bypassed —
+                # the parameter asserts nothing new and gives B905 its explicit
+                # argument. Kept as ONE line with both sides' intent, not two.
                 for raw_item, got_item in zip(texts, got_list, strict=True):
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from

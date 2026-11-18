@@ -237,6 +237,12 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    `origin/main` at `f6793959a2` too (`2 failed, 8 passed`) — same two tests, same paths.
    `git diff --stat` vs `main` = **2 files** (this plan doc + the test file) — the `9 files + 1 plan
    doc` this line used to carry was #13476's tree, measured at THAT head, and was false here.
+   ⛔ **SUPERSEDED for the absence reds by the `origin/main` merge (`130e20fdaf`, two commits after
+   `f6793959a2`).** That merge brought in `#13471`/`#13486`, which added the missing frontmatter to
+   ALL THREE paths named above — `git diff f6793959a2..130e20fdaf --stat -- <those 3 docs>` = **3 files,
+   40 insertions** — so at the merge head the same command measures **`18 passed, 0 failed`**
+   (measured, not inferred). Every `2 failed, N passed` figure in this doc stays true for the head it
+   names; what no longer holds is the PRESENT TENSE — "the 2 ARE the pre-existing absence reds".
 3. **Mutant matrix — 22/22 behave as designed** (M1–M20 by `/tmp/matrix_13452.sh`; M13–M18 were
    added after code review, and M21/M22 were measured separately in `e488d2adcc`'s scratch run —
    one mutation at a time, tree restored byte-identical between each):
@@ -396,7 +402,9 @@ listed in §9. #13484's own attestation is minted at its own final head, after t
 - the 2 pre-existing absence reds (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the
   evidence bundles `docs/evidence/13038-capstone/README.md` +
   `docs/evidence/13436-write-path-costs/README.md`, the latter landed by `#13436` after this plan) —
-  separate defect, explicitly excluded by the issue;
+  separate defect, explicitly excluded by the issue. **Fixed upstream while this PR was in review**
+  (`#13471`/`#13486`, integrated by the `origin/main` merge at `130e20fdaf`), so the red is gone at
+  the merge head; the exclusion still holds — this PR did not fix it, `main` did;
 - `config/ci-surfaces.yml` timing-cost rationale for `test_doc_affiliation_frontmatter.py` (cited by
   its key: line `:13167` at head `b0940c7a4ffc`, moved by `ci_timing.py --refresh-durations`) —
   rationale drift (category B, no behavioural consequence);
@@ -786,3 +794,9 @@ One correction this rebase forced: the pre-existing absence red on the evidence 
 TWO bundles, because `#13436` landed `docs/evidence/13436-write-path-costs/README.md` without
 frontmatter after this plan was written. §7 and the out-of-scope list above record both; the defect
 is `main`'s, not this PR's.
+
+**The `origin/main` merge at `130e20fdaf` then removed that red entirely** (`#13471`/`#13486` added
+the frontmatter to all three paths), so the file measures **`18 passed`** at the merge head and §7
+item 2 carries the measurement. Recorded here because this section's last word on the subject was
+"the defect is `main`'s" — true when written, resolved upstream since, and a reader at the merge head
+must not go hunting for a red that is gone.
