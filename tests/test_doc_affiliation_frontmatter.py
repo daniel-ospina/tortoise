@@ -1432,3 +1432,93 @@ def test_an_unlexable_key_is_what_makes_the_fail_open_a_RED(
     )["aboutObjects"] == "a,", "control: ` #` truncates this plain scalar too"
     msg = red('"aboutObjects": a, #11395 KEEP\n')
     assert "QUOTED key" in msg, msg
+
+
+#: The alphabet every quoting arm in this file turns on. The sweep below is
+#: EXHAUSTIVE over it, so the pin is a CLASS rather than one more hand-picked
+#: shape — this change has cleared one shape per review round, and each round the
+#: NEXT shape was what red.
+_SHAPE_ALPHABET = ("'", '"', "\\", "#", " ", "a")
+#: Length bound, stated rather than discovered. At 6 the sweep starts finding a
+#: PRE-EXISTING mis-slice that this change neither causes nor clears — `''''#'`,
+#: where YAML keeps `'` and the arm's body is `''#`, because `body = value[1:-1]`
+#: is not sliced at the close. It is recorded in the plan doc §9 with the reason
+#: the one-line slice fix cannot land alone (slicing at the close turns `'a'x'`
+#: GREEN on input YAML REFUSES). Including it here would red this pin for a reason
+#: that is not this diff's.
+_SHAPE_MAX_LEN = 5
+
+
+def test_no_GREEN_quoted_verdict_survives_a_parser_refusal() -> None:
+    """Differential: a real YAML parser is the oracle, ``_quoted_style`` the subject.
+
+    Every quoting defect this branch fixed was found ONE SHAPE AT A TIME, and each
+    round produced the next shape. This sweeps EVERY string over the alphabet the
+    arms turn on, up to five characters (3110 quoted values), and asserts the two
+    directions in which a bad value gets THROUGH:
+
+    * a shape a real parser REFUSES must not come back green (``single-quoted`` /
+      ``double-quoted``) — a green verdict is the one the caller COMPARES, so a
+      refusal reported green can pass; and
+    * a green verdict's ``body`` must equal what that parser returns, or the
+      comparison is made against the wrong text.
+
+    Measured at this head: 3110 shapes, 277 green, **0** refusals reported green,
+    0 body mismatches. Non-vacuity: the same sweep driven through ``main``'s
+    ``_closing_quote`` + ``_split_comment`` finds **1** — `'''''` (five quotes),
+    which YAML refuses as an unterminated scalar and ``main`` reports as
+    ``single-quoted`` with body ``''`` — so this pin reds on the PRE-fix helper and
+    is green only because the parity scan refuses to close an unterminated scalar.
+
+    The two counters are constant-derived (alphabet x bound), never tree-derived,
+    so they cannot red on a sparse tree: they exist so that an edit to those two
+    constants cannot leave a sweep that checks nothing.
+    """
+    shapes = green = 0
+    refused_but_green: list[tuple[str, str, object]] = []
+    mismatched: list[tuple[str, str, object, object]] = []
+    # Local imports, like the sibling pins' `parse_frontmatter`: a module-level
+    # import here would shift EVERY line number below it, and the plan doc cites
+    # lines in this file (the shift that cost a whole round already).
+    import itertools
+
+    import yaml
+
+    for length in range(1, _SHAPE_MAX_LEN + 1):
+        for chars in itertools.product(_SHAPE_ALPHABET, repeat=length):
+            raw = "".join(chars)
+            if raw[:1] not in ('"', "'"):
+                continue
+            shapes += 1
+            try:
+                parsed = yaml.safe_load(f"aboutObjects: {raw}\n")
+                if not isinstance(parsed, dict):
+                    raise yaml.YAMLError("a quoted scalar must still parse to a mapping")
+                value, refused = parsed.get("aboutObjects"), False
+            except yaml.YAMLError:
+                value, refused = None, True
+            style, body = _quoted_style(raw)
+            if style not in ("single-quoted", "double-quoted"):
+                continue
+            green += 1
+            if refused:
+                refused_but_green.append((raw, style, body))
+            elif body != value:
+                mismatched.append((raw, style, body, value))
+    assert shapes > 3000, (
+        "the sweep shrank — `_SHAPE_ALPHABET` / `_SHAPE_MAX_LEN` no longer generate "
+        f"the population this pin is calibrated on ({shapes} quoted shapes)"
+    )
+    assert green > 200, (
+        f"only {green} of {shapes} shapes reach a COMPARING verdict, so the two "
+        "assertions below would pass vacuously — re-point this pin"
+    )
+    assert not refused_but_green, (
+        "a quoted shape YAML REFUSES was reported with a COMPARING verdict, so a "
+        "truncated or unterminated value can pass the survival check: "
+        f"{refused_but_green!r}"
+    )
+    assert not mismatched, (
+        "a green verdict's body is not the text YAML reads, so the value is "
+        f"compared against the wrong text: {mismatched!r}"
+    )

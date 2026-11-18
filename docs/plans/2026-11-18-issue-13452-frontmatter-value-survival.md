@@ -208,10 +208,11 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
    failure output, not asserted.**
-2. **Fixed tree:** `2 failed, 15 passed` **at this head (`38df4e93a4`)** — `17 collected`, the 2
-   failures being the ones named below; the file carries exactly **7** tests this PR added (`comm` on
-   the two files' `^def test_` lines against `origin/main`: 15 vs main's 8), and each count is tied to
-   the head that produced it, because tests are appended to this file every round:
+2. **Fixed tree:** `2 failed, 16 passed` at the head that adds the differential pin — `18 collected`,
+   the 2 failures being the ones named below; the file carries exactly **8** tests this PR added
+   (`comm` on the two files' `^def test_` lines against `origin/main`: 16 vs main's 8), and each count
+   is tied to the head that produced it, because tests are appended to this file every round
+   (`15 passed` at `38df4e93a4`, before the differential pin):
    `8 passed` on `main` (`f6793959a2`), `9 passed` at the rebased `36700a89b7` (the extra pass is
    this branch's OWN first pin, `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` —
    `comm` on the two `^def test_` lists against `origin/main` names exactly that one test, and
@@ -219,8 +220,9 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    it cannot be the extra pass), `10 passed` once the `''`-parity pin
    landed, `11 passed` once the `"`-backslash pin landed, `12 passed` once the (C)-ordering pin
    landed, `13 passed` once the never-closing/`malformed` pin landed in `b0940c7a4f`,
-   `14 passed` once the verdict-split remedy pin landed, and `15 passed` once the
-   unlexable-key fail-open pin landed in `38df4e93a4`. The 2 are the
+   `14 passed` once the verdict-split remedy pin landed, `15 passed` once the
+   unlexable-key fail-open pin landed in `38df4e93a4`, and `16 passed` once the differential
+   refusal pin landed. The 2 are the
    pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the evidence bundles
    `docs/evidence/13038-capstone/README.md` **+** `docs/evidence/13436-write-path-costs/README.md` —
@@ -372,7 +374,11 @@ population claim, round 3 found (D) inert for block/flow plus three over-blocks 
 measurement, fixed, and covered by the matrix. Because the cap is spent, the *diff* then went to the
 **head-bound code review**, which found two more real defects — **(B) tautological** and **(C)
 unreachable behind the escape branch** — both verified by measurement, fixed, and now covered by M1 and
-M16 / M18. The attestation for #13476 is recorded at its FINAL head (`9f25dc79c9`), and that record
+M16 / M18. The attestation for #13476 is recorded at its FINAL head (`9f25dc79c9` — not an object in
+this clone, so a reader here cannot open it; it resolves on the remote,
+`gh api repos/daniel-ospina/tortoise/commits/9f25dc79c9`, and #13476's merged state on `main` is the
+squash `a5f1e7db46`. Cited by sha because that is the head the record is bound to, with the two
+resolvable pointers named beside it), and that record
 is `not-clean` with two findings — the escape one fixed in #13484, and the counter residuals now
 listed in §9. #13484's own attestation is minted at its own final head, after this section.
 
@@ -516,13 +522,17 @@ finding, and neither is an escape: `:893-894` assert `measured` and `compared` B
 affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
 the value; and `:798` skips `escaped` before `compared += 1` (`:808`), so a tree whose affiliated
 values are all escaped leaves the counter legitimately empty and fires the same message. (Line
-numbers are re-measured at this head (`34df19504d`): `assert measured` sits at `:893`, against
+numbers are re-measured at this head (`c32ff051b4`): `assert measured` sits at `:893`, against
 `:715` on `a5f1e7db46` → `:792` once `#13485` landed → `:892` at `38df4e93a4` → `:893` here — the
 last step is **+1** for a line this branch's own round inserted in `_split_comment`'s docstring,
 which is the mechanism that keeps moving these numbers. So at `38df4e93a4` of the total **+77** is
 `#13485`'s and the remaining **+100** is this
-branch's own (+71 for `_closing_quote`, its docstring and the fifth pin, and +22 for
-`_unkeepable_quoted`'s verdict split, a later round's addition). They move with every appended test,
+branch's own. (The itemisation of that `+100` that used to sit here — `+71` for `_closing_quote`, its
+docstring and "the fifth pin", `+22` for `_unkeepable_quoted`'s verdict split — is DELETED rather
+than corrected: it sums to `93` against a stated `100`, and the "fifth pin" it names is defined BELOW
+`:893` (every test this PR adds lives at `:1009` and later), so its insertion cannot shift a line
+above it. What moves these numbers is WHERE
+a line is inserted, not which test exists.) They move with every appended test,
 so they are re-measured rather than carried: an earlier revision of this section cited the
 pre-rebase `:751-752`,
 `:753`, `:658`, `:666`, and the revision before this one cited `:828-829`/`:830`/`:733`/`:743` — all
@@ -555,7 +565,7 @@ a legal inner quote. That half needed no lexer change and is now FIXED: `_unkeep
 the diagnosis by VERDICT, so `malformed` names the shapes that actually clear it (one space before
 the `#`; the whole value on one line inside its quotes; a block scalar) while only `broken` — where
 YAML really does stop at an inner quote — keeps the deletion advice, and
-`test_a_malformed_value_names_a_true_remedy` (`:1293`) pins both halves. Clearing the VERDICT means
+`test_a_malformed_value_names_a_true_remedy` (`:1296`) pins both halves. Clearing the VERDICT means
 teaching the arm to accept a non-space-separated trailing comment after a close — a lexer widening,
 out of this issue's scope, and unchanged by the remedy fix.
 Measured scale, so it is not read as larger than it is. ⚠️ The differential below was run by the
@@ -580,8 +590,9 @@ measured at `ae275460df93` by the fresh-context review and re-measured at `1c956
 this note covers; every later round moves both numbers again):
 
 - *"contains exactly one commit"* — false at this head: `git log --oneline origin/main..HEAD | wc -l`
-  = **27** at `1c956076`, **28** once that round's docstring commit was added, and **30** at
-  `38df4e93a4` (re-measured). The sentence was
+  = **27** at `1c956076`, **28** once that round's docstring commit was added, **30** at
+  `38df4e93a4`, and **32** at `c32ff051b4` (each re-measured; every round adds at least one, which is
+  the point). The sentence was
   true when the body was written (the PR was rebased onto `main` as a
   single commit); the review rounds then appended the rest. A merger reading "exactly one commit"
   against a 30-commit branch is being told something false about the diff's SHAPE, which is why this
@@ -589,7 +600,8 @@ this note covers; every later round moves both numbers again):
 - *"`pytest …` → **8 passed, 2 failed**"* — stale for the same reason §7 item 2 gives: tests are
   appended to this file every round. At `ae275460df93` the same command reported **13 passed, 2
   failed** (`15 collected`), at `1c956076` **14 passed, 2 failed** (`16 collected`), and at
-  `38df4e93a4` **15 passed, 2 failed** (`17 collected`; re-measured), the
+  `38df4e93a4` **15 passed, 2 failed** (`17 collected`; re-measured), and **16 passed, 2 failed**
+  (`18 collected`) once the differential refusal pin landed, the
   2 being the pre-existing absence reds named above.
 
 The body is **not** edited — it carries the review attestation the gate reads, and editing it wipes
@@ -601,7 +613,7 @@ is loadable YAML — `yaml.safe_load` returns `"x"`, and `parse_frontmatter` agr
 reports `('malformed', None)`. The verdict is the PRE-EXISTING part (see the next paragraph); the
 REMEDY is not: this round's `_unkeepable_quoted` prints *"put one space before the `#`"* for it, so
 the *"remove the inner quote"* advice the review recorded here is gone, pinned by
-`test_a_malformed_value_names_a_true_remedy` (`:1293`). `'x'# note` behaves the same.
+`test_a_malformed_value_names_a_true_remedy` (`:1296`). `'x'# note` behaves the same.
 This is NOT a regression and NOT a new refusal: `main`'s helper (`f6793959a2`) reaches `malformed`
 here too, via `not value.endswith(q)` — `_split_comment` only ever splits at a space-preceded `#`,
 so the raw keeps its trailing comment and never ends in the quote char. The fix neither causes it
@@ -612,6 +624,27 @@ reported, never silently skipped — so it cannot ship a defect. It is worth nam
 meets it the first time anyone writes `"…"#comment`, and because it is one member of a family
 whose VERDICT is the same while the gate is shut — the family's printed remedy, which this round's
 verdict split corrects, was the other half of the complaint.
+
+**The differential pin, and the one shape it deliberately stops short of.** Every quoting defect this
+branch fixed was found ONE SHAPE AT A TIME, and each round the NEXT shape was what red. So this round
+adds a CLASS pin: `test_no_GREEN_quoted_verdict_survives_a_parser_refusal` sweeps every string over
+the alphabet *(single quote, double quote, backslash, `#`, space, `a`)* up to five characters —
+3,110 quoted values — with `yaml.safe_load`
+as the oracle, and asserts the two directions in which a bad value gets THROUGH: a shape the parser
+REFUSES must not come back with a COMPARING verdict, and a comparing verdict's body must equal what
+the parser read. Measured: 277 shapes reach a comparing verdict, **0** refusals reported green,
+**0** body mismatches. Non-vacuity: the same sweep driven through `main`'s `_closing_quote` +
+`_split_comment` finds **1** — `'''''` (five quotes), which YAML refuses as unterminated and `main`
+reports as `single-quoted` with body `''` — and mutating this head's wholeness test back to main's
+`not value.endswith(q)` reds the new pin (`4 failed, 14 passed`, restored after the run).
+
+It stops at length 5 because at 6 the sweep finds a PRE-EXISTING mis-slice this change neither causes
+nor clears: `''''#'` is loadable YAML (`'`) and the arm's body is `''#`, because
+`body = value[1:-1]` is never sliced at the close the parity scan already located. Recorded, not
+fixed, because the one-line fix — `body = value[1:close]` — CANNOT land alone: it would make `'a'x'`
+GREEN with body `a` on input YAML REFUSES (a `ParserError`), i.e. it converts a fail-closed false
+block into a fail-open. It has to land WITH the lexer widening above, and the length bound in the pin
+names it rather than leaving it to be rediscovered.
 
 **Recorded, not fixed (the VERDICT) — a MULTI-LINE QUOTED scalar is refused; the remedy it prints is no longer mis-worded.**
 Found by the second fresh-context review at `ae275460df` and re-measured there. A quoted scalar may
@@ -626,7 +659,7 @@ aboutObjects: "a
 line (`_values(['title: x','aboutObjects: "a','  b"'])` → `('aboutObjects','scalar','"a')`), which
 returns `('malformed', None)` — so the arm fails the file, and since this round prints the
 one-line/block-scalar remedy rather than *"the value is TERMINATED there — remove the inner quote"*
-about a value YAML keeps intact (`test_a_malformed_value_names_a_true_remedy`, `:1293`). This is
+about a value YAML keeps intact (`test_a_malformed_value_names_a_true_remedy`, `:1296`). This is
 PRE-EXISTING: `main`'s
 helper reaches `malformed` here identically, and the fix neither causes nor clears it. It also
 falsifies the code comments that say a quoted value is closed on its line
