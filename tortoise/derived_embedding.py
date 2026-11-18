@@ -357,11 +357,13 @@ def write_scope(name: str = "live-write"):
     `TortoiseSDK._apply_and_journal`, `ConversationMiner._emit_event` and
     `TortoiseSDK._create_entity` (`one_encode_scope` below lists them with the
     reason each one exists) — because only a scope spanning the PAIR makes the
-    second encode free. ⛔ Which half comes first is per-door and must not be
-    assumed: three of them journal the record first and fold after, while
-    `_create_entity` folds BEFORE it journals (that door's own contract
-    exception 2), which is exactly why the scope brackets the pair rather than
-    the record half.
+    second encode free. ⛔ Which half comes first is PER LABEL, not per door, and
+    must not be assumed: `_create_entity` journals a `DocumentCreated` BEFORE the
+    fold and folds after it, while its Object/Subject registration blocks fold
+    BEFORE they journal (contract exception 2's neighbour) — and `_emit`,
+    `_apply_and_journal` and `_emit_event` journal first. That is exactly why the
+    scope brackets the pair rather than the record half, and why a comment here
+    must not name one order for a whole door.
 
     A NESTED scope shares the outermost memo rather than replacing it: an inner
     write must not silently re-enable the double encode, and a memo is a
@@ -389,8 +391,9 @@ def one_encode_scope(func):
       * `tortoise.mining.ConversationMiner._emit_event` — its own envelope;
       * `tortoise.sdk.TortoiseSDK._apply_and_journal` — the SDK's record door;
       * `tortoise.sdk.TortoiseSDK._create_entity` — the SDK's Object/Subject/Event
-        door, which folds BEFORE it journals (contract exception 2), so the scope
-        has to span the pair in the other order as well.
+        door, whose halves run in BOTH orders depending on the label (Object/
+        Subject fold first, `DocumentCreated` journals first — contract exception
+        2's neighbour), so the scope has to span the pair order-independently.
 
     ⛔ A DOOR THAT DOES NOT CARRY IT IS NOT A CORRECTNESS BUG — it pays the
     pre-#13447 second model call. That is the deliberate direction: the memo is an

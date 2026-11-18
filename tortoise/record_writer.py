@@ -1990,8 +1990,12 @@ def derived_embedding_columns(
     # per-label composition serves the record's column, the graph fold and the
     # rebuild, so the three cannot drift — see
     # `derived_embedding.TEXT_PARTS_BY_RECORD_TYPE`. The falsy/non-string/raising
-    # arms and their reasons ride back on `ComposedText` and are re-tagged below as
-    # this function's own vocabulary, which the DEBUG log reads.
+    # arms and their reasons come back on `ComposedText` and are handed to the
+    # caller VERBATIM (`_DerivedEmbedding(skipped=composed.skipped)`) — there is no
+    # re-tagging layer and no separate record-side vocabulary: the string the DEBUG
+    # log carries is the seam's own wording, so it must be read from
+    # `compose()` when it changes (`#13447` review cycle 11, P3 — this comment
+    # claimed the opposite, and no such translation exists).
     composed = _derived_embedding.compose(record_type, payload)
     if not composed.text:
         return _DerivedEmbedding(skipped=composed.skipped)

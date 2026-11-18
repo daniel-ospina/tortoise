@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1314** | **100** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,058** | **820** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,077** | **827** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
