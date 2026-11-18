@@ -186,7 +186,8 @@ Run 2026-10-24 against `tests/test_record_serve.py` (53 tests, re-derived with `
   and no query has to read both stores (§2.0: *"for now we keep the limit in falkor high so we don't
   need to rush"*). This unit builds the **capability** the epic's acceptance names — *"a read path
   answers from Postgres with the graph engine stopped"* — as an **opt-in arm**, not by re-plumbing the
-  1,074 sites. Nothing here widens the read path beyond the two named reads. **THE ARMING SURFACE IS
+  1,074 sites. Nothing here widens the read path beyond the three named reads in §3 (`point-by-id`,
+  `node-by-key`, `entity-union-by-id`). **THE ARMING SURFACE IS
   `docs/infra-runbook.md` → §"Arming the READ path — `TORTOISE_RECORD_SERVE`"**: the three modes
   (`off` default · `prefer` recommended · `record` strict), **`TORTOISE_RECORD_DSN` as a HARD
   PRECONDITION** (arming without a resolvable DSN is a structural `RecordServeError` — a 500 on every
@@ -199,8 +200,10 @@ Run 2026-10-24 against `tests/test_record_serve.py` (53 tests, re-derived with `
   complete**, which is a deployment fact, not a property of this code. `record` mode asserts it;
   `prefer` mode does not and pays for the doubt with a named, counted fallback. The endpoint answers
   **503** (never 404) for an impaired record, pinned by test. Two arms are NOT
-  impairments: (a) a credential that resolves no record tenant — a permanent
-  PER-CREDENTIAL fact, not a fault: `record` mode answers **500** because it has no
+  impairments: (a) a read whose org has no NAMEABLE `kind='default'` row — absent,
+  tombstoned, another org's, unreadable, or a deployment with no control plane — NOT a
+  credential class (#10046: an API key, a session/JWT and an `oat_` token all name that row),
+  and permanent for a retry rather than a fault: `record` mode answers **500** because it has no
   cache branch, while `prefer` mode falls back and names it
   (`record-tenant-unresolved`, the third of the SIX reasons — the other two are
   conditions of the READ LANE rather than of the record: `record-read-lane-refused`, the
