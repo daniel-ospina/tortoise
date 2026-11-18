@@ -13916,6 +13916,22 @@ def _refusal_repr(value) -> str:
     return text if type(text) is str else str.__str__(text)
 
 
+# ── UC1 recall preset — the multiplicative confidence gate's exponents/weight
+#    (epic #898 Wave A) ─────────────────────────────────────────────────────────
+# ⛔ ONE HOME for the preset. `recall_state`'s own signature defaults ARE these three
+# values, and TWO other places resolve an unsupplied value from them: the
+# `check_confidence(recall=True)` arm just below (which must send a resolved float,
+# not `None`) and `mcp_server`'s `tortoise_recall` door (`_RECALL_STATE_DEFAULTS`
+# aliases THIS dict — it lives here because `mcp_server` imports `sdk`, never the
+# reverse). Duplicating the literals let a retune in one file silently split the two
+# layers' answers while the arm test stayed green, since that test pins the numbers.
+RECALL_STATE_PRESET: dict[str, float] = {
+    "relevance_exp": 1.0,
+    "confidence_exp": 1.0,
+    "centrality_weight": 0.10,
+}
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -30490,8 +30506,13 @@ class TortoiseSDK:
         answer by 5x with no error (the failure class the door-retirement suite
         guards for `days`/`limit`).
 
-        ``require_calibration`` is forwarded verbatim to the EP read; ``None``
-        keeps the shared posture (default fail-closed, #344).
+        ``require_calibration`` is resolved PER ARM: the ``recompute=True`` arm sends
+        ``None`` through to :meth:`compute_confidence`, which keeps the retired
+        ``tortoise_compute_confidence``'s fail-closed default (#344) — a migrating
+        caller keeps exactly what it had — while the legacy arms pass ``None`` to the
+        EP read, which resolves it through ``_ep_require_calibration_default()`` (the
+        #1157 knob). Same parameter, two postures, because the doors it came from had
+        two.
         """
         armed = [name for name, on in (("recompute", recompute),
                                        ("recall", recall)) if on]
@@ -30545,6 +30566,30 @@ class TortoiseSDK:
                     "names NO arm. Without the arm it answers the graph-wide "
                     "calibration audit and these arguments are DROPPED with no "
                     f"error. Add {' and/or '.join(add)}, or drop the arguments.")
+        else:
+            # ⛔ The OTHER arm's arguments are refused too: `recall=True, factors=[…]`
+            # must not be served with `factors` dropped (the same shape, one level down).
+            off = (sorted(n for n, v in {
+                "mode": mode, "query": query, "kind": kind,
+                "include_superseded": include_superseded,
+                "min_confidence": min_confidence,
+                "relevance_exp": relevance_exp,
+                "confidence_exp": confidence_exp,
+                "centrality_weight": centrality_weight,
+            }.items() if v is not None)
+                if armed[0] == "recompute"
+                else sorted(n for n, v in {
+                    "factors": factors, "evidence": evidence, "anchors": anchors,
+                    "max_hops": max_hops, "rel_filter": rel_filter,
+                    "direction": direction, "recency_decay": recency_decay,
+                }.items() if v is not None))
+            if off:
+                other = "recall" if armed[0] == "recompute" else "recompute"
+                raise ValueError(
+                    f"check_confidence: {armed[0]}=True but this call also names "
+                    f"{other}-arm argument(s): {', '.join(off)}. This call answers "
+                    f"the {armed[0]} arm and would DROP them with no error — send "
+                    f"the {other} call separately.")
         if recompute:
             return self.compute_confidence(
                 factors, evidence, anchors=anchors,
@@ -30574,9 +30619,12 @@ class TortoiseSDK:
                                    else include_superseded),
                 min_confidence=(0.0 if min_confidence is None
                                 else min_confidence),
-                relevance_exp=(1.0 if relevance_exp is None else relevance_exp),
-                confidence_exp=(1.0 if confidence_exp is None else confidence_exp),
-                centrality_weight=(0.10 if centrality_weight is None
+                relevance_exp=(RECALL_STATE_PRESET["relevance_exp"]
+                               if relevance_exp is None else relevance_exp),
+                confidence_exp=(RECALL_STATE_PRESET["confidence_exp"]
+                                if confidence_exp is None else confidence_exp),
+                centrality_weight=(RECALL_STATE_PRESET["centrality_weight"]
+                                   if centrality_weight is None
                                    else centrality_weight))
         if claim_id:
             view = self.get_confidence(

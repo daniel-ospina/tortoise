@@ -63,7 +63,7 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 
 | # | Current tool | Source | SDK binding | Read-only | Destination |
 |---|---|---|---|---|---|
-| 1 | `tortoise_adjust_relationship` | `tool_registry.py:1769` | **none declared** | no | `adjust_relationship` |
+| 1 | `tortoise_adjust_relationship` | `tool_registry.py:1781` | **none declared** | no | `adjust_relationship` |
 | 2 | `tortoise_annotate_operator` | `tool_registry.py:749` | `annotate_operator` | no | `adjust_relationship` |
 | 3 | `tortoise_approve_merge` | `tool_registry.py:586` | `approve_merge` | no | `approve_merge` |
 | 4 | `tortoise_assess_source` | `tool_registry.py:1375` | `assess_source` ⚠️ **does not resolve** | no | `manage_source_trust` |
@@ -71,7 +71,7 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 6 | `tortoise_belief_timeline` | `tool_registry.py:618` | `belief_timeline` | yes | `check_confidence` |
 | 7 | `tortoise_calibrate_summary` | `tool_registry.py:672` | `calibrate_summary` | yes | `check_confidence` |
 | 8 | `tortoise_check_confidence` | `tool_registry.py:1615` | `check_confidence` | no | `check_confidence` |
-| 9 | `tortoise_check_connection` | `tool_registry.py:2032` | `check_connection` | yes | `check_connection` |
+| 9 | `tortoise_check_connection` | `tool_registry.py:2044` | `check_connection` | yes | `check_connection` |
 | 10 | `tortoise_check_structure` | `tool_registry.py:340` | `check_structure` | yes | `graph_overview` |
 | 11 | `tortoise_checkpoint` | `tool_registry.py:937` | `checkpoint` ⚠️ **does not resolve** | no | `mine_knowledge_from_session` |
 | 12 | `tortoise_compute_confidence` | `tool_registry.py:630` | `compute_confidence` | no | `check_confidence` |
@@ -94,11 +94,11 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 29 | `tortoise_entity_profile` | `tool_registry.py:911` | **none declared** | yes | `explore_connections` |
 | 30 | `tortoise_events_poll` | `tool_registry.py:846` | `poll_events` | yes | `poll_events` |
 | 31 | `tortoise_expand_relationships` | `tool_registry.py:523` | **none declared** | yes | `explore_connections` |
-| 32 | `tortoise_explore_connections` | `tool_registry.py:1647` | `explore_connections` | yes | `explore_connections` |
+| 32 | `tortoise_explore_connections` | `tool_registry.py:1659` | `explore_connections` | yes | `explore_connections` |
 | 33 | `tortoise_file_decision` | `tool_registry.py:787` | `write_question` | no | `write_question` |
 | 34 | `tortoise_file_human_approval` | `tool_registry.py:796` | `record_decision` | no | `record_decision` |
 | 35 | `tortoise_find_cross_lens_candidates` | `tool_registry.py:1182` | `get_cross_lens_candidates` | yes | `review_link_candidates` |
-| 36 | `tortoise_get` | `tool_registry.py:1687` | **none declared** | yes | `get_entity` |
+| 36 | `tortoise_get` | `tool_registry.py:1699` | **none declared** | yes | `get_entity` |
 | 37 | `tortoise_get_confidence` | `tool_registry.py:661` | `get_confidence` | no | `check_confidence` |
 | 38 | `tortoise_get_entity` | `tool_registry.py:1394` | `get_entity` | yes | `get_entity` |
 | 39 | `tortoise_get_events` | `tool_registry.py:1266` | `get_events` | yes | `get_entity` |
@@ -112,7 +112,7 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 47 | `tortoise_health` | `tool_registry.py:981` | `health` ⚠️ **does not resolve** | yes | `graph_overview` |
 | 48 | `tortoise_index_files` | `tool_registry.py:1295` | `index_directory` ⚠️ **does not resolve** | no | `index_sources_from_directory` |
 | 49 | `tortoise_index_sessions` | `tool_registry.py:1282` | `index_sessions` ⚠️ **does not resolve** | no | `index_sources_from_directory` |
-| 50 | `tortoise_index_sources_from_directory` | `tool_registry.py:1971` | `index_sources_from_directory` | no | `index_sources_from_directory` |
+| 50 | `tortoise_index_sources_from_directory` | `tool_registry.py:1983` | `index_sources_from_directory` | no | `index_sources_from_directory` |
 | 51 | `tortoise_ingest` | `tool_registry.py:1073` | `ingest` | no | `sdk:write_knowledge_batch` |
 | 52 | `tortoise_ingest_corpus` | `tool_registry.py:1060` | `ingest_corpus` | no | `index_sources_from_directory` |
 | 53 | `tortoise_invalidate` | `tool_registry.py:818` | `invalidate_point` | no | `supersede_knowledge` |
@@ -127,29 +127,29 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 62 | `tortoise_list_sources` | `tool_registry.py:400` | **none declared** | yes | `graph_overview` |
 | 63 | `tortoise_list_tags` | `tool_registry.py:449` | **none declared** | yes | `graph_overview` |
 | 64 | `tortoise_list_topics` | `tool_registry.py:1124` | **none declared** | yes | `list_knowledge` |
-| 65 | `tortoise_manage_source_trust` | `tool_registry.py:1957` | `manage_source_trust` | no | `manage_source_trust` |
-| 66 | `tortoise_manage_sources` | `tool_registry.py:1879` | **none declared** | no | `manage_sources` |
+| 65 | `tortoise_manage_source_trust` | `tool_registry.py:1969` | `manage_source_trust` | no | `manage_source_trust` |
+| 66 | `tortoise_manage_sources` | `tool_registry.py:1891` | **none declared** | no | `manage_sources` |
 | 67 | `tortoise_mine_conversations` | `tool_registry.py:562` | `mine_corpus` ⚠️ **does not resolve** | no | `mine_knowledge_from_directory` |
-| 68 | `tortoise_mine_knowledge_from_directory` | `tool_registry.py:2019` | `mine_knowledge_from_directory` | no | `mine_knowledge_from_directory` |
-| 69 | `tortoise_mine_knowledge_from_session` | `tool_registry.py:1993` | `mine_knowledge_from_session` | no | `mine_knowledge_from_session` |
+| 68 | `tortoise_mine_knowledge_from_directory` | `tool_registry.py:2031` | `mine_knowledge_from_directory` | no | `mine_knowledge_from_directory` |
+| 69 | `tortoise_mine_knowledge_from_session` | `tool_registry.py:2005` | `mine_knowledge_from_session` | no | `mine_knowledge_from_session` |
 | 70 | `tortoise_mitigate_operator` | `tool_registry.py:767` | `mitigate_operator` | no | `adjust_relationship` |
-| 71 | `tortoise_onboarding_github_index` | `tool_registry.py:1920` | **none declared** | no | `manage_sources` |
-| 72 | `tortoise_onboarding_session_recording` | `tool_registry.py:1911` | **none declared** | no | `manage_sources` |
+| 71 | `tortoise_onboarding_github_index` | `tool_registry.py:1932` | **none declared** | no | `manage_sources` |
+| 72 | `tortoise_onboarding_session_recording` | `tool_registry.py:1923` | **none declared** | no | `manage_sources` |
 | 73 | `tortoise_operator_action` | `tool_registry.py:1506` | **none declared** | no | `adjust_relationship` |
 | 74 | `tortoise_org_create` | `tool_registry.py:1222` | `org_create` | no | `tenancy:create_memory_graph` |
-| 75 | `tortoise_overview` | `tool_registry.py:1676` | **none declared** | yes | `graph_overview` |
+| 75 | `tortoise_overview` | `tool_registry.py:1688` | **none declared** | yes | `graph_overview` |
 | 76 | `tortoise_paginated_query` | `tool_registry.py:331` | `paginated_query` | yes | `search_knowledge` |
 | 77 | `tortoise_promote_point` | `tool_registry.py:607` | `promote_point` | no | `refresh_confidence` ⚠️ |
 | 78 | `tortoise_provenance` | `tool_registry.py:1200` | **none declared** | no | `check_confidence` |
 | 79 | `tortoise_query` | `tool_registry.py:300` | `paginated_query` | yes | `search_knowledge` |
 | 80 | `tortoise_query_points_by_tag` | `tool_registry.py:457` | `query_points_by_tag` | yes | `search_knowledge` |
 | 81 | `tortoise_recall` | `tool_registry.py:534` | `recall_state` | yes | `check_confidence` |
-| 82 | `tortoise_record_decision` | `tool_registry.py:1837` | `record_decision` | no | `record_decision` |
-| 83 | `tortoise_refresh_confidence` | `tool_registry.py:1795` | **none declared** | no | `refresh_confidence` |
-| 84 | `tortoise_register_source` | `tool_registry.py:1944` | `register_source` | no | `register_source` |
+| 82 | `tortoise_record_decision` | `tool_registry.py:1849` | `record_decision` | no | `record_decision` |
+| 83 | `tortoise_refresh_confidence` | `tool_registry.py:1807` | **none declared** | no | `refresh_confidence` |
+| 84 | `tortoise_register_source` | `tool_registry.py:1956` | `register_source` | no | `register_source` |
 | 85 | `tortoise_retract_point` | `tool_registry.py:899` | `retract_point` | no | `update_knowledge` |
 | 86 | `tortoise_review_connections` | `tool_registry.py:1159` | `review_connections` | yes | `review_link_candidates` |
-| 87 | `tortoise_review_link_candidates` | `tool_registry.py:1661` | `review_link_candidates` | yes | `review_link_candidates` |
+| 87 | `tortoise_review_link_candidates` | `tool_registry.py:1673` | `review_link_candidates` | yes | `review_link_candidates` |
 | 88 | `tortoise_search` | `tool_registry.py:511` | `tortoise_fts_query` | yes | `search_knowledge` |
 | 89 | `tortoise_search_knowledge` | `tool_registry.py:1560` | `search_knowledge` | no | `search_knowledge` |
 | 90 | `tortoise_search_sessions` | `tool_registry.py:1311` | **none declared** | yes | `search_knowledge` |
@@ -162,15 +162,15 @@ flag; see `canonical-mcp-tools.md` → *reads and writes never share a tool* for
 | 97 | `tortoise_suggest_entry_points` | `tool_registry.py:500` | **none declared** | yes | `search_knowledge` |
 | 98 | `tortoise_summarize_structure` | `tool_registry.py:360` | `summarize_structure` | yes | `graph_overview` |
 | 99 | `tortoise_supersede` | `tool_registry.py:827` | `supersede_knowledge` | no | `supersede_knowledge` |
-| 100 | `tortoise_supersede_knowledge` | `tool_registry.py:1749` | `supersede_knowledge` | no | `supersede_knowledge` |
+| 100 | `tortoise_supersede_knowledge` | `tool_registry.py:1761` | `supersede_knowledge` | no | `supersede_knowledge` |
 | 101 | `tortoise_taxonomy` | `tool_registry.py:1114` | **none declared** | yes | `graph_overview` |
 | 102 | `tortoise_traverse` | `tool_registry.py:927` | **none declared** | yes | `explore_connections` |
 | 103 | `tortoise_update` | `tool_registry.py:1469` | `update_knowledge` | no | `update_knowledge` |
 | 104 | `tortoise_update_entity` | `tool_registry.py:1405` | `update_knowledge` | no | `update_knowledge` |
-| 105 | `tortoise_update_knowledge` | `tool_registry.py:1718` | **none declared** | no | `update_knowledge` |
+| 105 | `tortoise_update_knowledge` | `tool_registry.py:1730` | **none declared** | no | `update_knowledge` |
 | 106 | `tortoise_update_point` | `tool_registry.py:709` | `update_knowledge` | no | `update_knowledge` |
 | 107 | `tortoise_validate_domain` | `tool_registry.py:348` | **none declared** | yes | `graph_overview` |
-| 108 | `tortoise_write_question` | `tool_registry.py:1825` | `write_question` | no | `write_question` |
+| 108 | `tortoise_write_question` | `tool_registry.py:1837` | `write_question` | no | `write_question` |
 
 **64** of these are RETIRED names (#3883): off the advertised surface, but they
 still answer through the warning shim, and each one's `Destination` is the destination of

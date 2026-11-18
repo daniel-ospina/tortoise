@@ -1640,6 +1640,18 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # `graphs:read` key can still call it: maintenance is the tier for exactly that
         # shape — it just does not auto-approve.
         risk="maintenance",
+        # ⛔ NOT IDEMPOTENT, and the hint must say so. The maintenance TIER derives
+        # `idempotentHint=True` (`_RISK_HINTS`), but this container's arms WRITE a value
+        # that a retry re-derives: the `claim_id` arm reaches `get_confidence` (pinned
+        # False in `tests/test_tool_risk_tiers.py` for exactly this), and `recompute=True`
+        # absorbs `tortoise_compute_confidence`, whose own override records the #4122
+        # measurement — a repeat call re-stores a re-derived score (0.693315 -> 0.693320).
+        # The absorbed door carried its declaration; the arm carries its operation, so the
+        # declaration has to move with it or a client that retries on `idempotentHint:
+        # true` repeats a call that RETURNS A DIFFERENT ANSWER and writes again.
+        # Fail-closed on ONE hint over five arms: an arm that is safe to retry cannot make
+        # an advertised "safe to retry" true, and the arms that are not would make it false.
+        idempotent=False,
         http_policy=True,
         # Custom handler, REAL binding — see `tortoise_search_knowledge` above.
         sdk_method="check_confidence",

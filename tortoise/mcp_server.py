@@ -29,6 +29,10 @@ from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS,
                           _supersede_window_end, _now_iso,
                           _ledger_record as _ledger_record_page)
+# #11609 P2 review: the UC1 preset has ONE home (`sdk.RECALL_STATE_PRESET`, which
+# `recall_state`'s own defaults mirror), and this module ALIASES it rather than
+# keeping a second copy that could drift from the `recall=True` arm's resolution.
+from tortoise.sdk import RECALL_STATE_PRESET
 from tortoise import monitoring
 # #9494: the loaded-module snapshot — used by `_safe` so a symbol failure on a
 # STALE process is answered with the measurement instead of a symbol name.
@@ -5592,8 +5596,9 @@ def tortoise_expand_relationships(point_id: str) -> list[dict]:
 # ── Recall — epistemic intents (epic #898) ─────────────────────
 
 # UC1 default exponents/weights for the multiplicative gate (Wave A).
-_RECALL_STATE_DEFAULTS = {"relevance_exp": 1.0, "confidence_exp": 1.0,
-                          "centrality_weight": 0.10}
+# ⛔ ALIASED from `sdk.RECALL_STATE_PRESET`, never re-typed: the `recall=True` arm on
+# `tortoise_check_confidence` resolves from the same dict, so a retune moves both.
+_RECALL_STATE_DEFAULTS = RECALL_STATE_PRESET
 # UC2 gap thresholds (Wave B).
 _RECALL_GAPS_DEFAULTS = {"min_load": 1, "max_support": 2}
 # UC3 subgraph expansion (Wave B).
@@ -8216,6 +8221,13 @@ def tortoise_check_confidence(claim_id: str | None = None,
 
     `limit` is resolved per arm, never by one shared default: the `topic` arm
     keeps 50, the recall arm keeps the recalled door's own per-mode defaults.
+
+    `require_calibration` is resolved per arm TOO, and the two differ ON PURPOSE:
+    the `recompute=True` arm resolves `None` to `True` — the retired
+    `tortoise_compute_confidence`'s own fail-closed default (#344), which a
+    migrating caller keeps — while the legacy arms forward `None` through to the
+    SDK's `_ep_require_calibration_default()` (the #1157 knob). Same parameter,
+    two postures, because the doors it came from had two.
     """
     # ⛔ THE ARM-ONLY ARGUMENT SETS. `None` means NOT SUPPLIED — every one of these
     # is `None`-defaulted ON PURPOSE (see the docstring): a non-None default would
@@ -8261,17 +8273,18 @@ def tortoise_check_confidence(claim_id: str | None = None,
         # Neither arm named: an arm-only argument is an ERROR, not a no-op. Both
         # sets are reported together (never just the first) so a caller that
         # named arguments from both arms gets the whole list in one round trip.
-        recompute_named = sorted(n for n, v in _recompute_only.items()
-                                 if v is not None)
-        recall_named = sorted(n for n, v in _recall_only.items() if v is not None)
-        if recompute_named or recall_named:
+        _off_arm_recompute = sorted(
+            n for n, v in _recompute_only.items() if v is not None)
+        _off_arm_recall = sorted(
+            n for n, v in _recall_only.items() if v is not None)
+        if _off_arm_recompute or _off_arm_recall:
             parts = []
             add = []
-            if recompute_named:
-                parts.append(f"recompute arm: {', '.join(recompute_named)}")
+            if _off_arm_recompute:
+                parts.append(f"recompute arm: {', '.join(_off_arm_recompute)}")
                 add.append("recompute=True")
-            if recall_named:
-                parts.append(f"recall arm: {', '.join(recall_named)}")
+            if _off_arm_recall:
+                parts.append(f"recall arm: {', '.join(_off_arm_recall)}")
                 add.append("recall=True")
             return _SafeError({
                 "error": ("check_confidence: this call names arm-specific "
@@ -8280,6 +8293,23 @@ def tortoise_check_confidence(claim_id: str | None = None,
                           "graph-wide calibration audit and these arguments are "
                           "DROPPED with no error. Add "
                           f"{' and/or '.join(add)}, or drop the arguments."),
+                "code": ERR_INVALID})
+    else:
+        # ⛔ AND THE OTHER ARM'S ARGUMENTS ARE REFUSED TOO. The check above compares
+        # the two sets against "nothing armed"; this one compares them against the arm
+        # that IS armed, so `recall=True, factors=[…]` cannot be served with `factors`
+        # on the floor — the same answers-one-drops-the-other shape, one level down.
+        off = (sorted(n for n, v in _recall_only.items() if v is not None)
+               if armed[0] == "recompute"
+               else sorted(n for n, v in _recompute_only.items() if v is not None))
+        if off:
+            other = "recall" if armed[0] == "recompute" else "recompute"
+            return _SafeError({
+                "error": (f"check_confidence: {armed[0]}=True but this call also "
+                          f"names {other}-arm argument(s): {', '.join(off)}. "
+                          "This call answers the "
+                          f"{armed[0]} arm and would DROP them with no error — "
+                          f"send the {other} call separately."),
                 "code": ERR_INVALID})
     if recompute:
         # `tortoise_compute_confidence`'s own default is True (fail-closed, #344);
