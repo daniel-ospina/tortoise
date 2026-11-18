@@ -97,7 +97,7 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # containers (their own 120 -> 112 landed after wave 2 branched), so the wave's own
 # "118 -> 102" is that branch's BEFORE/AFTER and not this tree's. MEASURED here with
 # `tools/surface-target-check.py` and `tools/sdk_surface.py --check`: 110 -> 94.
-DECLARED_COUNT = 94
+DECLARED_COUNT = 105
 
 
 def _declaration() -> dict:

@@ -471,7 +471,12 @@ CITES: dict[str, tuple[str, str]] = {
                  "`create_entity(type=)`. The ontology models all of them as entities. |"),
     "w1_coup": (CANON, "| `create_or_update_point` → `create_point` |"),
     "w1_batch": (BETA, "| `batch_create_points` | 1 | → `write_knowledge_batch`. |"),
-    "w2": (CANON, "| W2 | `write_knowledge` | — | `ingest` |"),
+    # #11609 P3 renamed this group's target from the sketch's `write_knowledge` to the
+    # approved row-13 name, and added `write_knowledge_batch` as a live member, so the
+    # anchor moves with the row. It stops at the target cell (`| #13 |`) rather than
+    # running into the member list: the claim this citation backs is "W2's target is
+    # `write_knowledge_batch`", and the members are a different cell of the same row.
+    "w2": (CANON, "| W2 | `write_knowledge_batch` | #13 |"),
     # The anchor names the blockquote paragraph's opening line; the region is the whole
     # paragraph (canonical lines 27–32). The old anchor authored a mid-paragraph wrapped
     # line, so the sentence it belonged to could be cut.
@@ -722,6 +727,25 @@ OVERRIDE: dict[str, tuple[str, str]] = {
     "mine_knowledge_from_session": (UNCHANGED, "unchanged4"),
     "mine_knowledge_from_directory": (UNCHANGED, "unchanged4"),
     "check_connection": (UNCHANGED, "unchanged4"),
+    # ── #11609 P3 — the eleven approved names that had no `def` ──────────────────
+    # Same reasoning as the block above, one wave later: these were approved TARGETS
+    # with no implementation, #11609 P3 implemented each as a delegation, and now that
+    # each is a PUBLIC method the partition must COVER it and the map must say so
+    # EXPLICITLY. Without the explicit entry each row would inherit its GROUP's target
+    # and read as a rename of itself — `create_key` would be filed as a rename to
+    # N4's `apikey` group target, and `adjust_relationship` as one to W15's.
+    # UNCHANGED is the honest disposition: the method IS its own approved destination.
+    "write_knowledge_batch": (UNCHANGED, "unchanged4"),   # row 13
+    "adjust_relationship": (UNCHANGED, "unchanged4"),     # row 25
+    "refresh_confidence": (UNCHANGED, "unchanged4"),      # row 26
+    "create_memory_graph": (UNCHANGED, "unchanged4"),     # row 29
+    "delete_memory_graph": (UNCHANGED, "unchanged4"),     # row 32
+    "create_key": (UNCHANGED, "unchanged4"),              # row 34
+    "list_keys": (UNCHANGED, "unchanged4"),               # row 35
+    "revoke_key": (UNCHANGED, "unchanged4"),              # row 36
+    "add_member": (UNCHANGED, "unchanged4"),              # row 37
+    "list_members": (UNCHANGED, "unchanged4"),            # row 38
+    "remove_member": (UNCHANGED, "unchanged4"),           # row 39
     # W4
     "reconcile_sessions": (DISCARDED, "w8_backfill"),
     # W8 — the beta row splits the group: the setter and the assessment fold into
@@ -863,7 +887,7 @@ TENSION_CITES: dict[str, tuple[str, str]] = {
     "t_r5": (CANON, "| R5 | `explore_connections` | #5 |"),
     "t_r6": (CANON, "| R6 | `graph_overview` | #6 |"),
     "t_n2": (CANON, "| N2 | `graph` | `list_memory_graphs`, "
-                    "`restore_memory_graph`, `update_memory_graph` |"),
+                    "`restore_memory_graph`, `update_memory_graph`"),
     "t_w8": (CANON, "| W8 | `manage_source_trust` | #14 |"),
     "t_w15": (CANON, "| W15 | `adjust_relationship` | #21 |"),
 }
