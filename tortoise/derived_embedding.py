@@ -60,7 +60,6 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
-import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -74,11 +73,8 @@ __all__ = [
     "derive_row",
     "encode",
     "one_encode_scope",
-    "reset_memo_for_tests",
     "write_scope",
 ]
-
-_logger = logging.getLogger(__name__)
 
 #: The record types whose node carries an embedding the JOURNAL does not, and the
 #: carried keys its text is composed from — the RECORD half of #13220, and the ONE
@@ -403,11 +399,6 @@ def one_encode_scope(func):
         with write_scope(getattr(func, "__qualname__", "live-door")):
             return func(*args, **kwargs)
     return wrapper
-
-
-def reset_memo_for_tests() -> None:
-    """Clear the thread's memo — a test hook, never a production reset path."""
-    _MEMO.set(None)
 
 
 def encode(text: str, width: int | None = None, *, bounded: bool = False,

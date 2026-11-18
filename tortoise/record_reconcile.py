@@ -318,6 +318,7 @@ from typing import Any
 from .cache_projection import (
     KEY_PROPERTY,
     NODE_TABLES,
+    RECORD_HELD_VECTOR_COLUMNS,
     RecordView,
     declared_key,
     episodic_source_prose_properties,
@@ -527,7 +528,26 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
         # either cache-owned (§17.5's EP/derived scalars — the record schema
         # refuses them) or a caller-supplied `props`-tail property, which the
         # RECORD side decides between; the reader marks, the composition judges.
-        placeable = projected_properties(NODE_TABLES[label]) | {KEY_PROPERTY[label]}
+        # ⛔ A RECORD-HELD VECTOR COLUMN IS PLACED BUT NOT COMPARED (#13447).
+        # `#13447`'s column door (`RECORD_HELD_VECTOR_COLUMNS`) makes the
+        # projection WRITE `embedding` for `object`/`subject` — the live fold and
+        # the restore's derivation both put a vector on the node — while the ROW
+        # may legitimately hold NONE: the vector is DERIVED from the text, so a
+        # row written before the column existed, or one the restore derived for,
+        # is correct with `embedding IS NULL`. Leaving the name in the placement
+        # map would make every such node a permanent `field_mismatch` — measured
+        # at `#13447`'s head: the faithful pair reads `divergent` (1 mismatch)
+        # where the pre-change map read `clean` + `graph_only=('embedding', 1)`,
+        # i.e. the exact "every journal-projected cache is permanently divergent"
+        # defect `#9196`'s review graded P1 one paragraph over. It is subtracted
+        # only from the PLACEMENT half: `_partition_cache_owned` also unions the
+        # RECORD's own properties (`keep |= set(record_props)`), so a row that
+        # DOES hold a vector is still compared and a stale cache copy still
+        # reads divergent (measured both ways).
+        placeable = (
+            projected_properties(NODE_TABLES[label])
+            - RECORD_HELD_VECTOR_COLUMNS.get(NODE_TABLES[label], frozenset())
+        ) | {KEY_PROPERTY[label]}
         try:
             rows = g.query(
                 f"MATCH (n:{label}) RETURN properties(n)",
