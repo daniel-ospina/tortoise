@@ -2528,9 +2528,9 @@ attributed the ≈58 % pricing to **§12.1b** (`"§12.1b, which prices the two r
 pre-PR base** — §14.3 V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of
 the unindexed read's store time was two REFUSED queryNodes round trips"* — and §12.1b (*"Where the vectors actually
 sit"*) carries the `16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. ⚠️ **It returns TWO at this head, and
-the second is this entry's own §12.1c sentence**, which cites that same 58 %: the check was scoped to the base it was
-made on, and the sentence that quotes it is itself a hit — stated here rather than left to look like a command that
-still answers one. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which is where it is
+the second is this PR's own §12.1c sentence in `STORAGE-ARCHITECTURE.md`**, which cites that same 58 %: the check was
+scoped to the base it was made on, and the sentence that quotes it is itself a hit — stated here rather than left to
+look like a command that still answers one. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which is where it is
 measured. The correction moves a citation, not a number.
 
 **⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
@@ -2543,17 +2543,22 @@ comment recording the correction.
 **⚠️ And every location above is cited by heading NAME, not by line number — a review finding, and the fix for its
 root.** Earlier revisions of this entry cited `:1241`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217` (plus
 §12.1b's `:1080–1168`). ⚠️ **Those cites failed in three different ways, and the cause is the same in all three:**
-`:1241` — the entry's FIRST version — was **computed against a base that had already moved**: §12.2 sat at `:1234` on
-`6264dc670c`, and this PR's own insertions above it move it to `:1241`, which is the arithmetic the cite came from —
-but the tree it landed in was built on a later base (`f462ad3acbb4`), where `#13435` had added three more lines above,
-so §12.2 was at `:1244` there and the cite was wrong from its first commit. `:1244` and `:1206–1211` were **correct in
+`:1241` — the entry's FIRST version — was **correct in the tree it was written in** (its authoring commit `38d711bd5d`,
+built on `6264dc670c`, had §12.2 at exactly `:1241`), and **rotted before it landed**: the branch was then rebuilt on a
+later base (`f462ad3acbb4`, where `#13435` had added three more lines above and §12.2 sat at `:1237`, so this PR's own
+seven insertions put it at `:1244`) — the cite was wrong from the merge onward. `:1244` and `:1206–1211` were **correct in
 their own tree and then rotted** under this PR's own later insertions above them — the first arriving at §12.1d's *"the
 index earns very little today"* item, a LATENCY paragraph, in the entry whose whole purpose is to establish that §12.2
-is not the latency section, and the second ending one line before the clause it named; while `:1169`, `:1250`,
-`:1213–1217` and `:1080–1168` were each **correct when written and still correct at this head**. ⇒ **So the failure is
+is not the latency section, and the second ending one line before the clause it named. And `:1169`, `:1250`,
+`:1213–1217` and `:1080–1168` were **correct when written and still resolve in the tree this entry was written against**
+(`36cb300057`: §12.1b `:1080`, §12.1c `:1169`, §12.2 `:1250`) — ⚠️ **but they had rotted on `main` too by the time this
+entry was repaired**, because unrelated PRs added lines above them: at `8cc31bbb9e` the same headings stand at `:1102`,
+`:1191` and `:1272`, and the ledger clause at `:1235`. **That is this entry's own point rather than an exception to it**
+— which is why nothing above is cited by number any more. ⇒ **So the failure is
 not "some cites went stale" as a single event: it is that a line number is a function of every edit ABOVE it** —
-authored against a base that moved, correct-then-rotted, or luckily still correct are three outcomes of one cause, and
-which one a given writer gets is not something that writer can see. ⛔ **And NO citation guard ever resolved these
+authored against a base that moved, correct-then-rotted under its own PR, or still correct until an unrelated PR on
+`main` added a line, are three outcomes of one cause, and which one a given writer gets is not something that writer can
+see. ⛔ **And NO citation guard ever resolved these
 pointers — which is why they stayed green.** `tests/test_docs_citation_refs.py` owns pointers into `docs/scoping/` and
 `docs/research/` only (its `_TARGET_SCOPE`), so a pointer into `docs/architecture/` is *skipped rather than checked* —
 its own `test_the_guard_ignores_targets_outside_its_declared_scope` asserts exactly that — and its **STATED LIMITS**
