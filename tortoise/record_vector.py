@@ -566,14 +566,29 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
         f"  AND t.{id_column} IS NOT NULL AND t.{id_column} <> ''",
         (scope.org_id, scope.graph_id),
     )
-    nodes = [node_from_row(label, row) for row in rows]
-    has_vector = {row.get(id_column): bool(row.get("has_embedding_vec"))
+    # ⛔ THE PROBE COLUMN IS POPPED BEFORE THE PROJECTION. `node_from_row` refuses
+    # an unclassified column by design
+    # (`object.has_embedding_vec is not classified by the placement table, not
+    # refused by the schema, and not record bookkeeping`) — so handing it the raw
+    # row makes the whole label raise `UnknownRecordColumn`, i.e. a graph fallback
+    # for these two labels on EVERY read. The datum is read here, in Python, and the
+    # row the projection sees is the record's own.
+    has_vector = {row.get(id_column): bool(row.pop("has_embedding_vec"))
                   for row in rows}
+    nodes = [node_from_row(label, row) for row in rows]
     events = read_lifecycle_events(conn, org_id=scope.org_id,
                                    graph_id=scope.graph_id)
     folded = apply_event_stream_folds(nodes, events)
     vocabulary, _include_outdated = _status_vocab_for(label)
-    excluded = frozenset(excluded_statuses or vocabulary)
+    # ⛔ `excluded_statuses == ()` IS NOT "use the default". It is the caller's
+    # terminal-rows-IN opt (the `#1353` supersede-structure surface), and the graph
+    # branches honour it by emitting NO clause. Written as
+    # `frozenset(excluded_statuses or vocabulary)` the empty tuple is FALSY and
+    # silently becomes the whole vocabulary — i.e. the one caller that asked to SEE
+    # terminal rows gets them filtered out. Measured by
+    # `test_the_audit_opt_in_returns_terminal_rows_on_the_record_leg`.
+    excluded = (frozenset() if excluded_statuses == ()
+                else frozenset(excluded_statuses or vocabulary))
 
     keys: list[str] = []
     available = 0

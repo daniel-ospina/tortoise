@@ -535,6 +535,9 @@ def test_a_superseded_object_is_excluded_by_the_CARRIER_fold(schema):
     assert [row[0] for row in rows] == ["o_13422_current"], (
         "a SUPERSEDED Object was served by the record leg — this is the #689 "
         f"regression the cage exists to prevent ({rows})")
+    opt_in = _search_vec("object", hot=3, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in opt_in) == [
+        "o_13422_current", "o_13422_super"], opt_in
 
 
 def test_an_archived_object_is_excluded_by_the_records_JOURNAL_fold(schema):
@@ -554,6 +557,13 @@ def test_an_archived_object_is_excluded_by_the_records_JOURNAL_fold(schema):
     assert [row[0] for row in rows] == ["o_13422_arch_live"], (
         "an ARCHIVED Object was served by the record leg — the fold's four-word "
         f"vocabulary is not being applied ({rows})")
+    # ⛔ THE VACUITY GUARD: the excluded row must be PROVABLY there and
+    # ANN-visible, or "it was not returned" proves nothing. With the audit opt-in
+    # BOTH come back, so the default read's single row is the CAGE's doing and not
+    # a missing/tiny row.
+    opt_in = _search_vec("object", hot=4, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in opt_in) == [
+        "o_13422_arch", "o_13422_arch_live"], opt_in
 
 
 def test_a_retracted_subject_is_excluded_by_the_records_journal_fold(schema):
@@ -571,6 +581,11 @@ def test_a_retracted_subject_is_excluded_by_the_records_journal_fold(schema):
     rows = _search_vec("subject", hot=5, limit=10)
     assert [row[0] for row in rows] == ["s_13422_retr_live"], (
         f"a RETRACTED Subject was served by the record leg ({rows})")
+    # The vacuity guard, as in the archived test: both rows exist and are
+    # ANN-visible, so the default read's answer is the cage's.
+    opt_in = _search_vec("subject", hot=5, limit=10, excluded_statuses=())
+    assert sorted(row[0] for row in opt_in) == [
+        "s_13422_retr", "s_13422_retr_live"], opt_in
 
 
 def test_the_audit_opt_in_returns_terminal_rows_on_the_record_leg(schema):
