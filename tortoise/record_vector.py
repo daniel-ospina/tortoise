@@ -306,6 +306,24 @@ ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 #: gap is named here rather than implied to be observable.
 RECORD_LEG_STATEMENTS_PER_READ = 3
 
+#: What the FOLDED arm DIVIDES the read by — one MORE than
+#: :data:`RECORD_LEG_STATEMENTS_PER_READ`, giving the graph branch its reserve share.
+#: ⚠️ The divisor and the statement count are DIFFERENT numbers and conflating them
+#: is the defect this pair of constants exists to stop (``#13466`` cycle 4, P3): the
+#: folded arm ISSUES three data statements (its two prefetches — rows, then lifecycle
+#: events — then the kNN) and therefore divides by FOUR, because a divisor equal to
+#: the count spends the whole read and leaves nothing. Spelled as a literal ``3`` in
+#: the pin and ``RECORD_LEG_STATEMENTS_PER_READ + 1`` in the code, both numbers were
+#: tied to nothing: a fourth data statement in the arm could spend the read and hand
+#: the graph branch a 0 ms reserve while a pin multiplying by ``3`` still passed.
+FOLD_ARM_DIVISOR = RECORD_LEG_STATEMENTS_PER_READ + 1
+
+#: How many data statements the folded arm actually ISSUES — its two prefetches and
+#: the kNN — i.e. one FEWER than :data:`FOLD_ARM_DIVISOR`. Asserted against the
+#: reserve in `tests/test_13422_object_subject_dense_leg.py`, so the declaration and
+#: the arithmetic cannot drift apart silently again.
+FOLD_ARM_STATEMENTS = FOLD_ARM_DIVISOR - 1
+
 
 def record_statement_ms(read_budget_ms: int | None,
                         statements: int = RECORD_LEG_STATEMENTS_PER_READ,
@@ -461,10 +479,13 @@ _FOLDED_STATUS = "\x00folded"
 #: its bounds are NAMED, not assumed away (`#13466` cycle 3, P2). The one-home rule
 #: requires this leg to consume `apply_event_stream_folds` rather than invent a
 #: second fold, so wherever that fold and the live graph fold disagree, this leg
-#: answers with the fold. Two such disagreements are RECORDED as open in that home
-#: (`cache_projection.py:1001` `(a-2)` — a delete-then-re-create ordering answers
-#: `absent`/`live` where the graph holds `archived`; `:1014` `(b)`/`(c)` in the
-#: opposite, conservative direction), measured there over an exhaustive sweep. So
+#: answers with the fold. Those disagreements are RECORDED as open in that home —
+#: cited by SYMBOL and not by line, because a line number in a 7k-line file that
+#: this leg does not own re-points at unrelated prose on the next insertion above it
+#: (the repo's cite-by-symbol rule, `#10524`): the ``EVENT_STREAM_FOLDS`` docstring's
+#: ``(a-2)`` clause (a delete-then-re-create ordering answers `absent`/`live` where
+#: the graph holds `archived`) and its ``(b)``/``(c)`` clauses (the opposite,
+#: conservative direction), each measured there over an exhaustive sweep. So
 #: the honest statement is NOT "the record can never serve a row the graph hides":
 #: it is that the record leg serves exactly the fold's answer, and the fold has a
 #: named, bounded, pre-existing ordering gap owned on `#9974`. ⚠️ That gap is
@@ -565,22 +586,38 @@ def _sql_literal(value: str) -> str:
 #: leg reported a timeout while presenting a bound it could never fire.
 #:
 #: ⛔ THE RESIDUAL, named rather than implied, and named CORRECTLY (`#13466` review
-#: cycle 2, P3 — the first statement of it was wrong in its mechanism):
+#: cycle 2 P3, then cycle 4 P3 — the first statement of it was wrong in its
+#: mechanism, and the second named only HALF of its observable outcomes):
 #: `statement_timeout` bounds STATEMENTS, `record_statement_ms` divides the read
 #: among them, and the fold runs BETWEEN them where that arithmetic does not reach.
-#: The fold's Python work is therefore bounded by two ROW COUNTS instead
+#: Its Python work is therefore bounded by ROW AND EVENT COUNTS
 #: (:data:`_FOLDED_PREFETCH_ROW_BUDGET`, :data:`_FOLDED_PREFETCH_EVENT_BUDGET`),
-#: because a count is the only thing this module can enforce across statements. ⚠️ A
-#: count is NOT a clock: a tenant under both budgets whose fold is slow for another
-#: reason (a pathological props payload, a slow `node_from_row`, a busy host) still
-#: overruns what is left of the read, and then the fused read's collector
-#: (`search_engine.degradation_chain`) expires on its own deadline and DISCARDS the
-#: rows as `timeout` — the `#11691` outcome the divisor work exists to prevent, one
-#: layer up. At the measured 0.19 s for 8,000 rows inside a 500 ms read the leg
-#: ANSWERS; at 10,000 rows it declines. Materialising the fold is what removes both
-#: the cost and the bound — the follow-up that makes the prefetch and these constants
-#: disappear. Filed rather than attempted here: a per-target narrowing of the node
-#: read is exactly the place where a missed path becomes a `#689` LEAK, and
+#: because a count is the only thing this module can enforce across statements.
+#:
+#: ⛔ AN OVERRUN THEREFORE HAS **TWO** OBSERVABLE OUTCOMES, and naming one is how a
+#: diagnoser is sent to a trace they will never see:
+#:   * past a declared BUDGET — a prefetch row/event count
+#:     (:data:`_FOLDED_PREFETCH_ROW_BUDGET`, :data:`_FOLDED_PREFETCH_EVENT_BUDGET`)
+#:     or the fold's terminal-key count (:data:`_FOLDED_TERMINAL_KEY_BUDGET`) — the
+#:     leg RAISES :class:`RecordVectorDeclined`, so the caller takes its NAMED
+#:     `scan_fallback` arm with `remaining_read_ms`. Measured on 8,000 objects with
+#:     4,001 archive events: 215 ms warm / 619 ms cold, the `#4999` surface;
+#:   * ⚠️ UNDER every budget the fold is still not a clock: a tenant whose prefetch
+#:     is inside both counts but whose fold is slow for another reason (a
+#:     pathological props payload, a slow `node_from_row`, a busy host) overruns
+#:     what is LEFT of the read, and then nothing raises — the fused read's
+#:     collector (`search_engine.degradation_chain`) expires on its own deadline and
+#:     DISCARDS the rows as `timeout`, which is the `#11691` outcome the divisor
+#:     work exists to prevent, one layer up, and the one with NO `scan_fallback` and
+#:     no trace entry of its own to point at.
+#: Both end in the graph branch; they differ in what the trace says, which is the
+#: whole reason this paragraph enumerates instead of summarising.
+#:
+#: At the measured 0.19 s for 8,000 rows inside a 500 ms read the leg ANSWERS; at
+#: 10,000 rows it declines. Materialising the fold is what removes both the cost and
+#: the bound — the follow-up that makes the prefetch and these constants disappear.
+#: Filed rather than attempted here: a per-target narrowing of the node read is
+#: exactly the place where a missed path becomes a `#689` LEAK, and
 #: correctness-before-cost is the order this lane was given.
 _FOLDED_TERMINAL_KEY_BUDGET = 4000
 
@@ -649,7 +686,7 @@ def _fold_prefetch_select(table: str) -> str:
     projection. Per-row sizes, measured with `pg_column_size` on `pgvector/pgvector:pg16`
     (`#13466` review cycle 2): `embedding_vec` is a FIXED `vector(384)` = **1,544 B**
     (it is a fixed-width type, so it cannot be larger), and `embedding` jsonb for a
-    384-element array is **4.8–7.7 KB** depending on whether the floats are
+    384-element array is **4.6–7.7 KB** depending on whether the floats are
     short-repr or full-precision. Both dwarf every column the fold does read.
 
     ⚠️ NOTHING IS SILENTLY LOST BY THE NARROWER ROW. `cache_projection.projected_columns`
@@ -1086,13 +1123,14 @@ def vector_search(
 
     literal = "[" + ",".join(repr(v) for v in vec) + "]"
     # ⛔ THE DIVISOR IS DECIDED HERE, BEFORE ANY STATEMENT RUNS, because the DOOR
-    # applies it: a folded label issues THREE data statements (its two prefetches,
-    # then the kNN) against the column arm's two, so it must divide by one MORE than
-    # it issues or it spends the whole read and hands the graph branch a floored
-    # 1 ms — see `record_statement_ms`.
+    # applies it: a folded label issues :data:`FOLD_ARM_STATEMENTS` data statements
+    # (its two prefetches, then the kNN) against the column arm's
+    # :data:`RECORD_LEG_STATEMENTS_PER_READ` divisor, so it must divide by
+    # :data:`FOLD_ARM_DIVISOR` — one MORE than it issues — or it spends the whole read
+    # and hands the graph branch a floored 1 ms. See `record_statement_ms`.
     status_source = _STATUS_COLUMN.get(entity_type)
     folded = status_source is not None and status_source[0] == _FOLDED_STATUS
-    statements = (RECORD_LEG_STATEMENTS_PER_READ + 1 if folded
+    statements = (FOLD_ARM_DIVISOR if folded
                   else RECORD_LEG_STATEMENTS_PER_READ)
 
     try:

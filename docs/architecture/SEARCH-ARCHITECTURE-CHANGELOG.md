@@ -348,12 +348,15 @@ contract's *"no record table serves this label"* — is taken silently, which is
 **What the review changed, and why it is recorded here rather than tidied away.** Three of the first cut's claims were
 wrong in ways that only a reviewer could see (`#13466`):
 
-* the prefetch was `SELECT *`, which materialises `embedding` (jsonb, **4.8–7.7 KB/row** for a 384-element array,
+* the prefetch was `SELECT *`, which materialises `embedding` (jsonb, **4.6–7.7 KB/row** for a 384-element array,
   measured with `pg_column_size`) and the generated `embedding_vec` (a FIXED `vector(384)`, **1,544 B/row**) that the
   fold never reads. **Measured: ~2.0 s on 8,000 `object` rows**, against **~0.19 s** for the payload-free projection
-  (≈47 ms of it the SELECT) — so at the folded arm's per-statement share the leg could never answer on any tenant of
-  realistic size, while presenting a bind budget it could never reach. ⚠️ The per-row sizes are the review's, not the
-  fold timings: the 8,000-row totals are attributed to the lane that measured them;
+  (27–47 ms of it the SELECT, the rest the fold) — so at the folded arm's per-statement share the leg could never
+  answer on any tenant of realistic size, while presenting a bind budget it could never reach. ⚠️ Three DIFFERENT
+  measurements, kept apart because a summary that merges two of them is how the wrong cost model survived review
+  twice: the 8,000-row totals are the lane's, the per-row byte figures are the reviewer's and were reproduced on a
+  second container (`vector(384)` = 1,544 B exactly; jsonb 4,616 B short-repr → 7,688 B full precision, with the
+  lane's real rows at 4,845 B);
 * the leg issues **three** data statements against the column arm's two, so dividing the read budget by
   `RECORD_LEG_STATEMENTS_PER_READ` let it spend the WHOLE read and hand the graph branch a floored `1 ms` — the
   `#11691` reserve silently did not hold for these two labels. The folded arm now divides by one MORE than it issues;

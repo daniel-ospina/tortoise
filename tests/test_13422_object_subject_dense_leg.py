@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -200,7 +201,8 @@ def test_the_folded_arm_is_wired_and_its_keys_reach_the_statement(monkeypatch):
         "`object` never reached the folded arm — it was answered by the column arm "
         f"(which emits NO clause for it) or not caged at all: {calls}")
     assert "<> ALL(%s)" in sql, sql
-    assert "o_13422_term" in [p for p in params if isinstance(p, (list, tuple))][0]
+    key_list = next(p for p in params if isinstance(p, (list, tuple)))
+    assert "o_13422_term" in key_list
 
 
 def test_the_audit_opt_in_reaches_the_folded_arm_and_emits_no_clause(monkeypatch):
@@ -410,15 +412,26 @@ def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
     column_share = record_vector.record_statement_ms(budget)
     assert column_share * 2 < budget, (
         "the column arm's two statements must fit strictly inside the read")
-    folded_share = record_vector.record_statement_ms(
-        budget, record_vector.RECORD_LEG_STATEMENTS_PER_READ + 1)
+    # ⛔ BOTH SIDES READ THE ONE DECLARATION of how many statements the folded arm
+    # issues (`#13466` cycle 4, P3): the divisor and the count it is multiplied by
+    # were tied to nothing — the pin multiplied by a literal `3` while the code
+    # spelled the divisor `constant + 1`, so a FOURTH data statement in the arm
+    # could spend the whole read and leave a 0 ms reserve while this pin still
+    # passed. `FOLD_ARM_STATEMENTS` is now the arm's real count in both places.
+    divisor = record_vector.FOLD_ARM_DIVISOR
+    statements = record_vector.FOLD_ARM_STATEMENTS
+    assert statements == divisor - 1, (
+        f"the folded arm issues {statements} statements and divides by {divisor} — "
+        "the divisor must be exactly one more, or the reserve below is arithmetic "
+        "over a count the arm does not actually run")
+    folded_share = record_vector.record_statement_ms(budget, divisor)
     # ⛔ THE RESERVE'S SIZE, not merely that it is positive (`#13466` cycle 3, P3):
     # `folded_share * 3 < budget` is TRUE at the FAILING divisor too
     # (`record_statement_ms(500, 3) == 166`, and 498 < 500) — so it measured
     # nothing. What the `#11691` guarantee actually is, is that at least ONE FULL
     # statement share is left for the graph branch: at the failing divisor that is
     # 500 - 498 = 2 ms, which is the empty-result path this pin exists to prevent.
-    reserve = budget - folded_share * 3
+    reserve = budget - folded_share * statements
     assert reserve >= folded_share, (
         f"the folded arm leaves only {reserve} ms of a {budget} ms read for the "
         f"graph branch after three {folded_share} ms statements — less than one "
@@ -429,12 +442,12 @@ def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
     func = next(node for node in ast.walk(tree)
                 if isinstance(node, ast.FunctionDef)
                 and node.name == "vector_search")
-    assert "RECORD_LEG_STATEMENTS_PER_READ + 1" in ast.unparse(func), (
+    assert "FOLD_ARM_DIVISOR" in ast.unparse(func), (
         "vector_search no longer adds the reserve share for folded labels")
 
 
 def test_the_prefetch_does_not_select_the_payload_columns():
-    """⛔ `SELECT *` ON THE PREFETCH IS A MEASURED 2.0 s -> 27 ms (`#13466` P2).
+    """⛔ `SELECT *` ON THE PREFETCH IS A MEASURED ~2.0 s -> ~0.19 s (`#13466` P2).
 
     The fold reads no vector and no jsonb, but `SELECT *` materialises both for
     every row of the label. Per-row sizes, measured with `pg_column_size` on
@@ -443,7 +456,17 @@ def test_the_prefetch_does_not_select_the_payload_columns():
     384-element array is **4.6–7.7 KB** depending on whether the floats are
     short-repr or full-precision. Measured on 8,000 rows: **~2.0 s** with the
     payload, **~0.19 s** without, against the **125 ms** per-statement share a
-    500 ms read gives three folded statements plus the graph's reserve.
+    500 ms read gives four folded statements plus the graph's reserve.
+
+    ⚠️ Keep the three numbers distinct — they are three DIFFERENT measurements and
+    an earlier version of this docstring merged two of them (`#13466` cycle 4, P3):
+    **27–47 ms** is the payload-free SELECT alone, **~0.19 s** is the whole
+    prefetch-plus-fold STEP, and **~2.0 s** is that same step with `SELECT *`. So
+    the payload-free step sits ~1.5x OVER its 125 ms share, not 4x under it: the
+    step is what must be materialised, which is the follow-up the module docstring
+    names. The jsonb floor is written 4.6 KB, not 4.8: 4,616 B was measured for a
+    short-repr 384-element array and 4,845 B for this lane's real `object` rows, so
+    the lower bound is the honest one to quote.
 
     ⚠️ The first version of this docstring carried the two figures REVERSED
     ("jsonb ~2.5 KB, `embedding_vec` ~7 KB") and the COLUMN arm's 166 ms share
@@ -492,7 +515,7 @@ def test_the_prefetch_row_budget_declines_instead_of_truncating():
     assert isinstance(budget, int) and budget > 0
 
     class _OverBudgetCursor:
-        description = [("id",)]
+        description: ClassVar[list[tuple[str]]] = [("id",)]
 
         def __init__(self):
             self.sql = ""
