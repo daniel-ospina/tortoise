@@ -565,15 +565,26 @@ def test_the_probe_graph_name_is_one_this_tree_can_reap():
         "literal there feeds `ensure_indexes`' DDL into ONE graph shared by "
         "every lane and CI run, and the census still passes because it only "
         "sees the keyword (#13290)")
-    minted = [n for n in ast.walk(tree)
-              if isinstance(n, ast.Assign)
-              and any(isinstance(t, ast.Name) and t.id == "_probe_graph"
-                      for t in n.targets)]
-    assert any(isinstance(n.value, ast.Call)
-               and getattr(n.value.func, "id", None) == "_probe_graph_name"
-               for n in minted), (
-        "`_probe_graph` is not assigned from `_probe_graph_name()` — the call "
-        "site is wired to something other than the per-run mint (#13290)")
+    # ⛔ EXACTLY ONE binding, not "a mint assignment exists somewhere" (review
+    # pass 4, P2 — MEASURED): `any()` over the assignments let a DECOY
+    # `_probe_graph = _probe_graph_name()` sit beside `_probe_graph =
+    # "tortoise_probe_8429"` in use, and both pins plus the census stayed GREEN.
+    # An annotated binding (`_probe_graph: str = _probe_graph_name()`) is the
+    # same fact spelled differently, so it counts as a binding rather than a
+    # false RED against a correct call site.
+    bindings = [n for n in ast.walk(tree)
+                if isinstance(n, (ast.Assign, ast.AnnAssign))
+                and (any(isinstance(t, ast.Name) and t.id == "_probe_graph"
+                         for t in (n.targets if isinstance(n, ast.Assign)
+                                   else [n.target])))]
+    assert len(bindings) == 1, (
+        f"expected EXACTLY ONE binding of `_probe_graph`, found {len(bindings)} "
+        "— a decoy mint assignment beside the literal IN USE would otherwise "
+        "pass this pin and the census (#13290)")
+    assert isinstance(bindings[0].value, ast.Call) and \
+        getattr(bindings[0].value.func, "id", None) == "_probe_graph_name", (
+        "`_probe_graph` is not bound to `_probe_graph_name()` — the call site is "
+        "wired to something other than the per-run mint (#13290)")
 
 
 def test_the_live_fixture_teardown_drops_its_own_graph(monkeypatch):

@@ -56,11 +56,12 @@ def _probe_graph_name() -> str:
     ``ensure_indexes=True``, whose schema DDL **CREATES** the graph it names, so
     an unnamed probe graph names a graph this probe does not own — on the
     ambient candidate, the SHARED env-URI graph that ``_uri()`` hands to every
-    ``sdk`` fixture below. The fixed ``tortoise_test_13302`` path this file
-    builds its candidates from is not a per-run MINT shape either (5 hex against
-    a floor of 8), so it meets neither cleanup arm
-    (``tests/_embedded.py::_SERVER_WIPE_PREFIXES``,
-    ``tests/_live_utils.py::_PER_RUN_GRAPH_NAME_RE``).
+    ``sdk`` fixture below. The fixed ``tortoise_test_13302`` path this file builds
+    its candidates from is inside the sweep's prefix family, so the session wipe
+    DOES reach it — but `drop_test_graph` refuses it by its own fail-closed gate
+    (``tests/_live_utils.py::_PER_RUN_GRAPH_NAME_RE`` needs an ``_<8+ hex>``
+    suffix; ``13302`` is 5 characters), and the ambient-seam argument above is
+    the one that makes a name mandatory at all. A mint meets both arms outright.
 
     Pinned by ``test_the_probe_graph_is_named_at_the_call``.
     """
@@ -147,15 +148,21 @@ def test_the_probe_graph_is_named_at_the_call():
         "literal there feeds `ensure_indexes`' DDL into ONE graph shared by "
         "every lane and CI run, and the census still passes because it only "
         "sees the keyword (#13302)")
-    minted = [n for n in ast.walk(tree)
-              if isinstance(n, ast.Assign)
-              and any(isinstance(t, ast.Name) and t.id == "probe_graph"
-                      for t in n.targets)]
-    assert any(isinstance(n.value, ast.Call)
-               and getattr(n.value.func, "id", None) == "_probe_graph_name"
-               for n in minted), (
-        "`probe_graph` is not assigned from `_probe_graph_name()` — the call "
-        "site is wired to something other than the per-run mint (#13302)")
+    # EXACTLY ONE binding (review pass 4, P2): a decoy mint assignment beside the
+    # literal IN USE must RED, and an annotated binding must count as a binding.
+    bindings = [n for n in ast.walk(tree)
+                if isinstance(n, (ast.Assign, ast.AnnAssign))
+                and (any(isinstance(t, ast.Name) and t.id == "probe_graph"
+                         for t in (n.targets if isinstance(n, ast.Assign)
+                                   else [n.target])))]
+    assert len(bindings) == 1, (
+        f"expected EXACTLY ONE binding of `probe_graph`, found {len(bindings)} — "
+        "a decoy mint assignment beside the literal IN USE would otherwise pass "
+        "this pin and the census (#13302)")
+    assert isinstance(bindings[0].value, ast.Call) and \
+        getattr(bindings[0].value.func, "id", None) == "_probe_graph_name", (
+        "`probe_graph` is not bound to `_probe_graph_name()` — the call site is "
+        "wired to something other than the per-run mint (#13302)")
 
 
 _docker_only = pytest.mark.skipif(
