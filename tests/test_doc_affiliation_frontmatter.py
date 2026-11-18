@@ -466,7 +466,7 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     Both are read through the SAME consumer the index pipeline uses, so this
     measures the real degradation rather than a re-implementation.
 
-    The affiliation VALUE is measured four ways, because one is provably not
+    The affiliation VALUE is measured five ways, because one is provably not
     enough — each of the first three was demonstrated to miss a real truncation:
 
     (A) a value whose text BEGINS with `#` is entirely a comment: the key
@@ -482,6 +482,13 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     (D) no silent omission: every declared affiliation value must have been
         measured, or the arm FAILS — a style nobody taught the arm about
         (`|`, `>`, `[...]`, `{...}`) is a failure, not a pass.
+    (E) SEQUENCES, item by item: a `sequence` affiliation value is not covered
+        by (A) alone, which sees only an item whose text BEGINS with `#`. Every
+        item gets (C)'s quoting check and a (B)-style value comparison, and a
+        length mismatch fails — a mid-item truncation
+        (`, #4333 census, #5380`) and a quoted item cut at an inner quote are
+        both green under (A)-(D) alone (found in review; the population carries
+        3 affiliation sequences).
 
     Multi-line plain values and continued sequence items are REFUSED (they are
     legal folding, and a continuation line opening with `#` is silently
@@ -543,8 +550,17 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                 texts = [str(it) for it in payload]  # type: ignore[union-attr]
 
             # (A) the whole value is a comment — 100% of it is gone.
+            #
+            # The texts (A) has already diagnosed are remembered, because a
+            # 100 %-lost value also resolves to ``None`` and would otherwise
+            # reach the non-string branch below — which explains a NON-string as
+            # "YAML implicit typing, nothing was lost" and so contradicted (A)
+            # inside one failure string (found in review: the `- #11395` item
+            # shape, where both messages were printed for one mechanism).
+            wholly_comment: set[str] = set()
             for text in texts:
                 if text.lstrip().startswith(_WHOLE_VALUE_COMMENT):
+                    wholly_comment.add(text)
                     bad.append(
                         f"`{key}` is ENTIRELY a YAML comment — everything after "
                         f"the leading `#` is discarded and the key resolves to "
@@ -577,6 +593,10 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                     )
                     continue
                 for raw_item, got_item in zip(texts, got_list):
+                    if raw_item in wholly_comment:
+                        # (A) already named this item's loss; a second reason from
+                        # _type_mismatch would contradict it in the same string.
+                        continue
                     style, expected = _quoted_style(raw_item)
                     if style in ("broken", "malformed"):
                         bad.append(
@@ -625,6 +645,8 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                 expected = texts[0]  # plain: YAML performs no transform
             got = parsed.get(key)
             if not isinstance(got, str):
+                if texts[0] in wholly_comment:
+                    continue  # (A) already named the 100 % loss; no second reason
                 bad.append(_type_mismatch(key, expected, got, "value"))
                 continue
             compared += 1
