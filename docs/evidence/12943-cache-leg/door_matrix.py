@@ -510,8 +510,15 @@ def main(argv: list[str]) -> int:
         rows.append(row)
         reached_canonical = _total(canonical) > 0
         reached_default = _total(org_default) > 0
+        # #12943 review cycle 3 (P3): the two summaries above cannot answer "did
+        # the cache receive this write" — the `misroute` row writes a THIRD graph,
+        # so both read False over a landed write. This third summary is the
+        # registry's own answer (the graph the write actually reached), and it is
+        # the one to read with the two graph counts, never instead of them.
+        reached_actual = any(v > 0 for v in target_delta.values())
         row["reached_canonical"] = reached_canonical
         row["reached_org_default"] = reached_default
+        row["reached_actual"] = reached_actual
         print(f"\n=== {door} ===")
         print(f"  tenant            org={org} graph={graph_id}")
         print(f"  record            {json.dumps(record)}")
@@ -521,7 +528,7 @@ def main(argv: list[str]) -> int:
         print(f"  write TARGETS     {json.dumps(target_delta)}")
         print(f"  cache_leg_failures {json.dumps(row['cache_leg_failures_delta'])}")
         print(f"  reached: canonical={reached_canonical} "
-              f"org_default={reached_default}"
+              f"org_default={reached_default} actual={reached_actual}"
               f"  writes_in_record={sum(record.values())}")
         if error:
             print(f"  WRITE RAISED      {error.splitlines()[-1]}")
