@@ -3168,7 +3168,9 @@ _PINNED_MODULES = {
 }
 
 # (module basename, first line, last line) -> (text required ON the first line,
-# text required ON the last line; None when the citation is a single line)
+# text required ON the last line; None when only the FIRST line is pinned, which the
+# single-line citations below are — a RANGE with `None` here would leave its end
+# unchecked while looking checked, so every multi-line entry pins both ends)
 _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # entities.py — the status latch, its two refusals, and the by-name reopen reach
     ("entities.py", 5128, 5130): (
@@ -3203,7 +3205,8 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("sdk.py", 53911, 53913): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 54063, 54072): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22388, 22563): ("def update_knowledge(", None),
+    ("sdk.py", 22388, 22563): ("def update_knowledge(",
+                             "return self._update_entity_any(id, **props)"),
     ("sdk.py", 54512, 54512): ("SET n += $props", None),
 }
 
