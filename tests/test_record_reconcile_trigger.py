@@ -417,7 +417,12 @@ def test_a_partial_declaration_reports_its_coverage():
 
 
 def test_the_UNDECLARED_second_writer_population_is_reported_never_a_mismatch():
-    """The FOURTH population: named in ``graph_only``, never a ``field_mismatches`` entry.
+    """The FIFTH population: named in ``graph_only``, never a ``field_mismatches`` entry.
+
+    ⛔ FIFTH, not fourth: `#13447` added the record-held vector column as a fourth
+    DECLARED class, so the TWO declared/undeclared totals moved with it (four
+    declared + this undeclared one = five). The ordinal is part of the census this
+    file quotes, and a stale one reads as a contradiction to the next reader.
 
     ⛔ This pin feeds ONE of that population's TWO shapes — a property a SECOND
     WRITER put on a **placed** node — and that shape's pair reads ``clean``. The
