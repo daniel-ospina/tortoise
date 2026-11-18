@@ -663,7 +663,7 @@ class RecordReconcileResult:
     def graph_only_total(self) -> int:
         """Properties the CACHE holds that the comparison did not judge.
 
-        ⛔ NOT "cache-owned": `graph_only` carries THREE DECLARED omission
+        ⛔ NOT "cache-owned": `graph_only` carries FOUR DECLARED omission
         classes plus one undeclared population (a second writer's property, which
         no declaration names — see the field's own declaration comment above,
         and :meth:`verdict` for how a clean verdict is reached), and `owned` is
@@ -776,7 +776,11 @@ def reconcile_record_and_cache(
     a record-sourced clear IN PLACE for the declined pair —
     ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
     ⛔ NOT a re-projection, which is additive and leaves an existing pair on the
-    node, the graph-side ``REMOVE`` for a not-projectable column (below), or *find
+    node, the graph-side ``REMOVE`` for a not-projectable column (below), NO
+    repair at all for the record-held vector column (`#13447` — the row's
+    ``NULL`` is legitimate because the vector is DERIVED, so the cache copy is
+    correct as it stands and re-deriving would replace a vector the record does
+    not have), or *find
     the writer* for the undeclared second-writer population the partition also
     counts.
 
@@ -883,7 +887,7 @@ def _partition_cache_owned(
         ) -> tuple[dict[str, Any], tuple[tuple[str, int], ...]]:
     """Split the cache side into what is COMPARED and what is CACHE-HELD.
 
-    ⛔ "cache-held" is the whole not-compared side, and it carries THREE DECLARED
+    ⛔ "cache-held" is the whole not-compared side, and it carries FOUR DECLARED
     omission classes plus one undeclared population — a second writer's property
     (see the module docstring's (5) and :meth:`verdict`);
     "cache-owned" is §17.5's term for only ONE of them — the scalars the
