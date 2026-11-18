@@ -1354,6 +1354,59 @@ retired:
   approval: null
 rows:
 - name: tortoise_query
+  # ⛔ PROVENANCE, not a value: `served_from` below is `main`'s cell, written by a re-cut — this
+  # diff does not re-stamp it (see the end of this block). It is recorded here because `main`'s copy
+  # of this file carries NO per-row rationale at all (a re-cut re-emits only `MANIFEST_HEADER`), so
+  # every fact below is one a later lane would otherwise have to re-derive from scratch.
+  #
+  # WHY THE CELL WENT STALE. `#13075` (`a09a0b3840`, "the currency rule reads the position axis")
+  # edited `def tortoise_query` IN PLACE — its diff is three hunks INSIDE the handler, four in the
+  # file, the fourth being the module-level `from tortoise.live import is_terminal_status` import,
+  # so that count is scoped to the handler and no reader should take it as the file's total.
+  # `served_from` is `_code_digest` of that handler's CODE OBJECT, so an edit inside it re-stamps
+  # the cell, and the row went stale: `surface_manifest.py check --provenance-strict` read it as a
+  # FAIL on `main` ITSELF — measured on pristine `main` worktrees at `55ec2c71b1` and at
+  # `3d437429e9` (the re-cut whose only changed file was `config/ci-surfaces.yml`, so it cannot
+  # reach this row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`
+  # pair. Re-derive it with that command; never type a digest from memory.
+  #
+  # ⛔ THIS ROW WAS RE-CUT, NOT HAND-HELD, IN #11609 P2 — and that is why the block survived the
+  # cut instead of being lost with it. The confidence-arms batch GREW `tortoise_check_confidence`
+  # (the RECOMPUTE/RECALL arms, then the refusal that an arm-only argument names its arm), so the
+  # handler's code object changed and `served_from`/`served_attributes` genuinely moved: the
+  # `cut` below wrote the derived pair, exactly as "Derived files re-cut, never hand-edited" says
+  # to. What that cut also does — silently, by design — is delete this block along with every
+  # other per-row one, which is the ONLY thing this block exists to warn about. It is restored by
+  # hand because `cut` re-emits `MANIFEST_HEADER` alone; the cell above is the cut's, never typed.
+  #
+  # ⛔ A LATER `main` LANE RESTATED THIS AND GOT IT WRONG, so its block is folded into this one
+  # instead of being kept twice. `#13000`'s `980f271acc` added eleven lines here saying this row
+  # was "refreshed here to the value the tree derives" and quoting `at 55` tools as "unchanged" —
+  # but that commit changes no `served_from` line at all (the refresh was `#13052`'s `cut`, landed
+  # earlier the same morning), and `#13052` had ALREADY retired seven doors, so 55 was a door count
+  # behind on the day it was written and 44 is what `rows` carries now (#11609 P2's
+  # confidence arms retired two, the create-arms wave two more). Keeping both blocks would
+  # leave this file asserting a count its own `rows` does not have — which is exactly what
+  # `test_no_per_row_comment_quotes_a_stale_surface_count` reds on. The measurement it quoted is
+  # preserved rather than erased: a pristine `main` at `2390101f68` read the same recorded/derived
+  # pair this block already names two paragraphs up, so what is dropped here is the stale COUNT and
+  # the wrong verb, not the fact.
+  #
+  # A full `cut` is deliberately NOT run from a docs branch. It is NOT owner-only — `p_cut.add_
+  # argument("--commit", …)` carries no `required=True` and `build_doc` falls back to
+  # `git rev-parse HEAD`, and `cmd_cut` carries no identity check — but it is gated on the owner's
+  # approval DOCUMENT: `read_approval` reads `docs/product/canonical-mcp-tools.md` and `build_doc`
+  # REFUSES when that file is missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or
+  # carries no `approval_status`. The operative reason here is narrower: a re-cut would delete this
+  # block to buy back a cell that is already correct on `main`.
+  #
+  # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the
+  # source and RE-RUN the generator (buf/protoc baselines and the mainstream codegen convention
+  # all state it, and it is the right default) — because this file's provenance is only
+  # re-derivable from the record beside the row: a `cut` deletes every per-row block, so "just
+  # regenerate it" would cost the WHY to re-buy a value the tree already agrees with. The VALUE is
+  # still never hand-derived — it is the digest `check --provenance-strict` compares. A reader
+  # holding the "always regenerate" page should put it down here, not "fix" this row by cutting.
   served_from: tortoise/mcp_server.py:59f8f7e5957d81d8
   served_attributes: 7a717e4e60ce3bfa
   family: memory
