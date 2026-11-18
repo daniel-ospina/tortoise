@@ -314,7 +314,9 @@ population claim, round 3 found (D) inert for block/flow plus three over-blocks 
 measurement, fixed, and covered by the matrix. Because the cap is spent, the *diff* then went to the
 **head-bound code review**, which found two more real defects — **(B) tautological** and **(C)
 unreachable behind the escape branch** — both verified by measurement, fixed, and now covered by M1 and
-M16 / M18. The attestation for this PR is recorded at the FINAL head, after those fixes.
+M16 / M18. The attestation for #13476 is recorded at its FINAL head (`9f25dc79c9`), and that record
+is `not-clean` with two findings — the escape one fixed in #13484, and the counter residuals now
+listed in §9. #13484's own attestation is minted at its own final head, after this section.
 
 **Out of scope — must NOT be raised** (note, file, do not chase):
 
@@ -380,6 +382,18 @@ over-block that cannot ship a defect (it fails closed and names the remedy), and
 distinguish an indented `#` continuation from a comment without becoming a YAML implementation —
 the refusal is declared in `_values`' docstring for that reason. Fixing it would require folding
 support, which is out of this issue's scope.
+
+**Recorded, not fixed — the guard's sanity counters can red on an empty population.** Two sites in
+`tests/test_doc_affiliation_frontmatter.py` report the same wrong diagnosis as round 5's escape
+finding, and neither is an escape: `:751-752` assert `measured` and `compared` BEFORE
+`assert not failures` (`:753`), so a tree the guard samples sparsely reds on *"measured no
+affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
+the value; and `:658` skips `escaped` before `compared += 1` (`:666`), so a tree whose affiliated
+values are all escaped leaves the counter legitimately empty and fires the same message. Both are
+false blocks of an author's tree, not fail-opens — nothing escapes measurement, they fail closed
+and name a remedy — and both live in the guard, not in the escape branch this PR fixes. Recorded
+here because a reader meets the message before the reason; fixing the ordering is a separate change
+to #13476's guard.
 
 **Recorded, not fixed — #13476's `470 values compared` figure.** At this head the same probe
 prints **90 measured / 94 compared**; the counter now counts affiliation values only. The
