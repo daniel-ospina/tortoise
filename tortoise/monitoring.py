@@ -806,6 +806,52 @@ CACHE_LEG_FAILURE_COUNT = Counter(
     ["reason"],
 )
 
+#: Rows STORED WITHOUT a vector because a bounded write declined to wait for a
+#: cold embedder (#13417). Every other counter near here counts a write that did
+#: not happen; this one counts a write that DID happen and left the dense leg a
+#: hole.
+#:
+#: WHY IT EXISTS. PR #13229 measured the fix for a 20,414 ms p95 on the
+#: subject-create path: the four DERIVED-entity folds wait
+#: ``WRITE_EMBED_BUDGET_S`` (0.25 s) for the embedder and then write the row
+#: **without a vector** rather than blocking on a 13.5 s cold model load
+#: (#13224). That trade is correct and is not undone here — but it produces
+#: exactly the state `docs/architecture/STORAGE-ARCHITECTURE.md` §17.2 forbids:
+#: *"truth == cache must be checkable"*, and a divergence nobody observes is not
+#: a divergence. The repair is `graph-scripts/backfill_embeddings.py`; the
+#: OBSERVATION is this counter.
+#:
+#: ⛔ WHY A COUNT AND NOT THE READ SIDE. The dense leg can be dropped by its own
+#: budget on a loaded box — measured at **45 % of eval windows** — and a
+#: budget-cancelled leg is **indistinguishable from a slow store** in the trace
+#: (`#13108`, `#13156`). A missing vector therefore cannot be inferred from a
+#: degraded read; it has to be counted where the write DECIDES not to embed.
+#:
+#: ⛔ WHY IT DOES NOT FEED ``status``. ``degraded`` stays reserved for an OBSERVED
+#: probe failure; this is a cumulative counter (see the note on
+#: ``RECORD_REFUSAL_WINDOW_SECONDS`` below for why a cumulative counter must
+#: never pin a deployment degraded for the life of the process). Additive only.
+#:
+#: ``reason`` vocabulary — the four causes ``EmbeddingModel
+#: .await_write_ready_reason`` can return, kept as a label rather than a bare
+#: counter because they need OPPOSITE operator responses (install the extra /
+#: repair a broken load / retry later / wait longer): ``not_installed`` ·
+#: ``fail_cooldown`` · ``attempt_spent`` · ``budget_expired``. ``budget_expired``
+#: is the only one where a wait actually happened, i.e. the genuine #13229 cost.
+#: ⚠️ ``#5008``'s embed GATE — a designed absence (identifier-only text) — is
+#: deliberately NOT counted here, for the ``#9231`` review P2 reason recorded at
+#: ``RECORD_NON_JOURNAL_SKIP_COUNT``: a designed, permanent absence parked on the
+#: same channel as a real degrade teaches an operator to ignore the channel.
+#:
+#: Single writer: ``tortoise.embeddings._note_vectorless_write`` (the
+#: ``#501``/``#3677`` house shape — callers never touch the counter directly).
+ROWS_WRITTEN_WITHOUT_VECTOR_COUNT = Counter(
+    "tortoise_rows_written_without_vector_total",
+    "DERIVED-entity rows stored WITHOUT a vector because the write bound "
+    "declined to wait for a cold embedder (#13417)",
+    ["reason"],
+)
+
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
 #:
 #: The counter above is CUMULATIVE since process start and is never reset — that
@@ -2814,6 +2860,30 @@ def record_cache_leg_failure(reason: str) -> None:
 def cache_leg_failure_counts() -> dict[str, int]:
     """In-process snapshot of ``CACHE_LEG_FAILURE_COUNT``, by reason (#12943)."""
     return _collect_by_label(CACHE_LEG_FAILURE_COUNT, "reason")
+
+
+def record_row_without_vector(reason: str) -> None:
+    """Count one row STORED WITHOUT a vector by a bounded write (#13417).
+
+    The write HAPPENED — the row exists and every reader sees it; only its
+    vector is absent, so the dense leg cannot find it until
+    ``graph-scripts/backfill_embeddings.py`` re-encodes it. That is why this is
+    NOT a reason on any record/journal failure counter: nothing was lost, and a
+    record counter reading non-zero here would misattribute a healthy record to
+    a missing vector (the #4034 misattribution class, pointed the other way).
+
+    Single writer: ``tortoise.embeddings._note_vectorless_write``, called from
+    ``encode_for_row``'s bounded decline — the ONE seam where a write decides a
+    row carries no vector, so a new writer cannot leave the count behind. The
+    ``reason`` vocabulary is documented at
+    ``ROWS_WRITTEN_WITHOUT_VECTOR_COUNT``.
+    """
+    ROWS_WRITTEN_WITHOUT_VECTOR_COUNT.labels(reason=reason).inc()
+
+
+def rows_written_without_vector_counts() -> dict[str, int]:
+    """In-process snapshot of ``ROWS_WRITTEN_WITHOUT_VECTOR_COUNT`` (#13417)."""
+    return _collect_by_label(ROWS_WRITTEN_WITHOUT_VECTOR_COUNT, "reason")
 
 
 def record_journal_write_failure() -> None:
@@ -7622,6 +7692,8 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
     offload_refusals, uptime} — plus the counter keys below (``wait_bound_breaches``
     #10602, ``health_setup_clamped`` #10749, ``record_position_unproven`` #9307,
     ``record_writes_applied``/``record_last_write_at`` #9548 and the rest).
+    #13417 adds ``rows_written_without_vector`` — the DERIVED-entity rows a
+    bounded write stored with no vector, keyed by the decline's cause.
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
@@ -7832,6 +7904,15 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # the measured shape (record 2 objects/3 points, cache 0/0) — so the
         # derived store gets its own key rather than a reason on the record's.
         "cache_leg_failures": cache_leg_failure_counts(),
+        # #13417: the DERIVED-entity vector's own channel. #13229 made a cold
+        # write return without a vector instead of blocking on a 13.5 s model
+        # load (p95 20,414 ms → 268 ms) — a trade that LEAVES ROWS the dense leg
+        # cannot find. §17.2 requires that divergence be checkable, and #13156
+        # rules out inferring it from the read side (a budget-cancelled leg reads
+        # like a slow store). Keyed by the decline's CAUSE, because the four
+        # causes need opposite responses. Like every key above: additive, never
+        # a term in `status`.
+        "rows_written_without_vector": rows_written_without_vector_counts(),
         # ...and WHERE the live writes actually landed (#12943 reopening). The
         # key above counts ONE configuration shape (record armed + embedded
         # cache); this one is cause-agnostic — `{store|graph: writes}` for this

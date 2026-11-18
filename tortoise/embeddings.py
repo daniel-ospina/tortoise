@@ -1817,6 +1817,15 @@ def encode_for_row(
     recompute their vector from the payload text, so a live decline is
     repairable from the graph and `derived = replay(journal)` still holds.
 
+    ⚠️ **The decline is COUNTED, not merely logged (#13417).** Every bounded
+    decline increments `monitoring.metrics()["rows_written_without_vector"]`
+    under the cause it declined for, because §17.2 requires that the
+    truth↔derived divergence the bound creates be checkable, and `#13156` rules
+    out inferring it from the read side (a budget-cancelled dense leg reads like
+    a slow store). The count is emitted from THIS seam rather than from each
+    fold, so a new writer cannot leave it behind — the same reason the gate
+    lives here.
+
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
     writers — a `Turn` is not an extracted row, and the batched form has one
@@ -1852,15 +1861,45 @@ def encode_for_row(
     if bounded and not _in_replay_scope():
         decline = EmbeddingModel.await_write_ready_reason(WRITE_EMBED_BUDGET_S)
         if decline is not None:
-            # Visible, not silent: counted on the existing "ran no model work"
-            # metering term (#4488) and logged once per process PER CAUSE — a bulk
-            # write must not storm the log with one line per row, and the cause
-            # travels with the line so the one entry an operator reads names what
-            # actually happened (#13229 review F2).
+            # Visible, not silent, on THREE channels — they answer different
+            # questions and none is redundant: the metering term (#4488) counts
+            # "no model work ran" per org; the counter (#13417) counts ROWS the
+            # dense leg is now missing, by cause, on `monitoring.metrics()`; and
+            # the line below explains once per process PER CAUSE what the two
+            # numbers mean — a bulk write must not storm the log with one line
+            # per row, and the cause travels with the line so the one entry an
+            # operator reads names what actually happened (#13229 review F2).
             _note_embed_skip(1)
+            _note_vectorless_write(decline)
             _note_cold_write(WRITE_EMBED_BUDGET_S, reason=decline)
             return None
     return encode_for_store(content, expected_dim)
+
+
+def _note_vectorless_write(reason: str) -> None:
+    """Count the row this bounded decline stores WITHOUT a vector (#13417).
+
+    TOTAL, and every occurrence — unlike `_note_cold_write`, which is latched to
+    one line per process per cause so a bulk write cannot storm the log. The log
+    line explains WHAT happened; this counter is the number an operator can
+    alert on, and a number that only moves once per process cannot answer "how
+    many rows is the dense leg missing?".
+
+    Imported lazily so this module stays import-order-independent and an unarmed
+    process pays one function call, not a module import (the
+    `_note_embed_encode` shape). A measurement fault must NEVER fail a write, so
+    this is swallowed: monitoring is an observation, not a dependency.
+
+    ⛔ It does NOT count `#5008`'s gate declines — those are a DESIGNED absence
+    (identifier-only text), permanent and unrepairable, and parking them on the
+    same channel as the #13229 cost would make the channel's non-zero value
+    unattributable. See `monitoring.ROWS_WRITTEN_WITHOUT_VECTOR_COUNT`.
+    """
+    try:
+        from .monitoring import record_row_without_vector
+        record_row_without_vector(reason)
+    except Exception:
+        pass
 
 
 def _note_cold_write(budget: float, *, reason: str) -> None:
