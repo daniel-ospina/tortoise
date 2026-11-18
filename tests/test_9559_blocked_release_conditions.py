@@ -1729,10 +1729,26 @@ def _strip_sql_comments(sql: str) -> str:
     false PASS the selection exists to close, reachable from the comment form the
     residual claimed could only RED.
 
-    String literals are NOT parsed: a `--` inside one truncates that line, exactly
-    as before. The direction is fail-closed (it can only REMOVE text an assertion
-    needs, never add a body that is not there), which is why it is disclosed here
-    rather than papered over.
+    String literals are NOT parsed — single-quoted (#13382's unlanded hardening) or
+    dollar-quoted. For the TWO COMMENT FORMS MODELLED ABOVE the direction is
+    fail-closed: a `--` inside a literal truncates that line, which can only REMOVE
+    text an assertion needs.
+
+    ⛔ THE DOLLAR-QUOTED CASE IS NOT FAIL-CLOSED, and an earlier cut of this
+    docstring claimed the whole function was. A migration whose sole content is
+    `SELECT $x$ … CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()
+    … $$ … $$ … $x$;` is left INTACT here, so the declaration inside the literal
+    survives the candidate scan in `_defining_migrations`, and `_function_body`
+    then anchors on it and returns the `$$…$$` quoted INSIDE the literal — a body
+    that is never executed. That is fail-OPEN: it can ADD an arm the live function
+    does not have, the opposite of the residual above.
+
+    ⛔ NOT FIXED HERE, and deliberately: making `$tag$` regions opaque would also
+    hide the plpgsql bodies this whole window exists to read, because a plpgsql
+    body IS dollar-quoted (#13390). That makes it a design change, not a strip
+    tweak. Open, reproduced on `main`, and recorded as item 1 of #13393 (P2
+    fail-open) — which is why that issue stays OPEN after #13398: the selector
+    order was one of its items, this literal case is not.
     """
     out: list[str] = []
     i, n, depth = 0, len(sql), 0
