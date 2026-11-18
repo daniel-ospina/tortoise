@@ -1254,9 +1254,10 @@ contended box — holds the fold's required legs PENDING with nothing to answer 
 MEASURABLY slower than hosted, in both of its architectures. On the x64 box, `test-slow (a)` over the
 same 365 nodeids took **1352.5 s against 246.5 s hosted — 5.49×** (`docs/ops/ci-runner-x64.md:208`); the
 ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:2105`) and one of them
-killed the canary at **32m12s of a 30m budget** (`python-ci.yml:2172`) — the same failure this section
-cites as the reason the `canary_producer` row is exempt. A priority mechanism that routes a fold onto a
-slower or stalled class makes the fold slower, which is the opposite of its purpose. Declare the class
+killed the canary at its **27m shard watchdog**, a 32m12s job wall (`python-ci.yml:2172`) — the same
+failure this section cites as the reason the `canary_producer` row is exempt. A priority mechanism
+that routes a fold onto a slower or stalled class makes the fold slower, which is the opposite of its
+purpose. Declare the class
 **and** the reason the fold may have it: on this fleet that reason is "dedicated fold capacity exists",
 and it does not yet.
 
@@ -1273,10 +1274,11 @@ The `canary_producer` exemption is not a nicety: `fast_shard_runner` rule 1 pins
 hosted label precisely because the producer's artifacts feed the canary streak, and that streak is a
 comparison of TESTS across runs. Moving the producer onto another class would turn it into a
 comparison of runner classes — the failure measured 2026-10-27..30, when run `40986603502` (head
-`5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s
-(`docs/ops/ci-runner-x64.md:885`) — 12 minutes past the 20 m watchdog budget the page records for
-these legs (`:884`, `:927`; the page states no 30 m budget, so do not quote one from here). A fold gets priority on the legs that carry the
-wall; the producer stays where the streak expects it.
+`5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64): the shard's own watchdog
+fired at 27 m and the job wall reached 32 m 12 s (`docs/ops/ci-runner-x64.md:885`). The 20 m budgets
+on the surrounding rows (`:884`, `:927`) are OTHER legs' derived budgets for OTHER runs — this
+shard's was 27 m (`python-ci.yml:2172` records it), so do not borrow one from them. A fold gets
+priority on the legs that carry the wall; the producer stays where the streak expects it.
 
 ⛔ **The class does not buy PARALLEL legs.** `strategy.max-parallel: 3` (#6744) is a bare literal on
 all three shard matrices, so it applies to a fold's validation run exactly as to any other PR: even

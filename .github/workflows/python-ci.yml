@@ -2169,7 +2169,7 @@ jobs:
     # opt-in mode the non-pool rows are not, and they include shards (c) and (e)
     # — the two measured below at ~78%/~91% of the 20m budget on the ARM64 VMs.
     # It fired for real on head 5a2ae6aa1: `test (i)`, the CANARY, was taken by
-    # `pi-runner-vm-5` (ARM64) and killed at 32m12s of a 30m budget. Closing THAT
+    # `pi-runner-vm-5` (ARM64): its own watchdog fired at 27m, job wall 32m12s. Closing THAT
     # needs `ubuntu-24.04` on those rows, which also drops the outage fallback
     # this gate exists for: a capacity decision, not a CI-hygiene one, filed on
     # #6897. Kept here as the record of why THIS job is version-pinned: a 9.72m

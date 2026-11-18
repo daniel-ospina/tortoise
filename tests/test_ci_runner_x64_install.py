@@ -4085,8 +4085,14 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # merge, which is the whole point. The pin reads the citation from the FILE and resolves it
     # against the workflow, so a fixer re-anchoring should trust the red, not this note.
     # Both sentences are load-bearing there: the first carries the "ARM64 VMs resolve
-    # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at 32m12s
-    # of a 30m budget" measurement the section argues a fold-routing decision on.
+    # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at its 27m
+    # shard watchdog" measurement the section argues a fold-routing decision on. ⛔ The BUDGET is
+    # DERIVED, not fixed (`shard_watchdog_minutes()` builds `matrix.watchdog_minutes` from the
+    # shard's packed estimate), so the pin reads BOTH numbers out of the cited workflow line rather
+    # than restating one here. The revision before this one hard-coded "32m12s of a 30m budget" — a
+    # 30m budget no artifact carries: job 123849604825 (run 40986603502) logs `WATCHDOG: pytest
+    # killed after 27m`, and the 32m12s is the JOB wall, not the watchdog. A pin that states a
+    # number the cited line does not is the drift this pin exists to catch, one level up.
     #
     # Pinned by SENTENCE, like the refs above, so an offset-shifted number reds here instead of
     # passing the `1 <= n <= EOF` range check that let it ship.
@@ -4107,16 +4113,23 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     )
 
     m = re.search(
-        r"killed the canary at \*\*32m12s of a 30m budget\*\* \(`python-ci\.yml:(\d+)`\)", batch
+        r"killed the canary at its \*\*(\d+)m shard watchdog\*\*, a 32m12s job wall "
+        r"\(`python-ci\.yml:(\d+)`\)",
+        batch,
     )
     assert m is not None, (
-        "batch-integration.md no longer cites `python-ci.yml:<line>` for the canary killed at "
-        "32m12s of a 30m budget — re-anchor this pin rather than deleting it"
+        "batch-integration.md no longer cites `python-ci.yml:<line>` for the canary killed at its "
+        "shard watchdog — re-anchor this pin rather than deleting it"
     )
-    n = int(m.group(1))
-    assert "32m12s of a 30m budget" in at(".github/workflows/python-ci.yml", n), (
-        f"batch-integration.md cites python-ci.yml:{n} for the canary killed at 32m12s, but that "
-        f"line is {at('.github/workflows/python-ci.yml', n)!r}"
+    budget_min, n = m.group(1), int(m.group(2))
+    cited = at(".github/workflows/python-ci.yml", n)
+    assert f"watchdog fired at {budget_min}m" in cited, (
+        f"batch-integration.md cites python-ci.yml:{n} quoting a {budget_min}m watchdog, but that "
+        f"line is {cited!r}"
+    )
+    assert "32m12s" in cited, (
+        f"batch-integration.md cites python-ci.yml:{n} for the 32m12s job wall, but that line is "
+        f"{cited!r}"
     )
 
     # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
