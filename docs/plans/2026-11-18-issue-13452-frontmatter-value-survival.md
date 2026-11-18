@@ -227,7 +227,28 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    restored between: round-1 tree GREEN on both, this head RED on both. A wholly indented
    frontmatter block was the third spelling offered; it is caught one arm earlier, by
    `frontmatter block does not parse (degraded to {})`, because YAML does not accept it as a
-   top-level mapping at all.
+   top-level mapping at all — measured both ways: keys indented under a column-0 fence, and the
+   whole block including its fences indented; `yaml.safe_load` rejects the latter with
+   `mapping values are not allowed here`, and `parse_frontmatter` returns `{}` for both.
+
+   **Round 3 — the diagnostics, not the checks.** A third fresh review found three messages that
+   gave the WRONG remedy or a false diagnosis. None let a defect through; each would have sent a
+   reader to the wrong place, which is the failure mode this whole issue is about. All three
+   verified by measurement before applying, and the fourth finding that review raised was
+   **falsified and not applied** (it claimed the indented block parses and is caught by the new
+   `declared` line — it does not, and it is not; see the paragraph above):
+
+   - (D) said **"Quote the value"** for a pair it can reach only because the KEY is unlexable, and
+     quoting cannot clear that. Measured: `aboutObjects : "a, #11395 KEEP, #13220"` parses INTACT
+     and still reds, so the message now names the respelling (the remedy that actually works).
+   - The **sequence-item** branch still said "a sequence item has no legal transform, so this is a
+     truncation" for `- 13452` -> int, the exact false diagnosis retired for scalars 20 lines
+     above; one file gave two contradictory diagnoses for one mechanism. Now shared.
+   - The new scalar wording **overcorrected**: `aboutObjects: 13452 #11395 reopen, #13220` parses
+     to int `13452`, and 22 author-written characters were terminated at the space-preceded `#` —
+     this issue's defect — while the message said "not a truncation". Both non-string members are
+     now one helper that decides from the RAW text: a space-preceded `#` in it means the tail was
+     cut, no such character means implicit typing lost nothing.
 
    (An earlier draft also listed "an extra item appended" as a mutant; that is a legitimate edit, not a
    truncation, and it correctly stays green — the expectation was wrong, not the arm.)

@@ -104,6 +104,38 @@ AFFILIATION_KEYS = ("aboutSubjects", "aboutObjects")
 UNMEASURED: frozenset[tuple[str, str]] = frozenset()
 
 
+def _type_mismatch(key: str, raw: str, got: object, unit: str) -> str:
+    """Explain a value that resolved to a NON-STRING without misdescribing why.
+
+    Two different mechanisms produce this shape, and they are oppositely bad:
+
+    * **YAML implicit typing** — `13452` -> int, `2026-11-18` -> date, `true` ->
+      bool. NOTHING is lost; the text is intact, just not a `str`. Reporting
+      this as a truncation sends the reader after a defect that is not there.
+    * **A space-preceded `#` ending the scalar** — the tail is discarded, and the
+      REMAINDER may then resolve to a non-string (`13452 #11395 reopen, #13220`
+      -> int `13452`, 22 author-written characters gone). This is exactly the
+      #13452 defect, and calling it "implicit typing, not a truncation" would
+      deny the very defect this guard exists for.
+
+    Both were found in review, one in each direction, so the branch is decided
+    from the RAW text rather than assumed: a ` #` in it means the tail was cut.
+    The remedy is the same in both cases, and the arm still fails closed.
+    """
+    if " #" in raw:
+        cut = raw.index(" #")
+        return (
+            f"`{key}` {unit} {raw!r} became {type(got).__name__} ({got!r}): a "
+            f"space-preceded `#` ended it at character {cut} of {len(raw)}, so "
+            f"the tail is GONE — this is a truncation, whatever type the "
+            f"remainder resolved to. Quote the {unit}."
+        )
+    return (
+        f"`{key}` {unit} {raw!r} resolves to {type(got).__name__} ({got!r}), "
+        f"not a string — YAML implicit typing, nothing was lost. Quote the {unit}."
+    )
+
+
 def _frontmatter(path: Path) -> list[str]:
     """Return the lines of the leading YAML block (empty list if there is none)."""
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -556,11 +588,15 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                     if expected is None:
                         expected = raw_item
                     compared += 1
-                    if not isinstance(got_item, str) or got_item != expected:
+                    if not isinstance(got_item, str):
+                        bad.append(_type_mismatch(key, expected, got_item, "item"))
+                        break
+                    if got_item != expected:
                         bad.append(
                             f"`{key}` item {raw_item!r} (len {len(expected)}) "
-                            f"became {got_item!r} — a sequence item has no legal "
-                            "transform, so this is a truncation. Quote the item."
+                            f"became {got_item!r} (len {len(got_item)}) — a plain "
+                            "sequence item on one line is not folded, so this "
+                            "is a truncation. Quote the item."
                         )
                         break
                 continue
@@ -587,16 +623,7 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                 expected = texts[0]  # plain: YAML performs no transform
             got = parsed.get(key)
             if not isinstance(got, str):
-                # NOT always a truncation: a plain scalar may legally resolve to
-                # a non-string through YAML implicit typing (`2026-11-18` ->
-                # date, `13452` -> int, `true` -> bool). Nothing was lost, so
-                # claiming truncation would send the reader after a defect that
-                # is not there. The remedy is the same, so it still fails.
-                bad.append(
-                    f"`{key}` resolves to {type(got).__name__} ({got!r}), not a "
-                    "string — YAML implicit typing, not a truncation. Quote the "
-                    "value."
-                )
+                bad.append(_type_mismatch(key, expected, got, "value"))
                 continue
             compared += 1
             if got != expected:
@@ -612,12 +639,36 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     # measured, unless it is an explicit per-value entry above. A style or a
     # block that silently escapes measurement is the defect this arm exists for,
     # so it fails here rather than passing quietly.
+    #
+    # The REMEDY has to be the one that actually clears the red (review): this arm
+    # now reaches a value `_values` could not lex at all (it is declared from the
+    # PARSED block too), and for that pair "quote the value" is advice that cannot
+    # work — an already fully-quoted value is still unlexable while the KEY is
+    # spelled `key :`, as a quoted key, or inside an indented block. Measured:
+    # `aboutObjects : "a, #11395 KEEP, #13220"` parses INTACT and reds here, so
+    # the message names the respelling instead of advice that does nothing.
     unmeasured = sorted(declared - measured - UNMEASURED)
+
+    def _remedy(rel: str, key: str) -> str:
+        lexable = {k for k, _, _ in _values(_frontmatter(ROOT / rel))}
+        if key not in lexable:
+            return (
+                f"`{rel}`: `{key}` is declared in a spelling this arm cannot lex "
+                f"(a space before the colon, or a quoted key), so quoting the "
+                f"value will NOT clear this — respell the key as `{key}:` at "
+                f"column 0, no space before the colon"
+            )
+        return (
+            f"`{rel}`: `{key}` quote the value (plain or simply-quoted is "
+            "measured)"
+        )
+
     assert not unmeasured, (
         "these affiliation values were NOT measured by ANY check — a silently "
-        "unmeasured affiliation is the #13452 defect. Quote the value (plain or "
-        "simply-quoted is measured), or, if the style is deliberate, add the "
-        f"(path, key) pair to UNMEASURED with a reason: {unmeasured}"
+        "unmeasured affiliation is the #13452 defect: "
+        + "; ".join(_remedy(rel, key) for rel, key in unmeasured)
+        + ". If the style is deliberate, add the (path, key) pair to UNMEASURED "
+        "with a reason."
     )
     assert measured, "measured no affiliation value at all — re-point this guard"
     assert compared, "compared no value at all — re-point this guard"
