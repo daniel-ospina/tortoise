@@ -124,8 +124,13 @@ CACHE_TARGET_OVERFLOW = "(other targets)"
 #: the signal that this process is past the registry's resolution.
 _TARGETS_CAP = 16
 
-#: ``{"<store>|<graph>": live writes}`` for THIS process, and its lock. Written
-#: by :func:`note_cache_write_target` from the one fold every live write passes.
+#: ``{"<store>|<graph>": live write attempts}`` for THIS process, and its lock.
+#: Written by :func:`note_cache_write_target` from the five live lanes — the fold,
+#: the structural-edge mint, and the three declared gateways — so the UNIT is one
+#: lane operation (a fold, a mint, a gateway statement), not one journal record.
+#: Read it for WHERE a process writes; do not read it as "writes landed", because
+#: an arm whose fold returns no count is counted even when its statement matched
+#: 0 rows (the bound is stated on `note_cache_write_target`).
 _TARGETS: dict[str, int] = {}
 _TARGETS_LOCK = threading.Lock()
 
@@ -221,7 +226,7 @@ def cache_store_fingerprint(endpoint: object) -> str:
 
 
 def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
-    """Count one LIVE write against the store+graph it actually folded into.
+    """Record one LIVE write ATTEMPT against the store+graph it reached.
 
     Five call sites, and the list is maintained rather than implied:
     ``projection.note_live_write_target`` is the ONE helper they all go through,
@@ -268,10 +273,15 @@ def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
     looked at has 0" becomes "this process wrote 8 to THAT target" — one number
     to compare, whichever of the shapes caused it (#12943 reopening).
 
-    A COUNT IS NOT A VERDICT: two targets in one process is normal for a
-    deployment that writes the registry graph as well as tenant graphs. What is
-    pathological is the TENANT's target absent from this list — or present under
-    a store the deployment does not read.
+    A COUNT IS NOT A VERDICT, AND IT IS NOT A WRITE COUNT. The unit is one lane
+    operation — a fold, a mint, a gateway statement — so it answers WHERE a
+    process writes, which is the question the split turns on; an arm whose fold
+    returns no count is still counted when its statement matched 0 rows (see
+    `FalkorProjection._apply_event`'s `_skip` bound), so the number is an upper
+    bound, deliberately erring that way rather than under-reporting. Two targets
+    in one process is normal for a deployment that writes the registry graph as
+    well as tenant graphs. What is pathological is the TENANT's target absent
+    from this list — or present under a store the deployment does not read.
 
     Deliberately cannot raise (#5148's rule — observability must never deny a
     write that already landed): the caller folds inside a live scope and the

@@ -12763,7 +12763,9 @@ class FalkorProjection(
         here would produce exactly the record-written / cache-not-folded split
         the registry exists to instrument; on the APPLY-FIRST doors the fold IS
         the commit point and the record that describes it is appended afterwards
-        (`_APPLY_FIRST_DOORS`), so a raise here would drop the write instead. `_stable_endpoint` is NOT
+        (`_APPLY_FIRST_DOORS`, inventoried in
+        `tests/test_9124_declared_live_doors.py`), so a raise here would drop the
+        write instead. `_stable_endpoint` is NOT
         exception-free by design (`_falkordb_version_cache_key` deliberately
         leaves `OverflowError` uncaught on a non-finite port).
 
@@ -12810,11 +12812,13 @@ class FalkorProjection(
             #12943: the write-target registry counts writes LANDED on a graph,
             and this fold has many exits that write nothing (a malformed
             envelope, an unwritable or absent id on the point/operator/promote
-            arms, an empty `merge_ids`, a re-stamp that folded no Point, a
-            supersede that matched no Object, a 0-row annotator / retract /
-            belief / edge-message fold, an `EntityLinked` or `SessionRecorded`
-            whose statement matched nothing, and the three
-            recognized-not-folded arms at the tail). Counting them
+            arms, a `PointRevised` with no writable id, a `SourceCreated` /
+            `SourceVersioned` with neither a writable url nor id, an empty
+            `merge_ids`, a re-stamp that folded no Point, a supersede that
+            matched no Object, a 0-row annotator / retract / belief /
+            edge-message fold, an `EntityLinked` or `SessionRecorded` whose
+            statement matched nothing, and the three recognized-not-folded arms
+            at the tail). Counting them
             would answer "how many folds were STARTED"; the one direction that
             matters is the opposite — a record-written / cache-not-written split
             must never read as a write that landed (#12943 review cycle 2,
@@ -13044,6 +13048,14 @@ class FalkorProjection(
             # Phase 1: discard new_context for v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
                 ev.pop("new_context", None)
+            # #12943 (review cycle 5, P2): an unwritable/absent id means
+            # `_revise_point` issues no statement — measured, the registry
+            # counted it as a landed write. `_revise_point`'s own `(False,
+            # False)` is NOT usable as the predicate (it also reports a
+            # legitimate content-only write), so the id is tested BEFORE the
+            # call, with the same `_writable_id` the fold itself uses.
+            if not _writable_id(ev.get("id")):
+                return _skip()
             self._revise_point(ev, set_updated_at=True)
         elif t == "OperatorAnnotated":
             # #3689: fold the explicit annotation record. Inline (a
@@ -13159,12 +13171,6 @@ class FalkorProjection(
                 # so it must not count as a landed cache write — the sibling
                 # `PointAdded` unwritable-id branch does the same.
                 _skip()
-            else:
-                # No `point` payload at all: no statement is issued, so nothing
-                # is written. `_skip()`'s own list already claims "an
-                # unwritable or ABSENT id on the point/operator/promote arms"
-                # is marked — this is the `apply()` arm that made that true.
-                _skip()
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
             # (#2256 review P1): promotion emitters journal FLAT get_point
@@ -13252,7 +13258,14 @@ class FalkorProjection(
                 return _skip()
             return _mutated
         elif t == "EventRecorded":
-            _replayed = self._upsert_event(ev)
+            # #12943 (review cycle 6, P1): the WRITE FLAG, not the return value.
+            # `_upsert_event` returns `None` on its plain path AFTER it has
+            # MERGEd the Event, so a falsy return is not "nothing landed" —
+            # gating `_skip()` on it skipped counting EVERY landed event (both
+            # halves: a landed fold counted 0, the same `{}` a process that took
+            # no live write reads). The fold owns the only predicate that can
+            # tell the two apart: its own unwritable-`eventId` guard.
+            _replayed = self._upsert_event(ev, _wrote=_wrote)
             # #8398: the about* links are GRAPH EDGES written live, not node
             # properties — so nothing replayed them and a rebuild silently
             # dropped every Event→entity link. Re-wire them from the record.
@@ -13308,11 +13321,10 @@ class FalkorProjection(
                     "yet; ``rebuild``/``rebuild_all`` re-wire these in a "
                     "trailing sweep, a direct ``apply`` replay cannot",
                     _about_f, ev.get("event_id") or ev.get("id"))
-            if not _replayed and not _about_w:
-                # #12943 (review cycle 4, P2): no writable `eventId` AND no
-                # about* edge wired — nothing was issued. Both halves, because
-                # the re-wire writes edges even when the upsert folded nothing.
-                _skip()
+            if _about_w and _wrote is not None:
+                # The re-wire decided to issue edges even when the Event upsert
+                # folded nothing, so a wired link is a landed write on its own.
+                _wrote[0] = True
             return _replayed
         elif t == "EntityLinked":
             # #3664: the capture entity-attachment replay consumer — an
@@ -13471,14 +13483,26 @@ class FalkorProjection(
             # internal ``_merge_run_id`` key (the creator's run token — the
             # race-safe CREATE discriminator on the embedded backend) is
             # popped here so it never reaches _persist_extra_props.
-            return self._upsert_source(
+            _src = self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+            # #12943 (review cycle 5, P2): `None` is this fold's no-statement
+            # signal (an unwritable/absent url AND id) — measured, it was counted
+            # as a landed write. The result is still RETURNED on every path: the
+            # SDK's counter-authority outcome reads it (#5024 pin b).
+            if _src is None:
+                _skip()
+            return _src
         elif t == "SourceVersioned":
             # #5024 (T6): the re-materialisation record. `_upsert_source`'s
             # hash-diff ON MATCH bumps version/updatedAt/contentHash in place
             # and journals nothing OF ITS OWN; this is that write's record.
             # A no-op re-check (identical hash) emits NOTHING, so the journal
             # does not grow on every re-check (§9.6's cost bound).
+            # #12943 (review cycle 5, P2): same predicate as `SourceCreated` —
+            # with neither a writable url nor a writable id the transition fold
+            # issues no statement, and the registry must not report one.
+            if not (_writable_id(ev.get("url")) or _writable_id(ev.get("id"))):
+                _skip()
             self._fold_source_versioned(ev)
         elif t == "ConfidenceChanged":
             # #2884 D3: the EP/dream belief-state write-back. Inline (a

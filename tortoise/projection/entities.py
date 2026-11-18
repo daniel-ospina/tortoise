@@ -5716,7 +5716,8 @@ class _EntityHandlers:
                 self._create_about_edges(did, ent)
 
     def _upsert_event(self, event: dict, *, guard: bool = False,
-                      guard_source_file: str | None = None) -> "tuple[str, bool] | None":  # noqa: UP037
+                      guard_source_file: str | None = None,
+                      _wrote: list[bool] | None = None) -> "tuple[str, bool] | None":  # noqa: UP037
         """MERGE Event node with all ONTOLOGY §3.1 properties.
 
         Handles both nested ({type:EventRecorded, event:{eventId:...}}) and
@@ -5745,6 +5746,15 @@ class _EntityHandlers:
 
         Unparameterized calls (legacy ingest_corpus, rebuild replay) execute
         the plain MERGE path byte-identically (SC4) and return None.
+
+        ⛔ ``_wrote`` EXISTS BECAUSE THIS RETURN VALUE CANNOT SAY IT (#12943
+        review cycle 6, P1). The plain path returns ``None`` AFTER
+        ``_event_plain_merge`` has written, so ``None`` means both "no statement
+        was issued" (the unwritable-`eventId` guard below) and "the Event MERGEd,
+        plain path". A caller that treated a falsy return as "nothing landed"
+        therefore skipped counting EVERY landed event. This list is the same
+        convention ``FalkorProjection._apply_event`` already threads: a caller
+        passes ``[True]`` and any guard that issues nothing sets it to ``False``.
         """
         inner = event.get("event", event)  # unwrap nested format
         eid = inner.get("id") or inner.get("eventId")
@@ -5752,6 +5762,8 @@ class _EntityHandlers:
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(eid):
             _log_identity_skip("Event", eid, "eventId (MERGE key)")
+            if _wrote is not None:
+                _wrote[0] = False     # no MERGE key ⇒ no statement
             return
         # Embedding: the journaled EventRecorded payload carries the live
         # value (epic #900 cycle-18/19 — the sanctioned replay carrier for the

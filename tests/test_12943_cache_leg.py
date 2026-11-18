@@ -1136,10 +1136,15 @@ def test_apply_keeps_the_signature_the_replay_engines_introspect(
     {"type": "PointsMerged", "merge_ids": [None, 7]},
     {"type": "ObjectSuperseded", "id": "no-such-object"},  # matched nothing
     {"type": "PointPromoted", "point": {"id": "\x00bad"}},  # unwritable id
+    # Review cycle 5, P2: the two arms that issue no statement for an
+    # unwritable identity but were still counted.
+    {"type": "PointRevised", "id": None, "new_content": "y"},
+    {"type": "SourceCreated"},
     # No `point` payload AT ALL: no statement is issued, so nothing is written.
-    # `_skip()`'s own list already claimed "an unwritable or ABSENT id on the
-    # point/operator/promote arms" was marked; this is the `apply()` arm that
-    # makes that claim true (#12943 review cycle 4 follow-up).
+    # Covered by the arm's own `if not isinstance(p, dict)` branch — measured
+    # (review cycle 5, P3): removing THAT branch reds this row, and the `else`
+    # a previous commit added was unreachable, so it was deleted rather than
+    # left to look like the guard.
     {"type": "PointPromoted"},
     # ── review cycle 4, P2: the DELEGATED folds that report their own
     # 0-row count straight through `_apply_event`, none of which called
@@ -1215,9 +1220,18 @@ def test_the_0_row_capable_arms_STILL_count_a_fold_that_LANDED(
              "confidence": 0.6},
             {"type": "PointRetracted", "id": point["id"]},
             {"type": "SessionRecorded", "id": "sess-landed-1"},
+            # #12943 (review cycle 6, P1): the arm whose write signal was the
+            # RETURN VALUE. `_upsert_event`'s plain path returns `None` AFTER
+            # it MERGEd, so this fold counted 0 while landing a real Event —
+            # the one polarity hole the four cases above did not cover
+            # (measured at `3e1e582468`: `EventRecorded landed -> {}`).
+            {"type": "EventRecorded", "event_id": "ev-landed-EventRecorded",
+             "event": {"eventId": "ev-landed-1", "eventKind": "meeting",
+                       "subject": "s", "object": "o"}},
         ):
             reset_cache_write_targets()
-            proj.apply(dict(event, event_id=f"ev-landed-{event['type']}"))
+            proj.apply(dict(event, event_id=event.get("event_id")
+                            or f"ev-landed-{event['type']}"))
             assert sum(cache_write_targets().values()) == 1, (
                 f"{event['type']} folded a real target and must count exactly "
                 f"one landed write — got {cache_write_targets()!r}")
