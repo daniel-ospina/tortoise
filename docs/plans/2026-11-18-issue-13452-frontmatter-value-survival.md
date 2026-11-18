@@ -186,8 +186,9 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
    failure output, not asserted.**
-2. **Fixed tree:** `2 failed, 9 passed` **at the post-rebase head** (`2 failed, 8 passed` at the
-   pre-rebase head — the extra pass is `#13485`'s own new test, which main added under ours) — the 2
+2. **Fixed tree:** `2 failed, 10 passed` **at this head** (`2 failed, 8 passed` at the
+   pre-rebase head — one extra pass is `#13485`'s own new test, which main added under ours, and the
+   other is the mid-body parity test this PR's tip commit added) — the 2
    are the pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the evidence bundles
    `docs/evidence/13038-capstone/README.md` **+** `docs/evidence/13436-write-path-costs/README.md` —
@@ -349,7 +350,8 @@ entire job is "no affiliation value escapes measurement" — not a message defec
 `e488d2adcc` and listed below. The later rounds found no further fail-open, but the last of them —
 the round-5 review of `9f25dc79c9` — found a **false block**: a wrong VERDICT, not only a message.
 Legal YAML `'the ''KEEP'' #11395 ruling'` was read as an unbalanced quote and check (C) failed it;
-that one is fixed in `268737ae6cd9` (this branch's first commit) and pinned below. Where a finding
+that one is fixed in `268737ae6cd9` — rebased onto this branch as `4bc4d177a850`, its first commit —
+and pinned below. Where a finding
 was applied it was measured first, and where it was falsified the record was corrected in place
 rather than restated. What is left is listed here so the next reader inherits the measurement
 instead of repeating it.
@@ -474,11 +476,13 @@ Measured at the post-rebase head:
 
 - the new test still **discriminates**: replaying the true pre-fix `_split_comment`
   (`raw[:i].rstrip().endswith(q)`) into a scratch copy of the head reds it
-  (`- single-quoted` / `+ broken`, `tests/test_doc_affiliation_frontmatter.py:973`);
+  (`- single-quoted` / `+ broken`, `tests/test_doc_affiliation_frontmatter.py:981`, the
+  `assert style == "single-quoted"`);
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
   truncation case still `broken`;
-- `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; the post-rebase head measures
-  `2 failed, 9 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test;
+- `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; this head measures
+  `2 failed, 10 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
+  and this PR's own mid-body parity test;
 - `test_docs_lint_baseline` + `test_docs_lint_gate` + `test_docs_citation_refs` → **106 passed**.
 
 One correction this rebase forced: the pre-existing absence red on the evidence bundles now names
