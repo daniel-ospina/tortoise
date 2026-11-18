@@ -1407,6 +1407,28 @@ _DEFERRAL_BY_RULING = re.compile(
     re.IGNORECASE,
 )
 
+#: The arms the scan below runs, in ONE tuple.
+#: ⛔ WHY IT IS A NAME AND NOT AN INLINE TUPLE: the non-vacuity rows call each
+#: regex directly, so removing an arm from the scan's tuple left this whole test
+#: GREEN (measured: dropping `_DEFERRAL_BY_RULING` from the scan, `1 passed`) —
+#: the guard could be unwired without a red, which is the "assert whose value
+#: cannot vary" #3442 rule 3 names, one level above the regexes. The fixtures go
+#: through `_deferral_offenders` for the same reason the scan does.
+_DEFERRAL_ARMS = (_DEFERRED_CUTOVER, _DEFERRAL_BY_RULING)
+
+
+def _deferral_offenders(text: str) -> list[str]:
+    """Every deferral claim in `text`, tagged with the line it sits on.
+
+    Shared by the document scan and by the non-vacuity fixtures, so an arm that
+    stops being WIRED reds the fixture rather than passing in isolation.
+    """
+    return [
+        f"line {text[:match.start()].count(chr(10)) + 1}: {match.group(0)!r}"
+        for rx in _DEFERRAL_ARMS
+        for match in rx.finditer(text)
+    ]
+
 
 def test_the_storage_document_does_not_defer_the_anchored_read_cutover():
     """`STORAGE-ARCHITECTURE.md` §2.0 states the cutover; it does not defer it.
@@ -1439,11 +1461,7 @@ def test_the_storage_document_does_not_defer_the_anchored_read_cutover():
     and an exemption that cannot tell that apart from a denial is a hole.
     """
     text = STORAGE.read_text(encoding="utf-8")
-    offenders = [
-        f"STORAGE-ARCHITECTURE.md:{text[:match.start()].count(chr(10)) + 1}: {match.group(0)!r}"
-        for rx in (_DEFERRED_CUTOVER, _DEFERRAL_BY_RULING)
-        for match in rx.finditer(text)
-    ]
+    offenders = [f"STORAGE-ARCHITECTURE.md:{found}" for found in _deferral_offenders(text)]
     assert not offenders, (
         "§2.0 states the anchored-read cutover as the ARMED capability it is. Two "
         "shapes are ruled out here: a DEFERRED STATUS for this cutover (the claim "
@@ -1506,6 +1524,24 @@ def test_the_storage_document_does_not_defer_the_anchored_read_cutover():
         "`TORTOISE_RECORD_SERVE` is OFF by default — §2.0's deferral stands: this builds the "
         "capability the epic's acceptance names, not a wider read path."
     ), "the attribution arm does not fire on the section's deferral spoken of as standing"
+
+    # WIRING — every arm must still be IN THE SCAN, not merely a regex that
+    # matches when called directly. Measured before this block existed: deleting
+    # `_DEFERRAL_BY_RULING` from the scan's tuple left the whole test GREEN, so a
+    # future lane could unwire the guard with nothing reddening (#3442 rule 3).
+    assert any(
+        "stays DEFERRED" in hit
+        for hit in _deferral_offenders(
+            "the 2026-11-07 split recorded here as *\"`#7970`'s anchored-read\n"
+            "cutover therefore stays DEFERRED by §2.0\"* — rescinded by the owner"
+        )
+    ), "the subject-scoped arm is no longer wired into the document scan"
+    assert any(
+        "deferred by §2.0" in hit
+        for hit in _deferral_offenders(
+            "The node-naming read that will drive this in production is deferred by §2.0."
+        )
+    ), "the attribution arm is no longer wired into the document scan"
 
 
 CHANGELOG = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE-CHANGELOG.md"
