@@ -3742,10 +3742,12 @@ def run_vector_query(
     four-slot contract recorded there, and the arity this function's own
     annotation and call site use. It is tried FIRST and records
     :data:`MECHANISM_PGVECTOR` when it answers. ``None`` from the
-    callable means this label is not served from the record
-    (``object``/``subject`` — see ``record_vector.LABEL_SERVED``), and the call
-    falls through to the graph branches below, which is that label's real path
-    and always was. An EXCEPTION takes the same graph fallback and is recorded
+    callable means this label is not served from the record ON THIS READ — no
+    record table serves it at all, or it serves it and declined its turn
+    (``object``/``subject`` over the fold's prefetch budget: see
+    ``record_vector.LABEL_SERVED`` and ``_FOLDED_PREFETCH_ROW_BUDGET``) — and the
+    call falls through to the graph branches below, which is that label's real
+    path and always was. An EXCEPTION takes the same graph fallback and is recorded
     as ``scan_fallback``, because the payload is still IN the graph — the move
     took the INDEX, not the property. Default ``None`` = the graph branches
     only, byte-identical to the pre-#11642 behaviour, so a box with no record

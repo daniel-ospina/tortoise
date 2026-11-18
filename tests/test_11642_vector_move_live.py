@@ -497,10 +497,10 @@ def _seed_restatus(conn, *, seq, label, node_id, status):
             (ORG, GRAPH, seq, payload))
 
 
-def test_a_live_object_is_found_by_a_dense_read_from_the_record(schema):
+def test_a_live_object_is_found_by_a_dense_read_from_the_record(tenant):
     """⛔ INDICATOR 1, per label. `None` here is the `#13220`-era answer."""
-    _seed_semantic(schema, "Object", "o_13422_live", embedding=_vec(0))
-    _seed_semantic(schema, "Object", "o_13422_far", embedding=_vec(1))
+    _seed_semantic(tenant, "Object", "o_13422_live", embedding=_vec(0))
+    _seed_semantic(tenant, "Object", "o_13422_far", embedding=_vec(1))
 
     rows = _search_vec("object", hot=0, limit=10)
     assert rows is not None, (
@@ -510,9 +510,9 @@ def test_a_live_object_is_found_by_a_dense_read_from_the_record(schema):
     assert rows[0][1] == pytest.approx(0.0, abs=1e-6), rows[0]
 
 
-def test_a_live_subject_is_found_by_a_dense_read_from_the_record(schema):
+def test_a_live_subject_is_found_by_a_dense_read_from_the_record(tenant):
     """The Subject twin — `#1423`'s family, and the second half of indicator 1."""
-    _seed_semantic(schema, "Subject", "s_13422_live", embedding=_vec(2))
+    _seed_semantic(tenant, "Subject", "s_13422_live", embedding=_vec(2))
 
     rows = _search_vec("subject", hot=2, limit=10)
     assert rows is not None, (
@@ -520,16 +520,16 @@ def test_a_live_subject_is_found_by_a_dense_read_from_the_record(schema):
     assert [row[0] for row in rows] == ["s_13422_live"], rows
 
 
-def test_a_superseded_object_is_excluded_by_the_CARRIER_fold(schema):
+def test_a_superseded_object_is_excluded_by_the_CARRIER_fold(tenant):
     """The `superseded` half of the cage, from the record's COLUMN carriers.
 
     `DERIVED_FROM_RECORD` (via `cache_projection.node_from_row`) folds
     `superseded_by`/`superseded_at` → `superseded`. Both rows are equally near,
     so an uncaged leg returns both — the assertion is what distinguishes them.
     """
-    _seed_semantic(schema, "Object", "o_13422_super", embedding=_vec(3),
+    _seed_semantic(tenant, "Object", "o_13422_super", embedding=_vec(3),
                    superseded_by="o_13422_live")
-    _seed_semantic(schema, "Object", "o_13422_current", embedding=_vec(3))
+    _seed_semantic(tenant, "Object", "o_13422_current", embedding=_vec(3))
 
     rows = _search_vec("object", hot=3, limit=10)
     assert [row[0] for row in rows] == ["o_13422_current"], (
@@ -540,7 +540,7 @@ def test_a_superseded_object_is_excluded_by_the_CARRIER_fold(schema):
         "o_13422_current", "o_13422_super"], opt_in
 
 
-def test_an_archived_object_is_excluded_by_the_records_JOURNAL_fold(schema):
+def test_an_archived_object_is_excluded_by_the_records_JOURNAL_fold(tenant):
     """⛔ THE WORD THE TWO-VALUE SQL VIEW CANNOT EXPRESS (`#13335`).
 
     `archived` exists only in `journal_event.payload -> 'state' -> 'status'`.
@@ -548,9 +548,9 @@ def test_an_archived_object_is_excluded_by_the_records_JOURNAL_fold(schema):
     the leg uses the fold. A leg reading the view here would serve this row and
     report it as better recall.
     """
-    _seed_semantic(schema, "Object", "o_13422_arch", embedding=_vec(4))
-    _seed_semantic(schema, "Object", "o_13422_arch_live", embedding=_vec(4))
-    _seed_restatus(schema, seq=_SEQ_OBJECT_ARCHIVED, label="Object",
+    _seed_semantic(tenant, "Object", "o_13422_arch", embedding=_vec(4))
+    _seed_semantic(tenant, "Object", "o_13422_arch_live", embedding=_vec(4))
+    _seed_restatus(tenant, seq=_SEQ_OBJECT_ARCHIVED, label="Object",
                    node_id="o_13422_arch", status="archived")
 
     rows = _search_vec("object", hot=4, limit=10)
@@ -566,16 +566,16 @@ def test_an_archived_object_is_excluded_by_the_records_JOURNAL_fold(schema):
         "o_13422_arch", "o_13422_arch_live"], opt_in
 
 
-def test_a_retracted_subject_is_excluded_by_the_records_journal_fold(schema):
+def test_a_retracted_subject_is_excluded_by_the_records_journal_fold(tenant):
     """The Subject twin, on a word `SUBJECT_STATUS_VALUES` refuses on WRITE.
 
     A `retracted` row can exist from a legacy/pre-fix writer, a raw Cypher
     producer or a JSONL replay, which is why the READ set stays wider than the
     write door (`#2977`). The cage is a property of what is STORED.
     """
-    _seed_semantic(schema, "Subject", "s_13422_retr", embedding=_vec(5))
-    _seed_semantic(schema, "Subject", "s_13422_retr_live", embedding=_vec(5))
-    _seed_restatus(schema, seq=_SEQ_SUBJECT_RETRACTED, label="Subject",
+    _seed_semantic(tenant, "Subject", "s_13422_retr", embedding=_vec(5))
+    _seed_semantic(tenant, "Subject", "s_13422_retr_live", embedding=_vec(5))
+    _seed_restatus(tenant, seq=_SEQ_SUBJECT_RETRACTED, label="Subject",
                    node_id="s_13422_retr", status="retracted")
 
     rows = _search_vec("subject", hot=5, limit=10)
@@ -588,22 +588,22 @@ def test_a_retracted_subject_is_excluded_by_the_records_journal_fold(schema):
         "s_13422_retr", "s_13422_retr_live"], opt_in
 
 
-def test_the_audit_opt_in_returns_terminal_rows_on_the_record_leg(schema):
+def test_the_audit_opt_in_returns_terminal_rows_on_the_record_leg(tenant):
     """`excluded_statuses=()` is the caller's terminal-rows-IN opt, mirrored.
 
     The graph branches emit NO status clause for it, so a record leg that kept
     excluding would make the two legs disagree about the same request.
     """
-    _seed_semantic(schema, "Object", "o_13422_optin_super", embedding=_vec(6),
+    _seed_semantic(tenant, "Object", "o_13422_optin_super", embedding=_vec(6),
                    superseded_by="o_13422_optin_live")
-    _seed_semantic(schema, "Object", "o_13422_optin_live", embedding=_vec(6))
+    _seed_semantic(tenant, "Object", "o_13422_optin_live", embedding=_vec(6))
 
     rows = _search_vec("object", hot=6, limit=10, excluded_statuses=())
     assert sorted(row[0] for row in rows) == [
         "o_13422_optin_live", "o_13422_optin_super"], rows
 
 
-def test_a_caged_short_answer_does_not_raise_a_shortfall(schema):
+def test_a_caged_short_answer_does_not_raise_a_shortfall(tenant):
     """The prefetch's `available` is the FOLDED count, not the raw row count.
 
     The shortfall assertion exists to catch a truncated ANN answer; a row the
@@ -613,9 +613,9 @@ def test_a_caged_short_answer_does_not_raise_a_shortfall(schema):
     `count(*)` over the PRE-cage rows, this read would raise `VectorShortfall` for
     a corpus that is complete.
     """
-    _seed_semantic(schema, "Object", "o_13422_short_super", embedding=_vec(7),
+    _seed_semantic(tenant, "Object", "o_13422_short_super", embedding=_vec(7),
                    superseded_by="o_13422_short_live")
-    _seed_semantic(schema, "Object", "o_13422_short_live", embedding=_vec(7))
+    _seed_semantic(tenant, "Object", "o_13422_short_live", embedding=_vec(7))
 
     rows = _search_vec("object", hot=7, limit=10)
     assert [row[0] for row in rows] == ["o_13422_short_live"], rows

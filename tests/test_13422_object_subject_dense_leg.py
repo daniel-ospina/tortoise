@@ -21,8 +21,14 @@ WHAT THIS FILE PINS (DB-FREE — the live arm is
 3. the folded arm reads its vocabulary from `search_engine._status_vocab_for`
    (the ONE dispatcher) rather than carrying a list of its own, and it reads the
    fold from `cache_projection` rather than restating it;
-4. the over-budget bound declines the RECORD's turn and never degrades the
-   answer — it returns `None`, which the caller answers from the graph.
+4. the over-budget bounds decline the RECORD's turn and never degrade the
+   answer — they return `None`, which the caller answers from the graph. There
+   are three of them: the terminal-key BIND budget, and the two prefetch
+   budgets (rows, journal events) that bound the part of the fold
+   `statement_timeout` cannot reach, because it runs in Python;
+5. the folded arm is WIRED — `vector_search` asks the fold and its keys reach
+   the statement — so a `if False:` on the folded-arm branch cannot leave this
+   file green (`ast` pins alone cannot see that).
 """
 from __future__ import annotations
 
@@ -115,14 +121,102 @@ def test_the_column_arm_cannot_be_mistaken_for_no_cage():
     assert record_vector._status_predicates("point", None)
 
 
-def test_the_audit_opt_in_emits_no_clause_on_the_column_arm():
-    """`excluded_statuses=()` is the caller's terminal-rows-IN opt.
+class _FakeCursor:
+    """A cursor that RECORDS every statement and answers the kNN with no rows.
 
-    Mirrored from the graph branches: they emit NO status clause for it, so a
-    record leg that kept excluding would make the two legs disagree about the
-    same request.
+    ⛔ The DB half of the folded arm (`_folded_terminal_keys`) is stubbed below on
+    purpose: what these pins are for is the WIRING — which arm of `vector_search`
+    runs, and what statement reaches the server — and neither question needs a
+    server. The behavioural half (a real fold excluding a real terminal row) is
+    the live arm, `tests/test_11642_vector_move_live.py`.
     """
-    assert record_vector._status_predicates("point", ()) == []
+
+    def __init__(self):
+        self.statements: list[tuple[str, tuple]] = []
+        self.description = [("id",), ("distance",), ("recency",)]
+
+    def execute(self, sql, params=None):
+        self.statements.append((sql, tuple(params or ())))
+
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return (0,)
+
+    def close(self):
+        return None
+
+
+class _FakeConn:
+    def close(self):
+        return None
+
+
+def _run_folded_read(monkeypatch, fold_answer, *, excluded_statuses=None):
+    """One `vector_search` over `object`, with the fold's DB half stubbed.
+
+    Returns ``(fold_calls, knn_statement)`` — the two things the wiring pins
+    assert on. ``fold_answer`` is what the stubbed fold returns, so a test can
+    choose "terminal keys found" versus "the audit opt-in excluded nothing".
+    """
+    import tortoise.record_projection as rp
+    import tortoise.record_serve as rs
+
+    cur = _FakeCursor()
+    conn = _FakeConn()
+    monkeypatch.setattr(rs, "open_record", lambda *a, **k: conn, raising=True)
+    monkeypatch.setattr(rp, "scope_connection", lambda c, org: cur, raising=True)
+    calls: list[tuple[str, object]] = []
+
+    def _fold(conn_, cur_, scope, entity_type, excluded):
+        calls.append((entity_type, excluded))
+        return fold_answer
+
+    monkeypatch.setattr(record_vector, "_folded_terminal_keys", _fold, raising=True)
+    record_vector.vector_search(
+        record_vector._Scope(org_id="org_13422", graph_id="graph_13422"),
+        "object", [0.0] * 8, 10, record_dsn="postgresql://localhost/record",
+        excluded_statuses=excluded_statuses)
+    knn = [s for s in cur.statements if "<=>" in s[0]]
+    assert len(knn) == 1, cur.statements
+    return calls, knn[0]
+
+
+def test_the_folded_arm_is_wired_and_its_keys_reach_the_statement(monkeypatch):
+    """⛔ THE DB-FREE WITNESS THAT THE CAGE IS APPLIED AT ALL.
+
+    The `if False:` mutant on `status_source[0] == _FOLDED_STATUS` leaves every
+    structural pin in this file green — the branch simply never runs and the
+    column arm answers `[]` for a folded label — so the wiring needs a witness
+    that observes the CALL. This one does: the fold must be asked, and the keys it
+    returns must arrive as the statement's `<> ALL(%s)` parameter.
+    """
+    calls, (sql, params) = _run_folded_read(monkeypatch, (["o_13422_term"], 0))
+    assert calls == [("object", None)], (
+        "`object` never reached the folded arm — it was answered by the column arm "
+        f"(which emits NO clause for it) or not caged at all: {calls}")
+    assert "<> ALL(%s)" in sql, sql
+    assert "o_13422_term" in [p for p in params if isinstance(p, (list, tuple))][0]
+
+
+def test_the_audit_opt_in_reaches_the_folded_arm_and_emits_no_clause(monkeypatch):
+    """`excluded_statuses=()` is the caller's terminal-rows-IN opt, on every arm.
+
+    The graph branches emit NO status clause for it, so the record leg must reach
+    the FOLDED arm and emit no exclusion either (the folded arm's opt-in is an
+    EMPTY key list, `_folded_terminal_keys`). ⛔ Reachable, unlike the assertion
+    this replaces: the first assertion reds if the folded arm is bypassed, the
+    second if the clause is appended regardless of the key list being empty.
+    """
+    calls, (sql, _params) = _run_folded_read(monkeypatch, ([], 0),
+                                             excluded_statuses=())
+    assert calls == [("object", ())], (
+        "the audit opt-in did not reach the folded arm as `()` — the leg would "
+        f"answer the default cage for the one caller that asked to SEE it: {calls}")
+    assert "<> ALL(%s)" not in sql, (
+        "the audit opt-in still emitted an exclusion clause — the record leg "
+        f"would disagree with both graph branches on the same request: {sql}")
 
 
 def test_the_folded_keys_are_the_columns_the_leg_returns():
@@ -257,3 +351,80 @@ def test_the_bind_budget_declines_the_record_branch():
 def test_the_budget_is_a_bound_and_it_is_positive():
     assert isinstance(record_vector._FOLDED_TERMINAL_KEY_BUDGET, int)
     assert record_vector._FOLDED_TERMINAL_KEY_BUDGET > 0
+
+
+def test_the_prefetch_row_budget_declines_instead_of_truncating():
+    """⛔ `statement_timeout` CANNOT BOUND THE PYTHON FOLD, so this must.
+
+    `_folded_terminal_keys` reads every row of the label and runs
+    `node_from_row` over each in the CLIENT process, where no server-side timeout
+    can cancel it. Past `_FOLDED_PREFETCH_ROW_BUDGET` the leg returns `None` (the
+    documented "not served HERE" answer, whose caller takes the graph branch) and
+    NEVER a truncated row set — a dropped row is a terminal key this leg would
+    then SERVE, which is the `#689` fail-OPEN direction.
+
+    RED if the budget check is removed (the fold would go on to project
+    `budget + 1` rows), and RED if the `LIMIT` stops reaching the statement.
+    """
+    budget = record_vector._FOLDED_PREFETCH_ROW_BUDGET
+    assert isinstance(budget, int) and budget > 0
+
+    class _OverBudgetCursor:
+        description = [("id",)]
+
+        def __init__(self):
+            self.sql = ""
+            self.params: tuple = ()
+
+        def execute(self, sql, params=None):
+            self.sql, self.params = sql, tuple(params or ())
+
+        def fetchall(self):
+            return [("o_13422_row",)] * (budget + 1)
+
+    cur = _OverBudgetCursor()
+    assert record_vector._folded_terminal_keys(
+        None, cur, record_vector._Scope(org_id="org", graph_id="graph"),
+        "object", None) is None, (
+        "an over-budget `object` prefetch must decline (`None` -> graph branch), "
+        "never fold a TRUNCATED row set")
+    assert "LIMIT %s" in cur.sql, cur.sql
+    assert cur.params[-1] == budget + 1, cur.params
+
+
+def test_the_prefetch_event_budget_declines_and_bounds_the_event_read(monkeypatch):
+    """The journal half of the same bound, and it is asked for BOUNDED.
+
+    `read_lifecycle_events` with no `target` returns the tenant's whole
+    status-bearing stream and `apply_event_stream_folds` then builds two dicts
+    over it — Python, uncancellable. The leg must ASK for `budget + 1` events (so
+    "exactly at" and "one past" are distinguishable) and decline on the overflow.
+    """
+    import tortoise.cache_projection as cp
+
+    budget = record_vector._FOLDED_PREFETCH_EVENT_BUDGET
+    assert isinstance(budget, int) and budget > 0
+    asked: dict = {}
+
+    class _OneRowCursor:
+        description = [("id",), ("has_embedding_vec",)]
+
+        def execute(self, sql, params=None):
+            pass
+
+        def fetchall(self):
+            return [("o_13422_row", True)]
+
+    def _events(conn, **kwargs):
+        asked.update(kwargs)
+        return tuple(range(budget + 1))
+
+    monkeypatch.setattr(cp, "node_from_row", lambda label, row: object())
+    monkeypatch.setattr(cp, "read_lifecycle_events", _events)
+    assert record_vector._folded_terminal_keys(
+        object(), _OneRowCursor(),
+        record_vector._Scope(org_id="org", graph_id="graph"),
+        "object", None) is None, (
+        "an over-budget journal prefetch must decline, never fold a TRUNCATED "
+        "event stream (an unapplied terminal fold serves the row)")
+    assert asked.get("limit") == budget + 1, asked

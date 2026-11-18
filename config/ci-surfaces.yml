@@ -3301,6 +3301,19 @@ surfaces:
   # provisions `pgvector/pgvector:pg16` and lists this file — and that job fails
   # on ANY skip (#9551), so the armed run cannot pass by absence.
   - test_11642_vector_move_live.py
+  # #13422: `object`/`subject` are record-served, and the `#689` cage is paid from
+  # the record's OWN fold. `core` because the subject IS `tortoise/record_vector.py`,
+  # which has no `SOURCE_PATTERNS` entry — a diff to it selects `core` and nothing
+  # else, so an unregistered file collects NOWHERE on the only change that can
+  # break it (the `#1349`/`#2938`/`#3154`/`#4367` silent-drop class recorded twice
+  # in this block). ⛔ This file is the DB-FREE half and it is the ONLY one that
+  # pins the structural properties: the served set, the cage being TOTAL over
+  # `_STATUS_FILTERED_LABELS`, the `id`-not-`node_key` exclusion coordinate, the
+  # one-home-each vocabulary/fold, the three over-budget declines, and — as of its
+  # review round — that the folded arm is WIRED at all (a `if False:` on the
+  # branch leaves every `ast` pin in it green). Its LIVE half is the `#13422`
+  # block in `test_11642_vector_move_live.py`, run by `test-record-postgres`.
+  - test_13422_object_subject_dense_leg.py
   # #11691: the record dense leg is bound by the READ's budget, not the door's.
   # `core` because every subject matches the `core` fallback and nothing else:
   # `tortoise/record_vector.py` and `tortoise/record_serve.py` have no

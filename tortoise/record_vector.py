@@ -134,11 +134,35 @@ HNSW_ITERATIVE_SCAN = "strict_order"
 #: (the label's rows, then its status-bearing journal events) before the kNN, so
 #: these two labels spend all :data:`RECORD_LEG_STATEMENTS_PER_READ` of a read's
 #: budget and have no share left for a separate shortfall `count(*)` — the
-#: prefetch IS the count (:func:`_folded_terminal_keys` returns both). A tenant
-#: whose journal makes that prefetch slow falls through to the graph branch by
-#: TIMEOUT, recorded as the named `scan_fallback`, which is the same posture every
-#: other over-budget record leg takes. Materialising the fold so the prefetch
-#: disappears is the follow-up, and it is what `#13335`'s successor should cost.
+#: prefetch IS the count (:func:`_folded_terminal_keys` returns both).
+#:
+#: ⛔ AND THE COST IS NOT FULLY BOUNDED BY ``statement_timeout`` — this used to
+#: say the whole prefetch was, which was only true of the two SQL statements.
+#: ``statement_timeout`` is a SERVER-side statement bound (`record_serve.
+#: open_record` applies ``min(RECORD_STATEMENT_TIMEOUT_MS, record_statement_ms)
+#: ``); the fold's PYTHON half — ``node_from_row`` per row, then
+#: ``apply_event_stream_folds`` over every event — runs in the CLIENT process,
+#: where nothing can cancel it and the caller has no outer wall clock
+#: (``search_engine`` reads ``remaining_read_ms`` only after this leg returns).
+#: So the prefetch is bounded HERE instead, by two row budgets
+#: (:data:`_FOLDED_PREFETCH_ROW_BUDGET`, :data:`_FOLDED_PREFETCH_EVENT_BUDGET`):
+#: past either, the leg returns ``None`` — "not served HERE" — and the caller
+#: takes the graph branch, which applies the identical cage in Cypher. That is
+#: the SAME fail-safe direction as :data:`_FOLDED_TERMINAL_KEY_BUDGET`, and it is
+#: what makes the TIMEOUT story above true for the whole prefetch rather than
+#: only for its SQL.
+#:
+#: ⚠️ TWO COSTS THE BUDGETS DO NOT REMOVE, stated so no reader has to measure
+#: them again. (1) ``SELECT *`` carries ``embedding`` — the jsonb payload, ~384
+#: floats per row — for every row of the label, and ``node_from_row`` then
+#: DISCARDS it (`refused_props_names()` lists it), so the widest column in the
+#: table is paid per read and thrown away; the row budget bounds that, it does
+#: not make it cheap. (2) ``read_lifecycle_events`` has no ``target`` here, so it
+#: reads the TENANT's whole status-bearing journal subset, not this label's —
+#: reading ``object`` parses the ``subject`` birth records too. Both disappear
+#: when the fold is materialised, which is therefore the ARMING PRECONDITION
+#: for these two labels rather than an optimisation: `#13335`'s successor should
+#: cost exactly that.
 #:
 #: The ``id column`` mirrors `search_engine`'s ``id_field`` derivation exactly
 #: (#448): ``source``/``document`` answer the canonical key ``url``, ``event``
@@ -478,6 +502,31 @@ def _sql_literal(value: str) -> str:
 #: what removes the bound.
 _FOLDED_TERMINAL_KEY_BUDGET = 4000
 
+#: How many of the label's ROWS one dense read will prefetch for the fold.
+#:
+#: ⛔ THE PYTHON HALF OF THE PREFETCH HAS NO OTHER BOUND. `_folded_terminal_keys`
+#: reads every row of the label for the tenant and runs `node_from_row` over each
+#: in the CLIENT process — `statement_timeout` cannot cancel that (it bounds the
+#: two SQL statements, not the fold). Past this many rows the leg returns `None`,
+#: i.e. "not served HERE": the caller's graph branch applies the identical cage in
+#: Cypher, which is CORRECT rather than degraded, and — unlike truncating the
+#: read — it cannot serve a terminal row (a truncated row set would silently drop
+#: terminal keys, which is the `#689` fail-OPEN direction).
+#:
+#: It is a BOUND, not a target: 20,000 rows of `object`/`subject` is already a
+#: ~150 MB prefetch, because `SELECT *` carries the jsonb `embedding` payload that
+#: the projection discards. Materialising the fold is what removes this too.
+_FOLDED_PREFETCH_ROW_BUDGET = 20_000
+
+#: How many JOURNAL EVENTS one dense read will replay for the fold.
+#:
+#: The prefetch's second read is the tenant's status-bearing journal subset
+#: (`read_lifecycle_events` with no `target`), and `apply_event_stream_folds`
+#: builds two dicts over it before folding — again in Python, again uncancellable.
+#: Past this many events the leg returns `None` for the same reason, and with the
+#: same fail-safe direction, as the row budget above.
+_FOLDED_PREFETCH_EVENT_BUDGET = 50_000
+
 
 def _rows_as_dicts(cur: Any, sql: str, params: tuple) -> list[dict[str, Any]]:
     """`SELECT` rows as dicts, by column name — a local three-line helper.
@@ -494,7 +543,7 @@ def _rows_as_dicts(cur: Any, sql: str, params: tuple) -> list[dict[str, Any]]:
 
 def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
                           excluded_statuses: tuple | None,
-                          ) -> tuple[list[str], int]:
+                          ) -> tuple[list[str], int] | None:
     """The keys this label's RECORD fold calls TERMINAL, and how much it has.
 
     ⛔ THE CAGE FOR A LABEL WHOSE STATUS IS NOT A COLUMN (`#13422`). `object` and
@@ -544,6 +593,15 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
     assertion needs, and it is EXACT rather than a second `count(*)` over the same
     predicate — which is why these two labels spend their three statement shares
     on (rows, events, kNN) and need no fourth.
+
+    ⛔ AND IT RETURNS ``None`` WHEN EITHER PREFETCH IS OVER ITS BUDGET
+    (:data:`_FOLDED_PREFETCH_ROW_BUDGET`, :data:`_FOLDED_PREFETCH_EVENT_BUDGET`).
+    ``None`` is this leg's "not served HERE": the caller answers from the graph
+    branch, which applies the identical cage in Cypher. ⚠️ The only alternative —
+    TRUNCATING the prefetch — is the `#689` fail-OPEN direction: a row or event
+    left out of the fold is a terminal key this leg would then SERVE. So the
+    read declines instead, and the ``LIMIT`` below is ``budget + 1`` precisely so
+    "exactly at the budget" and "one past it" are distinguishable.
     """
     from .cache_projection import (
         apply_event_stream_folds,
@@ -563,9 +621,14 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
         f"SELECT *, (t.embedding_vec IS NOT NULL) AS has_embedding_vec "
         f"FROM public.{table} AS t "
         f"WHERE t.org_id = %s AND t.graph_id = %s "
-        f"  AND t.{id_column} IS NOT NULL AND t.{id_column} <> ''",
-        (scope.org_id, scope.graph_id),
+        f"  AND t.{id_column} IS NOT NULL AND t.{id_column} <> '' "
+        f"LIMIT %s",
+        (scope.org_id, scope.graph_id, _FOLDED_PREFETCH_ROW_BUDGET + 1),
     )
+    if len(rows) > _FOLDED_PREFETCH_ROW_BUDGET:
+        # See _FOLDED_PREFETCH_ROW_BUDGET: a bounded decline, never a truncated
+        # fold (a dropped row is a terminal key this leg would serve).
+        return None
     # ⛔ THE PROBE COLUMN IS POPPED BEFORE THE PROJECTION. `node_from_row` refuses
     # an unclassified column by design
     # (`object.has_embedding_vec is not classified by the placement table, not
@@ -577,7 +640,12 @@ def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
                   for row in rows}
     nodes = [node_from_row(label, row) for row in rows]
     events = read_lifecycle_events(conn, org_id=scope.org_id,
-                                   graph_id=scope.graph_id)
+                                   graph_id=scope.graph_id,
+                                   limit=_FOLDED_PREFETCH_EVENT_BUDGET + 1)
+    if len(events) > _FOLDED_PREFETCH_EVENT_BUDGET:
+        # Same bound, same direction: the replay is Python and uncancellable, and
+        # a truncated stream would leave terminal folds unapplied.
+        return None
     folded = apply_event_stream_folds(nodes, events)
     vocabulary, _include_outdated = _status_vocab_for(label)
     # ⛔ `excluded_statuses == ()` IS NOT "use the default". It is the caller's
@@ -891,8 +959,20 @@ def vector_search(
                 where.append(kind_filter)
             status_source = _STATUS_COLUMN.get(entity_type)
             if status_source is not None and status_source[0] == _FOLDED_STATUS:
-                terminal_keys, available = _folded_terminal_keys(
+                fold = _folded_terminal_keys(
                     conn, cur, scope, entity_type, excluded_statuses)
+                if fold is None:
+                    # The prefetch itself is over budget (rows or journal events)
+                    # — see _FOLDED_PREFETCH_ROW_BUDGET. Declining the record's
+                    # turn is the fail-SAFE direction: the caller's graph branch
+                    # applies the identical cage in Cypher, and a truncated fold
+                    # would instead SERVE the rows `#689` hides.
+                    logging.getLogger(LOG_NAME).warning(
+                        "the record's `%s` fold prefetch is over its row/event "
+                        "budget, so this read stays on the graph branch (a "
+                        "bound, not a degradation)", entity_type)
+                    return None
+                terminal_keys, available = fold
                 if len(terminal_keys) > _FOLDED_TERMINAL_KEY_BUDGET:
                     # See _FOLDED_TERMINAL_KEY_BUDGET: declining the record's turn
                     # is the fail-SAFE direction — the caller's graph branch

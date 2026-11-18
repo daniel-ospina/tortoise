@@ -3127,7 +3127,8 @@ def _as_names(value: Any) -> tuple[str, ...]:
 
 def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
                       target: str | None = None,
-                      target_id: str | None = None) -> tuple[LifecycleEvent, ...]:
+                      target_id: str | None = None,
+                      limit: int | None = None) -> tuple[LifecycleEvent, ...]:
     """The record's lifecycle rows as fold inputs, ordered by `seq`.
 
     `target` narrows by NAME (the connector/pack fold's coordinate), `target_id`
@@ -3136,13 +3137,28 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
     they are OR-ed by the SQL, and a caller that holds both must pass both or the
     single-row fold disagrees with the rebuild (#9974 — a `restatus` names its
     target by id only).
+
+    ``limit`` is a ROW bound for a caller that cannot afford the whole stream
+    (`record_vector._folded_terminal_keys`, whose prefetch runs an uncancellable
+    Python fold over every event it is handed). ``None`` — the DEFAULT, and every
+    pre-existing caller — reads the stream whole, byte-identically to before.
+    ⚠️ A caller that passes one MUST detect the overflow (fetch ``budget + 1`` and
+    compare): this function does not report truncation, because a truncated
+    stream folds to the WRONG answer — a terminal fold left unapplied — and a
+    silent short answer is exactly the failure a row bound must not introduce.
     """
+    # ⛔the `LIMIT` is APPENDED, never substituted, and the params tuple is
+    # EXTENDED rather than rebuilt: with `limit=None` the statement and its
+    # parameters are byte-identical to what every pre-existing caller already
+    # sends, so this bound cannot change an unbounded read's plan or pin.
+    tail = "" if limit is None else " LIMIT %s"
     if target is None and target_id is None:
-        rows = _rows(cur, _LIFECYCLE_EVENTS_SQL + " ORDER BY seq",
-                     (org_id, graph_id))
+        params: tuple[Any, ...] = (org_id, graph_id)
+        sql = _LIFECYCLE_EVENTS_SQL + " ORDER BY seq" + tail
     else:
-        rows = _rows(cur, _LIFECYCLE_EVENTS_FOR_ONE_SQL + " ORDER BY seq",
-                     (org_id, graph_id, target, target, target, target_id))
+        params = (org_id, graph_id, target, target, target, target_id)
+        sql = _LIFECYCLE_EVENTS_FOR_ONE_SQL + " ORDER BY seq" + tail
+    rows = _rows(cur, sql, params if limit is None else (*params, int(limit)))
     out: list[LifecycleEvent] = []
     for row in rows:
         try:
@@ -3229,7 +3245,8 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
 
 def read_lifecycle_events(conn: Any, *, org_id: str, graph_id: str,
                           target: str | None = None,
-                          target_id: str | None = None) -> tuple[LifecycleEvent, ...]:
+                          target_id: str | None = None,
+                          limit: int | None = None) -> tuple[LifecycleEvent, ...]:
     """The record's event stream as fold inputs, for one tenant scope.
 
     The CONNECTION-scoped entry point to :func:`_lifecycle_events`, for a door
@@ -3249,7 +3266,7 @@ def read_lifecycle_events(conn: Any, *, org_id: str, graph_id: str,
     """
     cur = _rp.scope_connection(conn, org_id)
     return _lifecycle_events(cur, org_id=org_id, graph_id=graph_id,
-                             target=target, target_id=target_id)
+                             target=target, target_id=target_id, limit=limit)
 
 
 def _lifecycle_index():
