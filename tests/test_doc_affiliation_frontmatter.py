@@ -998,9 +998,16 @@ def test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured(
     and the ``''`` sits MID-body, so the close-POSITION test (``len(raw[:i]
     .rstrip()) - 1 == close``) cannot decide it — only ``_closing_quote``'s skip
     of a doubled quote can say where the scalar really ends. Without that skip
-    the close is found INSIDE the body, the split lands on the wrong `` #`` and
-    the arm reports ``('malformed', None)`` — the same *delete a legal escape*
-    class of false remedy this whole change removes.
+    the close is found INSIDE the body (index 3, not 6), so NO `` #`` in this
+    value can satisfy the split predicate: ``_split_comment`` returns the raw
+    text unstripped, and because that text no longer ends in a quote the arm
+    reports ``('malformed', None)`` — the same *delete a legal escape* class of
+    false remedy this whole change removes. The mechanism is worth stating
+    exactly, because it is NOT the pre-fix helper's: there the split FIRED at a
+    wrong `` #``, here it does not fire at all, which is also why the
+    close-position test alone stays green under this mutant (found in review:
+    the earlier wording claimed the split landed on the wrong `` #``, and the
+    measurement above refutes it).
 
     Why it needs its own test: measured with the skip deleted, the sibling
     single-quote test stays GREEN (its escape sits immediately before the
