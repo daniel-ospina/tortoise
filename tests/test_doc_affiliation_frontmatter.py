@@ -622,8 +622,15 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     measured: set[tuple[str, str]] = set()
     compared = 0
     for path in paths:
-        # No frontmatter block at all is the OTHER arms' business; this arm is
-        # about blocks that exist and do not parse / do not survive.
+        # No block at all is OUTSIDE this arm's declared scope — and, unlike the
+        # architecture/ops/evidence populations above, NOTHING else asserts
+        # PRESENCE for docs/research/**: 35 of its 103 files carry no block and
+        # stay green across this whole module (measured at this commit). An
+        # earlier version of this comment said presence was "the OTHER arms'
+        # business"; there is no such arm, so that was a false coverage claim and
+        # is corrected rather than carried.
+        #
+        # This arm is about blocks that EXIST and do not parse / do not survive.
         fm = _frontmatter(path)
         if not fm:
             continue

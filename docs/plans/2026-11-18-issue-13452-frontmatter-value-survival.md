@@ -8,7 +8,7 @@ subjects.team: epistemic-team
 ---
 
 <!-- research-path: https://github.com/daniel-ospina/tortoise/issues/13452#issuecomment-6967218550 -->
-<!-- plan-review: cycles=3, status=clean, version=2.3.0 -->
+<!-- plan-review: cycles=3, status=capped, version=2.3.0 -->
 
 # Frontmatter value survival — #13452
 
@@ -32,8 +32,11 @@ the space-preceded `#`**, because YAML admits `#` inside a plain scalar only wit
 lookbehind (`ns-plain-char(c)`, YAML 1.2.2 §7.3.3). The parse succeeds, the key survives, and the
 value is short.
 
-On `main` **before `#13476` landed** (`c0463806db`), measured through that same consumer across
-`docs/research/**/*.md`:
+On `main` **before `#13476` landed** — `035ed183fc`, which is `a5f1e7db46^` — measured through that
+same consumer across `docs/research/**/*.md`:  (⛔ NOT `c0463806db`, the head an earlier revision of
+this paragraph cited: `git merge-base --is-ancestor a5f1e7db46 c0463806db` exits 0, so that tree
+already CARRIES the fix and measures **0** truncated values, not 8 — the same defect this section
+exists to record, caught by review round 3.)
 
 ```text
 103 files · 68 frontmatter blocks · 8 truncated values · all 8 are `aboutObjects`
@@ -48,7 +51,7 @@ the same glob at this head reports **0** truncated values (`broken` count re-mea
 Stating `8` as a present-tense `main` measurement would be the exact defect this section
 exists to prevent — a number that no longer reproduces against the tree it names.
 
-`tests/test_doc_affiliation_frontmatter.py:606` cannot see any of them:
+`tests/test_doc_affiliation_frontmatter.py:642` cannot see any of them:
 `missing = [key for key in REQUIRED_KEYS if key not in parsed]` asks whether four keys are
 **present**, and `REQUIRED_KEYS` does not even contain the two fields that carry the affiliation
 to other entities.
@@ -269,8 +272,13 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    space still returns all **10** keys from `parse_frontmatter`, `aboutObjects` already truncated to
    `'… §17.1/§17.2,'`). It therefore reaches (D) — it is NOT caught by the parse arm — and it is
    closed by the same parsed-derived `declared` line as the other two. Only a block indented
-   **including its `---` fences** degrades to `{}`: `yaml.safe_load` rejects it with `mapping values
-   are not allowed here`, so THAT variant reds one arm earlier. An earlier revision of this
+   **including its `---` fences** degrades to `{}` — and NOT because of a YAML error, since the
+   consumer never reaches yaml: `_FM_RE.match("  ---\n  type: research…")` is `False`, so
+   `parse_frontmatter` sees no block at all and returns `{}` before that import is called (measured;
+   `yaml.safe_load` on the INNER, unindented block alone returns all 10 keys). The earlier
+   "`mapping values are not allowed here`" attribution named a call the consumer does not make — the
+   same "measured a different construction" error this item exists to record. That variant reds one
+   arm earlier. An earlier revision of this
    paragraph claimed the parse arm caught both; it was wrong, and the error was mine — the mutation
    I measured had indented the closing fence too, so it was mixed indentation (a parse error) and not
    the uniform-indent case at all. Round 4 caught it and the record is corrected here.
@@ -314,10 +322,13 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
 
 4. `parse_frontmatter` on the dossier returns `aboutObjects` at its full raw length.
 5. `tests/test_file_indexer.py` untouched. The pins that actually OPEN these files were run on both
-   trees: the 4 git-free ones give **identical** results (`3 failed, 182 passed` either side). The 5th
+   trees: the 4 git-free ones re-measure **identical** results at this head — `4 failed, 186 passed`
+   (190 collected). The 5th
    (`test_entry_point_python_guard`) shells out to `git ls-files`, so it cannot run against main content
    in a scratch tree and is **not** claimed identical here; on this branch its contribution is 4 named
-   pre-existing cases. Whole sibling batch: `7 failed, 784 passed, 2 skipped` (4 + 2 + 1 pre-existing).
+   pre-existing cases. The figures this item used to carry (`3 failed, 182 passed` either side; a
+   "whole sibling batch" of `7 failed, 784 passed, 2 skipped`) are SUPERSEDED: the second was a
+   single-TREE count, never an "either side" comparison, and quoting it as one contradicted this item.
 
 ## 8. Review Scope Contract
 
@@ -489,22 +500,22 @@ support, which is out of this issue's scope.
 
 **Recorded, not fixed — the guard's sanity counters can red on an empty population.** Two sites in
 `tests/test_doc_affiliation_frontmatter.py` report the same wrong diagnosis as round 5's escape
-finding, and neither is an escape: `:885-886` assert `measured` and `compared` BEFORE
-`assert not failures` (`:887`), so a tree the guard samples sparsely reds on *"measured no
+finding, and neither is an escape: `:892-893` assert `measured` and `compared` BEFORE
+`assert not failures` (`:894`), so a tree the guard samples sparsely reds on *"measured no
 
 affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
-the value; and `:790` skips `escaped` before `compared += 1` (`:800`), so a tree whose affiliated
+the value; and `:797` skips `escaped` before `compared += 1` (`:807`), so a tree whose affiliated
 values are all escaped leaves the counter legitimately empty and fires the same message. (Line
-numbers are re-measured at this head: `assert measured` sits at `:885`, against `:715` on
-`a5f1e7db46` → `:792` once `#13485` landed → `:885` here — so of the total, **+77** is
-`#13485`'s and the remaining **+93** is this
+numbers are re-measured at this head: `assert measured` sits at `:892`, against `:715` on
+`a5f1e7db46` → `:792` once `#13485` landed → `:892` here — so of the total, **+77** is
+`#13485`'s and the remaining **+100** is this
 branch's own (+71 for `_closing_quote`, its docstring and the fifth pin, and +22 for
 `_unkeepable_quoted`'s verdict split, a later round's addition). They move with every appended test,
 so they are re-measured rather than carried: an earlier revision of this section cited the
 pre-rebase `:751-752`,
 `:753`, `:658`, `:666`, and the revision before this one cited `:828-829`/`:830`/`:733`/`:743` — all
 of which had drifted, by the same mechanism. The sequence branch carries
-the same pair at `:761` / `:765`.) Both are
+the same pair at `:768` / `:772`.) Both are
 false blocks of an author's tree, not fail-opens — nothing escapes measurement, they fail closed
 and name a remedy — and both live in the guard, not in the escape branch this PR fixes. Recorded
 here because a reader meets the message before the reason; fixing the ordering is a separate change
@@ -662,7 +673,7 @@ Measured at the post-rebase head:
   test's own docstring describes — measured both ways at this head, so the two
   verdicts are not interchangeable. The failing assertion is
   `assert style == "single-quoted"` in
-  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1038` at this
+  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1045` at this
   head; it was `:974` when the mutant was run, and it moves whenever a test is
   appended to this file, so cite it by name, not by line);
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
