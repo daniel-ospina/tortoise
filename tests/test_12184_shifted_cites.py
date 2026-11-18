@@ -709,3 +709,39 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
 #: `:21734`/`:21857`) are pinned to their content by `_PINS`, which is the stronger arm — a pin
 #: resolves the line, a count only counts a spelling. #13508 still owns the head-selecting arm for a
 #: figure that has no working-tree line.
+
+
+def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
+    """The D5 row's `#13102` addendum states a PAIR in the present tense, and nothing read it.
+
+    Round-3 review, P1: the addendum said *"moved the `subject_binding_available` consume
+    pair to `:12111`/`:12164` here"* while the SAME markdown LINE — three clauses earlier —
+    said `:12116`/`:12169`, which is what the pin file asserts and what the tree holds:
+
+        grep -nF 'subject_binding_available,' tortoise/sdk.py     -> 12116
+        grep -nF 'and not subject_binding_available(graph):' …    -> 12169
+        sed -n '12111p' tortoise/sdk.py -> return results
+
+    `:12111`/`:12164` is `#13456`'s pre-`#13466` value, so the cell quoted two heads as
+    one. ⛔ **Why no existing row saw it**: the capstone pin's `_pin_row_failures` scopes a
+    row to ONE markdown LINE, and D5 is one line carrying ~50 numbers — so any `:12111`
+    anywhere on it satisfied every `sdk`-keyed row, and the addendum's own contradictory
+    spelling was read by nothing. This arm is scoped to the addendum's SENTENCE, which is
+    the narrowest thing that can disagree with it.
+    """
+    text = (REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md").read_text(
+        encoding="utf-8")
+    addendum = re.search(
+        r"moved the `subject_binding_available` consume pair to `:(\d+)`/`:(\d+)` here", text)
+    assert addendum, (
+        "the D5 row's `#13102` addendum no longer states the `subject_binding_available` "
+        "consume pair as `:<n>`/`:<n>` — this arm reads that sentence, so if it was "
+        "reworded, re-scope this regex rather than deleting the arm")
+    sdk = (REPO / _SDK).read_text(encoding="utf-8").splitlines()
+    for n, needle in zip(addendum.groups(),
+                         ("subject_binding_available,",
+                          "and not subject_binding_available(graph):")):
+        assert sdk[int(n) - 1].strip() == needle, (
+            f"the addendum's consume pair cites sdk.py:{n}, which reads "
+            f"{sdk[int(n) - 1].strip()!r}, not {needle!r} — re-derive the pair by content "
+            f"(`grep -nF '{needle}' tortoise/sdk.py`), never by a delta")
