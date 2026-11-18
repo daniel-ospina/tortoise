@@ -170,26 +170,39 @@ def test_a_real_public_attribute_on_the_class_is_caught(monkeypatch):
 
 
 def test_a_declared_method_that_does_not_exist_fails_and_is_named():
+    """State-independent: the absent name is SYNTHESIZED, not read off today's gap.
+
+    ⛔ This used to take `absent[0]` from the tree's real gap, which made it a second
+    pin on the same fact and silenced it the day the gap closed — #11609 P3 implemented
+    all 11 remaining approved methods, so `absent` is now empty and this test would have
+    raised StopIteration rather than testing anything. The property under test is the
+    GATE's, not the tree's: remove a declared name that DOES resolve, and the gate must
+    name it.
+    """
     declaration = _declaration()
     live = _live()
-    absent = sorted(n for n in declaration["__all__"] if not surface.resolves(n, live))
-    assert absent, "the gap is open: the declaration has approved-but-unimplemented methods"
-    gone = absent[0]
+    gone = next(
+        n for n in declaration["__all__"]
+        if n != surface.CONSTRUCTOR and surface.resolves(n, live)
+    )
 
-    problems = _problems(live=live)
+    problems = _problems(live=live - {gone})
 
     assert any(gone in p and "does NOT exist on TortoiseSDK" in p for p in problems), problems
 
 
 def test_the_absence_failure_is_NOT_vacuous():
-    """The same name stops being reported once the class has it — declaration unchanged."""
+    """The same synthesized name stops being reported once the class has it again."""
     declaration = _declaration()["__all__"]
-    absent = sorted(n for n in declaration if not surface.resolves(n, _live()))
-    gone = absent[0]
+    live = _live()
+    gone = next(
+        n for n in declaration
+        if n != surface.CONSTRUCTOR and surface.resolves(n, live)
+    )
+    pruned = live - {gone}
 
-    assert any(gone in p for p in _problems())
-    problems = _problems(live=_live() | {gone})
-    assert not any(gone in p for p in problems), problems
+    assert any(gone in p for p in _problems(live=pruned))
+    assert not any(gone in p for p in _problems(live=live))
 
 
 # ── 5. today's state is RED, with the real numbers ──────────────────────────────
@@ -237,10 +250,20 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
     # MEASURED on this tree, not carried over: the wave branched before #12951's
     # READ/QUERY containers landed, so its own "118 -> 102 / 96 -> 80 / absent 17" is
     # that branch's arithmetic. See `tools/sdk_surface_declaration.py show`.
-    assert len(live) == 94, "the live surface moved — update this premise (it pins today's gap)"
+    #
+    # 94 -> 105 and `absent` 11 -> 0 by #11609 P3 (#12901's SDK leg): the eleven approved
+    # names that had no `def` were IMPLEMENTED, each as a delegation to the implementation
+    # already in the tree. Implementations are not surplus, so the off-surface 66 does not
+    # move: `105 − 39 approved-and-live = 66`. This is the FIRST time the approved side has
+    # been complete, which is why the `absent` literal is now 0 rather than "small".
+    assert len(live) == 105, "the live surface moved — update this premise (it pins today's gap)"
 
     assert len(off_surface) == 66, "the gap moved — update this premise (it pins today's gap)"
-    assert len(absent) == 11, "the gap moved — update this premise (it pins today's gap)"
+    # ⛔ 0 is the DELIVERABLE of #11609 P3, not an accident: every declared method now
+    # exists on the class. The gate stays RED on the other half (66 off-surface) until
+    # #4282 Phase 2 finishes removing them — so this literal going up again means an
+    # approved name was dropped, and this test is where that is caught.
+    assert len(absent) == 0, "an approved name lost its implementation — that is a regression"
     assert problems, "the gate must be RED while the gap is open"
     # EVERY offender is named, and nothing else is: the count is the gap, exactly.
     assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)
