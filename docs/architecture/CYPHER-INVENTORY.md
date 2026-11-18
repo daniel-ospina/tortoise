@@ -118,7 +118,7 @@ tool's number. A bare `rg … tortoise/` gives 1,633 / 109, the 6 extra occurren
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,627 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 297 files>` → **2,330** across **143** files, while the tool
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 298 files>` → **2,330** across **143** files, while the tool
 reports 2,343 / 144. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
