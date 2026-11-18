@@ -1203,12 +1203,16 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
     ``_quoted_style`` records it).
 
     ⛔ This is the one branch of this helper whose loss is a FAIL-OPEN, not a false
-    remedy. Measured, with ``if _has_unescaped_dq(body):`` mutated to ``if False:``:
-    THIS test reds and so does one other pin
-    (``test_a_malformed_value_names_a_true_remedy``, which asserts ``"broken" in msg``
-    for a shape whose verdict this order decides — re-measured at this head as
-    ``4 failed, 13 passed``: the pre-existing absence rows, identical on
-    ``origin/main``, plus those two) while these two values, both TRUNCATED by the
+    remedy. Measured, with ``if _has_unescaped_dq(body):`` mutated to ``if False:``,
+    THREE pins red: THIS one, ``test_a_malformed_value_names_a_true_remedy`` (its
+    case (c) asserts ``"broken" in msg`` for a shape whose verdict this order
+    decides) and ``test_no_GREEN_quoted_verdict_survives_a_parser_refusal`` (its
+    ``mismatched`` assertion fires on the same mutant) — ``5 failed, 13 passed`` of
+    18 collected at ``fcf5d9cd72``, the other 2 being the pre-existing absence rows
+    that red identically on ``origin/main``. Named as well as totalled because an
+    earlier revision of this paragraph claimed "one other pin" and a
+    ``4 failed, 13 passed`` total, which is arithmetically impossible for an
+    18-item file and omitted the third pin. These two values, both TRUNCATED by the
     consumer, stop being reported:
 
         `"a, "#1" KEEP"`            yaml -> `'a, '`        head `('broken', None)` -> `('double-quoted', …)`
@@ -1225,16 +1229,18 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
     dossier carrying that value passes the arm under the mutant and reds it at this
     head, which is exactly the #13452 defect this guard exists to prevent. At the
     head this was written the two assertions below were the ONLY thing that noticed;
-    they no longer are — `test_a_malformed_value_names_a_true_remedy` also reds under
-    that mutant now (re-measured: `4 failed, 13 passed`, its case (c) asserting
-    `"broken" in msg`), so this test is the first custodian of the ordering, not the
-    sole one.
+    they no longer are — `test_a_malformed_value_names_a_true_remedy` and
+    `test_no_GREEN_quoted_verdict_survives_a_parser_refusal` also red under that
+    mutant now (re-measured at `fcf5d9cd72`: `5 failed, 13 passed`,
+    `test_a_malformed_value_names_a_true_remedy`'s case (c) asserting
+    `"broken" in msg`), so this test is the first custodian of the
+    ordering, not the sole one.
 
     Before this pin existed the same mutant left the WHOLE FILE green apart from the two
     pre-existing absence rows — measured at ``3b8de63b8a``, when the file held one test
     fewer — which is exactly why this test exists. That measurement is quoted WITH its
-    head, and no file-wide pass count is stated for this head: it moves whenever another
-    test is appended, and a count printed here has gone stale twice already.
+    head, and so is every count in this docstring: a count without one has gone stale
+    twice already, because it moves whenever another test is appended.
     """
     # An unescaped inner quote, with no escape anywhere in the body.
     assert _quoted_style('"a, "#1" KEEP"') == ("broken", None), (
@@ -1272,12 +1278,15 @@ def test_a_never_closing_quoted_scalar_is_malformed_not_escaped() -> None:
     alone, *and* ``_split_comment``'s ``raw[:i].rstrip().endswith(q)`` predicate
     in place of the ``_closing_quote`` gate — the FIRST entry below fails:
     ``_quoted_style`` returned ``('escaped', None)`` for it, while the other two
-    returned ``('broken', None)`` and ``('malformed', None)``. Exactly ONE other
-    pin reds on that replay, and it is named because this file must not claim
-    otherwise: ``test_a_single_quoted_escape_before_a_hash_is_measured_not_broken``
-    (``('broken', None)``; its own docstring owns that measurement, and the pair
-    reproduces as ``4 failed, 12 passed`` measured at ``1c956076``, with the 2
-    pre-existing absence reds).
+    returned ``('broken', None)`` and ``('malformed', None)``. TWO other pins red
+    on that replay, and both are named because this file must not claim otherwise:
+    ``test_a_single_quoted_escape_before_a_hash_is_measured_not_broken``
+    (``('broken', None)``; its own docstring owns that measurement) and
+    ``test_no_GREEN_quoted_verdict_survives_a_parser_refusal`` — ``5 failed, 13
+    passed`` of 18 at ``fcf5d9cd72``, the other 2 being the pre-existing absence
+    reds. An earlier revision said "exactly ONE other pin" and quoted the
+    ``4 failed, 12 passed`` measured at ``1c956076``: true there, stale here,
+    because the class pin below landed AFTER that head.
     The truncation pins stay GREEN under it: those shapes DO close at an inner
     quote, so ``_closing_quote`` finds the close and the wholeness test never
     changes their verdict.
