@@ -74,26 +74,87 @@ def test_the_register_is_tied_to_the_real_symbols():
 
 
 def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
-    """#13205/#13490: ONE declaration of the tenant family, and it is `sdk.py`'s.
+    """#13205/#13584: ONE declaration of the tenant family, and it is `sdk.py`'s.
 
-    `_PRODUCT_GRAPH_PREFIXES` and the tenant half of `_SWEEP_OWNED_PREFIXES`
-    must be the COMPOSER's own tuple **by object identity**. The register test
-    above cannot see this: it builds its expectation from the same module
-    attribute (`entry["set"] is getattr(embedded, name)`), so re-inlining the
-    literal `("org_", "team_")` at either site leaves it green — and a copy
-    that kept a spelling the composer had dropped would then widen a
-    `DETACH DELETE` gate over a family nothing mints. Hence `is`, not `==`:
-    an equal-but-redeclared tuple is exactly the drift, and it is the failure
-    that makes this test a lie.
+    TWO pins, because the two sites tie to the composer in DIFFERENT ways — and
+    saying which is which is the point:
+
+    * `_PRODUCT_GRAPH_PREFIXES` is the composer's tuple **by object identity**
+      (`is`). The register test above cannot see this one: it builds its
+      expectation from the same module attribute
+      (`entry["set"] is getattr(embedded, name)`), so re-inlining the literal
+      `("org_", "team_")` here leaves it green.
+    * the tenant half of `_SWEEP_OWNED_PREFIXES` **cannot** share identity — it
+      is composed into a longer tuple, so a slice is a fresh object. It is
+      pinned at the SOURCE instead: the declaration must still be a tuple
+      literal that UNPACKS `_TENANT_GRAPH_PREFIXES`. A value-identical re-inline
+      (`("test_", "tortoise_test", "org_", "team_")`) is a second declaration,
+      which IS the drift, and no comparison of the VALUE can tell it from the
+      composed form.
+
+    What that drift costs is stated where the alias is made (`tests/_embedded.py`):
+    this set gates an irreversible `DETACH DELETE` + `GRAPH.DELETE`.
     """
     from tortoise import sdk
 
     assert embedded._PRODUCT_GRAPH_PREFIXES is sdk._TENANT_GRAPH_PREFIXES
-    assert _SWEEP_OWNED_PREFIXES[len(("test_", "tortoise_test")):] \
-        == sdk._TENANT_GRAPH_PREFIXES
-    # The two non-tenant stems must stay AHEAD of the composed family, or the
-    # slice above would be measuring the wrong end of the tuple.
-    assert _SWEEP_OWNED_PREFIXES[:2] == ("test_", "tortoise_test")
+
+    tree = ast.parse((REPO / "tests" / "_embedded.py").read_text(encoding="utf-8"))
+    # EVERY declaration ANYWHERE in the module, not the first one — and not just
+    # the module-body statements. Two escapes this closes, both of which bind at
+    # runtime and both of which are the drift this test exists to catch:
+    #   * `next(...)` read the FIRST declaration, ignoring a value-identical
+    #     re-inline placed AFTER it (the one that wins);
+    #   * scanning `tree.body` missed a re-assignment inside a module-level
+    #     `if`/`try` (`if True:\n    _SWEEP_OWNED_PREFIXES = ("test_", …)`),
+    #     which is just as live.
+    # So: `ast.walk`. Both spellings are accepted (`Assign` and `AnnAssign`)
+    # because `sdk._TENANT_GRAPH_PREFIXES` is itself annotated, so annotating this
+    # one is the plausible next edit, not an offence.
+    decls = [n for n in ast.walk(tree)
+             if n.__class__.__name__ in ("Assign", "AnnAssign")
+             and any(isinstance(t, ast.Name) and t.id == "_SWEEP_OWNED_PREFIXES"
+                     for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+    # An explicit assert, not a bare `next(...)`: a rename must fail with a
+    # sentence saying what the pin was looking for, never a message-less
+    # `StopIteration`.
+    assert decls, (
+        "no assignment to `_SWEEP_OWNED_PREFIXES` found in tests/_embedded.py — "
+        "the alias pin cannot run; point it at wherever the vocabulary moved")
+    assert len(decls) == 1, (
+        "_SWEEP_OWNED_PREFIXES is declared "
+        f"{len(decls)} times in tests/_embedded.py — a second declaration is the "
+        "drift, and the LAST one binds, so a re-inline after the composed form "
+        "would win silently")
+    decl = decls[0]
+    assert isinstance(decl.value, ast.Tuple), (
+        "the sweep's journal vocabulary is no longer a tuple literal")
+    starred = [e.value for e in decl.value.elts if isinstance(e, ast.Starred)]
+    unpacked = [v.id for v in starred if isinstance(v, ast.Name)]
+    assert unpacked == ["_TENANT_GRAPH_PREFIXES"], (
+        "the tenant half of _SWEEP_OWNED_PREFIXES must UNPACK "
+        "`_TENANT_GRAPH_PREFIXES`, not restate its spelling — a restated tuple "
+        "is the drift the alias exists to prevent, and it would let the sweep "
+        "keep a prefix the composer dropped. Report EVERY starred element, not "
+        "only the bare-name ones: a qualified `*sdk._TENANT_GRAPH_PREFIXES` is "
+        "still one declaration, so a message that printed `[]` would describe "
+        "the source wrongly. Found starred element(s): "
+        f"{[ast.unparse(v) for v in starred]}")
+
+    # And the composed value must still be what the sweep documents it accepts.
+    # ⛔ EXACT tuple equality on the tail, not a set comparison (#13592 review 3):
+    # a set hides an extra non-tenant literal spliced in before the star —
+    # `("test_", "tortoise_test", "org_", *_TENANT_GRAPH_PREFIXES)` reds the
+    # exact form and passed the set form. The source pin above and this assert
+    # test DIFFERENT things (declaration form vs value shape); keep both.
+    assert _SWEEP_OWNED_PREFIXES[:2] == ("test_", "tortoise_test"), (
+        "the two non-tenant stems must stay AHEAD of the composed family, or "
+        "the tail assertion below measures the wrong end of the tuple")
+    assert _SWEEP_OWNED_PREFIXES[2:] == sdk._TENANT_GRAPH_PREFIXES, (
+        "the tenant half must be the composer's tuple VERBATIM — a restated, "
+        "duplicated, dropped or spliced-in prefix all land here, and each one "
+        "widens (or narrows) a sweep that performs an irreversible DETACH "
+        "DELETE + GRAPH.DELETE")
 
 
 def test_the_wipe_literal_is_a_subset_of_the_journal_set():
