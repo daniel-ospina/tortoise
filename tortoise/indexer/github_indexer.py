@@ -40,18 +40,23 @@ Lifecycle decision table (THE rule):
      ``commit_ops.OBJECT_TERMINAL_STATUSES``) — the fold refuses such a row in BOTH
      directions, so no fold ever reaches it;
   3. a row whose ``isClosed`` marker is a FALSY NON-BOOLEAN (``0`` / ``0.0`` /
-     ``""``) **on a position that records no end and whose legacy ``status`` word
-     does not say ``closed``** — the doors store it verbatim and the fold's
-     live-holder probe is type-sensitive (``0 = false`` is FALSE), so the row is
-     not LIVE and no CLOSING fold is ever dispatched for it. What is withheld is
-     the ``"open"`` answer only: that is the one that mints a ``-closed`` per poll
-     of a closed issue, because the close fold refuses a row with no live holder
+     ``""``) **and for which the polarity arms below would otherwise answer
+     ``"open"``** — the answer the arm actually withholds
+     (``return None if fall_through == "open" else fall_through``). The doors store
+     the marker verbatim and the fold's live-holder probe is type-sensitive
+     (``0 = false`` is FALSE), so the row is not LIVE and no CLOSING fold is ever
+     dispatched for it: the ``"open"`` answer would mint a ``-closed`` per poll of
+     a closed issue, because the close fold refuses a row with no live holder
      (#13326). ⛔ Not being trigger-reachable is not being unreachable — a
      ``github.issue.reopened`` fold reached by NAME does rewrite the marker to a
-     real boolean (``projection/entities.py:6157-6164`` → ``pipeline.py:434``);
+     real boolean (``projection/entities.py:6158-6164`` → ``pipeline.py:434``);
      what makes the truthy half self-heal is that this reader ANSWERS ``"closed"``
-     for it, so the fold is triggered at all. So an ENDED position, and a legacy
-     ``status`` word that says ``closed``, both KEEP their ``"closed"`` answer.
+     for it, so the fold is triggered at all. That is why the arm withholds the
+     ``"open"`` fall-through ONLY: an ENDED position and a ``_row_is_frozen`` row are
+     answered ABOVE it and keep their own reading, and for every other answer the
+     arm returns the fall-through UNCHANGED. The legacy ``status='completed'`` row
+     is that case — its ``"closed"`` comes from ``_STATUS_TO_STATE`` through this
+     very arm, and it is the reading the reopen fold reaches and repairs.
   ⚠️ Stated trade, symmetric: the rows these answers are actually taken for record
   no transition at all, so neither ``-closed`` nor ``-reopened``. Bounded and
   inspectable; an unbounded mint loop is neither (#13143, #13288 F1). This is NOT
@@ -1574,8 +1579,8 @@ class GitHubIndexer:
         # ANSWERS `"closed"` for it, so the fold is triggered at all.
         # The asymmetry that DOES justify `None` is the folds that REFUSE — and the
         # point holds at THIS arm, where the answer it replaces is `"open"`, not
-        # `"closed"` (`return "open"` below runs for every row carrying a
-        # stage/slot prop). Reading it `"open"` mints a `-closed` on every poll of
+        # `"closed"` (the `fall_through = "open"` below is what every row carrying
+        # a stage/slot prop gets). Reading it `"open"` mints a `-closed` on every poll of
         # a CLOSED issue, because the close fold refuses a row with no live holder
         # (measured `[1,1,1,1]`, the row left byte-identical). Reading it
         # `"closed"` would instead mint `-reopened` per poll wherever the REOPEN
@@ -1607,8 +1612,17 @@ class GitHubIndexer:
         # `test_a_FALSY_isClosed_on_an_ENDED_position_still_records_its_reopen`).
         # The shape the bug was measured on is an ACTIVE slot, where the position
         # arm is `False`, so narrowing costs that fix nothing.
-        # Cost, stated: one lost transition on a row no in-contract writer produces,
-        # against an unbounded journal mint, which is not a defensible alternative.
+        # Cost, stated: the shape the bug was measured on (a falsy marker on a LIVE
+        # position, the row every props door can produce — `update_knowledge(id,
+        # isClosed=0)` stores the integer verbatim: `update_knowledge`
+        # (`sdk.py:22388-22563`) relays through `_update_entity_any` to
+        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54512`)
+        # applies the caller's props unchanged — `isClosed` is no reserved name, so
+        # nothing coerces it) then records NO transition at all: `prev_state is None`
+        # gates the mint off and nothing repairs the marker, so nothing re-fires.
+        # Bounded and inspectable —
+        # the same symmetric trade the table above states — against an unbounded
+        # journal mint, which is not a defensible alternative.
         # The polarity the remaining axes give, computed ONCE so the falsy marker is
         # answered FROM it rather than in place of it.
         if stage_id is not None or slot is not None:
