@@ -175,11 +175,19 @@ class _Result:
 
 @pytest.fixture()
 def armed(monkeypatch):
-    """The cutover plus a tenant — the two gates `searcher()` refuses without."""
+    """The cutover plus a tenant — the two gates `searcher()` refuses without.
+
+    ⚠️ The SINGLE-TENANT declaration is part of the arming now (#13331 review
+    F4): `TORTOISE_RECORD_JOURNAL` names ONE journal path, process-globally, so
+    `journal_ready` refuses to apply it where the deployment did not declare that
+    it serves one graph (#9192). A test that stands in for an armed single-tenant
+    box must say so, exactly as the deployment does.
+    """
     import tortoise.record_writer as rw
 
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
     monkeypatch.setenv(record_vector.ARMING_ENV, "1")
+    monkeypatch.setenv(rw.RECORD_SINGLE_TENANT_ENV, "1")
     monkeypatch.setattr(rw, "record_tenant", lambda: None, raising=False)
     return ("org_11691", "graph_11691")
 
@@ -557,7 +565,7 @@ def test_every_construction_site_passes_a_budget():
     `timeout_ms=15000` at any site — or a mutation of `_budget_ms =
     VECTOR_LEG_BUDGET_MS` to `_budget_ms = 15000` — left every arm in this file
     GREEN. Measured at `f0da22b90f`: with `timeout_ms=15000` at the
-    `_cross_lens_pairs` site (`sdk.py:35507`), all 12 tests here passed. The
+    `_cross_lens_pairs` site (`sdk.py:35512`), all 12 tests here passed. The
     sibling pins cannot see it either: `test_the_dense_pass_default_…` pins a
     different function's DEFAULT, `test_the_expansion_pass_…` pins the OTHER
     end of the budget, and `test_no_leg_in_the_fused_read_…` pins a different
@@ -1405,6 +1413,141 @@ def test_the_destructive_warning_names_the_width_the_ddl_actually_builds():
         assert f"{width} columns in public.{table}" in message, (
             f"the refusal does not state the derived width of public.{table} "
             f"({width} columns): {message}")
+
+
+# ── the READINESS gate is bound too (#13331 review F3) ─────────────────────
+#
+# The gate that keeps a lagging tenant off the dense leg runs on the REQUEST's
+# thread, inside `record_vector.searcher()`, BEFORE any leg budget exists. It
+# opened the record with no `statement_timeout_ms`, so it inherited the door's
+# 15 s ceiling — the exact `#11691` defect one function above the fix for it —
+# and `journal_coverage` issued TWO statements under that ceiling
+# (`_COVERAGE_SQL`, then `_FIRST_GAP_SQL`, whose answer readiness never reads).
+# Cached 30 s per tenant, so a wedged record ate a ~30 s stall on roughly one
+# request per window.
+#
+# The pins below are the falsifiers: delete the budget threading or re-issue the
+# gap statement and they red on the APPLIED bound and on the statement set, not
+# on a wall clock (a 15 s sleep would be a slow test reporting the wrong cause).
+
+
+class _ReadinessCursor:
+    """Answers the coverage read; records the bound and every statement issued."""
+
+    def __init__(self, state: dict):
+        self._state = state
+
+    def execute(self, sql: str, params=None):
+        self._state["statements"].append(sql)
+        if "set_config('statement_timeout'" in sql:
+            self._state["applied_ms"] = int(params[0])
+            return None
+        if "lead(seq)" in sql:
+            self._state["gap_statements"] = self._state.get("gap_statements", 0) + 1
+            return None
+        if "journal_event" in sql:
+            return None
+        raise AssertionError(f"the readiness gate issued an unexpected statement: {sql}")
+
+    def fetchone(self):
+        return self._state["row"]
+
+    def fetchall(self):
+        raise AssertionError("unreachable — the readiness gate reads one row")
+
+    def close(self):
+        return None
+
+
+class _ReadinessConn:
+    def __init__(self, state: dict):
+        self._state = state
+
+    def cursor(self):
+        return _ReadinessCursor(self._state)
+
+    def close(self):
+        return None
+
+
+def _wire_readiness_door(monkeypatch, state: dict) -> None:
+    """The REAL door, a fake driver — its `min(ceiling, asked)` rule stays live."""
+    import tortoise.record_projection as rp
+    import tortoise.record_writer as rw
+
+    monkeypatch.setattr(rw, "_default_connect",
+                        lambda dsn: _ReadinessConn(state), raising=True)
+    monkeypatch.setattr(rp, "scope_connection",
+                        lambda conn, org: conn.cursor(), raising=True)
+
+
+def test_the_readiness_gate_is_bound_by_the_reads_budget(
+        monkeypatch, armed, tmp_path):
+    """`(high, present, min, within) = (2, 2, 1, 2)` against a 3-line journal."""
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("{}\n{}\n{}\n")
+    monkeypatch.setenv(record_vector.RECORD_JOURNAL_ENV, str(journal))
+
+    state: dict = {"statements": [], "row": (2, 2, 1, 2)}
+    _wire_readiness_door(monkeypatch, state)
+    record_vector.reset_readiness_cache()
+    try:
+        assert record_vector.journal_ready(
+            record_vector._Scope(org_id="org_11691", graph_id="graph_11691"),
+            timeout_ms=BUDGET_MS) is False, (
+            "a tenant whose record holds 2 of 3 journal positions was called ready")
+    finally:
+        record_vector.reset_readiness_cache()
+
+    assert state.get("applied_ms") == LEG_STATEMENT_MS, (
+        f"the readiness gate asked the door for {state.get('applied_ms')} ms "
+        f"inside a {BUDGET_MS} ms read: the read's budget does not reach it, so "
+        f"a wedged record can stall the request thread for the door's own "
+        f"{DOOR_MS} ms ceiling before the leg's budget exists at all")
+    assert not state.get("gap_statements"), (
+        "the readiness gate issued `_FIRST_GAP_SQL`, whose answer it never "
+        "reads — spending the read's budget on a fact nobody consumes")
+
+
+def test_the_readiness_gate_skips_the_gap_statement_and_says_so(
+        monkeypatch, armed, tmp_path):
+    """An unmeasured gap is NOT a measured absence (`#5090` Q2).
+
+    Skipping the statement is only correct if the coverage object stops claiming
+    the hole edge is clean: `first_gap is None` would otherwise make
+    `contiguous` answer `True` for a record with a hole in the middle.
+    """
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("{}\n{}\n{}\n")
+    monkeypatch.setenv(record_vector.RECORD_JOURNAL_ENV, str(journal))
+
+    state: dict = {"statements": [], "row": (3, 3, 1, 3)}
+    _wire_readiness_door(monkeypatch, state)
+    record_vector.reset_readiness_cache()
+    captured: dict = {}
+
+    import tortoise.record_projection as rp
+
+    real_coverage = rp.journal_coverage
+
+    def spy(conn, **kwargs):
+        cov = real_coverage(conn, **kwargs)
+        captured["cov"] = cov
+        return cov
+
+    monkeypatch.setattr(rp, "journal_coverage", spy)
+    try:
+        assert record_vector.journal_ready(
+            record_vector._Scope(org_id="org_11691", graph_id="graph_11691"),
+            timeout_ms=BUDGET_MS) is True
+    finally:
+        record_vector.reset_readiness_cache()
+
+    cov = captured["cov"]
+    assert cov.gap_measured is False
+    assert cov.contiguous is None, (
+        "a coverage reading that never looked for a hole reported `contiguous`")
+    assert cov.unprojected == 0          # the aggregate question IS answered
 
 
 def _column_path_statement_sites() -> int:

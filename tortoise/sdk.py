@@ -10660,8 +10660,28 @@ def _item_type_text(item: dict) -> str:
     return _type_text(item.get("type"))
 
 
+#: The label each ENTITY-ITEM `type=` writes — and, load-bearing, ingest's
+#: PHASE-1 VOCABULARY: `_validate_bundle` uses this map as the `entities[]` type
+#: ALLOW-LIST (`:31120`), step 3 dispatches on the same labels, and the
+#: connection-endpoint gate resolves an item's label through it.
+#: ⛔ IT DECIDES THINGS — so a key added here must come with a step-3 writer
+#: branch in the SAME batch (#13556 review N1). `point`/`diary` were added here
+#: for a `create_entity` MESSAGE, and the bundle path then accepted items that
+#: step 3 refused with `Phase2Error` — after step 2 had already committed the
+#: bundle's points, the #2422/#7925 partial-mutation class this file closes in
+#: half a dozen comments. They live in `_CREATE_ENTITY_TYPE_ARMS` only; both
+#: land on `:Point` (ONE belief kind, #10977), never on a label of their own.
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
                        "event": "Event", "document": "Source"}
+
+
+#: The `type=` values `TortoiseSDK.create_entity` DISPATCHES on — its arms, and
+#: the whole vocabulary of its `unknown type` message.
+#: ⛔ SEPARATE FROM `_ENTITY_ITEM_LABELS` ON PURPOSE (#13556 review N1): that map
+#: is ingest's Phase-1 allow-list and `point`/`diary` have no ingest writer, so
+#: adding them there opens a validation gate instead of extending a message. A
+#: message may name a type the ingest bundle cannot carry; a gate may not.
+_CREATE_ENTITY_TYPE_ARMS = (*_ENTITY_ITEM_LABELS, "point", "diary")
 
 
 def _indefinite(phrase: str) -> str:
@@ -16093,11 +16113,29 @@ class TortoiseSDK:
         # (after event.update(extra)), matching the graph branch order.
         if _jsonl_actor is not None:
             event["actor_user_id"] = _jsonl_actor
+        # #13331 — ONE CHOKEPOINT (epic #7879 surface S2). The append, the
+        # record projection and the cache fold are now ONE call, so this door
+        # cannot order them differently from the SDK's or the miner's. The
+        # append stays inside the caller's `try` (it is the commit point; a
+        # failure is this door's accounting, not a record refusal) and the
+        # chokepoint never withdraws it: the truth store does not wait for a
+        # derived store (see `tortoise/live_write.py`).
+        from . import live_write
+
         try:
             # #9190: the append's return value IS the record's journal position;
             # it is threaded to the record so layer 1 stops being empty on live
             # writes. `None` (an in-memory log) means there is nothing to number.
-            seq = log.append(event)
+            live_write.write(
+                # ⛔ NO `tenant=` HERE (#13345 review P3-2): it is consumed only by
+                # `live_write`'s DEFAULT project, and this door supplies its own
+                # (`_write_record_projection`), which reads `self._record_tenant`
+                # itself and hands it to `write_live_record` by value. Passing it
+                # here was inert and read as load-bearing.
+                event, log=log, fold=False,
+                record_sink=record_sink,
+                project=self._write_record_projection,
+                scope_label="sdk._emit_event")
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -16139,19 +16177,12 @@ class TortoiseSDK:
             # before/after delta can be moved by another thread's failure.
             return False
         # ── the Postgres record (#9188, epic #7879) ────────────────
-        # The append COMMITTED at this line (§17.1), so the record write runs
-        # after it and before any cache fold: truth first, then the projection.
-        # It is fail-soft for the SAME reason the append's own failure is — the
-        # graph write stands, and raising here would hand the caller a failure
-        # for a record that persisted while killing the fold too. The loss is
-        # observable instead (``monitoring.metrics()["record_write_failures"]``)
-        # and ``replay`` heals it from the journal.
-        if record_sink is not None:
-            # #10000: the outcome travels to the caller that has to decide
-            # whether the record holds this write (`_write_capture_turns`).
-            record_sink.append(self._write_record_projection(event, seq=seq))
-        else:
-            self._write_record_projection(event, seq=seq)
+        # #13331: the record write and the `record_sink` hand-off now happen
+        # INSIDE `live_write.write` (step 2 of the chokepoint), after the append
+        # and before the fold this door does not own. `_write_record_projection`
+        # is still the SDK's own record half (its import guard, durability read
+        # and fail-soft accounting have one home), it is just no longer
+        # ORDERED here.
         return True
 
     def _write_record_projection(self, record: dict,
@@ -45748,6 +45779,15 @@ class TortoiseSDK:
                 # resolved (a load still IN FLIGHT has recorded no failure of its
                 # own, so ``_last_failure_kind`` alone would answer the
                 # designed-absence term).
+                # ⛔ ``kind`` is a LEG-TRACE reason, and ``_unavailable``
+                # translates it into the refusal's ``failure_kind`` vocabulary
+                # (#13528 review P1-1). The rule, not a fixed pair: a reason
+                # already in that vocabulary (``load_failed`` / ``load_timeout``)
+                # IS the cause and passes unchanged; ``no_embedder`` /
+                # ``load_in_flight`` are trace-only words and are translated to
+                # the RECORDED kind, else ``model_unavailable``. So a recorded
+                # kind outranks the in-flight term — reconcile a refusal against
+                # ``_last_failure_kind``, never against a trace-word mapping.
                 EmbeddingModel._unavailable(
                     context="read: embedder not warm within the read's budget",
                     kind=_read_decline)
@@ -51367,13 +51407,15 @@ class TortoiseSDK:
                                    journal_armed=bool(self._event_log_path))
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
-        # ``create_entity("Point", …)`` raises `unknown type`
-        # (``_ENTITY_ITEM_LABELS``) — so a ``pointKind`` riding it is a stray
-        # property on a label the calibration gate never reads
-        # (``_CALIBRATION_GATED_LABELS = ("Point",)``), and refusing it failed an
-        # unrelated write (measured: ``create_object(..., props={'point_kind':
-        # padded})``) over a name this gate has no business with. The Point doors
-        # are where it belongs.
+        # this funnel never receives a `:Point` write — since #11609 the
+        # `type="point"`/`"diary"` arms RELAY to `create_point` and never reach
+        # here at all, which is the same shape as before (they did not exist, and
+        # ``create_entity("Point", …)`` was an `unknown type`) — so a
+        # ``pointKind`` riding it is a stray property on a label the calibration
+        # gate never reads (``_CALIBRATION_GATED_LABELS = ("Point",)``), and
+        # refusing it failed an unrelated write (measured: ``create_object(...,
+        # props={'point_kind': padded})``) over a name this gate has no business
+        # with. The Point doors are where it belongs.
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the
@@ -54975,6 +55017,21 @@ class TortoiseSDK:
             required; D10 (ONTOLOGY v3.15 §4.4) retires ``:Document`` — a
             document is a ``:Source``, so this routes through the deprecated
             label alias and journals ``DocumentCreated``)
+          - point    → a ``:Point`` claim. ``props={"pointKind": …}`` is the
+            kind (the same way ``subjectKind``/``objectKind`` are carried, and
+            for the same reason: the container has no per-kind parameters), and
+            an UNSENT kind defaults to ``statement`` — ONE belief kind, so a
+            point is ``:Point {pointKind: statement}``, never a new kind
+            (#10977). ``name`` is the claim's CONTENT (the point door's
+            ``content``), and the write RELAYS to ``create_point`` so every gate
+            on that path is reached unchanged. ``dedup`` defaults to ``True``
+            here because the retired ``tortoise_create_point`` door declared it
+            so; ``create_point``'s own default is ``False`` (#11609).
+          - diary    → a ``:Point {pointKind: 'diary'}``. ``name`` is the entry
+            and ``props`` carries ``authoredBy`` (REQUIRED — the retired
+            ``tortoise_diary_write`` named the agent as its first argument),
+            plus ``topic``/``wing``. A caller-supplied ``pointKind`` that
+            contradicts ``diary`` is REFUSED, never silently re-filed.
 
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with
@@ -54985,6 +55042,12 @@ class TortoiseSDK:
         (``no_source`` only for documents, where its remedy is real;
         ``extracted_from_inert`` on any type that declares an unwired ref).
         Advisory only: never a block, and it never changes what is stored.
+
+        The ``point``/``diary`` arms return the SAME ``{node, nudges}`` shape
+        and compute their nudges, but their ``node`` is whatever
+        ``create_point`` returned (minus its transient ``advisories``, which
+        move to the top level) — a Point's node is its property bag, including
+        the ``valid_to_shaped`` receipt (#9202).
 
         #9964 — THE KIND DECIDES THE LAYER. The classifier's entity partition
         merges objects and subjects, so a kind it returns can belong to the
@@ -55559,10 +55622,19 @@ class TortoiseSDK:
             node = self._create_entity("Document", did, {
                 "title": name, "documentKind": documentKind, **props},
                 "DocumentCreated", is_episodic=is_episodic)
+        elif t == "point" or t == "diary":
+            # ONE branch, not two: the arms differ in NOTHING here — the door's own
+            # `dedup` semantics are replayed inside `_absorbed_point_write` from the
+            # `t` it receives, so a split body would be two copies of one call that
+            # ruff reds as SIM114 (agent-infra-ci / lint). `t` still rides through
+            # unchanged, which is what lets the two arms disagree later without this
+            # line deciding anything.
+            return self._absorbed_point_write(
+                t, name, props, is_episodic=is_episodic, guard=_guard)
         else:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
-                f"{', '.join(_ENTITY_ITEM_LABELS)}")
+                f"{', '.join(_CREATE_ENTITY_TYPE_ARMS)}")
         # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
         # `extractedFrom` is a recognised prop on this door — it rides the
         # generic passthrough and is stored on the node.
@@ -55996,6 +56068,139 @@ class TortoiseSDK:
         scored.sort(key=lambda r: (-r["score"], r["candidate"]))
         return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
                 for r in scored[:limit]]
+
+    def _absorbed_point_write(self, t: str, name: str, props: dict, *,
+                              is_episodic: bool | None = None,
+                              guard: object | None = None) -> dict:
+        """The `type="point"` and `type="diary"` arms of `create_entity` (#11609).
+
+        `tortoise_create_point` and `tortoise_diary_write` retire FORWARD into
+        `create_entity`, and these arms are what make that retirement legal: the
+        `PROTECTED` table in `tests/test_11609_door_retirement.py` records
+        *"create_entity has no point arm"* / *"…no diary arm"* as the reason
+        neither door could retire, and a door may only leave that table in the
+        batch that makes its stated reason FALSE.
+
+        ⛔ BOTH ARMS RELAY TO `create_point` — they do not re-implement it. The
+        point write path is ~600 lines of gates with their own recorded rulings
+        (kind approval #5475, invisible-kind #9287, narrative #10000, the status
+        vocabulary #11824, the validity window #5352, content-hash dedup #6110,
+        provenance inference #3263 …). A second spelling of any of it here would
+        be the drift this file keeps paying for, and the ONE promise the
+        retirement makes is "the same node" — which is only provable by
+        reaching the same code. `create_point` STAYS an SDK method (it is the
+        door's SDK surface, and this arm makes no surface change); only the MCP
+        NAME retires.
+
+        ⛔ THE ARMS RETURN BEFORE THE ENTITY POST-PROCESSING, and that is
+        load-bearing rather than tidy. The code below the dispatch materialises
+        `extractedFrom` for the labels in `_ENTITY_SOURCE_LABELS` and otherwise
+        reports the ref as INERT — but `create_point` DOES wire a declared
+        `extractedFrom` (and infers one from `session_id`, #3263), so falling
+        through would duplicate that work and attach an `extracted_from_inert`
+        advisory to a write whose source was in fact materialised.
+
+        ⛔ TWO ARMS, ONE BODY — the split is for
+        `_create_entity_dispatch_arms()`, which reads the dispatch as
+        `^        (?:el)?if t == "([a-z_]+)":$` and would not see a combined
+        `elif t in (…):`. Each `type=` value must therefore be its OWN one-line
+        branch; the behaviour they share lives here.
+        """
+        # ⛔ THE KIND IS THE CALLER'S, NOT THIS ARM'S — except where the
+        # discriminator already decided it. `type="point"` is a DOOR, not a kind:
+        # `props={"pointKind": …}` says which kind, exactly as
+        # `subjectKind`/`objectKind` do one arm up, and an UNSENT kind defaults to
+        # `statement` (the ontology's claim default, #10977 — a point is
+        # `:Point {pointKind: statement}`, ONE belief kind, never a new kind).
+        # `type="diary"` pins the kind, so a caller-supplied `pointKind` that
+        # CONTRADICTS it is refused rather than silently re-filing the write: the
+        # retired `tortoise_diary_write` took no kind argument at all, and a
+        # container that answers `type="diary"` with a `statement` is exactly
+        # the "deletes the door and keeps the name, with no capability behind
+        # either" failure the door-retirement suite exists to catch.
+        declared_kind = props.pop("pointKind", None)
+        if declared_kind is None:
+            declared_kind = props.pop("point_kind", None)
+        if t == "diary":
+            # `_type_text` is the ONE primitive both sides of this seam read a
+            # `type`/kind with (content, lowercased, no subclass dispatch), so a
+            # `" Diary "` spelling is the same kind and a NON-STR reads as blank
+            # — "not supplied", the same rule `named_kind` applies. Either way
+            # the write below is a `pointKind='diary'`, which is exactly what
+            # `type='diary'` promised.
+            if declared_kind is not None and _type_text(declared_kind) not in (
+                    "", "diary"):
+                raise ValueError(
+                    "create_entity(type='diary') pins the kind — the write "
+                    f"declares pointKind={declared_kind!r}. A diary entry is "
+                    "a :Point {pointKind: 'diary'}; write a different kind "
+                    "with type='point'.")
+            # `tortoise_diary_write(agent_name, …)` could not be called without
+            # its author, so neither can the arm that absorbs it. A NAMED
+            # refusal, not a silent default: `authoredBy` is what makes a diary
+            # entry attributable. `None` (absent) is the only value refused — a
+            # blank string is accepted exactly as the retired door accepted it
+            # (#1934: never invent a refusal).
+            if props.get("authoredBy") is None:
+                raise ValueError(
+                    "create_entity(type='diary') requires authoredBy — the "
+                    "agent the entry is written by. The retired "
+                    "tortoise_diary_write named it as its first argument.")
+            point_kind = "diary"
+        else:
+            point_kind = "statement" if declared_kind is None else declared_kind
+            # ⛔ The retired door's DEDUP DEFAULT, not `create_point`'s. They
+            # differ and the difference is a silent behaviour change: the MCP
+            # `tortoise_create_point` declares `dedup: bool = True`, so a
+            # migrating caller that omits it FOLDS (the door's own docstring is
+            # largely about that fold), while `create_point`'s SDK default is
+            # False. Carrying `create_point`'s default here would turn every
+            # migrated re-write into a duplicate Point.
+            # ⛔ `tortoise_diary_write` passed NO dedup, so the diary arm does
+            # not acquire one: it keeps `create_point`'s default, which is what
+            # the door did.
+            props.setdefault("dedup", True)
+        point = self.create_point(
+            point_kind, name, is_episodic=is_episodic, **props)
+        return self._absorbed_point_result(point, name, guard)
+
+    def _absorbed_point_result(self, point: dict, text: str,
+                               guard: object | None = None) -> dict:
+        """The container's reply for a POINT-shaped arm (#11609).
+
+        The two arms that relay to `create_point` (`type="point"` and
+        `type="diary"`) get the container's `{node, nudges}` shape, not the
+        point's own flat dict — the same asymmetry `_flat_entity_result`
+        resolves in the other direction for the legacy `create_*` aliases.
+        Neither the retired door nor `create_point` is changed by this: they keep
+        answering exactly as they did, which is what the shipped shim serves.
+
+        ⛔ THE TRANSIENT KEYS MOVE, THEY ARE NOT COPIED. `create_point` returns
+        two things that are NOT node properties — `advisories` (the #8171/#9964
+        note, never journaled) and the `valid_to_shaped` receipt (#9202) — and
+        leaving `advisories` inside `node` would put it where every other arm
+        does not, so a caller switching on `result.get("advisories")` would see
+        nothing on the point arm alone. The receipt stays ON the node: it is a
+        statement about THIS caller's `validTo`, which is exactly where the point
+        door puts it.
+
+        Nudges are COMPUTED here rather than returned empty. An empty list is
+        indistinguishable from "this claim relates to nothing", and a claim is
+        the write most in need of the IMPL/NAND suggestion — the cost of the
+        scan is documented on `_nudge_candidates` (#13436: 12.3-13.3 ms at both
+        1,000 and 5,000 Points; its 400-row cap is constant) and it is the price
+        of the CONTAINER's shape, which the door it absorbed never paid because
+        the door does not promise nudges at all.
+        """
+        node = dict(point)
+        advisories = node.pop("advisories", None)
+        return {
+            "node": node,
+            **_kind_guard_payloads(guard),
+            "nudges": self._nudge_candidates(
+                text, exclude_ids=[node.get("id")]),
+            **({"advisories": advisories} if advisories else {}),
+        }
 
     def _flat_entity_result(self, result: dict) -> dict:
         """Bare node a legacy ``create_*`` alias returns, plus #8171 advisories.
