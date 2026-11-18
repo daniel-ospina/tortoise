@@ -63,7 +63,7 @@ sixteen written at the pin that never opened there, and the `#13124` review foun
 `main`** and sitting outside this list — so **the enumeration is a list of what has been RE-DERIVED, not
 the whole of the `main` set**, and the pin is the default for a cite in neither list only because that is
 where it was written.
-⛔ **Take the head from the list, never from the row.** §2.5's whole-node row carries one of each
+⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
 (`record_serve.py:461` is in the `main` list; `projection/__init__.py:14169` is not, so it is at the pin),
 and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
 ratio below is a **whole-document** measurement — every `path.py:NNNN` pair in this file, the `main`-set
@@ -162,7 +162,7 @@ no cite: the handle beside it then reads as corroboration of a line nobody read.
 individually correct at the pin they were written for, and the distance is **23** (`MATCH (s:Subject {id:$sid})
 RETURN properties(s)` and the walk `MATCH (s:Subject {id:$sid})-[r]->(n) …`, with the subject-chain composition
 between them). ⚠️ **That row's two ADDRESSES have since been re-derived twice — they are `:36985` and
-`:37008` now, both in this revision's `main` list below — and this paragraph is the record of the DISTANCE
+`:37008` now, both in this revision's `main` list above — and this paragraph is the record of the DISTANCE
 claim, so it quotes no address the row does not carry**: a number
 here that is not the number the row carries is the very defect it is warning about. So the rule above extends to the words
 **around** a cite: an adjective that fixes a position ("above", "beside", "in the same read") is a claim too, and

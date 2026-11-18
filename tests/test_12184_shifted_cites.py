@@ -117,8 +117,6 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
     (_AUDIT, "sdk.py:23982", _SDK, 23982, "(n:Point {id:$id})-[:TAGGED]->()"),
     (_AUDIT, "search_engine.py:6721", _SE, 6721, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
-    (_AUDIT, "sdk.py:23982", _SDK, 23982, '(n:Point {id:$id})-[:TAGGED]->()'),
-    (_AUDIT, "search_engine.py:6721", _SE, 6721, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3449", _SE, 3449, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3447`", _SE, 3447, "# #11682: the corpus join is PER FAMILY"),
@@ -210,8 +208,6 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:23982'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6721'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:23982'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6721'): 2,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2715'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21668'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21791`'): 1,
@@ -251,7 +247,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """REVERT GUARD, not a re-measurement — say what this does NOT prove.
 
     The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
-    the counts still read `322`/`216`/`106` for a file that measures `324`/`216`/`108`, and the pin-side
+    the counts still read `322`/`216`/`106` for a file that measures `324`/`215`/`109`, and the pin-side
     prose described `:3735` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; `:3735`
     is `for prop in sorted(STORED_VECTOR_PROPS):`) and `:2715` as `placement_spellings()` (that function is
     the pin's `:1798`; `:2715` is `if k not in tail_denied})`). Nothing asserted them, so both could revert
@@ -363,7 +359,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 48
+    assert len(_PINS) == 46
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -387,7 +383,9 @@ def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
         "`:6352` — it is history, so re-deriving it by content is not possible and a delta applied to it "
         "is the defect it warns about, one level up."
     )
-    for shifted in (":3084", ":4674-4678", ":6549"):
+    # ⛔ Scoped to the CLAUSE, not the whole document: these are bare addresses, and any legitimate
+    # `:6549` spelled elsewhere in the census would red this arm on correct text.
+    for shifted in ("`:3084`, `:4674-4678`, `:6549`", "walk at `:4674`", "operator leg at `:6549`"):
         assert shifted not in text, (
             f"the historical wrong-address list carries `{shifted}`, a line delta applied to an address "
             "that was never right — the addresses the census actually wrote were `:3064`, `:4477-4481` "
