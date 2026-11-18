@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import io
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -565,6 +567,74 @@ _GUARD_EXEMPT_FILES = {
 }
 
 
+def _string_and_comment_spans(src: str) -> list[tuple[int, int]]:
+    """Absolute character spans of STRING and COMMENT tokens (#13490).
+
+    A call spelling that lives INSIDE a string is TEXT, not a construction:
+    `test_12943_cache_leg.py` asserts `"_make_sdk(" in inspect.getsource(...)`,
+    and counting that spelling as a call site made this guard report a phantom
+    site at the ASSERT's line — its paren-balance walk then swept up the
+    `namespace="orgA"` literal of a construction hundreds of lines below,
+    which the scan finds on its own. The guard's evidence named a line that
+    holds no construction, which is the wrong thing to hand a triager.
+
+    Skipping these spans cannot hide a real construction: a CALL is code, so
+    it is never inside a STRING token. An f-string's expression part is still
+    scanned — PEP 701 tokenises it as its own code tokens, and its literal
+    parts are FSTRING_MIDDLE, which this does not skip either.
+
+    Best-effort on a file that cannot tokenise: whatever spans were found are
+    returned, so the failure direction is "scan more", never "skip the file".
+    """
+    starts = [0]
+    for line in src.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    spans: list[tuple[int, int]] = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type in (tokenize.STRING, tokenize.COMMENT):
+                spans.append((starts[tok.start[0] - 1] + tok.start[1],
+                              starts[tok.end[0] - 1] + tok.end[1]))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+    return spans
+
+
+def _namespace_literals_in_source(src: str):
+    """Yield (1-based line, literal) for every namespace="..." literal in a
+    TortoiseSDK(/_make_sdk(/sdk_factory( call block. Factored out of the file
+    walk so the string-blindness above is pinnable on a synthetic source."""
+    spans = _string_and_comment_spans(src)
+
+    def _inside_string_or_comment(pos: int) -> bool:
+        return any(a <= pos < b for a, b in spans)
+
+    for m in _CALL_RE.finditer(src):
+        if _inside_string_or_comment(m.start()):
+            continue
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(src) and depth:
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+            i += 1
+        block = src[m.start():i]
+        nm = _LITERAL_RE.search(block)
+        if not nm:
+            continue
+        line = src.count("\n", 0, m.start()) + 1
+        if src.split("\n")[line - 1].strip().startswith("#"):
+            continue  # comment/docstring sample — not a construction
+        yield line, nm.group(2)
+
+
+_CALL_RE = re.compile(r"\b(TortoiseSDK|_make_sdk|sdk_factory)\s*\(")
+_LITERAL_RE = re.compile(r"namespace\s*=\s*(['\"])([^'\"]+)\1")
+
+
 def _sdk_call_namespace_literals():
     """Yield (file_name, line_number, literal) for every namespace="..."
     literal inside TortoiseSDK(/_make_sdk(/sdk_factory( call blocks of
@@ -574,31 +644,13 @@ def _sdk_call_namespace_literals():
     redirect's per-path derivation covers them."""
     from tests._embedded import TEST_NO_REDIRECT_STEMS
     exempt = _GUARD_EXEMPT_FILES | set(TEST_NO_REDIRECT_STEMS)
-    call_re = re.compile(r"\b(TortoiseSDK|_make_sdk|sdk_factory)\s*\(")
-    lit_re = re.compile(r"namespace\s*=\s*(['\"])([^'\"]+)\1")
     for f in sorted(_TESTS_ROOT.glob("test_*.py")) \
             + sorted((_TESTS_ROOT / "e2e").glob("test_*.py")):
         if f.name in exempt:
             continue
         src = f.read_text(encoding="utf-8")
-        for m in call_re.finditer(src):
-            start = m.end()
-            depth = 1
-            i = start
-            while i < len(src) and depth:
-                if src[i] == "(":
-                    depth += 1
-                elif src[i] == ")":
-                    depth -= 1
-                i += 1
-            block = src[m.start():i]
-            nm = lit_re.search(block)
-            if not nm:
-                continue
-            line = src.count("\n", 0, m.start()) + 1
-            if src.split("\n")[line - 1].strip().startswith("#"):
-                continue  # comment/docstring sample — not a construction
-            yield f.name, line, nm.group(2)
+        for line, literal in _namespace_literals_in_source(src):
+            yield f.name, line, literal
 
 
 def _select_graph_literals():
@@ -629,6 +681,31 @@ def _select_graph_literals():
                 if is_f:
                     rendered = f"f{rendered}"
                 yield f.name, line, rendered
+
+
+def test_a_call_spelling_inside_a_string_is_not_a_construction():
+    """#13490: the guard's own evidence must name a LINE that holds a call.
+
+    `test_12943_cache_leg.py` asserts `"_make_sdk(" in inspect.getsource(...)`.
+    Counting that TEXT as a call site made the guard report a phantom site at
+    the assert's line, and its paren walk then swept up the `namespace="orgA"`
+    of a construction further down — so the guard red-ed naming a line with no
+    construction in it, and the triage that followed had to declare a literal
+    for a site that does not exist there.
+
+    DISCRIMINATING: with the string-blind scanner this source yields TWO
+    entries (the phantom at line 3 plus the real one at line 4); with the fix
+    it yields the construction's line only. A fix that simply stopped scanning
+    would yield NONE, so the exact list is asserted, not its length.
+    """
+    src = (
+        'def test_x():\n'
+        '    handler = inspect.getsource(hosted_api._data_sdk)\n'
+        '    assert "_make_sdk(" in handler\n'
+        '    sdk = hosted_api._make_sdk(namespace="orgA")\n'
+        '    return sdk\n'
+    )
+    assert list(_namespace_literals_in_source(src)) == [(4, "orgA")]
 
 
 def test_namespace_literals_guard_passing_or_routed():
