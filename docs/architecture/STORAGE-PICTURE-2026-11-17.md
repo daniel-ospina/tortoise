@@ -1,13 +1,12 @@
 ---
-title: "The storage picture — where the layer is going, and where it hurts (#13232)"
+title: "The storage picture — where the layer is going, and where it hurts"
 type: engineering
 domain: platform
 doc_status: draft
 created: 2026-11-17
-issue: "#13232"
 subjects.team: epistemic-team
-aboutSubjects: storage layer, Postgres record, FalkorDB cache, vector placement, write-path latency, search
-aboutObjects: "STORAGE-ARCHITECTURE.md, #13232, #13224, #7879, #13220, #4051"
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#13232, #13247, #13224, STORAGE-ARCHITECTURE.md"
 ---
 
 # The storage picture — where the layer is going, and where it hurts
