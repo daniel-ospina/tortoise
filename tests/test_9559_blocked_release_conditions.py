@@ -2655,8 +2655,12 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     # `$` CONTINUES an identifier too (§4.1), so `a$E'…'` is ONE identifier and the
     # escape must not arm there. Pinned because omitting `$` from the set is silent:
     # the true lexing keeps `-- c` inside a literal that never closes, so a stripping
-    # scanner has DELETED a comment the server would have executed as data. Measured:
-    # with `== "_"` (the pre-fix set) this input came back stripped.
+    # scanner has DELETED text that belongs inside an unterminated literal — a
+    # statement PostgreSQL REJECTS rather than executes (§4.1.2.1: a constant must be
+    # BOUNDED by quotes), so the loss is latent. With `standard_conforming_strings` off
+    # (§4.1.2.2) the literal closes early instead and the server discards `-- c` as a
+    # comment, so neither mode executes that text. Measured: with `== "_"` (the pre-fix
+    # set) this input came back stripped.
     assert _strip_sql_comments("SELECT a$E'\\'' AS q; -- c\n") == (
         "SELECT a$E'\\'' AS q; -- c\n"), (
         "`a$E'…'` is an identifier tail, not an escape string — a `$`-blind prefix "
