@@ -9775,6 +9775,17 @@ surfaces:
   # the SELECTION for this PR is already the full matrix (`tortoise/sdk.py` and
   # `tortoise/tool_registry.py` are both `SHARED_MODULES`), so neither registration
   # is load-bearing for THIS diff — both are load-bearing for the next one.
+  # #11609 P2 — `check_confidence`'s RECOMPUTE and RECALL arms, and the two doors they
+  # retire (`tortoise_compute_confidence`, `tortoise_recall`). Same surface as its three
+  # siblings above/below: the file builds and monkeypatches the `TortoiseSDK` methods the
+  # retired doors called (`compute_confidence` / `recall_state`) and asserts DISPATCH by
+  # substitution, so the container answers rather than a copy of it. ⚠️ As with its
+  # siblings, do NOT read this row as the load-bearing one for a `tortoise/sdk.py` /
+  # `tool_registry.py` / `mcp_server.py` diff: all three are `SHARED_MODULES` (measured —
+  # `ci_selection.py --changed-files tortoise/sdk.py` answers `full: true`, `test_files:
+  # ALL`), so the selection already runs this file on every diff that could red it. The
+  # row is what `--integrity` requires: a test file with no surface row is `manifest
+  # drift`, exit 1 — which is exactly how this one was caught at the head.
   - test_11609_confidence_arms.py
   - test_11858_source_door_markers.py
   # ⛔ NOT `test_13034_currency_rule_reads_position.py`, which #13110 (PR #13116) briefly put
