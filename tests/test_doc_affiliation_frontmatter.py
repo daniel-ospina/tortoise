@@ -647,7 +647,16 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
-                for raw_item, got_item in zip(texts, got_list):
+                # `strict=True` rather than `strict=False`: the arm above has
+                # ALREADY established `len(got_list) == len(texts)` and `continue`d
+                # otherwise, so equality is an invariant here — stating it as
+                # `strict=True` makes a later edit that drops that guard raise
+                # instead of silently TRUNCATING the pair-up and skipping the
+                # tail of the sequence unexamined (a fail-open in a guard arm).
+                # Required by `ruff`'s B905 (`select = ["E", "F", "B", ...]`,
+                # `pyproject.toml`); see #9896 for why a bare `zip` here is not
+                # merely stylistic — this one line was `main`'s ONLY lint red.
+                for raw_item, got_item in zip(texts, got_list, strict=True):
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from
                         # _type_mismatch would contradict it in the same string.
