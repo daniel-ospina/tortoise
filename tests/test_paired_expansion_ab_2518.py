@@ -1438,7 +1438,8 @@ def test_the_briefs_blast_radius_count_matches_the_cells_that_were_nulled():
 
     ⛔ Measured on the pre-fix blobs (`#13267` review 13 F3): 16 bare `NaN` tokens in
     the control and **8** in each point artifact, because a point artifact's
-    `mde_paired` / `mde_independent` are finite (`0.0383…` at k=15). The paragraph
+    `mde_paired` / `mde_independent` are finite (`0.0383…` at k=15 in `paired-point-300.json`,
+    `0.0208…` in `paired-point-300-short-query.json` — not one figure for both). The paragraph
     exists so a reader can verify the re-encoding, which makes it the one place a
     50 % overstatement must not stand — and the same count was restated in this
     file's own docstring, so the shape is pinned here instead of living in prose.

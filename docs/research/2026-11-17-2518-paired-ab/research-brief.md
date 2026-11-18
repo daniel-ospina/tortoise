@@ -435,7 +435,9 @@ protection they do not have.
 Their runs wrote `NaN` tokens into four KINDS of cell (`mde_paired`, `mde_independent`,
 `correlation.rho`, `correlation.se_reduction`) — all four per `k` in the control (16 tokens), but only
 the two correlation cells per `k` in each point artifact (8 each: their `mde_paired` /
-`mde_independent` are finite, `0.0383…` at k=15) — and RFC 8259 does not admit `NaN` in its number
+`mde_independent` are finite — `0.0383…` at k=15 in `paired-point-300.json`, `0.0208…` in
+`paired-point-300-short-query.json`, so quoting one figure for both is wrong) — and RFC 8259 does not
+admit `NaN` in its number
 grammar, so the committed evidence could not be loaded by any strict parser at all (node's `JSON.parse`
 rejected the whole file) and the tolerant ones mapped the token to `null` — the same cell an unrecorded
 field occupies (`#13267` review 12, P2). They were re-encoded with the tool's own writer (`_write_json`

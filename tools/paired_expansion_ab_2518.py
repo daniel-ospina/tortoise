@@ -233,9 +233,14 @@ def _write_json(path: Path, obj) -> None:
     emitting a document no strict parser can load. A silent ``NaN`` token is the
     defect; an exception here is the guard.
 
-    The trailing newline is part of the convention the committed evidence already
-    carries, so re-serializing an existing artifact changes the non-finite cells and
-    nothing else.
+    The trailing newline is part of the convention the THREE committed EVIDENCE
+    artifacts already carry, so re-serializing one of them changes the non-finite
+    cells and nothing else.
+    ⛔ The fourth committed JSON, ``corpus-snapshot-manifest.json``, does NOT end with
+    a newline (4,272 bytes, last byte ``}``): writing it through this function adds
+    one byte, so a one-byte diff there is this convention asserting itself, not
+    tampering. Do not "fix" the manifest back to no-newline either — a file this
+    writer owns should carry what this writer produces.
     """
     path.write_text(json.dumps(_json_safe(obj), indent=2, sort_keys=True,
                                allow_nan=False) + "\n")
