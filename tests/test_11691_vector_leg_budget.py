@@ -59,9 +59,11 @@ is scoped to the record fall-through and must not shave the pre-#11642 path.
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import pathlib
 import re
+import textwrap
 import time
 
 import pytest
@@ -693,6 +695,167 @@ def _binds_the_read_budget(
     return False
 
 
+#: The budgets a fused-read call site may fall back to when the caller gave
+#: none, and WHY that statement is allowed a number other than the read's own.
+#:
+#: `VECTOR_LEG_BUDGET_MS` is the read's: every leg the fused read JOINS runs on
+#: it, because `degradation_chain` waits on its workers' exit, so a leg on
+#: another budget is a leg the cap cannot bound.
+#:
+#: ⛔ A SECOND MEMBER IS ADMITTED ONLY FOR A STATEMENT THAT IS NOT JOINED
+#: (`#13302` review F1). `tortoise/ended.py`'s `ENDED_SCAN_BUDGET_MS` bounds the
+#: family-wide `MATCH … OPTIONAL MATCH … collect() … ORDER BY … LIMIT` that
+#: `tortoise_fts_query`'s ended arm issues, and that arm RETURNS before the
+#: retrieval machinery — so the hazard the read's budget exists to prevent (the
+#: read JOINS a straggler, and the caller pays its latency) cannot reach it:
+#: there is no sibling to straggle against, and the scan is bounded on its own
+#: (`GRAPH.QUERY … TIMEOUT <ms>` terminates the statement). What 500 ms DID do
+#: there is degrade the population the arm exists for to an empty answer
+#: (measured: 50k-ended points returned `[]` + `incomplete` at a 500 ms bound;
+#: 100k ended points cost 1.2 s unbounded). The 10 000 ms is the vendor's own
+#: general-query default (`ConnectionConfig.query_timeout_ms = 10_000`, FalkorDB
+#: GraphRAG), not a guess.
+#:
+#: The register is what ADMITS a fallback, so it cannot be widened by an edit
+#: alone: the scan below resolves every member from the module that owns it.
+#:
+#: ONE ENTRY PER budget a fused-read fallback may name:
+#: ``(owning module, why it is admitted, the ONE site it is admitted for)``.
+#:
+#: ⛔ THE THIRD FIELD IS THE POINT (#13302 review F1). A `None` site means "the
+#: read's own budget, admitted at every site" — that is `VECTOR_LEG_BUDGET_MS`,
+#: the one home for the number, and a fallback naming it anywhere is the fix, not
+#: a hole. Any OTHER member is admitted at exactly one
+#: ``(enclosing function, assignment target)`` and is REJECTED everywhere else:
+#: the admission is keyed on the STATEMENT, not on the name.
+#:
+#: The first version of this register keyed on the name alone, and that was
+#: measured as a hole: retargeting the bm25 arm — a leg the fused read JOINS,
+#: whose latency the caller pays — from the read's 500 ms budget to
+#: `ENDED_SCAN_BUDGET_MS` (10 000 ms) left the whole suite green. A name-scoped
+#: admission in a site-scoped guard protects only the site that already has its
+#: own pin.
+DECLARED_LEG_BUDGETS: dict[str, tuple[str, str, tuple[str, str] | None]] = {
+    "VECTOR_LEG_BUDGET_MS": (
+        "tortoise.search_engine",
+        "the fused read's own budget — every leg it JOINS runs on it",
+        None),
+    "ENDED_SCAN_BUDGET_MS": (
+        "tortoise.ended",
+        "the ended-scope scan, which returns BEFORE the retrieval machinery, so "
+        "it is not a leg the fused read joins (#13302 review F1)",
+        # `if ended_scope:` inside `tortoise_fts_query`, the arm that RETURNS
+        # before the retrieval machinery runs. Pinned to the statement, so the
+        # same name at any joined site is an offender rather than a pass.
+        ("tortoise_fts_query", "_ended_bound")),
+}
+
+
+def _declared_budget_names(node: ast.expr) -> set[str]:
+    """Which `DECLARED_LEG_BUDGETS` names does the expression READ?"""
+    names = {n.id for n in ast.walk(node)
+             if isinstance(n, ast.Name) and n.id in DECLARED_LEG_BUDGETS}
+    names |= {n.attr for n in ast.walk(node)
+              if isinstance(n, ast.Attribute) and n.attr in DECLARED_LEG_BUDGETS}
+    return names
+
+
+def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    return parents
+
+
+def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    cur = parents.get(node)
+    while cur is not None:
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return cur.name
+        cur = parents.get(cur)
+    return ""
+
+
+def _assignment_statements(tree: ast.AST) -> list[tuple[tuple[str, str], ast.stmt]]:
+    """Every simple assignment, as `((function, target), statement)`."""
+    parents = _parent_map(tree)
+    out: list[tuple[tuple[str, str], ast.stmt]] = []
+    for stmt in ast.walk(tree):
+        if isinstance(stmt, ast.Assign):
+            targets = stmt.targets
+        elif isinstance(stmt, ast.AnnAssign):
+            targets = [stmt.target]
+        else:
+            continue
+        names = [t.id for t in targets if isinstance(t, ast.Name)]
+        if len(names) != 1:
+            continue
+        out.append(((_enclosing_function(stmt, parents), names[0]), stmt))
+    return out
+
+
+def _enclosing_sites(tree: ast.AST) -> dict[int, tuple[str, str]]:
+    """Map every node to `(enclosing function, nearest simple assignment)`.
+
+    A site is how the register keys an admission: `_ended_bound = int(
+    _elevated_timeout_ms or ENDED_SCAN_BUDGET_MS)` is identified by the pair
+    `("tortoise_fts_query", "_ended_bound")`, and a keyword argument inside a
+    bare call — every joined leg — maps to its own enclosing assignment, or to
+    `("<function>", "")` when the statement binds nothing.
+    """
+    sites: dict[int, tuple[str, str]] = {}
+    for site, stmt in _assignment_statements(tree):
+        for node in ast.walk(stmt):
+            sites[id(node)] = site
+    return sites
+
+
+def _budget_fallback_offenders(source: str) -> list[str]:
+    """Every `int(_elevated_timeout_ms or …)` that has no legal budget fallback.
+
+    A PURE FUNCTION OF THE SOURCE on purpose: the repo-wide pin below feeds it
+    `sdk.py`, and the mutation test feeds it synthetic trees, so the guard's own
+    behaviour is pinned by a test that genuinely reds when the guard is
+    loosened — instead of being asserted only through the one file it scans.
+    """
+    tree = ast.parse(source)
+    sites = _enclosing_sites(tree)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        # the shape `int(_elevated_timeout_ms or <X>)` — compare the AST, so a
+        # renamed local or a reformatted line cannot slip past a text search.
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "int" and len(node.args) == 1):
+            continue
+        inner = node.args[0]
+        if not (isinstance(inner, ast.BoolOp)
+                and isinstance(inner.op, ast.Or)
+                and len(inner.values) == 2
+                and isinstance(inner.values[0], ast.Name)
+                and inner.values[0].id == "_elevated_timeout_ms"):
+            continue
+        fallback = inner.values[1]
+        where = f"line {getattr(node, 'lineno', '?')}: {ast.unparse(node)}"
+        names = _declared_budget_names(fallback)
+        if not names:
+            offenders.append(
+                f"{where} — the budget's fallback names no budget in "
+                f"DECLARED_LEG_BUDGETS, so this leg keeps its own number")
+            continue
+        site = sites.get(id(node), ("", ""))
+        binds = ".".join(p for p in site if p) or "<no binding>"
+        for name in sorted(names):
+            permitted = DECLARED_LEG_BUDGETS[name][2]
+            if permitted is not None and site != permitted:
+                offenders.append(
+                    f"{where} — `{name}` is admitted only for the "
+                    f"`{permitted[0]}::{permitted[1]}` assignment, and this "
+                    f"statement binds `{binds}`; that leg is on another budget "
+                    f"the fused read cannot cap (#11691 / #13302 review F1)")
+    return offenders
+
+
 def _names_the_budget(node: ast.expr) -> bool:
     """Does the expression READ `VECTOR_LEG_BUDGET_MS` anywhere?
 
@@ -772,7 +935,18 @@ def test_the_expansion_pass_binds_the_constant_not_a_literal():
 
 
 def test_no_leg_in_the_fused_read_carries_its_own_budget_literal():
-    """REPO-WIDE: every `int(_elevated_timeout_ms or …)` names the constant.
+    """REPO-WIDE: every `int(_elevated_timeout_ms or …)` has a legal fallback.
+
+    The defect class is the LITERAL: `int(_elevated_timeout_ms or 500)` is a
+    number with no home, so moving the constant splits the read's budget without
+    one pin noticing. A fallback that names a DECLARED budget is the opposite of
+    that — it is greppable, and the register above requires a reason for every
+    member.
+
+    ⛔ AND A DECLARED NAME IS NOT A LICENCE (#13302 review F1): a second member
+    is admitted for ITS OWN STATEMENT only, so `ENDED_SCAN_BUDGET_MS` at the
+    bm25 arm is an offender while the same name at `tortoise_fts_query`'s
+    `_ended_bound` is the fix. Before that, the name alone bought any site off.
 
     `search_engine.py` states the rule this protects: "the fused read JOINS its
     workers, so a leg on a different budget is a leg the cap cannot bound." The
@@ -783,31 +957,111 @@ def test_no_leg_in_the_fused_read_carries_its_own_budget_literal():
     budget (#11691 review, finding 3).
 
     A scan, not a count: the number of legs is expected to grow, so this asserts
-    about EVERY match rather than pinning how many there are.
+    about EVERY match rather than pinning how many there are. The scan itself is
+    `_budget_fallback_offenders`, pinned in both directions by the mutation test
+    below; this test is the same function applied to the real module.
     """
     source = pathlib.Path(sdk_module_file()).read_text()
-    tree = ast.parse(source)
-    offenders: list[str] = []
-    for node in ast.walk(tree):
-        # the shape `int(_elevated_timeout_ms or <X>)` — compare the AST, so a
-        # renamed local or a reformatted line cannot slip past a text search.
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "int" and len(node.args) == 1):
-            continue
-        inner = node.args[0]
-        if not (isinstance(inner, ast.BoolOp)
-                and isinstance(inner.op, ast.Or)
-                and len(inner.values) == 2
-                and isinstance(inner.values[0], ast.Name)
-                and inner.values[0].id == "_elevated_timeout_ms"):
-            continue
-        if not _names_the_budget(inner.values[1]):
-            offenders.append(
-                f"sdk.py:{node.lineno} binds {ast.unparse(node)} — the budget's "
-                f"fallback is a literal, so this leg keeps its own number")
+    offenders = _budget_fallback_offenders(source)
     assert not offenders, (
         "legs of the fused read carry their own budget literal:\n  "
         + "\n  ".join(offenders))
+
+    # POSITIVE CONTROL — the register is what admits a fallback, so every member
+    # must resolve to a real budget in the module that owns it, and the read's
+    # own budget must still be in it. A typo'd or invented entry buys nothing.
+    assert "VECTOR_LEG_BUDGET_MS" in DECLARED_LEG_BUDGETS, (
+        "the read's own budget was dropped from DECLARED_LEG_BUDGETS — the "
+        "register is not a place to retire it")
+    for name, (module_name, why, _site) in DECLARED_LEG_BUDGETS.items():
+        declared = getattr(importlib.import_module(module_name), name, None)
+        assert isinstance(declared, int) and declared > 0, (
+            f"DECLARED_LEG_BUDGETS admits {name!r} via {module_name}, which does "
+            f"not define it as a positive int ({declared!r}) — a register entry "
+            f"that resolves to nothing admits nothing")
+        assert why.strip(), f"{name} is admitted with no reason recorded"
+
+    # POSITIVE CONTROL — the site-scoped admissions are exactly one, and the
+    # exemption is USED (an exemption that pins no live statement is dormant,
+    # and a second statement with the same target would ride it).
+    exempt = {name: spec[2] for name, spec in DECLARED_LEG_BUDGETS.items()
+              if spec[2] is not None}
+    assert set(exempt) == {"ENDED_SCAN_BUDGET_MS"}, (
+        f"the site-scoped admissions are {sorted(exempt)} — re-derive this "
+        "control before widening it (#13302 review F1)")
+    tree = ast.parse(source)
+    used = {site for site, _stmt in _assignment_statements(tree)}
+    counts: dict[tuple[str, str], int] = {}
+    for site, _stmt in _assignment_statements(tree):
+        counts[site] = counts.get(site, 0) + 1
+    for name, site in exempt.items():
+        assert site in used, (
+            f"{name} is admitted for the site {site}, which binds no statement "
+            f"in sdk.py — a dormant exemption admits nothing")
+        assert counts.get(site) == 1, (
+            f"the exempting binding {site} is bound {counts.get(site, 0)} times "
+            f"in sdk.py — the admission is keyed on ONE statement")
+
+
+def test_a_declared_budget_is_admitted_only_at_the_site_that_earns_it():
+    """F1: the register's admission is SITE-scoped, not name-scoped.
+
+    Driven against synthetic trees, because this pins the GUARD rather than the
+    file it scans: the measured pre-fix behaviour was "retarget any joined leg's
+    fallback to `ENDED_SCAN_BUDGET_MS` and nothing reds", and a test that only
+    reads `sdk.py` can never show that. Each mutant below is exactly one edit to
+    a tree that otherwise satisfies the contract.
+    """
+    base = textwrap.dedent(
+        '''\
+        def tortoise_fts_query(self):
+            _probe = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
+            _residency = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
+            _bm25 = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
+            _structural = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
+            _expansion = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
+            _ended_bound = int(_elevated_timeout_ms or ENDED_SCAN_BUDGET_MS)
+        ''')
+
+    # CONTRACT HOLDS — the ended arm's own statement is admitted, and every joined
+    # leg still names the read's budget.
+    assert _budget_fallback_offenders(base) == [], _budget_fallback_offenders(base)
+
+    # THE FINDING, one mutant per joined leg: retarget THIS leg to the ended
+    # scan's 10 000 ms. Green everywhere before the fix.
+    joined = ("_probe", "_residency", "_bm25", "_structural", "_expansion")
+    for binding in joined:
+        mutant = base.replace(
+            f"{binding} = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)",
+            f"{binding} = int(_elevated_timeout_ms or ENDED_SCAN_BUDGET_MS)")
+        assert mutant != base, binding
+        offenders = _budget_fallback_offenders(mutant)
+        assert len(offenders) == 1 and binding in offenders[0], (binding, offenders)
+        assert "ENDED_SCAN_BUDGET_MS" in offenders[0], offenders
+
+    # …and the exemption cannot be carried to another statement by renaming its
+    # target, so the admission is a fact about the code, not about a comment.
+    renamed = base.replace("_ended_bound = int(_elevated_timeout_ms or "
+                           "ENDED_SCAN_BUDGET_MS)",
+                           "_scope_bound = int(_elevated_timeout_ms or "
+                           "ENDED_SCAN_BUDGET_MS)")
+    assert renamed != base
+    assert len(_budget_fallback_offenders(renamed)) == 1, (
+        _budget_fallback_offenders(renamed))
+
+    # …and a statement in ANOTHER function is not the admitted one either.
+    moved = base.replace("def tortoise_fts_query(self):",
+                         "def some_other_read(self):")
+    assert len(_budget_fallback_offenders(moved)) == 1, (
+        _budget_fallback_offenders(moved))
+
+    # The original defect class still reds: a literal at a joined site.
+    literal = base.replace("_bm25 = int(_elevated_timeout_ms or "
+                           "VECTOR_LEG_BUDGET_MS)",
+                           "_bm25 = int(_elevated_timeout_ms or 500)")
+    assert literal != base
+    offenders = _budget_fallback_offenders(literal)
+    assert len(offenders) == 1 and "names no budget" in offenders[0], offenders
 
 
 def sdk_module_file() -> str:

@@ -44837,7 +44837,11 @@ class TortoiseSDK:
         status set, slot literal or per-family deny-list lives here — served
         newest ending first, each row carrying the ending the record itself
         holds: its lifecycle `status` (``deprecated`` = nothing replaced it,
-        ``superseded`` = see `successorId`), the `stage` block (`slot` +
+        ``superseded`` = see the successor), the successor as the TWO facts the
+        model records — `successorId`/`allSuccessorIds` from a Point's `CORRECTS`
+        edge and `successorName` from the `supersededBy` carrier (an
+        Object/Subject names its successor; the carrier holds a NAME, so it is
+        never served under an `…Id` key) — the `stage` block (`slot` +
         `outcome`) for a record ended on the POSITION axis, and `endedAt`.
         `linkedEvents` carries the events wired to the record, which is what
         makes "planned and never happened" answerable without knowing a kind's
@@ -44864,6 +44868,15 @@ class TortoiseSDK:
         `ended_scope` is not a visibility field on the record and adds no word
         to the model: it is design §6's "option on the call", and the default
         keeps every existing surface answering exactly what it answered before.
+        The scan it issues is BOUNDED by `ended.ENDED_SCAN_BUDGET_MS`
+        (10 000 ms — FalkorDB's own general-query default, not the 500 ms leg
+        budget: #13302 review F1), overridable by the caller's own budget. A
+        budget it overruns degrades — zero rows, `incomplete`, a `degraded`
+        leg — **when the caller passes a sink that can carry that marking**
+        (`leg_trace`, `read_status_out` or `_truncation_out`); with none there
+        is nowhere for the marking to go, so it raises the store's error
+        instead of returning a bare `[]` that would claim "nothing of that
+        family ever ended" (#13302 review round 2).
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -45180,8 +45193,8 @@ class TortoiseSDK:
                     f"so it cannot apply {', '.join(_refused_ended)}. It answers "
                     f"\"what ended, and how\" from the records' own state: omit "
                     f"{', '.join(_refused_ended)} and read the returned rows' "
-                    f"`status` / `successorId` / `stage` (with its `slot` and "
-                    f"`outcome`) / `endedAt`. Narrow the population with "
+                    f"`status` / `successorId`+`successorName` / `stage` (with its "
+                    f"`slot` and `outcome`) / `endedAt`. Narrow the population with "
                     f"entity_type= and kind=, and bound the page with limit=; "
                     f"for a relevance read of what is still CURRENT, drop "
                     f"ended_scope and search as before."
@@ -45550,16 +45563,95 @@ class TortoiseSDK:
         # legs first would either waste them or — worse — let a degraded FTS
         # fallback fill an answer to a question that was never about words.
         if ended_scope:
-            from .ended import enumerate_ended
+            from .ended import ENDED_SCAN_BUDGET_MS, enumerate_ended
 
             # ONE row beyond the page, so the TRUNCATION marker is PROVEN rather
             # than guessed: a population wider than ``limit`` is the only way a
             # caller learns rows were cut, and asking for the extra row costs one
             # slot in a bounded scan. Without it the marker would have to report a
             # full page as complete (the #8447 defect) or an unfilled one as cut.
-            _fatter = enumerate_ended(
-                graph, entity_type=entity_type, kind=kind,
-                kinds=expanded_kinds, limit=limit + 1)
+            _ended_bound = int(_elevated_timeout_ms or ENDED_SCAN_BUDGET_MS)
+            try:
+                _fatter = enumerate_ended(
+                    graph, entity_type=entity_type, kind=kind,
+                    kinds=expanded_kinds, limit=limit + 1,
+                    # BOUNDED like every other statement this read issues: the
+                    # caller's own budget (the capstone's `_elevated_timeout_ms`)
+                    # or `ENDED_SCAN_BUDGET_MS`, never an unbounded query. ⛔ That
+                    # budget is the SCAN's own, not `VECTOR_LEG_BUDGET_MS`
+                    # (#13302 review F1): 500 ms is calibrated for the single-hop
+                    # legs (the `RETURN 1` probe, `_read_declaration`, the vector
+                    # legs), and a family-wide `MATCH … collect() … ORDER BY …
+                    # LIMIT` is not one of them — under it this arm degraded to an
+                    # empty answer on the population the read exists for.
+                    timeout_ms=_ended_bound)
+            except ValueError:
+                # ⛔ NOT a store failure: the door REFUSES a family with no
+                # lifecycle before it ever queries (`ended.py`'s `FAMILIES`
+                # check), and that refusal is the answer — swallowing it here
+                # would serve `ended_scope` on an Event as a degraded empty
+                # population, i.e. "nothing of that family ended", which is the
+                # claim the two must never share. Only the STORE's failure is
+                # degradable; a contract refusal keeps rising.
+                raise
+            except Exception as e:  # noqa: BLE001, RUF100
+                # ⛔ The degradation must be CARRIED, or it is a lie (#13302
+                # review round 2, P2). The marking below reaches the caller only
+                # through a sink: the leg entry through `status_trace`, the
+                # `incomplete` flag through `_truncation_out` (which
+                # `_with_read_status` publishes ONLY when that sink exists).
+                # With NEITHER, `[]` would arrive bare, byte-identical to the
+                # factual claim "nothing of that family ever ended" — the one
+                # reading `ended.py`'s docstring and this arm's own comment
+                # forbid. Measured before the guard: a no-sink caller got `[]`
+                # and a log line, nothing else.
+                #
+                # The SIBLING store-failure arm above answers it the same way —
+                # degrade when a sink exists, otherwise `raise` — so a caller
+                # with no vocabulary for "could not answer" gets the store's
+                # error, exactly as a direct `enumerate_ended` caller does.
+                # `status_trace` IS the "can this be carried?" test, and it is
+                # the only one needed: it is the caller's `leg_trace` when one
+                # was asked for, and is normalised to `[]` whenever a truncation
+                # sink exists without one (the #8447 round-5 seam just above).
+                # So `status_trace is None` is exactly `no sink at all` — do NOT
+                # key this on `read_status_out` alone the way the sibling arm can
+                # afford to: a trace-only or truncation-only caller HAS a
+                # vocabulary for "could not answer" and must keep degrading
+                # (`test_a_truncation_only_caller_still_degrades`,
+                # `test_a_trace_only_caller_sees_the_ended_leg_did_not_answer`).
+                if status_trace is None:
+                    raise
+                # FAIL-SAFE (#13302 review F1). FalkorDB's `timeout` is a MAXIMUM
+                # QUERY RUNTIME: the server aborts the statement and the client
+                # RAISES. This is the most expensive statement the read issues,
+                # so on a production-sized family it is the arm most likely to
+                # hit the budget — and without this handler a store that could
+                # not answer would throw OUT of a public read whose every
+                # sibling bounded statement degrades (the reachability probe
+                # above, the vector legs, `_read_declaration`). Degrade exactly
+                # as they do: zero rows, a leg entry that says the leg ran and
+                # did NOT answer, and a truncation marker that forbids reading
+                # the empty answer as COMPLETE. Never an unmarked empty list
+                # passed off as "nothing ever ended" — and, that being
+                # impossible without a sink, never a raise either once one is
+                # present (the guard above is what makes both true at once).
+                _logger.warning(
+                    "ended-scope enumeration did not answer within %s ms (%s) "
+                    "— degraded", _ended_bound, e)
+                # ⛔ APPEND IN PLACE, never rebind: `status_trace` IS the
+                # caller's `leg_trace` whenever no `read_status_out` was asked
+                # for (`45129`), and a rebind to a copy would send this entry to
+                # a list nobody reads — the sibling vector arm above
+                # (`45617`) appends in place for exactly that reason. A
+                # trace-only caller must see that the leg ran and did not
+                # answer, or the one record of the degradation is a throwaway.
+                if status_trace is not None:
+                    status_trace.append(_trace_entry(
+                        "ended", ran=True, degraded=True,
+                        reason="query_failed", count=0))
+                _trunc["incomplete"] = True
+                return _with_read_status([])
             _ended_rows = _fatter[:limit]
             # ``candidates`` is what this read could SEE and it may be BOUNDED
             # (exactly the hosted ``GET /v1/points`` ``limit+1`` probe shape), which
