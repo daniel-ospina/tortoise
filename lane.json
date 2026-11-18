@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-P6-1795038905-p2563336-d1cea47a",
+  "_sha": "da783b1c970cfc372fe104e5a840ade386621688",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/P6.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/11609-p6-red-pins"
+    },
+    {
+      "kind": "sha",
+      "value": "4eac297ddf05583350388f5b8fda739644cb0fa9"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/P6"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "duration_s": 7226,
+  "ended_at": 1795046131,
+  "exit_code": 143,
+  "heartbeat_at": 1795046131,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-P6-1795038905-p2563336-d1cea47a",
+  "lease_until": 1795053931,
+  "pid": 2563336,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795038905,
+  "state": "FAILED",
+  "tag": "P6",
+  "worktree": "/home/cmux/.worktrees/P6"
+}
