@@ -732,10 +732,11 @@ reads as an unclassified CYPHER statement in the bucket a migration candidate is
 **This cut's base:** `origin/main` **`c0463806db`**, merged here (the PR had gone `CONFLICTING` on this
 very file, and the conflict was resolved by REGENERATING it, never by picking a side: the pins and
 Appendix A are the merged tree's own `--markdown` output, and §0/§1's prose was re-measured with the
-predicates it states, not carried from a parent). ⚠️ **Both parents' §1 `rg` rows were one HIGH** —
-the branch and `main` each carried `2,347 / 146` whole-text and `2,334 / 14x` line-based while this
-merged tree measures **`2,346 / 145`** and **`2,333 / 144`**, because `main` removed one `MATCH (`
-occurrence (one carrying file) since the merge-base. The prose is the THIRD carrier with no check
+predicates it states, not carried from a parent). ⚠️ **Neither parent's §1 was re-measured at its own
+tree: BOTH carried `2,347 / 146` whole-text and `2,334 / 14x` line-based**, while this merged tree
+measures **`2,346 / 145`** and **`2,333 / 144`** — `main` removed one `MATCH (` occurrence, and the
+file that carried it, since the merge-base (measured at `bdcc133a41`: 2,334 / 145; at `origin/main`
+`c0463806db`: 2,333 / 144). The prose is the THIRD carrier with no check
 behind it — exactly the defect the paragraph above names — so the quoted counts are re-derived here
 and the bare/`.py`/`-t py` variants with them.
 
