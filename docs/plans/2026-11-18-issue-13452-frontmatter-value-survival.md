@@ -393,25 +393,32 @@ left that test GREEN, while a legal mid-body escape under a trailing comment, `'
 regressed from `('single-quoted', "it's")` to `('malformed', None)` (the same *delete a legal
 escape* remedy), with green CI. `test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured`
 now pins the parity half: with the skip deleted it reds and the sibling stays green
-(`1 failed, 1 passed`), so each half names its own falsifier.
+(`-k single_quoted` → `1 failed, 1 passed`), so each half names its own falsifier.
 
 **Fixed at this head — the `"` backslash skip had no pin (round-4 review).**
 
-`"a\"" # c` is legal YAML — `parse_frontmatter` returns `a"` — and the escaped quote sits
-immediately before the space-then-hash that introduces the comment, so a close found WITHOUT
-skipping backslash escapes lands on that
-escaped quote; nothing is stripped after it, the raw text reaches `_quoted_style` still ending in
-`# c`, and `value.endswith(q)` fails: the arm reports `('malformed', None)` — the same
-*remove the inner quote* class of false remedy this PR removes. This is the one arm the PRE-fix
+`"a\"" # c` is legal YAML — `parse_frontmatter` returns `a"` — and the TRUE close sits
+immediately before the space-then-hash that introduces the comment (for that raw the escaped quote
+is at index 3, the true close at 4, the `" #"` at 5). A close found WITHOUT skipping backslash
+escapes lands on the escaped quote at index 3 instead, so NO space-then-hash satisfies the split predicate:
+nothing is stripped, the raw text reaches `_quoted_style` still ending in `# c`, and
+`value.endswith(q)` fails — the arm reports `('malformed', None)`, the same
+*remove the inner quote* class of false remedy this PR removes. The mechanism is stated this
+precisely because it is NOT a mis-landed split: no split fires at all. (This paragraph carried the
+*landed on the escaped quote ⇒ the split took everything after it* wording until it was measured;
+the sibling parity test's docstring was corrected for the same wording first, and this copy
+survived that fix — recorded because the wrong mechanism is the one a reader would re-derive.)
+This is the one arm the PRE-fix
 helper already got RIGHT (it never scanned for a close: it cut at the space-then-hash whose left
 side ended in the quote char, which this shape satisfies), so the backslash skip is old behaviour carried by a
 NEW branch — and nothing else in the file reds when it goes: measured with the skip deleted at
 `f426ea53fa` (no pin in the file yet) the file stayed at `2 failed, 10 passed` — the same two
 pre-existing absence reds, nothing else noticing — while this shape regressed. Pinned now by
 `test_a_double_quoted_backslash_escape_before_a_comment_is_measured`; with the pin in place the same
-mutant reds this test alone (`-k double_quoted_backslash`: `1 failed, 12 deselected`), so the file's
+mutant reds this test alone (`-k double_quoted_backslash`), so the file's
 total under that mutant is the 2 pre-existing absence reds **plus** this one — no file-wide count is
-printed here, because it moves every time another test is appended. Same finding shape as the parity
+printed here, because it moves every time another test is appended (an earlier revision quoted
+`1 failed, 12 deselected` for that filter, which went stale the same way). Same finding shape as the parity
 half above, and the same reason it is worth its own test: `_closing_quote` added branches, and a
 branch nothing asserts is a branch a later simplification is free to drop.
 
