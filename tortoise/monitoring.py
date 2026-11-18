@@ -806,6 +806,89 @@ CACHE_LEG_FAILURE_COUNT = Counter(
     ["reason"],
 )
 
+#: DERIVED-entity embedding WRITES that produced no vector because the write
+#: bound declined to wait for a cold embedder (#13417).
+#:
+#: ⛔ **THE UNIT IS A DECLINED WRITE, NOT A ROW** — and that distinction is
+#: load-bearing, in the house form `CACHE_LEG_FAILURE_COUNT` above records for
+#: its own unit. The counter is emitted from `encode_for_row`'s bounded branch,
+#: the ONE seam where a write decides its row carries no vector, because a
+#: counter each fold had to remember would be missed by the next writer. The
+#: price of that seam is that the seam cannot see the row: it knows the encoder
+#: declined and it does NOT know whether the row already held a vector. Two
+#: consequences, both measured (2026-11-17) rather than assumed:
+#:
+#: * **A cold RE-WRITE counts and loses nothing.** Every DERIVED fold's write
+#:   clause preserves a stored vector against a null incoming one
+#:   (`vector_write.set_embedding_clause`, ``preserve_on_null=True``; only the
+#:   `Event` CREATE arm passes False). So `_upsert_subject`/`_upsert_object`
+#:   re-registering an already-embedded entity inside a cold window increments
+#:   this counter while the dense leg loses NOTHING — measured: warm create →
+#:   vector present; cold re-write of the same id → counter +1, vector still
+#:   present. ``graph_fold`` is therefore an **UPPER BOUND** on new holes, never
+#:   an exact row count. The exact end state is the repair's own reading
+#:   (`graph-scripts/backfill_embeddings.py --dry-run` /
+#:   `_residual_missing`), which is what actually reconciles the graph.
+#: * **ONE live create can decline once per LEG.** There are TWO bounded call
+#:   sites, not one: the four graph folds (`projection/entities.py`) and the
+#:   RECORD's own derivation (`record_writer.derived_embedding_columns`, #13220),
+#:   which runs before the cache fold — measured: one `ObjectRegistered` create
+#:   gave `graph_fold` +1 AND `record_derivation` +1. They are two CALLS in
+#:   sequence, not one call that counts twice: a projection fold invoked on its
+#:   own gives `graph_fold` alone and a `derived_embedding_columns` call on its
+#:   own gives `record_derivation` alone (both measured, and pinned by
+#:   `test_13417_vectorless_rows.py`). The distinction matters to anyone
+#:   reconciling the number against a single write path.
+#:
+#: Which is why the label is the LEG plus the cause, and why the two are never
+#: summed into one number an operator is asked to interpret:
+#:
+#: * ``graph_fold`` — the graph row carries no vector. Repair:
+#:   `graph-scripts/backfill_embeddings.py` (it recomputes from the row text).
+#: * ``record_derivation`` — the RECORD row's embedding column is NULL. Repair:
+#:   a **live re-write** (re-derivation) through `RecordWriter.write`, which is
+#:   `derived_embedding_columns`' ONLY caller. ⛔ **A journal replay is NOT a
+#:   repair today**, and saying so is the point: `record_projection.replay()`
+#:   re-derives only when its caller passes `derived=`, and the shipped
+#:   `tools/record_runner.py` fold passes none — so a replay leaves the column
+#:   NULL on the rows it creates (`tortoise/record_projection.py` records the
+#:   same limitation at its `DERIVED_COLUMNS` note, and the record migration's
+#:   header states it). There is **no operator CLI for this leg yet**; the graph
+#:   backfill is not one either (it reads graph nodes and would report 0 residual
+#:   over this population).
+#:
+#: ``decline`` vocabulary — ``"<leg>:<cause>"``, where ``cause`` is the value
+#: ``EmbeddingModel.await_write_ready_reason`` returned. The four causes need
+#: OPPOSITE operator responses (install the extra / repair a broken load / retry
+#: later / wait longer), and ``budget_expired`` is the only one where a wait
+#: actually happened — the genuine #13229 cost. Eight values, bounded, because
+#: `_collect_by_label` assumes ONE sample per label value.
+#:
+#: ⛔ **Two same-class causes are deliberately NOT counted here**, and the
+#: boundary is complete as stated: ``#5008``'s embed GATE (a designed, permanent
+#: absence — identifier-only text, which no wait and no backfill can change) and
+#: a refusal AFTER the bound (a wrong-width store — `_degrade_to_width` drops the
+#: vector — or an encoder that raised). Both are permanent and
+#: operator-actionable in a different way; parking either beside a real cold
+#: window would make a non-zero value unattributable, which is the ``#9231``
+#: review P2 lesson recorded at ``RECORD_NON_JOURNAL_SKIP_COUNT`` above.
+#:
+#: ⛔ **Never a term in ``status``.** Additive only: ``degraded`` stays reserved
+#: for an observed probe failure, and a cumulative counter must not pin a
+#: deployment degraded for the life of the process (see
+#: ``RECORD_REFUSAL_WINDOW_SECONDS`` below).
+#:
+#: Single writer: ``tortoise.embeddings._note_vectorless_write``.
+DERIVED_EMBED_DECLINE_COUNT = Counter(
+    "tortoise_derived_embed_declines_total",
+    "DERIVED-entity embedding writes that produced no vector because the write "
+    "bound skipped a cold embedder (#13417). Unit = a declined WRITE: "
+    "graph_fold is an UPPER BOUND on rows the dense leg lost (an ON MATCH "
+    "re-write preserves a stored vector), and one live create can decline once "
+    "per leg.",
+    ["decline"],
+)
+
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
 #:
 #: The counter above is CUMULATIVE since process start and is never reset — that
@@ -2814,6 +2897,40 @@ def record_cache_leg_failure(reason: str) -> None:
 def cache_leg_failure_counts() -> dict[str, int]:
     """In-process snapshot of ``CACHE_LEG_FAILURE_COUNT``, by reason (#12943)."""
     return _collect_by_label(CACHE_LEG_FAILURE_COUNT, "reason")
+
+
+def record_derived_embed_decline(scope: str, reason: str) -> None:
+    """Count one DERIVED-entity embedding WRITE that produced no vector (#13417).
+
+    The write HAPPENED — the row exists and every reader sees it; only its
+    vector is absent. That is why this is NOT a reason on any record/journal
+    failure counter: nothing was lost, and a record counter reading non-zero
+    here would misattribute a healthy record to a missing vector (the #4034
+    misattribution class, pointed the other way).
+
+    ``scope`` is the LEG the write belongs to and selects the REPAIR:
+    ``graph_fold`` → ``graph-scripts/backfill_embeddings.py``;
+    ``record_derivation`` → a live re-write (re-derivation), NOT a journal
+    replay and NOT the graph backfill — see the Counter's own note for why a
+    replay does not re-derive and why this leg has no operator CLI yet.
+    ``reason`` is the cause
+    ``EmbeddingModel.await_write_ready_reason`` returned. They are emitted as
+    ONE label value (``"<scope>:<reason>"``) rather than two labels because
+    :func:`_collect_by_label` assumes one sample per label value.
+
+    Single writer: ``tortoise.embeddings._note_vectorless_write``, called from
+    ``encode_for_row``'s bounded decline — the one seam where a write decides
+    its row carries no vector, so a new writer cannot leave the count behind.
+    What that seam cannot see (whether the row already held a vector, and that
+    one live create declines once per leg) is stated at
+    ``DERIVED_EMBED_DECLINE_COUNT``.
+    """
+    DERIVED_EMBED_DECLINE_COUNT.labels(decline=f"{scope}:{reason}").inc()
+
+
+def derived_embed_decline_counts() -> dict[str, int]:
+    """In-process snapshot of ``DERIVED_EMBED_DECLINE_COUNT``, by ``decline`` (#13417)."""
+    return _collect_by_label(DERIVED_EMBED_DECLINE_COUNT, "decline")
 
 
 def record_journal_write_failure() -> None:
@@ -7622,6 +7739,12 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
     offload_refusals, uptime} — plus the counter keys below (``wait_bound_breaches``
     #10602, ``health_setup_clamped`` #10749, ``record_position_unproven`` #9307,
     ``record_writes_applied``/``record_last_write_at`` #9548 and the rest).
+    #13417 adds ``derived_embed_declines`` — the DERIVED-entity embedding WRITES a
+    bounded write declined, keyed ``"<leg>:<cause>"``. It is an UPPER BOUND on
+    rows missing a vector (a cold re-write of an already-embedded row counts and
+    loses nothing), and its two legs have different repairs; see the counter's
+    own docstring for both, and read the repair's ``_residual_missing`` for the
+    exact end state.
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
@@ -7832,6 +7955,15 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # the measured shape (record 2 objects/3 points, cache 0/0) — so the
         # derived store gets its own key rather than a reason on the record's.
         "cache_leg_failures": cache_leg_failure_counts(),
+        # #13417: the DERIVED-entity vector's own channel. #13229 made a cold
+        # write return without a vector instead of blocking on a 13.5 s model
+        # load (p95 20,414 ms → 268 ms) — a trade that LEAVES ROWS the dense leg
+        # cannot find. §17.2 requires that divergence be checkable, and #13156
+        # rules out inferring it from the read side (a budget-cancelled leg reads
+        # like a slow store). Keyed by the decline's CAUSE, because the four
+        # causes need opposite responses. Like every key above: additive, never
+        # a term in `status`.
+        "derived_embed_declines": derived_embed_decline_counts(),
         # ...and WHERE the live writes actually landed (#12943 reopening). The
         # key above counts ONE configuration shape (record armed + embedded
         # cache); this one is cause-agnostic — `{store|graph: writes}` for this
