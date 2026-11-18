@@ -234,12 +234,32 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     make a name local to a block, so a binding in one block does not shadow a read in another) —
     a union is the sound minimal shape until this helper carries one. Neither arm alone invents
     or loses a site: the union is a strict superset of both, so no wiring either reading found
-    can go unreported — EXCEPT that a name this block BINDS is answered by the block alone (the
-    local rule in `_sets_for`; unioning it would re-admit the very shadow Python says wins).
-    A binding written inside a FUNCTION BODY IS replayed — into THAT block, and nowhere else
-    (`#13585 review` P3; see the block-identity note at `parents` below): it is another block's
-    local, so it cannot erase the module binding a sibling function's call resolves against,
-    and it MUST drop the name for the calls in its own block.
+    can go unreported — EXCEPT that a name a block on the call's chain BINDS is answered by that
+    block alone (unioning it would re-admit the very shadow Python says wins).
+
+    ⛔ EVERY BINDING IS REPLAYED INTO THE BLOCK THAT OWNS IT, AND A CALL IS RESOLVED THROUGH THE
+    WHOLE CHAIN (`#13585 review` P3). A FLAT replay cannot say which block a binding belongs to,
+    and that was wrong in BOTH available shapes: applying a shadow everywhere let one function's
+    local erase a real wiring elsewhere (the F1 defect), and skipping it everywhere meant a
+    shadow inside the graded call's OWN block never dropped the name for the calls after it —
+
+        from tortoise.tool_registry import FastAPIRouterAdapter
+        def build():
+            FastAPIRouterAdapter = object
+            return FastAPIRouterAdapter(x)      # `object(x)` — the name is LOCAL to this block
+
+    — which the pre-fix head reported as a site (`[4]`) where `main` reported `[]`: a FALSE
+    BLOCK, the pin claiming "routes ARE registry-derived again" about a module that derives
+    nothing. The language reference settles it (Execution model §4.2.1, `docs.python.org/3/
+    reference/executionmodel.html`; corroborated by PEP 227): *"If a name is bound in a block,
+    it is a local variable of that block, unless declared as nonlocal or global."* So a name
+    bound in a block resolves inside that block ONLY to that block's binding, and — because a
+    nested function CLOSES OVER an enclosing function's local — the same is true for every
+    enclosing FUNCTION block: `def outer(): A = object` … `def inner(): A(x)` instantiates
+    `object`, not the module's `A`, and the reverse (`outer` binds the MODULE) is a real wiring
+    a per-block seed would miss. That chain is why resolution walks `_lookup_keys` rather than a
+    single block's sets: grading one block against the module-final map alone reported `[5]` for
+    the closure shadow and `[]` for the closure wiring (measured).
 
     DELIBERATELY not matched, stated rather than hidden: an instantiation reached through a
     dict or a dynamic import the AST cannot resolve (`registry["FastAPIRouterAdapter"](…)`,
@@ -249,228 +269,298 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     by prose.
     """
     tree = ast.parse(source)
-    local_names: set[str] = set()
-    module_names: set[str] = set()
-
-    # ⛔ EVERY BINDING IS REPLAYED INTO THE BLOCK THAT OWNS IT (`#13585 review` P3 — the
-    # function-body shadow). A FLAT replay cannot say which block a binding belongs to, and that
-    # was wrong in BOTH available shapes: applying a shadow everywhere let one function's local
-    # erase a real wiring elsewhere (the F1 defect), and skipping it everywhere meant a shadow
-    # inside the graded call's OWN block never dropped the name for the calls after it —
-    #
-    #     from tortoise.tool_registry import FastAPIRouterAdapter
-    #     def build():
-    #         FastAPIRouterAdapter = object
-    #         return FastAPIRouterAdapter(x)      # `object(x)` — the name is LOCAL to this block
-    #
-    # — which the head reported as a site (`[4]`) where `main` reported `[]`: a FALSE BLOCK, the
-    # pin claiming "routes ARE registry-derived again" about a module that derives nothing. The
-    # language reference settles it (Execution model §4.2.1, `docs.python.org/3/reference/
-    # executionmodel.html`; corroborated by PEP 227): *"If a name is bound in a block, it is a
-    # local variable of that block, unless declared as nonlocal or global."* So a name bound
-    # anywhere in a function block resolves inside that block ONLY to that block's binding; the
-    # block's replay starts such a name empty, and its answer is definitive (the fail-closed union
-    # below cannot re-admit it).
-    parents: dict[int, ast.AST] = {}
-    for _parent in ast.walk(tree):
-        for _child in ast.iter_child_nodes(_parent):
-            parents[id(_child)] = _parent
-
-    def _scope_of(node: ast.AST) -> int | None:
-        """`id()` of the innermost enclosing FUNCTION block, or `None` at module level.
-
-        `id()` is the block key: it is stable for this call and the event list carries the same
-        node objects. A CLASS body is attributed to the enclosing function (or module) rather
-        than getting a key of its own — exactly how the walk this replaced already treated
-        class-body assignments; that residual is unchanged here, not widened.
-        """
-        current = parents.get(id(node))
-        while current is not None:
-            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                return id(current)
-            current = parents.get(id(current))
-        return None
-
-    def _binding_targets(node: ast.AST) -> set[str]:
-        """Every name `node` BINDS, per the language reference's list of binding forms.
-
-        Used only to decide whether a name is LOCAL to a block (the seed rule in `_sets_for`),
-        so it is deliberately broader than `_apply_import_or_definition`, which tracks only the
-        adapter and its module.
-        """
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            return {target.id for target in targets if isinstance(target, ast.Name)}
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            return {alias.asname or alias.name.split(".", 1)[0] for alias in node.names}
-        if isinstance(node, ast.ClassDef):
-            return {node.name}
-        return set()
-
-    def _function_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-        params = list(node.args.posonlyargs) + list(node.args.args) + list(node.args.kwonlyargs)
-        if node.args.vararg is not None:
-            params.append(node.args.vararg)
-        if node.args.kwarg is not None:
-            params.append(node.args.kwarg)
-        return {param.arg for param in params}
-
-    #: What each block binds ANYWHERE in it — the local rule above, computed once. A name here
-    #: is local to that block, so the block's replay starts it EMPTY instead of inheriting the
-    #: module's meaning (Python makes the local binding shadow for the WHOLE block, not just for
-    #: the statements after it).
-    scope_bound: dict[int | None, set[str]] = {}
-    for _node in ast.walk(tree):
-        if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # a `def` binds its NAME in the enclosing block and its PARAMETERS in its own
-            scope_bound.setdefault(_scope_of(_node), set()).add(_node.name)
-            scope_bound.setdefault(id(_node), set()).update(_function_params(_node))
-            continue
-        if isinstance(_node, (ast.Assign, ast.AnnAssign, ast.Import, ast.ImportFrom,
-                              ast.ClassDef)):
-            scope_bound.setdefault(_scope_of(_node), set()).update(_binding_targets(_node))
 
     def _is_module_name(dotted: str) -> bool:
         return dotted.rsplit(".", 1)[-1] == _ADAPTER_MODULE
 
-    def _resolves_to_class(dotted: str | None, local: set[str] | frozenset[str],
-                           module: set[str] | frozenset[str]) -> bool:
+    # ── SCOPE ATTRIBUTION ────────────────────────────────────────────────────────────────
+    # Every node is attributed to its BLOCK CHAIN: the innermost
+    # `FunctionDef`/`AsyncFunctionDef`/`Lambda`/`ClassDef` first, then its enclosing blocks,
+    # then the module (the empty chain). Python binds a name to the block that assigns it —
+    # *"a name bound anywhere within a function block is treated as local to that block"*
+    # (language reference, Execution model / Naming and binding; PEP 227) — so a call is graded
+    # against ITS OWN chain and never against a sibling block's locals.
+    #
+    # ⛔ THIS IS `#13585 review P3`. The flat replay skipped every function-body assignment to
+    # keep a sibling function's local from unbinding the module name — but skipping the replay
+    # also meant a shadow in the SAME block never dropped the name, so
+    # `def build(): FastAPIRouterAdapter = object; return FastAPIRouterAdapter(x)` reported a
+    # site for `object(x)`: a FALSE BLOCK the pin did not previously emit.
+    chains: dict[int, tuple[ast.AST, ...]] = {}
+
+    def _chain(node: ast.AST) -> tuple[ast.AST, ...]:
+        return chains.get(id(node), ())
+
+    def _walk(node: ast.AST, stack: tuple[ast.AST, ...]) -> None:
+        chains[id(node)] = stack
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # Decorators and default values are EVALUATED in the enclosing block, so they are
+            # attributed there; the body and the parameters are the new block.
+            for decorator in getattr(node, "decorator_list", ()):
+                _walk(decorator, stack)
+            for default in node.args.defaults:
+                _walk(default, stack)
+            for default in node.args.kw_defaults:
+                if default is not None:
+                    _walk(default, stack)
+            inner = (*stack, node)
+            for child in (node.body if isinstance(node.body, list) else [node.body]):
+                _walk(child, inner)
+            return
+        if isinstance(node, ast.ClassDef):
+            for decorator in node.decorator_list:
+                _walk(decorator, stack)
+            for base in [*node.bases, *(keyword.value for keyword in node.keywords)]:
+                _walk(base, stack)
+            inner = (*stack, node)
+            for child in node.body:
+                _walk(child, inner)
+            return
+        for child in ast.iter_child_nodes(node):
+            _walk(child, stack)
+
+    _walk(tree, ())
+
+    MODULE: int | None = None  # the module block's key (no other key can be None)
+    CLASS_BINDING = "class"
+    MODULE_BINDING = "module"
+    SHADOWED = "shadowed"
+
+    def _key(chain: tuple[ast.AST, ...]) -> int | None:
+        return id(chain[-1]) if chain else MODULE
+
+    def _lookup_keys(chain: tuple[ast.AST, ...]) -> list[int | None]:
+        """The block keys a name is resolved through, innermost first, then the module.
+
+        A CLASS body is its own namespace but is NOT in a nested function's or lambda's lookup
+        chain (Python's LEGB does not consult a class namespace from a method), so it is
+        skipped unless the call sits directly in that class body.
+        """
+        keys: list[int | None] = []
+        for position, block in enumerate(reversed(chain)):
+            if isinstance(block, ast.ClassDef) and position > 0:
+                continue
+            keys.append(id(block))
+        keys.append(MODULE)
+        return keys
+
+    #: The names each block binds ANYWHERE (so a same-block shadow shadows the module name for
+    #: every read in that block, exactly as Python's compile-time scoping does), and the value
+    #: each of those names holds as the walk sees it.
+    binds: dict[int | None, set[str]] = {MODULE: set()}
+    envs: dict[int | None, dict[str, str]] = {MODULE: {}}
+
+    declared_global: dict[int | None, set[str]] = {}
+    declared_nonlocal: dict[int | None, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            bucket = declared_global if isinstance(node, ast.Global) else declared_nonlocal
+            bucket.setdefault(_key(_chain(node)), set()).update(node.names)
+
+    def _note_binding(name: str, chain: tuple[ast.AST, ...]) -> None:
+        key = _key(chain)
+        if name in declared_nonlocal.get(key, ()):
+            return  # bound in an enclosing FUNCTION block; not this one's local
+        if name in declared_global.get(key, ()):
+            key = MODULE
+        binds.setdefault(key, set()).add(name)
+
+    def _target_names(target: ast.AST) -> list[str]:
+        return [node.id for node in ast.walk(target) if isinstance(node, ast.Name)]
+
+    def _parameter_names(args: ast.arguments) -> list[str]:
+        names = [param.arg for param in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+        for extra in (args.vararg, args.kwarg):
+            if extra is not None:
+                names.append(extra.arg)
+        return names
+
+    for node in ast.walk(tree):
+        chain = _chain(node)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for name in _target_names(target):
+                    _note_binding(name, chain)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            for name in _target_names(node.target):
+                _note_binding(name, chain)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    for name in _target_names(item.optional_vars):
+                        _note_binding(name, chain)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                _note_binding(node.name, chain)
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for generator in node.generators:
+                for name in _target_names(generator.target):
+                    _note_binding(name, chain)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                _note_binding(alias.asname or alias.name.split(".", 1)[0], chain)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if not isinstance(node, ast.Lambda):
+                _note_binding(node.name, chain)
+            inner = (*chain, node)
+            for name in _parameter_names(node.args):
+                _note_binding(name, inner)
+        elif isinstance(node, ast.ClassDef):
+            _note_binding(node.name, chain)
+
+    def _resolve(name: str, chain: tuple[ast.AST, ...], env_map: dict) -> str | None:
+        """The value `name` holds as seen from `chain`: a binding kind, or None if unbound.
+
+        A name bound in an INNER block stops the search even when its value is not the adapter
+        (`SHADOWED`) — that is Python's own shadowing rule, and it is what stops a module-level
+        import from lending its meaning to a call whose own block rebinds the name.
+        """
+        for key in _lookup_keys(chain):
+            if name in binds.get(key, ()):
+                return env_map.get(key, {}).get(name, SHADOWED)
+        return None
+
+    def _kind(dotted: str | None, chain: tuple[ast.AST, ...], env_map: dict) -> str | None:
+        """CLASS_BINDING / MODULE_BINDING / None for the dotted name as seen from `chain`."""
+        if dotted is None:
+            return None
+        root, _, rest = dotted.partition(".")
+        kind = _resolve(root, chain, env_map)
+        if rest:
+            return CLASS_BINDING if (kind == MODULE_BINDING and rest == _ADAPTER_CLASS) else None
+        return kind
+
+    def _resolves_to_class(dotted: str | None, chain: tuple[ast.AST, ...], env_map: dict) -> bool:
         if dotted is None:
             return False
-        if dotted in local:
-            return True
         head, _, tail = dotted.rpartition(".")
-        if tail != _ADAPTER_CLASS:
+        if tail == _ADAPTER_CLASS and _is_module_name(head):
+            # a fully dotted path with no bound root (`tortoise.tool_registry.FastAPIRouterAdapter`)
+            return True
+        return _kind(dotted, chain, env_map) == CLASS_BINDING
+
+    def _resolves_to_module(dotted: str | None, chain: tuple[ast.AST, ...], env_map: dict) -> bool:
+        if dotted is None:
             return False
-        return head in module or _is_module_name(head)
+        if "." in dotted and _is_module_name(dotted):
+            return True  # `tortoise.tool_registry` spelled out
+        return _kind(dotted, chain, env_map) == MODULE_BINDING
 
-    def _resolves_to_module(dotted: str | None, module: set[str] | frozenset[str]) -> bool:
-        return dotted is not None and (dotted in module or _is_module_name(dotted))
-
-    def _apply_import_or_definition(node: ast.AST, local: set[str], module: set[str]) -> None:
-        if isinstance(node, ast.ClassDef) and node.name == _ADAPTER_CLASS:
+    def _apply_import_or_definition(node: ast.AST, chain: tuple[ast.AST, ...]) -> None:
+        env = envs.setdefault(_key(chain), {})
+        if isinstance(node, ast.ClassDef):
             # ⛔ The DEFINING module is where a bare-name wiring is most likely, so the class
             # definition is itself a binding. An import-only reading made
             # `FastAPIRouterAdapter(app)` inside `tool_registry.py` invisible — the one module
             # the docstring above names as the legitimate wiring site.
-            local.add(node.name)
+            env[node.name] = CLASS_BINDING if node.name == _ADAPTER_CLASS else SHADOWED
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                bound = alias.asname or alias.name
+                bound = alias.asname or alias.name.split(".", 1)[0]
                 if alias.name == _ADAPTER_CLASS:
-                    local.add(bound)
+                    env[bound] = CLASS_BINDING
                 elif _is_module_name(alias.name):
                     # `from tortoise import tool_registry as tr` — the spelling this very file
                     # uses for `mcp_server` (`from tortoise import mcp_server as ms`), so it is
                     # a realistic regression path rather than an exotic one.
-                    module.add(bound)
+                    env[bound] = MODULE_BINDING
+                else:
+                    env.setdefault(bound, SHADOWED)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                if _is_module_name(alias.name):
-                    module.add(alias.asname or alias.name.split(".", 1)[0])
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                env[bound] = MODULE_BINDING if _is_module_name(alias.name) else SHADOWED
 
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.ClassDef, ast.ImportFrom, ast.Import)):
-            _apply_import_or_definition(node, local_names, module_names)
-
-    def _apply_assignment(node: ast.Assign | ast.AnnAssign, local: set[str],
-                          module: set[str]) -> None:
+    def _apply_assignment(node: ast.Assign | ast.AnnAssign, chain: tuple[ast.AST, ...]) -> None:
+        env = envs.setdefault(_key(chain), {})
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         bound_value = _dotted(node.value) if node.value is not None else None
+        class_bound = _resolves_to_class(bound_value, chain, envs)
+        module_bound = _resolves_to_module(bound_value, chain, envs)
         for target in targets:
-            if not isinstance(target, ast.Name):
+            for name in _target_names(target):
+                if class_bound:
+                    env[name] = CLASS_BINDING
+                elif module_bound:
+                    env[name] = MODULE_BINDING
+                else:
+                    # a reassignment that resolves to neither DROPS the name (see docstring).
+                    env[name] = SHADOWED
+
+    def _apply_parameters(node: ast.AST, chain: tuple[ast.AST, ...]) -> None:
+        """Bind a function's parameters in ITS block.
+
+        Default-argument bindings are statically readable (`def build(app,
+        cls=FastAPIRouterAdapter): cls(app)` instantiates the adapter), so a parameter whose
+        default resolves to the adapter stands for it. Every parameter still BINDS in the
+        function's block — a parameter with any other default shadows the module name for the
+        whole body, which is why it is recorded as `SHADOWED` rather than skipped.
+        """
+        env = envs.setdefault(id(node), {})
+        args = node.args
+        positional = [*args.posonlyargs, *args.args]
+        defaults = list(args.defaults)
+        pairs = list(zip(positional[-len(defaults):] if defaults else [], defaults, strict=False))
+        pairs += list(zip(args.kwonlyargs, args.kw_defaults, strict=False))
+        resolvable: dict[str, str] = {}
+        for param, default in pairs:
+            if default is None:
                 continue
-            if _resolves_to_class(bound_value, local, module):
-                local.add(target.id)
-                module.discard(target.id)
-            elif _resolves_to_module(bound_value, module):
-                module.add(target.id)
-                local.discard(target.id)
-            else:
-                # a reassignment that resolves to neither DROPS the name (see docstring).
-                local.discard(target.id)
-                module.discard(target.id)
+            resolved = _dotted(default)
+            if _resolves_to_class(resolved, chain, envs):
+                resolvable[param.arg] = CLASS_BINDING
+            elif _resolves_to_module(resolved, chain, envs):
+                resolvable[param.arg] = MODULE_BINDING
+        for name in _parameter_names(args):
+            env[name] = resolvable.get(name, SHADOWED)
 
     # FORWARD-REFERENCE PRE-PASS. Two ordered passes so a chain declared below its use
     # (`A = B` before `B = FastAPIRouterAdapter`) still resolves, while staying deterministic:
     # an unordered fixpoint would oscillate the moment a later shadow undoes an earlier add.
-    # ⛔ MODULE-LEVEL bindings only. This pre-pass SEEDS the module-final map — the fail-closed
-    # arm below — and a shadow written inside a function body must not erase the module binding
-    # a call in another block resolves against (`#13585 review` F1, the false-PASS direction:
-    # `def other(): A(app)` must keep resolving through the module binding a sibling function's
-    # local shadow never touched). Each function block replays its OWN bindings via `_sets_for`.
+    # Interleaved with the parameter pass, because a default value may name an alias declared
+    # elsewhere in its own block.
     assignments = sorted(
         (node for node in ast.walk(tree)
-         if isinstance(node, (ast.Assign, ast.AnnAssign)) and _scope_of(node) is None),
+         if isinstance(node, (ast.Assign, ast.AnnAssign))),
         key=lambda node: (node.lineno, node.col_offset),
     )
+    definitions = sorted(
+        (node for node in ast.walk(tree)
+         if isinstance(node, (ast.ClassDef, ast.ImportFrom, ast.Import))),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
+    parameterisable = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+    ]
     for _ in range(2):
+        for node in definitions:
+            _apply_import_or_definition(node, _chain(node))
         for node in assignments:
-            _apply_assignment(node, local_names, module_names)
+            _apply_assignment(node, _chain(node))
+        for node in parameterisable:
+            _apply_parameters(node, _chain(node))
 
-    # ⛔ THE SECOND ARM OF THE UNION: main's module-final map, snapshotted BEFORE the ordered
-    # walk mutates the live sets. This is `#13585 review P2` — the positional walk alone reports
-    # `[]` for a wiring whose binding is settled in a scope the walk cannot attribute, and that
-    # direction is the false PASS this reader exists to prevent. Keeping main's semantics as its
-    # own arm means the union can never lose a site the pre-F1 read found.
-    final_local_names = frozenset(local_names)
-    final_module_names = frozenset(module_names)
-
-    scope_local_sets: dict[int, set[str]] = {}
-    scope_module_sets: dict[int, set[str]] = {}
-
-    def _sets_for(scope: int | None) -> tuple[set[str], set[str]]:
-        """The name sets that hold in `scope` — module level, or ONE function block.
-
-        A function block INHERITS the module-final map for every name it does not bind (those
-        are free variables, resolved through the module) and starts EMPTY for every name it does
-        bind: the local rule, so the block's own replay decides and nothing else can.
-        """
-        if scope is None:
-            return local_names, module_names
-        if scope not in scope_local_sets:
-            local = set(final_local_names)
-            module = set(final_module_names)
-            for name in scope_bound.get(scope, ()):
-                local.discard(name)
-                module.discard(name)
-            scope_local_sets[scope] = local
-            scope_module_sets[scope] = module
-        return scope_local_sets[scope], scope_module_sets[scope]
-
-    # Default-argument bindings: `def build(app, cls=FastAPIRouterAdapter): cls(app)` is a
-    # statically readable instantiation, not a dynamic one. The parameter is bound in the
-    # FUNCTION's block, so it joins that block's sets — not the module's.
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        block_local, block_module = _sets_for(id(node))
-        positional = list(node.args.posonlyargs) + list(node.args.args)
-        if node.args.defaults:
-            for param, default in zip(positional[-len(node.args.defaults):],
-                                      node.args.defaults, strict=False):
-                if _resolves_to_class(_dotted(default), block_local, block_module):
-                    block_local.add(param.arg)
-        for param, default in zip(node.args.kwonlyargs, node.args.kw_defaults,
-                                  strict=False):
-            if default is not None and _resolves_to_class(
-                    _dotted(default), block_local, block_module):
-                block_local.add(param.arg)
+    # ⛔ THE SECOND ARM OF THE UNION: the module-final map, snapshotted BEFORE the ordered walk
+    # mutates the live environments. This is `#13585 review P2` — the positional walk alone
+    # reports `[]` for a wiring whose binding is settled in a scope the walk cannot attribute,
+    # and that direction is the false PASS this reader exists to prevent. Arm 2 resolves through
+    # the SAME scope chain as arm 1, so it restores every site the positional arm loses while
+    # still honouring a same-block shadow (which is what `#13585 review P3` measured).
+    final_envs: dict[int | None, dict[str, str]] = {
+        key: dict(env) for key, env in envs.items()
+    }
 
     def _is_instantiation(node: ast.Call) -> bool:
+        chain = _chain(node)
         dotted = _dotted(node.func)
-        scope = _scope_of(node)
-        head = dotted.split(".", 1)[0] if dotted is not None else None
-        locally_bound = scope is not None and head in scope_bound.get(scope, ())
-        block_local, block_module = _sets_for(scope)
-        if dotted is not None and _resolves_to_class(dotted, block_local, block_module):
-            return True
-        # ⛔ …or where the module settles (the fail-closed arm) — but NOT for a name THIS block
-        # binds: a local binding is definitive in Python, so unioning it would re-admit exactly
-        # the shadow the local rule just dropped (`#13585 review` P3). Every other name is a
-        # free variable, so the module-final reading is still a legitimate arm for it.
-        if (dotted is not None and not locally_bound
-                and _resolves_to_class(dotted, final_local_names, final_module_names)):
+        if dotted is not None and (
+            # where it stands (the per-position arm)
+            _resolves_to_class(dotted, chain, envs)
+            # …or where its blocks settle (the fail-closed arm)
+            or _resolves_to_class(dotted, chain, final_envs)
+        ):
             return True
         return (
             dotted == "getattr"
@@ -480,34 +570,34 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         )
 
     # ⛔ ONE SOURCE-ORDERED WALK, seeded with the pre-pass, NOT a final-map lookup (#13537
-    # review F1). The sets above are the pre-pass RESULT; walking the bindings again at their
-    # own positions is what makes a call answer against the bindings that hold WHERE IT
+    # review F1). The environments above are the pre-pass RESULT; replaying the bindings at
+    # their own positions is what makes a call answer against the bindings that hold WHERE IT
     # STANDS, so a later `A = object` cannot erase an earlier `A(app)` and an earlier one
     # cannot lend its meaning to a later call.
     events: list[tuple[int, int, int, ast.AST]] = []
+    binders = (ast.Assign, ast.AnnAssign, ast.Import, ast.ImportFrom, ast.ClassDef,
+               ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call, ast.Import,
-                             ast.ImportFrom, ast.ClassDef)):
+        if isinstance(node, (*binders, ast.Call)):
             # `ast.walk` yields parents before children, and a nested call shares its
-            # parent's line — so the column orders them, and the type rank keeps an
-            # assignment/import ahead of a call that starts at the same column. The import and
+            # parent's line — so the column orders them, and the type rank keeps a
+            # BINDING ahead of a call that starts at the same column. The import and
             # class-definition bindings are replayed here too, not just consumed by the seed
             # above: without them the walk would start from the PRE-PASS RESULT (which a later
             # shadow has already emptied) and the first binding in the file would count for
             # nothing.
-            rank = 0 if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Import,
-                                         ast.ImportFrom, ast.ClassDef)) else 1
+            rank = 1 if isinstance(node, ast.Call) else 0
             events.append((node.lineno, node.col_offset, rank, node))
     events.sort(key=lambda event: (event[0], event[1], event[2]))
     sites: list[int] = []
     for _lineno, _col, _rank, node in events:
+        chain = _chain(node)
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            # replayed into the block that OWNS it, so a function-local shadow drops the name
-            # for the calls in that block and touches no other (the `nested_bindings` skip this
-            # replaced answered the sibling-function case by ignoring the same-block one).
-            _apply_assignment(node, *_sets_for(_scope_of(node)))
+            _apply_assignment(node, chain)
         elif isinstance(node, (ast.ClassDef, ast.ImportFrom, ast.Import)):
-            _apply_import_or_definition(node, *_sets_for(_scope_of(node)))
+            _apply_import_or_definition(node, chain)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            _apply_parameters(node, chain)
         elif _is_instantiation(node):
             sites.append(node.lineno)
     return sorted(sites)
@@ -1175,6 +1265,35 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "    cls = FastAPIRouterAdapter\n"
         "    return cls(app)\n"
     ), "a function-local ALIAS of the module-level adapter stopped resolving"
+    # ⛔ …AND THE SAME RULE THROUGH THE ENCLOSING CHAIN, not just the call's own block. A nested
+    # function CLOSES OVER an enclosing function's local, so a shadow written in the ENCLOSING
+    # block governs the nested call — grading the inner block against the module-final map alone
+    # reported `[5]` here (a FALSE BLOCK on `object(x)`), which is the same species as the row
+    # above and the reason resolution walks the whole chain.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "def outer():\n"
+        "    FastAPIRouterAdapter = object\n"
+        "    def inner():\n"
+        "        return FastAPIRouterAdapter(x)\n"
+        "    return inner\n"
+    ) == [], (
+        "a shadow in an ENCLOSING block did not reach the nested call — the enclosing local is "
+        "what the closure reads, not the module name")
+    # …and the dangerous direction of the same chain: an enclosing block that binds the MODULE
+    # makes a nested call a REAL wiring, which a per-block seed resolved to `[]` (a FALSE PASS —
+    # the direction this whole reader exists to prevent, so it is the one that matters most).
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "tr = _fake_thing()\n"
+        "def outer():\n"
+        "    tr = tool_registry\n"
+        "    def inner():\n"
+        "        return tr.FastAPIRouterAdapter(x)\n"
+        "    return inner\n"
+    ), "a wiring bound in an ENCLOSING block was missed by the nested call — the closure reads " \
+       "that local, and reporting `[]` here would leave the pin green over a real registry-derived " \
+       "route"
     # and the forward-reference half must survive the per-position read: Python resolves a name
     # at CALL time, so a chain declared below its use still instantiates the adapter.
     assert _adapter_instantiation_sites(
