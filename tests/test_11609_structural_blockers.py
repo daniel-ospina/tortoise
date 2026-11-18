@@ -187,26 +187,76 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
       reded the pin with "REST routes ARE registry-derived again", a claim about a string.
 
     Matched: the bare name, a `from … import FastAPIRouterAdapter as X` alias, an
-    `import … tool_registry as tr` / `import tortoise.tool_registry` attribute chain, and
-    `getattr(mod, "FastAPIRouterAdapter")`. DELIBERATELY not matched, and stated rather than
-    hidden: an instantiation the AST cannot resolve (`registry["FastAPIRouterAdapter"](…)`,
-    `__import__`, a subclass instantiated instead of the class). A regex cannot see those
-    either, and at least the AST cannot be fooled by prose.
+    `import … tool_registry as tr` / `import tortoise.tool_registry` attribute chain,
+    `from … import tool_registry as tr`, `getattr(mod, "FastAPIRouterAdapter")`, and — via one
+    rebinding pass to a fixpoint — `A = FastAPIRouterAdapter; A(app)` and
+    `mod = tool_registry; mod.FastAPIRouterAdapter(app)`. The class DEFINITION in the module
+    that defines it is a binding too, because that module is the one place a bare-name wiring
+    is expected.
+
+    DELIBERATELY not matched, stated rather than hidden: an instantiation reached through a
+    dict or a dynamic import the AST cannot resolve (`registry["FastAPIRouterAdapter"](…)`,
+    `importlib.import_module(...)`, `__import__`), a `functools.partial` of it, and an
+    instantiation of a SUBCLASS. A regex cannot see those either, and at least the AST cannot
+    be fooled by prose.
     """
     tree = ast.parse(source)
     local_names: set[str] = set()
     module_names: set[str] = set()
+
+    def _is_module_name(dotted: str) -> bool:
+        return dotted.rsplit(".", 1)[-1] == _ADAPTER_MODULE
+
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            if (node.module or "").rsplit(".", 1)[-1] != _ADAPTER_MODULE:
-                continue
+        if isinstance(node, ast.ClassDef) and node.name == _ADAPTER_CLASS:
+            # ⛔ The DEFINING module is where a bare-name wiring is most likely, so the class
+            # definition is itself a binding. An import-only reading made
+            # `FastAPIRouterAdapter(app)` inside `tool_registry.py` invisible — the one module
+            # the docstring above names as the legitimate wiring site.
+            local_names.add(node.name)
+        elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
+                bound = alias.asname or alias.name
                 if alias.name == _ADAPTER_CLASS:
-                    local_names.add(alias.asname or alias.name)
+                    local_names.add(bound)
+                elif _is_module_name(alias.name):
+                    # `from tortoise import tool_registry as tr` — the spelling this very file
+                    # uses for `mcp_server` (`from tortoise import mcp_server as ms`), so it is
+                    # a realistic regression path rather than an exotic one.
+                    module_names.add(bound)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.rsplit(".", 1)[-1] == _ADAPTER_MODULE:
+                if _is_module_name(alias.name):
                     module_names.add(alias.asname or alias.name.split(".", 1)[0])
+
+    # Rebindings, resolved to a fixpoint: `A = FastAPIRouterAdapter; A(app)` and
+    # `mod = tool_registry; mod.FastAPIRouterAdapter(app)` are exactly what an AST CAN see,
+    # so calling them "unresolvable" would have been a false disclosure.
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if value is None:
+                continue
+            bound_value = _dotted(value)
+            if bound_value is None:
+                continue
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if bound_value in local_names and target.id not in local_names:
+                    local_names.add(target.id)
+                    changed = True
+                elif (bound_value in module_names or _is_module_name(bound_value)) \
+                        and target.id not in module_names:
+                    module_names.add(target.id)
+                    changed = True
 
     sites: list[int] = []
     for node in ast.walk(tree):
@@ -747,6 +797,33 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "import tortoise.tool_registry as tr\n"
         "app = getattr(tr, 'FastAPIRouterAdapter')(app)\n"
     ), "`getattr(mod, 'FastAPIRouterAdapter')(…)` binds the same class without naming it"
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry as tr\n"
+        "app = tr.FastAPIRouterAdapter(app)\n"
+    ), "`from pkg import tool_registry as tr` is not read as a module binding — the spelling " \
+       "this very test file uses for `mcp_server`"
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "A = FastAPIRouterAdapter\n"
+        "A = FastAPIRouterAdapter\n"
+        "app = A(app)\n"
+    ), "a rebound local alias (`A = FastAPIRouterAdapter; A(app)`) is not resolved"
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "mod = tool_registry\n"
+        "app = mod.FastAPIRouterAdapter(app)\n"
+    ), "a rebound module alias (`mod = tool_registry; mod.FastAPIRouterAdapter(app)`) is " \
+       "not resolved"
+    # the class DEFINED in the module that defines it, wired by bare name: the one module the
+    # helper's own docstring names as the legitimate wiring site.
+    assert _adapter_instantiation_sites(
+        "class FastAPIRouterAdapter:\n"
+        "    def __init__(self, app): self.app = app\n"
+        "def build_routes(app, handlers):\n"
+        "    adapter = FastAPIRouterAdapter(app)\n"
+        "    adapter.register_all(TOOL_REGISTRY, handlers)\n"
+    ), "a bare-name instantiation inside the DEFINING module is invisible — the one place a " \
+       "wiring is expected"
 
     # the DEFINITION is not a call — `tool_registry.py` legitimately declares the class.
     assert _adapter_instantiation_sites(

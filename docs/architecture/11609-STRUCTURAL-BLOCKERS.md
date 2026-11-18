@@ -226,12 +226,15 @@ $ rg -n 'FastAPIRouterAdapter' --glob '!.venv/*' .
 ```
 
 (Excerpt. The print above is the product code plus the test that constructs the adapter. The
-full run's remaining hits are 12 in other `docs/…` files, 10 in this document (one of them
-this file's own frontmatter `aboutObjects:` line), and 16 in
-`tests/test_11609_structural_blockers.py` — none of them product code.)
+full run's remaining hits are in other `docs/…` files, in this document (including its own
+frontmatter `aboutObjects:` line) and in the pins themselves — none of them product code. The
+per-file counts are deliberately **not** quoted: editing this document changes them, which is
+exactly how an earlier revision's numbers went stale between two heads.)
 
-The only **instantiation** is in a test (`tests/test_tool_registry.py:818`); the product has
-a comment and the class definition, and nothing else. And `tortoise/hosted_api.py` does not import
+No **product** module instantiates it. The **tests** do, deliberately —
+`tests/test_tool_registry.py:818` and this file's own adapter probes
+(`tests/test_11609_structural_blockers.py:978`, `:1016`). The product has a comment and the
+class definition, and nothing else. And `tortoise/hosted_api.py` does not import
 `TOOL_REGISTRY` for routes at all (its only registry import is `capability_catalog`, an
 unrelated indexer table). The **served** routes are hand-written decorators that call the
 **SDK** directly:
