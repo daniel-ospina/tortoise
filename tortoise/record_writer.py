@@ -1868,6 +1868,16 @@ def _session_source_skip(payload: Mapping[str, Any]) -> str:
 #:     (`projection/entities.py:2111`) makes `embedding` a caller passthrough, so
 #:     the caller's vector is the node's own and recomputing would make the two
 #:     stores disagree (`EventRecorded`'s arm is the same shape).
+#:
+#: ⛔ THE DERIVED TEXT IS ALSO BOUND TO THE ROW'S OWN TEXT COLUMN, where the row
+#: has one (`_TEXT_COLUMN_RULES` below). A vector is a copy of a text, so a row
+#: whose `embedding` and `_search_text` were written from DIFFERENT statements has
+#: a dense leg describing something its sparse leg does not hold — the incoherence
+#: a review of this change measured on a title-only `SourceCreated`, where the
+#: vector would have come from `title` while `_search_text` kept an earlier
+#: document's text. Binding both from the SAME composed string makes the row
+#: coherent by construction, in every arm, instead of in the arms whose payload
+#: happened to state the text.
 _RECORD_EMBEDDING_TEXT: dict[str, _EmbeddingTextRule] = {
     "ObjectRegistered": _EmbeddingTextRule(
         ("name",), lambda payload: (("name", payload.get("name")),)),
@@ -1885,6 +1895,24 @@ _RECORD_EMBEDDING_TEXT: dict[str, _EmbeddingTextRule] = {
     "SourceCreated": _EmbeddingTextRule(
         ("_searchText", "title"), _source_embedding_parts),
 }
+
+
+#: Record type → the record-table column that holds the SAME text its derived
+#: vector encodes. Empty for a label whose indexed text is composed by Postgres
+#: from the other columns (`document` has no `_search_text` column), and it must
+#: stay a declaration about a REAL column: the projection already admits a derived
+#: value only when the name is in `table_columns()`, so a wrong entry here is
+#: dropped in silence and the invariant this table exists to state would be false.
+#:
+#: `source` is the only entry, and deliberately: its row's indexed text IS
+#: `_search_text` (the `:Source` FTS index is declared on that field —
+#: `projection/__init__.py:6870`, `:20548`), while the OTHER source columns
+#: (`title`, `topics`) are inputs to it. `_upsert_source` writes the same string to
+#: `s._searchText` (`entities.py:7194`), so a plain `:Source` whose producer states
+#: no `_searchText` gets its composed text into the record column too — closing the
+#: record-side half of the family `#13474` records (the journal payload carries no
+#: `_searchText`, so the split alone could never bind one).
+_TEXT_COLUMN_RULES: dict[str, str] = {"SourceCreated": "_search_text"}
 
 
 @dataclass(frozen=True)
@@ -2125,7 +2153,16 @@ def derived_embedding_columns(
         return _DerivedEmbedding(skipped="the encode raised")
     if not vec:
         return _DerivedEmbedding(skipped="the embedder produced no vector")
-    return _DerivedEmbedding(columns={"embedding": list(vec)})
+    columns: dict[str, Any] = {"embedding": list(vec)}
+    text_column = _TEXT_COLUMN_RULES.get(record_type)
+    if text_column is not None:
+        # The vector's own text, into the column that indexes it — one statement,
+        # one datum (`_TEXT_COLUMN_RULES`). It cannot overwrite a CARRIED text:
+        # the payload's `_searchText` binds the same value through the split when
+        # it is the composed one, and the arms above have already returned for the
+        # two populations that derive nothing at all.
+        columns[text_column] = text
+    return _DerivedEmbedding(columns=columns)
 
 
 @dataclass

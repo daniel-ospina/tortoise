@@ -262,7 +262,18 @@ def test_a_plain_source_derives_the_text_its_node_holds(encoder):
         {"type": "SourceCreated", "url": "https://example.com/a",
          "title": "Acme pricing page"})
     assert encoder.text == "Acme pricing page"
-    assert set(out.columns) == {"embedding"}
+    # ⚠️ REVERSED AGAIN, in the same direction and for a measured reason: this
+    # pin used to be `{"embedding"}` alone. A vector is a copy of a TEXT, so a row
+    # whose `embedding` came from one statement and whose `_search_text` column
+    # still held another (`DocumentCreated` first, then a title-only
+    # `SourceCreated` for the same URL) has a dense leg answering something its
+    # own sparse leg does not contain — measured in review of this change.
+    # `record_writer._TEXT_COLUMN_RULES` therefore binds both from the ONE
+    # composed string, and `_search_text` is a real `public.source` column
+    # (`record_projection._CONTENT_COLUMNS` names it), so this is a binding the
+    # schema accepts.
+    assert set(out.columns) == {"embedding", "_search_text"}
+    assert out.columns["_search_text"] == encoder.text
 
 
 def test_a_meeting_event_derives_nothing(encoder):
@@ -721,8 +732,16 @@ def test_the_record_binds_a_plain_sources_vector_at_the_plan_level(encoder):
     record = {"type": "SourceCreated", "url": "https://example.com/a",
               "title": "a source"}
     derived = rw.derived_embedding_columns(record)
-    assert set(derived.columns) == {"embedding"}, derived
+    # ⚠️ REVERSED: `{"embedding"}` alone until the review of this change found
+    # the incoherence it leaves — see the sibling reversal above
+    # (`_TEXT_COLUMN_RULES`: the vector and the row's indexed text are one datum).
+    assert set(derived.columns) == {"embedding", "_search_text"}, derived
     plan = rp.replay_plan([record], org_id="org", graph_id="g",
                           derived={0: derived.columns})
     upserts = [s for s in plan if s.sql.startswith("INSERT INTO public.source ")]
     assert "embedding" in upserts[0].param_columns
+    assert "_search_text" in upserts[0].param_columns, (
+        "the plan must carry the text column too, or the vector and the row's "
+        "indexed text diverge on a title-only source write")
+    assert (upserts[0].params[upserts[0].param_columns.index("_search_text")]
+            == encoder.text)

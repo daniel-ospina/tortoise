@@ -6131,13 +6131,20 @@ def _declared_mutations(
             # carry (`object`/`subject` fingerprints, an event's composed vector,
             # a SOURCE row's text vector — a document's `_searchText` and a
             # plain `:Source`'s `_searchText or title`, `#13412`/`#13418`). Bound
-            # AFTER the split and not merged into `props`, because these are the
-            # ONE class the payload may not write through the ordinary path
-            # (`DERIVED_COLUMNS`):
-            # a carried `embedding` is refused as DERIVED-authority while the
-            # record's own derivation is the column's legitimate writer. Merging
-            # them would have made one name behave differently depending on who
-            # supplied it in the same dict, which is a rule nobody could read.
+            # AFTER the split and not merged into `props`, so one name cannot
+            # behave differently depending on who supplied it in the same dict —
+            # the rule nobody could read.
+            #
+            # ⛔ NOT ONLY `DERIVED_COLUMNS` ANY MORE. `event`/`document`/`source`
+            # are served from the record (`record_vector.LABEL_SERVED`) and their
+            # payloads DO carry `embedding` (a caller's passthrough, e.g.
+            # `_SOURCE_EXTRA_PROPS`), so on those three the payload may write the
+            # column through the ordinary split and the derivation simply
+            # overwrites it. `DERIVED_COLUMNS` still names the labels where a
+            # payload value is REFUSED (`object`/`subject`) — so what is enforced
+            # here is "the record's derivation is the LAST writer", not "the
+            # payload may not write it", which is what this comment said and it
+            # was false for three of the five labels.
             for column, value in derived.items():
                 if column in GENERATED_COLUMNS or column in _BOOKKEEPING_COLUMNS:
                     # Postgres computes it / the payload may not write it: the

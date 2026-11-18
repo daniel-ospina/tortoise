@@ -171,16 +171,59 @@ def test_a_plain_source_derives_from_the_search_text_the_node_holds(encoder):
     assert encoder.text == "acme pricing discounts renewal", (
         "a plain `:Source` must encode the text its node holds in "
         "`_searchText` (`_upsert_source`, #13418)")
-    assert set(out.columns) == {"embedding"}
+    assert set(out.columns) == {"embedding", "_search_text"}
+    assert out.columns["_search_text"] == encoder.text, (
+        "the row's dense and sparse legs must be ONE text: the derived vector is "
+        "bound together with the `_search_text` column it indexes")
 
 
 def test_a_plain_source_falls_back_to_its_title(encoder):
     """No `_searchText` ⇒ `title`, the same `or` arm the graph takes."""
-    rw.derived_embedding_columns({
+    out = rw.derived_embedding_columns({
         "type": "SourceCreated", "url": "https://example.com/a",
         "title": "Acme pricing page",
     })
     assert encoder.text == "Acme pricing page"
+    assert out.columns["_search_text"] == "Acme pricing page", (
+        "#13474's source half: the journal carries no `_searchText`, so without "
+        "this binding the record's FTS column stays NULL while its vector "
+        "describes the title")
+
+
+def test_the_source_row_is_COHERENT_after_two_writers(encoder):
+    """A vector and a text column written from DIFFERENT records is the defect.
+
+    The scenario a review of this change measured: a `DocumentCreated` composes
+    the row's text (and a `public.source._search_text` value) for a URL, then a
+    later `SourceCreated` for the same URL carries only a `title`. If the
+    derivation bound the vector alone, the row would hold an embedding of
+    `"Acme pricing page"` next to a `_search_text` describing the MEMO — a dense
+    leg answering something its own sparse leg does not contain. Both are bound
+    from one composed string (`_TEXT_COLUMN_RULES`), so whichever record wrote
+    last, the row agrees with itself.
+
+    ⛔ What this does NOT claim: that the RECORD matches the graph's
+    hash-gated `coalesce($st, s._searchText)` (`_upsert_source`), which
+    preserves the node's text on a same-hash re-emit. The record is the truth
+    and the graph is its derived cache (§2.0), and the record already binds
+    `title` unconditionally on this arm; the durable fix for the text half of
+    the family is the producer carrying the composed text (`#13474`).
+    """
+    doc = rw.derived_embedding_columns({
+        "type": "DocumentCreated", "id": "https://example.com/a",
+        "title": "Q3 pricing", "summary": "the memo",
+    })
+    assert "_search_text" not in doc.columns, (
+        "a document's row has no `_search_text` column — Postgres composes its "
+        "indexed text from the other columns")
+    src = rw.derived_embedding_columns({
+        "type": "SourceCreated", "url": "https://example.com/a",
+        "title": "Acme pricing page",
+    })
+    assert [c[0] for c in encoder.calls] == ["Q3 pricing the memo",
+                                             "Acme pricing page"]
+    assert src.columns["_search_text"] == encoder.calls[-1][0], (
+        "the source's vector and its `_search_text` came from ONE statement")
 
 
 def test_a_plain_source_never_embeds_its_IDENTITY(encoder):
