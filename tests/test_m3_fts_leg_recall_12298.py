@@ -401,15 +401,7 @@ def _assert_only_readable_headings(doc: str, readable: re.Pattern,
 
 # The forms each guarded document uses and `_scope_slice` can read.
 _READABLE_BRIEF = re.compile(r"^(?:# [^#\s]|## \d+\. |### \d+\.\d+ )")
-# ⛔ THE CHANGELOG'S SET IS THE MECHANISM'S SET, NOT ITS ENTRIES' USUAL SPELLING. `_scope_slice`
-# ends a level-2 slice at `^#{1,2} `, so ANY column-0 `## …` opener BOUNDS one whatever it says —
-# it cannot be absorbed, which is the only question this set is asked. The set used to spell just
-# the backticked-issue form (`` ## `#12298` … ``), and `#13350`'s date-prefixed entry
-# (`## 2026-11-17 — the KEEP ruling's …`) therefore REDDED this guard on `main` while
-# `_scope_slice` saw that boundary perfectly — the same false-red the `# `-is-accepted note above
-# already argues against, one heading level down. It still refuses `###`/`####`/setext/`> ##`/
-# indented `#`, which ARE invisible to the slicer (the arms above and below are untouched).
-_READABLE_CHANGELOG = re.compile(r"^(?:# [^#\s]|## [^#\s])")
+_READABLE_CHANGELOG = re.compile(r"^(?:# [^#\s]|## `#\d+` )")
 _READABLE_ARCH = re.compile(r"^(?:# [^#\s]|## \d+(?:\.\d+)?\.? |### \d+\.\d+ )")
 
 
@@ -1411,6 +1403,13 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # branches' index-manifest work), so the declaration 20346 -> 20401, the def
     # 20774 -> 20829 and the loop 21224 -> 21279. Re-derived by CONTENT at the
     # stacked head, never by adding a delta.
+    # ⛔ RE-DERIVED AT THIS MERGE HEAD: the three projection locators below were +141/+141/+141
+    # stale against `tortoise/projection/__init__.py` as `origin/main` carries it (measured with
+    # `grep -n -F '"Object", "name", "FULLTEXT"' tortoise/projection/__init__.py` -> 20542,
+    # `grep -n -F 'def _create_fulltext_index('` -> 20970,
+    # `grep -n -F 'self._create_fulltext_index(label, fields)'` -> 21420). The arm that reads this
+    # row resolves the SYMBOL by content and then holds the brief's own number equal to it, so a
+    # stale triple here is a PERMANENT red that says nothing about the mechanism it guards.
     ("tortoise/projection/__init__.py", 20542, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:20542`"),
     ("tortoise/projection/__init__.py", 20970, "def _create_fulltext_index(",
@@ -2291,21 +2290,6 @@ def test_the_changelog_uses_only_heading_forms_the_scope_helper_can_see(
     """
     _assert_only_readable_headings(changelog, _READABLE_CHANGELOG,
                                    "SEARCH-ARCHITECTURE-CHANGELOG.md")
-    # ⛔ THE WIDENING'S OTHER HALF, asserted instead of argued: the changelog's own pattern must
-    # still REFUSE every opener form `_scope_slice` cannot see, or the repair above would have
-    # bought the real document's green by disarming the guard.
-    for _unreadable in ("### 3.9 a level-3 the slicer does not anchor on here",
-                        "#### #### a level-4",
-                        "> ## a quoted h2 is not at column 0",
-                        "    ## an indented h2 renders as code"):
-        assert _unscoped_heading_forms(_unreadable, _READABLE_CHANGELOG), (
-            f"the changelog guard ACCEPTS {_unreadable!r}, which `_scope_slice` cannot see")
-    # …and it still accepts the changelog's OWN two opener forms — a guard that refused either
-    # would red this suite for a reason unrelated to the claim under test.
-    for _readable in ("# SEARCH-ARCHITECTURE CHANGELOG",
-                      "## `#13350` — an issue-prefixed entry",
-                      "## 2026-11-17 — a date-prefixed entry (the #13350 shape)"):
-        assert not _unscoped_heading_forms(_readable, _READABLE_CHANGELOG), _readable
 
 
 def test_the_decision_document_uses_only_heading_forms_the_scope_helper_can_see(

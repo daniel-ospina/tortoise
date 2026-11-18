@@ -1428,3 +1428,70 @@ async def test_a_failing_starved_write_cannot_break_the_STARTED_arm(
     assert rec.status == 200, (
         "a counter failure replaced a served response on the started arm — the "
         "arm has no outer guard, so `_count_starved`'s own is the only one")
+
+
+# ── the OPERATOR SURFACE: a channel the process emits must be DOCUMENTED ──
+#
+# #13248 Finding 1 (P1) — the mechanism this arm exists for, measured:
+# `docs/infra-runbook.md`'s `### 4.1.1c … wait_bound_starved` section (114 lines,
+# added by #13197) was DELETED from the tree by a whole-file OURS conflict
+# resolution, while `tortoise/hosted_api.py` still emitted the field (7
+# occurrences on both sides). Nothing reded: the census gates count statements,
+# the census pins are SCALARS, and the arm that would notice did not exist — so
+# an operator following the merged runbook had no documented way to read
+# `wait_bound_starved`, and a served-late answer over the bound (a `401` at
+# 20.27 s with `wait_bound_breaches.total = 0`) reads as healthy.
+#
+# Derive the demanded set from `metrics()` rather than listing it here: a NEW
+# wait-bound channel must fail this arm on the commit that adds it, not on the
+# merge that later drops its section.
+
+_RUNBOOK = (_ROOT := __import__("pathlib").Path(__file__).resolve().parent.parent) / "docs" / "infra-runbook.md"
+_SUBSECTION_RE = __import__("re").compile(r"^### 4\.1\.1[a-z]? ")
+
+
+def _subsection_body_naming(doc: str, channel: str) -> str | None:
+    """The body of the numbered `4.1.1*` subsection whose HEADING names `channel`."""
+    lines = doc.splitlines()
+    for i, line in enumerate(lines):
+        if _SUBSECTION_RE.match(line) and channel in line:
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                if lines[j].startswith("### ") or lines[j].startswith("## "):
+                    end = j
+                    break
+            return "\n".join(lines[i + 1:end])
+    return None
+
+
+def test_every_emitted_wait_bound_channel_has_its_own_numbered_runbook_subsection():
+    """Both channels `metrics()` emits must have a `### 4.1.1*` subsection naming each.
+
+    Non-vacuity, both directions, MEASURED on the pre-fix bytes
+    (`5bb957cef3:docs/infra-runbook.md`, the tree before #13197 restored the
+    section): this arm reports `['wait_bound_starved']` — i.e. it REDS on the
+    tree that lost the section, and passes on the tree that carries it.
+    """
+    emitted = sorted(k for k in monitoring.metrics() if k.startswith("wait_bound_"))
+    assert emitted, (
+        "`metrics()` no longer reports a `wait_bound_*` channel at all — this "
+        "arm derives its demanded set from that surface, so re-point it rather "
+        "than letting it pass over an empty set")
+    doc = _RUNBOOK.read_text(encoding="utf-8")
+    undoc = [ch for ch in emitted if _subsection_body_naming(doc, ch) is None]
+    assert not undoc, (
+        f"{_RUNBOOK.name} documents no subsection of its own for {undoc} — the "
+        "process emits the field and the operator surface cannot read it. A "
+        "whole-file conflict resolution that drops a section reds exactly here "
+        "(#13248 Finding 1: 114 lines, `wait_bound_starved`)")
+
+    # …and the operator RECIPE must survive somewhere in the runbook with it: the
+    # section this pin protects is the one that tells an operator which jq path
+    # distinguishes "breached" from "starved" (the #13197 story). The path is
+    # asserted at DOCUMENT scope, not inside the channel's own subsection — the
+    # `wait_bound_breaches.total` recipe lives in §4.1.1a, beside the sibling
+    # channel, and pinning it under §4.1.1 would be a different claim.
+    missing_path = [ch for ch in emitted if f".{ch}.total" not in doc]
+    assert not missing_path, (
+        f"the runbook no longer shows the operator any `.{missing_path[0]}.total` "
+        "path — the operator recipe for a channel the process emits is gone")

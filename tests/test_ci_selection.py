@@ -829,6 +829,11 @@ def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
         ):
             runbook_readers.add(reader_path.name)
     assert runbook_readers == {
+        # #13248 Finding 1: `test_10602_wait_bound_breach_visible.py` joined the set when
+        # it grew the operator-surface pin (the `wait_bound_*` channels must each have a
+        # numbered `4.1.1*` runbook subsection). Registered in `tier1` there, because a
+        # docs-only runbook edit selects no surface.
+        "test_10602_wait_bound_breach_visible.py",
         # #10488: the consent-key OPERATOR table (§4.4) — registered in `tier1` for the same reason
         # as the rest of this set, and in its own file so the always-run smoke gains one pin rather
         # than fourteen.

@@ -11155,6 +11155,16 @@ tier1:
 # rides the URI-less tier1 legs. Pinned by
 # tests/test_ci_selection.py::test_the_residency_gate_runs_on_a_migration_only_diff
 - test_9559_blocked_release_conditions.py
+# #13248 Finding 1 (P1): this suite now READS `docs/infra-runbook.md` — it derives the
+# `wait_bound_*` channels from `metrics()` and requires each to have its own numbered
+# `4.1.1*` subsection naming it (the pin for the 114-line `wait_bound_starved` section a
+# whole-file OURS resolution deleted while the process still emitted the field). A
+# docs-only edit of the runbook is therefore the ONLY change class that can make that pin
+# false, and a docs-only diff takes the tier1 early return and selects no surface — so
+# without this row the pin would run ZERO times on exactly the edit it guards. Hermetic
+# (one markdown read plus the module's own zero-valued counters; no DB, no graph, no
+# network, no model), ~15 s — dual-registered with `api` + `core`.
+- test_10602_wait_bound_breach_visible.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 slow_files:
