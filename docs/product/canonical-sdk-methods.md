@@ -44,8 +44,8 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **94** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **94** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **105** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **105** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
@@ -88,15 +88,22 @@ number:
   one was PRIVATISED rather than deleted (each body has a caller in the hosted API, the CLI or
   `mcp_auth`), so the declaration stays at 40 and no capability moved.
 
+- **94 → 105 on 2026-11-18** — `#11609` P3 IMPLEMENTED the eleven approved names that still had
+  no `def` (`create_memory_graph`, `delete_memory_graph`, `create_key`, `list_keys`, `revoke_key`,
+  `add_member`, `list_members`, `remove_member`, `adjust_relationship`, `refresh_confidence`,
+  `write_knowledge_batch`). Implementing an approved name is not an addition to the approved 40,
+  so the declaration stays at 40 — the count moves UP here for the first time in this list,
+  because the move delivers approved surface instead of removing surplus.
+
 The overlap is chosen rather than assumed: wave 1 admitted a name only when NO `tool_registry` entry
 (live or retired) bound it, and the four doors that batch re-keyed were live MCP tools at that time,
 so the waves could not have consumed each other's candidates. Wave 2 rests on the same gate plus the
 partition: it is `N1`–`N6` minus the approved rows minus the one MCP-bound member, and the three
 waves are disjoint by construction (the wave-1 and wave-2 candidate lists share no name — wave 1's
 members were checked against every `tool_registry` entry, wave 2's are checked against the partition
-AND against wave 1's recorded set). **94 is the count today**, and it is derived, not typed: `ast`
+AND against wave 1's recorded set). **105 is the count today**, and it is derived, not typed: `ast`
 over `tortoise/sdk.py`, `tools/sdk_surface.py --check` and `counts.sdk_public_methods` in
-`config/surface-manifest.yml` all read 94. (Wave 2 was written against a main that predated
+`config/surface-manifest.yml` all read 105. (Wave 2 was written against a main that predated
 `#12951`'s READ/QUERY containers, so the derivation it recorded — 118 → 102 — is that branch's
 BEFORE/AFTER; on the tree this landed in, the same sixteen departures read 110 → 94.) *Removed from the surface* below is the per-method
 record.

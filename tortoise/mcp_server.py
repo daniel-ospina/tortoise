@@ -29,6 +29,10 @@ from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           _RESERVED_ACTOR_PROPS, SUPERSEDE_STRUCTURAL_RELS,
                           _supersede_window_end, _now_iso,
                           _ledger_record as _ledger_record_page)
+# #11609 P2 review: the UC1 preset has ONE home (`sdk.RECALL_STATE_PRESET`, which
+# `recall_state`'s own defaults mirror), and this module ALIASES it rather than
+# keeping a second copy that could drift from the `recall=True` arm's resolution.
+from tortoise.sdk import RECALL_STATE_PRESET
 from tortoise import monitoring
 # #9494: the loaded-module snapshot — used by `_safe` so a symbol failure on a
 # STALE process is answered with the measurement instead of a symbol name.
@@ -5592,8 +5596,9 @@ def tortoise_expand_relationships(point_id: str) -> list[dict]:
 # ── Recall — epistemic intents (epic #898) ─────────────────────
 
 # UC1 default exponents/weights for the multiplicative gate (Wave A).
-_RECALL_STATE_DEFAULTS = {"relevance_exp": 1.0, "confidence_exp": 1.0,
-                          "centrality_weight": 0.10}
+# ⛔ ALIASED from `sdk.RECALL_STATE_PRESET`, never re-typed: the `recall=True` arm on
+# `tortoise_check_confidence` resolves from the same dict, so a retune moves both.
+_RECALL_STATE_DEFAULTS = RECALL_STATE_PRESET
 # UC2 gap thresholds (Wave B).
 _RECALL_GAPS_DEFAULTS = {"min_load": 1, "max_support": 2}
 # UC3 subgraph expansion (Wave B).
@@ -8156,17 +8161,180 @@ def tortoise_check_confidence(claim_id: str | None = None,
                               session: bool = False,
                               calibrate: bool = False,
                               include_provenance: bool = False,
-                              limit: int = 50,
-                              require_calibration: bool | None = None) -> Any:
-    """How confident the graph is — the confidence view only (#4282 row 5).
+                              limit: int | None = None,
+                              require_calibration: bool | None = None,
+                              recompute: bool = False,
+                              factors: Any = None,
+                              evidence: Any = None,
+                              anchors: Any = None,
+                              max_hops: int | None = None,
+                              rel_filter: str | None = None,
+                              direction: str | None = None,
+                              recall: bool = False,
+                              mode: str | None = None,
+                              query: str | None = None,
+                              kind: str | None = None,
+                              include_superseded: bool | None = None,
+                              min_confidence: float | None = None,
+                              relevance_exp: float | None = None,
+                              confidence_exp: float | None = None,
+                              centrality_weight: float | None = None,
+                              seed: str | None = None,
+                              depth: int | None = None,
+                              completeness: str | None = None,
+                              min_load: int | None = None,
+                              max_support: int | None = None,
+                              max_nodes: int | None = None) -> Any:
+    """How confident the graph is — the view, plus the two arms it absorbed.
 
     Dispatch by argument: claim_id | topic | session | calibrate (the default
-    when nothing is named). It never RECOMPUTES the posterior, and it is not
-    write-free either: the `claim_id` arm reaches `get_confidence`, whose
-    lazy-consistency path dreams a DIRTY root (`self.dream(dirty_only=True, …)`)
-    — a write that PRE-DATES this container and is unchanged by it, which is why
-    the row is tiered `maintenance` rather than `read`.
+    when nothing is named) | recompute | recall. It is not write-free: the
+    `claim_id` arm reaches `get_confidence`, whose lazy-consistency path dreams
+    a DIRTY root (`self.dream(dirty_only=True, …)`) — a write that PRE-DATES
+    this container and is unchanged by it, which is why the row is tiered
+    `maintenance` rather than `read`. `recompute=True` writes by definition.
+
+    `recompute=True` RE-DERIVES the posterior by EP belief propagation and is
+    what `tortoise_compute_confidence` retires into; it DISPATCHES to that
+    handler rather than re-implementing it, so the retired name (still served
+    through the #3883 warning shim, on that exact function) and this arm cannot
+    disagree.
+
+    `recall=True` answers "what is true and high-confidence right now" and is
+    what `tortoise_recall` retires into. It dispatches to that handler too, and
+    therefore carries ALL FOUR of its intents (`state`, `gaps`, `subgraph`,
+    `custom`) — the signature above names every argument both of the retired
+    doors took, so a migrating caller keeps its whole call.
+
+    ⛔ ONE arm per call: naming `recompute`/`recall` together, or either beside
+    `claim_id`/`topic`/`session`/`calibrate`, is REFUSED below rather than
+    answered partly. The legacy precedence among the four OLD selectors is
+    untouched.
+
+    ⛔ AND THE ARM'S OWN ARGUMENTS ARE REFUSED WITHOUT THE ARM. Every parameter
+    the two arms added is `None`-defaulted — "not supplied" and "supplied" are
+    different states, which is what makes the check possible at all. A call
+    naming `query=` / `factors=` / `min_confidence=` … but NOT `recall=True` /
+    `recompute=True` would otherwise answer the graph-wide calibration audit and
+    drop the caller's argument with no error — the answers-one-drops-the-other
+    shape this door refuses everywhere else. The refusal names the arm.
+
+    `limit` is resolved per arm, never by one shared default: the `topic` arm
+    keeps 50, the recall arm keeps the recalled door's own per-mode defaults.
+
+    `require_calibration` is resolved per arm TOO, and the two differ ON PURPOSE:
+    the `recompute=True` arm resolves `None` to `True` — the retired
+    `tortoise_compute_confidence`'s own fail-closed default (#344), which a
+    migrating caller keeps — while the legacy arms forward `None` through to the
+    SDK's `_ep_require_calibration_default()` (the #1157 knob). Same parameter,
+    two postures, because the doors it came from had two.
     """
+    # ⛔ THE ARM-ONLY ARGUMENT SETS. `None` means NOT SUPPLIED — every one of these
+    # is `None`-defaulted ON PURPOSE (see the docstring): a non-None default would
+    # make "supplied" unknowable and the silent drop below un-refusable. The
+    # shared parameters (`limit`, `require_calibration`) are deliberately NOT here:
+    # they belong to a legacy arm too, so supplying them names no arm.
+    _recompute_only = {
+        "factors": factors, "evidence": evidence, "anchors": anchors,
+        "max_hops": max_hops, "rel_filter": rel_filter, "direction": direction,
+    }
+    _recall_only = {
+        "mode": mode, "query": query, "kind": kind,
+        "include_superseded": include_superseded,
+        "min_confidence": min_confidence,
+        "relevance_exp": relevance_exp, "confidence_exp": confidence_exp,
+        "centrality_weight": centrality_weight, "seed": seed, "depth": depth,
+        "completeness": completeness, "min_load": min_load,
+        "max_support": max_support, "max_nodes": max_nodes,
+    }
+    armed = [name for name, on in (("recompute", recompute),
+                                   ("recall", recall)) if on]
+    if len(armed) > 1:
+        return _SafeError({
+            "error": ("check_confidence: ONE arm per call — this call names "
+                      f"{', '.join(sorted(armed))}. They answer different "
+                      "questions (a re-derived posterior, an epistemic recall), "
+                      "so a combined call would return one of them and drop the "
+                      "other with no error. Send them as separate calls."),
+            "code": ERR_INVALID})
+    legacy = [name for name, on in (("claim_id", bool(claim_id)),
+                                    ("topic", bool(topic)),
+                                    ("session", session),
+                                    ("calibrate", calibrate)) if on]
+    if armed and legacy:
+        return _SafeError({
+            "error": (f"check_confidence: {armed[0]}=True cannot be combined "
+                      f"with {', '.join(legacy)}. {armed[0]}=True selects its "
+                      "own arm — a call naming both would answer one of them "
+                      "and drop the other with no error. Send them as separate "
+                      "calls."),
+            "code": ERR_INVALID})
+    if not armed:
+        # Neither arm named: an arm-only argument is an ERROR, not a no-op. Both
+        # sets are reported together (never just the first) so a caller that
+        # named arguments from both arms gets the whole list in one round trip.
+        _off_arm_recompute = sorted(
+            n for n, v in _recompute_only.items() if v is not None)
+        _off_arm_recall = sorted(
+            n for n, v in _recall_only.items() if v is not None)
+        if _off_arm_recompute or _off_arm_recall:
+            parts = []
+            add = []
+            if _off_arm_recompute:
+                parts.append(f"recompute arm: {', '.join(_off_arm_recompute)}")
+                add.append("recompute=True")
+            if _off_arm_recall:
+                parts.append(f"recall arm: {', '.join(_off_arm_recall)}")
+                add.append("recall=True")
+            return _SafeError({
+                "error": ("check_confidence: this call names arm-specific "
+                          f"argument(s) belonging to the {'; '.join(parts)} — "
+                          "but names NO arm. Without the arm it answers the "
+                          "graph-wide calibration audit and these arguments are "
+                          "DROPPED with no error. Add "
+                          f"{' and/or '.join(add)}, or drop the arguments."),
+                "code": ERR_INVALID})
+    else:
+        # ⛔ AND THE OTHER ARM'S ARGUMENTS ARE REFUSED TOO. The check above compares
+        # the two sets against "nothing armed"; this one compares them against the arm
+        # that IS armed, so `recall=True, factors=[…]` cannot be served with `factors`
+        # on the floor — the same answers-one-drops-the-other shape, one level down.
+        off = (sorted(n for n, v in _recall_only.items() if v is not None)
+               if armed[0] == "recompute"
+               else sorted(n for n, v in _recompute_only.items() if v is not None))
+        if off:
+            other = "recall" if armed[0] == "recompute" else "recompute"
+            return _SafeError({
+                "error": (f"check_confidence: {armed[0]}=True but this call also "
+                          f"names {other}-arm argument(s): {', '.join(off)}. "
+                          "This call answers the "
+                          f"{armed[0]} arm and would DROP them with no error — "
+                          f"send the {other} call separately."),
+                "code": ERR_INVALID})
+    if recompute:
+        # `tortoise_compute_confidence`'s own default is True (fail-closed, #344);
+        # `None` here means NOT SUPPLIED rather than False, so it resolves to it.
+        # The other `None`-defaulted arm arguments resolve to that door's own
+        # defaults here and only here, which is why the signature can keep
+        # "not supplied" distinguishable at all.
+        return tortoise_compute_confidence(
+            factors, evidence, anchors=anchors,
+            max_hops=1 if max_hops is None else max_hops,
+            rel_filter="IMPL|NAND" if rel_filter is None else rel_filter,
+            direction="both" if direction is None else direction,
+            require_calibration=(True if require_calibration is None
+                                 else require_calibration))
+    if recall:
+        return tortoise_recall(
+            query,
+            mode="state" if mode is None else mode, kind=kind, limit=limit,
+            include_superseded=(False if include_superseded is None
+                               else include_superseded),
+            min_confidence=(0.0 if min_confidence is None else min_confidence),
+            relevance_exp=relevance_exp, confidence_exp=confidence_exp,
+            centrality_weight=centrality_weight,
+            seed=seed, depth=depth, completeness=completeness,
+            min_load=min_load, max_support=max_support, max_nodes=max_nodes)
     return _safe(
         _get_org_sdk().check_confidence, claim_id, topic=topic, session=session,
         calibrate=calibrate, include_provenance=include_provenance,

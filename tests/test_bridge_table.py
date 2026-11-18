@@ -821,8 +821,12 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # 60 -> 62: #11609 lane P1 does the same for the two POINT-shaped doors
     # (`create_point`, `diary_write`) — `create_entity`'s `type="point"`/`type="diary"`
     # ARMS are built on a tool that is already advertised, so again no container row
-    # arrives: 60 + 2 = 62, matching `counts.retired` and Part B's own header.
-    assert len(retired) == 62, f"expected 62 retired rows, got {len(retired)}"
+    # arrives: 60 + 2 = 62, matching `counts.retired` at that merge.
+    # 62 -> 64: #11609 P2's CONFIDENCE-ARMS wave retires `compute_confidence` and `recall`
+    # forward into `tortoise_check_confidence`, which was already advertised — two more rows
+    # gain a `use_instead` and no container row arrives: 62 + 2 = 64, which is the count
+    # `counts.retired` and Part B's own header state at THIS head.
+    assert len(retired) == 64, f"expected 64 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "

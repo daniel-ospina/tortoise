@@ -1615,17 +1615,22 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_check_confidence",
         id="surface.check_confidence",
-        description="How confident the graph is — the confidence view ONLY (#4282 row "
-                    "5). Dispatch is by argument: claim_id = one claim's EP posterior "
-                    "{mean,variance,alpha,beta}, and include_provenance adds the chain "
-                    "behind it; topic = the dated belief chain for a topic; session = "
-                    "what happened last session, including its confidence changes; "
-                    "calibrate (or no selector) = the graph-wide calibration audit. It "
-                    "never RECOMPUTES the posterior — that is "
-                    "tortoise_compute_confidence's job — and it is NOT write-free: the "
-                    "claim_id arm reaches get_confidence, whose lazy consistency pass "
-                    "dreams a dirty root, which is why this door is tiered maintenance "
-                    "rather than read.",
+        description="How confident the graph is — the confidence view, its recompute, "
+                    "and its recall (#4282 row 5). Dispatch is by argument: claim_id = "
+                    "one claim's EP posterior {mean,variance,alpha,beta}, and "
+                    "include_provenance adds the chain behind it; topic = the dated "
+                    "belief chain for a topic; session = what happened last session, "
+                    "including its confidence changes; calibrate (or no selector) = the "
+                    "graph-wide calibration audit; recompute=True = RE-DERIVE the "
+                    "posterior by EP belief propagation (factors/evidence/anchors, "
+                    "max_hops, rel_filter, direction); recall=True = what is true and "
+                    "high-confidence right now, re-ranked by the multiplicative "
+                    "confidence gate, with mode=state|gaps|subgraph|custom. ONE arm per "
+                    "call. It is NOT "
+                    "write-free: the claim_id arm reaches get_confidence, whose lazy "
+                    "consistency pass dreams a dirty root, and recompute=True writes "
+                    "posteriors by definition — which is why this door is tiered "
+                    "maintenance rather than read.",
         # ⛔ maintenance, NOT read: one arm refreshes a stored projection through a write
         # — the `claim_id` arm reaches `get_confidence`, whose lazy `dream(dirty_only=True)`
         # writes `n.confidence` (the no-selector default answers from `calibrate_summary`,
@@ -1635,6 +1640,18 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # `graphs:read` key can still call it: maintenance is the tier for exactly that
         # shape — it just does not auto-approve.
         risk="maintenance",
+        # ⛔ NOT IDEMPOTENT, and the hint must say so. The maintenance TIER derives
+        # `idempotentHint=True` (`_RISK_HINTS`), but this container's arms WRITE a value
+        # that a retry re-derives: the `claim_id` arm reaches `get_confidence` (pinned
+        # False in `tests/test_tool_risk_tiers.py` for exactly this), and `recompute=True`
+        # absorbs `tortoise_compute_confidence`, whose own override records the #4122
+        # measurement — a repeat call re-stores a re-derived score (0.693315 -> 0.693320).
+        # The absorbed door carried its declaration; the arm carries its operation, so the
+        # declaration has to move with it or a client that retries on `idempotentHint:
+        # true` repeats a call that RETURNS A DIFFERENT ANSWER and writes again.
+        # Fail-closed on ONE hint over five arms: an arm that is safe to retry cannot make
+        # an advertised "safe to retry" true, and the arms that are not would make it false.
+        idempotent=False,
         http_policy=True,
         # Custom handler, REAL binding — see `tortoise_search_knowledge` above.
         sdk_method="check_confidence",
@@ -2663,6 +2680,28 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # recorded for `tortoise_check_structure`).
     "tortoise_get_confidence": 'tortoise_check_confidence(claim_id=...)',
     "tortoise_belief_timeline": 'tortoise_check_confidence(topic=...)',
+    # ── #11609 Phase 2 — the two arms `tortoise_check_confidence` now carries ──
+    # These two doors were held live by a reason with an ABSENCE behind it: the
+    # container "does not recompute" and "has no recall arm". Both arms LAND here,
+    # so the reasons are FALSE and the names retire FORWARD in the same PR that
+    # makes them false — the rule `PROTECTED` states in
+    # `tests/test_11609_door_retirement.py`, which drops both rows in this batch.
+    #
+    # Each pointer NAMES the arm (`recompute=True` / `recall=True`) because the
+    # container's default is a DIFFERENT operation, not a smaller one: a caller
+    # pointed at `tortoise_check_confidence(...)` without the arm gets the stored
+    # calibration view, which would look like a successful migration.
+    # The rest of each pointer shows the arguments a caller most often passes, and
+    # every one of them is a real parameter of the container (the door-retirement
+    # suite BINDS these against its signature). `rel_filter` is shown without its
+    # value on purpose — the literal default contains a `|`, which is a markdown
+    # cell delimiter in the rendered table.
+    "tortoise_compute_confidence":
+        'tortoise_check_confidence(recompute=True, factors=..., evidence=..., '
+        'anchors=...)',
+    "tortoise_recall":
+        'tortoise_check_confidence(recall=True, query=..., mode="state", '
+        'min_confidence=..., limit=...)',
     # ⛔ `tortoise_expand_relationships` is NOT retired here either: it declares a LIST
     # envelope (`-> list[dict]`) and so carries the #8482 repair, which a `-> Any`
     # container cannot. Its handler already answers through the container
@@ -2850,12 +2889,18 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #     below). Their reason was the prototype of this rule: the `PROTECTED`
     #     contract named "create_entity has no point arm" / "…no diary arm", and
     #     the arm had to land BEFORE the door could leave the table.
-    #     `compute_confidence` is the same shape at `check_confidence`, whose own
-    #     docstring says so. `recall` is the same shape one step further out: the
-    #     canonical target (row 3) names `recall_beliefs` as its absorber, that
-    #     container is not live yet, and its bridge-table destination
-    #     `check_confidence` has no `recall` arm — so retiring it today would
-    #     delete the read, not fold it.
+    #   · `compute_confidence` and `recall` — RETIRED in #11609 lane P2, the
+    #     confidence-arms batch, on exactly that rule. Both WERE the same shape at
+    #     `check_confidence`, which had neither a recompute nor a recall arm and
+    #     took no `mode`/`query` selector at all: ⛔ BOTH ARMS LANDED in that same
+    #     PR, so the reasons are FALSE and both names retire FORWARD above. A door
+    #     may leave the held list only in the batch that makes its stated reason
+    #     untrue, and only with a test proving it (the rule
+    #     `tests/test_11609_door_retirement.py::TestProtectedDoorsStayLive`
+    #     states and enforces). `recall`'s four-intent dispatch is reachable
+    #     through the container now, `gaps`/`subgraph` included — see
+    #     `tortoise_check_confidence`'s own docstring for why those two stay
+    #     graph-structure reads rather than confidence reads at the SDK layer.
     #   · `delete`/`delete_point`/`delete_entity`, `create_edge`/`create_operator`,
     #     `events_poll`, `org_create`, `ingest`, `list_graphs` — their destinations
     #     (`delete_knowledge`, `link_entities`, `poll_events`, the tenancy pair and
@@ -2864,9 +2909,11 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #
     # The seven below are the residue: `-> dict`, no `rest_spec`, no envelope
     # repair, and a destination arm that exists and delegates to the very method
-    # the door calls. The names above are 23 of the 23 live names off the 27-target —
-    # if you find a live name that is not on the target and not in that list, the
-    # list is incomplete and that name is NOT safe to retire.
+    # the door calls. The names above plus these seven are 21 of the 21 live names
+    # off the 27-target — if you find a live name that is not on the target and not
+    # in that list, the list is incomplete and that name is NOT safe to retire.
+    # (It was 25 before the #11609 P1 and P2 waves left it there, with their arms:
+    # `create_point`/`diary_write` in P1, `compute_confidence`/`recall` in P2.)
     # ⛔ ONE HOP to a live name in every pointer (GitHub's own
     # `DeprecatedToolAliases` states the limit: aliases are not transitive).
     # Arguments are named where dropping one changes the operation — `type=` and
