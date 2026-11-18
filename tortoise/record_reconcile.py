@@ -196,7 +196,13 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (``cache_projection``'s own stated bound, #10852 review); and the
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
   — which the record's TABLE can hold and which no projection may ever write,
-  because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE
+  because the graph is where they must not live; and the RECORD-HELD VECTOR
+  COLUMNS (``cache_projection.RECORD_HELD_VECTOR_COLUMNS``, `#13447`) — the
+  record's TABLE holds them and the ROW may legitimately hold ``NULL``, because
+  the vector is DERIVED from the text, so the placement map (not the comparison)
+  excludes them (see above) and their repair is NONE: the derived cache copy is
+  correct as it stands, and re-deriving it would REPLACE a vector the record does
+  not have. ⛔ The NOT-PROJECTABLE class's repair is a DESTRUCTIVE
   CLEAR: the graph-side removal of the column itself (``REMOVE n.story_arc``) or
   ``record-restore`` / ``rebuild_from_record``, which wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
@@ -644,8 +650,7 @@ class RecordReconcileResult:
     #: TABLE holds them, the ROW may legitimately hold ``NULL`` because the vector
     #: is DERIVED from the text, `#13447`, and the repair is NONE), PLUS one
     #: population no declaration names — a property a SECOND WRITER put on a
-    #: placed node the
-    #: record does not carry, or on a node the record does not own at
+    #: placed node the record does not carry, or on a node the record does not own at
     #: all (``#11221``; the bucket is partitioned OUT of ``field_mismatches``, so
     #: the placed-node case reads `clean` while a node the record does not own is
     #: an ``extra_in_cache`` divergence and reads DIVERGENT; either way the
