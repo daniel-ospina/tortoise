@@ -186,8 +186,8 @@ rationale drift, or the 2 pre-existing absence reds.
 |---|---|---|---|
 | `tortoise.file_indexer.parse_frontmatter` | python consumer | `tests/test_file_indexer.py` (unchanged) | the read path this fix depends on; **not modified** |
 | `tortoise/docs_miner.py:352` | importer | `tests/test_file_indexer.py` | consumes the same parse; unaffected by quoting data |
-| `tests/test_doc_affiliation_frontmatter.py:524` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
-| `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at this head) | data | the arm's glob `:589` | the population the assertion iterates |
+| `tests/test_doc_affiliation_frontmatter.py:553` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
+| `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at this head) | data | the arm's glob `:618` | the population the assertion iterates |
 | `scripts/check-doc-affiliation.cjs` | commit-time advisory | not CI-wired | **not touched**; deferred per §2 alternative E |
 
 ## 7. Verification plan — measured (PROVE evidence)
@@ -205,8 +205,8 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
    failure output, not asserted.**
-2. **Fixed tree:** `2 failed, 13 passed` **at this head** — `15 collected`, the 2 failures being the
-   ones named below; the file carries exactly **5** tests this PR added (`comm` on the two files'
+2. **Fixed tree:** `2 failed, 14 passed` **at this head** — `16 collected`, the 2 failures being the
+   ones named below; the file carries exactly **6** tests this PR added (`comm` on the two files'
    `^def test_` lines against `origin/main`), and each count is tied to the head that produced it,
    because tests are appended to this file every round:
    `8 passed` on `main` (`f6793959a2`), `9 passed` at the rebased `36700a89b7` (the extra pass is
@@ -215,7 +215,8 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
    `#13485`'s `test_a_wholly_commented_value_gets_ONE_TRUE_diagnosis` is already inside the `8`, so
    it cannot be the extra pass), `10 passed` once the `''`-parity pin
    landed, `11 passed` once the `"`-backslash pin landed, `12 passed` once the (C)-ordering pin
-   landed, and `13 passed` once the never-closing/`malformed` pin landed in `b0940c7a4f`. The 2 are the
+   landed, `13 passed` once the never-closing/`malformed` pin landed in `b0940c7a4f`, and
+   `14 passed` once the verdict-split remedy pin landed. The 2 are the
    pre-existing absence reds
    (`docs/architecture/STORAGE-PICTURE-2026-11-17.md`, and the evidence bundles
    `docs/evidence/13038-capstone/README.md` **+** `docs/evidence/13436-write-path-costs/README.md` —
@@ -488,21 +489,22 @@ support, which is out of this issue's scope.
 
 **Recorded, not fixed — the guard's sanity counters can red on an empty population.** Two sites in
 `tests/test_doc_affiliation_frontmatter.py` report the same wrong diagnosis as round 5's escape
-finding, and neither is an escape: `:863-864` assert `measured` and `compared` BEFORE
-`assert not failures` (`:865`), so a tree the guard samples sparsely reds on *"measured no
+finding, and neither is an escape: `:885-886` assert `measured` and `compared` BEFORE
+`assert not failures` (`:887`), so a tree the guard samples sparsely reds on *"measured no
 
 affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
-the value; and `:768` skips `escaped` before `compared += 1` (`:778`), so a tree whose affiliated
+the value; and `:790` skips `escaped` before `compared += 1` (`:800`), so a tree whose affiliated
 values are all escaped leaves the counter legitimately empty and fires the same message. (Line
-numbers are re-measured at this head: `assert measured` sits at `:863`, against `:715` on
-`a5f1e7db46` → `:792` once `#13485` landed → `:863` here — so of the total, **+77** is
-`#13485`'s and the remaining **+71** is this
-branch's own `_closing_quote`, its docstring and the fifth pin. They move with every appended test,
+numbers are re-measured at this head: `assert measured` sits at `:885`, against `:715` on
+`a5f1e7db46` → `:792` once `#13485` landed → `:885` here — so of the total, **+77** is
+`#13485`'s and the remaining **+93** is this
+branch's own (+71 for `_closing_quote`, its docstring and the fifth pin, and +22 for
+`_unkeepable_quoted`'s verdict split, a later round's addition). They move with every appended test,
 so they are re-measured rather than carried: an earlier revision of this section cited the
 pre-rebase `:751-752`,
 `:753`, `:658`, `:666`, and the revision before this one cited `:828-829`/`:830`/`:733`/`:743` — all
 of which had drifted, by the same mechanism. The sequence branch carries
-the same pair at `:734` / `:738`.) Both are
+the same pair at `:761` / `:765`.) Both are
 false blocks of an author's tree, not fail-opens — nothing escapes measurement, they fail closed
 and name a remedy — and both live in the guard, not in the escape branch this PR fixes. Recorded
 here because a reader meets the message before the reason; fixing the ordering is a separate change
@@ -522,12 +524,17 @@ arm is the SPEC-CORRECT side here (YAML 1.2.2 §6.6: *"Comments must be separate
 by white space characters"*, so `"…"# c` is not a comment), and PyYAML is the lenient one — but
 PyYAML is the consumer this arm exists to model, so for that consumer it is a false block. It
 cannot ship a defect — it fails CLOSED, the value is REPORTED rather than silently skipped — and it
-is the same class as the (C) truncation case this PR deliberately keeps red. ⚠️ But for this shape the
-remedy it names is itself the class this PR removes: the arm says *"the value is TERMINATED there —
-remove the inner quote"* when `yaml.safe_load` reads the value whole, so a reader is told to delete a
-legal inner quote. That is a mis-worded remedy behind a closed gate, not a fail-open, and it is
-recorded here rather than presented as a harmless note. Clearing it means teaching the arm to accept a
-non-space-separated trailing comment after a close — a lexer widening, out of this issue's scope.
+is the same class as the (C) truncation case this PR deliberately keeps red. ⚠️ The VERDICT is still
+refused, and clearing that is still out of this issue's scope for the reason below — but the REMEDY
+it printed was itself the class this PR removes: the arm said *"the value is TERMINATED there —
+remove the inner quote"* when `yaml.safe_load` reads the value whole, so a reader was told to delete
+a legal inner quote. That half needed no lexer change and is now FIXED: `_unkeepable_quoted` splits
+the diagnosis by VERDICT, so `malformed` names the shapes that actually clear it (one space before
+the `#`; the whole value on one line inside its quotes; a block scalar) while only `broken` — where
+YAML really does stop at an inner quote — keeps the deletion advice, and
+`test_a_malformed_value_names_a_true_remedy` (`:1271`) pins both halves. Clearing the VERDICT means
+teaching the arm to accept a non-space-separated trailing comment after a close — a lexer widening,
+out of this issue's scope, and unchanged by the remedy fix.
 Measured scale, so it is not read as larger than it is. ⚠️ The differential below was run by the
 round that found this, over a **generator it did not commit**, so the figure is a historical
 measurement: an independent re-run at `4be2f9a959` over 81,243 YAML-parseable generated raws found
@@ -548,8 +555,10 @@ edited: it carries the review attestation the gate reads, and an unrelated edit 
 **Recorded, not fixed — a comment with NO space after the close is a PRE-EXISTING false block.**
 Found by the fresh-context review at `23cfffc260` and re-measured there. `aboutObjects: "x"# note`
 is loadable YAML — `yaml.safe_load` returns `"x"`, and `parse_frontmatter` agrees — but the arm
-reports `('malformed', None)` and prints *"the value is TERMINATED there — remove the inner quote"*,
-the same mis-worded remedy as the finding this PR exists to remove. `'x'# note` behaves the same.
+reports `('malformed', None)`. The verdict is the PRE-EXISTING part (see the next paragraph); the
+REMEDY is not: this round's `_unkeepable_quoted` prints *"put one space before the `#`"* for it, so
+the *"remove the inner quote"* advice the review recorded here is gone, pinned by
+`test_a_malformed_value_names_a_true_remedy` (`:1271`). `'x'# note` behaves the same.
 This is NOT a regression and NOT a new refusal: `main`'s helper (`f6793959a2`) reaches `malformed`
 here too, via `not value.endswith(q)` — `_split_comment` only ever splits at a space-preceded `#`,
 so the raw keeps its trailing comment and never ends in the quote char. The fix neither causes it
@@ -558,9 +567,10 @@ clearing it means teaching the arm to accept a non-space-separated trailing comm
 which is the same lexer widening and the same out-of-scope boundary. It fails CLOSED — the value is
 reported, never silently skipped — so it cannot ship a defect. It is worth naming because a reader
 meets it the first time anyone writes `"…"#comment`, and because it is one member of a family
-whose remedy text is wrong while the gate is shut.
+whose VERDICT is the same while the gate is shut — the family's printed remedy, which this round's
+verdict split corrects, was the other half of the complaint.
 
-**Recorded, not fixed — a MULTI-LINE QUOTED scalar is refused with the same mis-worded remedy.**
+**Recorded, not fixed (the VERDICT) — a MULTI-LINE QUOTED scalar is refused; the remedy it prints is no longer mis-worded.**
 Found by the second fresh-context review at `ae275460df` and re-measured there. A quoted scalar may
 legally continue onto the next line:
 
@@ -571,8 +581,10 @@ aboutObjects: "a
 
 `parse_frontmatter` reads that whole as `'a b'`, but `_values` hands `_quoted_style` only the first
 line (`_values(['title: x','aboutObjects: "a','  b"'])` → `('aboutObjects','scalar','"a')`), which
-returns `('malformed', None)` — so the arm fails the file and prints *"the value is TERMINATED
-there — remove the inner quote"* about a value YAML keeps intact. This is PRE-EXISTING: `main`'s
+returns `('malformed', None)` — so the arm fails the file, and since this round prints the
+one-line/block-scalar remedy rather than *"the value is TERMINATED there — remove the inner quote"*
+about a value YAML keeps intact (`test_a_malformed_value_names_a_true_remedy`, `:1271`). This is
+PRE-EXISTING: `main`'s
 helper reaches `malformed` here identically, and the fix neither causes nor clears it. It also
 falsifies the code comments that say a quoted value is closed on its line
 (`tests/test_doc_affiliation_frontmatter.py:169` and `:210`) — those are corrected to the narrower
@@ -619,15 +631,15 @@ Measured at the post-rebase head:
   test's own docstring describes — measured both ways at this head, so the two
   verdicts are not interchangeable. The failing assertion is
   `assert style == "single-quoted"` in
-  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1016` at this
+  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1038` at this
   head; it was `:974` when the mutant was run, and it moves whenever a test is
   appended to this file, so cite it by name, not by line);
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
   truncation case still `broken`;
 - `main` at `f6793959a2` measures `2 failed, 8 passed` on this file; this head measures
-  `2 failed, 13 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
-  and this PR's own **five** pins (`''` parity, mid-body parity, `"` backslash, the (C) ordering,
-  and the never-closing `malformed` pin);
+  `2 failed, 14 passed` — the same 2 pre-existing absence reds, the same paths, plus `#13485`'s test
+  and this PR's own **six** pins (`''` parity, mid-body parity, `"` backslash, the (C) ordering,
+  the never-closing `malformed` pin, and the verdict-split remedy pin);
 - `test_docs_lint_baseline` + `test_docs_lint_gate` + `test_docs_citation_refs` → **106 passed**.
 
 One correction this rebase forced: the pre-existing absence red on the evidence bundles now names
