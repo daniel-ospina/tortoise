@@ -3451,6 +3451,15 @@ surfaces:
   # `core` row is what makes `--integrity` classify the file at all. The `eval` row is the
   # `tortoise/embeddings.py` arm and the `api` row the hosted-door arm.
   - test_13224_cold_embedder_write_bound.py
+  # #13417 (fresh-context review HIGH, PR #13430): the VECTORLESS-ROW observation and the repair
+  # loop it feeds. `core` is the `tortoise/monitoring.py` arm — that module matches no named
+  # SOURCE_PATTERN and therefore selects `core` by fallback, and it owns the counter's family name
+  # and its `metrics()` publication, which `test_metrics_publishes_the_count` reads. The file is a
+  # `carve_out:` member, so this row is the CLASSIFICATION record, not the leg trigger (`select()`
+  # subtracts a carve-out member from `test_files` and the carve-out job runs it); it is what makes
+  # `--integrity` classify the file at all. The `eval` row is the `tortoise/embeddings.py` +
+  # `graph-scripts/backfill_embeddings.py` arm and the `api` row the hosted-door arm.
+  - test_13417_vectorless_rows.py
   # #10687: `tools/attest_census.py` owns its own suite — the hermetic arms pin the
   # RESTORE/RE-REVIEW partition (repair separated from fabrication), the 0/2-never-1
   # exit contract, and the report shape the REQUIRED `docs` check lints whole. `core`

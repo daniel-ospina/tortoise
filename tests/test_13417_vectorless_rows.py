@@ -407,3 +407,58 @@ def test_the_count_survives_a_burst_the_log_latches(cold_window, proj):
     for i in range(5):
         proj._upsert_subject({"id": f"s-burst-{i}", "name": f"burst subject {i}"})
     assert _delta(before, _no_vector_counts()) == {f"{_GRAPH}:budget_expired": 5}
+
+
+def test_an_ABSENT_identity_component_still_identifies_the_row(proj, monkeypatch):
+    """A row whose identity component is ABSENT must be repaired, not skipped.
+
+    This is the pin for `_null_safe_eq` specifically, and it exists because the
+    loop test above cannot reach that branch: its cold row is a `Subject`, whose
+    identity (`name`) is a single always-present component. `Event`'s "other"
+    branch instead identifies a row by (subject, eventKind, object), and TWO of
+    those are legitimately absent — an event written with no `object` and no
+    `eventKind` is an ordinary shape, not a malformed row. In Cypher
+    `NULL = NULL` is NULL-FALSY, so a plain-equality write excludes such a row
+    from its OWN write: `_backfill_graph` then counts it `skipped` and the
+    repair silently does nothing. That is exactly the failure the whole repair
+    exists to prevent, so absence has to be part of the identity — and a mutant
+    that reverts `_null_safe_eq` to `f"{node_expr} = {row_ref}"` reds here
+    (`updated` 0, `skipped` 1) while every other case in this file stays green.
+
+    Both components are taken from the identity the WRITE builds
+    (`_write_where("Event", "other")`), not from a positional restatement here:
+    `_EVENT_COLUMNS` is the one spelling of the surface's collected layout, so a
+    copied index would drift from the write it is meant to grade.
+    """
+    g = proj.db.select_graph(proj.graph_name)
+    cold_name = "cold event with no object"
+    g.query(
+        "CREATE (n:Event {eventId: $id, subject: $subject})",
+        params={"id": "e-13417-null", "subject": cold_name})
+
+    mod = _load_backfill()
+    # Non-vacuity for the SHAPE, not just the outcome: both absent components must
+    # reach the WRITE as NULL-safe comparisons, or this case would be grading a
+    # row the write happens to match for some other reason.
+    where = mod._write_where("Event", "other")
+    for expr in ("n.eventKind", "n.object"):
+        assert f"({expr} IS NULL AND row.k" in where, (
+            f"{expr} is an identity component that may be ABSENT, so the write "
+            f"must compare it NULL-safely — got {where}"
+        )
+
+    fake = _FakeEmbed()
+    monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
+    stats = mod._backfill_graph(proj.db, proj.graph_name, ["Event"],
+                               0, 500, required_dim=None)
+
+    assert stats["updated"] == 1, (
+        "the row must be repaired on its OWN identity, absence included — a "
+        f"`skipped` here is a repair that silently did nothing: {stats}"
+    )
+    assert stats["skipped"] == 0, stats
+    assert _stored_vector(g, "Event", "eventId", "e-13417-null") == pytest.approx(
+        fake(cold_name)), (
+        "the repaired row must carry the vector for its own composed text "
+        "(subject alone — both other components are absent)"
+    )
