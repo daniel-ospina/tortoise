@@ -6789,24 +6789,30 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "in the slot the resolver reads")
     # …and that other head's value is pinned WITH its head, so the re-wording cannot quietly
     # drop the value it was re-worded to keep. ⛔ WHAT THIS ARM CAN AND CANNOT SAY (#13489
-    # review, P1 — MEASURED): `:20236` is the value that head's record carries, and it is
-    # QUOTED HISTORY, not a re-measurement — `2584a86ec1` is ABSENT from this box
-    # (`git cat-file -t 2584a86ec1` -> `fatal: Not a valid object name`), so neither this
-    # arm nor a reader can re-open it. An earlier version of this message told the reader to
-    # run `git show 2584a86ec1:tortoise/sdk.py | grep -n '_honours: dict'`, which CANNOT RUN
-    # here, and the D5 clause beside it claimed the object WAS present and the number
-    # "measured rather than inherited" — a checkable sentence that a single `git cat-file -t`
-    # refutes. The arm therefore asserts only what it can: the number is stated WITH that
-    # head and stays outside the slot the resolver reads.
+    # review, P1 — MEASURED, and re-measured): `:20236` IS re-measured at `2584a86ec1`, not
+    # inherited — `git cat-file -t 2584a86ec1` -> `commit`, and
+    # `git show 2584a86ec1:tortoise/sdk.py | grep -n '_honours: dict'` -> `20236`, the value
+    # pinned just below. What this ARM cannot do is resolve another head's LINE from the suite:
+    # CI checks the repo out at one commit and a shallow/filtered clone need not carry another
+    # head's tree — the limit `test_the_legacy_head_really_predates_the_flip` names for its own
+    # head, and the reason `test_the_merge_head_honours_line_is_what_that_head_carries` below
+    # SKIPS on a shallow clone and re-measures on a full one, instead of asserting from memory
+    # in either direction.
+    # ⛔ AN EARLIER CUT OF THIS COMMENT SAID THE OPPOSITE AND IS DELETED, not softened: it called
+    # `:20236` "QUOTED HISTORY, not a re-measurement" because `2584a86ec1` was said to be ABSENT
+    # from this box, quoting `fatal: Not a valid object name` — which `git cat-file -t` refutes
+    # here. The POLARITY is the point: PRESENCE is what that probe confirms, and a `fatal` is
+    # the absence. The D5 clause beside it had already been corrected for this exact error
+    # (reading a refusal as a measured absence) while the guard that documents the document
+    # kept it, so the correction had to land in both places (#13489 review, P1).
     _honours_merge_head_value = re.findall(
         r"at the MERGE head `2584a86ec1`[^(){]{0,80}`:(\d+)`", _d5)
     assert _honours_merge_head_value == ["20236"], (
         "05-verify.md D5 should state the MERGE head `2584a86ec1`'s own `_honours` line "
         "(`:20236`) immediately after naming that head, and this reads "
-        f"{_honours_merge_head_value!r} — that value is quoted history with its head (the "
-        "object is not in a fresh checkout, so it cannot be re-measured here); if it moves, "
-        "correct it in the same commit that changes the record, not by carrying this head's "
-        "number into it")
+        f"{_honours_merge_head_value!r} — that figure is that head's own, re-measured there "
+        "with `git show 2584a86ec1:tortoise/sdk.py`; if it moves, correct it in the same "
+        "commit that changes the record, not by carrying this head's number into it")
 
     # ⛔ THE RETRACTED `sdk.py:25127` CLAIM, RE-MEASURED (#13489 review, finding 2 — MEASURED).
     # D5 stated that "this PR re-derived [the content-review filter cite] to `sdk.py:25127`",
@@ -7437,6 +7443,62 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "— there is no number there to re-derive; fix the manifest block or the "
         "document sentence.\n"
         + "\n".join(f"- {f}" for f in row_failures + block_failures))
+
+
+def test_the_merge_head_honours_line_is_what_that_head_carries():
+    """D5's `:20236` is a MEASURED value at `2584a86ec1`, not a quoted one.
+
+    ⛔ THE POLARITY (#13489 review, P1). A comment inside the epic-bundle pin called
+    `:20236` "QUOTED HISTORY, not a re-measurement", because `2584a86ec1` was said to
+    be ABSENT from this box and a `fatal: Not a valid object name` was quoted as the
+    proof. MEASURED: `git cat-file -t 2584a86ec1` -> `commit`, and
+    `git show 2584a86ec1:tortoise/sdk.py` carries the definition on `:20236` — the
+    exact value the pin asserts. Presence is what the probe CONFIRMS; a `fatal` there
+    would be the absence, so the polarity was backwards and the stated limit did not
+    exist. This arm is that measurement, so the figure is checkable by an instrument
+    rather than asserted in prose.
+
+    ⛔ WHAT THIS ARM CANNOT DO, stated rather than assumed: CI checks this repo out with
+    a bare `actions/checkout@v4` (`python-ci.yml`, default `fetch-depth: 1`), where
+    another head does not exist by construction. So the read SKIPS on a shallow clone
+    and FAILS on a full clone whose object is unreadable — the same distinction
+    `test_the_legacy_head_really_predates_the_flip` makes for its own head, and the
+    reason the arm above is a prose pin instead of a `git show`.
+
+    NON-VACUITY, MEASURED on a full clone: reds if the definition moves off `:20236` at
+    that head (and the value is read there, not here), and reds if that head becomes
+    unreadable in a full clone — the two ways the figure could stop being true.
+    """
+    head = "2584a86ec1"
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"{head}:tortoise/sdk.py"],
+            cwd=_REPO, capture_output=True, text=True)
+    except FileNotFoundError:  # no `git` on this host at all
+        pytest.skip("`git` is not installed here, so no commit can be read")
+    if shown.returncode != 0:
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=_REPO, capture_output=True, text=True).stdout.strip()
+        if shallow == "true":
+            pytest.skip(
+                f"{head} (the MERGE head D5 quotes `:20236` for) is not in this "
+                "clone's history — a `fetch-depth: 1` checkout cannot contain "
+                "another head, so the figure is UNCHECKED here, not disproved. "
+                "`git fetch --unshallow origin` re-arms this arm.")
+        pytest.fail(
+            f"{head} is unreadable in a FULL clone, so the head D5 binds `:20236` "
+            "to is wrong rather than merely unreachable — and a skip here would "
+            "leave the figure unchecked forever. "
+            f"git: {shown.stderr.strip()}")
+    hits = [
+        _n for _n, _line in enumerate(shown.stdout.splitlines(), 1)
+        if "_honours: dict[str, frozenset[str]] = {" in _line]
+    assert hits == [20236], (
+        f"`_honours: dict[str, frozenset[str]] = {{` sits at {hits} in "
+        f"`{head}:tortoise/sdk.py`, while 05-verify.md D5 names `:20236` for that "
+        "head — re-derive the figure with `git show "
+        f"{head}:tortoise/sdk.py | grep -n '_honours: dict'`, never carry it forward")
 
 
 @pytest.mark.parametrize("prose", [
