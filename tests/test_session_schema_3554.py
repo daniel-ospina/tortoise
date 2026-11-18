@@ -1969,7 +1969,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     cite a comment id, and v3.33 — the block that landed `D2 — A` for this very
     question — cites none"* as the evidence for narrowing a gate's scope. Measured with
     this module's own tools the count is **5 of 41**, and that block DOES cite — the permalink
-    ``#issuecomment-5619843002`` (``docs/ONTOLOGY-CHANGELOG.md:247``):
+    ``#issuecomment-5619843002`` (v3.33's issue-#11824 block, ``docs/ONTOLOGY-CHANGELOG.md:296``):
     the citing versions are listed below, one entry per block, and the sentences that
     quote them are checked by this pin. Both halves
     of the sentence were wrong, in a file whose subject is removing unverified
@@ -2580,7 +2580,7 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
         # ⛔ AND THIS PIN'S OWN DOCSTRING, WHICH THE BOLD ARM CANNOT REFUSE EITHER
         # (review finding, measured). `allowed_bold` accepts the citing count AND its
         # complement in ANY position, so changing this docstring's `count is **5 of
-        # 41**` to `**36 of 41**` — a false claim, since four blocks cite — left the
+        # 41**` to `**36 of 41**` — a false claim, since five blocks cite — left the
         # whole suite at 57 passed. The sentence makes a CITING claim (`the count is
         # <N of M>`), so the citing pair is what it must state.
         # ⛔ AND THE TWO ADJACENT CLAIMS ON THE SAME SENTENCE (review finding,
@@ -2927,9 +2927,9 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     patterned sentences are held to one copy each.) An earlier cut of this
     sentence said "3 of 39" and added that
     v3.33 — the block that landed `D2 — A` for this very question — *cites none*:
-    BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:209` (issue
+    BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:296` (issue
     #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` at
-    `:247` — an accepted form, enumerated below, in the sentence the old text
+    `:334` — an accepted form, enumerated below, in the sentence the old text
     contradicted. So v3.33 is not evidence for the narrow scope; the 36 blocks that
     cite nothing are.)
     What the approval rule actually needs is that no
@@ -2953,7 +2953,7 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     # ``comment 1234567890``, ``comment `1234567890` ``, ``comment-id: 1234567890``,
     # and the permalink ``#issuecomment-1234567890``.
     # ⛔ THE PLURAL ``comments 1234567890`` IS REFUSED even though the file itself
-    # uses that style (v3.32, ``docs/ONTOLOGY-CHANGELOG.md:274``): accepting it
+    # uses that style (the v3.32 block): accepting it
     # re-opens the issue-number arm below. A reader who hits a red on that form is
     # looking at a deliberate refusal, not a broken pin — rewrite it in the
     # singular or as a permalink.

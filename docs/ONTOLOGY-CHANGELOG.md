@@ -76,7 +76,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   and priority has no design yet. The same two rows record that the goal's two endings are the
 >   lifecycle's endings on that axis (`abandoned` is `deprecated`; `superseded` is `superseded`), and
 >   that a write whose ending disagrees with `status` is refused.
-> - **§5's Object-kind blockquote** carries the dated status note recording the `guideline` removal and
+> - **§5's `goalState` blockquote** carries the dated status note recording the `guideline` removal and
 >   where it went, following this file's convention of correcting an approved clause with a dated note
 >   rather than rewriting it.
 >
@@ -96,7 +96,6 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > (`docs/plans/2026-11-16-state-lifecycle-implementation.md`) and the issues that track them (#10371,
 > #12855, #13034, #13035, #13100).
 >
-
 > **Changelog v3.35 (2026-11-13 — the temporal-immutability constraint states the model, not its enforcement):**
 >
 > **Owner approval of the exact changes:** 2026-11-13, given in-session. The approval's artifact is the
