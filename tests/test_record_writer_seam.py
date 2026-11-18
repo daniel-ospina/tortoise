@@ -225,6 +225,33 @@ def _no_ambient_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(rw.RECORD_DSN_ENV, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No embedder, so the seam emits EXACTLY the plan's columns.
+
+    ⛔ HERMETIC ON PURPOSE, and this is a correctness fix rather than tidiness
+    (`#13447`). The seam enriches a derived-entity row with the record's
+    `embedding` column (`record_writer.derived_embedding_columns`, `#13220`), and
+    `rp.replay_plan` — the ONE declaration this file holds the seam to — does not:
+    the column is an ENRICHMENT, derived from an embedder that may or may not exist.
+    So "the seam emits exactly the record plan" is only measurable with the
+    derivation OFF, and without this fixture the five equality assertions below
+    pass on a CI lane that has no model and FAIL on any lane that does (measured:
+    with the `embeddings` extra installed they red on
+    `INSERT INTO public.object (…, embedding, …)`). Asserting the derived column
+    ITSELF belongs to `tests/test_13220_record_label_embeddings.py`, which drives
+    it deliberately; this suite pins statement IDENTITY and ORDER.
+
+    `EmbeddingModel.get()` → `None` is the documented "uninstalled embedder" arm
+    (`compute_embeddings` then answers one `None` per text), so no private seam is
+    patched.
+    """
+    from tortoise import embeddings
+
+    monkeypatch.setattr(embeddings.EmbeddingModel, "get",
+                        classmethod(lambda cls, *a, **k: None))
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 1. THE SEAM EMITS THE RECORD'S PLAN — exactly, and nothing of its own
 # ════════════════════════════════════════════════════════════════════════════

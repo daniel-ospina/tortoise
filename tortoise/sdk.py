@@ -42,6 +42,7 @@ from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any, ClassVar
 
+from . import derived_embedding
 from .domain_loader import known_kinds, register_kind
 # #9572: the "nothing was named" predicate for the identity doors, ONE home
 # shared with the hosted REST/commit doors and the eval lane (stdlib-only leaf,
@@ -1136,9 +1137,14 @@ def _record_vector_searcher(sdk=None, timeout_ms=None):
 
     ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET, AND IT IS BOUND HERE (#11691).
     ``record_vector.searcher`` threads it into the returned closure, which divides
-    it once (``record_vector.record_statement_ms``: two bounded statements per
-    read, so each gets a third) and hands the quotient to the door, where the
-    applied ``statement_timeout`` is ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``.
+    it once (``record_vector.record_statement_ms``) and hands the quotient to the
+    door, where the applied ``statement_timeout`` is
+    ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``. ⚠️ The divisor is PER-ARM
+    (`#13466` cycle 5, P3): a column-filtered label issues two bounded statements
+    and divides by `record_vector.RECORD_LEG_STATEMENTS_PER_READ`, while a
+    folded-status label (`object`/`subject`) issues three and divides by
+    `record_vector.FOLD_ARM_DIVISOR` — so "each gets a third" is the column arm's
+    arithmetic, not the folded one's.
     The division is what leaves the graph branch time to answer after a
     cancellation; see that function for the arithmetic. The reason it is bound at
     CONSTRUCTION rather than passed per call: the callable's FOUR-argument shape is
@@ -16400,6 +16406,10 @@ class TortoiseSDK:
             type_, id=id_, recorded_ts=recorded_ts,
             **_journal_record_payload(event))
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): the record write and the fold below both
+    # encode this row's text; the decorator binds one memo across the pair, so the
+    # second encode is free (`derived_embedding.one_encode_scope`).
+    @derived_embedding.one_encode_scope
     def _apply_and_journal(self, proj, event: dict, *,
                            journal: bool = True) -> None:
         """THE live-write door for a pre-built Object/Subject/Event record.
@@ -45909,8 +45919,11 @@ class TortoiseSDK:
         _mark_read_stage(STAGE_RETRIEVAL)
         # #11691: the SAME budget `degradation_chain` gives every leg's
         # `timeout_ms` below, so the RECORD dense leg's statement bound is
-        # `min(record door, a third of this)` instead of the door's 15 s — the
-        # third is `record_vector.record_statement_ms`, which reserves the rest of
+        # `min(record door, a share of this)` instead of the door's 15 s — the
+        # share is `record_vector.record_statement_ms`, the read divided by the
+        # ARM's statement count plus one (a third for a column-filtered label's
+        # two statements, a quarter for a folded label's three), which reserves
+        # the rest of
         # the read for the graph branch after a cancellation. Derived with the
         # identical expression degradation_chain uses (`int(elevated or
         # VECTOR_LEG_BUDGET_MS)`) rather than a second guess at it.
@@ -51295,6 +51308,14 @@ class TortoiseSDK:
 
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): this door runs the record write and the
+    # fold in BOTH orders depending on the LABEL — its Object/Subject/Event blocks
+    # fold before they journal (contract exception 2's neighbour), while
+    # `DocumentCreated` journals first and folds after — so the scope spans the
+    # PAIR order-independently; either way the second encode of the same text is
+    # free (`derived_embedding.one_encode_scope`, whose docstring states the
+    # per-label rule this comment must not contradict).
+    @derived_embedding.one_encode_scope
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None,

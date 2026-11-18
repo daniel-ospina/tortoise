@@ -1367,8 +1367,8 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # `run_vector_query`, which moves every row below: +25 for the rows above that
     # function's body, +55 for the rows after it. Re-derived against the live file
     # again — the pin caught it, which is what it is for.
-    ("tortoise/search_engine.py", 2886, "def run_fts_query(",
-     "`tortoise/search_engine.py:2886`"),
+    ("tortoise/search_engine.py", 2888, "def run_fts_query(",
+     "`tortoise/search_engine.py:2888`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
     # moves the two LATE rows and only them: the FTS call and the rank loop.
     # Re-derived against the live file after the forward-merge, not nudged by a
@@ -1376,19 +1376,26 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # drifts with every edit and reads as authoritative, and the tuples below
     # are the only place this block may state one — the historical numbers in
     # the rows ABOVE are the record of a drift, not a locator to trust.
-    ("tortoise/search_engine.py", 3098, "CALL db.idx.fulltext.queryNodes",
-     "`:3098-3107`"),
-    ("tortoise/search_engine.py", 2728, "def recency_tie_clause(",
-     "`search_engine.py:2728`"),
-    ("tortoise/search_engine.py", 4904,
+    ("tortoise/search_engine.py", 3100, "CALL db.idx.fulltext.queryNodes",
+     "`:3100-3109`"),
+    ("tortoise/search_engine.py", 2730, "def recency_tie_clause(",
+     "`search_engine.py:2730`"),
+    # #13422 (PR #13466) inserts inside `search_engine.py` above this loop, so the
+    # row is +15 against `main`'s own re-derived value. Measured on the MERGE tree,
+    # not nudged by a constant.
+    ("tortoise/search_engine.py", 4921,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4904`"),
-    ("tortoise/projection/__init__.py", 20822, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20822`"),
-    ("tortoise/projection/__init__.py", 21265, "def _create_fulltext_index(",
-     "`:21265`"),
-    ("tortoise/projection/__init__.py", 21715,
-     "self._create_fulltext_index(label, fields)", "`:21715`"),
+     "`tortoise/search_engine.py:4921`"),
+    # The three `projection/__init__.py` rows were stale on `main` too (both the
+    # brief and this pin still named the pre-#13290 lines), and this branch's own
+    # seam work moves them a further +23. Re-derived against the live file, so
+    # the pin and §1 of the brief name the same lines as the code.
+    ("tortoise/projection/__init__.py", 20845, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20845`"),
+    ("tortoise/projection/__init__.py", 21288, "def _create_fulltext_index(",
+     "`:21288`"),
+    ("tortoise/projection/__init__.py", 21738,
+     "self._create_fulltext_index(label, fields)", "`:21738`"),
 )
 
 

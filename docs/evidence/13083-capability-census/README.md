@@ -127,7 +127,7 @@ and deterministic; the residency figure is **unmeasured**.
 in `tests/test_cache_projection.py` (`:186-195`, `:243-246`) refuse the declaration until it is widened
 with a tail-only category — a decision belonging to `#10429`, which owns this route. The MECHANISM does
 honour the entry (`_props_from_row`'s `tail_denied` is the plain forbidden set plus its spellings,
-`cache_projection.py:2715`). See the audit's §5.1.
+`cache_projection.py:2776`). See the audit's §5.1.
 
 ## Per-shape census (single run, `before` arm)
 
