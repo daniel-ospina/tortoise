@@ -45740,9 +45740,10 @@ class TortoiseSDK:
                 # the ONE absent exit, so ``TORTOISE_EMBEDDING_MODEL_REQUIRED``
                 # (#4861/#5275) keeps failing LOUD rather than degrading
                 # silently, and the refusal names the cause this read actually
-                # resolved (a load still IN FLIGHT has recorded no failure of its
-                # own, so ``_last_failure_kind`` alone would answer the
-                # designed-absence term).
+                # resolved — which ``_last_failure_kind`` ALONE cannot supply: it
+                # is unset while a load is merely in flight (and would answer the
+                # designed-absence term), and on the re-arm arm it can hold an
+                # OLDER recorded failure that the trace term does not name.
                 # ⛔ ``kind`` is a LEG-TRACE reason, and ``_unavailable``
                 # translates it into the refusal's ``failure_kind`` vocabulary
                 # (#13528 review P1-1). The rule, not a fixed pair: a reason
