@@ -6306,6 +6306,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "extractor_v2"),
         ("02-scope.md", "per-door `_honours` set", (
             ("22296", "_honours: dict[str, frozenset[str]] = {"),        ), "sdk"),
+        # ⛔ The D5 row's OWN currency claim for the same symbol, added at review round 2: the row
+        # says "The clause is read directly there now", and until this row existed NOTHING read it —
+        # measured: mutating all three `:22296` back to `:22291` in `05-verify.md` left all 458 tests
+        # green. Its `02-scope.md` sibling above does not reach this document, so this is a second
+        # row and not a duplicate: a row scopes to one FILE.
+        ("05-verify.md", "is at `:22296` at THIS head", (
+            ("22296", "_honours: dict[str, frozenset[str]] = {"),
+        ), "sdk"),
         ("A4-PER-LAYER.md", "compares `pkind.lower()` against", (
             # RE-DERIVED by CONTENT on the merged tree (main added this row, but this
             # branch's `extractor_v2.py` carries +90 lines above these anchors):
