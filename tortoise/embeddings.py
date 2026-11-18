@@ -1764,8 +1764,18 @@ def _in_replay_scope() -> bool:
         return True
 
 
+#: The two LEGS a bounded write belongs to — they have DIFFERENT repairs, so
+#: the count is never summed across them (#13417).
+BOUNDED_SCOPE_GRAPH_FOLD = "graph_fold"
+BOUNDED_SCOPE_RECORD_DERIVATION = "record_derivation"
+
+
 def encode_for_row(
-    content: str, expected_dim: int | None, *, bounded: bool = False,
+    content: str,
+    expected_dim: int | None,
+    *,
+    bounded: bool = False,
+    bounded_scope: str = BOUNDED_SCOPE_GRAPH_FOLD,
 ) -> list[float] | None:
     """The EMBED-gated submission step for a WRITTEN row (#5008).
 
@@ -1817,6 +1827,26 @@ def encode_for_row(
     recompute their vector from the payload text, so a live decline is
     repairable from the graph and `derived = replay(journal)` still holds.
 
+    ⚠️ **The decline is COUNTED, not merely logged (#13417).** Every bounded
+    decline increments `monitoring.metrics()["derived_embed_declines"]` under
+    the LEG it belongs to and the cause it declined for, because §17.2 requires
+    that the truth↔derived divergence the bound creates be checkable, and
+    `#13156` rules out inferring it from the read side (a budget-cancelled dense
+    leg reads like a slow store). The count is emitted from THIS seam rather
+    than from each caller, so a new writer cannot leave it behind — the same
+    reason the gate lives here.
+
+    ⛔ **`bounded_scope` is a CALLER's fact, not this seam's**, and it is
+    required because the seam cannot infer it: the two legs are repaired
+    differently. `graph_fold` (the four folds, the default) is repaired by
+    `graph-scripts/backfill_embeddings.py`; `record_derivation`
+    (`record_writer.derived_embedding_columns`, #13220) leaves the RECORD's
+    `embedding` column NULL, and that tool reads graph nodes — it would report
+    zero residual over this population. The seam also cannot see whether the row
+    already held a vector, so `graph_fold` counts a cold RE-write that lost
+    nothing; `monitoring.DERIVED_EMBED_DECLINE_COUNT` states both limits and the
+    repair that reconciles exactly.
+
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
     writers — a `Turn` is not an extracted row, and the batched form has one
@@ -1852,15 +1882,51 @@ def encode_for_row(
     if bounded and not _in_replay_scope():
         decline = EmbeddingModel.await_write_ready_reason(WRITE_EMBED_BUDGET_S)
         if decline is not None:
-            # Visible, not silent: counted on the existing "ran no model work"
-            # metering term (#4488) and logged once per process PER CAUSE — a bulk
-            # write must not storm the log with one line per row, and the cause
-            # travels with the line so the one entry an operator reads names what
-            # actually happened (#13229 review F2).
+            # Visible, not silent, on THREE channels — they answer different
+            # questions and none is redundant: the metering term (#4488) counts
+            # "no model work ran" per org; the counter (#13417) counts the WRITES
+            # that stored no vector — the LEG and the cause, on
+            # `monitoring.metrics()`, and an UPPER BOUND on rows the dense leg is
+            # missing rather than a row count (a cold re-write of an
+            # already-embedded row counts and loses nothing); and
+            # the line below explains once per process PER CAUSE what the two
+            # numbers mean — a bulk write must not storm the log with one line
+            # per row, and the cause travels with the line so the one entry an
+            # operator reads names what actually happened (#13229 review F2).
             _note_embed_skip(1)
+            _note_vectorless_write(bounded_scope, decline)
             _note_cold_write(WRITE_EMBED_BUDGET_S, reason=decline)
             return None
     return encode_for_store(content, expected_dim)
+
+
+def _note_vectorless_write(scope: str, reason: str) -> None:
+    """Count the WRITE this bounded decline leaves without a vector (#13417).
+
+    TOTAL, and every occurrence — unlike `_note_cold_write`, which is latched to
+    one line per process per cause so a bulk write cannot storm the log. The log
+    line explains WHAT happened; this counter is the number an operator can
+    alert on, and a number that only moves once per process cannot answer "how
+    many rows is the dense leg missing?".
+
+    Imported lazily so this module stays import-order-independent and an unarmed
+    process pays one function call, not a module import (the
+    `_note_embed_encode` shape). A measurement fault must NEVER fail a write, so
+    this is swallowed: monitoring is an observation, not a dependency.
+
+    ⛔ It does NOT count `#5008`'s gate declines — those are a DESIGNED absence
+    (identifier-only text), permanent and unrepairable — nor a post-bound refusal
+    (a wrong-width store, or an encoder that raised). Both are permanent and
+    operator-actionable in a different way, and parking either beside a real cold
+    window would make the channel's non-zero value unattributable. See
+    `monitoring.DERIVED_EMBED_DECLINE_COUNT` for the full boundary and for the
+    two limits this seam cannot see.
+    """
+    try:
+        from .monitoring import record_derived_embed_decline
+        record_derived_embed_decline(scope, reason)
+    except Exception:
+        pass
 
 
 def _note_cold_write(budget: float, *, reason: str) -> None:
