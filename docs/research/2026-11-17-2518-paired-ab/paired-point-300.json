@@ -1832,8 +1832,8 @@
             "seed": 20261117
           },
           "correlation": {
-            "rho": NaN,
-            "se_reduction": NaN
+            "rho": null,
+            "se_reduction": null
           },
           "discordance": 0.043333333333333335,
           "discordant_hit_to_miss": 0,
@@ -1873,8 +1873,8 @@
             "seed": 20261117
           },
           "correlation": {
-            "rho": NaN,
-            "se_reduction": NaN
+            "rho": null,
+            "se_reduction": null
           },
           "discordance": 0.056666666666666664,
           "discordant_hit_to_miss": 0,
@@ -1914,8 +1914,8 @@
             "seed": 20261117
           },
           "correlation": {
-            "rho": NaN,
-            "se_reduction": NaN
+            "rho": null,
+            "se_reduction": null
           },
           "discordance": 0.016666666666666666,
           "discordant_hit_to_miss": 0,
@@ -1955,8 +1955,8 @@
             "seed": 20261117
           },
           "correlation": {
-            "rho": NaN,
-            "se_reduction": NaN
+            "rho": null,
+            "se_reduction": null
           },
           "discordance": 0.02,
           "discordant_hit_to_miss": 0,
@@ -2083,7 +2083,7 @@
   "population_file": "/tmp/snap-2518/population-300.json",
   "provenance": {
     "git_head": "9b537d875a3ee27e6abdb7ccac07b28ef71a78cd",
-    "git_head_note": "`git_head` is the repo commit the run sat on, and it does NOT identify the producing code: ALL THREE artifacts carry the `mde_note` key, and the object control's is populated and sits beside a `nan` `mde_paired` (the two point artifacts' `mde_note` is `\"\"` and their `mde_paired` is finite) \u2014 the tool emits that key only from 5898385f2e onward, and that fix was UNCOMMITTED when the run happened. `tool_sha256` is null because this run predates the field; a run from this tool version records the digest of its own bytes and whether they were committed (#13267 F4).",
+    "git_head_note": "`git_head` is the repo commit the run sat on, and it does NOT identify the producing code: ALL THREE artifacts carry the `mde_note` key, and the object control's is populated beside a `mde_paired` that the run wrote as `NaN` and this file encodes as strict `null` \u2014 the cell is PRESENT and null, and the note beside it is what distinguishes it from a field that was never recorded. The two point artifacts' `mde_note` is `\"\"` and their `mde_paired` is finite, so that cell carries no token; the `NaN` their runs wrote sits in `correlation.rho` / `correlation.se_reduction`, which are `null` here for the same reason. The tool emits `mde_note` only from 5898385f2e onward, and that fix was UNCOMMITTED when the run happened. `tool_sha256` is null because this run predates the field; a run from this tool version records the digest of its own bytes and whether they were committed (#13267 F4).",
     "tool_path": "tools/paired_expansion_ab_2518.py",
     "tool_sha256": null,
     "tool_uncommitted": true
