@@ -1195,8 +1195,21 @@ separate migration, index build and backfill (`docs/architecture/SEARCH-ARCHITEC
 single hop — and the job these vectors do is **resolution**, a *lookup*, not a *traversal* — so an unindexed
 graph-side copy **loses to an indexed Postgres one on the axis the index exists for** (a scan grows with the
 population, an index does not), which is the whole of the argument option 2 makes. ⚠️ **The comparison is
-SIZE-DEPENDENT, and the paragraph above is the measurement that says so:** 9.26 ms for a full scan of 7,859 `Object`
-vectors is *faster* than the ~10–15 ms cross-store hop — so at this size the scan wins on latency, and what makes the case for the index is the SIZE dependence rather than today's number (`21.04 ms → 21.48 ms` from 1,000 to 8,000 rows indexed, `34.45 ms → 56.88 ms` scanned). What holds at EVERY
+SIZE-DEPENDENT, and the document's own readings are what say so — but they do NOT agree on which way it points at
+this size, so no single number decides it:** the BARE linear scan is **9.26 ms** for 7,859 `Object` vectors (§12.1d,
+2026-09-24) — *faster* than the ~10–15 ms cross-store hop (§12.1c) — while the same UNINDEXED read measured through
+the app's own path was **16.96 ms p50** in the 2026-09-24 census (§12.1b) and **34.45 ms p50**, with **133.25 ms p50 /
+634.50 ms p99** under load, in the 2026-11-17 re-read (`#13108`, §14.3 V3) — both *slower* than the hop. ⚠️ **Those two
+app-path readings are PRE-REMOVAL, and the gap is priced: §14.3 V3 attributes ≈58 % of that read's store time to two
+REFUSED `queryNodes` round trips, which `#13108` removed.** With them gone the paired read drops **34.78 ms → 13.26 ms
+p50** at 1,000 rows (−62 % against its own pre-removal arm) — *inside* the hop's band — while that same paired read
+still grows to **47.47 ms at 8,000 rows** (−28 % against its pre-removal arm, same artifacts;
+`docs/research/2026-11-17-13108-dense-leg/research-brief.md` §5; ⚠️ §5's own qualification on the 8,000 pair: it was
+measured against a draft of the fix rather than the merged commit — both arms `scan_fallback`, so the direction
+stands). ⇒ **So even the app path's verdict is size-dependent, and that is the point: what makes the case for the
+index is the SIZE dependence rather than today's number** — `21.04 ms → 21.48 ms` from 1,000 to 8,000 rows indexed,
+`34.45 ms → 56.88 ms` scanned in that re-read's single-arm rows, and `13.26 ms → 47.47 ms` on its paired post-removal
+read. What holds at EVERY
 size is the ledger rather than the latency: the graph-side copy is bytes on provisioned, unevictable RAM held for a row
 the record already has — ⚠️ **and the record's vector column arrives EMPTY, so the graph copy is today the only copy of
 that vector for the rows written before the column could be filled — §12.1b's two-population state, not one store
