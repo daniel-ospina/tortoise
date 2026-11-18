@@ -11156,7 +11156,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     a `TORTOISE_DB_URI` satisfies) — one more skip and one fewer pass than the docker
     lane, which is the invariant that lasts; the two figures above are bound to the sha
     for exactly that reason. The two splits therefore add to the tree's OWN collected
-    count: `276 + 1` and `275 + 2` at THIS tree, both equal to the `277` the pin re-derives
+    count: `279 + 1` and `278 + 2` at THIS tree, both equal to the `280` the pin re-derives
     below (the `eee465029a` pair, `185/1` and `184/2`, adds to that tree's 186 instead),
     which is why the doc states its split as lane-bound: a carve-out run must not
     "correct" the docker lane's figure.
@@ -14099,7 +14099,7 @@ def test_12549_a_REFUSED_resolver_is_never_published_as_having_ANSWERED(
 
 
 def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
-    """#13447 review cycle 3, issue 7 — the seam reach is resolved by NAME.
+    """#13447 review cycle 3, issue 7 — the seam reach is resolved by BINDING, not by NAME.
 
     `_seam_module_calls` decides which writers the census credits with a gated
     reach of `encode_for_row`, and its own docstring promises that
@@ -14114,18 +14114,31 @@ def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
     cycle-3-fix spelling (`name.endswith("_" + SEAM_MODULE)`) the negative tree returns
     `{"encode", "derive_row"}` — from the two `my_derived_embedding.*` rows added at
     review cycle 6, issue 1 — so the suffix arm cannot come back unnoticed either.
+
+    ⛔ This arm is the SPELLING half only. The BINDING half — a receiver that resolves
+    to the module's name but is bound to something else — is
+    `test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach`.
     """
     positive = ast.parse(
         "derived_embedding.encode('Acme')\n"
         "_derived_embedding.derive_row('Object', {})\n"
     )
-    assert probe._seam_module_calls(positive, {}) == {"encode", "derive_row"}
+    # ⛔ The map is REQUIRED even for the bare spelling (`#13447` review cycle 7, P2): a receiver
+    # is credited only when the writer's own import map resolves it to the module, so a name the
+    # writer never imported is not a reach. Both spellings here are what `_import_aliases` really
+    # produces for `from tortoise import derived_embedding[ as _derived_embedding]`.
+    assert probe._seam_module_calls(
+        positive, {probe.SEAM_MODULE: probe.SEAM_MODULE,
+                   "_" + probe.SEAM_MODULE: probe.SEAM_MODULE}) == {"encode", "derive_row"}
 
-    # A SHORT alias resolved through the caller's own import map is still a reach —
-    # the aliased canonical name ends in the module name.
+    # A SHORT alias resolved through the caller's own import map is still a reach — this is the
+    # `from tortoise import derived_embedding as de` shape, which `_import_aliases` really emits
+    # (`{"de": "derived_embedding"}`). ⛔ Before cycle 7 this arm hand-fed
+    # `{"de": "tortoise.derived_embedding"}`, a key no production caller can build, so it pinned a
+    # branch `_embedding_writers` could never take.
     aliased = ast.parse("de.encode('Acme')\n")
     assert probe._seam_module_calls(
-        aliased, {"de": "tortoise.derived_embedding"}) == {"encode"}
+        aliased, {"de": probe.SEAM_MODULE}) == {"encode"}
 
     # …and these are NOT: each merely CONTAINS the module name, or is a
     # different object carrying the same attribute. The two `my_derived_embedding`
@@ -14142,3 +14155,83 @@ def test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach() -> None:
         "a receiver that only CONTAINS the seam module's name was credited as a "
         "gated reach of `encode_for_row` — the census then reports the writer as "
         "covered and it owes no declaration (the fail-open direction)")
+
+
+#: The three shapes `#13447` review cycle 7 (P2) measured as credited by SPELLING, each paired with
+#: the write clause that makes its writer DISCOVERABLE — so the assertion is about the KIND the
+#: census assigns (owed vs not owed), not about whether the writer is in the population at all.
+_REBOUND_RECEIVER_SHAPES: dict[str, str] = {
+    # a PARAMETER of the writer's own scope
+    "parameter": (
+        "def _w(proj, derived_embedding):\n"
+        "    return proj.g.query('MATCH (n:Point) SET n.embedding = $e', "
+        "{'e': derived_embedding.encode('x')})\n"
+    ),
+    # an ASSIGNMENT in the writer's own scope
+    "assignment": (
+        "def _w(proj):\n"
+        "    _derived_embedding = make()\n"
+        "    return proj.g.query('MATCH (n:Point) SET n.embedding = $e', "
+        "{'e': _derived_embedding.encode('x')})\n"
+    ),
+    # a FOREIGN import (`from other.pkg import …`) — same name, a different object
+    "foreign_import": (
+        "from other.pkg import derived_embedding\n"
+        "def _w(proj):\n"
+        "    return proj.g.query('MATCH (n:Point) SET n.embedding = $e', "
+        "{'e': derived_embedding.encode('x')})\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_REBOUND_RECEIVER_SHAPES))
+def test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach(shape, tmp_path) -> None:
+    """#13447 review cycle 7, P2 — a receiver is the module only while the BINDING says so.
+
+    `_seam_module_calls` credited `.encode`/`.derive_row` on any receiver whose NAME was
+    `derived_embedding`/`_derived_embedding`, with no binding check. A parameter, an assignment, and
+    a foreign import all bind that name to something else, and all three measured as a credited
+    reach — which sets `kind="gated"`, and `gated` is OUTSIDE `NEEDS_A_DECLARATION`. So the writer
+    stopped OWING a declaration while never reaching the gate: `#12020` round 3's fail-open class
+    (`a writer-local _enc = lambda p: p still credited encode_for_row`), one seam over, in the file
+    whose whole purpose is that guard.
+
+    Drives `_embedding_writers` over a scratch tree, not `_seam_module_calls` directly, because two
+    of the three shapes are caught one layer UP: the caller drops a shadowed alias through
+    `_keep_shadowed_aliases`. This test is about the writer's KIND, so it has to see the caller.
+
+    Non-vacuity: on the pre-fix code each shape measures `gated` (measured at `e9017e1e95` —
+    `_locally_bound` already saw the names, but the receiver test only read the spelling), so the
+    `unresolved_write` assertion is the row that reds. The healthy control in the same file pins
+    the other direction, so the fix cannot be "credit nothing".
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text("", encoding="utf-8")
+    (tmp_path / "tortoise" / "shadow.py").write_text(
+        _REBOUND_RECEIVER_SHAPES[shape], encoding="utf-8")
+    # ⛔ The healthy control lives in its OWN module, not beside the shape: `_scope_bound_names`
+    # shadows a module alias for the WHOLE module ON PURPOSE (`_keep_shadowed_aliases`: "a
+    # rebinding anywhere in the module makes a bare name ambiguous for a GATE spelling"), so the
+    # foreign-import row would legitimately shadow the control and this arm would red a correct
+    # verdict. The two are therefore separate files, which is also what the production tree looks
+    # like.
+    (tmp_path / "tortoise" / "healthy.py").write_text(
+        "from tortoise import derived_embedding\n"
+        "def _healthy(proj):\n"
+        "    return proj.g.query('MATCH (n:Point) SET n.embedding = $e', "
+        "{'e': derived_embedding.encode('x')})\n",
+        encoding="utf-8")
+
+    writers = probe._embedding_writers(tmp_path)
+    # ⛔ The healthy control: the module import IS a reach, so the row below is a binding verdict
+    # and not a resolver that credits nothing.
+    assert writers["tortoise.healthy::_healthy"]["kind"] == "gated", (
+        "the honest `from tortoise import derived_embedding` reach stopped being credited — the "
+        "fix over-corrected into the false-block direction")
+    kind = writers["tortoise.shadow::_w"]["kind"]
+    assert kind in ("unresolved_write", "ungated"), (
+        f"a receiver rebound in the writer's own scope ({shape}) was credited as a gated reach of "
+        f"`encode_for_row` (measured {kind!r}) — `gated` is outside NEEDS_A_DECLARATION, so the "
+        "writer owes no declaration while never reaching the gate (the fail-open direction)")
+    assert writers["tortoise.shadow::_w"]["callee"] != probe.SEAM_CALL, (
+        "the shadowed receiver was credited to the seam anyway — the binding was not consulted")

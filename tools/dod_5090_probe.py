@@ -397,8 +397,17 @@ WRITE_CLAUSE_BUILDERS: tuple[str, ...] = ("set_embedding_clause", "clear_then_se
 
 #: The names an import can alias to something this instrument must still resolve — the clause
 #: builders above plus the gate seams. Built once, not per call.
+#: ⛔ `SEAM_MODULE` IS ENROLLED FOR THE BINDING, NOT FOR THE CALL (`#13447` review cycle 7, P2).
+#: A *module* import has no call name to credit — `_named_callees`/`_callees` answer a `Name` or an
+#: `Attribute`, and this one resolves to `_seam_module_calls` — so membership adds nothing to the
+#: credit path. What it adds is a HOME for `_imports_that_REBIND` to test: without an entry, a
+#: module import is a name no rule resolves, so `from tortoise import derived_embedding` bound
+#: `derived_embedding` ambiguously and the receiver was decided by SPELLING alone. That is how a
+#: parameter, a writer-local assignment, or a foreign `from other.pkg import derived_embedding` came
+#: to be credited as the seam — the fail-open direction, because a credited reach is `gated`, which
+#: is OUTSIDE `NEEDS_A_DECLARATION`.
 _ALIASABLE_CALL_NAMES: frozenset[str] = (
-    frozenset(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL} | frozenset(UNGATED_CALLS))
+    frozenset(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL, SEAM_MODULE} | frozenset(UNGATED_CALLS))
 
 #: The module each aliasable name actually LIVES in. ⛔ An `ImportFrom` from anywhere else binds a
 #: different function that merely shares the name, and crediting it as the seam flips a writer that
@@ -433,6 +442,16 @@ _ALIAS_HOMES: dict[str, frozenset[str]] = {
     SEAM_CALL: frozenset({"tortoise.embeddings", "embeddings"}),
     "encode_for_store": frozenset({"tortoise.embeddings", "embeddings"}),
     "compute_session_embedding": frozenset({"tortoise.session_indexer", "session_indexer"}),
+    # ⛔ A MODULE, so the accepted spellings are the ones a `from … import` can NAME — not the
+    # module's own dotted path (`#13447` review cycle 7, P2). `_import_aliases` compares against
+    # `ImportFrom.module`, so the two live shapes arrive as `"tortoise"`
+    # (`from tortoise import derived_embedding`, `tortoise/**/*.py`) and `""`
+    # (`from . import derived_embedding`, `cache_projection.py`) — a home set of
+    # `{"tortoise.derived_embedding", …}` would match NEITHER and every real seam reach would drop
+    # to `unresolved_write` (the false-block direction: declarations demanded of gated writers).
+    # Anywhere else is a different object that shares the name, and `_imports_that_REBIND` counts it
+    # as a rebinding — which is exactly what stops a foreign import being credited (P2's third row).
+    SEAM_MODULE: frozenset({"tortoise", ""}),
 }
 
 
@@ -1059,32 +1078,56 @@ def _locally_bound(node) -> set[str]:
 def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
     """The gate seam reached through the :data:`SEAM_MODULE` module (#13447).
 
-    Returns the matched call names (empty when the writer does not reach it). The
-    receiver is resolved through the writer's own aliases AND by the module's own
-    spelling, so `_derived_embedding.encode(...)` (a module aliased on import),
-    `derived_embedding.encode(...)` and `de.derive_row(...)`-style spellings that
-    keep the module name are the same reach, while `client.encode(...)` — same
-    attribute, a different object — is not a reach at all.
+    Returns the matched call names (empty when the writer does not reach it).
 
-    ⚠️ RESIDUAL, stated rather than implied: a SHORT alias that drops the module
-    name (`import tortoise.derived_embedding as de`) is not resolved here, because
-    `_import_aliases` keeps only the canonical names it is taught and this tool has
-    no import-graph resolver. Such a caller is reported the pre-#13447 way
-    (`unresolved_write`, i.e. it owes a declaration) rather than silently credited
-    — the false-BLOCK direction, chosen because the other one makes the census
-    blind to a gate reach (`#12020`).
+    ⛔ THE RECEIVER IS DECIDED BY ITS BINDING, NEVER BY ITS SPELLING (`#13447` review cycle 7, P2).
+    The question is *"does this name still mean the module?"*, which is the same question
+    `_locally_bound` / `_keep_shadowed_aliases` already answer for every other seam spelling in
+    this file — and the answer has to come from the import map, not from what the identifier looks
+    like. A name that merely READS like the module is not the module:
 
-    ⛔ The local spelling is matched against the TWO bound spellings and nothing else
-    (`name in (SEAM_MODULE, "_" + SEAM_MODULE)`): containment credited
-    `derived_embedding_client.encode(...)` — a different object with the same
-    attribute — which is exactly the reach this docstring says does not count, i.e. the
-    fail-open direction on the instrument that decides which writers owe a declaration
-    (`#13447` review cycle 3, issue 7). A `"_" + SEAM_MODULE` SUFFIX is not that bounded
-    set either: it credits every `*_derived_embedding` receiver (`my_derived_embedding`),
-    so the suffix arm was replaced by membership at review cycle 6, issue 1.
+        from tortoise import derived_embedding      # ← the module: a reach
+        def w(derived_embedding): …                 # ← a PARAMETER: not a reach
+        def w():
+            _derived_embedding = make()             # ← an ASSIGNMENT: not a reach
+        from other.pkg import derived_embedding     # ← a FOREIGN import: not a reach
+
+    Crediting any of the last three classes the writer `gated`, which is OUTSIDE
+    `NEEDS_A_DECLARATION` — so it stops owing a declaration while never reaching the gate. That is
+    `#12020` round 3's failure class (a writer-local `_enc = lambda p: p` still credited
+    encode_for_row`), re-created one seam over, and it is the direction this module exists to close.
+
+    Two conditions, both required:
+
+    * the receiver RESOLVES through the writer's own import map (`aliases`) to :data:`SEAM_MODULE`;
+      `SEAM_MODULE` is enrolled in `_ALIASABLE_CALL_NAMES` / `_ALIAS_HOMES` so `_import_aliases`
+      resolves `from tortoise import derived_embedding` and `from . import derived_embedding`
+      unchanged, and `_imports_that_REBIND` counts a foreign import as the rebinding it is;
+    * the receiver is NOT bound in the writer's own scope (`_locally_bound`) — belt AND braces,
+      because the caller already drops shadowed aliases through `_keep_shadowed_aliases` and this
+      function is also called directly (its unit test, and any future caller) with a hand-fed map.
+
+    An UNRESOLVED receiver — including the shape no rule in this file resolves
+    (`import tortoise.derived_embedding as de`, an `ast.Import`, which `_import_aliases` does not
+    read) — is reported the pre-#13447 way (`unresolved_write`, i.e. it owes a declaration). That is
+    the false-BLOCK direction, chosen deliberately: the other one makes the census blind to a gate
+    reach (`#12020`).
+
+    ⛔ The SPELLING arms are gone rather than narrowed a second time. Containment
+    (`SEAM_MODULE in name`) credited `derived_embedding_client.encode(...)` — a different object
+    with the same attribute, i.e. exactly the reach this docstring says does not count (`#13447`
+    review cycle 3, issue 7). Its replacement, a `"_" + SEAM_MODULE` SUFFIX, credited every
+    `*_derived_embedding` receiver (`my_derived_embedding`, `#13447` review cycle 6, issue 1). Both
+    were re-spellings of the same unasked question, which is why cycle 7 replaced the question
+    (binding) instead of the answer (a third spelling). Pinned by
+    `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`
+    (the substring/suffix rows) and
+    `…::test_a_receiver_REBOUND_in_the_writers_scope_is_not_a_reach` (the three binding rows).
     """
     import ast
 
+    # ONE binding question per writer, asked once rather than per call.
+    bound = _locally_bound(node)
     out: set[str] = set()
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
@@ -1096,27 +1139,15 @@ def _seam_module_calls(node, aliases: dict[str, str]) -> set[str]:
         name = getattr(receiver, "id", None)
         if name is None:
             continue
-        canonical = aliases.get(name, name)
-        # ⛔ The LOCAL spelling is matched by NAME, never by substring containment
-        # (`#13447` review cycle 3, issue 7). `SEAM_MODULE in name` credited a
-        # receiver that merely CONTAINS the module name — `derived_embedding_client`,
-        # `my_derived_embedding` — as a gated reach of `encode_for_row`, contradicting
-        # this function's own promise that `client.encode(...)` (same attribute, a
-        # DIFFERENT object) is not a reach at all. That is the fail-open direction on
-        # the census that decides which writers owe a declaration.
-        #
-        # The two real spellings are the bare module name and its underscore-alias form
-        # (`derived_embedding`, `_derived_embedding`), so the test is MEMBERSHIP in that
-        # two-element set — a bounded set, not an open one. ⛔ It was written as
-        # `name.endswith("_" + SEAM_MODULE)`, which is NOT bounded: any receiver named
-        # `*_derived_embedding` — `my_derived_embedding`, the very spelling this comment
-        # names as rejected — was credited (`#13447` review cycle 6, issue 1, measured).
-        # Pinned by
-        # `tests/test_dod_5090_probe.py::test_a_receiver_that_only_CONTAINS_the_seam_name_is_not_a_reach`,
-        # whose negative tree carries `my_derived_embedding` so the suffix arm cannot return.
-        if (canonical.split(".")[-1] == SEAM_MODULE
-                or name in (SEAM_MODULE, "_" + SEAM_MODULE)):
-            out.add(func.attr)
+        # ⛔ `aliases.get(name)` with NO bare-name fallback: `aliases.get(name, name)` made the
+        # resolution a no-op, so the guard below could never fire for a name the writer never
+        # imported — the only case that matters (`#13447` review cycle 7, P2).
+        canonical = aliases.get(name)
+        if canonical is None or canonical.split(".")[-1] != SEAM_MODULE:
+            continue
+        if name in bound:
+            continue
+        out.add(func.attr)
     return out
 
 
