@@ -2520,12 +2520,21 @@ def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
     assert _strip_sql_comments(sql) != sql, (
         "the fixture removed no comment — the pre-fix cut would pass this row too")
 
-    # 4. The neighbour the disclosure names: `U&'…'` is NOT an escape string and must
-    #    not get the `E` rule — its quote is written by DOUBLING, which the literal
-    #    branch already models. Pinned so the docstring cannot drift back to claiming
-    #    a shared backslash rule it would then be implementing.
+    # 4. The scope of the rule, which is the part a reader is most likely to get
+    #    wrong: only `E'…'` escapes a quote with a backslash. A BARE literal (and the
+    #    `U&'…'` spelling, which writes its quote by DOUBLING) ends at that quote —
+    #    so the `--` after it is still a comment and must still be removed.
+    #    ⛔ These two are the row's ONLY defence against applying the `E` rule to every
+    #    literal, and that mutant is fail-OPEN on valid SQL (it keeps the comment), so
+    #    they are pinned here rather than in prose. Measured: with the prefix test
+    #    replaced by `escape_literal = True`, this row reddened; without these two
+    #    assertions the whole file stayed green (33 passed) under that mutant.
+    assert _strip_sql_comments("SELECT 'a\\' AS x; -- c\n") == "SELECT 'a\\' AS x; \n", (
+        "a bare literal ends at the quote after a backslash (standard_conforming_"
+        "strings is on) — if the `E` rule leaked onto it, the tail comment survives")
+    assert _strip_sql_comments("SELECT U&'a\\' AS x; -- c\n") == "SELECT U&'a\\' AS x; \n", (
+        "`U&'…'` is not an escape string: its quote is written by DOUBLING, so a "
+        "backslash does not reach past the closing quote")
     assert _strip_sql_comments("SELECT U&'a''b' -- c\n") == "SELECT U&'a''b' \n", (
-        "a `U&'…'` literal is scanned as an ordinary literal (closes on `''`); if it "
-        "stopped doing so, a comment in the tail would survive")
-    assert _strip_sql_comments("SELECT U&'\\0041' -- c\n") == "SELECT U&'\\0041' \n", (
-        "a `\\XXXX` unicode escape inside `U&'…'` must not be read as a quote escape")
+        "a `U&'…'` literal closes on `''` like a bare one; if it stopped doing so, a "
+        "comment in the tail would survive")
