@@ -7723,8 +7723,12 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
     offload_refusals, uptime} — plus the counter keys below (``wait_bound_breaches``
     #10602, ``health_setup_clamped`` #10749, ``record_position_unproven`` #9307,
     ``record_writes_applied``/``record_last_write_at`` #9548 and the rest).
-    #13417 adds ``rows_written_without_vector`` — the DERIVED-entity rows a
-    bounded write stored with no vector, keyed by the decline's cause.
+    #13417 adds ``derived_embed_declines`` — the DERIVED-entity embedding WRITES a
+    bounded write declined, keyed ``"<leg>:<cause>"``. It is an UPPER BOUND on
+    rows missing a vector (a cold re-write of an already-embedded row counts and
+    loses nothing), and its two legs have different repairs; see the counter's
+    own docstring for both, and read the repair's ``_residual_missing`` for the
+    exact end state.
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
