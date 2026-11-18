@@ -653,14 +653,22 @@ exist on `main` — so the exclusion is about ownership, not severity.
   `parse_frontmatter("aboutObjects: 'a'x'")` returns `{}` (measured: the same PARSE-arm refusal this
   document relies on above for the four `''''X'` rows), so no comparing verdict is consumed
   end-to-end. What the fix would leave is a HELPER-LEVEL comparing verdict on parser-refused input —
-  the latent class those four rows already carry — not a fail-open. It is out of THIS change only
-  because it moves an executable verdict path and needs its own pin rather than riding along in a
-  prose round; a fresh review measured an exhaustive sweep to length 6 with the fix applied as 0
-  wrong bodies on YAML-accepted input and no green→red regression (its measurement, not this
-  document's), so the next lane is not blocked from landing it.
+  the latent class those four rows already carry — not a fail-open.
+- ⛔ It is NOT free either, and the review's own measurement covers only two of the three directions.
+  Applied to this head, the slice turns the class pin's FIRST direction from **0 to 122**
+  refused-but-green shapes at bound 5 (comparing verdicts `277 → 422`) and reds
+  `test_no_GREEN_quoted_verdict_survives_a_parser_refusal` outright, plus
+  `test_a_malformed_value_names_a_true_remedy`; at bound 6 it is `1430 → 2527`. The mechanism is the
+  same one that makes the mis-slice harmless: `'' '` closes at index 1, so `value[1:close]` is the
+  empty string and the text AFTER the close is silently dropped instead of refused
+  (`('broken', None)` here). So the fix does clear `''''#'` (`''#` → `'`, the correct body) and adds
+  0 wrong bodies on YAML-ACCEPTED input — both of which the review measured — but it must land WITH
+  the wholeness test that refuses a close the text continues past. "Not blocked" is the wrong
+  reading: as a one-liner it reds this PR's own pin, which is why it did not ride along in a prose
+  round.
 - ⚠️ The slice fix and the LEXER widening above are INDEPENDENT: the slice fix does not need the
-  widening in order to land, and the widening's own out-of-scope note is unchanged by the
-  correction above.
+  widening, and the widening's own out-of-scope note is unchanged by the correction above. What the
+  slice needs is the WHOLENESS change, which is a third thing.
 
 The length bound in the pin names the whole residual rather than leaving it to be rediscovered.
 

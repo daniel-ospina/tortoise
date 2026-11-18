@@ -1207,7 +1207,10 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
     THREE pins red: THIS one, ``test_a_malformed_value_names_a_true_remedy`` (its
     case (c) asserts ``"broken" in msg`` for a shape whose verdict this order
     decides) and ``test_no_GREEN_quoted_verdict_survives_a_parser_refusal`` (its
-    ``mismatched`` assertion fires on the same mutant) — ``5 failed, 13 passed`` of
+    ``refused_but_green`` assertion fires on the same mutant — measured, NOT its
+    ``mismatched`` one: with the ordering gone, a shape the parser REFUSES comes
+    back with a COMPARING verdict, which is that pin's first direction) —
+    ``5 failed, 13 passed`` of
     18 collected at ``fcf5d9cd72``, the other 2 being the pre-existing absence rows
     that red identically on ``origin/main``. Named as well as totalled because an
     earlier revision of this paragraph claimed "one other pin" and a
@@ -1501,8 +1504,10 @@ _SHAPE_ALPHABET = ("'", '"', "\\", "#", " ", "a")
 #:
 #: * ONE is a mis-slice — `''''#'` is loadable YAML (`'`) and the arm's body is
 #:   `''#`, because `body = value[1:-1]` is not sliced at the close the parity scan
-#:   already located. False red → it fails CLOSED (see the plan doc §9 for why the
-#:   one-line slice fix cannot land alone).
+#:   already located. False red → it fails CLOSED. It is fixable (`body = value[1:close]`
+#:   clears it and adds 0 wrong bodies on YAML-accepted input) but it cannot land ALONE:
+#:   measured, it turns 122 further parser-REFUSED shapes at bound 5 into comparing
+#:   verdicts (`277 → 422`), which REDS this very pin. §9 carries the measurement.
 #: * FOUR are the pin's FIRST and most severe direction — REFUSED-BUT-GREEN, i.e.
 #:   a comparing verdict on input a real parser REJECTS — and all four are of the
 #:   `''''X'` form: `''''"'`, `''''\'`, `'''' '`, `''''a'`.
@@ -1529,11 +1534,15 @@ def test_no_GREEN_quoted_verdict_survives_a_parser_refusal() -> None:
       comparison is made against the wrong text.
 
     Measured at this head: 3110 shapes, 277 green, **0** refusals reported green,
-    0 body mismatches. Non-vacuity: the same sweep driven through ``main``'s
-    ``_closing_quote`` + ``_split_comment`` finds **1** — `'''''` (five quotes),
-    which YAML refuses as an unterminated scalar and ``main`` reports as
-    ``single-quoted`` with body ``''`` — so this pin reds on the PRE-fix helper and
-    is green only because the parity scan refuses to close an unterminated scalar.
+    0 body mismatches. Non-vacuity: the same sweep driven through ``main``'s SCALAR
+    VERDICT path — ``_split_comment`` + ``_quoted_style``, which is where the
+    compared verdict is decided — finds **1**: `'''''` (five quotes), which YAML
+    refuses as an unterminated scalar and ``main`` reports as ``single-quoted`` with
+    body ``''`` — so this pin reds on the PRE-fix helper and is green only because
+    the parity scan refuses to close an unterminated scalar. ⛔ ``_closing_quote``
+    does NOT exist on ``main`` (this branch introduces it), so an earlier revision of
+    THIS paragraph replayed a function a reader cannot find there; the pairing above
+    is the one that was measured, and re-measuring it still finds exactly one shape.
 
     The two counters are constant-derived (alphabet x bound), never tree-derived,
     so they cannot red on a sparse tree: they exist so that an edit to those two
