@@ -4088,8 +4088,9 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at its 27m
     # shard watchdog" measurement the section argues a fold-routing decision on. ⛔ The BUDGET is
     # DERIVED, not fixed (`shard_watchdog_minutes()` builds `matrix.watchdog_minutes` from the
-    # shard's packed estimate), so the pin reads BOTH numbers out of the cited workflow line rather
-    # than restating one here. The revision before this one hard-coded "32m12s of a 30m budget" — a
+    # shard's packed estimate), so the pin reads the budget OUT of the cited workflow line and
+    # asserts the wall against it — the wall literal below is what the cited line must contain, not
+    # a second number the pin reads. The revision before this one hard-coded "32m12s of a 30m budget" — a
     # 30m budget no artifact carries: job 123849604825 (run 40986603502) logs `WATCHDOG: pytest
     # killed after 27m`, and the 32m12s is the JOB wall, not the watchdog. A pin that states a
     # number the cited line does not is the drift this pin exists to catch, one level up.
@@ -4130,6 +4131,30 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     assert "32m12s" in cited, (
         f"batch-integration.md cites python-ci.yml:{n} for the 32m12s job wall, but that line is "
         f"{cited!r}"
+    )
+
+    # …and the SAME claim has a SECOND site in that file (`:1277-1280`), which the regex above does
+    # not reach: it resolves its own citation into the RUNBOOK and repeats the budget. Pinning only
+    # the first site let the regression this pin exists for return green — edit the second back to a
+    # borrowed budget and nothing reds while the two sites disagree — so the two are asserted to
+    # agree on BOTH numbers, and the second site's workflow citation to be the first site's.
+    m2 = re.search(
+        r"the shard's own watchdog\s+fired at (\d+) m and the job wall reached 32 m 12 s"
+        r".*?this\s+shard's was \1 m \(`python-ci\.yml:(\d+)` records it\)",
+        batch,
+        re.S,
+    )
+    assert m2 is not None, (
+        "batch-integration.md's SECOND site of the canary claim no longer states the same budget "
+        "twice and cites `python-ci.yml:<line>` for it — re-derive it, do not drop this arm"
+    )
+    assert m2.group(1) == budget_min, (
+        f"batch-integration.md's two sites disagree: {budget_min}m at the first, {m2.group(1)}m at "
+        f"the second"
+    )
+    assert int(m2.group(2)) == n, (
+        f"batch-integration.md's two sites cite different workflow lines: python-ci.yml:{n} at the "
+        f"first, python-ci.yml:{m2.group(2)} at the second"
     )
 
     # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
