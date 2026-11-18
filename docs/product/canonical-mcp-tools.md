@@ -338,6 +338,23 @@ inventing a destination (see `docs/product/bridge-table.md` §D2c).
 ruling quoted below, so the surface moved **72 → 68 advertised tools**, carrying the same 23
 retired-forward entries it had at the previous head. Nothing was retired-forward into a replacement: a name with no destination gets no shim.
 
+**Amended 2026-11-18** (execution record, #11609 lane P1 — the POINT/DIARY door retirement):
+`tortoise_create_point` and `tortoise_diary_write` retired FORWARD into `tortoise_create_entity`'s
+newly built `type="point"` / `type="diary"` arms, which is what makes the two `PROTECTED` reasons
+(*"create_entity has no point arm"* / *"…no diary arm"*) false in the same batch the doors leave
+that table. The frozen baseline is re-cut in the same PR for `tortoise_create_entity`, because
+**the container had to absorb more than the node write**: the retired door's handler carried the
+server-side onboarding completion signal (`_maybe_onboarding_auto_complete`), and leaving it behind
+would have made "file your first memory" stop flipping the dashboard to Connected for every harness
+that follows the advertised call — #394's lesson (`create_document`'s `_linkSource` half was lost in
+its move). Its description also had to stop naming the doors it absorbs, because a live description
+naming a retired tool hands a tool-grant client a call absent from its own `tools/list`.
+**No tool is added, removed or renamed and no parameter, schema or SDK method changes** — the
+counts are unchanged at **46 advertised / 62 retired-forward / 94 SDK methods**, so this is the
+same class as the 2026-10-14 amendment above (the digest moves with the handler body and the
+description). status: unchanged (the surface remains the approved one) · principal:
+daniel-ospina · PR #13556 · date: 2026-11-18.
+
 **Amended 2026-11-14** (execution record, #11609 batch 2 — the SOURCES/MINE/SESSION containers):
 rows 14–18 and row 40 landed as `tortoise_register_source`, `tortoise_manage_source_trust`,
 `tortoise_index_sources_from_directory`, `tortoise_mine_knowledge_from_session`,
