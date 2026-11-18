@@ -346,6 +346,71 @@ def test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence() -> None:
     )
 
 
+#: ⛔ RESTORED (#13494, fresh-context review at `1038810281`). This arm exists on `origin/main` and was
+#: DROPPED by the `#13345` integration merge (`66e5fe9293`) without a word in any commit message; every
+#: later forward merge re-dropped it because the branch tip already lacked it. It is RED on `main` (the
+#: D-1 promise is broken there: `docs/00_index.md` says `sdk.py:28019`, `ENTITY-VERDICT-BANDS.md` says
+#: `sdk.py:28019` and that line is `"IMPL", pid, [prior], label="alreadyDecided",`) and GREEN on this
+#: PR's tree — so deleting it bought nothing and cost the only arm that DERIVES the address instead of
+#: comparing two hardcoded literals. `_PINS` cannot replace it: a coordinate edit of the doc token, the
+#: pin line and the pin fragment satisfies every pin while two documents still name two different lines.
+#: Its docstring said exactly that ("The CROSS-DOCUMENT arm — `_PINS` cannot see it") and nothing at
+#: HEAD re-implemented it (`grep -n 'address_beside' tests/test_12184_shifted_cites.py` -> no match).
+
+def test_the_dedup_filter_is_one_address_in_both_documents_that_promise_it() -> None:
+    """The CROSS-DOCUMENT arm — `_PINS` cannot see it.
+
+    `docs/00_index.md`'s D-1 row states the promise in as many words: *"the filter it names is at
+    `sdk.py:<n>` at this head, and `ENTITY-VERDICT-BANDS.md` carries the same number"*. Every row in
+    `_PINS` is satisfied by its OWN document, so two documents naming two DIFFERENT lines both pass every
+    pin — which is the shipped `#13345` state, measured: `docs/00_index.md` `sdk.py:27866` (prose at the
+    head, and the filter at no head) against `ENTITY-VERDICT-BANDS.md` `sdk.py:27861` (the value before
+    `#13290` moved it). The row that claims agreement was the only thing that had to hold, and nothing
+    checked it: the `+5` delta was applied to one document and not the other, and the promise broke
+    while reading as a correction.
+
+    NON-VACUOUS on that tree: the two addresses differ (`27866` vs `27861`), so the first assertion reds;
+    and neither opens on `dedup_reviewed IS NULL`, so the second reds independently. The address is
+    read out of each document by regex rather than hardcoded, so this arm survives a legitimate future
+    re-derivation of BOTH rows together (which is the only edit that keeps the promise true).
+    """
+    def address_beside(doc_rel: str) -> str:
+        lines = (REPO / doc_rel).read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if "dedup_reviewed" not in line:
+                continue
+            # `ENTITY-VERDICT-BANDS.md` puts the address on the line AFTER the marker; `00_index.md`
+            # carries both on one line. One line of slack covers both, and the regex is anchored on
+            # the qualified `sdk.py:` form so a bare `:NNNN` elsewhere on the line cannot be picked up.
+            window = " ".join(lines[i:i + 2])
+            found = re.search(r"sdk\.py:(\d{4,5})", window)
+            if found:
+                return found.group(1)
+        raise AssertionError(
+            f"{doc_rel} carries no `sdk.py:NNNN` address beside its `dedup_reviewed` marker — the D-1 "
+            "filter cite was dropped rather than re-derived."
+        )
+
+    index_addr = address_beside(_INDEX)
+    bands_addr = address_beside(_EVIDENCE)
+    assert index_addr == bands_addr, (
+        f"the two documents disagree on the D-1 dedup filter: `docs/00_index.md` says `sdk.py:{index_addr}` "
+        f"and `ENTITY-VERDICT-BANDS.md` says `sdk.py:{bands_addr}`, while `docs/00_index.md` promises the "
+        "latter \"carries the same number\". Only one address can open at any head, so one of the two "
+        "readers is sent to the wrong line. Re-derive BOTH from the statement "
+        "(`grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py`) rather than re-pointing one by a delta."
+    )
+    target = (REPO / _SDK).read_text(encoding="utf-8").splitlines()
+    assert 0 < int(bands_addr) <= len(target), (
+        f"`sdk.py:{bands_addr}` is out of range ({len(target)} lines) — the file shrank under the cite."
+    )
+    assert "dedup_reviewed IS NULL" in target[int(bands_addr) - 1], (
+        f"both documents agree on `sdk.py:{bands_addr}`, but that line is "
+        f"{target[int(bands_addr) - 1].strip()[:100]!r} — agreeing on the wrong line is still wrong, and "
+        "it is the reason this arm checks content as well as agreement."
+    )
+
+
 def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_ones() -> None:
     """REVERT GUARD, not a re-measurement — say what this does NOT prove.
 
