@@ -1110,10 +1110,17 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
         `"a, "#1" KEEP"`            yaml -> `'a, '`        head `('broken', None)` -> `('double-quoted', …)`
         `"a\\tb\\" "#1" KEEP"`      yaml -> `'a\\tb" '`     head `('broken', None)` -> `('escaped', None)`
 
-    i.e. a value is silently NOT compared, which is exactly the #13452 defect this
-    guard exists to prevent. The two assertions below are the only thing that notices;
-    end-to-end, a `docs/research` dossier carrying either value passes the arm under
-    that mutant and reds it at this head.
+    ⛔ Only the SECOND of those is a fail-open, and the difference has to be stated
+    because the first shape still reds — with a different message. Under the mutant
+    `"a, "#1" KEEP"` is measured as `('double-quoted', 'a, "#1" KEEP')`, so the scalar
+    branch still COMPARES it and still reports *does not SURVIVE the parse* (`len 14 →
+    3`) where it used to say TERMINATED: the verdict changes, the comparison does not
+    disappear. The second shape carries a legal backslash escape, so it reaches
+    `('escaped', None)` and the `escaped` branch `continue`s BEFORE any comparison —
+    THAT is the value which escapes measurement, and end-to-end a `docs/research`
+    dossier carrying that value passes the arm under the mutant and reds it at this
+    head, which is exactly the #13452 defect this guard exists to prevent. The two
+    assertions below are the only thing that notices either change.
 
     Before this pin existed the same mutant left the WHOLE FILE green apart from the two
     pre-existing absence rows — measured at ``3b8de63b8a``, when the file held one test

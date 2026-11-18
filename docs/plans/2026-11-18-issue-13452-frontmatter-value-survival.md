@@ -433,12 +433,14 @@ legal `\`, i.e. that `_quoted_style` tests `_has_unescaped_dq` BEFORE the escape
 was pinned only by `/tmp/matrix_13452.sh` — a scratch script that no longer exists — never by a
 committed assertion. Measured with `if _has_unescaped_dq(body):` mutated to `if False:`: the whole
 file stays GREEN (`2 failed, 11 passed` at `3b8de63b8a`, the same two pre-existing reds) while two
-values the consumer TRUNCATES stop being reported — `"a, "#1" KEEP"` (YAML reads `'a, '`) goes
-`('broken', None)` → `('double-quoted', …)`, and `"a\tb\" "#1" KEEP"` (YAML reads `'a\tb" '`) goes
-`('broken', None)` → `('escaped', None)`, where `escaped` declines the comparison entirely. That is a
-value escaping measurement — the #13452 defect this guard exists to prevent — behind green CI, and it
-is the only branch of this helper whose loss is a fail-open rather than a mis-worded remedy; the two
-pins above are the other class. `test_an_unescaped_quote_is_broken_even_beside_a_legal_escape` now
+values the consumer TRUNCATES change what the arm reports — and only ONE of them escapes
+measurement. `"a, "#1" KEEP"` (YAML reads `'a, '`) goes `('broken', None)` →
+`('double-quoted', 'a, "#1" KEEP')`, so the scalar branch still compares it and still reds, with
+*does not SURVIVE the parse* (`len 14 → 3`) where it used to say TERMINATED. `"a\tb\" "#1" KEEP"`
+(YAML reads `'a\tb" '`) goes `('broken', None)` → `('escaped', None)`, and `escaped` declines the
+comparison entirely: THAT is the value escaping measurement — the #13452 defect this guard exists to
+prevent — behind green CI, and it is the only branch of this helper whose loss is a fail-open rather
+than a mis-worded remedy; the two pins above are the other class. `test_an_unescaped_quote_is_broken_even_beside_a_legal_escape` now
 pins both shapes (unit-level on `_quoted_style`, which is where the ordering decides) and reds alone
 under that mutant (`3 failed, 11 passed`; the 2 pre-existing reds plus this one).
 
