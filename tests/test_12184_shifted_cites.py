@@ -493,19 +493,19 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
     `:4489-4490` assertion is what makes it reachable.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
-    assert "`none`: `search_engine.py:4708-4710`, a plain label scan" in text, (
-        "§2.1's verdict paragraph no longer names the label scan at `:4708-4710`; re-derive it from "
+    assert "`none`: `search_engine.py:4725-4727`, a plain label scan" in text, (
+        "§2.1's verdict paragraph no longer names the label scan at `:4725-4727`; re-derive it from "
         "the statement rather than applying a delta to the address beside it."
     )
     assert "`none`: `search_engine.py:4350-4351`" not in text, (
         "§2.1's verdict paragraph names the label scan at `:4350-4351` while the table above it names "
-        "the same reader row at `:4708-4710` — two addresses for one reader, and only one of them can "
+        "the same reader row at `:4725-4727` — two addresses for one reader, and only one of them can "
         "open at any head. That is the defect class this file exists for."
     )
     assert "`none`: `search_engine.py:4489-4490`" not in text, (
         "§2.1's verdict paragraph names `:4489-4490`, which is `run_vector_query`'s "
         "`MATCH (n:{label}) WHERE n.embedding IS NOT NULL RETURN count(*)` — a different plain label "
-        "scan from the `run_structural_query` one the table row quotes at `:4708-4710`. `#13290` reached "
+        "scan from the `run_structural_query` one the table row quotes at `:4725-4727`. `#13290` reached "
         "it by applying a delta to `:4350-4351` instead of opening the statement, which is the same "
         "offset-not-content failure as the `:4549` re-point this file was written for. Re-derive from "
         "the fragment (`grep -n 'MATCH (n:{label_str})'`), never from the address beside it."

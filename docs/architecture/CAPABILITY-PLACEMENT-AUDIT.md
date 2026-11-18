@@ -316,7 +316,7 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | **the whole-node accessor family** — `tortoise/sdk.py:24633`, `:25506`, `:27101`, `:27197`, `:27296` (`get_point`'s `_cache_answer`), `:40513`; `tortoise/record_serve.py:468` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
 
 **Verdict: `graph`.** Eighteen reader rows, **fifteen of them capability-carrying** (three are deliberately
-`none`: `search_engine.py:4708-4710`, a plain label scan; `domain_validators.py:105`, a property-equality join;
+`none`: `search_engine.py:4725-4727`, a plain label scan; `domain_validators.py:105`, a property-equality join;
 and the whole-node accessor family above), **fifteen of them across six files** (`projection/propagation.py`,
 `sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`, `domain_validators.py`) — the three
 `none` rows bring `record_serve.py`, `projection/__init__.py` and `record_reconcile.py` as well; a
