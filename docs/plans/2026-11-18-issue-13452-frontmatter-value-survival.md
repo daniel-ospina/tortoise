@@ -346,8 +346,15 @@ Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_
   comment first; it now compares against RAW and flags 8 of 8.
 - **R2** the assertion **over-blocks** — a legal YAML construct reported as truncation → measured, not
   asserted: a deliberate trailing comment (M8), a quoted value with a trailing comment (M9), a legal
-  escaped body (M10) and an indented comment line after a quoted value (M17) all stay **GREEN**. The
-  shapes that do fail closed are refused with a message naming a remedy that actually clears them.
+  escaped body (M10) and an indented comment line after a quoted value (M17) all stay **GREEN**. For
+  the shapes this PR fixes — the `''` escape, the never-closing scalar, the (C) ordering — the
+  message names a remedy that actually clears the red, and each is pinned by a test that proves it.
+  ⚠️ That is NOT true of one shape the arm still over-blocks: an affiliation SEQUENCE followed by an
+  indented comment line (`aboutObjects:` / `- a, b` / `# note`) reds as `MULTI-LINE` with *"quote the
+  whole value instead"*, yet `parse_frontmatter` reads it INTACT (`['a, b']`) and quoting the items
+  reds with the identical message — so the printed remedy cannot clear it. It is PRE-EXISTING
+  (`main` produces the same text) and is recorded in §9 among the remedy residuals rather than
+  claimed clean here.
 - **R3** quoting **truncates** a value (unescaped inner `"`, unbalanced `'`, missing close) → caught by
   **(C)**, which runs **before** the escape decline — the reverse order let an escaped body with an
   unescaped quote through green (M16 now reds). Scoped honestly: truncation-at-a-quote, NOT a
@@ -480,9 +487,12 @@ measurement. `"a, "#1" KEEP"` (YAML reads `'a, '`) goes `('broken', None)` →
 comparison entirely: THAT is the value escaping measurement — the #13452 defect this guard exists to
 prevent — behind green CI, and it is the only branch of this helper whose loss is a fail-open rather
 than a mis-worded remedy; the two pins above are the other class. `test_an_unescaped_quote_is_broken_even_beside_a_legal_escape` now
-pins both shapes (unit-level on `_quoted_style`, which is where the ordering decides) and reds alone
-under that mutant (re-measured at `23cfffc260`: `3 failed, 12 passed`; the 2 pre-existing reds plus
-this one — the ordering is the one branch that pin really does own exclusively).
+pins both shapes (unit-level on `_quoted_style`, which is where the ordering decides). At the head
+this was measured (`23cfffc260`) it red alone under that mutant — `3 failed, 12 passed`, the 2
+pre-existing reds plus this one. It no longer does: at this head the mutant reds this test **and**
+`test_a_malformed_value_names_a_true_remedy` (`4 failed, 13 passed`), because that later pin asserts
+`"broken" in msg` for a shape whose verdict the ordering decides. The exclusivity claim is dropped,
+not re-dated — it is now one of two pins, which is the stronger fact.
 
 **Already fixed — the sequence branch's false diagnosis.** `- 13452` (int) once reported "a
 sequence item has no legal transform, so this is a truncation" while the scalar branch said
@@ -543,7 +553,7 @@ a legal inner quote. That half needed no lexer change and is now FIXED: `_unkeep
 the diagnosis by VERDICT, so `malformed` names the shapes that actually clear it (one space before
 the `#`; the whole value on one line inside its quotes; a block scalar) while only `broken` — where
 YAML really does stop at an inner quote — keeps the deletion advice, and
-`test_a_malformed_value_names_a_true_remedy` (`:1271`) pins both halves. Clearing the VERDICT means
+`test_a_malformed_value_names_a_true_remedy` (`:1292`) pins both halves. Clearing the VERDICT means
 teaching the arm to accept a non-space-separated trailing comment after a close — a lexer widening,
 out of this issue's scope, and unchanged by the remedy fix.
 Measured scale, so it is not read as larger than it is. ⚠️ The differential below was run by the
@@ -587,7 +597,7 @@ is loadable YAML — `yaml.safe_load` returns `"x"`, and `parse_frontmatter` agr
 reports `('malformed', None)`. The verdict is the PRE-EXISTING part (see the next paragraph); the
 REMEDY is not: this round's `_unkeepable_quoted` prints *"put one space before the `#`"* for it, so
 the *"remove the inner quote"* advice the review recorded here is gone, pinned by
-`test_a_malformed_value_names_a_true_remedy` (`:1271`). `'x'# note` behaves the same.
+`test_a_malformed_value_names_a_true_remedy` (`:1292`). `'x'# note` behaves the same.
 This is NOT a regression and NOT a new refusal: `main`'s helper (`f6793959a2`) reaches `malformed`
 here too, via `not value.endswith(q)` — `_split_comment` only ever splits at a space-preceded `#`,
 so the raw keeps its trailing comment and never ends in the quote char. The fix neither causes it
@@ -612,7 +622,7 @@ aboutObjects: "a
 line (`_values(['title: x','aboutObjects: "a','  b"'])` → `('aboutObjects','scalar','"a')`), which
 returns `('malformed', None)` — so the arm fails the file, and since this round prints the
 one-line/block-scalar remedy rather than *"the value is TERMINATED there — remove the inner quote"*
-about a value YAML keeps intact (`test_a_malformed_value_names_a_true_remedy`, `:1271`). This is
+about a value YAML keeps intact (`test_a_malformed_value_names_a_true_remedy`, `:1292`). This is
 PRE-EXISTING: `main`'s
 helper reaches `malformed` here identically, and the fix neither causes nor clears it. It also
 falsifies the code comments that say a quoted value is closed on its line
@@ -635,6 +645,8 @@ mutant at a time with the tree restored between runs:
 passed` (the 2 pre-existing absence reds plus the 2 pins). The counts moved `11 → 12` because the
 verdict-split round appended a 14th test; a stale count in the very paragraph that tells the reader
 not to trust stale counts is the failure mode §7 item 2 exists for.
+
+**Recorded, not fixed — an affiliation SEQUENCE followed by an indented COMMENT line is a PRE-EXISTING false block whose printed remedy cannot clear it.** Found by the fourth fresh-context review and re-measured here. `aboutObjects:` / `- a, b` / `# note` (the comment on its own indented line, after the items) reds as `MULTI-LINE` with *"…a continuation line opening with `#` is silently swallowed; quote the whole value instead"*, yet `parse_frontmatter` reads the block **INTACT** (`['a, b']`) — and quoting the items (`- "a, b"`) reds with the IDENTICAL message, so the remedy the arm prints is one that cannot clear the red. `_values`' own docstring defines `sequence_multiline` as *"a sequence whose item is continued on a following indented line"*; a trailing comment is not a continuation, so the verdict is mis-classified as well as mis-worded. PRE-EXISTING — `main`'s arm produces the same text for the same file — so this PR neither causes nor clears it, and it is recorded here rather than fixed: clearing it means teaching the sequence scanner to skip a comment-only trailing line instead of marking the item `continued`, which is the same lexer-widening boundary as its siblings. Fails CLOSED, so it cannot ship a defect; §8 R2 used to claim this class was absent and now names it.
 
 ## 10. Rebase onto `main` — the conflict, and why the resolution is additive
 

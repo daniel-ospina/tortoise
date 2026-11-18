@@ -1189,8 +1189,12 @@ def test_an_unescaped_quote_is_broken_even_beside_a_legal_escape() -> None:
     `('escaped', None)` and the `escaped` branch `continue`s BEFORE any comparison —
     THAT is the value which escapes measurement, and end-to-end a `docs/research`
     dossier carrying that value passes the arm under the mutant and reds it at this
-    head, which is exactly the #13452 defect this guard exists to prevent. The two
-    assertions below are the only thing that notices either change.
+    head, which is exactly the #13452 defect this guard exists to prevent. At the
+    head this was written the two assertions below were the ONLY thing that noticed;
+    they no longer are — `test_a_malformed_value_names_a_true_remedy` also reds under
+    that mutant now (re-measured: `4 failed, 13 passed`, its case (c) asserting
+    `"broken" in msg`), so this test is the first custodian of the ordering, not the
+    sole one.
 
     Before this pin existed the same mutant left the WHOLE FILE green apart from the two
     pre-existing absence rows — measured at ``3b8de63b8a``, when the file held one test
@@ -1357,3 +1361,66 @@ def test_a_malformed_value_names_a_true_remedy(
     assert "TERMINATED at an inner quote" in msg, msg
     assert "Remove the inner quote" in msg, msg
     assert "put one space before the `#`" not in msg, msg
+
+
+def test_an_unlexable_key_is_what_makes_the_fail_open_a_RED(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(D)'s ONE fail-open, pinned — the branch was recorded and left untested.
+
+    The plan doc §9 calls this line *"a FAIL-OPEN in check (D) … the exact
+    #13452 defect the guard exists to close, reachable with a one-keystroke
+    typo"* and then records it as fixed with no pin. It was the only fix in this
+    PR whose revert left the whole file GREEN.
+
+    ``declared`` is the authoritative list of keys the guard owes a measurement
+    for. ``_values`` can only lex ``key:``, so a legal-but-unlexable key
+    spelling (a space before the colon, a quoted key, an indented block) is
+    invisible to it; unioning in the PARSED block is what makes that pair FAIL
+    instead of vanish. Without it the pair is in neither `declared` nor
+    `measured`, (D) has nothing to complain about, and a value YAML truncates
+    from 14 characters to 2 sails through green.
+
+    Non-vacuity, measured at this head: deleting
+    ``declared |= {(rel, k) for k in AFFILIATION_KEYS if k in parsed}`` leaves
+    this file at ``2 failed, 14 passed`` — the two pre-existing absence reds and
+    NOTHING else — while the arm goes GREEN on the case below. That is why the
+    pin exists rather than a comment.
+    """
+
+    def red(body: str) -> str:
+        """Run the arm over a one-case tmp docs tree and return its failure text."""
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        (root / "docs" / "research").mkdir(parents=True, exist_ok=True)
+        (root / "docs" / "research" / "control.md").write_text(
+            _FM_HEAD + "aboutObjects: tortoise-platform, tortoise-hosted\n---\n\n# c\n",
+            encoding="utf-8",
+        )
+        (root / "docs" / "research" / "case.md").write_text(
+            _FM_HEAD + body + "---\n\n# case\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "ROOT", root)
+        with pytest.raises(AssertionError) as excinfo:
+            test_research_doc_frontmatter_parses_as_yaml()
+        return str(excinfo.value).split("\n", 1)[0]
+
+    from tortoise.file_indexer import parse_frontmatter
+
+    # (a) SPACE before the colon. The shape is a REAL truncation — YAML ends the
+    # plain scalar at the ` #` — so a green arm here is a shipped defect, not a
+    # false block. Control first, so the test cannot pass by refusing a value
+    # that was never broken.
+    assert parse_frontmatter(
+        "---\ntitle: x\naboutObjects : a, #11395 KEEP\n---\n"
+    )["aboutObjects"] == "a,", "control: ` #` truncates this plain scalar"
+    msg = red("aboutObjects : a, #11395 KEEP\n")
+    assert "has a SPACE before its colon" in msg, msg
+    assert "quote the value" not in msg.split("Respell")[0], msg
+
+    # (b) a QUOTED key: also legal YAML, also invisible to `_values`, and it
+    # needs its OWN remedy — "quote the value" cannot clear it.
+    assert parse_frontmatter(
+        "---\ntitle: x\n\"aboutObjects\": a, #11395 KEEP\n---\n"
+    )["aboutObjects"] == "a,", "control: ` #` truncates this plain scalar too"
+    msg = red('"aboutObjects": a, #11395 KEEP\n')
+    assert "QUOTED key" in msg, msg
