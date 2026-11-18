@@ -124,7 +124,7 @@ string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE 
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — a wrapped English sentence in ten (e.g. `oauth.py:1600`'s “limits match” / “(#329): preserve
 None”) and a wrapped Cypher example in three (`projection/__init__.py:1204`,
-`record_projection.py:4830`, `vector_write.py:495`). Enumerated, not inferred: that TWO-LINE predicate
+`record_projection.py:4830`, `vector_write.py:498`). Enumerated, not inferred: that TWO-LINE predicate
 over the same 297 files finds exactly 13 — the verb-at-end-of-line scan alone finds 175, which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
@@ -468,13 +468,18 @@ reads) and **no** Cypher statement site, so `ast_door_calls` **1569→1571** and
 stays 297 and `files_with_sites` 99: the reader lives in a file that already carries sites. The
 `rg` reconciliation in §1 is re-measured on this tree (1,624 / 2,330 / 1,630 bare / 2,064 / 2,402),
 Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned counts match`**.
-⚠️ Those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
-below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
+⚠️ THREE of those five `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as
+the row below and from the same commit: `tortoise/record_writer.py:1723` is a COMMENT line containing
 `MERGE (s:Source {url:$id})`, and this census counts LINES — so the tool reads 2,343 / 143 where it
 read 2,342 / 142, and `rg` reads 2,330 / 142, 2,064 and 2,402 where it read 2,329 / 141, 2,063 and
-2,401. The 13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED
-(the added match is single-line, not cross-line), and §1's `record_projection.py:4777` citation is
-corrected to `:4830` because that same commit moved it.
+2,401. The TWO DOOR figures in that row are NOT among them and did NOT move at `#13265`: measured at
+its parent `ace6ba8a94` and at `#13265` itself, the door predicate reads `1,624` over the 297 product
+files and `1,630` over the no-type-filter population in BOTH — which is what the predicate says it
+must, since a `MERGE (` comment line cannot match `\.(?:ro_)?(?:query|execute)\s*\(` at all. The
+13-occurrence one-file whole-text gap and the ten-prose/three-Cypher split are UNCHANGED
+(the added match is single-line, not cross-line), §1's `record_projection.py:4777` citation is
+corrected to `:4830` because that same commit moved it, and `vector_write.py:495` is corrected to
+`:498` because THIS branch's own `vector_write.py` change moved that wrapped example down.
 ⚠️ That regeneration is not decorative at this head: `main`'s `#13115` (`9f327e1435`) moved code
 inside files that already carried sites, so re-cutting the appendix moves ROWS while every SCALAR
 stays put. Measured on THIS cut against `origin/main` **`34bd33d22a`**: exactly **one row** differs
