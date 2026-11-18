@@ -6156,7 +6156,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to one
         # FILE and the consume pair was re-pointed in one document while the definition
-        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged.
+        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — each re-read by content at the head that moved it.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
             ("7048", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
@@ -6169,7 +6169,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
-        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`.
+        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12116`/`12169` pair the rows now carry.
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("12136", "subject_binding_available,"),
             ("12189", "and not subject_binding_available(graph):"),
@@ -6306,6 +6306,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "extractor_v2"),
         ("02-scope.md", "per-door `_honours` set", (
             ("22327", "_honours: dict[str, frozenset[str]] = {"),        ), "sdk"),
+        # ⛔ The D5 row's OWN currency claim for the same symbol, added at review round 2: the row
+        # says "The clause is read directly there now", and until this row existed NOTHING read it —
+        # measured: mutating all three `:22327` back to `:22291` in `05-verify.md` left all 458 tests
+        # green. Its `02-scope.md` sibling above does not reach this document, so this is a second
+        # row and not a duplicate: a row scopes to one FILE.
+        ("05-verify.md", "is at `:22327` at THIS head", (
+            ("22327", "_honours: dict[str, frozenset[str]] = {"),
+        ), "sdk"),
         ("A4-PER-LAYER.md", "compares `pkind.lower()` against", (
             # RE-DERIVED by CONTENT on the merged tree (main added this row, but this
             # branch's `extractor_v2.py` carries +90 lines above these anchors):
@@ -6414,7 +6422,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("12109", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
-            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`.
+            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, so the live values are `12116`/`12169`.
             ("12136", "subject_binding_available,"),
             ("12189", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -6701,6 +6709,35 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             f"{_d5.count(_spelling)} time(s): {_spelling!r}. Both halves are the same hit \u2014 "
             "if the line moved, re-derive EVERY statement of it, because a half-done move "
             "leaves the document asserting two numbers for one `git grep` hit")
+
+    # ⛔ THE OTHER THREE `_honours` CURRENCY CLAIMS ON D5, READ BY A DERIVED LITERAL (#13494
+    # review cycles 4 and 5). The `_pin_row_failures` row added for this clause is scoped to the
+    # phrase `is at \`:22327\` at THIS head`, and THAT PHRASE CONTAINS THE NUMBER IT GATES —
+    # so the row is satisfied whatever the SIBLING claims say (the addendum's
+    # "`_honours: dict[str, frozenset[str]]` measures `:22327` here", the mid clause's
+    # "**`:22327` at this head**", and the stated `grep` OUTPUT "-> 22327, the file's ONLY
+    # occurrence"). Measured before this arm existed: re-pointing the claims to `:22291` left
+    # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
+    # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
+    # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
+    # because D5 is one markdown LINE carrying ~50 numbers: a row cannot separate two
+    # statements on one line, and an arm that covers half of them reports a guarantee it does
+    # not hold. The number comes from the SOURCE, so a source move nobody re-derived reds too.
+    _honours_line = next(
+        _n for _n, _ln in enumerate(sources["sdk"], 1)
+        if "_honours: dict[str, frozenset[str]] = {" in _ln)
+    for _claim in (
+        f"is at `:{_honours_line}` at THIS head",
+        f"`grep -n '_honours: dict' tortoise/sdk.py` -> {_honours_line}, the file's ONLY occurrence",
+        f"**`:{_honours_line}` at this head**",
+        f"`_honours: dict[str, frozenset[str]]` measures `:{_honours_line}` here",
+    ):
+        assert _d5.count(_claim) == 1, (
+            f"05-verify.md states {'the current-tense'} `_honours` clause and this spelling now "
+            f"occurs {_d5.count(_claim)} time(s): {_claim!r} \u2014 the source definition is at "
+            f"`tortoise/sdk.py:{_honours_line}`. ALL FOUR statements of it must move together: "
+            "they are the set the pin row cannot read, because its scoping phrase carries the "
+            "number")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
     # `hosted_api.py:15225-15302`, and the END of that range is a BLANK line — so the row
@@ -16195,3 +16232,4 @@ def test_the_D5_row_is_still_one_table_row():
         "characters of citations (its length is not typed — it moves with every commit "
         "that edits the row); one unescaped `|` splits it and reds the REQUIRED `docs` check "
         "with ~178 findings (#13489). Escape a pipe in a cell as `\\|`")
+
