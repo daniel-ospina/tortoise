@@ -926,14 +926,27 @@ class EmbeddingModel:
         ask for the embedder.
 
         ``kind`` (#13528) lets a caller that has ALREADY resolved the cause —
-        :meth:`await_read_ready_reason`, whose decline is its own reason
-        because the load it declined to wait for is still IN FLIGHT and has
-        therefore recorded no failure — say it on the refusal, instead of the
+        :meth:`await_read_ready_reason` — say it on the refusal, instead of the
         refusal re-deriving a cause from ``_last_failure_kind``. ``None`` keeps
         the historical read of that field, so every existing exit is unchanged.
+
+        ⛔ ``kind`` IS A LEG-TRACE TERM, NOT A ``failure_kind`` (#13528 review
+        P1-1), and the two fields have different vocabularies because they
+        answer different questions. ``absent_reason()`` publishes
+        ``no_embedder`` for a ``not_installed`` failure — the designed-absence
+        word the TRACE needs — while ``failure_kind`` must name the CAUSE, which
+        is why #5275 exists: an ARMED process must never be told "there is no
+        embedder" when the truth is "it was never installed, and you asked for
+        it". Passing the trace word straight through made the bounded READ arm
+        report ``no_embedder`` where ``get()`` had always reported
+        ``not_installed``. So a term outside the ``failure_kind`` vocabulary is
+        translated HERE, once, at the single exit — see
+        :meth:`_as_failure_kind`; the trace keeps its own word either way.
         """
         if not cls._embedder_required():
             return None
+        if kind is not None:
+            kind = cls._as_failure_kind(kind)
         raise EmbedderUnavailableError(
             failure_kind=kind or cls._last_failure_kind or "model_unavailable",
             model=EMBEDDING_MODEL,
@@ -941,6 +954,28 @@ class EmbeddingModel:
             last_error=cls._last_error,
             context=context,
         )
+
+    @classmethod
+    def _as_failure_kind(cls, reason: str) -> str:
+        """Translate a LEG-TRACE reason into ``failure_kind`` (#13528 review P1-1).
+
+        The trace and the refusal answer different questions, and this module is
+        the only place that knows both vocabularies. ``no_embedder`` is the
+        trace word for the designed absence, so the CAUSE is whatever kind was
+        recorded — ``not_installed`` in the missing-extra state the word is
+        published for. A reason that names no recorded failure at all (a load
+        still IN FLIGHT, which is the read's own decline) has no cause to
+        report, and the contract's documented fallback is the honest answer.
+
+        A reason already IN the vocabulary is returned unchanged, so every
+        existing ``get()`` exit keeps its exact ``failure_kind``.
+        """
+        if reason in _FAILURE_KINDS:
+            return reason
+        if reason == "no_embedder":
+            recorded = cls._last_failure_kind
+            return recorded if recorded in _FAILURE_KINDS else "model_unavailable"
+        return "model_unavailable"
 
     @classmethod
     def absent_reason(cls) -> str:
@@ -1288,8 +1323,11 @@ class EmbeddingModel:
         longer). The one difference is the return vocabulary: a read publishes
         its decline on the LEG TRACE next to the terms that already live there,
         so this returns a leg-trace reason (``absent_reason``'s terms, plus
-        ``load_timeout`` for the state that has recorded no failure yet) rather
-        than the write path's private decline tokens.
+        ``load_in_flight`` for the state that has recorded no failure yet) rather
+        than the write path's private decline tokens. ⛔ That vocabulary is NOT
+        ``EmbedderUnavailableError.failure_kind``: the refusal translates it at
+        the single exit (:meth:`_as_failure_kind`), so an ARMED process gets the
+        CAUSE (``not_installed``, never the trace's ``no_embedder``).
 
         ⛔ THE DEFECT THIS EXISTS TO REMOVE (#13528). ``get()`` blocks its caller
         for the WHOLE one-time load, and when the load is already in flight it
@@ -1349,6 +1387,10 @@ class EmbeddingModel:
         # `embeddings` extra absent the model can never load, so neither waiting
         # nor retrying can help — answering instantly is what keeps the budget
         # from costing 0.25 s on every read of the DOCUMENTED DEFAULT install.
+        # ⛔ The reason returned here is the TRACE word (``no_embedder``, the
+        # designed absence). It is deliberately NOT the refusal's
+        # ``failure_kind``: an armed process gets ``not_installed`` — the cause —
+        # because ``_unavailable`` translates it (#13528 review P1-1).
         if cls._last_failure_kind == "not_installed":
             return cls.absent_reason()
         now = time.monotonic()
@@ -1365,7 +1407,16 @@ class EmbeddingModel:
             # forever, and decline without waiting: nothing can make progress
             # inside the budget.
             cls._rearm_warm_up()
-            return cls.absent_reason()
+            # ⛔ NOT unconditionally ``absent_reason()`` (#13528 review P2-2):
+            # the attempt was just RE-ARMED, so a load is about to be in flight
+            # and there is nothing absent to report. ``absent_reason`` answers
+            # ``no_embedder`` whenever no attempt has recorded a failure, which
+            # here would label a retry-in-progress "the extra was never
+            # installed" — the conflation this very fix exists to close, one arm
+            # over. A RECORDED failure still wins: it is the operator's answer.
+            if cls._last_failed_at is not None:
+                return cls.absent_reason()
+            return _READ_DECLINE_LOAD_IN_FLIGHT
         deadline = now + max(0.0, budget)
         while True:
             inst = cls._instance
@@ -1380,7 +1431,7 @@ class EmbeddingModel:
                 return cls.absent_reason()
             remaining = deadline - now
             if remaining <= 0:
-                return _READ_DECLINE_LOAD_TIMEOUT
+                return _READ_DECLINE_LOAD_IN_FLIGHT
             time.sleep(min(_WRITE_READY_POLL_S, remaining))
 
     @classmethod
@@ -1856,18 +1907,26 @@ _WRITE_READY_POLL_S = 0.01
 READ_EMBED_BUDGET_S = 0.25
 
 #: #13528 — the reason a READ declines the embedder with when the load it would
-#: have waited for does not land inside ``READ_EMBED_BUDGET_S``. It is the
+#: have waited for does not land inside ``READ_EMBED_BUDGET_S``, or when a read
+#: has just re-armed an attempt that is therefore not yet in flight. It is the
 #: LEG-TRACE vocabulary (``EmbeddingModel.absent_reason``), not a second one: the
 #: read publishes it on the vector entry, where the pre-existing terms already
 #: live, so no consumer learns a new word.
 #:
-#: ⛔ ``load_timeout`` is the one case the other arms cannot express: the load is
-#: still IN FLIGHT, so nothing has FAILED and ``_last_failure_kind`` is empty —
-#: and answering ``no_embedder`` there would state the designed absence ("the
-#: extra was never installed") for an embedder that is merely loading, which is
-#: the conflation #5275/#1542 exist to forbid. Every other decline arm reuses
-#: ``absent_reason()`` unchanged.
-_READ_DECLINE_LOAD_TIMEOUT = "load_timeout"
+#: ⛔ NOT ``load_timeout`` (#13528 review P2-1). That term is already published
+#: by ``absent_reason`` for a load that actually TIMED OUT — a recorded FAILURE
+#: whose operator response is "repair the load" — while this one names a load
+#: still IN FLIGHT (or just re-armed), whose response is "retry later". One
+#: string serving both would put back the exact conflation #5275/#1542 forbid,
+#: now between two *failures* instead of between a failure and an absence.
+_READ_DECLINE_LOAD_IN_FLIGHT = "load_in_flight"
+
+#: The whole ``EmbedderUnavailableError.failure_kind`` vocabulary
+#: (``exceptions.py``). A leg-trace reason outside this set is translated by
+#: ``EmbeddingModel._as_failure_kind`` before it can reach a refusal — the trace
+#: word and the cause are different fields (#13528 review P1-1).
+_FAILURE_KINDS = frozenset(
+    {"not_installed", "load_failed", "load_timeout", "model_unavailable"})
 
 def _in_replay_scope() -> bool:
     """True when this fold is a journal REPLAY, not a live door (#13224).

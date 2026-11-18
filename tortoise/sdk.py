@@ -45738,6 +45738,11 @@ class TortoiseSDK:
                 # resolved (a load still IN FLIGHT has recorded no failure of its
                 # own, so ``_last_failure_kind`` alone would answer the
                 # designed-absence term).
+                # ⛔ ``kind`` is a LEG-TRACE reason, and ``_unavailable``
+                # translates it into the refusal's ``failure_kind`` vocabulary
+                # (#13528 review P1-1): the trace says ``no_embedder`` /
+                # ``load_in_flight``, an ARMED refusal says ``not_installed`` /
+                # ``model_unavailable``. Never publish the trace word as a cause.
                 EmbeddingModel._unavailable(
                     context="read: embedder not warm within the read's budget",
                     kind=_read_decline)
