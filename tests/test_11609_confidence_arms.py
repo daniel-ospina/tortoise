@@ -307,15 +307,19 @@ class TestTheArmArgumentsNameTheirArm:
         """P3 from the architecture review: the no-arm refusal compared the two sets
         against NOTHING armed, so an explicitly-armed call carrying the other arm's
         arguments was served with them on the floor."""
-        # Both handlers are stubbed so NEITHER arm can silently answer: only
-        # `sdk` is called, and the other bindings exist for their side effect
-        # (the monkeypatch), so they carry the `_` prefix ruff's RUF059 wants.
-        sdk, _calls = _sdk_stub(monkeypatch, "recall_state", [])
-        _sdk2, _calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
+        # Both handlers are stubbed so NEITHER arm can silently answer, and both
+        # recorders are READ below: "refused" alone is also what a
+        # serve-then-raise looks like, so an empty call log is the half of this
+        # test that says the refusal preceded dispatch (RUF059 flagged the
+        # dropped assertion, it was not dead weight — #13593).
+        sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
+        _, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
         with pytest.raises(ValueError) as exc:
             sdk.check_confidence(**kwargs)
         assert arg in str(exc.value), str(exc.value)
         assert f"{off}-arm argument(s)" in str(exc.value), str(exc.value)
+        assert calls == [], calls
+        assert calls2 == [], calls2
 
     @pytest.mark.parametrize("kwargs,arg", [
         ({"recall": True, "query": "q", "factors": [{"id": "f1"}]}, "factors"),
