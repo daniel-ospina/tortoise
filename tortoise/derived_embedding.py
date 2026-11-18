@@ -357,10 +357,15 @@ _MEMO: contextvars.ContextVar[dict[str, list[float]] | None] = contextvars.Conte
 def write_scope(name: str = "live-write"):
     """Bind ONE memo to this write: the record write and its graph fold.
 
-    The live doors open this AROUND both halves (`EventAPI._emit`,
-    `TortoiseSDK._apply_and_journal`, `ConversationMiner._emit_event`), because the
-    record's column is written before the fold and only a scope spanning the two
-    can make the second encode free.
+    The FOUR live doors open this AROUND both halves — `EventAPI._emit`,
+    `TortoiseSDK._apply_and_journal`, `ConversationMiner._emit_event` and
+    `TortoiseSDK._create_entity` (`one_encode_scope` below lists them with the
+    reason each one exists) — because only a scope spanning the PAIR makes the
+    second encode free. ⛔ Which half comes first is per-door and must not be
+    assumed: three of them journal the record first and fold after, while
+    `_create_entity` folds BEFORE it journals (that door's own contract
+    exception 2), which is exactly why the scope brackets the pair rather than
+    the record half.
 
     A NESTED scope shares the outermost memo rather than replacing it: an inner
     write must not silently re-enable the double encode, and a memo is a
