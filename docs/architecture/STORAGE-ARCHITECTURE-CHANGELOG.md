@@ -2537,6 +2537,18 @@ as **§12.2**'s. The paragraph is inside **§12.1c** (`### 12.1c ⭐ DECISION (R
 whose section number sends a reader to an unrelated lever is the one thing it exists to prevent. The issue carries a
 comment recording the correction.
 
+**⚠️ And the pre-removal readings are now labelled as such — a review finding, fixed before merge.** The first landed
+version said the app path *"pays"* the `queryNodes` round trips, present tense, and concluded *"both slower than the
+hop"* from that. §14.3 V3's own row says the opposite: *"≈58 % of the unindexed read's store time was two REFUSED
+`queryNodes` round trips, **which `#13108` removed**"* — and the code carries the removal (`search_engine.py`
+`_index_known_absent`, which skips the doomed attempt). The paired artifacts in `docs/research/2026-11-17-13108-dense-leg/`
+§5 measure what that read does once the round trips are gone: **34.78 ms → 13.26 ms p50** at 1,000 rows (−62 %) —
+*inside* the ~10–15 ms hop band the paragraph compares against. So a sentence citing the removal's cost as the
+current app-path number would have made the paragraph's own claim ("the readings disagree, so no single number
+decides it") rest on a defect that no longer exists. The three readings are **kept with their dates**, the two
+app-path ones are marked **pre-removal**, the post-removal reading is stated, and the conclusion is unchanged — and
+it now rests on the readings as they are rather than on one of them as it was.
+
 **What did NOT change.** The argument for option 2 is untouched **by this change**: it rests on the **ledger**
 (provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,
 and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
