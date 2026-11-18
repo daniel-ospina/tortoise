@@ -9762,6 +9762,18 @@ surfaces:
   # policy module moves.
   - test_csp_plan_doc_consistency.py
   sdk:
+  # #11609 lane P1: `create_entity`'s POINT and DIARY arms — the half that makes the two
+  # retirements in the row below TRUE. Measured by substitution (a recorder at
+  # `create_point` must receive the arm's call, so a re-implementation inside
+  # `create_entity` reds here) and on a REAL graph (the same claim written through the door
+  # and through the arm, stored nodes compared — that is what catches a container answering
+  # `type="point"` with a `:Subject`, a dropped `pointKind`, or duplication where the door
+  # folded), plus the retired names through the #3883 shim. Same surface as its siblings
+  # below: the file's subject is the `TortoiseSDK` door it builds and monkeypatches. The row
+  # is what `--integrity` requires (a test file with no surface row is `manifest drift`,
+  # exit 1); selection already covers `tortoise/tool_registry.py` / `tortoise/sdk.py` diffs
+  # via `SHARED_MODULES`, for the reason stated in the row below.
+  - test_11609_create_arms.py
   - test_11609_door_retirement.py  # #11609 lane E: the seven doors retired FORWARD —
   # every pointer resolves in ONE hop to a LIVE `TOOL_REGISTRY` name (GitHub's own
   # `DeprecatedToolAliases` states aliases are not transitive, and a pointer at another

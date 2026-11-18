@@ -818,7 +818,11 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # 53 -> 60: #11609's DOOR-RETIREMENT wave (lane E) retires seven doors FORWARD into
     # containers that were already advertised, so seven rows gain a `use_instead` and no
     # container row arrives: 53 + 7 = 60, the same number `counts.retired` derives.
-    assert len(retired) == 60, f"expected 60 retired rows, got {len(retired)}"
+    # 60 -> 62: #11609 lane P1 does the same for the two POINT-shaped doors
+    # (`create_point`, `diary_write`) — `create_entity`'s `type="point"`/`type="diary"`
+    # ARMS are built on a tool that is already advertised, so again no container row
+    # arrives: 60 + 2 = 62, matching `counts.retired` and Part B's own header.
+    assert len(retired) == 62, f"expected 62 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "

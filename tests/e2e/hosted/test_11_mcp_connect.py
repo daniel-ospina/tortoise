@@ -2,9 +2,16 @@
 
 Reconstructed case (#303). The full Streamable-HTTP client handshake against
 the mounted /mcp app: initialize → tools/list (tenant-scoped tortoise_* tools
-visible) → tools/call tortoise_create_point → the Point is readable through
-the REST surface with the same key (write path verified end to end, SSE
-framing parsed).
+visible) → tools/call tortoise_create_entity(type="point") → the Point is
+readable through the REST surface with the same key (write path verified end to
+end, SSE framing parsed).
+
+⛔ THE CALL IS THE ADVERTISED DOOR, NOT A RETIRED ONE (#11609 lane P1):
+`tortoise_create_point` retired FORWARD into `tortoise_create_entity`'s
+`type="point"` arm, so it is no longer in `tools/list` — a call by that name is
+exactly what a tool-grant client can no longer make. This suite asserted the
+retired name and reddened the `hosted-e2e` required check, which is the
+desired signal: an E2E must walk the surface the README and the skills advertise.
 
 Negatives: no token → 401; non-tt_ token → 401 (format guard); unknown tool
 call → JSON-RPC error (never a 200 with a silent no-op).
@@ -61,12 +68,17 @@ def test_mcp_full_handshake_and_tool_call(api, tenant_factory):
     assert r.status == 200, f"tools/list: {r.status} {r.text()}"
     tools = _parse_sse_json(r.text()).get("result", {}).get("tools", [])
     names = {t_["name"] for t_ in tools}
-    assert "tortoise_create_point" in names, f"tool missing: {sorted(names)[:20]}"
+    assert "tortoise_create_entity" in names, f"tool missing: {sorted(names)[:20]}"
+    assert "tortoise_create_point" not in names, (
+        "a retired name is still advertised: `tortoise_create_point` retired "
+        "FORWARD into `tortoise_create_entity(type=\"point\")` (#11609 lane P1) "
+        "and may only answer through its #3883 shim, not through tools/list")
 
     content = f"mcp-created point (E2E-11-D) {uuid.uuid4().hex[:6]}"
     r = _mcp(api, key, "tools/call", {
-        "name": "tortoise_create_point",
-        "arguments": {"content": content, "kind": "statement"},
+        "name": "tortoise_create_entity",
+        "arguments": {"type": "point", "name": content,
+                      "props": {"pointKind": "statement"}},
     }, rid=3)
     assert r.status == 200, f"tools/call: {r.status} {r.text()}"
     result = _parse_sse_json(r.text()).get("result", {})
