@@ -1317,9 +1317,12 @@ class GitHubIndexer:
         per-direction case, not a blanket `None`: its CLOSE fold is never dispatched
         (no live holder), so it answers the POSITION where the row has an ENDED one,
         `None` where that position is LIVE (it must get no opinion, and a close minted
-        against a row with no live holder re-fires for ever), and the WORD where the
-        row has no position at all — except where that word is `open`, which is
-        withheld for the same reason (`_project_issue`).
+        against a row with no live holder re-fires for ever), and `"closed"` where the
+        row has no position at all — UNLESS the word maps to `open` (`_STATUS_TO_STATE`:
+        `in_progress`, `live`, `open`), which is withheld as `None` for that same
+        reason. A word OUTSIDE the map (`outdated`, NULL) is therefore answered
+        `"closed"`: it names no state to withhold on, and only a reopen can fold.
+        (`_project_issue`)
 
         ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
         the connector folds off that axis — a close now folds the terminal STAGE
@@ -1342,9 +1345,11 @@ class GitHubIndexer:
         in the FOLD's latch set, the legacy `outdated` flag) are NOT one question,
         and the rule is per-direction, not per-term: a LATCHED word answers `None`
         always (`_status_is_latched` — the fold refuses both ways); the WIDE terms
-        answer the POSITION, and `None` only where the position is live
-        (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
-        is not). "Written once and never cleared" was the earlier, WRONG summary:
+        answer the POSITION where the row has an ENDED one, `None` where it is LIVE,
+        and `"closed"` where there is no position unless the word maps to `open` —
+        the cases are enumerated on `_object_state_to_issue_state`'s docstring rather
+        than restated here (`_row_is_frozen` — the close fold is unreachable for them,
+        the reopen fold is not). "Written once and never cleared" was the earlier, WRONG summary:
         a coherent un-supersede does clear `superseded` (`sdk.py:54213-54222`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
@@ -1486,15 +1491,16 @@ class GitHubIndexer:
         # dispatched under DIFFERENT rules (`_status_is_latched`): the CLOSE fold
         # needs a LIVE holder, and an `outdated` row has none, so the close can never
         # be applied and must get no opinion; the REOPEN fold takes
-        # `_reopen_targets_closed` and DOES apply. So this read answers the POSITION
-        # for these rows, which is what converges — measured on a row at
+        # `_reopen_targets_closed` and DOES apply. So for these rows this read answers
+        # the POSITION where the row has one — which is what converges — and the word's
+        # DIRECTION where it has none. Measured on a row at
         # `status='outdated'` + closed position, GitHub reopened:
         #
         #   `None` for both directions  -> [0, 0, 0], row stays `done`/`isClosed=true`
         #                                 — a reopen the projection WOULD apply is dropped
         #   position (this arm)         -> [1, 0, 0], row reaches `in_progress`/`active`
         #
-        # and the not-ended shape (no live holder, so no close can ever fold) gets
+        # and the not-ended POSITION (no live holder, so no close can ever fold) gets
         # `None`, which is the only answer that cannot mint without bound. The one
         # residual is recorded on the PR: after such a reopen the word is still
         # `outdated`, so a SUBSEQUENT GitHub close mints nothing — unavoidable, since

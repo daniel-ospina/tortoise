@@ -3201,7 +3201,8 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
         "NOT MONOTONE — the carriers CAN be cleared", None),
     # sdk.py — the non-scalar refusal and the coherent un-supersede admission arm
     # ⛔ RE-DERIVED, never carried (`#13348` post-merge review): `main` inserted a
-    # uniform +150 lines above this arm (`#13267`'s lifecycle door work), so the
+    # uniform +150 lines above this arm (`#13416` (`e52460b55e`), the `ended_scope`
+    # read — `git show --numstat e52460b55e -- tortoise/sdk.py` → `150 0`), so the
     # three addresses below moved together and the pin was RED on `main` before
     # this change. The shift was MEASURED, not inferred from a diff stat: the
     # expected FIRST-line text of each pin was searched for at the current tree and
