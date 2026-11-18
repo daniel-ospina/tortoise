@@ -1747,9 +1747,11 @@ def _source_embedding_parts(
 
     `projection/entities.py:7106` composes the source node's search surface as
     `ev.get("_searchText") or ev.get("title")` and writes it at `:7194`
-    (`s._searchText = $st`; the `:Source` FTS index is declared on that field).
-    The vector encodes THAT text and nothing else, so the label's sparse and dense
-    legs describe one datum — the same rule #8419 established for documents.
+    (`s._searchText = $st`; the `:Source` FTS index is declared on exactly that
+    field — `projection/__init__.py:6870` and the FULLTEXT declaration at
+    `:20548`). The vector encodes THAT text and nothing else, so the label's
+    sparse and dense legs describe one datum — the same rule #8419 established
+    for documents.
 
     ⛔ THE IDENTITY IS NEVER THE TEXT (STORAGE §9.4 ③: *"NEVER use a vector to
     decide whether two sources are the same"* — identity is the canonicalised URL
