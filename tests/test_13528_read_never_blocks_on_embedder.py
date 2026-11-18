@@ -184,8 +184,11 @@ def sdk(tmp_path):
         # ⛔ `await_read_ready_reason` IS NOT PATCHED (#13544 review). A
         # second mock here was dead weight: `tests/conftest.py` pins
         # `TORTOISE_EMBEDDER_WARMUP=0` process-wide, and the predicate returns at
-        # its FIRST check ("warm-up disabled") before it can spawn anything — so
-        # at fixture time it neither loads the model nor warms the singleton.
+        # its CONFIGURATION check (`embeddings.py:1370-1371`, "warm-up disabled")
+        # before `start_warm_up()` can run — which is exactly the `None` the
+        # deleted lambda returned. Not its first check: the loaded short-circuit
+        # above it (`:1366-1368`) is what answers when the singleton is warm, and
+        # the `_reset()` earlier in this fixture is what keeps it from doing so.
         with mock.patch.object(EmbeddingModel, "get", lambda *_a, **_k: None):
             sdk.tortoise_fts_query(_QUERY, limit=3)
         assert not EmbeddingModel.loaded(), (
@@ -285,10 +288,13 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     is a fast decision rather than a stall, and ``embed_encode`` never opens at
     all. ``pre_handler`` is reported here too, but this SINGLE-THREADED row
     cannot make it large — the defect lands in ``embed_get`` above — so the
-    bound below is a UNIT PIN (it stops that frame's number drifting off the
-    unit) and it does NOT assert the production ``pre_handler`` property, reads
-    QUEUED behind workers parked in the load, which needs more than one
-    concurrent read.
+    bound below is a PIN, not a discriminator: it reddens if the FIRST stage
+    mark moves AFTER the acquire, because the frame that should be pre-handler
+    then absorbs the load. It is NOT a unit guard (a ``* 1000.0`` slip leaves
+    ~100 ms against a 4 000 ms bar, so it stays green; the ``embed_get`` bar
+    above is what catches that), and it does NOT assert the production
+    ``pre_handler`` property — reads QUEUED behind workers parked in the load —
+    which needs more than one concurrent read.
     """
     timeline = begin()
     with request_stages(timeline):
@@ -313,13 +319,15 @@ def test_the_cold_read_charges_the_load_to_neither_stage(sdk, cold_embedder):
     # row ``pre_handler`` stays ~0.1 ms even with the defect restored — the whole
     # load lands in ``embed_get`` above, which is the frame that reddens — so
     # nothing here proves the queueing property, and neither this comment nor
-    # the message below may claim it. It is kept to stop the number drifting with
-    # the unit; measuring the queue itself needs more than one concurrent read.
-    # The row is not the disposition's owner: #13540 keeps it reachable.
+    # the message below may claim it. What it DOES catch is ATTRIBUTION: move the
+    # first stage mark after the acquire and the load lands in this frame while
+    # ``embed_get`` falls to ~0 and stays green. Measuring the queue itself needs
+    # more than one concurrent read. The row is not the disposition's owner:
+    # #13540 keeps it reachable.
     assert spent.get(STAGE_PRE_HANDLER, 0.0) < _LOAD_S / 2 * 1000.0, (
         f"pre_handler accrued {spent.get(STAGE_PRE_HANDLER)} ms of a "
-        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a MILLISECOND bar for this "
-        f"frame's accrued time (it tracks the unit; it does not measure a queue)")
+        f"{_LOAD_S / 2 * 1000.0:.0f} ms bar — a stage mark that moved after the "
+        f"acquire lands the load in THIS frame (it does not measure a queue)")
 
 
 # ── the counter-tests: the fix may not become "stop embedding" ────────────
