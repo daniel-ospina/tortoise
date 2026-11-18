@@ -999,7 +999,8 @@ rules are arguable here.
   (`#13474`), not a vector rule. The demand measurement below still informs the graph-side half; it is not a placement
   question.
 - **A PLACEMENT question the row above does not cover, raised by the writer:** `_upsert_source` computes no embedding, and
-  `SourceCreated` is no longer absent from `_RECORD_EMBEDDING_TEXT` (PR `#13473`, closing `#13418`) — so the placement
+  `SourceCreated` is no longer absent from `_RECORD_EMBEDDING_TEXT` (PR `#13473`, closing `#13418`; the `SourceVersioned` transition rides the same
+  rule, since it is the record that moves a row's `_search_text`) — so the placement
   question this census posed is now answered for the RECORD and still open for the GRAPH. "The graph holds **0** `:Source`
   embeddings on NON-DOCUMENT rows" remains a true reading of the LIVE fold (`_upsert_source` computes none), while a
   record-sourced REBUILD of the now-occupied rows writes one, because `source` is a SERVED label

@@ -1782,6 +1782,25 @@ def _source_embedding_parts(
     The record is the truth and the graph its derived cache (§2.0); when the two
     disagree the record's value is the one the repair re-derives.
 
+    ⛔ THE VERSION TRANSITION USES THIS SAME RULE, and it is the arm where the
+    composition MATTERS MOST. `SourceVersioned` is the one `:Source` record that
+    MOVES a row's text: `create_source` emits it with `**payload` on a content-hash
+    change (`sdk.py:58641`) and `payload` includes `_searchText` — the retitle is a
+    named, in-tree write (`sdk._index_source_merge` → `create_source(…, title=…,
+    _searchText=_source_search_text(title=title))`). The split rebinds
+    `public.source._search_text` from that key, so a version line that derived
+    NOTHING would leave the row's dense leg on the previous version's vector while
+    its FTS leg searched the new text — one served label (`LABEL_SERVED["source"]`)
+    answering from two different texts, the class `#13412` closes for
+    `DocumentCreated` and the reason `title` is refused above. Re-embedding when
+    the embedded text changes is also the rule comparable systems converge on
+    (the #13473 review's external pass); nothing else would repair it, because a
+    STALE vector is not a VECTORLESS one, so `#13417`'s counting/backfill pass
+    cannot see it. ⚠️ Its own residual is the SAME third skip arm and not a new
+    one: a version line that states no `_searchText` binds no column either, so
+    its old text and its old vector stay a matched pair — coherent, one version
+    behind, and repaired when the producer states the composed text (`#13474`).
+
     ⛔ THE IDENTITY IS NEVER THE TEXT (STORAGE §9.4 ③: *"NEVER use a vector to
     decide whether two sources are the same"* — identity is the canonicalised URL
     plus a content hash), so `url`/`id`/`contentHash` are absent by construction,
@@ -1903,6 +1922,12 @@ def _session_source_skip(payload: Mapping[str, Any]) -> str:
 #:     and same root — as `#13474` (a `DocumentCreated` row whose `_search_text` is
 #:     NULL): the fix belongs to the PRODUCER stating the composed text, not to a
 #:     record rule inventing a column value the journal never carried.
+#:   ⚠️ BOTH `:Source` writers run through these arms — `SourceCreated` and the
+#:   `SourceVersioned` transition, which share one rule in the table below. The
+#:   transition is the reason the rule cannot be create-only: it REBINDS
+#:   `public.source._search_text` from its own payload, so a row versioned without
+#:   a derived vector would have its dense leg answering the PRIOR version's text
+#:   while its FTS leg searched the new one.
 #:
 #: ⛔ THE TEXT A RULE COMPOSES IS TEXT THE RECORD ROW ALREADY HOLDS. That is why
 #: `_source_embedding_parts` reads `_searchText` and NOT `title`: `_search_text` is
@@ -1925,6 +1950,11 @@ _RECORD_EMBEDDING_TEXT: dict[str, _EmbeddingTextParts] = {
     ),
     "DocumentCreated": _document_embedding_parts,
     "SourceCreated": _source_embedding_parts,
+    # The version transition, on the SAME rule: it is the one `:Source` record
+    # that moves a row's `_search_text`, so a vector left behind on the prior
+    # version would make the served row's dense and sparse legs describe two
+    # different texts. See `_source_embedding_parts`'s version paragraph.
+    "SourceVersioned": _source_embedding_parts,
 }
 
 
@@ -2085,7 +2115,12 @@ def derived_embedding_columns(
     elif record_type == "DocumentCreated":
         if payload.get("suppress_embedding") or record.get("suppress_embedding"):
             return _DerivedEmbedding(skipped="suppress_embedding is set")
-    elif record_type == "SourceCreated":
+    elif record_type in ("SourceCreated", "SourceVersioned"):
+        # BOTH source writers share the arms below — `SourceVersioned` is the
+        # transition that moves the row's text, and the skip reasons apply to it
+        # unchanged (a version line stating no `_searchText` binds no column, so
+        # its old text and old vector stay a matched pair rather than drifting).
+        #
         # The three `:Source` arms that derive NOTHING, each stated on the table
         # above: a caller-carried vector (the node's own, via the `embedding`
         # passthrough), a session `:Source` (§9.4's narrative rule), and a record

@@ -18,6 +18,15 @@ Two defects, one seam, one table (`record_writer._RECORD_EMBEDDING_TEXT`):
    `title + content` — two different texts, two different vectors, for one row.
    `content` is not even a graph property post-D10 (`_DOC_RETIRED_KEYS`).
 
+3. **The VERSION TRANSITION moved the text and left the vector (review F1).**
+   `SourceVersioned` rebinds `public.source._search_text` from its payload's
+   `_searchText` (the indexer's retitle: `sdk._index_source_merge` →
+   `create_source(…, _searchText=…)`), but the table had no entry for it, so the
+   served row's dense leg answered the PRIOR version's text while its FTS leg
+   searched the new one. The same rule now covers both `:Source` writers, with the
+   same three skip arms — including the session arm (§9.4), which a version line
+   would otherwise reach and derive the topic lexicon into.
+
 WHAT MAKES THESE TESTS FAIL ON THE OLD TREE, rather than merely pass on the new
 one:
 
@@ -356,6 +365,112 @@ def test_a_source_written_to_an_armed_record_CARRIES_a_vector(encoder):
         f"the {type(bound).__name__} vector was bound directly to a jsonb column")
     assert bound.startswith("[0.125, 0.125,"), bound[:40]
     assert bound.count("0.125") == 384
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #13418 (review F1) — the VERSION TRANSITION moves the text, so it moves the vector
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_version_transition_reembeds_from_the_version_it_moves_to(encoder):
+    """`SourceVersioned` is the ONE `:Source` record that moves a row's text.
+
+    `create_source` emits it with `**payload` on a content-hash change
+    (`sdk.py:58641`) and that payload carries `_searchText` — the retitle is a
+    named, in-tree write (`sdk._index_source_merge` →
+    `create_source(…, _searchText=_source_search_text(title=title))`). The split
+    rebinds `public.source._search_text` from that same key, so a version line with
+    no derivation left the row's dense leg on the PRIOR version's vector while its
+    FTS leg searched the new text: one served label, two texts. That is the class
+    `#13412` closes for `DocumentCreated`, and nothing would repair it — a STALE
+    vector is not a VECTORLESS one, so `#13417`'s counting pass cannot see it.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceVersioned",
+        "id": "https://example.com/a", "url": "https://example.com/a",
+        "_searchText": "acme pricing 2024 renewal",
+        "contentHash": "h2", "previousContentHash": "h1",
+        "previousValidTo": "2026-11-18T00:00:00Z",
+    })
+    assert out.columns, (
+        "a version transition derived no vector — the row's `_search_text` moves "
+        "to the new version while its vector stays on the old one")
+    assert encoder.text == "acme pricing 2024 renewal", (
+        f"the version arm encoded {encoder.text!r}, not the text it moved the row "
+        "to — the dense and sparse legs of one served row would disagree")
+    assert out.skipped == "", out.skipped
+
+
+def test_the_version_transition_binds_the_vector_with_the_text_it_binds(encoder):
+    """Plan level: `[SourceCreated(old), SourceVersioned(new)]` on one row.
+
+    The `SourceVersioned` statement is where the two legs must move TOGETHER: the
+    split binds `_search_text` from the payload and the derivation binds
+    `embedding` after it (`_declared_mutations`), so both columns appear on the
+    SAME `INSERT INTO public.source`. Asserting only the derivation would leave the
+    join in `replay_plan` unpinned for this record type.
+    """
+    created = {"type": "SourceCreated", "url": "https://example.com/a",
+               "_searchText": "acme pricing"}
+    versioned = {"type": "SourceVersioned", "url": "https://example.com/a",
+                 "_searchText": "acme pricing 2024",
+                 "contentHash": "h2", "previousContentHash": "h1"}
+    plans = rp.replay_plan(
+        [created, versioned], org_id="org", graph_id="g",
+        derived={0: rw.derived_embedding_columns(created).columns,
+                 1: rw.derived_embedding_columns(versioned).columns})
+    upserts = [s for s in plans if s.sql.startswith("INSERT INTO public.source ")]
+    assert len(upserts) == 2, [s.sql[:60] for s in upserts]
+    assert "embedding" in upserts[0].param_columns
+    assert "embedding" in upserts[1].param_columns, (
+        "the version transition bound the new `_search_text` but not a vector, so "
+        "one row answers from two versions of its own text")
+    bound = upserts[1].params[upserts[1].param_columns.index("embedding")]
+    assert isinstance(bound, str) and bound.startswith("[0.125, 0.125,"), (
+        "the version arm's vector was bound as a Python list, not the jsonb text "
+        "`_jsonb_or_scalar` requires")
+    assert upserts[1].params[
+        upserts[1].param_columns.index("_search_text")] == "acme pricing 2024"
+
+
+def test_a_version_that_states_NO_text_keeps_its_old_pair_rather_than_guessing(encoder):
+    """The third skip arm applies to the version line, and it is the RIGHT answer.
+
+    A version record that carries no `_searchText` binds no `_search_text` either
+    (`create_source`'s same-hash extras arm, and any caller that omits it), so the
+    row keeps the previous text; deriving from `title` here would move the vector
+    onto a text the column does not hold. The skip must NAME that root rather than
+    read as `no embedding rule for this record type` — the reason this arm is
+    checked in the caller and not inside the rule.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceVersioned", "url": "https://example.com/a",
+        "title": "Acme pricing page", "contentHash": "h2",
+        "previousContentHash": "h1",
+    })
+    assert out.columns == {} and encoder.calls == [], (
+        "a text-less version line derived a vector — its own column did not move")
+    assert "_searchText" in out.skipped and "#13474" in out.skipped, out.skipped
+
+
+def test_a_versioned_session_source_derives_NOTHING_too(encoder):
+    """§9.4 survives the transition: a session `:Source`'s text is the narrative.
+
+    Without the shared skip branch, `SourceVersioned` reaches the composition and
+    derives the node's topic LEXICON into `public.source.embedding` — the one text
+    §9.4 forbids for a session `:Source` (`#10000`), and the arm whose absence the
+    `SourceCreated` sibling pins. Same record family, same rule (§14.3 V2).
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceVersioned", "url": "session:abc123",
+        "sourceKind": "agentSession", "sessionId": "abc123",
+        "_searchText": "pricing, discount, renewal",
+        "contentHash": "h2", "previousContentHash": "h1",
+    })
+    assert out.columns == {} and encoder.calls == [], (
+        "a versioned session `:Source` derived its topic lexicon — §9.4 says the "
+        "text is the S1 narrative, which this fold cannot read")
+    assert "narrative" in out.skipped, out.skipped
 
 
 # ════════════════════════════════════════════════════════════════════════════
