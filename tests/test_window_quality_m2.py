@@ -3459,8 +3459,10 @@ def test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does():
     `tests/test_rerank_pool.py`'s `intentional_keep` row for this file exists on
     the stated ground that opting the rerank out "would make the recall figures
     it prints describe a reader `_fts_rows` does not run — the mirror would be
-    broken by the fix, not by the gate". That row exempts the FILE, so nothing
-    in the census can see the mirror's own flags move: measured before this pin,
+    broken by the fix, not by the gate". That row grants `query()` BY NAME (it
+    exempted the whole FILE when this pin was written; the entry is
+    `frozenset({"query"})` now), so nothing in the census can see the mirror's
+    own flags move: measured before this pin,
     flipping `query()` to `_rerank_candidates=False` left the census green, and
     the only thing that reddened was the artifact's `tool_sha256` pin — which any
     artifact re-cut clears. So the contract the row cites is asserted HERE,
