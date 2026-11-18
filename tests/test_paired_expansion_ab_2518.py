@@ -1068,14 +1068,15 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
             f"the {arm} arm is not keyword_only for all {n} items")
     assert f"`keyword_only` {n}/{n}" in row, (
         "the row's window-mode cell is not the artifact's measured mode")
-    # ⛔ the row's OPENING quotation is the retired comparison's own published
-    # figures, and they are not derivable from these artifacts (they come from
-    # `#13118`), so they are pinned as quoted CONSTANTS — the row exists to retire
-    # that comparison, and a re-staled quote there misstates it (measured GREEN at
-    # `64504c6d20`: `76.3 → 79.9 @3` and `85.0 → 80.0 @15`). The brief's §0 copy is
-    # pinned elsewhere; the row's was not.
+    # ⛔ the row's OPENING quotation is the retired comparison's own figures, and
+    # they are not derivable from these artifacts (they come from the owner's
+    # re-measurement comment on `#2518`, 6939661408 — `#13118`'s body carries only
+    # the pre-baseline `28 / 88 % / 75 %`), so they are pinned as quoted CONSTANTS
+    # — the row exists to retire that comparison, and a re-staled quote there
+    # misstates it (measured GREEN at `64504c6d20`: `76.3 → 79.9 @3` and
+    # `85.0 → 80.0 @15`). The brief's §0 copy is pinned elsewhere; the row's was not.
     assert '"75.0 → 76.3 @3, 88.0 → 85.0 @15"' in row, (
-        "the index row must quote `#13118`'s published pair exactly as it was")
+        "the index row must quote the `#2518` re-measurement's pair exactly as it was")
 
 
 # ── 2e. the published RESULT figures, recomputed cell by cell ────────────────
@@ -2553,19 +2554,21 @@ def test_every_pp_and_every_scientific_p_the_brief_prints_is_a_recorded_one():
                     value = cell.get(cell_key)
                     if value is not None and value == value:  # not NaN
                         allowed_pp.add(round(value * 100, 2))
-    # ⛔ §0 is a QUOTATION of another PR's published run — 75.0/76.3 % @3 and
-    # 88.0/85.0 % @15 from `#13118` — so its two deltas are those subtractions,
-    # its SE (2.8 pp) is that PR's own published figure, and its 7.82 pp is THIS
-    # tool's independent-design MDE for that design. They are pinned as quoted,
-    # not silently allowed: the four recalls must be in the brief and the two
-    # deltas must be their difference.
+    # ⛔ §0 is a QUOTATION of the owner's re-measurement comment on `#2518`
+    # (6939661408) — 75.0/76.3 % @3 and 88.0/85.0 % @15 — so its two deltas are
+    # those subtractions, its SE (2.8 pp) is DERIVED for an independent design at
+    # n = 300, p̄ ≈ 0.865 (√(2·p̄·(1−p̄)/n); `#13118`'s body prints no SE, no after-
+    # value and no z), and its 7.82 pp is THIS tool's independent-design MDE for
+    # that design. They are pinned as quoted, not silently allowed: the four recalls
+    # must be in the brief and the two deltas must be their difference.
     quoted = {"before3": 75.0, "after3": 76.3, "before15": 88.0, "after15": 85.0}
     for label, value in quoted.items():
         assert f"{value} %" in brief, f"§0 no longer quotes {label} = {value} %"
     allowed_pp |= {round(quoted["after3"] - quoted["before3"], 2),
                    round(quoted["after15"] - quoted["before15"], 2)}
     allowed_pp.add(round(P.independent_effect(300, 0.865) * 100, 2))
-    # ⛔ §0's standard errors are quoted from `#13118`, not produced by this run, so
+    # ⛔ §0's standard errors are DERIVED (independent design, n = 300, p̄ ≈ 0.865),
+    # not quoted from any PR, so
     # they are admitted ONLY where they re-derive as delta / z in the SAME sentence
     # — `z = 0.37` beside a single "SE 2.8" was arithmetic that cannot add up, and
     # an invented SE cannot ride in on an allow-list entry (`#13267` review 9 F5).
@@ -2852,7 +2855,8 @@ def test_the_annotation_count_is_the_count_of_groups_actually_listed():
         f"the {ordinal} — the summary calls it something else")
 
 
-def test_the_tool_does_not_declare_point_only_figures_on_the_object_arm():
+def test_the_tool_does_not_declare_point_only_figures_on_the_object_arm(
+        _no_embedder_probe):
     """F6 — the artifacts said the object arm's `seed_effect` was recomputed.
 
     `#13267` review 7 F6: `_recomputable` / `_PER_ITEM_DERIVED` were built for
@@ -2860,6 +2864,15 @@ def test_the_tool_does_not_declare_point_only_figures_on_the_object_arm():
     recomputable and `off_topk_displacement` unpinned — figures that arm emits
     nowhere, which the helper then `continue`d over. Fixing the artifacts without
     pinning the TOOL left the generator free to re-introduce it.
+
+    ⛔ `#13267` review 12 F2: this is a STRUCTURAL pin over a synthetic artifact, so
+    it must not pay for an embedder. It was one of TWO `_build_fake_artifact`
+    callers without the fixture (with `test_a_read_limit_below_every_k_...`), and
+    `_build_artifact` calls `_has_embedder()` → `EmbeddingModel.get()`, which loads
+    a model (~2 min) on any box that has one: measured 122.21 s of a 127.23 s file
+    there, against `ci-surfaces.yml`'s "~5 s (measured)" for this surface. The
+    fixture makes the cost independent of the host's model cache rather than of the
+    code under test.
     """
     names = [f"item-{n:06d}" for n in range(8)]
     point_off = {i: [f"{i}-a"] for i in names}
@@ -3044,7 +3057,8 @@ def test_every_z_score_the_brief_prints_divides_its_own_delta_by_its_own_se():
             f"z = {z} does not equal {delta} / {se_pp}")
 
 
-def test_a_read_limit_below_every_k_is_REFUSED_not_silently_empty():
+def test_a_read_limit_below_every_k_is_REFUSED_not_silently_empty(
+        _no_embedder_probe):
     """F4 — a run that measured nothing exited 0 and recorded no refusal.
 
     `#13267` review 9 F4: `--read-limit 2` produced `per_k: []`, `refusals: []`

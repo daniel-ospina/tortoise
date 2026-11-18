@@ -3,10 +3,14 @@
 
 WHY THIS EXISTS
 ---------------
-`#13118` compared two INDEPENDENT eval runs of an expansion lever and published
-"a wash with a regression in it" — recall@3 75.0 % → 76.3 %, recall@15 88.0 % →
-85.0 %, `absent_at_any_k` 28 → 25 — from **two loose runs on a live corpus at
-different loads**. The arithmetic retires the claim on its own: the @15 delta is
+The re-measurement posted on `#2518` after `#13118` merged (2026-11-17T05:35:36Z,
+comment 6939661408) compared two INDEPENDENT eval runs of an expansion lever and
+called the result "a wash with a regression in it": recall@3 75.0 % → 76.3 %,
+recall@15 88.0 % → 85.0 %, `absent_at_any_k` 28 → 25, from **two loose runs on a
+live corpus at different loads**. ⛔ `#13118`'s own body carries the PRE-baseline
+(`28 / 88 % / 75 %`, which it reports as not reproducible on its box) only — not
+the after-half, not the phrase, not the standard errors.
+The arithmetic retires the claim on its own: the @15 delta is
 3.0 pp at SE 2.8 pp (z = 1.08) and the @3 delta 1.3 pp (z = 0.37). Nothing there
 is distinguishable from noise, and the truth was *we do not know*.
 

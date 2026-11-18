@@ -24,8 +24,12 @@ aboutObjects: "#2518, #13118, #12186, #11901, tools/paired_expansion_ab_2518.py"
 
 ## 0. The claim this replaces, and the arithmetic that retires it
 
-`#13118` compared two **independent** eval runs of the expansion and published *"a wash with a regression
-in it"*:
+The re-measurement posted on `#2518` after `#13118` merged — [owner comment,
+2026-11-17T05:35:36Z](https://github.com/daniel-ospina/tortoise/issues/2518#issuecomment-6939661408) —
+compared two **independent** eval runs of the expansion and called the result *"a wash with a regression
+in it"*. ⛔ `#13118`'s own body is NOT the source of the after-half: it prints the pre-baseline
+(`28 / 88 % / 75 %`, which it reports as **not reproducible on its box**) and carries none of
+76.3 / 85.0, none of the phrase, and none of the two standard errors below:
 
 | | before (load 124) | after (load 100) |
 |---|---|---|
@@ -388,7 +392,11 @@ so rather than implying otherwise.
 ⛔ **And SIX field groups in these three files are ANNOTATIONS, not run output** (this count has been
 wrong three times — `#13267` reviews 6 F6 and 7 F2 — so each one is listed, and they are counted at
 the end rather than guessed at the start). The control's
-`identity_measured: false` + its `identity_note`; the two POINT files' `ranked_lists_compared_note`, which
+`identity_measured: false` + its `identity_note`, **and a hand-added clause inside its `why`** —
+"⛔ and this particular run did not MEASURE that identity (see `identity_note`); it is a call-site fact" —
+which no version of the tool emits (`_build_artifact` builds `why` from the measured counts and stops at
+"not a null effect"), so it is a hand annotation that no count of FIELD GROUPS can see — which is why it
+is named here rather than folded into the total; the two POINT files' `ranked_lists_compared_note`, which
 *asserts* "fired/identical was a real element-wise comparison" and which **no version of the tool
 emits** — the other hand-added field that described a measurement rather than its absence; all three files'
 `construction_unrecorded: {fields: [query_chars, key_tokens, min_query_tokens]}` (their runs predate those
