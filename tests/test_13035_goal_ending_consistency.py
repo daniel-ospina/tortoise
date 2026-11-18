@@ -1889,8 +1889,9 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     assert "the legacy 'deprecated' spelling" not in msg, msg   # it IS the word
     # ⛔ AND THE SET IS THE MAP'S, RENDERED — not a fourth hand-written copy.
     # This file caught the drift only because a stale SET was spelled out in
-    # prose; `_LIVE_DECLARED_TEXT` renders `_ALLOWED_TRANSITIONS['live']` at
-    # import, so a future map change reaches the message and this pin together.
+    # prose; `_LIVE_DECLARED_TEXT` renders `live`'s ONE authored set
+    # (`_LIVE_TARGETS`, which the map's own row derives from) at import, so a
+    # future change reaches the message and this pin together.
     assert _LIVE_DECLARED_TEXT in msg, (
         "the message must state the DECLARED set as the map renders it "
         f"({_LIVE_DECLARED_TEXT}); a hand-written copy is how this clause went "

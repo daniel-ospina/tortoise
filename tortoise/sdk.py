@@ -4817,21 +4817,18 @@ CROSS_LENS_ANN_TOP_K_MAX = 100
 # deltas whose value is ``{}`` — that emptiness is what makes a stored word
 # terminal — so the map is a SUPERSET of the table BY KEY SET and an exact match
 # on every row the table states. ⛔ THAT ROW EQUALITY IS PINNED by
-# ``tests/test_claim_lifecycle.py::test_ontology_transitions_column_matches_the_
-# guard_map``, which compares every ``Transitions to`` cell against this map:
-# narrowing §5's `draft` cell to ``live`` reds it — the doc is not a subset.
-# NOT consulted by update_point per-call (update_point only promotes
-# draft→live; every claim transition is observable via a Task 3 emit hook, and
-# no transition can slip through update_point unemitted).
+# ``test_claim_lifecycle.py::test_ontology_transitions_column_matches_the_guard_map``,
+# which compares every ``Transitions to`` cell against this map: narrowing §5's
+# `draft` cell to ``live`` reds it — the doc is not a subset.
+# NOT consulted by update_point per-call (it only promotes draft→live; every claim
+# transition is observable via a Task 3 emit hook, and none slips through unemitted).
 # ⛔ IT IS CONSULTED, for the transition question, by `_update_entity`'s Point
-# `status` arm (#9649) — the generic tenant door, which had no transition check
-# at all: `update_entity(superseded_point, status='live')` resurrected a dead
-# claim.
+# `status` arm (#9649) — the generic tenant door, which had no transition check at
+# all: `update_entity(superseded_point, status='live')` resurrected a dead claim.
 # What that door consults is the DECLARED TARGET SET for a stored status — never
-# terminality, which stays in the shared predicate (#2498's
-# `live.is_terminal_status`, which also covers the legacy `outdated=true` flag,
-# not a key here). A stored status with no entry here (NULL/legacy) defers rather
-# than being guessed at.
+# terminality, which stays in the shared predicate (#2498's `live.is_terminal_status`,
+# which also covers the legacy `outdated=true` flag, not a key here). A stored status
+# with no entry here (NULL/legacy) defers rather than being guessed at.
 #
 # #11824 S0: the LIVE rows now offer `deprecated`, because it is a declared word
 # of the four-word vocabulary (it was absent from `POINT_STATUS_VALUES` before,
@@ -4840,12 +4837,15 @@ CROSS_LENS_ANN_TOP_K_MAX = 100
 # TERMINAL rows rather than being deleted: they are READ deltas for stored rows
 # (no backfill, #11824 §1), and a stored word with no row would DEFER — i.e.
 # silently become transitionable — which is the opposite of terminal.
+#: ``live``'s ONE authored target set: the map's row and the message text below both
+#: derive from it, and the renderer reads THIS, never the map (whose reader is pinned).
+_LIVE_TARGETS = frozenset({"deprecated", "superseded"})
 _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # P2 (code-review): guards allow draft→deprecated/superseded (a draft point
     # can be terminal before ever going live); keep the declarative spec
     # aligned with the retract/supersede guards.
     "draft": frozenset({"live", "deprecated", "superseded"}),  # promote + terminal
-    "live": frozenset({"deprecated", "superseded"}),  # retract_point / supersede_point
+    "live": _LIVE_TARGETS,  # retract_point / supersede_point
     "deprecated": frozenset(),                           # terminal
     "superseded": frozenset(),                           # terminal
     # ── legacy stored words: READ deltas, terminal, minted by no door ──
@@ -4860,13 +4860,13 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 #: ``live``'s declared target set, RENDERED for the refusal messages that must
-#: state it. ⛔ DERIVED from the map ON PURPOSE (v3.37 review): the reviewers found
-#: THREE hand-written copies of this set in this one function, and two of them had
-#: already gone stale — one still said ``{retracted, superseded}`` and told a
-#: caller `archived` was "REFUSED as reserved" on a Point, which both the map and
-#: the synonym normalisation refute. A message may NAME a set; it may not keep a
-#: second copy of one.
-_LIVE_DECLARED_TEXT = "{" + ", ".join(sorted(_ALLOWED_TRANSITIONS["live"])) + "}"
+#: state it. ⛔ DERIVED from ONE authored set (v3.37 review): the reviewers found
+#: THREE hand-written copies of it in this one function, and two had already gone
+#: stale — one still said ``{retracted, superseded}`` and told a caller `archived`
+#: was "REFUSED as reserved" on a Point, which the map and the synonym
+#: normalisation both refute. A message may NAME a set; it may not keep a second
+#: copy of one.
+_LIVE_DECLARED_TEXT = "{" + ", ".join(sorted(_LIVE_TARGETS)) + "}"
 
 
 def _lifecycle_meaning(word: str) -> str:
