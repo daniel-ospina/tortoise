@@ -407,6 +407,11 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # row in ``config/ci-surfaces.yml``; a stem in only one of the two is the
     # silent hole ``test_carve_out_mirrors_test_no_redirect_stems`` catches.
     "test_13417_vectorless_rows",
+    # #13447: the DB-free half of the derive-and-encode seam's proof — a lambda stands in for
+    # `compute_embedding`, so nothing on that file needs a connection, a graph or a model.
+    # Mirrors the ``carve_out`` row in ``config/ci-surfaces.yml``; a stem in only one of the
+    # two is the silent hole ``test_carve_out_mirrors_test_no_redirect_stems`` catches.
+    "test_13447_derived_embedding_seam",
     # #4921: the construct-lock pin builds TWO real embedded servers (one per
     # arm) under a forced check-then-act interleave and skips under the docker
     # redirect. Its stem is already in config/ci-surfaces.yml's carve-out list,
