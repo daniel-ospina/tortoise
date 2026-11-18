@@ -286,7 +286,10 @@ def enumerate_ended(graph, *, entity_type: str = "point", kind: str | None = Non
     answer is a graded status rather than an exception, wraps this call and
     degrades (zero rows + ``incomplete`` truncation + ``degraded`` status),
     exactly as it does for every other bounded statement it issues (#13302
-    review F1).
+    review F1) — but only when the caller has a sink that can CARRY the
+    marking (``leg_trace``, ``read_status_out`` or ``_truncation_out``). With
+    none, the read serves no unmarked empty and raises the store's error
+    instead, because an undecorated ``[]`` is that same factual claim.
 
     The read is BOUNDED (``LIMIT $limit``) and ordered by the record's own
     ending time, so the caller gets the most recent endings rather than an

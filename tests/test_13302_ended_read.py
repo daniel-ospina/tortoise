@@ -956,3 +956,54 @@ def test_a_trace_only_caller_sees_the_ended_leg_did_not_answer(monkeypatch):
     )
     assert ended_legs[0]["degraded"] is True
     assert ended_legs[0]["reason"] == "query_failed"
+
+
+def test_the_fail_safe_refuses_to_serve_an_unmarked_empty(monkeypatch):
+    """#13302 review round 2, P2: no sink, no degradation — the store's error.
+
+    The degraded empty is only HONEST when something carries the marking: the
+    leg entry rides `status_trace`, and `_with_read_status` publishes the
+    `incomplete` flag only when `_truncation_out` exists. With no sink at all,
+    the empty answer below would reach the caller as a bare `[]` — byte-identical
+    to the factual claim "nothing of that family ever ended", which is the one
+    reading both `ended.py`'s docstring and this arm forbid. Measured before the
+    guard: this exact call returned `[]` and nothing else.
+
+    The sibling store-failure arm on the same path already answers it this way
+    (degrade under `read_status_out`, otherwise raise), so the guard is the
+    consistent arm, not a new rule.
+    """
+    graph = _RecordingGraph(raise_on_enumerate=RuntimeError("Query timed out"))
+    sdk = _hermetic_sdk(monkeypatch, graph)
+
+    with pytest.raises(RuntimeError, match="Query timed out"):
+        sdk.tortoise_fts_query(None, entity_type="point", ended_scope=True,
+                               limit=5)
+
+
+def test_a_truncation_only_caller_still_degrades(monkeypatch):
+    """…and one sink is enough: the truncation marker can carry it alone.
+
+    This is the mutant the guard must NOT make: keying it on `read_status_out`
+    alone — which is how the sibling store-failure arm reads, because there a
+    status sink is the only carrier — would turn every trace-only and
+    truncation-only caller's degrade into a raise. Both shapes have a
+    vocabulary for "could not answer" and keep the degrade (see also
+    `test_a_trace_only_caller_sees_the_ended_leg_did_not_answer`); this row and
+    that one red on that edit. Verified by mutating the guard to
+    `if read_status_out is None: raise`: 2 failed / 48 passed.
+    """
+    graph = _RecordingGraph(raise_on_enumerate=RuntimeError("Query timed out"))
+    sdk = _hermetic_sdk(monkeypatch, graph)
+    truncation: dict = {}
+
+    rows = sdk.tortoise_fts_query(
+        None, entity_type="point", ended_scope=True, limit=5,
+        _truncation_out=truncation)
+
+    assert rows == []
+    assert truncation["truncated"] is True, (
+        "the truncation sink is what carries `incomplete` — a truncation-only "
+        "caller must receive the marker, not an exception"
+    )
+    assert truncation.get("_exact") is False

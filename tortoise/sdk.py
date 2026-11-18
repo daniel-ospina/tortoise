@@ -45541,6 +45541,33 @@ class TortoiseSDK:
                 # degradable; a contract refusal keeps rising.
                 raise
             except Exception as e:  # noqa: BLE001, RUF100
+                # ⛔ The degradation must be CARRIED, or it is a lie (#13302
+                # review round 2, P2). The marking below reaches the caller only
+                # through a sink: the leg entry through `status_trace`, the
+                # `incomplete` flag through `_truncation_out` (which
+                # `_with_read_status` publishes ONLY when that sink exists).
+                # With NEITHER, `[]` would arrive bare, byte-identical to the
+                # factual claim "nothing of that family ever ended" — the one
+                # reading `ended.py`'s docstring and this arm's own comment
+                # forbid. Measured before the guard: a no-sink caller got `[]`
+                # and a log line, nothing else.
+                #
+                # The SIBLING store-failure arm above answers it the same way —
+                # degrade when a sink exists, otherwise `raise` — so a caller
+                # with no vocabulary for "could not answer" gets the store's
+                # error, exactly as a direct `enumerate_ended` caller does.
+                # `status_trace` IS the "can this be carried?" test, and it is
+                # the only one needed: it is the caller's `leg_trace` when one
+                # was asked for, and is normalised to `[]` whenever a truncation
+                # sink exists without one (the #8447 round-5 seam just above).
+                # So `status_trace is None` is exactly `no sink at all` — do NOT
+                # key this on `read_status_out` alone the way the sibling arm can
+                # afford to: a trace-only or truncation-only caller HAS a
+                # vocabulary for "could not answer" and must keep degrading
+                # (`test_a_truncation_only_caller_still_degrades`,
+                # `test_a_trace_only_caller_sees_the_ended_leg_did_not_answer`).
+                if status_trace is None:
+                    raise
                 # FAIL-SAFE (#13302 review F1). FalkorDB's `timeout` is a MAXIMUM
                 # QUERY RUNTIME: the server aborts the statement and the client
                 # RAISES. This is the most expensive statement the read issues,
@@ -45551,8 +45578,10 @@ class TortoiseSDK:
                 # above, the vector legs, `_read_declaration`). Degrade exactly
                 # as they do: zero rows, a leg entry that says the leg ran and
                 # did NOT answer, and a truncation marker that forbids reading
-                # the empty answer as COMPLETE. Never a raise, and never an
-                # unmarked empty list passed off as "nothing ever ended".
+                # the empty answer as COMPLETE. Never an unmarked empty list
+                # passed off as "nothing ever ended" — and, that being
+                # impossible without a sink, never a raise either once one is
+                # present (the guard above is what makes both true at once).
                 _logger.warning(
                     "ended-scope enumeration did not answer within %s ms (%s) "
                     "— degraded", _ended_bound, e)
