@@ -620,7 +620,7 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
-    """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21496`.
+    """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21540`.
 
     `05-verify.md` stated, as the row's re-point at the head being merged, a pair the
     tree refutes at BOTH ends: neither `sdk.py:19449` nor `sdk.py:19485` occurs in

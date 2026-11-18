@@ -6711,11 +6711,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ THE `_honours` CITE'S OWN HALF-DONE MOVE (#13489 review, finding 1 — MEASURED).
     # D5 states the line the `_honours` definition sits on THREE TIMES in current tense, and
-    # this PR re-pointed the same hit in `02-scope.md:61` to the measured `:22247` while leaving
+    # this PR re-pointed the same hit in `02-scope.md:61` to the measured `:22291` while leaving
     # all three of D5's statements on the pre-move `:22225` — i.e. the exact defect class this row
     # exists to close, one row over from where its sibling was fixed. Neither existing arm
     # could have caught it: `_pin_row_failures` scopes to a markdown LINE and D5 IS one line
-    # carrying ~50 numbers, so a row passes as soon as ANY `:22247` is somewhere on it; and
+    # carrying ~50 numbers, so a row passes as soon as ANY `:22291` is somewhere on it; and
     # the spelling loop above pins the two `:1186` spellings, not this clause. So the claim
     # is read off the CLAUSE: every current-tense number D5 attaches to `_honours` must equal
     # the line the definition is actually on, which makes a partial re-derivation red while a
@@ -6755,10 +6755,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ THE NUMBER'S HEAD-BINDING (#13489 review pass 6 — MEASURED, and this is the arm the
     # pin above CANNOT supply). That clause used to read
-    #   "… `is at `:22247` at the MERGE head AND at this head`"
+    #   "… `is at `:22291` at the MERGE head AND at this head`"
     # — true of THIS head, FALSE of the MERGE head, where
     # `git show 2584a86ec1:tortoise/sdk.py | grep -n '_honours: dict'` prints `20236` and that
-    # head's `:22247` is unrelated prose. So a reader who followed the clause (and its own
+    # head's `:22291` is unrelated prose. So a reader who followed the clause (and its own
     # `grep` instruction) landed on a plausible line naming nothing — D5's own stated failure,
     # one head over. The three-statement pin above cannot see it: it compares every
     # current-tense number to the WORKING TREE's line, so a statement that ALSO names another
@@ -6771,7 +6771,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # ⛔ THE QUALIFIER IS MATCHED BY POSITION, NOT BY AN ENUMERATION (#13489 review, P2 —
     # MEASURED). The first cut of this arm listed the capitalised spellings it expected
     # (`MERGE|branch|PRE-PR`) and was therefore defeated by a LOWER-CASED one: with the D5
-    # sentence rewritten to `… is at `:22247` at the merge head …` every arm stayed GREEN
+    # sentence rewritten to `… is at `:22291` at the merge head …` every arm stayed GREEN
     # while the sentence still put another head's line in the slot the resolver reads —
     # the exact invariant the comment above claims this arm enforces. The qualifier is
     # whatever FOLLOWS the slot, so it is captured and judged, never predicted.
