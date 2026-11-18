@@ -10306,14 +10306,18 @@ surfaces:
   # the #13224 row above does for `await_write_ready_reason`. Same module as
   # `test_13224_cold_embedder_write_bound.py` directly above.
   - test_13528_read_never_blocks_on_embedder.py
-  # #13528 / review: DUAL-REGISTERED with `core` (below). `tortoise/embeddings.py`
-  # is an EXACT `eval` SOURCE_PATTERN and a named-surface match REPLACES the `core`
-  # fallback, so an embeddings.py-only diff hides the `core` row — and that diff is
-  # precisely the one this pin exists for (a `_last_failure_kind` producer literal
-  # drifting out of `FAILURE_KINDS`). Measured on this head:
-  # select(['tortoise/embeddings.py'],'pull_request') -> ['eval'], full=False, and
-  # the pin is absent from the 167 selected test files; without this arm the drift
-  # merges and reds main's push lane rather than this PR's.
+  # #13528 / review: DUAL-REGISTERED with `core` (the #4861 row above).
+  # `tortoise/embeddings.py` is an EXACT `eval` SOURCE_PATTERN and a
+  # named-surface match REPLACES the `core` fallback, so an embeddings.py-only
+  # diff hides the `core` row — and that diff is precisely the one this pin
+  # exists for (a `_last_failure_kind` producer literal drifting out of
+  # `FAILURE_KINDS`). The SHAPE is
+  # select(['tortoise/embeddings.py'],'pull_request') -> ['eval'], full=False,
+  # i.e. `core` is replaced and this row would otherwise be ABSENT; without
+  # this arm the drift merges and reds main's push lane rather than this PR's.
+  # No count is quoted on purpose: the selected-file population moves with
+  # `main`, and every reading in this file is bound to the sha named beside it,
+  # never to "this head".
   - test_embedding_model_required.py
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of

@@ -420,16 +420,25 @@ def test_the_required_flag_with_no_extra_reports_not_installed(
         sdk, monkeypatch):
     """An ARMED missing-extra process is refused with ``not_installed`` (#5275).
 
-    THE P1-1 DISCRIMINATOR (#13528 review). The bounded read resolves the cause
-    as the leg-trace word ``no_embedder`` (the designed absence, correct on the
-    trace), and the ONE exit must translate it into the ``failure_kind`` the
-    contract defines for that state — ``not_installed``. On ``main`` the trace
-    word itself was published as the cause, so an ARMED process was told "there
-    is no embedder" (the designed-absence statement #5275 forbids) where
-    ``get()`` had always said ``not_installed``. Passing the trace word through
-    verbatim — the defect this pins — makes this row red, while the trace
-    assertion below keeps the fix from "solving" it by changing the trace
-    vocabulary instead.
+    The REGRESSION GUARD for this refusal, in the shape this diff ships. The
+    bounded read resolves the cause as the leg-trace word ``no_embedder`` (the
+    designed absence, correct on the trace), and the ONE exit must translate it
+    into the ``failure_kind`` the contract defines for that state —
+    ``not_installed``.
+
+    Where the defect lives, named against the tree that carries it: the
+    PRE-#13535 tree published the trace word itself as the cause, telling an
+    ARMED process "there is no embedder" (the designed-absence statement #5275
+    forbids) where ``get()`` had always said ``not_installed``. ``main`` already
+    repairs that through the fixed dict ``_READ_DECLINE_FAILURE_KIND`` that
+    #13535 shipped, and this diff REPLACES that dict with the rule
+    ``_as_failure_kind`` — so this row is GREEN on ``main`` and is NOT a
+    discriminator against it; what it pins is that the replacement keeps the
+    answer #13535 established. (The row that IS the delta over ``main`` is
+    `test_the_re_armed_read_names_a_recorded_failure_on_the_refusal`, which
+    reds on that dict.) Passing the trace word through verbatim — the
+    pre-#13535 defect — makes this row red, while the trace assertion below
+    keeps the fix from "solving" it by changing the trace vocabulary instead.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
     monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
