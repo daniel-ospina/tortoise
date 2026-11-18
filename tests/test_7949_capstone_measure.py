@@ -6169,7 +6169,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
-        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12116`/`12169` pair the rows now carry.
+        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12136`/`12189` pair the rows now carry (`#13556` then added a further `+20`).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("12136", "subject_binding_available,"),
             ("12189", "and not subject_binding_available(graph):"),
@@ -6422,7 +6422,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("12109", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
-            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, so the live values are `12116`/`12169`.
+            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, so the live values are `12136`/`12189` (`#13556`'s own insert then added a further `+20`).
             ("12136", "subject_binding_available,"),
             ("12189", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -7362,10 +7362,10 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
     # defect this function exists for, one figure over. Read BOTH sides out of the document
     # and compare against the head's own blob.
     _quartet = re.search(
-        r"merge head `(?P<head>[0-9a-f]{7,40})` carried "
-        r"`:(?P<batch>\d+)`/`:(?P<dedup>\d+)`, "
+        r"their THIS-HEAD values are `:(?P<batch>\d+)`/`:(?P<dedup>\d+)`, "
         r"`_cas_witness` `:(?P<witness>\d+)`, "
-        r"`_promote_incident_operators` `:(?P<promote>\d+)`",
+        r"`_promote_incident_operators` `:(?P<promote>\d+)`, "
+        r"measured at[^\u2014]{0,140}?`(?P<head>[0-9a-f]{7,40})`",
         _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8"))
     assert _quartet, (
         "05-verify.md's promote/dedup clause no longer matches the form this arm reads: "

@@ -170,7 +170,7 @@ no cite: the handle beside it then reads as corroboration of a line nobody read.
 individually correct at the pin they were written for, and the distance is **23** (`MATCH (s:Subject {id:$sid})
 RETURN properties(s)` and the walk `MATCH (s:Subject {id:$sid})-[r]->(n) …`, with the subject-chain composition
 between them). ⚠️ **That row's two ADDRESSES have since been re-derived twice — they are `:37369` and
-`:37392` now, both in this revision's `main` list above — and this paragraph is the record of the DISTANCE
+`:37392` now, both in this revision's own group above — and this paragraph is the record of the DISTANCE
 claim, so it quotes no address the row does not carry**: a number
 here that is not the number the row carries is the very defect it is warning about. So the rule above extends to the words
 **around** a cite: an adjective that fixes a position ("above", "beside", "in the same read") is a claim too, and
@@ -366,7 +366,7 @@ mechanism, not a citation nicety.
 | `tortoise/goal_judgement.py:1128` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
 | `tortoise/search_engine.py:7045` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
 | `tortoise/assembly.py:2629` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
-| `tortoise/search_engine.py:3100` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3005` derives the label from `entity_type`; `sdk.py:56190` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6933` | **fulltext index** |
+| `tortoise/search_engine.py:3100` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3005` derives the label from `entity_type`; `sdk.py:57276` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6933` | **fulltext index** |
 
 **Verdict: `graph`.** ⚠️ **Whole-node reads are absent from the table above and belong to it by §2's own rule —
 and this is a LOWER BOUND of eight, not a census of two.** The two the earlier draft found are

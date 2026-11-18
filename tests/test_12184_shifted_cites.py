@@ -105,6 +105,26 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:2882`", _SDK, 2882, "SET s.capture_redactions=$redactions"),
     (_AUDIT, "`sdk.py:37369`", _SDK, 37369, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     (_AUDIT, "`:37392`", _SDK, 37392, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    # ⛔ The three rows below pin SITES the pair rows above cannot reach, because those rows carry
+    # TABLE/ROW context on purpose (a bare `:37392` is satisfied by the header enumeration or by the
+    # proximity paragraph, so the §2.5 rows could be re-pointed alone with nothing red). MEASURED, at
+    # the head before this pin: §2.5's adjacency row and row 8 both cited `sdk.py:37206` for the
+    # `-[r]->(n)` walk — a line that is `bd_id: bd.confidence_mean` at this head, a document line at
+    # the pin's neighbours and `RETURN type(r)…` on `:37392` — so the walk's ADDRESS resolved on NO
+    # head the row named, while `len(_PINS)` and every count arm stayed green. The proximity
+    # paragraph above §2.5 carried the same rot in the other direction: it named `:37183` (a `#11702`
+    # comment at every head) as the address "the row carries" — the one thing that paragraph says
+    # must never disagree with the row.
+    (_AUDIT, "| `tortoise/sdk.py:37392` |", _SDK, 37392, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "the `-[r]->` walk (`sdk.py:37392`)", _SDK, 37392, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    (_AUDIT, "they are `:37369` and", _SDK, 37369, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
+    # (`:3005`, `:6933`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
+    # `#13551` lane's previous pass re-derived on the PRE-merge tree — is a docstring line at this
+    # head, at `f07b73b1de` and on `origin/main`, where the statement is `:57276` (the `#13550` /
+    # `#13584` integration inserted 186 lines above it). A cite re-derived before a merge is stale
+    # after it, which is D5's own rule; the pin is what makes the next one red instead of silent.
+    (_AUDIT, '`sdk.py:57276` passes `"event"`', _SDK, 57276, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -245,6 +265,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2882`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37369`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37392`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37392` |'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37392`)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37369` and'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57276` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
@@ -257,7 +281,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # 2: `:6938` is BOTH the §1 label-scan table row's own key (already in this document) and the
     # §2.5 header enumeration's disclosure of THIS tree's Object declaration, added by `#13489` beside
     # its three siblings. Two sites, one spelling — a single pin resolves the line, and the count is
-    # what stops a third occurrence appearing unannounced.
+    # what stops a third occurrence appearing unannounced. Measured at THIS head:
+    # `grep -o '\`:6938\`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 2, and
+    # `grep -o '\`:6939\`' …` -> 1, so `origin/main`'s 1 is the count BEFORE `#13489`'s second site.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
@@ -271,6 +297,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4921'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4840`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3081-3096'): 1,
+    # ⛔ `origin/main`'s two `sdk.py:28019` rows are DROPPED at this merge, not carried: `28019` is
+    # `main`'s value for the content-review filter, and this branch re-derived that cite to `:28067`
+    # in BOTH documents. Measured at this head: `grep -rn 'sdk.py:28019' docs/00_index.md
+    # docs/architecture/ENTITY-VERDICT-BANDS.md` -> no match (the token survives only in
+    # `05-verify.md`'s sentence stating the re-point), so a row asserting 1 occurrence would be a
+    # false pin over a token the documents no longer carry.
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21756'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21798'): 2,
@@ -406,17 +438,28 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
 
 
 def test_the_resolver_reds_on_a_double_applied_offset() -> None:
-    """Negative control — the exact defect: 4921 + 3 = 4924 is the `#7704` note, not the loop.
+    """Negative control — the exact defect: the loop's cite re-pointed at the `#7704` note below it.
 
     Reachable: it is the shipped pre-fix state of the m3 brief, reintroduced here by mutating a COPY of
     the shipped row with the cite token LEFT INTACT, so the failure is reported by the CONTENT arm and
     cannot be satisfied by the token arm (which is what a re-pointed token would trip first).
+
+    The spurious line is DERIVED FROM CONTENT, not hardcoded: the note it must land on has moved twice
+    since this control was written, and a hardcoded `4907` rotted into a line that no longer holds the
+    note — the do-nothing control then failed for the wrong reason (the note check, not the content arm).
     """
-    row = (_M3_BRIEF, "tortoise/search_engine.py:4921", _SE, 4921, "for rank, (pid, _score) in enumerate(ranked)")
-    doubled = (row[0], row[1], row[2], 4924, row[4])
+    loop_line = 4921
+    note_line = next(
+        i + 1
+        for i, line in enumerate((REPO / _SE).read_text(encoding="utf-8").splitlines())
+        if "#7704 (MEASURED MECHANISM" in line
+    )
+    assert note_line > loop_line, "the `#7704` note must sit BELOW the loop it annotates"
+    row = (_M3_BRIEF, "tortoise/search_engine.py:4921", _SE, loop_line, "for rank, (pid, _score) in enumerate(ranked)")
+    doubled = (row[0], row[1], row[2], note_line, row[4])
     errors = _resolve((doubled,))
     assert errors, "a spurious +3 must red the resolver"
-    assert ":4924" in errors[0] and "#7704" in errors[0]
+    assert f":{note_line}" in errors[0] and "#7704" in errors[0]
     assert "is gone" not in errors[0], "the content arm must be the one that fires"
 
 
@@ -446,8 +489,14 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 52 -> 55 at review cycle 6: the three addresses review P2-2 measured as pinned NOWHERE —
     # `sdk.py:28008` in `00_index.md` and in `ENTITY-VERDICT-BANDS.md`, and `sdk.py:28372` there too —
     # where a `+1` mutation on all three left 441 tests green. Same shape, same reason.
+    # 55 -> 58 at the #13551 fix lane: the three §2.5 sites that cited `sdk.py:37206` (or, in the
+    # proximity paragraph, `:37183`) for statements that are on `:37392` / `:37369` at every head the
+    # row names — measured above the rows. The pair pins could not see them: a `:37392` anywhere on
+    # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6938` was.
+    # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
+    # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`).
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
-    assert len(_PINS) == 55
+    assert len(_PINS) == 59
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
