@@ -31,33 +31,29 @@ from tortoise.embedding_residual_scan import (
 # ── the served set ──────────────────────────────────────────────────────────
 
 def test_only_the_labels_whose_vector_the_record_carries_are_served():
-    """`object`/`subject` are NOT served — the reason is the `#689` status cage.
+    """Seven entity types, five labels — and `object`/`subject` are now among them.
 
-    ⛔ THE PREMISE THIS PIN WAS WRITTEN ON IS RETIRED (#13220), so it is restated
-    rather than left to be re-derived from a false starting point: their vector
-    is still derived inside the graph fold from `name` (#7845), but as of
-    `20261117000001_record_object_subject_embedding.sql` `public.object` /
-    `public.subject` DO carry `embedding` + a generated `embedding_vec` + an HNSW
-    index, and the write seam fills them (`record_writer.derived_embedding_columns`).
-    "No column to read" is no longer the answer.
+    ⛔ THE HISTORY, restated so it is not re-derived from a false starting point.
+    `object`/`subject` were withheld while their vector had no record column
+    (#13220 says why that premise is retired: `20261117000001_…` gives both
+    tables `embedding` + a generated `embedding_vec` + an HNSW index, and the
+    write seam fills them). What still blocked the READ was `#689`'s
+    TERMINAL-STATUS CAGE — `search_engine._STATUS_FILTERED_LABELS` drops
+    superseded/deprecated/archived/retracted entities from the dense leg, and the
+    record holds no `status` COLUMN for these two labels to filter on.
 
-    What still blocks them is `#689`'s TERMINAL-STATUS CAGE, and it is a
-    correctness gate, not a missing feature: `search_engine._STATUS_FILTERED_LABELS`
-    drops superseded/deprecated/archived/retracted entities from the dense leg, the
-    record has no `status` column for these two labels to apply that cage, and
-    `public.object_current_status` answers only `live`/`superseded` where the graph
-    vocabulary has four terminal members — so serving them from the record would
-    return entities the graph leg hides. `tortoise/record_vector.py::LABEL_SERVED`
-    carries the same reasoning at the source; keep the two in step.
-
-    A future lane that "adds" them here must therefore land the record-side status
-    filter FIRST — adding them because a column exists would serve the `#689`
-    regression on the branch that carries production traffic.
+    `#13422` pays that cage from the RECORD'S OWN FOLD
+    (`record_vector._folded_terminal_keys` → `cache_projection.apply_event_stream_folds`
+    over `public.journal_event`) rather than from a column or from the two-value
+    SQL view, so both labels are served with the exclusion applied. ⚠️ A lane that
+    re-reads "the record has no status column" as "the label is unserved" will
+    re-withhold them and re-open the issue: the column arm and the folded arm are
+    two ways to apply ONE cage, and `_STATUS_COLUMN` names which one a label
+    takes.
     """
     assert set(record_vector.LABEL_SERVED) == {
-        "point", "operator", "source", "document", "event"}
-    assert "object" not in record_vector.LABEL_SERVED
-    assert "subject" not in record_vector.LABEL_SERVED
+        "point", "operator", "source", "document", "event",
+        "object", "subject"}
 
 
 def test_every_served_label_is_a_real_entity_type():

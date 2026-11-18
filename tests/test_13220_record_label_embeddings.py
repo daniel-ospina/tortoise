@@ -15,8 +15,12 @@ code:
 3. **The carrier rule.** The derived value lands in the record's COLUMN and never
    in `public.journal_event.payload` — the record's copy of the journal line.
 4. **The rulings that are NOT spent.** The graph copy of `:Object`/`:Subject` is
-   still written (2026-11-10 KEEP, #11395), the `props` refusal still stands, and
-   the dense leg still does NOT serve `object`/`subject` from the record.
+   still written (2026-11-10 KEEP, #11395) and the `props` refusal still stands.
+   ⚠️ The fourth member of this list USED to be "the dense leg still does NOT
+   serve `object`/`subject` from the record" — `#13422` landed that read half
+   (with the `#689` cage paid from the record's own fold), so the pin here now
+   asserts the opposite and `tests/test_13422_object_subject_dense_leg.py` owns
+   it.
 
 DB-FREE: the migrations are read from disk and the plans are built without a
 connection, so this rides `TORTOISE_TEST_CARVE_OUT=1`.
@@ -586,24 +590,33 @@ def test_a_PAYLOAD_carried_EVENT_embedding_is_still_stored():
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_object_and_subject_still_have_no_record_served_dense_leg():
-    """⛔ WITHHELD ON PURPOSE — the record cannot apply the `#689` cage.
+def test_object_and_subject_ARE_record_served_once_the_cage_is_paid():
+    """⛔ THE READ HALF, LANDED (#13422) — this pin used to assert the opposite.
 
     `search_engine._STATUS_FILTERED_LABELS` is ``("Point", "Object", "Subject")``
     and `record_vector._status_predicates` applies that exclusion on the record
-    leg "because the graph branches do". The record has no `status` column for
-    these two labels (`OpDispatch.never_store`, §2.6) and its procedural fold
-    (`public.object_current_status`) answers only `live`/`superseded` — while the
-    graph's vocabulary has four terminal members (deprecated/archived/retracted
-    arrive as `EntityMutated op=restatus` and the record DROPS them). Serving them
-    from the record today would return entities the graph leg hides: the `#689`
-    loophole on the branch that would carry production traffic. The COLUMN is
-    what this change owes; the leg is blocked on the status cage.
+    leg "because the graph branches do". The record has no `status` COLUMN for
+    these two labels (`OpDispatch.never_store`, §2.6; `chk_object_props_no_derived`
+    refuses the props tail) — but the cage does not need a column: the record's
+    own journal fold (`cache_projection.apply_event_stream_folds`, replayed over
+    `public.journal_event`) expresses all four terminal words, and
+    `record_vector._folded_terminal_keys` reads it. So the labels are SERVED and
+    the cage is applied from the fold rather than from SQL.
+
+    ⚠️ THE COLUMN IS STILL THE WRITE HALF and this file keeps pinning it; what
+    moved is only the claim that the column's existence did not make the label
+    servable. `tests/test_13422_object_subject_dense_leg.py` pins the cage's
+    structure, and the live arm is in `tests/test_11642_vector_move_live.py`.
     """
-    assert "object" not in rv.LABEL_SERVED
-    assert "subject" not in rv.LABEL_SERVED
+    assert "object" in rv.LABEL_SERVED
+    assert "subject" in rv.LABEL_SERVED
     assert "event" in rv.LABEL_SERVED
     assert "document" in rv.LABEL_SERVED and "source" in rv.LABEL_SERVED
+    # …and both are terminal-filtered on the graph leg, which is WHY serving
+    # them needed the cage rather than two dict entries.
+    from tortoise.search_engine import _STATUS_FILTERED_LABELS
+
+    assert set(_STATUS_FILTERED_LABELS) >= {"Object", "Subject"}
 
 
 def test_the_graph_still_writes_object_and_subject_embeddings():

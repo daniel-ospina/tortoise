@@ -95,36 +95,50 @@ HNSW_ITERATIVE_SCAN = "strict_order"
 
 #: ``entity_type -> (table, id column, kind filter, recency columns)``.
 #:
-#: ⛔ `object`/`subject` ARE STILL ABSENT, AND THE REASON CHANGED (#13220). It is
-#: no longer "the record has no column" — since
-#: `20261117000001_record_object_subject_embedding.sql` both tables carry
-#: `embedding` + a generated `embedding_vec` + an HNSW index, and the write seam
-#: fills them (`record_writer.derived_embedding_columns`). What still blocks them
-#: is the `#689` TERMINAL-STATUS CAGE, and it is a correctness gate rather than a
-#: missing feature:
+#: ⛔ `object`/`subject` ARE SERVED, AND THE GATE THAT HELD THEM BACK IS NOW
+#: PAID (#13422) — the record leg applies `#689`'s terminal-status cage through
+#: the RECORD'S OWN FOLD, not through a status column. The history matters
+#: because the shape of the old refusal is what the next reader will re-derive:
 #:
 #:   * `search_engine._STATUS_FILTERED_LABELS` is ``("Point", "Object", "Subject")``,
 #:     so BOTH graph branches drop a superseded/deprecated/archived/retracted
 #:     entity out of the dense leg, and :func:`_status_predicates` exists precisely
 #:     so the record leg is not a loophole around that;
-#:   * the RECORD has no `status` column for these two labels — it is a
+#:   * the RECORD has no `status` COLUMN for these two labels — it is a
 #:     projection-owned CACHE (`OpDispatch.never_store`, §2.6) and
 #:     `chk_object_props_no_derived` refuses it in the props tail;
-#:   * its procedural fold (`public.object_current_status`) answers only
-#:     `live`/`superseded`, while the graph's vocabulary has four terminal
-#:     members: `deprecated`/`archived`/`retracted` arrive as
-#:     `EntityMutated op=restatus` and the record DROPS them.
+#:   * the SQL view (`public.object_current_status`) answers only
+#:     `live`/`superseded` — **and the leg does not read it.** `#13335` is still
+#:     open, and it is a gap in that VIEW; it was never a gap in the record.
 #:
-#: ⇒ serving these two from the record today would return entities the graph leg
-#: hides — `#689`'s regression on the branch that would carry production traffic.
-#: They keep the brute-force graph scan they have always used (they were never
-#: ann-served: the graph's only vector index was `Point`'s, `#4997`), and the
-#: COLUMN + index this change adds is what makes them queryable AT ALL — by the
-#: noun-resolution step the 2026-11-17 ruling names, and by the dense leg the
-#: moment the record can apply the cage. :data:`LABEL_SERVED` is what tells the
-#: caller to take the graph branch instead of pretending the record answered;
-#: `tests/test_13220_record_label_embeddings.py` pins both halves (the columns
-#: exist, the two labels are NOT served).
+#: ⇒ WHAT ACTUALLY OPENS THE GATE, and why it is not a two-dict-entry change.
+#: The record's status fold already expresses all four terminal words, because
+#: the fold is not the view: `cache_projection.apply_event_stream_folds` replays
+#: `public.journal_event` — the record's own append-only truth — through the SAME
+#: `status_folds` vocabulary and the same per-event guard the live graph fold
+#: applies (`projection/entities.py::_fold_object_status`), including the
+#: `EntityMutated` `state.status` carrier `#9974` restored. So the set of keys a
+#: label's fold calls TERMINAL is computable from the record WITHOUT a status
+#: column, without a grant on the procedural views (`#10193` — the layer tables
+#: carry their own SELECT policy, which is what this leg reads), and without
+#: restating the predicate here.
+#:
+#: ⚠️ THE TWO PATHS ARE NOT THE SAME QUESTION, so `#13335`/`#10193` are NOT
+#: preconditions of this entry. They are preconditions of serving these labels
+#: from the SQL VIEW — the two-value fold — which is the path a lane would take if
+#: it tried to answer the cage in SQL. This leg takes the fold instead, which is
+#: why the gate closes here and those two issues stay open on their own merits.
+#: `docs/architecture/SEARCH-ARCHITECTURE.md` carries the same correction.
+#:
+#: WHAT IT COSTS, named rather than implied: two tenant-scoped record reads
+#: (the label's rows, then its status-bearing journal events) before the kNN, so
+#: these two labels spend all :data:`RECORD_LEG_STATEMENTS_PER_READ` of a read's
+#: budget and have no share left for a separate shortfall `count(*)` — the
+#: prefetch IS the count (:func:`_folded_terminal_keys` returns both). A tenant
+#: whose journal makes that prefetch slow falls through to the graph branch by
+#: TIMEOUT, recorded as the named `scan_fallback`, which is the same posture every
+#: other over-budget record leg takes. Materialising the fold so the prefetch
+#: disappears is the follow-up, and it is what `#13335`'s successor should cost.
 #:
 #: The ``id column`` mirrors `search_engine`'s ``id_field`` derivation exactly
 #: (#448): ``source``/``document`` answer the canonical key ``url``, ``event``
@@ -171,6 +185,16 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
     "document": ("source", "url", "document_kind IS NOT NULL",
                  ("updated_at", "created_at")),
     "event": ("event", "event_id", "", ("updated_at", None)),
+    # ⛔ `object`/`subject` carry NO `updated_at` column (`table_columns()`), so
+    # the recency half is `created_at` alone. It is placed in the UPDATED slot on
+    # purpose: `_recency_sql` renders that slot as ``coalesce(t.created_at, '')``,
+    # which is exactly what `search_engine.recency_key_expr`'s CASE degrades to
+    # when `updatedAt` is absent — the same key the graph leg hands the caller's
+    # ONE sort. Writing it in the CREATED slot instead would emit a bare
+    # literal from `_recency_sql`'s ``updated is None`` arm, i.e. no recency at
+    # all, and every Object would sort as oldest.
+    "object": ("object", "id", "", ("created_at", None)),
+    "subject": ("subject", "id", "", ("created_at", None)),
 }
 
 
@@ -344,20 +368,42 @@ def _resolve_scope(carried: tuple[str, str] | None = None) -> _Scope | None:
     return _Scope(org_id=org_id, graph_id=graph_id)
 
 
+#: The sentinel `_STATUS_COLUMN` uses for a label whose status is NOT a column on
+#: its record row. A record table cannot hold it (§2.6: the value is a
+#: projection-owned CACHE, and `chk_object_props_no_derived` refuses it in the
+#: props tail), so the cage is applied from the record's own journal fold instead
+#: of from SQL. ⛔ It is a VALUE, never a column name, so a lane that renames a
+#: column cannot collide with it; the leading NUL makes `sql` refuse it outright
+#: if it ever reaches a statement.
+_FOLDED_STATUS = "\x00folded"
+
 #: ``entity_type -> (status column, carries the legacy `outdated` flag)`` for the
 #: labels whose dense leg must not leak TERMINAL rows (`#689`).
 #:
 #: ⛔ THIS IS NOT A SECOND VOCABULARY. The values come from
 #: `search_engine._status_vocab_for`, the ONE family→vocabulary dispatcher, at
-#: call time; this map only says WHICH COLUMN holds the status on each table and
-#: whether the legacy `outdated` conjunct applies — facts about the SCHEMA, which
-#: the record owns. `source`/`event` are absent because they carry no status on
-#: the dense leg today: `search_engine._STATUS_FILTERED_LABELS` is
+#: call time; this map only says WHERE the status lives on each label and whether
+#: the legacy `outdated` conjunct applies — facts about the SCHEMA, which the
+#: record owns. `source`/`event` are absent because they carry no status on the
+#: dense leg today: `search_engine._STATUS_FILTERED_LABELS` is
 #: ``("Point", "Object", "Subject")``, and `Source`/`Event` are not in it — so
 #: adding them here would filter rows the graph leg still returns.
+#:
+#: ⛔ `object`/`subject` ANSWER :data:`_FOLDED_STATUS`, WHICH IS NOT A COLUMN, and
+#: the distinction is the whole of `#13422`. Their status is a projection-owned
+#: cache the schema refuses as a column (§2.6), so it is not readable from the
+#: row; it is derived by replaying the record's journal through the ONE fold
+#: (`_folded_terminal_keys`). A label whose status IS a column keeps the cheap
+#: SQL predicate; a label whose status is folded pays two prefetch reads for the
+#: cage. Both are the SAME cage — same vocabulary, same exclusion — which is
+#: what `tests/test_13422_object_subject_dense_leg.py` pins structurally: every
+#: label in `search_engine._STATUS_FILTERED_LABELS` has an entry here, so a family
+#: added to that tuple cannot silently skip the exclusion on the record leg.
 _STATUS_COLUMN: dict[str, tuple[str, bool]] = {
     "point": ("status", True),
     "operator": ("status", True),
+    "object": (_FOLDED_STATUS, False),
+    "subject": (_FOLDED_STATUS, False),
 }
 
 
@@ -378,11 +424,23 @@ def _status_predicates(entity_type: str,
     (the #1353 supersede-structure surface uses it), and the graph branches honor
     it by emitting NO clause — mirrored here, because a different reading would
     make the two legs disagree about the same request.
+
+    ⛔ THIS IS ONLY THE COLUMN ARM. A label whose status is NOT a column
+    (``object``/``subject``, :data:`_FOLDED_STATUS`) cannot be filtered here and
+    is filtered by :func:`_folded_terminal_keys` instead — the clause for it
+    names the fold's own answer rather than a column, so emitting an empty list
+    here is correct and is NOT "no cage". Calling this for a folded label and
+    reading the empty answer as "nothing to exclude" is the `#689` regression
+    this split exists to prevent.
     """
     mapping = _STATUS_COLUMN.get(entity_type)
     if mapping is None or excluded_statuses == ():
         return []
     column, has_outdated_flag = mapping
+    if column == _FOLDED_STATUS:
+        # Not expressible as a column predicate — see the docstring. The folded
+        # arm is applied by the caller, not by this function.
+        return []
     from .search_engine import _status_vocab_for
 
     vocabulary, include_outdated = _status_vocab_for(
@@ -404,6 +462,129 @@ def _status_predicates(entity_type: str,
 #: doubled so a value carrying a quote cannot break out.
 def _sql_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+#: How many folded terminal keys one dense read will bind into its statement.
+#:
+#: ⛔ A BOUND, NOT A QUALITY KNOB, and it fails toward the LEG THAT ALWAYS ANSWERED.
+#: The folded arm passes the record's own terminal keys as ``<> ALL(%s)``; the
+#: parameter is a text array, and a tenant whose fold calls an enormous number of
+#: Objects terminal would make that array the dominant cost of the read. Past this
+#: bound the leg returns ``None`` — *"this label is not served HERE"*, the
+#: documented not-armed outcome — so the caller takes its graph branch, which
+#: applies the identical cage in Cypher and is CORRECT rather than degraded. The
+#: failure direction therefore hides nothing and serves nothing terminal; it only
+#: declines the record's turn. Materialising the fold (so the list disappears) is
+#: what removes the bound.
+_FOLDED_TERMINAL_KEY_BUDGET = 4000
+
+
+def _rows_as_dicts(cur: Any, sql: str, params: tuple) -> list[dict[str, Any]]:
+    """`SELECT` rows as dicts, by column name — a local three-line helper.
+
+    ⛔ NOT `cache_projection._rows`: that is a private of a module this one
+    already imports lazily for the fold, and reaching into it would couple two
+    modules' internals for a `zip`. The shape, not the function, is what both
+    need.
+    """
+    cur.execute(sql, params)
+    columns = [d[0] for d in (cur.description or ())]
+    return [dict(zip(columns, row, strict=False)) for row in cur.fetchall()]
+
+
+def _folded_terminal_keys(conn: Any, cur: Any, scope: _Scope, entity_type: str,
+                          excluded_statuses: tuple | None,
+                          ) -> tuple[list[str], int]:
+    """The keys this label's RECORD fold calls TERMINAL, and how much it has.
+
+    ⛔ THE CAGE FOR A LABEL WHOSE STATUS IS NOT A COLUMN (`#13422`). `object` and
+    `subject` cannot answer :func:`_status_predicates` — the record refuses
+    `status` as a column (§2.6, `chk_object_props_no_derived`) and the SQL view
+    that folds it knows only `live`/`superseded` (`#13335`). Returning an empty
+    predicate for them and calling the cage applied is the `#689` regression the
+    whole gate exists to prevent, so the leg applies it from the fold instead.
+
+    WHY THIS IS NOT A SECOND DECLARATION OF THE FOLD. Nothing here restates the
+    rule. The rows become `RecordNode`s through `cache_projection.node_from_row`
+    — the SAME row→property map both record doors read, which is also where
+    `DERIVED_FROM_RECORD`'s carrier fold (`superseded_by`/`superseded_at` →
+    `superseded`) is applied — and `cache_projection.apply_event_stream_folds`
+    replays the record's journal over them through `status_folds`' vocabulary and
+    the live fold's own per-event guard. So the four terminal words come from the
+    ONE home, the sequencing comes from the record's `seq`, and a change to the
+    fold reaches this leg without an edit here.
+
+    WHICH WORDS ARE "TERMINAL" is still `search_engine._status_vocab_for`, the
+    ONE family→vocabulary dispatcher, and ``excluded_statuses`` is the caller's
+    opt-in exactly as it is on the graph branches (``()`` = terminal rows IN,
+    which yields an EMPTY key list because the answer is "exclude nothing").
+    ⚠️ The comparison is EXACT and case-sensitive ON PURPOSE: the graph clauses
+    are ``coalesce(n.status, '') NOT IN ('archived', …)``, which a stored
+    `'Archived'` survives, so a case-folding comparison here would hide a name the
+    graph leg still returns — the "hide-a-live-name" direction `#9974` review
+    round 7 refused.
+
+    ⚠️ THE KEY THIS RETURNS IS THE LEG'S OWN `id` COLUMN — ``LABEL_SERVED``\'s
+    second slot — not the record's ``node_key``. For `object`/`subject` the
+    contract key `node_from_row` folds by is `id` (`cache_projection.KEY_PROPERTY`),
+    the same column the kNN SELECTs and the same value the caller joins back to the
+    graph with, so a list built from `node_key` (= `name`) would name the wrong
+    side of the row and exclude NOTHING while looking correct. Pinned by
+    `tests/test_13422_object_subject_dense_leg.py::test_the_folded_keys_are_the_columns_the_leg_returns`.
+
+    ⚠️ A row whose `id` is NULL or empty is SKIPPED here rather than raising: the
+    kNN's own post-filter already drops such a row (`a NULL key is not addressable
+    by the caller`), so it can neither be served nor excluded, and letting
+    `node_from_row` raise on it would turn one legacy row into a `RecordVectorError`
+    for the whole label — a graph fallback caused by a row the leg was never going
+    to return.
+
+    Returns ``(keys, available)`` where ``available`` is how many non-terminal
+    rows of this label carry a usable vector. That is the number the shortfall
+    assertion needs, and it is EXACT rather than a second `count(*)` over the same
+    predicate — which is why these two labels spend their three statement shares
+    on (rows, events, kNN) and need no fourth.
+    """
+    from .cache_projection import (
+        apply_event_stream_folds,
+        node_from_row,
+        read_lifecycle_events,
+    )
+    from .search_engine import _status_vocab_for
+
+    label = entity_type.capitalize()
+    table, id_column = LABEL_SERVED[entity_type][0], LABEL_SERVED[entity_type][1]
+    # `embedding_vec` is a pgvector `vector`, which psycopg2 hands back as an
+    # unregistered (string) type. The question here is only NULL-ness, so it is
+    # asked in SQL and never parsed in Python — a caster this module does not own
+    # is not worth depending on for a boolean.
+    rows = _rows_as_dicts(
+        cur,
+        f"SELECT *, (t.embedding_vec IS NOT NULL) AS has_embedding_vec "
+        f"FROM public.{table} AS t "
+        f"WHERE t.org_id = %s AND t.graph_id = %s "
+        f"  AND t.{id_column} IS NOT NULL AND t.{id_column} <> ''",
+        (scope.org_id, scope.graph_id),
+    )
+    nodes = [node_from_row(label, row) for row in rows]
+    has_vector = {row.get(id_column): bool(row.get("has_embedding_vec"))
+                  for row in rows}
+    events = read_lifecycle_events(conn, org_id=scope.org_id,
+                                   graph_id=scope.graph_id)
+    folded = apply_event_stream_folds(nodes, events)
+    vocabulary, _include_outdated = _status_vocab_for(label)
+    excluded = frozenset(excluded_statuses or vocabulary)
+
+    keys: list[str] = []
+    available = 0
+    for node in folded:
+        status = node.props.get("status")
+        if isinstance(status, str) and status in excluded:
+            keys.append(node.key)
+            continue
+        if has_vector.get(node.key):
+            available += 1
+    return keys, available
 
 
 def _recency_sql(columns: tuple[str | None, str | None], alias: str = "t") -> str:
@@ -595,11 +776,11 @@ def vector_search(
 
     THREE outcomes, and the third is the one that is easy to get wrong:
 
-    * ``None`` — this ``entity_type`` is NOT served from the record at all
-      (``object``/``subject``: the record holds their vectors since #13220 but
-      cannot apply the `#689` terminal-status cage — see :data:`LABEL_SERVED`).
-      The caller MUST take its graph branch; this is not an empty answer and
-      must never be rendered as one.
+    * ``None`` — this ``entity_type`` is NOT served from the record *on this
+      read*: either it is not in :data:`LABEL_SERVED` at all, or its folded
+      terminal-key set exceeded :data:`_FOLDED_TERMINAL_KEY_BUDGET`. The caller
+      MUST take its graph branch; this is not an empty answer and must never be
+      rendered as one.
     * ``[]`` — served, asked, and the filter genuinely selects nothing.
     * rows — the answer.
 
@@ -618,24 +799,37 @@ def vector_search(
     the bound a slow record read ran to 15 s while the read's own cap was 500 ms,
     and the leg was then recorded as ``timeout`` with its rows discarded.
 
-    ⛔ TWO STATEMENTS, NAMED RATHER THAN IMPLIED. ``statement_timeout`` bounds
-    each statement, and the SHORT path below issues a SECOND one (the shortfall
-    ``count(*)``). That is why the read's budget is split into
-    :data:`RECORD_LEG_STATEMENTS_PER_READ` shares instead of being applied whole:
-    at most two statements spend at most two thirds of the read, and the last
-    third is what the graph branch answers from after a cancellation — bounded
-    there by ``search_engine.remaining_read_ms``, so the reserve is spent by the
-    graph branch rather than merely left unclaimed (#11691 review P2). Reducing
-    the leg to a single statement is not available — the shortfall assertion is
-    what stops a truncated kNN answer being rendered as a small corpus (§6.1) — so
-    the second statement is bounded by arithmetic rather than removed.
+    ⛔ THREE STATEMENTS AT MOST, NAMED RATHER THAN IMPLIED — and WHICH THREE
+    depends on the label. ``statement_timeout`` bounds each statement, so the
+    read's budget is split into :data:`RECORD_LEG_STATEMENTS_PER_READ` shares
+    instead of being applied whole; the last third is what the graph branch
+    answers from after a cancellation — bounded there by
+    ``search_engine.remaining_read_ms``, so the reserve is spent by the graph
+    branch rather than merely left unclaimed (#11691 review P2).
+
+    * a **column-filtered** label (`point`, `operator`, `source`, `document`,
+      `event`) issues the kNN read and — on the SHORT path only — the shortfall
+      ``count(*)``: two of the three shares;
+    * a **folded-status** label (`object`, `subject`, `#13422`) issues the fold's
+      prefetch (its rows, then the tenant's status-bearing journal events) and
+      then the kNN read: three of three. It spends NOTHING on a ``count(*)``
+      because the prefetch already returns the exact `available` figure, which is
+      why the cage does not push it to four.
+
+    ⚠️ That third share is not slack — a folded label has none left. A record
+    read that overruns its share is CANCELLED and falls through to the graph
+    branch as the named ``scan_fallback``, which is correct-but-slower rather
+    than wrong; the cost is real and it is named here so a lane reading a
+    `scan_fallback` trace for these two labels knows which prefetch to look at
+    before concluding the record is broken. Reducing the leg to fewer statements
+    is not available — the shortfall assertion is what stops a truncated kNN
+    answer being rendered as a small corpus (§6.1) — so it is bounded by
+    arithmetic rather than removed.
     """
     mapping = LABEL_SERVED.get(entity_type)
     if mapping is None:
-        # object / subject — see LABEL_SERVED (#13220: the record HOLDS their
-        # vectors now, but cannot apply the `#689` terminal-status cage, so the
-        # label stays on its graph branch). NOT an empty result: the caller's
-        # graph branch is this label's real path and always was.
+        # A label no record table serves. NOT an empty result: the caller's graph
+        # branch is this label's real path and always was.
         return None
     table, id_column, kind_filter, recency_columns = mapping
     if limit <= 0:
@@ -647,22 +841,7 @@ def vector_search(
     from .record_projection import scope_connection
     from .record_serve import open_record
 
-    where = ["t.embedding_vec IS NOT NULL"]
-    if kind_filter:
-        where.append(kind_filter)
-    where.extend(_status_predicates(entity_type, excluded_statuses))
-    predicate = " AND ".join(where)
-    sql = (
-        f"SELECT t.{id_column}, "
-        f"(t.embedding_vec <=> %s::vector) AS distance, "
-        f"{_recency_sql(recency_columns)} AS recency "
-        f"FROM public.{table} AS t "
-        f"WHERE t.org_id = %s AND t.graph_id = %s AND {predicate} "
-        f"ORDER BY t.embedding_vec <=> %s::vector "
-        f"LIMIT %s"
-    )
     literal = "[" + ",".join(repr(v) for v in vec) + "]"
-    params = (literal, scope.org_id, scope.graph_id, literal, int(limit))
 
     try:
         # ⚠️ TWO CALL SHAPES ON PURPOSE: with no budget the door is asked exactly
@@ -682,6 +861,53 @@ def vector_search(
     try:
         cur = scope_connection(conn, scope.org_id)
         try:
+            # ── THE PREDICATE, built HERE because one arm needs the record ──
+            # A label whose status is a COLUMN filters in SQL. A label whose
+            # status is FOLDED (object/subject) cannot: the value is a
+            # projection-owned cache the schema refuses as a column, so the leg
+            # asks the record's own fold which of this tenant's keys are terminal
+            # and excludes them by key. Building the statement after that
+            # decision — rather than before it — is what keeps the two arms from
+            # drifting into one statement that silently applies neither.
+            where = ["t.embedding_vec IS NOT NULL"]
+            key_params: list[Any] = []
+            available: int | None = None
+            if kind_filter:
+                where.append(kind_filter)
+            status_source = _STATUS_COLUMN.get(entity_type)
+            if status_source is not None and status_source[0] == _FOLDED_STATUS:
+                terminal_keys, available = _folded_terminal_keys(
+                    conn, cur, scope, entity_type, excluded_statuses)
+                if len(terminal_keys) > _FOLDED_TERMINAL_KEY_BUDGET:
+                    # See _FOLDED_TERMINAL_KEY_BUDGET: declining the record's turn
+                    # is the fail-SAFE direction — the caller's graph branch
+                    # applies the identical cage in Cypher.
+                    logging.getLogger(LOG_NAME).warning(
+                        "the record's fold calls %d `%s` keys terminal — over "
+                        "the %d-key bind budget, so this read stays on the "
+                        "graph branch (a bound, not a degradation)",
+                        len(terminal_keys), entity_type,
+                        _FOLDED_TERMINAL_KEY_BUDGET)
+                    return None
+                if terminal_keys:
+                    # The LEG's key column, not the record's `node_key` — see
+                    # `_folded_terminal_keys`'s note on why the two differ.
+                    where.append(f"t.{id_column} <> ALL(%s)")
+                    key_params.append(terminal_keys)
+            else:
+                where.extend(_status_predicates(entity_type, excluded_statuses))
+            predicate = " AND ".join(where)
+            sql = (
+                f"SELECT t.{id_column}, "
+                f"(t.embedding_vec <=> %s::vector) AS distance, "
+                f"{_recency_sql(recency_columns)} AS recency "
+                f"FROM public.{table} AS t "
+                f"WHERE t.org_id = %s AND t.graph_id = %s AND {predicate} "
+                f"ORDER BY t.embedding_vec <=> %s::vector "
+                f"LIMIT %s"
+            )
+            params = (literal, scope.org_id, scope.graph_id, *key_params,
+                      literal, int(limit))
             # ⛔ TRANSACTION-LOCAL and set BEFORE the read: the default returns a
             # SHORT answer on a selective filter (0 rows where 152 exist —
             # measured, see HNSW_ITERATIVE_SCAN), and a short answer is
@@ -694,18 +920,25 @@ def vector_search(
             # A short answer is only ONE of two things: a corpus smaller than
             # the limit (honest, and the common case for a small tenant) or a
             # scan that stopped (a lie). Nothing in the row shape can tell them
-            # apart, so on the SHORT path only we ask the filter how much
-            # material it selects: one bounded aggregate, paid once per short
-            # dense read and never on a full one. It is not free and it is not
-            # silent — a caller that wants it off must say so by arming nothing.
+            # apart, so on the SHORT path only we learn how much material the
+            # filter selects. It is not free and it is not silent — a caller that
+            # wants it off must say so by arming nothing.
+            #
+            # ⛔ TWO WAYS TO LEARN IT, and the folded arm takes the free one: a
+            # column-filtered label pays one bounded aggregate, while a folded
+            # label already holds the exact number from its prefetch (`available`)
+            # and must NOT spend a fourth statement re-asking it. Using the
+            # `count(*)` there instead would blow the read's statement share and
+            # turn an answerable read into a cancellation.
             if len(rows) < int(limit):
-                cur.execute(
-                    f"SELECT count(*) FROM public.{table} AS t "
-                    f"WHERE t.org_id = %s AND t.graph_id = %s AND {predicate}",
-                    (scope.org_id, scope.graph_id),
-                )
-                counted = cur.fetchone()
-                available = int(counted[0]) if counted else 0
+                if available is None:
+                    cur.execute(
+                        f"SELECT count(*) FROM public.{table} AS t "
+                        f"WHERE t.org_id = %s AND t.graph_id = %s AND {predicate}",
+                        (scope.org_id, scope.graph_id, *key_params),
+                    )
+                    counted = cur.fetchone()
+                    available = int(counted[0]) if counted else 0
                 if available > len(rows):
                     raise VectorShortfall(
                         f"the record's dense leg returned {len(rows)} of the "

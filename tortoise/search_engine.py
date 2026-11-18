@@ -3978,10 +3978,17 @@ def run_vector_query(
     # graph (writes stay there; the INDEX is what moved).
     #
     # Three outcomes from the searcher, and each takes a different branch:
-    #   * None  -> this label is not served from the record (object/subject).
-    #             Fall THROUGH to the graph, silently: that is their real path
-    #             and always was (`#4997`: the graph holds exactly one vector
-    #             index, on `Point`).
+    #   * None  -> this label is NOT served from the record ON THIS READ, so the
+    #             graph is its real path: either no record table serves it at
+    #             all, or it serves it and declined its turn (`#13422`: a folded
+    #             `object`/`subject` whose terminal-key set is over the leg's bind
+    #             budget). Fall THROUGH to the graph. ⛔ Since `#13422` that is no
+    #             longer `object`/`subject` as a CLASS — both are in
+    #             `record_vector.LABEL_SERVED` and answer `pgvector` once the
+    #             dense leg is armed, with `#689`'s terminal cage applied from the
+    #             record's own fold. The graph still answers while
+    #             `record_vector.cutover_armed()` is OFF, which is the default, so
+    #             the graph leg is what ships today.
     #   * rows  -> record `pgvector` and return through the SAME ordering pass
     #             the graph branches use, so the ranking cannot drift between
     #             the two by construction (`#6214`/`#10121`).
