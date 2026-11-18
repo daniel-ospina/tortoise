@@ -35,8 +35,25 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 > **Changelog v3.36 (2026-11-17 — one four-word lifecycle vocabulary; `guideline` leaves `goalState`):**
 >
-> **Owner approval of the exact changes:** 2026-11-17, given in-session. The approval's artifact is the
-> text itself: the six hunks below are what was approved, applied verbatim.
+> **Owner approval of the exact changes:** the ruling these hunks apply is on record on **#11824**,
+> comment `6925010125`: *"archive and deprecate are synonyms, for write we should have either and then
+> the guard auto-fixes to a single one"*. The owner approved the **exact text** of the six hunks on
+> 2026-11-17, in-session, and the approval is relayed onto **#11824** as comment `6965147045`, so a
+> reader can resolve it instead of being told it lives in a pane. The design the hunks implement is
+> owner-approved and recorded: #12895 merged 2026-11-16, and #12954 carried its remaining rulings.
+>
+> **v3.36 lands this sentence in §4.3, and this is the sentence the file carries:**
+>
+> > **Core Object types accept `draft`, `live`, `deprecated`, `superseded` (#11824); an Object created
+> > without a status stores none and reads as `live` (#9974 R1 — never a fabricated `live` write).
+> > `superseded` means replaced: it names the successor; `deprecated` is ended with nothing replacing it
+> > and needs no successor — `archived` is accepted as its synonym on write and stored as `deprecated`.
+> > A journal rebuild is unchanged and still restores a supersession recorded without a successor.
+> > `in_progress` and `completed` are **positions, not lifecycle words** — they become stages of the
+> > kind's declared pipeline (`pipelineStageId`, #2792), and the built-in connector folds that write
+> > them target those stages. `outdated` and `retracted` are not Object lifecycle words and are not
+> > retained. Pack-declared kinds validate against their own declared words, which become their pipeline
+> > stages rather than a wider status list (#11824).**
 >
 > Source: the approved target model, `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`, and the
 > decisions recorded on **#11824**.
@@ -65,8 +82,9 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >
 > **Two residues this edit leaves, named so the owner sees them rather than inheriting them silently:**
 > §5's *Point Status Vocabulary* table and a §9 comparison row still present the retired six words as the
-> model vocabulary. They fall outside the six approved hunks, and no unapproved edit is permitted in
-> that file — the exact corrective text is proposed on #11824 and applies only on approval.
+> model vocabulary. They fall outside the six approved hunks, and the CRITICAL RULE at
+> `docs/ONTOLOGY.md:41` forbids editing them without the owner's approval of that exact text — the
+> corrective text is proposed on #11824 and applies only once it is approved.
 >
 > **What did NOT change:** the §4 field tables other than those five rows; every `Impl` status; the
 > valid-time rules (§4.7); the pack-declaration mechanics; and every stored value. Nothing is migrated
@@ -443,7 +461,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
 > `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
-> (`ONTOLOGY.md:1174`) remains correct as written.
+> (`ONTOLOGY.md:1179`) remains correct as written.
 
 ---
 

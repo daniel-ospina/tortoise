@@ -1317,7 +1317,8 @@ def test_a_model_version_bump_with_no_changelog_block_fails() -> None:
 
 OBJECT_CLAUSE_START = "**Core Object types accept"
 OBJECT_CLAUSE_END = (
-    "Pack-declared kinds validate against their own declared words.**")
+    "Pack-declared kinds validate against their own declared words, which become "
+    "their pipeline stages rather than a wider status list (#11824).**")
 
 
 def _landed_object_lifecycle_clause(ontology: str) -> str:
@@ -1345,7 +1346,7 @@ def _newest_block_body(changelog: str) -> str:
     Measured at head ``7e6baffc5d``: this returns 11375 characters, equal to
     ``len(_block_bodies(changelog)[0])``; the after-the-header cut returned 11269
     and the two were not equal. No block currently writes a citation in its header
-    (measured: 0 of 40 headers carry one), so the wider extent changes no verdict
+    (measured: 0 of 41 headers carry one), so the wider extent changes no verdict
     today — it closes the blind spot rather than reacting to a live miscount.
     """
     first = _BLOCK_VERSION_RE.search(changelog)
@@ -1763,7 +1764,7 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     head ``7e6baffc5d``: 11269 characters against 11375 for
     ``_block_bodies(...)[0]``, and the two were not equal. Equality (header
     included) is the contract below; nothing else in the file would have caught a
-    revert, because 0 of 40 headers carry a citation at this head, so every
+    revert, because 0 of 41 headers carry a citation at this head, so every
     citation verdict is unchanged either way.
     """
     changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
@@ -1788,7 +1789,7 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     # become false while the extent pin stayed green.
     assert sum(1 for block in blocks
                if _CITATION_RE.search(block.split("\n", 1)[0])) == 0, (
-        "a block's HEADER line now carries a comment citation, so the `0 of 40 "
+        "a block's HEADER line now carries a comment citation, so the `0 of 41 "
         "headers cite` justification the wider extent rests on is FALSE — restate "
         "that claim. (The citing COUNTS are measured live by the citation pin, so a "
         "header citation on an already-citing block does not move them, and this "
@@ -1834,7 +1835,8 @@ def test_the_lifecycle_clause_extraction_ignores_the_rest_of_the_row() -> None:
         "the compared span's start moved — the SCOPE paragraph and this file's "
         "residual claim are written against this endpoint")
     assert OBJECT_CLAUSE_END == (
-        "Pack-declared kinds validate against their own declared words.**"), (
+        "Pack-declared kinds validate against their own declared words, which become "
+        "their pipeline stages rather than a wider status list (#11824).**"), (
         "the compared span's end moved — the SCOPE paragraph and this file's "
         "residual claim are written against this endpoint")
     clause_at = status_line.index(OBJECT_CLAUSE_START)
@@ -1903,7 +1905,8 @@ def test_the_4_3_status_lifecycle_clause_must_be_quoted_verbatim_by_some_changel
     is one span of one cell: ``_landed_object_lifecycle_clause`` extracts the §4.3
     ``status`` row from ``OBJECT_CLAUSE_START`` (*"**Core Object types accept"*)
     to ``OBJECT_CLAUSE_END`` (*"Pack-declared kinds validate against their own
-    declared words.**"*). It is NOT "§4.3 may not change": every other cell of
+    declared words, which become their pipeline stages rather than a wider status
+    list (#11824).**"*). It is NOT "§4.3 may not change": every other cell of
     that same row, and every other row of §4.3, is INVISIBLE to this comparison —
     a lane can rewrite the cell's opening sentence or the ``supersededBy`` row and
     this pin stays green, while ``docs/ONTOLOGY.md:41``'s CRITICAL RULE requires
@@ -1965,7 +1968,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     Finding 1 of #12089: the sibling pin's SCOPE paragraph offered *"3 of 39 blocks
     cite a comment id, and v3.33 — the block that landed `D2 — A` for this very
     question — cites none"* as the evidence for narrowing a gate's scope. Measured with
-    this module's own tools the count is **4 of 40**, and that block DOES cite — the permalink
+    this module's own tools the count is **5 of 41**, and that block DOES cite — the permalink
     ``#issuecomment-5619843002`` (``docs/ONTOLOGY-CHANGELOG.md:247``):
     the citing versions are listed below, one entry per block, and the sentences that
     quote them are checked by this pin. Both halves
@@ -2030,7 +2033,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # ⛔ WHITESPACE IS NORMALISED BEFORE MATCHING, in both the scan text and the
     # docstring: markdown line wrapping is not part of a fact, and a scan that
     # cannot see a re-wrapped sentence reds with a message denying the prose says
-    # what it does (measured: re-wrapping `**4 of 40**\n blocks cite a comment id`
+    # what it does (measured: re-wrapping `**5 of 41**\n blocks cite a comment id`
     # produced "must appear exactly ONCE … found 0", with no second copy anywhere).
     module_source = re.sub(
         r"\s+", " ", Path(__file__).read_text(encoding="utf-8"))
@@ -2547,7 +2550,7 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
     # ⛔ THE STATED PAIR IS RE-ASSERTED HERE (review finding, measured). The bold arm
     # in `_assert_no_stale_citation_claim` accepts BOTH true pairs — the citing count
     # and its complement — so if the pin's own `stated` assertion were deleted, a
-    # docstring claiming 36 of 40 blocks cite a comment id (4 do) would pass it.
+    # docstring claiming 36 of 41 blocks cite a comment id (5 do) would pass it.
     # Measured: deleting that assertion plus editing the sentence left 57 passed. The
     # sibling's pair is read from its docstring and compared against the block counts
     # the pin itself handed to the sweep arm.
@@ -2576,8 +2579,8 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
                 "refuses a stale pair)")
         # ⛔ AND THIS PIN'S OWN DOCSTRING, WHICH THE BOLD ARM CANNOT REFUSE EITHER
         # (review finding, measured). `allowed_bold` accepts the citing count AND its
-        # complement in ANY position, so changing this docstring's `count is **4 of
-        # 40**` to `**36 of 40**` — a false claim, since four blocks cite — left the
+        # complement in ANY position, so changing this docstring's `count is **5 of
+        # 41**` to `**36 of 41**` — a false claim, since four blocks cite — left the
         # whole suite at 57 passed. The sentence makes a CITING claim (`the count is
         # <N of M>`), so the citing pair is what it must state.
         # ⛔ AND THE TWO ADJACENT CLAIMS ON THE SAME SENTENCE (review finding,
@@ -2909,8 +2912,8 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
     the next release that touches §4.5 (verified with a synthetic `v3.35`), and
-    the file's practice does not support the demand: **4 of 40** blocks cite a
-    comment id, so **36 of 40** cite none; citing versions: v3.34, v3.33, v3.33, v3.32
+    the file's practice does not support the demand: **5 of 41** blocks cite a
+    comment id, so **36 of 41** cite none; citing versions: v3.36, v3.34, v3.33, v3.33, v3.32
     — one entry per block, the first of the two v3.33 entries being the block
     that landed `D2 — A`. An unconditional demand reds a legitimate release that
     changes something else. (Measured with this module's own ``_block_bodies`` and
