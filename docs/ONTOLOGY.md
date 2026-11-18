@@ -1166,13 +1166,13 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 
 | Status | Kind | Transitions to | Notes |
 |--------|------|----------------|-------|
-| `draft` | initial (opt-in, #1088) | `live` | Inert for EP computation; promoted by `promote_point` / `update_point(status='live')`, and — for its OWN minted ids — by the capture ingest pass. An AUTHOR-explicit draft on a folded/pre-existing point is never retro-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
+| `draft` | initial (opt-in, #1088) | `live`, `deprecated`, `superseded` | Inert for EP computation; promoted by `promote_point` / `update_point(status='live')`, and — for its OWN minted ids — by the capture ingest pass. An AUTHOR-explicit draft on a folded/pre-existing point is never retro-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for. A draft can also END before it ever went live — `retract_point`/`supersede_point` accept a draft — so both terminal words are legal from `draft` (`_ALLOWED_TRANSITIONS` in `tortoise/sdk.py`) |
 | `live` | active | `deprecated`, `superseded` | Full EP participation |
 | `deprecated` | terminal | *(none)* | **Ended, and nothing replaced it.** `archived` is accepted on write as a synonym and stored as this word (#11824) |
 | `superseded` | terminal | *(none)* | **Ended because something replaced it** — the successor is named. Structural replacement via the CORRECTS edge + **restatement-scoped edge disposition** (semantic edges are triaged per edge, not bulk-transferred); `supersede_point` also sets the legacy `outdated` flag |
 
 > **`retracted`, `outdated` and `archived` are read-side legacy**, not statuses: **in this model** no verb produces them, while every reader still treats them as ended over stored rows (#12855). ⚠️ The code is not yet aligned: `retract_point` **still writes `retracted` today** — a stated residual of #11824, not a description of the model. The `outdated` boolean likewise remains a second, flag-based dead marker (#2498) that readers — including EP's currency predicate — must continue to honour.
-
+>
 > **`challenged` is NOT a state** — it is a DERIVED condition emerging from the presence of a NAND operator edge on a live point, queryable as such:
 >
 > ```cypher

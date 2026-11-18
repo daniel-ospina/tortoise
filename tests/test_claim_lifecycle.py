@@ -315,6 +315,46 @@ def test_ontology_status_table_matches_the_code_vocabulary():
         f"table: {sorted(POINT_STATUS_VALUES - declared)}")
 
 
+def test_ontology_transitions_column_matches_the_guard_map():
+    """§5's `Transitions to` cells state the transitions the guards actually allow.
+
+    The sibling test above pins the status WORDS; this one pins the EDGES between
+    them, which is the other half of the same table and went stale the same way.
+    The shipped v3.37 table stated `draft` → `live` alone while
+    `_ALLOWED_TRANSITIONS` allows a draft point to END before it ever went live
+    (`tortoise/sdk.py`: `"draft": frozenset({"live", "deprecated",
+    "superseded"})`, with the guard-side comment saying so) — and this very file
+    asserts `"deprecated" in _ALLOWED_TRANSITIONS["draft"]` twenty lines up, so the
+    model and its own guard contradicted each other.
+
+    NON-VACUOUS on that table: `draft` parses to `{live}` against the code's
+    `{live, deprecated, superseded}`, failing on the two missing edges.
+    """
+    from tortoise.sdk import _ALLOWED_TRANSITIONS  # noqa: I001
+
+    section = _ontology_status_section()
+    rows = [ln for ln in section.splitlines() if ln.startswith("|")]
+    assert len(rows) >= 3, f"§5's table parsed to {len(rows)} line(s); got {rows!r}"
+    seen: set[str] = set()
+    for row in rows[1:]:
+        cells = [c.strip() for c in row.split("|")[1:-1]]
+        if len(cells) < 3 or set(cells[0]) <= set("-: "):
+            continue
+        status_match = re.fullmatch(r"`([a-z_]+)`", cells[0])
+        assert status_match is not None, (
+            f"§5's Transitions pin cannot read this Status cell: {cells[0]!r}")
+        status = status_match.group(1)
+        stated = frozenset(re.findall(r"`([a-z_]+)`", cells[2]))
+        seen.add(status)
+        assert stated == _ALLOWED_TRANSITIONS[status], (
+            f"§5's `{status}` row states transitions {sorted(stated)} but the guards "
+            f"allow {sorted(_ALLOWED_TRANSITIONS[status])} (#11824). The table is "
+            "canonical; either the row is stale or the guard moved without the doc")
+    assert seen == POINT_STATUS_VALUES, (
+        f"this pin read the transitions of {sorted(seen)}, not the four model words "
+        f"{sorted(POINT_STATUS_VALUES)} — a table row it cannot reach is unpinned")
+
+
 def test_ontology_discloses_the_legacy_words_it_no_longer_lists():
     """The three retired words stay NAMED in §5 as read-side legacy.
 

@@ -35,8 +35,12 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 > **Changelog v3.37 (2026-11-17 — §5's vocabulary table states the model, not the code; the last six-word restatements go):**
 >
-> **Owner approval of the exact changes:** 2026-11-17, given in-session (*"good > easy"* — the structurally
-> correct fix, not the smallest diff). The artifact is the text itself.
+> **Owner approval of the exact changes:** the owner approved the exact text on **2026-11-17, in-session**
+> (*"good > easy"* — the structurally correct fix, not the smallest diff), and the approval is relayed onto
+> **#11824** as comment `6970713492`, so a reader can resolve it instead of being told it is the text itself —
+> the form the owner rejected for v3.36 (comment `6965147045`). The ruling these hunks apply is that issue's
+> comment `6925010125`. The relay also names the three corrections recorded below, so the approval's scope
+> is legible against the text actually shipped.
 >
 > **Why a second entry.** v3.36 fixed the §4 field tables but left two older restatements of the retired
 > six-word vocabulary, deliberately: they fell outside the approved hunks. The owner has now approved
@@ -52,15 +56,32 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >   (no longer `retracted`), a `deprecated` row is added (*ended, nothing replaced it*; `archived` is its
 >   write-side synonym), and `superseded` keeps its successor obligation and its edge-disposition note.
 > - A note beneath the table states that **`retracted`, `outdated` and `archived` are read-side legacy** —
->   no verb produces them, every reader treats them as ended over stored rows (#12855), and the `outdated`
->   boolean remains a second, flag-based dead marker (#2498) that readers **including EP's currency
->   predicate** must go on honouring.
+>   **in this model** no verb produces them (the code is not yet aligned, and that divergence is named in the
+>   same note: `retract_point` still writes `retracted`), every reader treats them as ended over stored rows
+>   (#12855), and the `outdated` boolean remains a second, flag-based dead marker (#2498) that readers
+>   **including EP's currency predicate** must go on honouring.
 > - **One remaining §5 vocabulary restatement** — the problem-family note at `docs/ONTOLOGY.md:1042`
 >   ("the claim point is superseded/retracted") — now reads `superseded/deprecated`. A one-word correction
 >   inside the same section the table governs, not a new rule.
 > - **§10.5's decision row** (`docs/ONTOLOGY.md:1527`, the "potentially invalidated" comparison) no longer
 >   restates the six-word set; it names the four and marks the other three as read-side legacy. Its original
 >   point — belief is measured by posterior variance, not by a status word — is unchanged.
+>
+> - **§5's `draft` row, `Transitions to` cell** — now `live`, `deprecated`, `superseded`. It read `live`
+>   alone, which understated `_ALLOWED_TRANSITIONS` (`tortoise/sdk.py:4845`: a draft point can END before it
+>   ever went live) and contradicted this release's own guard test. One cell, in the table this entry rewrites.
+>
+> **Corrected in review, after the approval was given** (each stated so the approval's scope is legible; the
+> relay comment `6970713492` names all three):
+>
+> 1. §5's `draft` row, above — it understated the legal transitions by two edges.
+> 2. This entry's own paraphrase of the legacy note — it said *"no verb produces them"* WITHOUT the
+>    **in this model** qualifier, which asserted a false code fact and contradicted this entry's own
+>    *"`retract_point` still writes `retracted`"* twenty lines later. The doc note was already scoped; only
+>    its paraphrase here was not.
+> 3. The legacy note and the pre-existing *"`challenged` is NOT a state"* blockquote are now **one**
+>    blockquote (a line containing only `>` between them): two blockquotes separated by a blank line is
+>    markdownlint **MD028**, which the required `docs` leg charged as new debt on this diff.
 >
 > **What did NOT change:** every §4 field row (v3.36 already settled them), the `challenged is NOT a state`
 > note, the `Write path` facts themselves (unchanged; they are recorded in the code and in this file's own
