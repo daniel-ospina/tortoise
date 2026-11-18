@@ -2524,10 +2524,13 @@ about today rather than by the one that agrees.
 
 **⚠️ One attribution in the finding was corrected before landing, by re-deriving it.** The finding's ready-made patch
 attributed the ≈58 % pricing to **§12.1b** (`"§12.1b, which prices the two refused queryNodes round trips at ≈58 %…"`).
-`git show origin/main:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returns exactly **one** hit — §14.3
-V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of the unindexed read's
-store time was two REFUSED queryNodes round trips"* — and §12.1b (*"Where the vectors actually sit"*) carries the
-`16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which
+`git show origin/main:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returned exactly **one** hit **on the pre-PR
+base `f462ad3acbb4`** — §14.3 V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that
+≈58 % of the unindexed read's store time was two REFUSED queryNodes round trips"* — and §12.1b (*"Where the vectors
+actually sit"*) carries the `16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. ⚠️ **It returns TWO at this
+head, and the second is this entry's own §12.1c sentence**, which cites that same 58 %: the check was scoped to the base
+it was made on, and the sentence that quotes it is itself a hit — stated here rather than left to look like a command
+that still answers one. The landed sentence therefore attributes the 58 % to the 2026-11-17 re-read, which
 is where it is measured. The correction moves a citation, not a number.
 
 **⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
@@ -2539,16 +2542,18 @@ comment recording the correction.
 
 **⚠️ And every location above is cited by heading NAME, not by line number — a review finding, and the fix for its
 root.** Earlier revisions of this entry cited `:1241`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217` (plus
-§12.1b's `:1080–1168`). ⚠️ **Those cites did not fail the same way, and the difference is the point:**
-`:1241` — the entry's FIRST version — was **wrong on arrival**: §12.2 sat at `:1234` on the base that revision was
-written against (`6264dc670c`, the PR's stated base) and at `:1244` in its own tree, so `:1241` matched neither; `:1244` and
-`:1206–1211` were **correct when written and rotted** under this PR's own later insertions above them — the first
-arriving at §12.1d's *"the index earns very little today"* item, a LATENCY paragraph,
-in the entry whose whole purpose is to establish that §12.2 is not the latency section, and the second ending one line
-before the clause it named; while `:1169`, `:1250`, `:1213–1217` and `:1080–1168` were each **correct when written and
-still correct at this head**. So the failure is not "a later commit moved every number": line numbers in a document
-this size are **unreliable in BOTH directions** — wrong on arrival, and rotting on the next edit — and which one a given
-writer gets is not something the writer can see. ⛔ **And the citation guards were green through all of it**, because
+§12.1b's `:1080–1168`). ⚠️ **Those cites failed in three different ways, and the cause is the same in all three:**
+`:1241` — the entry's FIRST version — was **computed against a base that had already moved**: §12.2 sat at `:1234` on
+`6264dc670c`, and this PR's own insertions above it move it to `:1241`, which is the arithmetic the cite came from —
+but the tree it landed in was built on a later base (`f462ad3acbb4`), where `#13435` had added three more lines above,
+so §12.2 was at `:1244` there and the cite was wrong from its first commit. `:1244` and `:1206–1211` were **correct in
+their own tree and then rotted** under this PR's own later insertions above them — the first arriving at §12.1d's *"the
+index earns very little today"* item, a LATENCY paragraph, in the entry whose whole purpose is to establish that §12.2
+is not the latency section, and the second ending one line before the clause it named; while `:1169`, `:1250`,
+`:1213–1217` and `:1080–1168` were each **correct when written and still correct at this head**. ⇒ **So the failure is
+not "some cites went stale" as a single event: it is that a line number is a function of every edit ABOVE it** —
+authored against a base that moved, correct-then-rotted, or luckily still correct are three outcomes of one cause, and
+which one a given writer gets is not something that writer can see. ⛔ **And the citation guards were green through all of it**, because
 they check line PRESENCE and say so (`tests/test_docs_citation_refs.py`: *"This is line PRESENCE, not semantic
 correctness"*), so a passing guard was never evidence here. The rule this repo already records is the fix —
 *"assertions by NAME — never by line number, and never by row ordinal. Both go stale the same way"*
