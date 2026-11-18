@@ -182,6 +182,60 @@ def _count_lines(path: Path) -> int:
         return sum(1 for _ in fh)
 
 
+# ── serialization: every artifact this tool writes is STRICT JSON ────────────
+def _json_safe(obj):
+    """Map every non-finite float to ``None`` so the dump is strict JSON.
+
+    ⛔ ``json.dumps`` defaults to ``allow_nan=True`` and writes the bare tokens
+    ``NaN`` / ``Infinity`` / ``-Infinity``, which RFC 8259 does not admit in its
+    number grammar. The consequence is not cosmetic and it is not local to one
+    cell: a STRICT parser rejects the WHOLE DOCUMENT (measured: node's
+    ``JSON.parse`` raises ``SyntaxError: Unexpected token 'N', … "rho": NaN,``),
+    so the evidence becomes readable only by Python's lenient decoder. And the
+    TOLERANT readers (``jq``, ``JSON.stringify``) map the token to ``null`` — the
+    same cell a field that was never recorded occupies, which is precisely the
+    distinction this artifact exists to keep (`_ids_digest(None)` is *unrecorded*
+    while ``_ids_digest([]) == sha256(b"")`` is *recorded empty*, and
+    ``identity_measured: false`` + ``identity_note`` exist so a null count cannot
+    read as a measured one).
+
+    ⛔ No information is lost, because the value a ``NaN`` stands for already has
+    its prose carrier: `analyze` writes ``mde_note`` = "NOT ESTIMABLE: no
+    discordant pair was observed …" beside an undefined MDE, and the correlation
+    block's ``rho`` is undefined for the same documented reason. So the cell
+    encodes "not estimable" as ``null`` and the note beside it says which of the
+    two nulls it is.
+
+    Convention taken from this repo's sibling artifact writer,
+    `tools/longmem_eval/report.py::_json_safe` (``#1747`` rounds 11-15, pinned by
+    `tests/test_eval_report_integrity.py` with ``allow_nan=False``), rather than
+    invented here.
+    """
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+def _write_json(path: Path, obj) -> None:
+    """Write ``obj`` as strict, sorted, indented JSON.
+
+    ``allow_nan=False`` is the second layer: if a non-finite float ever reaches
+    this call by a route `_json_safe` does not cover, the write RAISES instead of
+    emitting a document no strict parser can load. A silent ``NaN`` token is the
+    defect; an exception here is the guard.
+
+    The trailing newline is part of the convention the committed evidence already
+    carries, so re-serializing an existing artifact changes the non-finite cells and
+    nothing else.
+    """
+    path.write_text(json.dumps(_json_safe(obj), indent=2, sort_keys=True,
+                               allow_nan=False) + "\n")
+
+
 def snapshot_digest(manifest: dict) -> str:
     """The aggregate digest: sha256 over ``name:sha256:bytes``, sorted by name.
 
@@ -225,7 +279,7 @@ def freeze_snapshot(src: Path, dst: Path) -> dict:
     for f in files:
         shutil.copy2(f, dst / f.name)
     manifest = _build_manifest(dst, source=str(src))
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    _write_json(manifest_path, manifest)
     return manifest
 
 
@@ -431,7 +485,7 @@ def load_or_make_population(path: Path, *, harvested, snapshot_digest_: str,
     body = population_body(rows, snapshot_digest_=snapshot_digest_,
                            population=population, sample=sample, seed=seed)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(body, indent=2, sort_keys=True))
+    _write_json(path, body)
     return rows, body
 
 
@@ -1136,7 +1190,7 @@ def run(args: argparse.Namespace) -> int:
     out = Path(os.path.expanduser(args.out)) if args.out else None
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(artifact, indent=2, sort_keys=True))
+        _write_json(out, artifact)
     _print_summary(artifact)
     # ⛔ Rebuilt from the artifact's own two parallel lists, so the exit rule reads
     # the CLASS of each refusal and `--allow-mixed-modes` can be scoped to the

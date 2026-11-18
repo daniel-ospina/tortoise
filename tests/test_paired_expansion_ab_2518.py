@@ -1103,9 +1103,26 @@ def test_the_docs_index_row_repeats_only_what_the_evidence_carries():
 
 
 def _same_cell(recorded, recomputed) -> bool:
-    """NaN-aware equality — the control publishes `NaN` MDEs as a called shot."""
+    """NaN-aware equality across the artifact's STRICT-JSON encoding.
+
+    The RECORDED side carries `null` for a value that is not estimable, because the
+    artifact has to be valid JSON (`#13267` review 12 F1): RFC 8259 has no `NaN` in
+    its number grammar, so a non-finite float is written as `null` and the `mde_note`
+    beside it says which null it is. The RECOMPUTED side still RETURNS NaN for that
+    cell — that is the value `analyze` computes — so this helper is the bridge
+    between the two encodings of one value.
+
+    ⛔ Deliberately NOT "None equals anything": a recorded `null` matches only a
+    recomputed NaN, so nulling out a cell that has a finite recomputation still
+    reds.
+    """
+    if recorded is None and isinstance(recomputed, float) \
+            and math.isnan(recomputed):
+        return True
     if isinstance(recorded, float) and isinstance(recomputed, float):
         if math.isnan(recorded) and math.isnan(recomputed):
+            # a lenient re-read (or an in-memory `analyze` dict) can still carry
+            # the NaN itself; the same rule has to reach it.
             return True
         return math.isclose(recorded, recomputed, rel_tol=0, abs_tol=1e-12)
     if isinstance(recorded, dict) and isinstance(recomputed, dict):
@@ -1116,6 +1133,20 @@ def _same_cell(recorded, recomputed) -> bool:
         return (recorded.keys() == recomputed.keys()
                 and all(_same_cell(recorded[k], recomputed[k]) for k in recorded))
     return recorded == recomputed
+
+
+def _estimable(value) -> bool:
+    """A recorded figure a reader can compare — not `null`, not NaN.
+
+    ⛔ Both spellings have to be excluded. The artifact encodes a value the tool
+    could not estimate as strict-JSON `null` (`#13267` review 12 F1), so
+    `value == value` is TRUE for it (`None == None`) and a filter built only on the
+    NaN test multiplied `None` by 100. A lenient re-read of an older file can still
+    hand back `float('nan')`, which `math.isfinite` rejects too.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
 
 
 def _recomputed_entry(block: dict, k: int) -> dict:
@@ -1197,6 +1228,117 @@ def test_every_published_result_cell_recomputes_from_the_artifacts_own_rows():
                         assert 0 <= seed[field] <= n, (
                             f"{name}/{arm}/{key}: {field}={seed[field]!r} is not "
                             f"a count of {n} items")
+
+
+# ── the artifacts' own ENCODING: strict JSON, and a null that says why it is ──
+_COMMITTED_JSON = ("paired-point-300.json", "paired-point-300-short-query.json",
+                   "paired-object-60-control.json",
+                   "corpus-snapshot-manifest.json")
+
+
+def _strict_round_trip(text: str) -> dict:
+    """Parse, then re-serialize with `allow_nan=False`; raise if a token survives.
+
+    ⛔ This is the pin the repo's `#1747` strict-JSON convention already has on its
+    sibling artifact writer (`tools/longmem_eval/report.py::_json_safe`, held by
+    `tests/test_eval_report_integrity.py`) and this suite did not. A bare `NaN`
+    token makes the document **not JSON**: RFC 8259 has no `NaN` in its number
+    grammar, so a strict parser rejects the WHOLE file rather than the one cell,
+    and a tolerant one reads the cell as `null` — the same value as a field that
+    was never recorded.
+    """
+    parsed = json.loads(text)
+    json.dumps(parsed, allow_nan=False)
+    return parsed
+
+
+def test_every_committed_artifact_is_strict_json():
+    """F1 — the evidence had four cells per `k` that no strict reader could load.
+
+    Measured before the fix (`#13267` review 12): 16 bare `NaN` tokens in the
+    control, 8 in each point artifact, and `node -e 'JSON.parse(...)'` on the
+    control raised `SyntaxError: Unexpected token 'N', … "rho": NaN,`. The
+    suite could not see it *by construction* — it reads through Python's lenient
+    decoder — so the invalid encoding was invisible to every assertion here.
+    """
+    seen = set()
+    for path in sorted(_DOCS.glob("*.json")):
+        seen.add(path.name)
+        try:
+            _strict_round_trip(path.read_text())
+        except ValueError as exc:  # pragma: no cover - only on a regression
+            raise AssertionError(
+                f"{path.name} is not strict JSON ({exc}) — a `NaN`/`Infinity` "
+                "token makes the artifact unloadable by every strict parser"
+            ) from exc
+    assert seen == set(_COMMITTED_JSON), (
+        f"the committed evidence is {sorted(_COMMITTED_JSON)}, found {sorted(seen)}")
+
+
+def test_the_writer_encodes_a_not_estimable_mde_as_strict_null(tmp_path):
+    """F1 — the value the artifact exists to publish honestly was the one token no
+    strict reader accepts.
+
+    A zero-discordance run is `mde_paired: nan` with `mde_note` "NOT ESTIMABLE…"
+    (measured on the control, where the two switch states are one code path).
+    `json.dumps` defaults to `allow_nan=True`, so the committed files carried the
+    bare token: strict parsers rejected the file outright and `jq` read the cell as
+    `null`, i.e. as an unrecorded field.
+
+    The non-vacuity is asserted rather than described: the PRE-fix call shape emits
+    the token, and re-serializing that text strictly is rejected.
+    """
+    row = P.analyze([0] * 60, [0] * 60, ks=P.KS, bootstrap=50, seed=7)
+    assert math.isnan(row["mde_paired"])          # the value IS undefined
+    assert "NOT ESTIMABLE" in row["mde_note"]     # … and says so in prose
+
+    legacy = json.dumps({"per_k": {"k=3": row}}, indent=2, sort_keys=True)
+    assert "NaN" in legacy, "the pre-fix writer must emit the token"
+    with pytest.raises(ValueError):
+        json.dumps(json.loads(legacy), allow_nan=False)
+
+    out = tmp_path / "artifact.json"
+    P._write_json(out, {"per_k": {"k=3": row}})
+    text = out.read_text()
+    assert "NaN" not in text and "Infinity" not in text
+    cell = _strict_round_trip(text)["per_k"]["k=3"]
+    assert cell["mde_paired"] is None             # "not estimable" …
+    assert "NOT ESTIMABLE" in cell["mde_note"]    # … named by its carrier
+    assert cell["correlation"] == {"rho": None, "se_reduction": None}
+
+
+def test_a_null_cell_is_distinguishable_from_an_unrecorded_one():
+    """F1's second half: the encoding must not collapse into "never recorded".
+
+    `_ids_digest(None)` is *unrecorded* while `_ids_digest([]) == sha256(b"")` is
+    *recorded empty*, and `identity_measured: false` + `identity_note` exist so a
+    null count cannot read as a measured one. The MDE needs the same separation,
+    and it has it: the cell is PRESENT and null, and the `mde_note` beside it names
+    the reason — so an absent key and a not-estimable value are different facts.
+    """
+    control = _artifact("paired-object-60-control.json")
+    cell = control["arms"]["object"]["per_k"]["k=15"]
+    assert cell["mde_paired"] is None
+    assert "no_such_field" not in cell
+    assert "NOT ESTIMABLE" in cell["mde_note"]
+    # a finite MDE keeps its number and needs no note
+    point = _artifact("paired-point-300.json")
+    finite = point["arms"]["point"]["per_k"]["k=15"]
+    assert isinstance(finite["mde_paired"], float) and finite["mde_paired"] > 0
+    assert finite["mde_note"] == ""
+
+
+def test_json_safe_maps_only_non_finite_floats_to_null():
+    """The mapping is lossless for everything else — a finite float is not touched."""
+    assert P._json_safe(float("nan")) is None
+    assert P._json_safe(float("inf")) is None
+    assert P._json_safe(float("-inf")) is None
+    assert P._json_safe(0.0625) == 0.0625
+    assert P._json_safe(3) == 3
+    assert P._json_safe(True) is True
+    assert P._json_safe({"a": [float("nan"), 1.5]}) == {"a": [None, 1.5]}
+    assert P._json_safe((float("inf"),)) == [None]
+    assert P._json_safe("NaN") == "NaN"   # a string is not a non-finite float
 
 
 # ── the brief's own tables, parsed as a reader sees them ────────────────────
@@ -2558,7 +2700,10 @@ def test_every_pp_and_every_scientific_p_the_brief_prints_is_a_recorded_one():
                     allowed_pp.add(round(bound * 100, 2))
                 for cell_key in ("mde_paired", "mde_independent"):
                     value = cell.get(cell_key)
-                    if value is not None and value == value:  # not NaN
+                    # ⛔ not estimable is strict-JSON `null` in the artifact (never
+                    # a `NaN` token, `#13267` review 12 F1), so it carries no figure
+                    # to allow — `mde_note` names it in prose instead.
+                    if _estimable(value):
                         allowed_pp.add(round(value * 100, 2))
     # ⛔ §0 is a QUOTATION of the owner's re-measurement comment on `#2518`
     # (6939661408) — 75.0/76.3 % @3 and 88.0/85.0 % @15 — so its two deltas are
@@ -2631,7 +2776,7 @@ def test_every_pp_and_every_scientific_p_the_brief_prints_is_a_recorded_one():
              for n in [_artifact(a)["population"]["sample"]]
              for blk in _artifact(a)["arms"].values()
              for c in blk["per_k"].values()
-             if c.get("mde_paired") == c.get("mde_paired")}
+             if _estimable(c.get("mde_paired"))}
     for shown_delta, shown_mde in re.findall(
             r"\(([+-]?\d+\.\d+) against (\d+\.\d+)\)", brief):
         assert (round(float(shown_delta.lstrip("+")), 2),

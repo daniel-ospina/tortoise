@@ -69,7 +69,7 @@ annotation on a legacy run, not something a re-run would emit: the tool now emit
 itself and records each item's ranked list on **both** sides (with a per-side digest in the artifact), so
 a re-run *measures* the identity (and reports `identity_measured: true`) instead of asserting it. Its
 minimum detectable
-effect is reported as **not estimable** (`nan`, with a `mde_note`) rather than `0` — an all-agree run
+effect is reported as **not estimable** (`null`, with a `mde_note`) rather than `0` — an all-agree run
 carries no information about the difference, and an MDE of 0 beside a null reads as "infinitely powered",
 which is the opposite of what it means.
 
@@ -431,10 +431,22 @@ digests, so its only protection is the range invariants plus the CHURN framing. 
 suite RE-DERIVES every declared one; the committed files declare none, and say so, rather than implying a
 protection they do not have.
 
+⛔ **These three files were RE-SERIALIZED once, mechanically, and it is not a seventh annotation group.**
+Their runs wrote `NaN` tokens into four cells per `k` (`mde_paired`, `mde_independent`, `correlation.rho`,
+`correlation.se_reduction`), and RFC 8259 does not admit `NaN` in its number grammar, so the committed
+evidence could not be loaded by any strict parser at all (node's `JSON.parse` rejected the whole file) and
+the tolerant ones mapped the token to `null` — the same cell an unrecorded field occupies (`#13267`
+review 12, P2). They were re-encoded with the tool's own writer (`_write_json` → `_json_safe`), which
+maps every non-finite float to `null`; **it changes no other byte, adds no field and loses no
+information** — the value a `NaN` stood for is carried by the `mde_note` that sits beside it
+("NOT ESTIMABLE: no discordant pair was observed …"). So the count above stays SIX annotation FIELD
+groups: this is a re-encoding of run output, not an annotation of it, and a reader can verify it by
+diffing the three files against the run that produced them.
+
 The tool records, in the artifact's own `provenance` block, the sha256 of its own bytes and whether those
 bytes were committed (`tool_sha256` / `tool_uncommitted`) — because `git_head` alone does **not** identify
 the producing code (`#13267` F4): these three artifacts record `9b537d875a` while carrying the `mde_note`
-key (the control's populated, beside a `nan` `mde_paired`; the two point artifacts' `""` with a finite
+key (the control's populated, beside a `null` `mde_paired`; the two point artifacts' `""` with a finite
 `mde_paired`), which only `5898385f2e`'s code emits (that fix was uncommitted when the run happened),
 and the earlier generation recorded `44a1b82` while carrying fields first committed in `9b537d8`.
 
