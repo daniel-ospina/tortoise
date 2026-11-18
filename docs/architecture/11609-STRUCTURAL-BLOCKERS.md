@@ -69,8 +69,9 @@ Probe (`FastMCP("p").add_tool` + `call_tool`, a fake arm returning a list and a 
 
 **Answer to (a).** The envelope adds exactly three wire facts: (i) `structuredContent`
 becomes `{"result": <value>}`, (ii) `result` is in `required`, and (iii) where a **wrapped**
-annotation declares one, `result` also carries a `type` (`array` for `list[dict]`, `object`
-for the `object`-annotated form). A UNION declares `anyOf` and no `type` regardless of its
+annotation declares one, `result` also carries a `type` — `array` for `list[dict]`, and
+NOTHING for the `object`-annotated form, whose `result` is `{}` (the `type: object` in that
+row is the schema's own top level, not `result`'s). A UNION declares `anyOf` and no `type` regardless of its
 members (`list[dict] | dict` and `dict | bool` alike), and `object` declares `{}` and no
 `type` — which is precisely why `_violates_wrap_envelope` is type-blind for both. A container
 **can** return a pageable shape
