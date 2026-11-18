@@ -236,16 +236,16 @@ def test_a_read_does_not_block_on_a_cold_embedder(sdk, cold_embedder):
 
 
 def test_the_cold_read_records_its_absent_reason(sdk, cold_embedder):
-    """The degrade must be DECLARED, not silent, and it must name the CAUSE.
+    """The degrade must be DECLARED, not silent, and it must name WHY.
 
     A read that answered without its dense leg is not hybrid retrieval. The leg
-    trace is where that is said, and the reason must name the CAUSE — a load the
-    read declined to wait for is ``load_in_flight`` (#13528 review P2-1), never
-    the designed-absence term ``no_embedder`` (the conflation #5275/#1542 exist
-    to forbid: "the extra was never installed" and "the embedder is loading
-    RIGHT NOW" need opposite operator responses) and never ``load_timeout``,
-    which ``absent_reason`` already publishes for a load that actually TIMED OUT
-    — a recorded failure with a different response again.
+    trace is where that is said, and the reason must name WHY the leg did not
+    run — a load the read declined to wait for is ``load_in_flight`` (#13528
+    review P2-1), never the designed-absence term ``no_embedder`` (the
+    conflation #5275/#1542 exist to forbid: "the extra was never installed" and
+    "the embedder is loading RIGHT NOW" need opposite operator responses) and
+    never ``load_timeout``, which ``absent_reason`` already publishes for a load
+    that actually TIMED OUT — a recorded failure with a different response again.
     """
     trace: list[dict] = []
     _read(sdk, trace=trace)
@@ -255,8 +255,8 @@ def test_the_cold_read_records_its_absent_reason(sdk, cold_embedder):
     assert entry["degraded"] is True, (
         "an absent vector leg is a degraded read, and must be published as one")
     assert entry["reason"] == "load_in_flight", (
-        f"the recorded reason must name the cause (a load the read declined to "
-        f"wait for, which has recorded no failure) and not the load-failure or "
+        f"the recorded reason must say WHY the leg did not run (a load the read "
+        f"declined to wait for) and not borrow the load-failure or "
         f"designed-absence terms, got {entry['reason']!r}")
 
 
@@ -442,12 +442,15 @@ def test_the_required_flag_still_fails_loud(sdk, cold_embedder, monkeypatch):
 
     ⛔ THE REFUSAL MUST NAME ITS CAUSE (#13528 review P1-2). Asserting only the
     exception class let a wrong attribution through: the trace word
-    ``no_embedder`` was handed to the refusal as its ``failure_kind``, which is
-    the designed-absence statement #5275 forbids an armed process from
-    receiving. This row now pins the KIND, so restoring that conflation reds
-    here. Nothing has FAILED in this scenario — the load is in flight — so the
-    honest cause is the contract's ``model_unavailable`` fallback, never
-    ``no_embedder`` and never a fabricated failure term.
+    ``load_timeout`` — a FAILURE term — was handed to the refusal as its
+    ``failure_kind`` for a load that had never failed. This row now pins the
+    KIND, so restoring that conflation reds here. Nothing has FAILED in this
+    scenario — the load is in flight — so the honest cause is the contract's
+    ``model_unavailable`` fallback, never a fabricated failure term.
+
+    (The designed-absence half of the same class — an ARMED missing-extra
+    process told ``no_embedder`` — is pinned by
+    :func:`test_the_required_flag_with_no_extra_reports_not_installed`.)
     """
     monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
     assert not EmbeddingModel.loaded(), "precondition: cold embedder"
@@ -474,9 +477,13 @@ def test_the_required_flag_with_no_extra_reports_not_installed(
     THE P1-1 DISCRIMINATOR (#13528 review). The bounded read resolves the cause
     as the leg-trace word ``no_embedder`` (the designed absence, correct on the
     trace), and the ONE exit must translate it into the ``failure_kind`` the
-    contract defines for that state. Passing the trace word through verbatim —
-    the defect this pins — makes this row red, while the trace assertion below
-    keeps the fix from "solving" it by changing the trace vocabulary instead.
+    contract defines for that state — ``not_installed``. On ``main`` the trace
+    word itself was published as the cause, so an ARMED process was told "there
+    is no embedder" (the designed-absence statement #5275 forbids) where
+    ``get()`` had always said ``not_installed``. Passing the trace word through
+    verbatim — the defect this pins — makes this row red, while the trace
+    assertion below keeps the fix from "solving" it by changing the trace
+    vocabulary instead.
     """
     monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
     monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
