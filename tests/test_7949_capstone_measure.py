@@ -16487,8 +16487,9 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     line = rows[0]
     opening = re.search(r"consumed `sdk\.py:(\d+)`/`:(\d+)`", line)
     # ⛔ ONE spelling was not enough (#13602 review, cycles 3, 4 and 5). The first cut
-    # matched only the bare `are `N`/`M` here` shape; cycle 4 added the `sdk.py:N`/`:M`
-    # form; cycle 5 measured that the SPACED form (backtick colon-N backtick, slash, colon-M)
+    # matched only the bare `are `N`/`M` here` shape; cycle 3 added the `sdk.py:N`/`:M`
+    # form; cycle 4 added `:N`/`:M` and `sdk.py:N`/`sdk.py:M`; cycle 5 measured that the
+    # SPACED form (backtick colon-N backtick, slash, colon-M)
     # followed by `here` was still GREEN,
     # and that form is live in the sibling D5 cell this PR is about - 6 occurrences in that
     # cell alone (8 across `05-verify.md`), e.g. `:21604` / `:21562`. So BOTH elements now take
