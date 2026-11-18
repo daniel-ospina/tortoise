@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1314** | **100** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,064** | **824** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,064 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,069** | **825** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,064 / 9,069 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -440,6 +440,13 @@ SCALAR moved (`--check` → **`25 pinned counts match`**): `tortoise/embeddings.
 `tortoise/monitoring.py` and `tortoise/record_writer.py` gained no statement site. Appendix A moved by
 **one** row — `monitoring.py`'s `_probe_once._run_query` `RETURN 1`, 4,670→**4,787** — so it is
 regenerated again here: the `file:line`-versus-SCALAR gap, from a fourth side.
+
+⚠️ **The one figure that DID move at that merge is the dated `--all-surface` reading, and that is
+exactly why it is not a pin:** §0 now reads **9,069 / 825** (measured with `--all-surface --json` at
+this head), where the `f462ad3acb` cut above recorded **9,064 / 824**. That population includes
+`tests/`, `docs/`, `graph-scripts/` and `eval/`, so it moves with any edit to those — and the
+`tortoise/**` SCALARS did not move at all, which is the distinction the row's own note draws. A
+reader checking §0 should re-run the tool rather than trust either integer.
 
 **Earlier cut — `origin/main` **`48585c94ff`** merged into this branch.** **No scalar moved at that
 merge, and that was a measurement rather than an assumption:** `--check` reported **`25 pinned counts
