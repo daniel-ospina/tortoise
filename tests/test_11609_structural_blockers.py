@@ -82,10 +82,16 @@ LIST_CONTAINERS = (
 
 #: The `rest_spec` doors, with the route the row NOMINALLY owns. NOT the route that serves:
 #: the served routes are hand-written and never read this row (see the pins below).
+#: ⛔ The METHOD is pinned here as a LITERAL, not read back off the row. Taking it from
+#: `entry.rest_spec.method` makes the pin measure whatever the row now says, so a row
+#: re-pointed from GET to POST reports green against the POST operation that happens to
+#: share the path (measured: `/v1/context` serves `session_context` GET at
+#: `hosted_api.py:37761` AND `volunteer_context` POST at `:37939`, so a mutated method made
+#: the handler pin read the WRONG handler while all 38 cases stayed green).
 REST_SPEC_DOORS = {
-    "tortoise_issue_insight": ("/v1/issue-insight"),
-    "tortoise_session_context": ("/v1/context"),
-    "tortoise_search": ("/v1/search"),
+    "tortoise_issue_insight": ("GET", "/v1/issue-insight"),
+    "tortoise_session_context": ("GET", "/v1/context"),
+    "tortoise_search": ("GET", "/v1/search"),
 }
 
 #: A hand-written route decorator: `@app.get("/v1/search")` / `@router.post("/context")`.
@@ -336,8 +342,8 @@ class _RecordingRouter:
         self.routes.append((path, tuple(methods or ()), name))
 
 
-@pytest.mark.parametrize("door,path", sorted(REST_SPEC_DOORS.items()))
-def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, path):
+@pytest.mark.parametrize("door,spec", sorted(REST_SPEC_DOORS.items()))
+def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     """Question (b), MEASURED — and the answer is the opposite of the registry's prose.
 
     Three separate measurements, because the doc's headline rests on all three:
@@ -361,12 +367,14 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, path):
     """
     from tortoise import hosted_api, selfhost_api
 
+    method, path = spec
     entry = _live().get(door)
     assert entry is not None, f"{door} is not advertised — re-derive this pin"
     assert entry.rest_spec is not None, (
         f"{door} lost its `rest_spec`, which is the only thing `PROTECTED` cites for it")
-    assert entry.rest_spec.path == path, (
-        f"{door}'s `rest_spec` moved to {entry.rest_spec.path}, not {path}")
+    assert (entry.rest_spec.method, entry.rest_spec.path) == (method, path), (
+        f"{door}'s `rest_spec` moved to {entry.rest_spec.method} {entry.rest_spec.path}, "
+        f"not {method} {path}")
 
     # (1) the adapter that would derive the route is wired into NO product module.
     # ⛔ Repo-wide, not the two apps: an instantiation in a third module (a startup hook,
@@ -544,8 +552,8 @@ def _sdk_attributes(node) -> set[str]:
             and n.value.id == "sdk"}
 
 
-@pytest.mark.parametrize("door,path", sorted(REST_SPEC_DOORS.items()))
-def test_the_serving_handler_reaches_the_sdk_not_the_mcp_door(door, path):
+@pytest.mark.parametrize("door,spec", sorted(REST_SPEC_DOORS.items()))
+def test_the_serving_handler_reaches_the_sdk_not_the_mcp_door(door, spec):
     """S3's premise, MEASURED — retiring the MCP door cannot break the live route.
 
     The two pins above prove the route EXISTS, that the deriving adapter is unwired, and what
@@ -565,7 +573,13 @@ def test_the_serving_handler_reaches_the_sdk_not_the_mcp_door(door, path):
     entry = _live().get(door)
     assert entry is not None and entry.rest_spec is not None, (
         f"{door} is not advertised with a `rest_spec` — re-derive this pin")
-    method = entry.rest_spec.method
+    # ⛔ From the LITERAL table, not off the row: a row re-pointed to another METHOD shares
+    # the path with a different operation (`/v1/context` is GET `session_context` and POST
+    # `volunteer_context`), so reading the method back would examine the wrong handler.
+    method, path = spec
+    assert (entry.rest_spec.method, entry.rest_spec.path) == (method, path), (
+        f"{door}'s row is {entry.rest_spec.method} {entry.rest_spec.path}, not "
+        f"{method} {path} — this pin would otherwise read a different route's handler")
 
     found = []
     for module in _serving_modules():
@@ -654,12 +668,19 @@ def test_register_all_would_derive_the_route_from_the_row():
     """
     entries = [e for e in TOOL_REGISTRY if e.name == "tortoise_issue_insight"]
     assert entries, "tortoise_issue_insight left TOOL_REGISTRY — re-derive this pin"
-    path = entries[0].rest_spec.path
+    # The LITERAL table, not the row: a row whose method changed would make this pin assert
+    # whatever the mutated row now says, and `/v1/context` shows the path is not unique per
+    # verb, so both the method and the path have to come from the literal.
+    method, path = REST_SPEC_DOORS["tortoise_issue_insight"]
+    assert (entries[0].rest_spec.method, entries[0].rest_spec.path) == (method, path), (
+        f"tortoise_issue_insight's row is {entries[0].rest_spec.method} "
+        f"{entries[0].rest_spec.path}, not {method} {path}")
 
     full = _RecordingRouter()
     all_handlers = {e.name: (lambda: None) for e in TOOL_REGISTRY if e.rest_spec is not None}
     FastAPIRouterAdapter(full).register_all(TOOL_REGISTRY, all_handlers)
-    assert any(p == path for p, _, _ in full.routes), full.routes
+    assert any(p == path and m == (method,) for p, m, _ in full.routes), (
+        f"no {method} {path} route was registered by the adapter — {full.routes}")
 
     # …and without THIS row, with a handler for every surviving route-bearing row, exactly
     # that one route disappears. (A short handler map would register nothing at all and so
@@ -667,7 +688,8 @@ def test_register_all_would_derive_the_route_from_the_row():
     survivors = [e for e in TOOL_REGISTRY if e.name != entries[0].name]
     without_row = _RecordingRouter()
     FastAPIRouterAdapter(without_row).register_all(survivors, all_handlers)
-    assert not any(p == path for p, _, _ in without_row.routes), without_row.routes
+    assert not any(p == path and m == (method,) for p, m, _ in without_row.routes), (
+        without_row.routes)
     assert len(without_row.routes) == len(full.routes) - 1, (
         "removing one row changed the route count by "
         f"{len(full.routes) - len(without_row.routes)}, not 1")
