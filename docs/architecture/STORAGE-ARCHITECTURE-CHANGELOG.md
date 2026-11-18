@@ -2520,7 +2520,12 @@ replaced by the target state:
   (`tortoise/record_serve.py::serve_mode`) and the three doors that serve a point through `record_serve.serve_point`
   (`hosted_api.get_point`, the MCP point read, the SDK's), and why `prefer` is the mode armed in production: it is the
   one that MEASURES the migration, since every answer names the store that produced it (`servedFrom` /
-  `fallbackReason`). **`record` follows that count, never a date.** The paragraph carries the **`OVERRIDES:`** line.
+  `fallbackReason`). **`record` follows that count, never a date.** The `OVERRIDES:` line itself lives on the issue —
+  `#7970` comment [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268), where
+  AGENTS.md's rule puts it — and §2.0 carries a one-line pointer to it rather than a second copy (`grep -n
+  "OVERRIDES:" docs/architecture/STORAGE-ARCHITECTURE.md` → the pointer only; the seven-line supersession essay and
+  its quotation of the retired sentence are gone, because a dated *"was deferred, now it isn't"* re-telling is the
+  narration the owner ruled out).
 - **§14.2's split marker** — the same status, stated there because that marker is where the engine's-role question is
   answered and it had restated the deferral.
 - **§17.3's reader paragraph** — *"the node-naming read that will drive this in production is deferred by §2.0"* was
@@ -2562,10 +2567,12 @@ edge question, owner ruling 2026-09-23; and `#9213`'s restore-reason lane), so a
 content — and the class check's arms are per-line, while the retired sentence wrapped. What pins this shape is
 therefore a separate subject-scoped arm, added by this change:
 `::test_the_storage_document_does_not_defer_the_anchored_read_cutover`, which ties `DEFERRED` to *this* cutover in
-both word orders and carries a non-vacuity fixture on the retired sentence. **It reds on the pre-fix text
-(`f392d513`) and is green here, so this shape is now guarded rather than merely absent.**
+both word orders and carries a non-vacuity fixture on the retired sentence. **It reds on the pre-fix text — measured
+at 2 hits on `origin/main` before this branch, and at 2 on this branch's own first commit `f392d513` — and is green
+here, so this shape is now guarded rather than merely absent.**
 `tests/test_extractor_v4_doc_citations.py` and
-`tests/test_extractor_v4_step_list_consistency.py` (37 together with the above), and the ten doc-cite files that read
+`tests/test_extractor_v4_step_list_consistency.py` (38 together with the above — 16 + 2 + 20, measured), and the ten
+doc-cite files that read
 this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pin.py`,
 `tests/test_10853_session_source_prose.py`, `tests/test_7948_about_object_read_sites.py`,
 `tests/test_10000_source_prose.py`, `tests/test_10122_point_name_not_indexed.py`,

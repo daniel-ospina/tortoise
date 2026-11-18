@@ -1408,9 +1408,18 @@ def test_the_storage_document_does_not_defer_the_anchored_read_cutover():
     2026-09-23) and `#9213`'s restore-reason lane — which is the whole content of
     the scoping and the reason a bare `DEFERRED` arm was refused.
 
-    A pointer to the rescission is fine and expected; a repeated status claim is
-    not, in either word order, which is the same order-symmetry the class check's
-    `_STATUS_ADJACENT` carries.
+    WHAT THE ARM DELIBERATELY DOES NOT DO: tell a status claim from prose that
+    DENIES the deferral (*"the cutover is NOT deferred"*) or from the argument
+    that the deferral protects nothing. Measured at `f392d513`, the second of
+    the two pre-fix hits was that argumentative shape, not a status claim. The
+    arm reds on any co-occurrence of the subject and `deferred` in one sentence,
+    on purpose: the owner ruled the *"was deferred, now it isn't"* narration out
+    of this document (2026-11-18), so the honest place for a sentence that puts
+    this cutover next to the word `deferred` is
+    `STORAGE-ARCHITECTURE-CHANGELOG.md`, and the failure message says so rather
+    than calling the author's sentence a status claim. No negation exemption is
+    offered: *"not deferred until the cache is complete"* is still a deferral,
+    and an exemption that cannot tell that apart from a denial is a hole.
     """
     text = STORAGE.read_text(encoding="utf-8")
     offenders = [
@@ -1418,9 +1427,13 @@ def test_the_storage_document_does_not_defer_the_anchored_read_cutover():
         for match in _DEFERRED_CUTOVER.finditer(text)
     ]
     assert not offenders, (
-        "§2.0 states the anchored-read cutover as the ARMED capability it is; a "
-        "DEFERRED status for it is the claim the owner rescinded on 2026-11-18, and "
-        "the record of the move belongs in STORAGE-ARCHITECTURE-CHANGELOG.md:\n  - "
+        "§2.0 states the anchored-read cutover as the ARMED capability it is. Two "
+        "shapes are ruled out here: a DEFERRED STATUS for this cutover (the claim "
+        "the owner rescinded on 2026-11-18), and the narration that re-tells the "
+        "move — *\"was deferred, now it isn't\"*, in either word order. This arm "
+        "cannot tell those two apart, so it reds on both: the record of the move "
+        "belongs in STORAGE-ARCHITECTURE-CHANGELOG.md, which is where a sentence "
+        "putting this cutover next to the word `deferred` should go:\n  - "
         + "\n  - ".join(offenders)
     )
 
