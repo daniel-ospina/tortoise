@@ -35,6 +35,9 @@ import inspect
 
 import pytest
 
+# The declared public-method set is ONE implementation (#4282): "did not grow" is
+# measured against it, never against a count typed here.
+from tools.sdk_surface import load_declaration, reflected_from_runtime
 from tortoise import mcp_server as ms
 from tortoise.sdk import TortoiseSDK
 from tortoise.tool_registry import (
@@ -332,11 +335,29 @@ class TestTheAbsorbedDoorStillAnswers:
         assert marker["use_instead"] == RETIRED_USE_INSTEAD[name]
         assert "check_confidence(" in marker["message"]
 
-    def test_the_retired_name_runs_its_handler(self):
-        """Substituted at the handler the shim is built over: the shim must CALL the
-        capability, not merely resolve to a description."""
-        tool = asyncio.run(ms.mcp.get_tool("tortoise_recall"))
-        assert callable(tool.fn), "the retired name resolved to a tool with no handler"
+    @pytest.mark.parametrize("name, method, payload", [
+        ("tortoise_compute_confidence", "compute_confidence", {"confidences": {}}),
+        ("tortoise_recall", "recall_state", [{"id": "p1"}]),
+    ])
+    def test_the_retired_name_runs_its_handler(self, name, method, payload, door):
+        """Substituted at the SDK method the handler dispatches to: the shim must CALL
+        the capability, not merely resolve to a description.
+
+        `callable(tool.fn)` is not this claim — a shim that returned `None`, or one
+        wired to a copy of the answer, is equally callable. The recorder goes where the
+        shim's handler ends up, so an empty call log means the shim never reached it.
+        """
+        calls = door(method, payload)
+        tool = asyncio.run(ms.mcp.get_tool(name))
+        assert callable(tool.fn), f"{name} resolved to a tool with no handler"
+
+        tool.fn()
+
+        why = ("the retired name resolved but never reached the handler" if not calls
+               else "the shim called the capability more than once")
+        assert len(calls) == 1, (
+            f"{name} dispatched to the capability it shim's {len(calls)} times: "
+            f"{calls} — {why}")
 
     @pytest.mark.parametrize("name", [
         "tortoise_compute_confidence", "tortoise_recall",
@@ -438,11 +459,46 @@ class TestTheSignaturesCarryBothArms:
             f"{layer}: check_confidence no longer accepts {missing}, so a caller of the "
             "retired tortoise_recall cannot migrate without losing them")
 
-    def test_the_sdk_surface_did_not_grow(self):
+    def test_the_sdk_surface_matches_its_declaration(self):
         """#11609's target is a FALLING surface: the arms are PARAMETERS on an existing
-        method, so no public SDK method may have been added to carry them."""
-        public = {n for n in dir(TortoiseSDK)
-                  if not n.startswith("_") and callable(getattr(TortoiseSDK, n, None))}
+        method, so no public SDK method may have been added to carry them.
+
+        "Did not grow" is a statement about the SET, so it is measured against the
+        declared surface (`config/sdk-surface.json`) and not by five membership checks —
+        those pass just as happily for a surface that gained
+        `check_confidence_recompute` alongside the routes it meant to keep.
+
+        This test is deliberately the DERIVED view's reconciliation, NOT the approval: the
+        declaration is regenerable, so an intended addition can be admitted by regenerating
+        it, and this test then passes by design. The authority on whether a method may
+        exist is the owner's approval (#4282 — the declared target in `tortoise/__all__.py`,
+        never a snapshot of what the code currently does), and what reds an UNAPPROVED
+        addition in required CI is the `high_water_counts` growth pin in
+        `config/surface-manifest.yml`, enforced independently by the BASE-REF-pinned
+        `tools/surface-guard.py` (its step 7) — raising that pin is a deliberate edit in the
+        approving PR, so a re-cut over a grown surface cannot be green by construction.
+        `tools/sdk_surface.py --check` is the third thing: it keeps this declaration and the
+        frozen `sdk:` rows from drifting apart. This test only keeps a surface change from
+        arriving unaccompanied by its declaration.
+        """
+        # The REACHABLE view is `reflected_from_runtime()`'s — the same one the frozen
+        # baseline was cut from. Re-implementing `dir()` + `callable` here would be a
+        # second opinion about what the public surface IS (#4282).
+        public = reflected_from_runtime()
+        declared, _ = load_declaration()
+
+        added = sorted(public - declared)
+        assert not added, (
+            f"the SDK surface gained {added} — #11609 carries both arms as PARAMETERS of "
+            "`check_confidence`, so a new public method for one is the growth this wave "
+            "exists to prevent. If the addition is intended it needs the owner's approval "
+            "(#4282): regenerate config/sdk-surface.json, add the `sdk:` row and raise "
+            "`high_water_counts.sdk_public_methods` in config/surface-manifest.yml — that "
+            "pin, enforced by the base-ref-pinned tools/surface-guard.py, is what reds an "
+            "unapproved addition")
+        removed = sorted(declared - public)
+        assert not removed, (
+            f"the SDK surface lost {removed} while the declaration still names it")
         for needed in ("compute_confidence", "recall_state", "recall_gaps",
                        "recall_subgraph", "check_confidence"):
             assert needed in public, (
