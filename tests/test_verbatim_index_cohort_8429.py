@@ -483,19 +483,30 @@ def _cohort_sdk():
 def _binding_parts(node):
     """(targets, value) for the node kinds that can bind a name; None otherwise.
 
-    `value` is None for a bare declaration (`x: str`), which binds nothing, and
-    for a `for` / `with … as` target, whose bound value this scan cannot see. The
-    pin treats those two differently, so the distinction is carried, not lost.
+    `value` is the bound VALUE where the syntax carries one. It is None for the
+    two kinds that bind without a visible value — a bare declaration (`x: str`,
+    which binds nothing) and a binding whose value is produced by a construct
+    (`for` / `with … as` / `except … as` / an import alias) — and the pin treats
+    those differently, so the distinction is carried rather than lost.
+    ⛔ `NamedExpr` returns its VALUE: a walrus binds exactly what the expression
+    evaluates to, so `(x := mint())` is a minted binding, not an unprovable one.
     """
     if isinstance(node, ast.Assign):
         return node.targets, node.value
-    if isinstance(node, ast.AnnAssign):
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
         return [node.target], node.value
-    if isinstance(node, (ast.NamedExpr, ast.For)):
+    if isinstance(node, ast.NamedExpr):
+        return [node.target], node.value
+    if isinstance(node, (ast.For, ast.AsyncFor)):
         return [node.target], None
     if isinstance(node, (ast.With, ast.AsyncWith)):
         return [i.optional_vars for i in node.items
                 if i.optional_vars is not None], None
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return [ast.Name(id=node.name, ctx=ast.Store())], None
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [ast.Name(id=a.asname, ctx=ast.Store())
+                for a in node.names if a.asname], None
     return None
 
 
@@ -530,8 +541,8 @@ def _probe_binding_errors(tree: ast.Module, name: str) -> list:
         if value is None:
             if isinstance(node, ast.AnnAssign):
                 continue          # bare declaration: binds nothing
-            errors.append("bound by a `for`/`with … as` target, whose value "
-                          "this scan cannot prove is the mint")
+            errors.append("bound by a construct whose value this scan cannot "
+                          "read (for / with / except / import alias)")
             continue
         if any(isinstance(n, ast.Call)
                and getattr(n.func, "id", None) == "_probe_graph_name"
@@ -540,8 +551,15 @@ def _probe_binding_errors(tree: ast.Module, name: str) -> list:
         else:
             errors.append("assigned a value that never calls "
                           "`_probe_graph_name()`")
-    if not minted:
-        errors.append("never assigned from `_probe_graph_name()`")
+    # ⛔ Only a READ name needs a minted BINDING (#13468 pass 7, P2): the call
+    # site may legitimately pass `graph_name=_probe_graph_name()` INLINE with no
+    # variable at all, and the call-site half of the pin accepts that. Demanding a
+    # binding for a name nothing reads redded that correct shape with a false
+    # message ("never assigned from …").
+    if minted == 0 and any(isinstance(n, ast.Name) and n.id == name
+                           and isinstance(n.ctx, ast.Load)
+                           for n in ast.walk(tree)):
+        errors.append("is READ but never assigned from `_probe_graph_name()`")
     return errors
 
 
@@ -610,9 +628,9 @@ def test_the_probe_graph_name_is_one_this_tree_can_reap():
     # literal this change removes — leaving `_probe_graph` untouched. The pin
     # passed and the census stayed `[]` (it only sees the PRESENCE of
     # `graph_name=`), i.e. the leak could return with every gate green. So the
-    # call is read statically here: the ONE `from_uri` call in this module must
-    # take `graph_name=` AS the minted name, and that name must come from the
-    # minting helper.
+    # call is read statically here: EVERY `from_uri` call in this module must take
+    # `graph_name=` AS the minted name (or as a direct `_probe_graph_name()` call),
+    # and every assignment that name receives must contain the mint.
     # ⛔ THE CALL SITE AND THE NAME IT CARRIES (review passes 3-6, each one
     # measured). pass 3: the pin read a fresh call and the global, so a call-site
     # literal stayed GREEN. pass 4: "a mint assignment exists somewhere" let a

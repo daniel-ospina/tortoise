@@ -110,19 +110,30 @@ _AVAILABLE, _WORKING_URI = _probe([
 def _binding_parts(node):
     """(targets, value) for the node kinds that can bind a name; None otherwise.
 
-    `value` is None for a bare declaration (`x: str`), which binds nothing, and
-    for a `for` / `with … as` target, whose bound value this scan cannot see. The
-    pin treats those two differently, so the distinction is carried, not lost.
+    `value` is the bound VALUE where the syntax carries one. It is None for the
+    two kinds that bind without a visible value — a bare declaration (`x: str`,
+    which binds nothing) and a binding whose value is produced by a construct
+    (`for` / `with … as` / `except … as` / an import alias) — and the pin treats
+    those differently, so the distinction is carried rather than lost.
+    ⛔ `NamedExpr` returns its VALUE: a walrus binds exactly what the expression
+    evaluates to, so `(x := mint())` is a minted binding, not an unprovable one.
     """
     if isinstance(node, ast.Assign):
         return node.targets, node.value
-    if isinstance(node, ast.AnnAssign):
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
         return [node.target], node.value
-    if isinstance(node, (ast.NamedExpr, ast.For)):
+    if isinstance(node, ast.NamedExpr):
+        return [node.target], node.value
+    if isinstance(node, (ast.For, ast.AsyncFor)):
         return [node.target], None
     if isinstance(node, (ast.With, ast.AsyncWith)):
         return [i.optional_vars for i in node.items
                 if i.optional_vars is not None], None
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return [ast.Name(id=node.name, ctx=ast.Store())], None
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [ast.Name(id=a.asname, ctx=ast.Store())
+                for a in node.names if a.asname], None
     return None
 
 
@@ -157,8 +168,8 @@ def _probe_binding_errors(tree: ast.Module, name: str) -> list:
         if value is None:
             if isinstance(node, ast.AnnAssign):
                 continue          # bare declaration: binds nothing
-            errors.append("bound by a `for`/`with … as` target, whose value "
-                          "this scan cannot prove is the mint")
+            errors.append("bound by a construct whose value this scan cannot "
+                          "read (for / with / except / import alias)")
             continue
         if any(isinstance(n, ast.Call)
                and getattr(n.func, "id", None) == "_probe_graph_name"
@@ -167,8 +178,15 @@ def _probe_binding_errors(tree: ast.Module, name: str) -> list:
         else:
             errors.append("assigned a value that never calls "
                           "`_probe_graph_name()`")
-    if not minted:
-        errors.append("never assigned from `_probe_graph_name()`")
+    # ⛔ Only a READ name needs a minted BINDING (#13468 pass 7, P2): the call
+    # site may legitimately pass `graph_name=_probe_graph_name()` INLINE with no
+    # variable at all, and the call-site half of the pin accepts that. Demanding a
+    # binding for a name nothing reads redded that correct shape with a false
+    # message ("never assigned from …").
+    if minted == 0 and any(isinstance(n, ast.Name) and n.id == name
+                           and isinstance(n.ctx, ast.Load)
+                           for n in ast.walk(tree)):
+        errors.append("is READ but never assigned from `_probe_graph_name()`")
     return errors
 
 
@@ -179,9 +197,11 @@ def test_the_probe_graph_is_named_at_the_call():
     only sees the PRESENCE of a `graph_name=` keyword, and the helper's own
     vocabulary can be right while the call site is wired to something else —
     measured on the #13290 sibling: pointing its call at the old fixed literal
-    left both the census `[]` and that pin GREEN. So this reads the ONE
-    `from_uri(` call statically and requires it to pass `probe_graph`, itself
-    assigned from the per-run mint. Hermetic — no server, no import side effect.
+    left both the census `[]` and that pin GREEN. So the call sites are read
+    statically: EVERY `from_uri(` call here must pass `graph_name=` as the minted
+    name (`probe_graph`) or as a direct `_probe_graph_name()` call, and every
+    assignment that variable receives must contain the mint. Hermetic — no server,
+    no import side effect.
     """
     from tests._embedded import _SERVER_WIPE_PREFIXES
 
@@ -215,7 +235,7 @@ def test_the_probe_graph_is_named_at_the_call():
         kw = {k.arg: k.value for k in call.keywords}
         assert "graph_name" in kw, (
             "a `from_uri(` call here passes no `graph_name=` — the census reds "
-            "and the graph its schema DDL creates belongs to nobody (#13290)")
+            "and the graph its schema DDL creates belongs to nobody (#13302)")
         passed = kw["graph_name"]
         ok = ((isinstance(passed, ast.Name) and passed.id == "probe_graph")
               or (isinstance(passed, ast.Call)
@@ -224,10 +244,10 @@ def test_the_probe_graph_is_named_at_the_call():
             "a `from_uri(` call passes `graph_name=` as something other than the "
             "MINTED name — a literal there feeds `ensure_indexes`' DDL into ONE "
             "graph shared by every lane and CI run, and the census still passes "
-            "because it only sees the keyword (#13290)")
+            "because it only sees the keyword (#13302)")
     assert not errors, (
         "the probe's graph name is not a per-run mint: " + "; ".join(errors)
-        + " (#13290)")
+        + " (#13302)")
 
 
 
