@@ -447,9 +447,13 @@ def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
     The `outdated` boolean is a dead marker for retrieval — `_terminal_excluded`
     ANDs its `coalesce(n.outdated, false) = false` conjunct by default
     (`tortoise/live.py:159`) — but it is NOT hidden on every read.
-    `belief_timeline` (`tortoise/sdk.py:27720`) takes no opt-in flag and
-    deliberately re-attaches superseded priors down the CORRECTS chain
-    (`:27831-27844`); `get_point` (`:29952`) returns the row by address. That
+    `belief_timeline` (`tortoise/sdk.py:27720`) takes no opt-in flag: its
+    primary query (`:27821`) matches `{pointKind:'decision'}` and applies NO
+    status/outdated conjunct to the POINT (the terminal predicate sits on the
+    topic OBJECT), so an invalidated decision Point — which keeps its
+    `aboutObject` edge, `invalidate_point` transfers no edges — comes back
+    as-is, and a superseded one is re-attached down the CORRECTS chain
+    (`:27834-27844`). `get_point` (`:29952`) returns the row by address. That
     the prior SURVIVES is asserted by
     `tests/test_de2e6_temporal.py::TestDe2e6ReviewFixes::test_timeline_keeps_superseded_prior`
     (`:405`, its assertions at `:420-422`: `len(timeline) >= 2` plus a `CORRECTS`
@@ -469,17 +473,27 @@ def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
     exclusion to the DEFAULT query surfaces, so this pin holds the page to the
     ontology: every read treats the row as ENDED, the default query surfaces
     drop it, and the addressed/history reads still show it.
+
+    ⚠️ `no longer writable at all` is banned only UNQUALIFIED. Scoped to the
+    STATUS word the sentence is TRUE ("as a status, `outdated` is no longer
+    writable at all"), and a pin that banned the phrase outright would red on a
+    page more accurate than the one it protects — so the assertion demands a
+    `status` qualifier in the preceding window instead.
     """
     html = _read(DOCS)
-    assert "no longer writable at all" not in html, (
-        "website/docs.html calls `outdated` no longer writable AT ALL. The "
-        "STATUS word is refused (`read_caller_status` raises with a repair "
-        "naming `deprecated`/`superseded`), but the PROPERTY of the same name "
-        "is live and server-stamped on supersede, on invalidate, and when a "
-        "newer assessment of the same source is written by the same assessor "
-        "(see `tortoise/record_projection.py` PointSuperseded/PointInvalidated "
-        "and `tortoise/sdk.py` `_assess_source`). Say which one is refused."
-    )
+    for _m in re.finditer("no longer writable at all", html):
+        window = html[max(0, _m.start() - 200):_m.start()]
+        assert "status" in window, (
+            "website/docs.html calls `outdated` no longer writable AT ALL "
+            "without naming the STATUS word. The *status* is refused "
+            "(`read_caller_status` raises with a repair naming "
+            "`deprecated`/`superseded`), but the *property* of the same name "
+            "is live and server-stamped on supersede, on invalidate, and when "
+            "a newer assessment of the same source is written by the same "
+            "assessor (`tortoise/record_projection.py` "
+            "PointSuperseded/PointInvalidated, `tortoise/sdk.py` "
+            "`_assess_source`). Scope the claim to the status word."
+        )
     assert "every read surface hides" not in html, (
         "website/docs.html claims every read surface HIDES an `outdated` row. "
         "That is not true: `get_point` returns ANY flagged row by address, and "
@@ -488,7 +502,8 @@ def test_docs_scopes_the_outdated_flag_to_surfaces_that_drop_it() -> None:
         "tests/test_de2e6_temporal.py::TestDe2e6ReviewFixes::test_timeline_keeps_superseded_prior, "
         "which passes on main. State the bounded fact instead: every read treats "
         "it as ENDED, the default QUERY surfaces drop it, and the addressed / "
-        "history reads still show it (the history read only for supersession)."
+        "history reads still show it (the history read for a superseded or "
+        "invalidated DECISION point — an `assessment` is not one)."
     )
     assert "belief_timeline" in html, (
         "website/docs.html no longer names the read surface that KEEPS an "
