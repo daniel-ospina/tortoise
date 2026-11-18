@@ -113,6 +113,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6933`", _PI, 6933, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6934`", _PI, 6934, '("Subject", ["name"])'),
     (_AUDIT, "`:6939`", _PI, 6939, '("Source", ["_searchText"])'),
+    # The FIFTH declaration in the same block, and the one the re-derivation missed: §2.5 row 8's
+    # `("Object", ["name"])` cite kept the pre-merge `:6869` while its four siblings in the same
+    # sentence were re-pointed, and `:6869` is `"pointKind",` inside `_POINT_RANGE_INDEX_PROPS` at
+    # this head (it IS `("Object", ["name"])` at `main` `ae54df166d`, which is why the enumeration
+    # in §1 keeps `:6869` as correct HISTORY — see the `hosted_api.py:33583` precedent). Unpinned,
+    # the row sent a reader to the wrong line in the document that tells them to distrust numbers.
+    (_AUDIT, "`:6938`", _PI, 6938, '("Object", ["name"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
     (_AUDIT, "sdk.py:24010", _SDK, 24010, "(n:Point {id:$id})-[:TAGGED]->()"),
@@ -211,6 +218,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6933`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6934`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24010'): 2,
@@ -376,7 +384,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     """
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    assert len(_PINS) == 46
+    assert len(_PINS) == 47, (
+        "46 before this row was added. The bound is not a target: a row DELETED to make the suite pass is "
+        "the failure mode, so this number moves only when a row is added on purpose — the `:6938` row was "
+        "added because §2.5 row 8's `(\"Object\", [\"name\"])` cite was the one address in that block no "
+        "pin reached (it kept the pre-merge `:6869` while its four siblings were re-pointed)."
+    )
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
