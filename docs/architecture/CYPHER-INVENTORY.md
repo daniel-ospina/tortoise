@@ -449,10 +449,12 @@ stays 258; that was true of THIS PR's own diff at its cut and is no longer true 
 tree, which is why the number is re-cut here rather than carried.
 
 **And a SECOND integration at the same cut:** the branch's own next commit, **`2454724a4b`**
-(the actor rows reading the store auth reads; the graph scope walking claims), adds **203**
-lines to `tortoise/sdk.py` and **no** census statement site, so every SCALAR above still holds —
-`--check` prints **`25 pinned counts match`** — while **173 Appendix A rows** moved by **+19**
-lines each (`tortoise/sdk.py:40774` → **`40793`**), because the insertion sits above them. That is
+(the actor rows reading the store auth reads; the graph scope walking claims), adds **193** net
+lines to `tortoise/sdk.py` (`198` inserted, `5` removed) and **no** census statement site, so every
+SCALAR above still holds — `--check` prints **`25 pinned counts match`** — while **173 Appendix A
+rows** moved: **+19** for **87** of them, **+60** for `1`, **+97** for `4`, **+116** for `2` and
+**+193** for **79**, because the insertions sit at five different depths and the shifts are
+cumulative (`tortoise/sdk.py:40774` → **`40793`** is one of the `+19` rows). That is
 the `file:line`-versus-SCALAR gap this section describes, from the fifth side: the pins were GREEN
 over an index whose rows no longer resolve, and only re-running `--markdown` shows it. Appendix A
 is therefore regenerated here a second time at the same head.
