@@ -51,7 +51,7 @@ the same glob at this head reports **0** truncated values (`broken` count re-mea
 Stating `8` as a present-tense `main` measurement would be the exact defect this section
 exists to prevent — a number that no longer reproduces against the tree it names.
 
-`tests/test_doc_affiliation_frontmatter.py:642` cannot see any of them:
+`tests/test_doc_affiliation_frontmatter.py:643` cannot see any of them:
 `missing = [key for key in REQUIRED_KEYS if key not in parsed]` asks whether four keys are
 **present**, and `REQUIRED_KEYS` does not even contain the two fields that carry the affiliation
 to other entities.
@@ -189,8 +189,8 @@ rationale drift, or the 2 pre-existing absence reds.
 |---|---|---|---|
 | `tortoise.file_indexer.parse_frontmatter` | python consumer | `tests/test_file_indexer.py` (unchanged) | the read path this fix depends on; **not modified** |
 | `tortoise/docs_miner.py:352` | importer | `tests/test_file_indexer.py` | consumes the same parse; unaffected by quoting data |
-| `tests/test_doc_affiliation_frontmatter.py:553` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
-| `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at this head) | data | the arm's glob `:618` | the population the assertion iterates |
+| `tests/test_doc_affiliation_frontmatter.py:554` | the arm itself | `config/ci-surfaces.yml:3728` (`tier1`) + `:10678` (`core`) | dual-registered, so it runs for a docs-only diff AND for the full suite |
+| `docs/research/**/*.md` (103 files, of which **68** carry a leading block — re-measured at this head) | data | the arm's glob `:619` | the population the assertion iterates |
 | `scripts/check-doc-affiliation.cjs` | commit-time advisory | not CI-wired | **not touched**; deferred per §2 alternative E |
 
 ## 7. Verification plan — measured (PROVE evidence)
@@ -511,14 +511,15 @@ support, which is out of this issue's scope.
 
 **Recorded, not fixed — the guard's sanity counters can red on an empty population.** Two sites in
 `tests/test_doc_affiliation_frontmatter.py` report the same wrong diagnosis as round 5's escape
-finding, and neither is an escape: `:892-893` assert `measured` and `compared` BEFORE
-`assert not failures` (`:894`), so a tree the guard samples sparsely reds on *"measured no
-
+finding, and neither is an escape: `:893-894` assert `measured` and `compared` BEFORE
+`assert not failures` (`:895`), so a tree the guard samples sparsely reds on *"measured no
 affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
-the value; and `:797` skips `escaped` before `compared += 1` (`:807`), so a tree whose affiliated
+the value; and `:798` skips `escaped` before `compared += 1` (`:808`), so a tree whose affiliated
 values are all escaped leaves the counter legitimately empty and fires the same message. (Line
-numbers are re-measured at this head: `assert measured` sits at `:892`, against `:715` on
-`a5f1e7db46` → `:792` once `#13485` landed → `:892` here — so of the total, **+77** is
+numbers are re-measured at this head (`34df19504d`): `assert measured` sits at `:893`, against
+`:715` on `a5f1e7db46` → `:792` once `#13485` landed → `:892` at `38df4e93a4` → `:893` here — the
+last step is **+1** for a line this branch's own round inserted in `_split_comment`'s docstring,
+which is the mechanism that keeps moving these numbers. So at `38df4e93a4` of the total **+77** is
 `#13485`'s and the remaining **+100** is this
 branch's own (+71 for `_closing_quote`, its docstring and the fifth pin, and +22 for
 `_unkeepable_quoted`'s verdict split, a later round's addition). They move with every appended test,
@@ -526,7 +527,7 @@ so they are re-measured rather than carried: an earlier revision of this section
 pre-rebase `:751-752`,
 `:753`, `:658`, `:666`, and the revision before this one cited `:828-829`/`:830`/`:733`/`:743` — all
 of which had drifted, by the same mechanism. The sequence branch carries
-the same pair at `:768` / `:772`.) Both are
+the same pair at `:769` / `:773`.) Both are
 false blocks of an author's tree, not fail-opens — nothing escapes measurement, they fail closed
 and name a remedy — and both live in the guard, not in the escape branch this PR fixes. Recorded
 here because a reader meets the message before the reason; fixing the ordering is a separate change
@@ -554,7 +555,7 @@ a legal inner quote. That half needed no lexer change and is now FIXED: `_unkeep
 the diagnosis by VERDICT, so `malformed` names the shapes that actually clear it (one space before
 the `#`; the whole value on one line inside its quotes; a block scalar) while only `broken` — where
 YAML really does stop at an inner quote — keeps the deletion advice, and
-`test_a_malformed_value_names_a_true_remedy` (`:1292`) pins both halves. Clearing the VERDICT means
+`test_a_malformed_value_names_a_true_remedy` (`:1293`) pins both halves. Clearing the VERDICT means
 teaching the arm to accept a non-space-separated trailing comment after a close — a lexer widening,
 out of this issue's scope, and unchanged by the remedy fix.
 Measured scale, so it is not read as larger than it is. ⚠️ The differential below was run by the
@@ -600,7 +601,7 @@ is loadable YAML — `yaml.safe_load` returns `"x"`, and `parse_frontmatter` agr
 reports `('malformed', None)`. The verdict is the PRE-EXISTING part (see the next paragraph); the
 REMEDY is not: this round's `_unkeepable_quoted` prints *"put one space before the `#`"* for it, so
 the *"remove the inner quote"* advice the review recorded here is gone, pinned by
-`test_a_malformed_value_names_a_true_remedy` (`:1292`). `'x'# note` behaves the same.
+`test_a_malformed_value_names_a_true_remedy` (`:1293`). `'x'# note` behaves the same.
 This is NOT a regression and NOT a new refusal: `main`'s helper (`f6793959a2`) reaches `malformed`
 here too, via `not value.endswith(q)` — `_split_comment` only ever splits at a space-preceded `#`,
 so the raw keeps its trailing comment and never ends in the quote char. The fix neither causes it
@@ -625,7 +626,7 @@ aboutObjects: "a
 line (`_values(['title: x','aboutObjects: "a','  b"'])` → `('aboutObjects','scalar','"a')`), which
 returns `('malformed', None)` — so the arm fails the file, and since this round prints the
 one-line/block-scalar remedy rather than *"the value is TERMINATED there — remove the inner quote"*
-about a value YAML keeps intact (`test_a_malformed_value_names_a_true_remedy`, `:1292`). This is
+about a value YAML keeps intact (`test_a_malformed_value_names_a_true_remedy`, `:1293`). This is
 PRE-EXISTING: `main`'s
 helper reaches `malformed` here identically, and the fix neither causes nor clears it. It also
 falsifies the code comments that say a quoted value is closed on its line
@@ -691,7 +692,7 @@ Measured at the post-rebase head:
   test's own docstring describes — measured both ways at this head, so the two
   verdicts are not interchangeable. The failing assertion is
   `assert style == "single-quoted"` in
-  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1045` at this
+  `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken` (`:1046` at this
   head; it was `:974` when the mutant was run, and it moves whenever a test is
   appended to this file, so cite it by name, not by line);
 - over-block controls unchanged (`trailing-comment` / `plain-quoted` / `escaped-body`), and (C)'s
