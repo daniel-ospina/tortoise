@@ -191,11 +191,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # to `ast.parse`, never a construction — `test_a_literal_namespace_is_not_an
     # _org_scoped_site` hands the record-tenant scanner a synthetic source
     # snippet, and the other is the same literal quoted in that test's own
-    # docstring. ⛔ **NO ROW, and that is deliberate (#13490 review 2).** This
+    # docstring. ⛔ **NO ROW, and that is deliberate (#11929; #13584 review).**
+    # This
     # guard used to grep file TEXT, so it could not tell a string sample from a
     # real construction and both matches red `test-slow (e)` without a row. The
     # span scanner now classifies STRING and COMMENT tokens first
-    # (`_namespace_literals_in_source`), so both matches are skipped as samples
+    # (`_string_and_comment_spans`), so both matches are skipped as samples
     # and the declaration below went dead. **A dead routing row is not harmless:
     # it would silently ROUTE a real `namespace="registry"` construction added
     # to this file later** — the fail-OPEN direction. MEASURED at this head:
@@ -340,12 +341,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_pack_state.py": {
         "tenant-a": "team-identity", "tenant-b": "team-identity",
         "team-k": "team-identity", "t-reg-2": "team-identity",
-        # ⛔ `mcp-team` was declared here and REMOVED (#13490 review 3): it
+        # ⛔ `mcp-team` was declared here and REMOVED (#11929; #13584 review): it
         # occurs zero times in this file, so the row could never be consulted —
         # and a dead routing row does not merely do nothing, it would ROUTE a
         # real `namespace="mcp-team"` added later instead of reddening. MEASURED
         # at the review head: `grep -c mcp-team tests/test_pack_state.py` → 0.
-        # (This is a FOURTH dead row, distinct from the three #11929 rows.)
+        # (A FURTHER dead row, distinct from the three #11929 rows — do not
+        # re-count and widen that issue's count.)
         "t-bf-1": "team-identity",
     },
     "test_quota.py": {"registry": "prod-coupled"},

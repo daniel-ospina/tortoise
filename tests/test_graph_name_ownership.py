@@ -100,13 +100,18 @@ def test_the_product_family_is_an_ALIAS_of_the_composer_that_strips_it():
     assert embedded._PRODUCT_GRAPH_PREFIXES is sdk._TENANT_GRAPH_PREFIXES
 
     tree = ast.parse((REPO / "tests" / "_embedded.py").read_text(encoding="utf-8"))
-    # EVERY declaration, not the first one: `next(...)` would read a composed
-    # declaration and ignore a value-identical re-inline placed AFTER it — which
-    # is the one that binds, and precisely the drift this test exists to catch.
-    # Both spellings are accepted (`Assign` and `AnnAssign`) because
-    # `sdk._TENANT_GRAPH_PREFIXES` is itself annotated, so annotating this one is
-    # the plausible next edit, not an offence.
-    decls = [n for n in tree.body
+    # EVERY declaration ANYWHERE in the module, not the first one — and not just
+    # the module-body statements. Two escapes this closes, both of which bind at
+    # runtime and both of which are the drift this test exists to catch:
+    #   * `next(...)` read the FIRST declaration, ignoring a value-identical
+    #     re-inline placed AFTER it (the one that wins);
+    #   * scanning `tree.body` missed a re-assignment inside a module-level
+    #     `if`/`try` (`if True:\n    _SWEEP_OWNED_PREFIXES = ("test_", …)`),
+    #     which is just as live.
+    # So: `ast.walk`. Both spellings are accepted (`Assign` and `AnnAssign`)
+    # because `sdk._TENANT_GRAPH_PREFIXES` is itself annotated, so annotating this
+    # one is the plausible next edit, not an offence.
+    decls = [n for n in ast.walk(tree)
              if n.__class__.__name__ in ("Assign", "AnnAssign")
              and any(isinstance(t, ast.Name) and t.id == "_SWEEP_OWNED_PREFIXES"
                      for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
