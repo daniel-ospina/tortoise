@@ -184,6 +184,21 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     "update_entity": "update_knowledge",
     "file_decision": "write_question",
     "file_human_approval": "record_decision",
+    # ── #11609 P3: the hints that could finally be written ────────────────────────────
+    # ⛔ These eleven were WITHHELD on purpose, not forgotten. The #3836 (c) ruling is
+    # that a retired name carries a hint ONLY when its destination is a method a caller
+    # can actually call — so until #11609 P3 built the eleven approved names below, each
+    # of these records named a destination that had no `def`, and a hint pointing at it
+    # would have been a promise the class could not keep. `test_sdk_retirement.py`'s
+    # `test_a_live_recorded_destination_is_hinted_or_declared` is the arm that now sees
+    # them as LIVE and demands the hint; this block is that assertion's other half.
+    #
+    # ⛔ NONE OF THE ELEVEN IS HINTED HERE, and the reason is the record, not caution. Every
+    # one of them is a REMOVAL in `REMOVED_SDK_METHODS` — "deleted with nothing to migrate
+    # to" — so a hint ("was retired, use X instead") would contradict the record that says
+    # there is no X. `docs/product/beta-sdk-surface.md` DOES record a destination for four of
+    # them, which is a real disagreement between two artifacts; it is declared, per name, in
+    # `UNHINTED_LIVE_DESTINATIONS` rather than resolved by picking a side here.
 }
 
 #: The RECORDED destination of every name in the #4282 surplus block — one machine-readable
@@ -250,6 +265,78 @@ SURPLUS_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
 #: `tests/test_sdk_retirement.py` reds on a live destination in either cell that is
 #: neither hinted nor declared here, and on an entry here that has stopped being live.
 UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
+    # #11609 P3: six destinations became LIVE when the eleven approved names were
+    # implemented, and each of these six is DECLARED rather than hinted — not because the
+    # rename is doubtful, but because `docs/product/beta-sdk-surface.md` records no
+    # approved replacement for it. The destination is real and recorded in the inventory
+    # (`canonical-sdk-methods.md`), which is why it must be named here rather than left out;
+    # an approval is a different artifact from a record, and a hint asserts the former.
+    "apikey_create": (
+        "Recorded destination `create_key` is LIVE since #11609 P3, but the beta doc's "
+        "removed-name table names no replacement for `apikey_create` — its five-member "
+        "line is `org_update`/`org_delete`/`membership_get`/`membership_update_role`/"
+        "`apikey_verify`, none of which is this name. The destination is the inventory's "
+        "record, not an owner-approved rename, so no hint is emitted (#3836 (c))."
+    ),
+    "apikey_list": (
+        "Recorded destination `list_keys` is LIVE since #11609 P3 (beta row 35), and this "
+        "name is not named in the beta doc's removed table at all — the destination is "
+        "the inventory's record only, so a hint would assert an approval that does not "
+        "exist (#3836 (c))."
+    ),
+    "apikey_revoke": (
+        "Recorded destination `revoke_key` is LIVE since #11609 P3 (beta row 36), but the "
+        "beta doc records no approved replacement for `apikey_revoke` by name; a hint "
+        "here would name an approval the artifact does not carry (#3836 (c))."
+    ),
+    "membership_create": (
+        "Recorded destination `add_member` is LIVE since #11609 P3 (beta row 37), but the "
+        "beta doc's membership line covers `membership_get`/`membership_update_role` only, "
+        "so this rename has a record and no approval (#3836 (c))."
+    ),
+    "membership_list": (
+        "Recorded destination `list_members` is LIVE since #11609 P3 (beta row 38); the "
+        "beta doc names no replacement for it, so the destination is the inventory's "
+        "record and no hint is emitted (#3836 (c))."
+    ),
+    "membership_delete": (
+        "Recorded destination `remove_member` is LIVE since #11609 P3 (beta row 39); the "
+        "beta doc names no replacement for it, so the destination is the inventory's "
+        "record and no hint is emitted (#3836 (c))."
+    ),
+    "operator_action": (
+        "Recorded destination `adjust_relationship` is LIVE since #11609 P3 (beta row 25), "
+        "but its approving row names TWO approved targets — `adjust_relationship` for "
+        "strength AND `update_knowledge` for annotation — so it authorises no single "
+        "replacement and cannot carry a hint (#3836 (c)). This is the same two-destination "
+        "row that keeps `annotate_operator` and `mitigate_operator` on the surface; it "
+        "waits on the owner settling §D2c of `docs/product/bridge-table.md`."
+    ),
+    "graph_delete": (
+        "Recorded destination `delete_memory_graph` is LIVE since #11609 P3 (beta row 32; "
+        "the group row approves rows 30–33 `*_memory_graph*`). This name is a REMOVAL in "
+        "`REMOVED_SDK_METHODS` — 'deleted with nothing to migrate to' — so a hint would "
+        "contradict its own record. The two artifacts disagree; declared, not resolved "
+        "here."
+    ),
+    "graph_key_ids": (
+        "Recorded destination `list_keys` is LIVE since #11609 P3 (beta row 35, "
+        "'Console diagnostics. Both fold into `list_keys`'), but this name is a REMOVAL "
+        "in `REMOVED_SDK_METHODS`, so it can carry no retirement hint without "
+        "contradicting that record (#3836 (c))."
+    ),
+    "graph_active_key_count": (
+        "Recorded destination `list_keys` is LIVE since #11609 P3 (beta row 35), but this "
+        "name is a REMOVAL in `REMOVED_SDK_METHODS` — a hint would assert a replacement "
+        "the removal record says does not exist (#3836 (c))."
+    ),
+    "batch_create_points": (
+        "Recorded destination `write_knowledge_batch` is LIVE since #11609 P3 (beta row "
+        "13), and beta's own row says `batch_create_points` → `write_knowledge_batch` — "
+        "but the REMOVAL record says the opposite (no replacement), and this cell exists "
+        "for exactly this shape: the two artifacts disagree, so the disagreement is "
+        "declared here rather than silently resolved by whichever one the hint reads."
+    ),
     # #11609 Phase 2: two more recorded destinations became LIVE when the read
     # containers landed, and neither can be awarded a hint by the approving-region
     # parser. Declared here rather than quietly skipped (#3836 (c)).

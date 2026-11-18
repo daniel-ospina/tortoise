@@ -1489,11 +1489,14 @@ def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
     assert "Re-set the graph's packs deliberately" not in out.err, out.err
 
 
-# ⛔ The doc half of this fix (`docs/durability-posture.md`'s declaration) is
-# pinned in `tests/test_pack_selection_durability_doc_pin_9752.py`, NOT here:
-# this file is graph-touching and registered only under `api` + `core`, and a
-# docs-only diff selects NO surface, so a pin here runs ZERO times on exactly
-# the change that can delete the declaration (measured; #11839 review P2).
+# ⛔ The doc half of this fix (`docs/durability-posture.md`'s declaration) used to
+# be pinned by a separate text-assertion module. `#13439` retired that pin: the
+# behaviour it stood in for is asserted HERE — `test_rebuild_all_preserves_the_
+# pack_selection_marker` (a configured graph stays configured) and
+# `test_rebuild_all_does_not_readmit_a_removed_pack` (the harm the doc names).
+# The document states the target; these tests decide whether it is true, so
+# re-wording the doc cannot red them and breaking the carry cannot pass them
+# (`CONTRIBUTING.md`, "A test asserts behaviour; a document states the target").
 
 
 # ── #9752: the THIRD `rebuild_all` caller — `tortoise migrate-db` ───────────
