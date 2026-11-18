@@ -137,8 +137,9 @@ that nothing else is at `main`** — and a range entry spans every line it cover
 `:6923-6939` (the block), `:6933` (`Event`), `:6934` (`Subject`), `:6939` (`Source`);
 `record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37018`/`:37041` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5089`/`:8034`; `goal_judgement.py:1128`; and §2.1's own table, which carries
-two of this class as well — `sdk.py:24015` and `search_engine.py:6721`, both open at `main` and neither
-open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at `main` but
+two of this class as well — `sdk.py:24015` (this branch's head; the statement is `:24004` at `origin/main`
+and `:23982` at `ae54df166d`) and `search_engine.py:6721`, which opens at `main`; neither opens at the pin
+— plus row 13's four writer addresses, which the `#13394` sweep found pinned at `main` but
 absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth
 (`:22925`) is unrelated code:
 `sdk.py:21701` (the capture writer) with its read-back `:21824`, and `hosted_api.py:22925` (the commit

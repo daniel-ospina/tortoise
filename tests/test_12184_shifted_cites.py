@@ -154,7 +154,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
-#: header must carry, target file, 1-based line at `main`, verbatim fragment on that line). Five of these
+#: header must carry, target file, 1-based line in the WORKING TREE (`_resolve` reads `REPO`, so a branch
+#: that moves `.py` files shifts these with it), verbatim fragment on that line). Five of these
 #: are reached by `_PINS` already; `:2433`, `:2490` and `projection/entities.py:5646` were in NO pin at all
 #: before this one, and the header named none of the eight — which is the defect
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
@@ -169,9 +170,11 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":3735", _CP, 3735, 'if table == "point"'),
     (":5646", _ENT, 5646, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
-    # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:24010` is a DELETE
-    # statement and `hosted_api.py:22925` is `if is_subject_kind(...)`, both executable. The pin is wrong for
-    # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
+    # sent readers to the pin. ⛔ The pin is wrong for all six, and the earlier form of this comment was
+    # itself wrong about HOW: it said `sdk.py:24010` is a DELETE and `hosted_api.py:22925` is
+    # `if is_subject_kind(...)`, "both executable". Measured at `ccb49741b2ec`: `sdk.py:24010` is
+    # `# creates a PARALLEL edge on attribute change; the two-` and there is NO `DELETE` in 23990-24040;
+    # `hosted_api.py:22925` is the `)` closing `create_entity(...)`, the guard being `:22919`.
     ("sdk.py:24015", _SDK, 24015, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:6721", _SE, 6721, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:21701", _SDK, 21701, "s.summary=CASE WHEN $sum"),
@@ -480,8 +483,9 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     Two arms, because the defect was two-sided:
 
-    * CONTENT — each of the eight carries, at `main` (the working tree: this branch is docs-only, so
-      `main`'s `.py` files are this tree's), the fragment the document quotes for it. `_PINS` reaches
+    * CONTENT — each of the eight carries, in the WORKING TREE (`_resolve` reads `REPO`, so these rows are
+      branch coordinates: on the docs-only branch that wrote them that was identical to `main`, and a branch
+      that moves `.py` files must move these rows with it), the fragment the document quotes for it. `_PINS` reaches
       five of them; `:2433`, `:2490` and `projection/entities.py:5646` were in NO pin before this one.
     * CLAIM — the header still NAMES them, and no longer states the three absolutes the review measured
       false, nor the "pin-written remainder" label whose denominator contradicted it.
