@@ -36,7 +36,7 @@ property that makes it safe is **`derived = replay(journal)`**. **§17** is the 
 | # | criterion | verdict | deciding artifact | homed |
 |---|---|---|---|---|
 | **S1** | every write goes to the truth store first; the cache is projected from it | ⛔ **NOT-GREEN** | `s1-bypass-probe.log`: an **armed** journal-backed projection refuses `apply` but lets `proj.g.query` write the cache directly (0 journal records) | **`#7951`** (OPEN) |
-| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log` **re-cut at `#9556`** (R8): `read_record_view` has **2** production call sites — the `record-reconcile` verb (`#9189`) and the `record-restore` verb (`#9556`) — `record_projection.replay` **2** (`record_writer`, `#9187`, and `tools/record_runner.py`, `#13210`), and `rebuild_from_record` **1** (`record_restore`, `#9556`). `reconcile` is the only **0**, and **no schedule drives either verb yet**, so divergence is observed only when a human runs the sweep. The measured half is clean since `#8615`: `e2e-chain-probe.log`'s clean record-sourced rebuild is `0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0, form_normalized=1)`, and **both** second-writer signatures still register | **`#9189`** (the trigger) + **`#9276`** (the scheduled sweep) + **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** |
+| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log` **re-cut at `#9556`** (R8): `read_record_view` has **2** production call sites — the `record-reconcile` verb (`#9189`) and the `record-restore` verb (`#9556`) — `record_projection.replay` **2** (`record_writer`, `#9187`, and `tools/record_runner.py`, `#13210`), and `rebuild_from_record` **1** (`record_restore`, `#9556`). `reconcile` is the only **0**, and **no schedule drives either verb yet**, so divergence is observed only when a human runs the sweep. The measured half is clean since `#8615`: `e2e-chain-probe.log`'s clean record-sourced rebuild is `0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0, form_normalized=1)`, and **both** second-writer signatures still register | **`#9189`** (the trigger) + **`#9276`** (the scheduled sweep) + **`#7951`** + **`#7970`** (**CLOSED COMPLETED (2026-10-25)**; ARMED since the §2.0 deferral was rescinded 2026-11-18 — no longer a blocker); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** |
 | **S3** | ⭐ the completeness marker works | ✅ **GREEN** | `s3-s4-named-tests.log` + live bounded rebuild in `e2e-chain-probe.log` (`Point:p1` → `not-hot`) | `#7952` (CLOSED) |
 | **S4** | a residency miss is not an insufficiency | ✅ **GREEN** | `s3-s4-unit-tests.log`: 30 router tests; residency outranks sufficiency | `#7953` (CLOSED) |
 | **S5** | derived/volatile fields are NOT in the system of record | ✅ **GREEN** | `s5-s6-pglite-validate.log` (`20261012000001_record_schema.sql PASSED`, incl. the `subject.props.status` refusal) | `#8263` (CLOSED) |
@@ -338,7 +338,8 @@ The marker rides its **own** field on the **customer-callable** hosted `GET /v1/
 **Recorded caveat (not hidden):** the marker is **OFF by default** (`TORTOISE_RESIDENCY`) and the
 declaration **defaults to `complete`**, under which the marker **cannot fire** — §2.0's deliberate
 deferral, not an absence. The per-key node-naming read path that would drive it in production
-(`#7970`) is deferred.
+(`#7970`) is **ARMED** — the point read `record_serve.serve_point`, under `TORTOISE_RECORD_SERVE`, since
+the §2.0 deferral was rescinded on 2026-11-18 (`STORAGE-ARCHITECTURE.md` §17.3 states the same sentence).
 
 ---
 
@@ -484,11 +485,12 @@ Recorded here because the proof touches the affected surface.
 | # | blocker |
 |---|---|
 | **S1** | enforcement on the raw-handle lane (`proj.g.query`) + the atomic write → **`#7951`** (OPEN) |
-| **S2** | a **scheduled** running reconciliation: `reconcile` still has no caller and no timer drives the `record-reconcile` verb → **`#9276`** (the scheduled sweep, OPEN) + **`#7951`** + **`#7970`** (OPEN); `read_record_view` (**2** call sites — `#9189`'s `record-reconcile` and `#9556`'s `record-restore`), `rebuild_from_record` (**1**, `#9556`) and `record_projection.replay` (**2** — `#9187`'s `record_writer` and `#13210`'s `tools/record_runner.py`) are wired; the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** (a clean rebuild now reports `field_mismatches=0`, a second-writer property write still reports `field_mismatches=1`) |
+| **S2** | a **scheduled** running reconciliation: `reconcile` still has no caller and no timer drives the `record-reconcile` verb → **`#9276`** (the scheduled sweep, OPEN) + **`#7951`** + **`#7970`** (**CLOSED COMPLETED (2026-10-25)**; ARMED since the §2.0 deferral was rescinded 2026-11-18 — no longer a blocker); `read_record_view` (**2** call sites — `#9189`'s `record-reconcile` and `#9556`'s `record-restore`), `rebuild_from_record` (**1**, `#9556`) and `record_projection.replay` (**2** — `#9187`'s `record_writer` and `#13210`'s `tools/record_runner.py`) are wired; the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** (a clean rebuild now reports `field_mismatches=0`, a second-writer property write still reports `field_mismatches=1`) |
 | **S6 caveat** | live legacy-id normalisation (W1b) → **no issue home** |
 
 Not blocking, recorded: the marker is off by default under a `complete` declaration (§2.0's
-deliberate deferral); the record read path (`#7970`) is deferred; `#8497` is CLOSED `NOT_PLANNED`
+deliberate deferral); the record read path (`#7970` — **CLOSED COMPLETED (2026-10-25)**, ARMED since the
+§2.0 deferral was rescinded 2026-11-18, sequenced rather than deferred); `#8497` is CLOSED `NOT_PLANNED`
 (not a defect).
 
 ## Reproduction
