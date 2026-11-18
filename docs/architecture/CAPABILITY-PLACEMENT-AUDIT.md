@@ -134,10 +134,11 @@ test beside this paragraph pins all eight to the content they quote. They are li
 enumeration is what has been RE-DERIVED, each entry carrying the head it was measured at — never a claim
 that nothing else is at `main`** — and a range entry spans every line it covers.
 ⚠️ **This revision adds its own entries to it**: `projection/__init__.py`'s fulltext declarations
-`:6923-6939` (the block), `:6933` (`Event`), `:6934` (`Subject`), `:6939` (`Source`);
+`:6923-6939` (the block), `:6933` (`Event`), `:6934` (`Subject`), `:6939` (`Source`) — ⚠️ **this tree's**;
+`:6854-6870`/`:6864`/`:6865`/`:6870` at the `main` head this header names;
 `record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37007`/`:37030` (the whole-node pair, still 23 apart —
 ⚠️ **this tree's** figures, not the `main` head's: that head reads `:36985`/`:37008` there, which is the
-`+22` this paragraph states two paragraphs down);
+`+22` the delta sentence below states);
 `audit.py:817`; `mcp_server.py:5089`/`:8034`; `goal_judgement.py:1128`; and §2.1's own table, which carries
 two of this class as well — `sdk.py:24004` and `search_engine.py:6721`, both open at this tree and
 neither open at the pin — ⚠️ `:24004` is **THIS tree's** figure (the `main` this header names reads
@@ -145,10 +146,13 @@ neither open at the pin — ⚠️ `:24004` is **THIS tree's** figure (the `main
 absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth
 (`:22925`) is unrelated code:
 `sdk.py:21690` (the capture writer) with its read-back `:21813`, and `hosted_api.py:22925` (the commit
-door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:22737`.
-⚠️ **Those seventeen addresses were RE-DERIVED on this branch (`#13363`) — eleven of them to this tree's
-numbers, the other six opening identically at both heads — and a number quoted above is
-THIS tree's.** The branch's inserts are **not one uniform delta**, which is exactly why each figure was
+door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:22737` — ⚠️ those four are **this
+tree's** as well (`:21668`/`:21791` and `:22919`/`:22731` at the `main` head named above).
+⚠️ **Eleven of those seventeen addresses moved on this branch (`#13363`), and every one of the eleven is
+listed above with BOTH heads — the figure it holds here, and the `main` head's. The other six open
+identically at both heads, so they need no second figure.** ⛔ **No entry above depends on an offset:**
+`+22`/`+69`/`+6` describe how far a site MOVED, never how to recover the other head from the number —
+applying one is the drift this header exists to stop. The branch's inserts are **not one uniform delta**, which is exactly why each figure was
 re-derived from its own quoted fragment (`grep -n '<fragment>' <path>`, the rule at the top of this
 header) rather than by applying an offset: `sdk.py` moved **+22** at every site here, but
 `projection/__init__.py` moved **+69** at the fulltext declaration and **+280** at the rebuild's

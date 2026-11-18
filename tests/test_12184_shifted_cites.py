@@ -539,10 +539,12 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     """The header enumeration's numbers are bound to the `main` head the paragraph announces — `:6869` is
     that head's cite.
 
-    ⚠️ This region is the HEADER, not §1: the binding sentence sits at doc line 113, and `## 1.` starts at
-    line 209. The file's own name for it is "the header region — every line before `## 1.`" (see
-    `test_the_main_set_enumeration_names_the_group_it_was_missing`), and §1 is 18 rows of writers, which
-    carries no enumeration of cites at all.
+    ⚠️ This region is the HEADER, not §1: the binding sentence sits in the preamble, ABOVE `## 1.`, which
+    opens a hundred-odd lines below it. The file's own name for the region is "the header region — every line
+    before `## 1.`" (see `test_the_main_set_enumeration_names_the_group_it_was_missing`), and §1 is 18 rows of
+    writers, which carries no enumeration of cites at all. ⛔ No line numbers are asserted here on purpose:
+    the first cut of this docstring said "line 113" and "`## 1.` at line 209", and the very text it was
+    describing moved both — a positional claim about the document, inside the document's own guard.
 
     The header paragraph opens with its own binding: *"All sixteen were re-derived at `main` (`ae54df166d`)
     — ⚠️ **so they do NOT open at the pin above** — and each is named here by the cite it became"*. Every
@@ -559,9 +561,9 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     `git show ae54df166d:tortoise/projection/__init__.py | sed -n '6869p;6938p'` ->
     `("Object", ["name"]),` and then `# background RDB/AOF child in the fork slot, and a hung un-reaped`.
 
-    ⚠️ It does NOT ban `:6938` from the header: naming BOTH heads — the shape `hosted_api.py:33583` already
-    uses one paragraph up (`:33583` there, `:33601` at this head) — keeps the sentence true and this arm
-    green, which is why the assertion is on the `:6869` adjacency rather than on a token count.
+    ⚠️ It does NOT ban `:6938` from the header: naming BOTH heads — the shape the `hosted_api.py:33583`
+    (`:33601` at this head) pair already uses — keeps the sentence true and this arm green, which is why the
+    assertion is on the `:6869` adjacency rather than on a token count.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     assert '`("Object", ["name"])`\n`:6869`;' in text, (
@@ -569,5 +571,5 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "at the `main` head that paragraph announces (`ae54df166d`). `:6938` is THIS tree's value (and "
         "§2.5's row); putting it here re-points a history cite to a working-tree address, the "
         "`⚠️ CORRECTED` failure this file exists to stop. Either restore `:6869`, or name both heads "
-        "(`:6869` there, `:6938` at this head) as `hosted_api.py:33583` does above."
+        "(`:6869` there, `:6938` at this head) as the `hosted_api.py:33583`/`:33601` pair does."
     )
