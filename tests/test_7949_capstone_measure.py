@@ -6753,6 +6753,29 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "they are the set the pin row cannot read, because its scoping phrase carries the "
             "number")
 
+    # ⛔ THE SAME TREATMENT FOR THE CONTENT-REVIEW FILTER (#13589 review, P3). The pin row
+    # added for this clause scopes to the phrase `the content-review queue filter that cite
+    # named`, which is DISCRIMINATING (`:28067` is the file's only `dedup_reviewed IS NULL`),
+    # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
+    # scoped line — and D5 IS ONE LINE carrying `:28067` four times, so a row satisfied by any
+    # of them cannot tell the clause being re-pointed from another occurrence staying put.
+    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28067`" left the
+    # row GREEN. The sentence is therefore read WHOLE, with its number DERIVED from the
+    # source, so both halves are graded: a source move the document did not follow reds, and
+    # a document re-point the source did not make reds.
+    _dedup_filter_line = next(
+        _n for _n, _ln in enumerate(sources["sdk"], 1)
+        if "dedup_reviewed IS NULL" in _ln)
+    _dedup_clause = (
+        "the content-review queue filter that cite named, `dedup_reviewed IS NULL`, sits at "
+        f"`sdk.py:{_dedup_filter_line}` at this head")
+    assert _d5.count(_dedup_clause) == 1, (
+        f"05-verify.md states the content-review filter clause and this spelling now occurs "
+        f"{_d5.count(_dedup_clause)} time(s): {_dedup_clause!r} — the source definition is at "
+        f"`tortoise/sdk.py:{_dedup_filter_line}`. The pin row scoped to the clause's phrase "
+        "cannot grade this half on its own: D5 is one markdown line and every `:N` on it "
+        "satisfies a row scoped to the line, so this sentence is asserted whole.")
+
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
     # `hosted_api.py:15225-15302`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
