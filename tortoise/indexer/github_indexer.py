@@ -49,7 +49,7 @@ Lifecycle decision table (THE rule):
      a closed issue, because the close fold refuses a row with no live holder
      (#13326). ⛔ Not being trigger-reachable is not being unreachable — a
      ``github.issue.reopened`` fold reached by NAME does rewrite the marker to a
-     real boolean (``projection/entities.py:6158-6164`` → ``pipeline.py:434``);
+     real boolean (``projection/entities.py:6222-6228`` → ``pipeline.py:434``);
      what makes the truthy half self-heal is that this reader ANSWERS ``"closed"``
      for it, so the fold is triggered at all. That is why the arm withholds the
      ``"open"`` fall-through ONLY: an ENDED position and a ``_row_is_frozen`` row are
@@ -68,8 +68,12 @@ Lifecycle decision table (THE rule):
   ⚠️ The WIDER terms — ``status='outdated'`` and the legacy ``outdated=true`` flag —
   are NOT latched: ``_fold_object_stage``'s set has no ``outdated`` member, the
   CLOSE fold cannot reach such a row (no live holder) while the REOPEN fold can
-  (``_reopen_targets_closed``), so they are answered from the POSITION, per
-  direction. See ``_status_is_latched`` / ``_row_is_frozen`` / the reader below.
+  (``_reopen_targets_closed``). Answered from the POSITION where the row has one —
+  and `None` while that position is LIVE — and, where it has NONE, `"closed"`
+  unless the word maps to `open`, which is withheld (a close against a row with no
+  live holder re-fires for ever). ⛔ NOT "the POSITION, per direction", and not
+  "the WORD where it has none" either: both are one case short. The cases are
+  enumerated once, in ``_object_state_to_issue_state``'s docstring.
   ⛔ FAMILIES 1 AND 2 ARE ANSWERED BEFORE THE POLARITY (closed/open) ARMS, on
   purpose: their answer therefore does not depend on ``isClosed``. It must not,
   because ``is_position_ended`` short-circuits on the marker alone and never looks
@@ -88,7 +92,7 @@ Lifecycle decision table (THE rule):
   declaration this reader resolves against is ``core:workitem`` only, because that
   is the only pipeline the BUILT-IN fold can put on an indexed issue Object. A pack
   that DECLARES a stage fold for ``pm:issue`` keys the pipeline on the declaring
-  kind (``projection/entities.py:5976-5977``, ``pipeline_key = target_kind``), so
+  kind (``projection/entities.py:6040-6041``, ``pipeline_key = target_kind``), so
   such a row's ``pipelineStageKey`` names a pipeline this reader cannot resolve and
   it answers ``None`` — its close/reopen history stops, re-introducing the #13143
   symptom (``events_minted: 0`` on a close) for that population. That answer is
@@ -98,7 +102,7 @@ Lifecycle decision table (THE rule):
   ⛔ ``None`` is not unconditional and the bound is not unconditional: it holds for
   a row a PACK fold keyed. ``_fold_object_stage`` carries a SECOND silent refusal
   this reader does not model — the kind-OWNERSHIP guard (``declared_kinds``, passed
-  at ``projection/entities.py:6187``, applied at ``:6239-6241``) — and the query
+  at ``projection/entities.py:6251``, applied at ``:6303-6305``) — and the query
   below does not even fetch ``o.objectKind`` (``:1288-1293``). So the moment a pack
   DECLARES state on ``pm:issue`` (a ``statuses:``/``pipeline:`` block on
   ``kindDefs.issue``, which ``packs/*/manifest.yaml`` does not have today), the
@@ -320,19 +324,19 @@ def _row_is_frozen(status, outdated) -> bool:
     (``live.TERMINAL_EXCLUDED_STATUSES``) is deliberately WIDER than the fold's
     ``OBJECT_TERMINAL_STATUSES``. ``_fold_object_stage`` does not fetch
     ``o.outdated`` and its set has no ``outdated`` member
-    (``entities.py:6219-6224``, ``commit_ops.py:88``; ``commit_ops.py:82-83``
+    (``entities.py:6283-6288``, ``commit_ops.py:88``; ``commit_ops.py:82-83``
     says so from the other side: the render-time probe *"adds `outdated` …
     which this fold does not"*).
 
     ⚠️ The invariant is "the CLOSING direction has no live holder", NOT "no
     writer can clear it" — the stronger claim is false. A coherent un-supersede
     (``update_entity(obj, status='live', supersededBy=None, supersededAt=None)``,
-    admitted at ``sdk.py:54012-54021`` and documented as the NOT MONOTONE
-    exception at ``sdk.py:6030-6048``) DOES clear ``superseded``, and this read
+    admitted at ``sdk.py:54435-54444`` — the NOT MONOTONE exception, documented
+    at ``cache_projection.py:811``) DOES clear ``superseded``, and this read
     resumes the moment it does because the answer is derived from the stored row
     and never cached. What ``_upsert_object`` guarantees is narrower and is the
     part this module relies on: ``o.status`` is written ON CREATE only
-    (``projection/entities.py:5128-5130`` — *"status ON CREATE only — ON MATCH
+    (``projection/entities.py:5137-5139`` — *"status ON CREATE only — ON MATCH
     never touches it (the clobber guard)"*), so an unrelated re-mention cannot
     reset the word out from under a poll.
 
@@ -359,7 +363,7 @@ def _row_is_frozen(status, outdated) -> bool:
     # refuse it at intake (`lifecycle_vocabulary.py:279-286`, reached from S0's
     # `_read_caller_status` on both the update and create paths). It is kept readable
     # because rows persist — `lifecycle_vocabulary.py:263-264` records the history
-    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:53859-53861`
+    # ("`status=['live']` *used to be* STORED on an `:Object`") and `sdk.py:54283-54285`
     # enumerates the routes from the other side (a pre-fix SDK, a raw Cypher producer, a
     # JSONL replay of either) — and this repo deliberately keeps readers wider than its
     # doors (`live.py:100-108`). ⛔ Deliberately NOT citing the individual `sdk.py` call
@@ -372,7 +376,7 @@ def _status_is_latched(status) -> bool:
     """True when ``status`` is a word ``_fold_object_stage`` LATCHES on.
 
     ``commit_ops.OBJECT_TERMINAL_STATUSES`` — the set the fold refuses on, read
-    BEFORE any position test (``entities.py:6228``) — is NARROWER than the
+    BEFORE any position test (``entities.py:6292``) — is NARROWER than the
     reader's vocabulary: it has no ``outdated`` member. That single missing word
     is the whole difference, and it is not cosmetic, because the two folds that
     consume these transitions are dispatched under DIFFERENT rules
@@ -382,8 +386,8 @@ def _status_is_latched(status) -> bool:
       applies the CURRENCY predicate — and ``outdated`` is in
       ``live.TERMINAL_EXCLUDED_STATUSES``/the ``outdated`` flag conjunct, so such
       a row has NO live holder and the fold is never dispatched. Nothing can
-      move it, so any state this read answers about it re-fires forever.
-    * the REOPEN fold takes ``_reopen_targets_closed`` (``entities.py:6159-6162``),
+      close it, so any state this read answers about it re-fires forever.
+    * the REOPEN fold takes ``_reopen_targets_closed`` (``entities.py:6223-6226``),
       which bypasses the live-holder requirement when there is exactly one
       registered incarnation — so for that direction the fold IS dispatched, and
       it APPLIES, because the latch is this narrower set.
@@ -428,13 +432,18 @@ def _declared_stage_slot(pipeline_key, stage_id) -> str | None:
     """
     if stage_id is None:
         return None
-    # ⛔ ABSENT key and PRESENT-BUT-UNRECOGNISED key are DIFFERENT questions
-    # (#13289 F2), and an `or` here conflates them: it fires for any key it cannot
-    # resolve, so a row folded against a PACK declaration was read against CORE.
-    # A pack stage whose id collides with a core id of a different slot (`done`,
-    # `cancelled`) then resolved to CORE's slot — an answer the fold that moved the
-    # row does not agree with, and (because this arm only ever ADDS "closed"
-    # answers) the same one-directional widening as F1.
+    # ⛔ ABSENT key and PRESENT-BUT-UNRECOGNISED key are DIFFERENT questions (#13289
+    # F2); the split below states them SEPARATELY so the refusal is visible where
+    # it happens. ⚠️ MEASURED, and it is NOT a behaviour change: the pre-fix line was
+    # verbatim, `_PIPELINE_DECLS.get(str(pipeline_key or CORE_WORK_ITEM_PIPELINE_KEY))`,
+    # and a PRESENT key went through VERBATIM, `.get` returned falsy, and the
+    # `if not decl: return None` below fired, so an unrecognised pack key never
+    # resolved against CORE and the collision this comment used to narrate (a pack
+    # `done` read as CORE's `terminal`) could not occur. What the split buys is
+    # that both questions are stated where they are answered; the contract is
+    # pinned by `test_a_pack_keyed_stage_is_not_resolved_against_the_core_declaration`
+    # — which, like any pin of unchanged behaviour, cannot redden on the pre-fix
+    # code, and says so.
     key = str(pipeline_key or "")
     if key:
         decl = _PIPELINE_DECLS.get(key)
@@ -1306,7 +1315,18 @@ class GitHubIndexer:
     def _object_state_to_issue_state(proj, obj_id: str) -> str | None:
         """Previous issue-state derived from the persisted Object's POSITION.
 
-        None = first ingest (Object absent or never folded on either axis).
+        None = "no opinion": the Object is ABSENT or was never folded on either
+        axis, OR one of the guards below applies — a latched word (always), an
+        unplaceable position, or a WIDE (`outdated`) term. ⚠️ The WIDE term is the
+        per-direction case, not a blanket `None`: its CLOSE fold is never dispatched
+        (no live holder), so it answers the POSITION where the row has an ENDED one,
+        `None` where that position is LIVE (it must get no opinion, and a close minted
+        against a row with no live holder re-fires for ever), and `"closed"` where the
+        row has no position at all — UNLESS the word maps to `open` (`_STATUS_TO_STATE`:
+        `in_progress`, `live`, `open`), which is withheld as `None` for that same
+        reason. A word OUTSIDE the map (`outdated`, NULL) is therefore answered
+        `"closed"`: it names no state to withhold on, and only a reopen can fold.
+        (`_project_issue`)
 
         ⛔ #13143 (S0 reader sweep): this read `Object.status` ONLY, and S0 moved
         the connector folds off that axis — a close now folds the terminal STAGE
@@ -1329,10 +1349,11 @@ class GitHubIndexer:
         in the FOLD's latch set, the legacy `outdated` flag) are NOT one question,
         and the rule is per-direction, not per-term: a LATCHED word answers `None`
         always (`_status_is_latched` — the fold refuses both ways); the WIDE terms
-        answer the POSITION, and `None` only where the position is live
+        answer the POSITION where the row has an ENDED one, `None` where it is LIVE,
+        and `"closed"` where there is no position unless the word maps to `open`
         (`_row_is_frozen` — the close fold is unreachable for them, the reopen fold
         is not). "Written once and never cleared" was the earlier, WRONG summary:
-        a coherent un-supersede does clear `superseded` (`sdk.py:54012-54021`). Answering `"closed"` there was the fix's own regression:
+        a coherent un-supersede does clear `superseded` (`sdk.py:54435-54444`). Answering `"closed"` there was the fix's own regression:
         it is a SUPERSET of the fold's guard set, and a superset re-fires exactly
         as a subset does.
         """
@@ -1369,18 +1390,24 @@ class GitHubIndexer:
         # mint-per-poll loop F1 removed, behind a different guard (measured
         # through the public door `update_knowledge(id, status="archived")`:
         # poll1/2/3 each `events_minted=1`, the row never moves). Reading that
-        # row as "closed" instead is NOT the fix: the word is permanent, so it
-        # loops in the other direction (below).
-        # ⛔ FIRST: a row whose answer can never move gets NO OPINION, never the
-        # other state (#13289 F1). A LATCHED word is permanent — see
-        # `_status_is_latched` — and `_fold_object_stage` refuses on it BEFORE any
-        # position test, in BOTH directions, so a GitHub `open` could never be
-        # reconciled against it: `issue_to_event` mints `-reopened`, the projection
-        # refuses, the next poll reads the same word again, and
-        # `_next_transition_id` mints `-reopened-2`, `-reopened-3`, … — one Event +
-        # one journal record per poll, without bound. Measured through the public
-        # door `update_knowledge(id, status="archived")` (stores `deprecated`) on an
-        # issue that stays OPEN on GitHub: `[1, 1, 1]` before this arm.
+        # row as "closed" instead is NOT the fix: the word STAYS SET — that is what
+        # the fold latches on — so it loops in the other direction (below).
+        # ⛔ FIRST: a row the fold refuses in BOTH directions gets NO OPINION, never
+        # the other state (#13289 F1). A LATCHED word makes `_fold_object_stage`
+        # refuse BEFORE any position test, in BOTH directions, and while the word is
+        # SET a GitHub `open` could never be reconciled against it: `issue_to_event`
+        # mints `-reopened`, the projection refuses, the next poll reads the same
+        # word again, and `_next_transition_id` mints `-reopened-2`, `-reopened-3`,
+        # … — one Event + one journal record per poll, without bound. Measured
+        # through the public door `update_knowledge(id, status="archived")` (stores
+        # `deprecated`) on an issue that stays OPEN on GitHub: `[1, 1, 1]` before
+        # this arm.
+        # ⚠️ "While set", not "for ever": a coherent un-supersede DOES clear
+        # `superseded` (`sdk.py:54435-54444`; the NOT-MONOTONE bullet at
+        # `cache_projection.py:811`), so the earlier "permanent" wording was one claim
+        # too strong. It does not weaken the answer: this read derives from the
+        # STORED row, so it resumes on the write that clears the word, and until
+        # then `None` is the only answer that cannot mint without bound.
         # `None` is this module's "no opinion" value — `_project_issue` gates the
         # transition mint on `prev_state is not None` — so a latched row mints no
         # transition in EITHER direction, which is the only stable answer while the
@@ -1467,15 +1494,19 @@ class GitHubIndexer:
         # dispatched under DIFFERENT rules (`_status_is_latched`): the CLOSE fold
         # needs a LIVE holder, and an `outdated` row has none, so the close can never
         # be applied and must get no opinion; the REOPEN fold takes
-        # `_reopen_targets_closed` and DOES apply. So this read answers the POSITION
-        # for these rows, which is what converges — measured on a row at
-        # `status='outdated'` + closed position, GitHub reopened:
+        # `_reopen_targets_closed` and DOES apply. So for these rows this read answers
+        # the POSITION where the row has an ENDED one — which is what converges —
+        # `None` where it is LIVE (a close could never be dispatched, so it must get no
+        # opinion), and where it has NO position, `None` if the word maps to `open` and
+        # `"closed"` otherwise — the opposite of answering with the word, because a
+        # close minted for a row with no live holder re-fires for ever. Measured on a row
+        # at `status='outdated'` + closed position, GitHub reopened:
         #
         #   `None` for both directions  -> [0, 0, 0], row stays `done`/`isClosed=true`
         #                                 — a reopen the projection WOULD apply is dropped
         #   position (this arm)         -> [1, 0, 0], row reaches `in_progress`/`active`
         #
-        # and the not-ended shape (no live holder, so no close can ever fold) gets
+        # and the not-ended POSITION (no live holder, so no close can ever fold) gets
         # `None`, which is the only answer that cannot mint without bound. The one
         # residual is recorded on the PR: after such a reopen the word is still
         # `outdated`, so a SUBSEQUENT GitHub close mints nothing — unavoidable, since
@@ -1483,7 +1514,7 @@ class GitHubIndexer:
         # holder.
         # ⛔ SECOND STATED RESIDUAL (`#13289` review F4, and it is NOT bounded away):
         # `"closed"` below assumes the REOPEN fold is actually DISPATCHED, and
-        # `_reopen_targets_closed` (`entities.py:6158-6163`) requires exactly ONE
+        # `_reopen_targets_closed` (`entities.py:6222-6227`) requires exactly ONE
         # registered incarnation (`not _live_holders and len(_held) == 1`). On a name
         # with TWO OR MORE registered carriers — the legal coexistence `#3590` pins,
         # `tests/test_3590_minted_identity_acceptance.py:1443-1445` — that predicate is
@@ -1501,7 +1532,7 @@ class GitHubIndexer:
         # ⚠️ Only the STAGE position counts. A legacy pre-S0 row (`status='completed'`,
         # no pipeline props) that also carries `outdated` must not stop here, or it
         # drops the reopen the fold DOES apply (`_reopen_targets_closed`,
-        # `entities.py:6159-6162`: one registered incarnation, no live holder). With no
+        # `entities.py:6223-6226`: one registered incarnation, no live holder). With no
         # stage position this read falls through to `_STATUS_TO_STATE`, which is where
         # a legacy row's answer has always lived.
         # ⛔ The test is `stage_id`/`slot`, NOT `is_closed` (round-7 review, P2). By this
@@ -1534,7 +1565,7 @@ class GitHubIndexer:
             # reconcile — and `None` where it says "open", because minting a close
             # against a row with no live holder would re-fire for ever
             # (`resolve_fold_name` → `live._terminal_excluded`, which carries the
-            # `outdated` conjunct; `resolve_fold_name` at `entities.py:6166-6168`).
+            # `outdated` conjunct; `resolve_fold_name` at `entities.py:6230-6232`).
             # ⚠️ Falling through unconditionally here instead put the loop back:
             # `status='in_progress'` + `outdated=true`, GitHub closed, minted
             # `-closed` on every poll.
@@ -1566,7 +1597,7 @@ class GitHubIndexer:
         # ⛔ THE REACH AND THE ANSWER ARE DIFFERENT FACTS, and only the second one
         # grounds `None`. The reopen arm's by-name reach does NOT test the marker's
         # TYPE: `_reopen_targets_closed` keys on "no live holder" + ONE registered
-        # incarnation (`projection/entities.py:6158-6164`: `object_id = _held[0]`,
+        # incarnation (`projection/entities.py:6222-6228`: `object_id = _held[0]`,
         # reached BEFORE `resolve_fold_name`), `_held` comes from
         # `all_name_holder_ids` (any status — an Integer-`0` row IS held,
         # `entity_identity.py:466,990`), and `_live_holders` uses the same
@@ -1615,8 +1646,8 @@ class GitHubIndexer:
         # Cost, stated: the shape the bug was measured on (a falsy marker on a LIVE
         # position, the row every props door can produce — `update_knowledge(id,
         # isClosed=0)` stores the integer verbatim: `update_knowledge`
-        # (`sdk.py:22388-22563`) relays through `_update_entity_any` to
-        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54512`)
+        # (`sdk.py:22459-22634`) relays through `_update_entity_any` to
+        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:54884`)
         # applies the caller's props unchanged — `isClosed` is no reserved name, so
         # nothing coerces it) then records NO transition at all: `prev_state is None`
         # gates the mint off and nothing repairs the marker, so nothing re-fires.

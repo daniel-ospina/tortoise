@@ -278,12 +278,13 @@ def test_valid_status_is_journaled_against_point_and_survives_rebuild(env):
     label), so ``rebuild_all`` refuses with ``state-op-miss`` and the status
     reverts. Journaling against ``:Point`` is what makes the change durable.
 
-    ⚠️ #9649: the fixture moved from ``archived`` to ``live`` because
-    ``archived`` is not a DECLARED transition from ``draft``
-    (``_ALLOWED_TRANSITIONS['draft']`` is ``{live, retracted, superseded}``;
-    ONTOLOGY §5 records ``archived`` as *"reserved — no v1 write path"*), so the
-    generic door now refuses it. The property this test owns is the LABEL the
-    record names, not the value.
+    ⚠️ #9649: the fixture moved from ``archived`` to ``live``. The reason this
+    comment used to give — "``archived`` is not a DECLARED transition from
+    ``draft`` … so the generic door refuses it" — is FALSE: ``archived`` is
+    ``deprecated``'s write-side synonym, normalised by ``_read_caller_status``
+    (measured: ``status='archived'`` on a live point LANDS and reads back
+    ``deprecated``), so the door accepts it wherever it accepts ``deprecated``.
+    This test owns the LABEL the record names, not the value.
     """
     sdk, events = env
     pid = _multilabel_point(sdk)

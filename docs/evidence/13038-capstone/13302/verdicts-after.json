@@ -1,0 +1,39 @@
+{
+  "_provenance": {
+    "packet": "/private/tmp/capstone-r2b/judge-packet.json",
+    "reader": "fresh",
+    "elapsed_s": 92.9,
+    "reason": "",
+    "note": "Written by this instrument. `--verdicts <this file>` re-scores the same packet without spawning a reader."
+  },
+  "Q1": {
+    "verdict": "wrong",
+    "because": "The answer serves only Q4 pricing and the Q4 uptime goal (correctly excluding Q3 and the retired onboarding flow) but omits the 12 December launch plan, which the narrative names as a current commitment, so the list of commitments is incomplete.",
+    "cause": "The object-side reads returned 0 rows (empty fts/structural legs plus degraded no-embedder vector), so a plan stored as an object cannot be reached by the commitment query."
+  },
+  "Q2": {
+    "verdict": "right",
+    "because": "It serves the launch as a core:plan at stage 'scheduled' with isClosed=false and no linked events, which says it was planned and has not happened.",
+    "cause": null
+  },
+  "Q3": {
+    "verdict": "right",
+    "because": "The Q3 decision is served as superseded ($29/seat) alongside the live Q4 decision that names itself as 'replacing the Q3 decision' and carries the supersedes edge to Q3's id, so the successor is named and no rationale is invented.",
+    "cause": null
+  },
+  "Q4": {
+    "verdict": "right",
+    "because": "The judgement states 'unmet' with the basis: reading 99.72 against the >= 99.9 threshold, comparison false, as of 2026-11-15, i.e. a measurement rather than a bare status.",
+    "cause": null
+  },
+  "Q5": {
+    "verdict": "right",
+    "because": "The ended-scope read serves the Thursday partner call of 6 November with stage 'cancelled', slot 'terminal' and isClosed=true, while the 12 December launch is correctly not listed as ended.",
+    "cause": null
+  },
+  "Q6": {
+    "verdict": "right",
+    "because": "The retracted beach-club confirmation statement is served only in the terminal scope with status 'retracted' (and read by id), so it is excluded from the default scope and its withdrawal is stated.",
+    "cause": null
+  }
+}

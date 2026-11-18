@@ -1317,7 +1317,8 @@ def test_a_model_version_bump_with_no_changelog_block_fails() -> None:
 
 OBJECT_CLAUSE_START = "**Core Object types accept"
 OBJECT_CLAUSE_END = (
-    "Pack-declared kinds validate against their own declared words.**")
+    "Pack-declared kinds validate against their own declared words, which become "
+    "their pipeline stages rather than a wider status list (#11824).**")
 
 
 def _landed_object_lifecycle_clause(ontology: str) -> str:
@@ -1345,7 +1346,7 @@ def _newest_block_body(changelog: str) -> str:
     Measured at head ``7e6baffc5d``: this returns 11375 characters, equal to
     ``len(_block_bodies(changelog)[0])``; the after-the-header cut returned 11269
     and the two were not equal. No block currently writes a citation in its header
-    (measured: 0 of 40 headers carry one), so the wider extent changes no verdict
+    (measured: 0 of 42 headers carry one), so the wider extent changes no verdict
     today — it closes the blind spot rather than reacting to a live miscount.
     """
     first = _BLOCK_VERSION_RE.search(changelog)
@@ -1380,8 +1381,8 @@ def _block_bodies(changelog: str) -> list[str]:
 
     ``^`` is load-bearing: a block's prose can QUOTE an older header
     (``> > **Changelog v3.7 …`` inside the v3.2 entry), and an unanchored
-    pattern counts that quote as a release — measured at this head: 41 pieces
-    for 40 blocks, one of them a fragment starting at the quoted header.
+    pattern counts that quote as a release — measured at this head: 43 pieces
+    for 42 blocks, one of them a fragment starting at the quoted header.
     """
     starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
     # `pairwise` over the spans plus the end offset — the spans are DELIBERATELY
@@ -1763,7 +1764,7 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     head ``7e6baffc5d``: 11269 characters against 11375 for
     ``_block_bodies(...)[0]``, and the two were not equal. Equality (header
     included) is the contract below; nothing else in the file would have caught a
-    revert, because 0 of 40 headers carry a citation at this head, so every
+    revert, because 0 of 42 headers carry a citation at this head, so every
     citation verdict is unchanged either way.
     """
     changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
@@ -1788,7 +1789,7 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     # become false while the extent pin stayed green.
     assert sum(1 for block in blocks
                if _CITATION_RE.search(block.split("\n", 1)[0])) == 0, (
-        "a block's HEADER line now carries a comment citation, so the `0 of 40 "
+        "a block's HEADER line now carries a comment citation, so the `0 of 42 "
         "headers cite` justification the wider extent rests on is FALSE — restate "
         "that claim. (The citing COUNTS are measured live by the citation pin, so a "
         "header citation on an already-citing block does not move them, and this "
@@ -1834,7 +1835,8 @@ def test_the_lifecycle_clause_extraction_ignores_the_rest_of_the_row() -> None:
         "the compared span's start moved — the SCOPE paragraph and this file's "
         "residual claim are written against this endpoint")
     assert OBJECT_CLAUSE_END == (
-        "Pack-declared kinds validate against their own declared words.**"), (
+        "Pack-declared kinds validate against their own declared words, which become "
+        "their pipeline stages rather than a wider status list (#11824).**"), (
         "the compared span's end moved — the SCOPE paragraph and this file's "
         "residual claim are written against this endpoint")
     clause_at = status_line.index(OBJECT_CLAUSE_START)
@@ -1886,7 +1888,7 @@ def test_the_lifecycle_clause_extraction_ignores_the_rest_of_the_row() -> None:
 def test_the_4_3_status_lifecycle_clause_must_be_quoted_verbatim_by_some_changelog_block() -> None:
     """A changelog that quotes a sentence the model does not carry is a false record.
 
-    ``docs/ONTOLOGY.md:41`` and ``ONTOLOGY-CHANGELOG.md:32`` both require
+    ``docs/ONTOLOGY.md:41`` and the changelog's own CRITICAL RULE both require
     *explicit approval of the exact changes*, and the approval is of **exact
     text** — so any block that quotes the §4.3 lifecycle sentence must quote the
     sentence the model carries, and a release that CHANGES that sentence must
@@ -1903,7 +1905,8 @@ def test_the_4_3_status_lifecycle_clause_must_be_quoted_verbatim_by_some_changel
     is one span of one cell: ``_landed_object_lifecycle_clause`` extracts the §4.3
     ``status`` row from ``OBJECT_CLAUSE_START`` (*"**Core Object types accept"*)
     to ``OBJECT_CLAUSE_END`` (*"Pack-declared kinds validate against their own
-    declared words.**"*). It is NOT "§4.3 may not change": every other cell of
+    declared words, which become their pipeline stages rather than a wider status
+    list (#11824).**"*). It is NOT "§4.3 may not change": every other cell of
     that same row, and every other row of §4.3, is INVISIBLE to this comparison —
     a lane can rewrite the cell's opening sentence or the ``supersededBy`` row and
     this pin stays green, while ``docs/ONTOLOGY.md:41``'s CRITICAL RULE requires
@@ -1965,8 +1968,8 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     Finding 1 of #12089: the sibling pin's SCOPE paragraph offered *"3 of 39 blocks
     cite a comment id, and v3.33 — the block that landed `D2 — A` for this very
     question — cites none"* as the evidence for narrowing a gate's scope. Measured with
-    this module's own tools the count is **4 of 40**, and that block DOES cite — the permalink
-    ``#issuecomment-5619843002`` (``docs/ONTOLOGY-CHANGELOG.md:247``):
+    this module's own tools the count is **6 of 42**, and that block DOES cite — the permalink
+    ``#issuecomment-5619843002`` (v3.33's issue-#11824 block, ``docs/ONTOLOGY-CHANGELOG.md:365``):
     the citing versions are listed below, one entry per block, and the sentences that
     quote them are checked by this pin. Both halves
     of the sentence were wrong, in a file whose subject is removing unverified
@@ -2030,7 +2033,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # ⛔ WHITESPACE IS NORMALISED BEFORE MATCHING, in both the scan text and the
     # docstring: markdown line wrapping is not part of a fact, and a scan that
     # cannot see a re-wrapped sentence reds with a message denying the prose says
-    # what it does (measured: re-wrapping `**4 of 40**\n blocks cite a comment id`
+    # what it does (measured: re-wrapping `**6 of 42**\n blocks cite a comment id`
     # produced "must appear exactly ONCE … found 0", with no second copy anywhere).
     module_source = re.sub(
         r"\s+", " ", Path(__file__).read_text(encoding="utf-8"))
@@ -2318,7 +2321,8 @@ def test_every_declared_sweep_arm_refuses_a_stale_restatement() -> None:
     wrong_ordinal = "second" if lands_first else "first"
     # ⛔ A NUMERATOR THAT IS STALE IN BOTH DIRECTIONS: `k + 1` collides with the
     # complement when `k + 1 == n - k`, i.e. `2k + 1 == n` — a collision only an ODD
-    # block count can produce. At 40 blocks the equation has no integer solution, so
+    # block count can produce. With 42 blocks and 6 citing, `k + 1` cannot collide
+    # with the complement — `2·6 + 1 = 13 ≠ 42` — so
     # the fixture below is a deliberate construction rather than a state this file
     # reaches; what it pins is that the arm rejects a stale numerator in EITHER
     # direction, which is as true of a hand-built pair as of a real one.
@@ -2547,7 +2551,7 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
     # ⛔ THE STATED PAIR IS RE-ASSERTED HERE (review finding, measured). The bold arm
     # in `_assert_no_stale_citation_claim` accepts BOTH true pairs — the citing count
     # and its complement — so if the pin's own `stated` assertion were deleted, a
-    # docstring claiming 36 of 40 blocks cite a comment id (4 do) would pass it.
+    # docstring claiming 36 of 42 blocks cite a comment id (6 do) would pass it.
     # Measured: deleting that assertion plus editing the sentence left 57 passed. The
     # sibling's pair is read from its docstring and compared against the block counts
     # the pin itself handed to the sweep arm.
@@ -2576,8 +2580,8 @@ def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
                 "refuses a stale pair)")
         # ⛔ AND THIS PIN'S OWN DOCSTRING, WHICH THE BOLD ARM CANNOT REFUSE EITHER
         # (review finding, measured). `allowed_bold` accepts the citing count AND its
-        # complement in ANY position, so changing this docstring's `count is **4 of
-        # 40**` to `**36 of 40**` — a false claim, since four blocks cite — left the
+        # complement in ANY position, so changing this docstring's `count is **6 of
+        # 42**` to `**36 of 42**` — a false claim, since six blocks cite — left the
         # whole suite at 57 passed. The sentence makes a CITING claim (`the count is
         # <N of M>`), so the citing pair is what it must state.
         # ⛔ AND THE TWO ADJACENT CLAIMS ON THE SAME SENTENCE (review finding,
@@ -2909,8 +2913,8 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
     the next release that touches §4.5 (verified with a synthetic `v3.35`), and
-    the file's practice does not support the demand: **4 of 40** blocks cite a
-    comment id, so **36 of 40** cite none; citing versions: v3.34, v3.33, v3.33, v3.32
+    the file's practice does not support the demand: **6 of 42** blocks cite a
+    comment id, so **36 of 42** cite none; citing versions: v3.37, v3.36, v3.34, v3.33, v3.33, v3.32
     — one entry per block, the first of the two v3.33 entries being the block
     that landed `D2 — A`. An unconditional demand reds a legitimate release that
     changes something else. (Measured with this module's own ``_block_bodies`` and
@@ -2924,10 +2928,10 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     patterned sentences are held to one copy each.) An earlier cut of this
     sentence said "3 of 39" and added that
     v3.33 — the block that landed `D2 — A` for this very question — *cites none*:
-    BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:209` (issue
-    #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` at
-    `:247` — an accepted form, enumerated below, in the sentence the old text
-    contradicted. So v3.33 is not evidence for the narrow scope; the 36 blocks that
+    BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:365` (issue
+    #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` — an
+    accepted form, enumerated below, in the sentence the old text contradicted.
+    So v3.33 is not evidence for the narrow scope; the 36 blocks that
     cite nothing are.)
     What the approval rule actually needs is that no
     release RECORDS owner-approved §4.3 text without naming where that approval
@@ -2950,7 +2954,7 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     # ``comment 1234567890``, ``comment `1234567890` ``, ``comment-id: 1234567890``,
     # and the permalink ``#issuecomment-1234567890``.
     # ⛔ THE PLURAL ``comments 1234567890`` IS REFUSED even though the file itself
-    # uses that style (v3.32, ``docs/ONTOLOGY-CHANGELOG.md:274``): accepting it
+    # uses that style (the v3.32 block): accepting it
     # re-opens the issue-number arm below. A reader who hits a red on that form is
     # looking at a deliberate refusal, not a broken pin — rewrite it in the
     # singular or as a permalink.
@@ -3754,3 +3758,70 @@ def test_seed_demo_graph_derives_its_session_id_from_the_declaration() -> None:
     body = ast.get_source_segment(src, fn) or ""
     assert "demo_session_id(org_id)" in body
     assert "session_demo_" not in body
+
+
+# ── a positional changelog pointer must still identify a block ─────────────
+
+
+_CHANGELOG_LINE_POINTER_RE = re.compile(r"ONTOLOGY-CHANGELOG\.md:(\d+)")
+
+
+def test_every_positional_changelog_pointer_lands_on_a_release_header() -> None:
+    """A positional pointer is only an IDENTITY if it lands on a block's header.
+
+    Successive review rounds on #13404 found the same class repeatedly: a line
+    pointer into `docs/ONTOLOGY-CHANGELOG.md` left un-re-based by a release that
+    inserted a block above it, and NOTHING reds when that happens, because this
+    suite resolves citations by CONTENT and a moved number still parses. The
+    measured worst case is why "just renumber it" is not enough: one pointer had
+    already been stale on `main` BEFORE the PR re-based it, so the arithmetic
+    that looked correct landed a second wrong number.
+
+    So the invariant is not "renumber carefully" — it is that a number must at
+    least still identify a BLOCK. A pointer that resolves to a release header
+    names something a reader can follow even after an insertion; a pointer that
+    resolves to a sentence inside some block (or to the CRITICAL RULE banner)
+    names nothing recoverable. The durable form is the one this repo already
+    records (`docs/00_index.md`: cited by SYMBOL, not by line, because a symbol
+    cannot re-stale): cite the release (``v3.NN``) or the permalink of the
+    comment the block quotes. A positional pointer is tolerated only where a pin
+    requires one for a block's IDENTITY (the SCOPE pin above reads
+    `docs/ONTOLOGY-CHANGELOG.md:<line>` beside the issue that block records), and
+    even there it must resolve to a release header.
+
+    ⛔ STATED LIMIT: this pin resolves any `ONTOLOGY-CHANGELOG.md:<line>` pointer, with
+    or without the `docs/` prefix — the pattern is not anchored to `docs/`, and
+    saying otherwise was false of it. A bare `:NNN` shorthand names no file, so
+    the module text alone cannot resolve it, and it is not read here; a line
+    pointer into a DIFFERENT document has its own resolver
+    (`tests/test_status_as_reported_single_declaration_10524.py` covers the
+    `ONTOLOGY.md` idiom pointer). Widening this arm to the shorthand needs the
+    enclosing sentence's file reference, not a bigger regex.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8").splitlines()
+    pointers = _CHANGELOG_LINE_POINTER_RE.findall(source)
+    # ⛔ A SWEEP THAT CAN FIND NOTHING MUST NOT PASS. `bad == []` is also what a
+    # module with NO positional pointer produces, so deleting the last guarded
+    # pointer would leave this pin green with nothing checked — and this very PR
+    # converts pointers away from the positional form, which is the edit that
+    # reaches that state. Fail closed instead, and name the alternative.
+    assert pointers, (
+        "no `docs/ONTOLOGY-CHANGELOG.md:<line>` pointer is left in this module, "
+        "so this pin checks nothing. Restate the claim by release or permalink "
+        "AND keep one positional pointer for a block's identity (the SCOPE pin "
+        "above needs one), or delete this pin deliberately.")
+    bad = []
+    for pointer in pointers:
+        line_no = int(pointer)
+        text = (changelog[line_no - 1]
+                if 0 < line_no <= len(changelog) else "")
+        if _BLOCK_VERSION_RE.search(text) is None:
+            bad.append(f":{pointer} reads {text.strip()[:70]!r}")
+    assert bad == [], (
+        "a positional pointer into the changelog no longer lands on a RELEASE "
+        "HEADER, so it identifies no block a reader can recover: "
+        + "; ".join(bad)
+        + ". Cite the release (`v3.NN`) or the permalink of the comment the "
+        "block quotes — a number that points at prose inside a block rots on "
+        "the next insertion and nothing else in this suite reds.")

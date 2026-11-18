@@ -2234,7 +2234,9 @@ question of whether `:Object`/`:Event` ever carry embeddings (§14.3 **V3**). **
 not reversed: its *"keep the limit in falkor high"* clause is narrowed to *complete through private-beta,
 windowed after M2*, and carries an `OVERRIDES:` line; its *"so we don't need to rush with enabling our queries
 to parse both falkor and postgres"* clause is what makes the dual-store **search** path adoptable. ⚠️ **`#7970`'s
-anchored-read cutover stays DEFERRED by §2.0** — the split does not sanction it.
+anchored-read cutover stays DEFERRED by §2.0** — the split does not sanction it. → **⛔ SUPERSEDED 2026-11-18: the owner
+rescinded that deferral; the cutover is ARMED. See this file's 2026-11-18 entry. The line above stands as the record of
+what that day's split concluded, not as the current status.**
 
 **The canonical document is `docs/architecture/SEARCH-ARCHITECTURE.md`**, registered in `docs/00_index.md`,
 which holds the method ruling, the executing surface of the move, the window policy and the five measurements
@@ -2432,7 +2434,8 @@ storage is decided"* — appear nowhere in `#13350`'s base (`git grep -F <phrase
 → 0 hits each — that commit is the merge of this PR, so its first parent is the base); an intermediate revision of
 this PR wrote them. The §14.3 heading's *"in force today"* is the same phrase as the six sites' uppercase *"IN FORCE
 TODAY"* in the other casing, absent from the base for the same reason (it entered the file at `d392ac79aa` itself:
-`git log -S "in force today"` → that commit), so the two casings are counted once — which is why this reads **four**.
+`git log -S "in force today" -- docs/architecture/STORAGE-ARCHITECTURE.md` → that commit), so the two casings are
+counted once — which is why this reads **four**.
 ⚠️ Run the same grep against the merged `origin/main` and the last of the four now hits, because
 the merge itself put it there — which is why the ref is named here instead of the branch name. What the net change
 corrects is the result, and one of the corrections below is **content, not wording**:
@@ -2497,3 +2500,199 @@ that distinction while this changelog still asserted it, and left the sites abov
 *and* unchallenged — a record contradicting its own record. The marker is restored; the operative rule is untouched:
 **while `#13220` is in flight, nothing may be removed and nothing may stop being written.** No measurement was
 re-read and no figure was retired.
+
+## §12.1c's latency verdict now states EVERY reading of the same unindexed read — pre-removal and post-removal — and the size dependence carries the conclusion rather than one number (`#13428`, 2026-11-18)
+
+**What was wrong.** §12.1c's comparison paragraph settled the latency question from **one** of the readings the
+document holds for **the same unindexed `:Object` read**, and that one is the cheapest of them:
+
+| reading | the unindexed `:Object` read | section |
+|---|---|---|
+| bare linear scan | **9.26 ms** | §12.1d (2026-09-24) |
+| the same read, app path (census) | **16.96 ms p50** (vs `point` 4.97 ms) | §12.1b (2026-09-24) |
+| the 2026-11-17 re-read | **34.45 ms p50**; **133.25 ms p50 / 634.50 ms p99** under load (7/60 windows over the 500 ms budget) | §14.3 V3 (`#13108`) |
+| the hop it is compared against | ~10–15 ms | §12.1c |
+
+The sentence read *"…is faster than the ~10–15 ms cross-store hop — **so at this size the scan wins on latency**, and
+what makes the case for the index is the SIZE dependence…"*. A categorical verdict drawn from the bare scan is
+**false of the two app-path readings the same document reports**, both of which are slower than the hop — and the
+document already states why they differ: §14.3 V3 prices **two REFUSED `queryNodes` round trips at ≈58 % of the
+unindexed read's store time**, which the bare scan does not pay.
+
+**What changed.** The paragraph now names all three readings with the date of each, attributes the app-path/bare-scan
+gap to the round trips §14.3 V3 already prices, and keeps the conclusion at **`⇒ What makes the case for the index is
+the SIZE dependence rather than today's number`** — the same conclusion, now supported by the readings that disagree
+about today rather than by the one that agrees.
+
+**⚠️ One attribution in the finding was corrected before landing, by re-deriving it.** The finding's ready-made patch
+attributed the ≈58 % pricing to **§12.1b** (`"§12.1b, which prices the two refused queryNodes round trips at ≈58 %…"`).
+`git show f462ad3acbb4:docs/architecture/STORAGE-ARCHITECTURE.md | grep -n "58 %"` returned exactly **one** hit **on that
+pre-PR base** — §14.3 V3's row, inside the 2026-11-17 read-time measurement (`#13108`): *"it also found that ≈58 % of
+the unindexed read's store time was two REFUSED queryNodes round trips"* — and §12.1b (*"Where the vectors actually
+sit"*) carries the `16.96 / 13.40 / 4.97 ms` pair with **no** round-trip pricing. ⚠️ **It returns TWO at this head:
+§14.3 V3's row, plus the §12.1c sentence `ae54df166d` added to `STORAGE-ARCHITECTURE.md`** — the hit the base
+lacked — which cites that same 58 %: the check was scoped to the base it was made on, and the sentence that quotes it
+is itself a hit — stated here rather than left to look like a command that still answers one. The landed sentence
+therefore attributes the 58 % to the 2026-11-17 re-read, which is where it is measured. The correction moves a
+citation, not a number.
+
+**⚠️ And the finding's own section number was corrected too.** The issue (#13428) titled and described this paragraph
+as **§12.2**'s. The paragraph is inside **§12.1c** — `### 12.1c ⭐ DECISION (RESOLVED 2026-11-07) — should the vector
+index live in FalkorDB at all?` — and §12.2 is a different section, `### 12.2 ⇒ The lever is "what gets an embedding"`;
+the DECIDED block that follows the paragraph is §12.1c's too. This entry states the measured location rather than
+propagating the issue's, because a changelog entry whose section number sends a reader to an unrelated lever is the
+one thing it exists to prevent. The issue carries a comment recording the correction.
+
+**⚠️ And every location above is cited by heading NAME, not by line number — a review finding, and the fix for its
+root.** Earlier revisions of this entry cited `:1241`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217` (plus
+§12.1b's `:1080–1168`). ⚠️ **Those cites failed in three different ways, and the cause is the same in all three:**
+`:1241` — the entry's FIRST version — was **correct in the tree it was written in** (its authoring commit `38d711bd5d`,
+built on `6264dc670c`, had §12.2 at exactly `:1241`), and **rotted before it landed**: the branch was then rebuilt on a
+later base (`f462ad3acbb4`, where `#13435` had added three more lines above and §12.2 sat at `:1237`, so this PR's own
+seven insertions put it at `:1244`) — the cite was wrong from the merge onward. `:1244` and `:1206–1211` were **correct in
+their own tree and then rotted** under this PR's own later insertions above them — the first arriving at §12.1d's *"the
+index earns very little today"* item, a LATENCY paragraph, in the entry whose whole purpose is to establish that §12.2
+is not the latency section, and the second ending one line before the clause it named. And `:1169`, `:1250`,
+`:1213–1217` and `:1080–1168` were **correct when written and still resolve in the tree this entry was written against**
+(`36cb300057`: §12.1b `:1080`, §12.1c `:1169`, §12.2 `:1250`) — ⚠️ **but they had rotted on `main` too by the time this
+entry was repaired**, because unrelated PRs added lines above them: at `8cc31bbb9e` the same headings stand at `:1102`,
+`:1191` and `:1272`, and the ledger clause at `:1235`. **That is this entry's own point rather than an exception to it**
+— which is why nothing above is cited by number any more. ⇒ **So the failure is
+not "some cites went stale" as a single event: it is that a line number is a function of every edit ABOVE it** —
+authored against a base that moved, correct-then-rotted under its own PR, or still correct until an unrelated PR on
+`main` added a line, are three outcomes of one cause, and which one a given writer gets is not something that writer can
+see. ⛔ **And NO citation guard ever resolved these
+pointers — which is why they stayed green.** `tests/test_docs_citation_refs.py` owns pointers into `docs/scoping/` and
+`docs/research/` only (its `_TARGET_SCOPE`), so a pointer into `docs/architecture/` is *skipped rather than checked* —
+its own `test_the_guard_ignores_targets_outside_its_declared_scope` asserts exactly that — and its **STATED LIMITS**
+record that a bare `:NN` continuation *"carries no document name, so it cannot be resolved in isolation and is NOT
+checked"*; where it does resolve a pointer it checks line PRESENCE alone (*"This is line PRESENCE, not semantic
+correctness"*). ⇒ **The green was evidence about nothing, not evidence that presence happened to hold** — the stronger
+form of this entry's lesson, and the reason the rule below is the fix rather than a tidier guard. The rule this repo
+already records is the fix — *"assertions by NAME — never by line number, and never by row ordinal. Both go stale the
+same way"* (`docs/architecture/S2-DECISION-SEAM.md`) — and it is what this entry now does.
+
+**⚠️ And the pre-removal readings are now labelled as such — a review finding, fixed before merge.** The first landed
+version said the app path *"pays"* the `queryNodes` round trips, present tense, and concluded *"both slower than the
+hop"* from that. §14.3 V3's own row says the opposite: *"≈58 % of the unindexed read's store time was two REFUSED
+`queryNodes` round trips, **which `#13108` removed**"* — and the code carries the removal (`search_engine.py`
+`_index_known_absent`, which skips the doomed attempt). The paired artifacts in `docs/research/2026-11-17-13108-dense-leg/`
+§5 measure what that read does once the round trips are gone: **34.78 ms → 13.26 ms p50** at 1,000 rows (−62 %) —
+*inside* the ~10–15 ms hop band the paragraph compares against — and **65.73 ms → 47.47 ms** at 8,000, still well
+outside it (⚠️ with §5's own qualification on that pair: it was measured against a draft of the fix rather than the
+merged commit; both arms `scan_fallback`, so the direction stands). So a sentence citing the removal's cost as the
+current app-path number would have made the paragraph's own claim ("the readings disagree, so no single number
+decides it") rest on a defect that no longer exists — and the clause written to replace it ("today's app-path number
+does not settle it either way") was itself corrected by the next review round, because it generalised the
+**1,000-row** reading to the paragraph's own ~8,000-object size. The readings are **kept with their dates**, the two
+app-path ones are marked **pre-removal**, the post-removal readings are stated at BOTH sizes — **and their own size
+dependence with them**, because a conclusion resting on the *pre-removal* pair alone would be the same error one level
+down: the paired artifacts give the post-removal read as **13.26 ms → 47.47 ms** from 1,000 to 8,000 rows (−62 % / −28 %
+against each arm's own pre-removal pair), so the SIZE argument holds on the shipped series as well as on the
+single-arm `34.45 → 56.88 ms` one. The conclusion is unchanged, and it now rests on the readings as they are rather
+than on one of them as it was.
+
+**What did NOT change.** The argument for option 2 is untouched **by this change**: it rests on the **ledger**
+(provisioned, unevictable RAM for a row the record already holds, §12.1a / §14.3 V1) and on the **size dependence**,
+and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
+sentence immediately following the changed ones — same paragraph, not the next one — was itself revised on `main` by
+`#13435` in the same window (it now says *“held for a row the record already has”* and carries the two-population
+clause; its greppable span is *"size is the ledger rather than the latency"* — `grep -c` → **1** in the design
+document, and short enough to paste back out of **this** file, whose own hard wrap breaks the long form — and it
+**continues** the sentence opening *"What holds at EVERY size is the ledger rather than the latency"* — split after
+"EVERY" by the hard wrap, which is why a contiguous span inside it is quoted rather than the opening words), and
+this rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
+ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
+though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
+record-first sequencing and its release boundary are untouched (§12.1c's DECIDED block, `#11395` comment `6956793300`).
+
+**Why it is recorded rather than silently reworded.** This is the class `#13395` exists to fix — a design document
+stating a conclusion its own measurements contradict — and the `#13395` review found it as a P2 **after** the sibling
+finding (§14.3's lead omitting the SERVING half, `#13422`) had already been fixed on main. The same shape recurred one
+sentence below the fixed one, from the other side; the record of that is the point.
+
+## 2026-11-18 — the anchored-read cutover's deferral is RESCINDED, and §2.0 states the armed cutover (`#7970`, `#8542`)
+
+**The decision.** The owner rescinded the deferral of `#7970`'s anchored-read cutover on 2026-11-18 (`#7970` comment
+[`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268)), which carries the
+`OVERRIDES:` line for the 2026-11-07 reading recorded in this file under *"2026-11-07 — V1 RESOLVED…"*. Its stated
+reason: the deferral existed for one constraint — the dual-store **search** path had to be adoptable *"without forcing
+the ordinary read path to parse both stores"* — and the built cutover satisfies that constraint itself, so the deferral
+now protects nothing. **The destination is unchanged** (2026-10-08: Postgres is the system of record, FalkorDB a derived
+hot cache); only the *timing* moves, and it moves the direction that ruling already chose — *the split happens BEFORE
+the first customer, because migration cost scales with customer count*.
+
+**What the design document now states, and where.** The deferral is gone as a status claim from three sites, each
+replaced by the target state:
+
+- **§2.0's marker** — the SPLIT block's third paragraph now states the cutover as ARMED, names the switch
+  (`TORTOISE_RECORD_SERVE` → `off` / `prefer` / `record`, `record_serve.MODES`), the one place its mode is parsed
+  (`tortoise/record_serve.py::serve_mode`) and the **two** doors that serve an anchored read today — the typed point read
+  (`record_serve.serve_point`, reached by `hosted_api.get_point`, by the MCP `tortoise_get_entity(id, type="point")`
+  door and by the SDK's `get_point(served_out=…)`) and the bare by-id entity union (`record_serve.serve_entity`,
+  `#13093`) — with the third read the registry marks `SERVED` while nothing in production consumes it named as exactly
+  that (`node-by-key`), and why `prefer` is the mode armed in production: it is the
+  one that MEASURES the migration, since every answer names the store that produced it (`servedFrom` /
+  `fallbackReason`). **`record` follows that count, never a date.** The `OVERRIDES:` line itself lives on the issue —
+  `#7970` comment [`6965853268`](https://github.com/daniel-ospina/tortoise/issues/7970#issuecomment-6965853268), where
+  AGENTS.md's rule puts it — and §2.0 carries a one-line pointer to it rather than a second copy. ⚠️ **§2.0 does
+  carry ONE bold `**OVERRIDES:**` line, and it is NOT this one:** it marks the *"keep the limit in falkor high"* clause
+  below, a different departure, which is why `grep -n "OVERRIDES:" docs/architecture/STORAGE-ARCHITECTURE.md` returns
+  several hits and cannot be used to check this. What is gone is the seven-line supersession essay and its quotation of
+  the retired sentence, because a dated *"was deferred, now it isn't"* re-telling is the narration the owner ruled out.
+- **§14.2's split marker** — the same status, stated there because that marker is where the engine's-role question is
+  answered and it had restated the deferral.
+- **§17.3's reader paragraph** — *"the node-naming read that will drive this in production is deferred by §2.0"* was
+  the stale twin of the same claim; the node-naming read IS `record_serve.serve_point` under the switch.
+
+**The state this records is not an intention.** `TORTOISE_RECORD_SERVE` is a live Fly secret armed `prefer`
+out-of-band (`.github/scripts/fly-managed-secrets.txt` → `fly-only:#13209`, whose ruling is on the issue and whose
+operating procedure is `docs/infra-runbook.md` §"Arming the READ path"). `off` is the shipped default and is
+byte-identical to the pre-`#7970` path; `record` answers from the record alone and raises on an unreachable record
+rather than reading an outage as an absence. Arming is an OWNER action — nothing in the code arms it and no deploy sets
+it — so this entry records a status the operator set, not code that ships a mode.
+
+**The three other documents that restated the deferral, and what each now says.** A contradiction across these is the
+thing this workstream exists to end, so each was reconciled explicitly rather than left to drift:
+
+- `docs/architecture/STORAGE-PICTURE-2026-11-17.md` — a **dated** picture (`d1bfef778f`, 2026-11-17), which keeps its
+  date and now carries a header note stating that one cell it reads has since moved, plus the two affected rows (the
+  read-doors row, and **D6**). D6 is the interesting one: *"point the read path at Postgres now"* is now **half
+  ORDERED and half refused** — the read path's move to the record IS the design; *"one store"*, i.e. dropping the cache,
+  still contradicts §2.0/§14.2, because FalkorDB is demoted, never dropped.
+- `docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` — §0.1's contradiction-test table and item
+  **N1**. The candidate *"serve reads from Postgres / cut over the read path"* is no longer excluded **by** a decision
+  it would reverse; it is a decision the owner has taken and a capability in the tree. N1 stays off the epic's critical
+  path as a SEQUENCING statement (arming `record` follows the measuring mode), and no longer as a deferral.
+- **This file's 2026-11-07 entry** — carries a forward pointer, not a rewrite: a changelog records what a day
+  concluded, so the sentence stays as that day's conclusion and is marked superseded rather than edited away.
+
+**What was deliberately NOT touched.** The deferrals that are about something else keep their words: the cache's
+completeness through private-beta (bounded after the search doc's M2), self-hosting as a cache-tier ops question
+(§12.2b lever 5, §15 M4), the stored-vs-derived edge question (owner 2026-09-23), and §15 M6's retention *goal* (as
+opposed to its measurement). None of them is this cutover, and collapsing them into one status would be the opposite
+of the fix.
+
+**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (16) — the class guard that scans
+`STORAGE-ARCHITECTURE.md` for issue-state claims, change narration and delivery state. ⚠️ **Read its coverage
+exactly: that vocabulary does NOT include a bare *"stays DEFERRED"*.** `DEFERRED` is deliberately outside
+`_STATUS_WORDS`/`_STATUS_LOWER` because this document legitimately defers two other things (the stored-vs-derived
+edge question, owner ruling 2026-09-23; and `#9213`'s restore-reason lane), so a `DEFERRED` arm would red on correct
+content — and the class check's arms are per-line, while the retired sentence wrapped. What pins this shape is
+therefore TWO arms, added by this change, in the one test
+`::test_the_storage_document_does_not_defer_the_anchored_read_cutover`: a **subject-scoped** arm that ties `DEFERRED`
+to *this* cutover in both word orders, and an **attribution-scoped** arm (`deferred BY §2.0`, `§2.0's deferral`) for
+the shape the third pre-fix site used — §17.3 named the read only by DESCRIPTION (*"the node-naming read that will
+drive this in production is deferred by §2.0"*), so the subject arm provably cannot see it. Both directions are
+fixtures in the test rather than prose: the subject arm is asserted NOT to match that sentence and the attribution arm
+is asserted to, and a bare `§2.0` was refused as a token because §12.2b's lever-5 sentence sits within 80 characters
+of one (also a fixture). **Measured on the pre-fix text (`origin/main` at `f462ad3a`): 3 sites — the subject arm sees 2
+of them, the attribution arm adds the third — and green here, so this shape is now guarded rather than merely absent.**
+`tests/test_extractor_v4_doc_citations.py` and
+`tests/test_extractor_v4_step_list_consistency.py` (38 together with the above — 16 + 2 + 20, measured), and the ten
+doc-cite files that read
+this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pin.py`,
+`tests/test_10853_session_source_prose.py`, `tests/test_7948_about_object_read_sites.py`,
+`tests/test_10000_source_prose.py`, `tests/test_10122_point_name_not_indexed.py`,
+`tests/test_11821_journal_vector_width.py`, `tests/test_7951_create_point_outbox.py`,
+`tests/test_7951_delete_point_outbox.py`, `tests/_about_call_time_census.py`).

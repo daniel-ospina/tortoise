@@ -287,7 +287,7 @@ its own scope (it decided nothing and created no index). The work the ruling ord
 the record-served dense leg through `record_vector.LABEL_SERVED`, the retirements, the arming — is
 `#13220`'s and is not this document's narration.
 
-## 2026-11-17 — the KEEP ruling's *status* words restated: its prohibition is today's operative rule, and the GRAPH-COPY reopen is recorded as the ruling that governs removal (`#13350`)
+## `#13350` — 2026-11-17: the KEEP ruling's *status* words restated: its prohibition is today's operative rule, and the GRAPH-COPY reopen is recorded as the ruling that governs removal
 
 Applies an owner instruction of 2026-11-17: the **INDEX** half stays *decided, implementation in flight — `#13220`*,
 and the 2026-11-10 KEEP ruling's prohibition — `:Object`/`:Subject` keep their stored embedding, and no pass may
@@ -321,3 +321,72 @@ ruling reopens the KEEP half — for the GRAPH COPY only … `OVERRIDES:` record
 with a sentence that kept the condition but dropped the reopen's status, its scope and its `OVERRIDES:` citation.
 The reopen's statement is restored with all three. This entry is the record that the wording moved **and that the
 `:Event`/`:Source` permission sentence changed with it.** **No measurement was re-read and no figure was retired.**
+
+## `#13422` — 2026-11-18: the `:Object`/`:Subject` read half landed, and the cage came from the record's FOLD rather than its view
+
+**What changed.** `record_vector.LABEL_SERVED` gained `object` and `subject`, and the dense leg applies `#689`'s
+terminal-status exclusion to them. The estimate this document carried — that the gate opened only when `#10193`
+(the app role's SELECT on the procedural views) AND `#13335` (the views' two-value vocabulary) both closed — was
+**wrong, and wrong in a way worth recording**: it named the SQL VIEW as the only record-side path to a status, so it
+made two open issues look like preconditions of a read that never touches them.
+
+**Why the view was the wrong path.** `#13335` is a real defect in `public.object_current_status`, which folds
+`superseded_by`/`superseded_at` and nothing else. But the record's status fold is not the view:
+`cache_projection.apply_event_stream_folds` replays `public.journal_event` — the record's own append-only truth,
+on layer tables that carry their own SELECT policy, so no grant is needed — through `status_folds`' vocabulary and
+the same per-event terminal latch the live graph fold applies, including the `EntityMutated` `state.status` carrier
+`#9974` restored. All four terminal words were therefore expressible **before either issue closed**.
+
+**What the leg does now.** `record_vector._folded_terminal_keys` builds the label's `RecordNode`s through
+`cache_projection.node_from_row` (which applies `DERIVED_FROM_RECORD`'s carrier fold) and folds the tenant's
+status-bearing events over them, then the kNN excludes the fold's terminal keys by `t.<id_column> <> ALL(%s)`. The
+same prefetch returns the shortfall assertion's `available` figure, so the cage costs two extra statements and not a
+fourth. Past `_FOLDED_TERMINAL_KEY_BUDGET` keys the leg RAISES `RecordVectorDeclined`, so the caller names the
+fallback (`#4999`) and hands the graph branch only what is left of the read (`#11691`); a plain `None` — the
+contract's *"no record table serves this label"* — is taken silently, which is why the first cut was wrong.
+
+**What the review changed, and why it is recorded here rather than tidied away.** Three of the first cut's claims were
+wrong in ways that only a reviewer could see (`#13466`):
+
+- the prefetch was `SELECT *`, which materialises `embedding` (jsonb, **4.6–7.7 KB/row** for a 384-element array,
+  measured with `pg_column_size`) and the generated `embedding_vec` (a FIXED `vector(384)`, **1,544 B/row**) that the
+  fold never reads. **Measured: ~2.0 s on 8,000 `object` rows**, against **~0.19 s** for the payload-free projection
+  (27–47 ms of it the SELECT, the rest the fold) — so at the folded arm's per-statement share the leg could never
+  answer on any tenant of realistic size, while presenting a bind budget it could never reach. ⚠️ Three DIFFERENT
+  measurements, kept apart because a summary that merges two of them is how the wrong cost model survived review
+  twice: the 8,000-row totals are the lane's, the per-row byte figures are the reviewer's and were reproduced on a
+  second container (`vector(384)` = 1,544 B exactly; jsonb 4,616 B short-repr → 7,688 B full precision, with the
+  lane's real rows at 4,845 B);
+- the leg issues **three** data statements against the column arm's two, so dividing the read budget by
+  `RECORD_LEG_STATEMENTS_PER_READ` let it spend the WHOLE read and hand the graph branch a floored `1 ms` — the
+  `#11691` reserve silently did not hold for these two labels. The folded arm now divides by one MORE than it issues;
+- the over-budget decline returned `None`, which the caller takes SILENTLY (it is the contract's *"no record table
+  serves this label"*), so the fallback was recorded as a plain `scan` and the graph branch got the full budget again
+  (`#4999`, `#11691`). It now raises `RecordVectorDeclined`.
+
+⛔ **The residual that is still true, and the reason this is a read half rather than the whole answer** — restated,
+because the first version of this paragraph named the wrong mechanism (`#13466` cycle 2, P3): the fold's Python work
+costs ~0.14 s on 8,000 nodes and is bounded by **no CLOCK in the leg** — `statement_timeout` bounds STATEMENTS, and
+nothing in `record_vector` divides the work BETWEEN them by time. What bounds it is COUNT: past
+`_FOLDED_PREFETCH_ROW_BUDGET` rows or `_FOLDED_PREFETCH_EVENT_BUDGET` journal events the leg DECLINES
+(`RecordVectorDeclined`, a NAMED `scan_fallback`) rather than folding a truncated stream, so an overrun has **two**
+observables and the count bound is the first of them — naming only the collector's `timeout` is how a diagnoser is
+sent looking for a trace they will never see. At the measured 0.19 s inside a 500 ms read the leg ANSWERS, well
+inside both counts; a tenant large enough for the fold to overrun what is left of the read while staying UNDER the
+counts does not get a `scan_fallback` but the
+fused read's collector expiring on its own deadline and DISCARDING the rows as `timeout` — the `#11691` outcome, one
+layer up. That second, count-under sub-case is the residual. The cost is removed by materialising the fold; narrowing
+the node read per target is exactly where a missed
+path becomes a `#689` leak, so it is filed rather than attempted.
+
+**What did NOT change, and must not be read as changed.** `cutover_armed()` is still OFF by default, so **the graph
+leg answers for these two labels today** exactly as it did; the graph copy is still written and still read, because
+removing it is the second step of the `#11395` comment `6956793300` ruling (record first, graph removal second, never
+the same release) and is not this issue. `#13335` and `#10193` remain open on their own merits — closing them removes
+this leg's prefetch COST, not its CORRECTNESS.
+
+**In `SEARCH-ARCHITECTURE.md`:** the read-half paragraph (restated as paid, with the residual named rather than
+retired), the `Object` and `Subject` rows of the per-label gate table, and the arming-order sentence that called the
+last two *"gated on the status fold"*. **No measurement was re-read and no figure was retired.** The live arm is
+`tests/test_11642_vector_move_live.py` (the file `test-record-postgres` runs) on `pgvector/pgvector:pg16`; the
+structural pins are `tests/test_13422_object_subject_dense_leg.py`.

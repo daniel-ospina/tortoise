@@ -399,6 +399,19 @@ def _worker_stem_embedded_probe(results: list, path: str) -> None:
 # lane. (Post-P3 reconciliations grew the set past 17 — graph-integrity,
 # eval_* and longmem stems below are each dated additions.)
 TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
+    # #13417: the counter/backfill loop drives real DERIVED-entity folds and the
+    # backfill against its OWN embedded `FalkorProjection` per test
+    # (`tempfile.mkdtemp` + `graph_name=`), so a URI-set lane would redirect that
+    # construction into the shared container and grade a graph shared with every
+    # other run — the measured shape recorded on #5084. Mirrors the ``carve_out``
+    # row in ``config/ci-surfaces.yml``; a stem in only one of the two is the
+    # silent hole ``test_carve_out_mirrors_test_no_redirect_stems`` catches.
+    "test_13417_vectorless_rows",
+    # #13447: the DB-free half of the derive-and-encode seam's proof — a lambda stands in for
+    # `compute_embedding`, so nothing on that file needs a connection, a graph or a model.
+    # Mirrors the ``carve_out`` row in ``config/ci-surfaces.yml``; a stem in only one of the
+    # two is the silent hole ``test_carve_out_mirrors_test_no_redirect_stems`` catches.
+    "test_13447_derived_embedding_seam",
     # #4921: the construct-lock pin builds TWO real embedded servers (one per
     # arm) under a forced check-then-act interleave and skips under the docker
     # redirect. Its stem is already in config/ci-surfaces.yml's carve-out list,
@@ -731,6 +744,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # tests/test_ci_selection.py pins the equality) and DECLARED in
     # tests/test_markers.py::test_no_redirect_stems_registry_exact.
     "test_13224_cold_embedder_write_bound",
+    # #13528: the READ-side twin — a read must not spend its budget acquiring the
+    # embedder (`EmbeddingModel.await_read_ready_reason`). Every case builds a
+    # `TortoiseSDK(<tmp_path>)` path store, so the load-bearing reason is the
+    # REDIRECT: a URI-set lane would discard the path and grade a graph this file
+    # never seeded. Registered in all THREE homes — config/ci-surfaces.yml
+    # `carve_out:`, TEST_NO_REDIRECT_STEMS and
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact.
+    "test_13528_read_never_blocks_on_embedder",
 )
 
 _HAS_FALKOR: bool | None = None

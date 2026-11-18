@@ -1,3 +1,14 @@
+---
+title: "Capstone #13038 — the state model measured by customer value"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-17
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#11824, #13038, #13303, #12855, state/lifecycle model, docs/plans/2026-11-15-state-lifecycle-and-pipelines.md, tools/capstone_state_value.py, narrative.json"
+---
+
 # Capstone #13038 — the state model measured by customer value
 
 **Parent:** #11824 · **Design of record:** `docs/plans/2026-11-15-state-lifecycle-and-pipelines.md`
@@ -197,6 +208,13 @@ produced is asserted beyond that:
   name the successor from the replaced record's own structure" would fail Q3; the question as a
   customer asks it is satisfied. This is recorded as an observation, not used to move the verdict —
   and it is why Q3 is the row to re-read first when "change is legible" is next claimed.
+  ⚠️ **The wording above is the record of THAT run, not the signal's current text:**
+  `names-its-successor` read `bool(supersededBy)` on a Point, whose successor is the `CORRECTS`
+  edge, so it printed `False` for every superseded Point — a `False` that meant "not looked for".
+  The signal now reads the carrier the FAMILY uses (the id carrier when the read serves one, the
+  `supersededBy` name, else the successor's own `supersedes` row) and says which answered, so a
+  re-run prints the true fact on this row. The committed boards are left as they were produced —
+  they are a record of a past run, not a claim about the current instrument.
 
 ---
 
@@ -245,3 +263,13 @@ owner already named in the table above.
 
 The instrument is the arbiter for that last row: **if a slice moves the drift test and not the
 scoreboard, the scoreboard wins.**
+
+**Measured 2026-11-18 — the Q5/Q6 rows moved (#13302).** The ended-scope read shipped on the SDK
+read (`tortoise_fts_query(..., ended_scope=True)`), and the instrument's Q5 and Q6 recipes now ask
+it. Re-run on this box, same fixture, one fresh reader per run: **before `3 right · 3 wrong` →
+after `5 right · 1 wrong`**. Q5 and Q6 are `right`; Q2–Q4 hold; **Q1 stays `wrong`** (its cause is
+*reach*, a different gap — an `entity_type`-scoped read never names an Object commitment unless the
+caller guesses its name — and no lifecycle slice moves it). Both boards, both readers' verdicts and
+the exact commands are in [`13302/`](13302/README.md); this bundle's own four files are untouched,
+because the baseline above is the FIRST scoreboard and a later run must not overwrite the record of
+what it measured.

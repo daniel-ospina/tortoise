@@ -8,7 +8,7 @@ updated: 2026-11-12
 subjects.team: epistemic-team
 issue: "#11901"
 aboutSubjects: Tortoise S3 link-before-create prior, entity resolution candidate generation, extractor v2 write path
-aboutObjects: STORAGE-ARCHITECTURE.md §14.3 V3, SEARCH-ARCHITECTURE.md V1, research-brief #2730 entity attachment, #11395 KEEP ruling
+aboutObjects: "STORAGE-ARCHITECTURE.md §14.3 V3, SEARCH-ARCHITECTURE.md V1, research-brief #2730 entity attachment, #11395 KEEP ruling"
 ---
 
 # Candidate recall@k for the capture-time noun-matching prior

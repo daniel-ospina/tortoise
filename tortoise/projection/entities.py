@@ -4856,14 +4856,21 @@ class _EntityHandlers:
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
         embedding = None
         try:
-            from tortoise.embeddings import encode_for_row
+            # ⛔ THE SEAM (#13447), not `embeddings.encode_for_row` directly:
+            # `derived_embedding.encode` IS that call — same #5008 gate, same
+            # #13224 `bounded`, same #4280 width — plus the per-write memo that
+            # makes the RECORD's identical encode (`record_writer.
+            # derived_embedding_columns`, #13220) a second FREE call instead of a
+            # second model call. Both halves run inside one
+            # `derived_embedding.write_scope()` opened by the live door.
+            from tortoise import derived_embedding
             # #13224: `bounded=True` — a DERIVED entity vector, recomputed from
             # the payload text on replay, so it is repairable from the graph and
             # a live request may decline to wait for a cold embedder. Scoped
             # here and to the three sibling entity folds ONLY: a Point's vector
             # is record truth (#5004) and is never dropped. The bound is
             # suppressed under a replay scope, so a rebuild stays deterministic.
-            embedding = encode_for_row(
+            embedding = derived_embedding.encode(
                 name, self.required_embedding_dim, bounded=True)
         except Exception:
             pass
@@ -5049,9 +5056,11 @@ class _EntityHandlers:
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
         embedding = None
         try:
-            from tortoise.embeddings import encode_for_row
+            # ⛔ THE SEAM (#13447) — see `_upsert_subject` for the scope and for
+            # why the record's identical encode is free rather than a second call.
+            from tortoise import derived_embedding
             # #13224: DERIVED vector — see `_upsert_subject` for the scope.
-            embedding = encode_for_row(
+            embedding = derived_embedding.encode(
                 name, self.required_embedding_dim, bounded=True)
         except Exception:
             pass
@@ -5443,9 +5452,20 @@ class _EntityHandlers:
         if not ev.get("suppress_embedding") and st and st.strip():
             # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:
-                from tortoise.embeddings import encode_for_row
+                # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The TEXT here is `st`
+                # (`_build_search_text(title, summary, topics)`), and it is ALSO the
+                # record's text: `#13412` LANDED in main and the seam's
+                # `DocumentCreated` rule CALLS this same function
+                # (`derived_embedding._document_embedding_parts`), so the record column
+                # and this fold compose ONE string and the text-keyed memo serves this
+                # second leg at zero model calls — a document write pays ONE encode,
+                # like every other label. ⚠️ This comment said the opposite until
+                # review cycle 8 (P3): it was written while `#13412` was still unlanded,
+                # the re-cut made it false, and it then contradicted the seam module's
+                # own `DocumentCreated` paragraph ("the document pair dedupes for free").
+                from tortoise import derived_embedding
                 # #13224: DERIVED vector — see `_upsert_subject` for the scope.
-                embedding = encode_for_row(
+                embedding = derived_embedding.encode(
                     st, self.required_embedding_dim, bounded=True)
             except Exception:
                 pass
@@ -5744,7 +5764,8 @@ class _EntityHandlers:
                 self._create_about_edges(did, ent)
 
     def _upsert_event(self, event: dict, *, guard: bool = False,
-                      guard_source_file: str | None = None) -> "tuple[str, bool] | None":  # noqa: UP037
+                      guard_source_file: str | None = None,
+                      _wrote: list[bool] | None = None) -> "tuple[str, bool] | None":  # noqa: UP037
         """MERGE Event node with all ONTOLOGY §3.1 properties.
 
         Handles both nested ({type:EventRecorded, event:{eventId:...}}) and
@@ -5773,6 +5794,15 @@ class _EntityHandlers:
 
         Unparameterized calls (legacy ingest_corpus, rebuild replay) execute
         the plain MERGE path byte-identically (SC4) and return None.
+
+        ⛔ ``_wrote`` EXISTS BECAUSE THIS RETURN VALUE CANNOT SAY IT (#12943
+        review cycle 6, P1). The plain path returns ``None`` AFTER
+        ``_event_plain_merge`` has written, so ``None`` means both "no statement
+        was issued" (the unwritable-`eventId` guard below) and "the Event MERGEd,
+        plain path". A caller that treated a falsy return as "nothing landed"
+        therefore skipped counting EVERY landed event. This list is the same
+        convention ``FalkorProjection._apply_event`` already threads: a caller
+        passes ``[True]`` and any guard that issues nothing sets it to ``False``.
         """
         inner = event.get("event", event)  # unwrap nested format
         eid = inner.get("id") or inner.get("eventId")
@@ -5780,6 +5810,8 @@ class _EntityHandlers:
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(eid):
             _log_identity_skip("Event", eid, "eventId (MERGE key)")
+            if _wrote is not None:
+                _wrote[0] = False     # no MERGE key ⇒ no statement
             return
         # Embedding: the journaled EventRecorded payload carries the live
         # value (epic #900 cycle-18/19 — the sanctioned replay carrier for the
@@ -5808,9 +5840,13 @@ class _EntityHandlers:
             if event_content.strip():
                 # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
-                    from tortoise.embeddings import encode_for_row
+                    # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The text is
+                    # this fold's own `" ".join(filter(None, [...]))`, which is
+                    # byte-identical to the record's `EventRecorded` rule, so a
+                    # live event write dedupes (1 model call, measured).
+                    from tortoise import derived_embedding
                     # #13224: DERIVED vector — see `_upsert_subject` for the scope.
-                    embedding = encode_for_row(
+                    embedding = derived_embedding.encode(
                         event_content, self.required_embedding_dim, bounded=True)
                 except Exception:
                     pass

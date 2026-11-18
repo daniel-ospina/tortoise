@@ -977,6 +977,40 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
 #: `nothing consults it` (§4.3, `#5333`). The claim is about READS of the name.
 TRANSITION_MAP = "_ALLOWED_TRANSITIONS"
 
+#: The consumers design §4.3 (G5) describes, ONE entry per read site, matched
+#: against the READING LINE'S SOURCE TEXT rather than a line number — this tree
+#: has spent rounds re-pointing rotted `file.py:NNNN` numbers (#12184), and a pin
+#: whose identity is a number measures the insertion above it, not the claim.
+#:
+#: * `#9649` — `_update_entity`'s Point `status` arm asks the map for the DECLARED
+#:   transition, which is what refuses `draft -> archived` and a terminal
+#:   `-> live`;
+#: * v3.37 / `#11824` S0 — `_LIVE_DECLARED_TEXT` RENDERS `live`'s declared target
+#:   set for the refusal messages instead of keeping a hand-written copy of it.
+#:   It reads the SAME Point table and answers the same question (which status a
+#:   POINT may become), for prose rather than for a write. It is why the pin is
+#:   two and not one: the passage's *"no longer inert"* account has to name every
+#:   consumer, and an unstated one is what made the pre-#9649 wording false.
+DOCUMENTED_READS = (
+    "_ALLOWED_TRANSITIONS.get(_stored_meaning)",
+    '_LIVE_DECLARED_TEXT = "{" + ", ".join(sorted(_ALLOWED_TRANSITIONS["live"])) + "}"',
+)
+
+
+def _read_line_texts(reads: list[str]) -> list[str]:
+    """The source line each ``rel:line`` read site points at, stripped.
+
+    ``_transition_map_sites`` scans ``tortoise/``, so every ``rel`` here is
+    relative to that directory. Resolving the text is what keeps
+    ``DOCUMENTED_READS`` an identity pin rather than a line-number pin.
+    """
+    texts: list[str] = []
+    for site in reads:
+        rel, _, lineno = site.rpartition(":")
+        body = (ROOT / "tortoise" / rel).read_text(encoding="utf-8").splitlines()
+        texts.append(body[int(lineno) - 1].strip())
+    return texts
+
 
 def _transition_map_sites(
     root: Path, symbol: str = TRANSITION_MAP
@@ -1010,7 +1044,7 @@ def _transition_map_sites(
     return definitions, reads
 
 
-def test_the_transition_map_the_doc_cites_has_exactly_one_documented_reader() -> None:
+def test_the_transition_map_the_doc_cites_has_exactly_the_documented_readers() -> None:
     """The doc's account of `_ALLOWED_TRANSITIONS`, executed — INVERTED by #9649.
 
     Until #9649 the pin was `reads == []`, because the design doc said *"nothing
@@ -1019,15 +1053,23 @@ def test_the_transition_map_the_doc_cites_has_exactly_one_documented_reader() ->
     consults the map for the declared transition, which is what makes the door
     refuse `draft -> archived` and a terminal `-> live` (#9649). The pin is still
     the CLAIM, in both directions — the passage now says the map *"is no longer
-    inert"* and scopes it to POINTS, so this reds if the consumer is removed (the
-    doc would overclaim a mechanism this tree no longer has) or if a SECOND
-    consumer appears (the passage would under-describe it, and, more to the point,
-    a reader outside `sdk.py` could consult the Point map for a non-Point label).
+    inert"* and scopes it to POINTS, so this reds if a DOCUMENTED consumer is
+    removed (the doc would overclaim a mechanism this tree no longer has) or if a
+    FURTHER consumer appears (the passage would under-describe it, and, more to
+    the point, a reader outside `sdk.py` could consult the Point map for a
+    non-Point label).
+
+    **TWO documented consumers since v3.37** (`DOCUMENTED_READS`): #9649's
+    transition arm, and the `_LIVE_DECLARED_TEXT` renderer that derives `live`'s
+    declared target set for the refusal messages instead of keeping a third
+    hand-written copy of it. The second is a READ of the same Point table for
+    prose, so it is announced in §4.3 rather than left for the next reader of
+    `sdk.py` to find — the count is pinned against the passage, not left free.
 
     The scan covers **`sdk.py` too**, and it counts READS rather than textual
-    mentions. Both halves are load-bearing: the map and the verb that consults it
-    (`_update_entity`) live in the same file, so a guard that skipped the
-    definition's own file could not see the only consumer.
+    mentions. Both halves are load-bearing: the map and the verbs that consult it
+    (`_update_entity`, the refusal-message renderer) live in the same file, so a
+    guard that skipped the definition's own file could not see them.
     """
     definitions, reads = _transition_map_sites(ROOT / "tortoise")
     assert definitions, (
@@ -1039,17 +1081,32 @@ def test_the_transition_map_the_doc_cites_has_exactly_one_documented_reader() ->
         "`_update_entity`'s Point `status` arm to it, so the design doc's 'no "
         "longer inert' is now the stale half (#5333)."
     )
-    # ⛔ Review F10-2: the test's NAME and its docstring both promise "exactly
-    # ONE documented reader" and that a SECOND consumer reds — but `assert reads`
-    # only says ≥1, so a second reader INSIDE `sdk.py` (the one shape the
-    # `sdk.py:` prefix check below cannot catch) stayed green. A second Point-table
-    # reader is exactly the hazard the passage is written against (#5333).
-    assert len(reads) == 1, (
-        f"`{TRANSITION_MAP}` gained a second production reader ({reads}) — the "
-        "map is ONTOLOGY §5's POINT table; another consumer (especially one that "
-        "could apply it to a non-Point label) must update this pin and the design "
-        "doc together (#5333/#9649)."
+    # ⛔ Review F10-2: the test's NAME and its docstring both promise a pin on the
+    # NUMBER of documented readers — but a bare `assert reads` only says ≥1, so an
+    # extra reader INSIDE `sdk.py` (the one shape the `sdk.py:` prefix check below
+    # cannot catch) stayed green. An unannounced Point-table reader is exactly the
+    # hazard the passage is written against (#5333). The pin is now TWO-STAGE:
+    # the count must equal the number of consumers the passage describes, and each
+    # of those consumers must still be one of the reads — so a documented reader
+    # cannot be swapped for an undocumented one while the count stays green.
+    assert len(reads) == len(DOCUMENTED_READS), (
+        f"`{TRANSITION_MAP}` has {len(reads)} production reader(s) ({reads}) but "
+        f"design §4.3 describes {len(DOCUMENTED_READS)} — #9649's "
+        "`_update_entity` Point `status` arm and the `_LIVE_DECLARED_TEXT` "
+        "renderer (`DOCUMENTED_READS`). A FURTHER consumer (especially one that "
+        "could apply the Point table to a non-Point label) is a design change: "
+        "update this pin and the design doc together (#5333/#9649/#11824)."
     )
+    read_texts = _read_line_texts(reads)
+    for documented in DOCUMENTED_READS:
+        holders = [text for text in read_texts if documented in text]
+        assert len(holders) == 1, (
+            f"the documented consumer `{documented}` no longer reads "
+            f"`{TRANSITION_MAP}` — it holds {len(holders)} of these reads: "
+            f"{read_texts}. Design §4.3 still describes it, so either restore the "
+            "consumer or update the passage and this pin together "
+            "(#5333/#9649/#11824)."
+        )
     assert all(site.startswith("sdk.py:") for site in reads), (
         f"`{TRANSITION_MAP}` gained a reader outside `sdk.py` ({reads}). The map "
         "is ONTOLOGY §5's POINT lifecycle table and the consumer that must ask it "

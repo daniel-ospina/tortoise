@@ -1,0 +1,562 @@
+"""#13418 + #13412 — the RECORD's derivation for `:Source` and for a document.
+
+Two defects, one seam, one table (`record_writer._RECORD_EMBEDDING_TEXT`):
+
+1. **#13418 — a plain `:Source` derived no vector at all.** The table had no
+   `SourceCreated` key, so a source's record row never received one while the
+   label IS served from the record (`record_vector.LABEL_SERVED["source"]`,
+   `document_kind IS NULL`) — i.e. the label the dense leg answers from Postgres
+   had no writer on that leg. The graph fold computes no vector for a plain
+   `:Source` either (`_upsert_source` has no embedding write), so this is not a
+   two-store disagreement: it is an absence on BOTH sides that the record now
+   fills, per §14.3 V2 (`:Source` gets a vector, in Postgres).
+
+2. **#13412 — a document's two stores encoded DIFFERENT text.** After #8419/PR
+   #13290 the graph composes the document vector's input from
+   `_build_search_text(title, summary, topics)` and writes it to `s._searchText`
+   (`projection/entities.py:5423`, `:5530`), while the record still folded
+   `title + content` — two different texts, two different vectors, for one row.
+   `content` is not even a graph property post-D10 (`_DOC_RETIRED_KEYS`).
+
+3. **The VERSION TRANSITION moved the text and left the vector (review F1).**
+   `SourceVersioned` rebinds `public.source._search_text` from its payload's
+   `_searchText` (the indexer's retitle: `sdk._index_source_merge` →
+   `create_source(…, _searchText=…)`), but the table had no entry for it, so the
+   served row's dense leg answered the PRIOR version's text while its FTS leg
+   searched the new one. The same rule now covers both `:Source` writers, with the
+   same three skip arms — including the session arm (§9.4), which a version line
+   would otherwise reach and derive the topic lexicon into.
+
+WHAT MAKES THESE TESTS FAIL ON THE OLD TREE, rather than merely pass on the new
+one:
+
+* the document test asserts the text equals `projection.entities.
+  _build_search_text(...)` — the GRAPH's function, imported here — and asserts
+  the payload's `content` is ABSENT from it. On the old table the record joined
+  `title + content`, so both halves red;
+* the plain-source test asserts a non-empty vector where the old table answered
+  `no embedding rule for this record type`;
+* the parity test below mutates the graph's OWN composer and requires the
+  record's text to follow it — a copy of the composition inside `record_writer`
+  cannot pass that, which is the drift #13412 exists to make impossible.
+
+DB-FREE: the plans are built without a connection and the embedder is a stub, so
+this rides `TORTOISE_TEST_CARVE_OUT=1` like its sibling
+`tests/test_13220_record_label_embeddings.py`.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+import tortoise.record_projection as rp
+import tortoise.record_vector as rv
+import tortoise.record_writer as rw
+
+_ENTITIES = (Path(__file__).resolve().parent.parent
+             / "tortoise" / "projection" / "entities.py")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# The one embedding seam, stubbed (signature mirrored EXACTLY, #13417)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls: list[tuple[str, int | None]] = []
+
+    def __call__(self, content: str, expected_dim: int | None = None, *,
+                 bounded: bool = False,
+                 bounded_scope: str = "graph_fold"):
+        self.calls.append((content, expected_dim))
+        return [0.125] * 384
+
+    @property
+    def text(self) -> str:
+        assert len(self.calls) == 1, f"expected ONE encode, got {self.calls}"
+        return self.calls[0][0]
+
+
+@pytest.fixture()
+def encoder(monkeypatch):
+    import tortoise.embeddings as embeddings
+
+    recorder = _Recorder()
+    monkeypatch.setattr(embeddings, "encode_for_row", recorder)
+    return recorder
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #13412 — a document's text is the GRAPH's text, and `content` is not in it
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_document_derives_from_the_graphs_search_text(encoder):
+    """`_searchText` = title + summary + topics — the surface the node holds.
+
+    `_upsert_document` computes `st = _build_search_text(title, summary, topics)`
+    on ONE line and reads it TWICE — for the vector and for `s._searchText`
+    (`projection/entities.py:5423`, `:5530`) — so the graph's dense and sparse
+    legs describe the same text by construction. The record must encode that
+    text and no other, or one journal line yields two vectors (#13412).
+    """
+    from tortoise.projection.entities import _build_search_text
+
+    out = rw.derived_embedding_columns({
+        "type": "DocumentCreated",
+        "url": "https://example.com/q3",
+        "title": "Q3 pricing",
+        "summary": "the memo",
+        "topics": ["pricing", "q3"],
+        "content": "the long body text",
+    })
+    assert encoder.text == _build_search_text(
+        "Q3 pricing", "the memo", ["pricing", "q3"]), (
+        "the record encoded a different text than the graph's `_searchText` "
+        "composition for the same DocumentCreated payload (#13412)")
+    assert "the long body text" not in encoder.text, (
+        "`content` reached the record's vector: it is not a graph property "
+        "post-D10 (`_DOC_RETIRED_KEYS`) and the graph stopped embedding it in "
+        "#8419, so a vector computed from it is derived from text the node "
+        "never holds — the divergence #13412 measures")
+    assert set(out.columns) == {"embedding"}
+
+
+def test_the_document_composition_IS_the_graphs_function_not_a_copy(encoder, monkeypatch):
+    """Mutate the graph's composer; the record's text must follow it.
+
+    This is the anti-drift pin. A re-implemented `" ".join(filter(None, …))` in
+    `record_writer` would produce the same bytes as long as nobody changed
+    either side — which is exactly how `title + content` survived #8419
+    unnoticed. Here the GRAPH's function is replaced with a sentinel, so only a
+    call THROUGH it can produce the sentinel text.
+    """
+    import tortoise.projection.entities as entities
+
+    monkeypatch.setattr(entities, "_build_search_text",
+                        lambda title, summary=None, topics=None: "SENTINEL")
+    rw.derived_embedding_columns({
+        "type": "DocumentCreated", "url": "https://example.com/a",
+        "title": "t", "summary": "s", "topics": ["x"],
+    })
+    assert encoder.text == "SENTINEL", (
+        "the record composed the document text itself instead of calling "
+        "`projection.entities._build_search_text` — a second copy of the "
+        "composition is the defect #13412 exists to prevent")
+
+
+def test_the_document_rule_composes_from_the_graphs_fields_and_not_content():
+    """The plug point a shared seam (#13447) reads is the callable, not a field list.
+
+    `(name, value)` parts rather than declared field names, deliberately: this
+    composition has ONE part (the function that builds it), and a field-name list
+    a seam could join would stringify `topics` (a list) and let `content` back in
+    — the retired input of `#13412`.
+    """
+    parts = rw._RECORD_EMBEDDING_TEXT["DocumentCreated"]({
+        "title": "Q3 pricing", "summary": "the memo",
+        "topics": ["pricing", "q3"], "content": "the long body text"})
+    assert [name for name, _ in parts] == ["title+summary+topics"], parts
+    assert parts[0][1] == "Q3 pricing the memo pricing q3", parts
+    assert "long body text" not in parts[0][1]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #13418 — a plain :Source derives from the text the NODE holds
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_plain_source_derives_from_the_text_the_RECORD_row_holds(encoder):
+    """`_searchText` is the one text the row is known to hold — and it is enough.
+
+    `projection/entities.py:7106` composes `ev.get("_searchText") or ev.get("title")`
+    and writes it to the node at `:7194`; the record binds its own `_search_text`
+    column from the payload's `_searchText` key (the split), so this is the one
+    arm where the vector and the column are provably one datum. `#13418`.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceCreated",
+        "url": "https://example.com/pricing",
+        "title": "Acme pricing page",
+        "_searchText": "acme pricing discounts renewal",
+    })
+    assert encoder.text == "acme pricing discounts renewal", (
+        "a plain `:Source` must encode the text its row carries in "
+        "`_search_text` (`_upsert_source`, #13418)")
+    assert set(out.columns) == {"embedding"}, (
+        "the vector is the ONLY column this derivation writes — the split already "
+        "bound `_search_text` from the same payload key")
+
+
+def test_a_title_only_source_ABSTAINS_and_names_the_text_carrier_gap(encoder):
+    """No `_searchText` ⇒ the row holds no text ⇒ no vector, and the reason says why.
+
+    ⛔ The `title` fallback the GRAPH applies is deliberately NOT mirrored. It would
+    encode text the row's own indexed column does not hold, and on a
+    `SourceCreated` that resolves onto a DOCUMENT row it would overwrite the
+    `_build_search_text` vector `DocumentCreated` composed — for a row
+    `document_kind IS NOT NULL` still routes to the `document` dense leg
+    (`record_vector.py:169`/`:171`). The gap is the journal's
+    (`register_source(url, kind, title=…)` puts the title in `**props` and states
+    no `_searchText`) and its root is `#13474`: the producer carries the text.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceCreated", "url": "https://example.com/a",
+        "title": "Acme pricing page",
+    })
+    assert out.columns == {} and encoder.calls == []
+    assert "#13474" in out.skipped and "no _searchText" in out.skipped, out.skipped
+
+
+def test_a_plain_source_never_embeds_its_IDENTITY(encoder):
+    """STORAGE §9.4 ③: *"NEVER use a vector to decide whether two sources are the same"*.
+
+    Identity is the canonicalised URL plus a content hash; `url` is never part of
+    the embedded text. Pinned because the obvious shortcut for "a Source has no
+    text" is to embed its id, which would make every `session:`/URL-keyed source
+    encode its own identity as meaning.
+    """
+    rw.derived_embedding_columns({
+        "type": "SourceCreated", "url": "https://example.com/pricing",
+        "_searchText": "acme pricing discounts renewal",
+    })
+    assert "example.com" not in encoder.text
+
+
+def test_the_source_STATEMENT_does_not_clobber_a_document_rows_vector(encoder):
+    """The two-record pin: `[DocumentCreated(url=X), SourceCreated(url=X, title)]`.
+
+    A document IS a `:Source` (D10), one row carries both served labels, and
+    `record_projection`'s upsert emits `embedding = EXCLUDED.embedding` on
+    conflict. So a derivation that accepted a title-only `SourceCreated` would let
+    the plain-source composition take a document row's vector while
+    `document_kind IS NOT NULL` keeps routing that row to the `document` dense leg
+    — one label answering a text its owner never composed (found in review of this
+    change, measured on the plan).
+    """
+    doc = {"type": "DocumentCreated", "id": "https://example.com/a",
+           "title": "Q3 pricing", "summary": "the memo"}
+    src = {"type": "SourceCreated", "url": "https://example.com/a",
+           "title": "Acme pricing page"}
+    plans = rp.replay_plan([doc, src], org_id="org", graph_id="g",
+                           derived={0: rw.derived_embedding_columns(doc).columns,
+                                    1: rw.derived_embedding_columns(src).columns})
+    upserts = [s for s in plans if s.sql.startswith("INSERT INTO public.source ")]
+    assert len(upserts) == 2, [s.sql[:60] for s in upserts]
+    assert "embedding" in upserts[0].param_columns
+    assert "embedding" not in upserts[1].param_columns, (
+        "the source statement must not bind a vector: the document's survives")
+
+
+def test_a_session_source_derives_NOTHING_and_says_why(encoder):
+    """§9.4: a session `:Source`'s vector text is the S1 narrative — never `summary`.
+
+    `STORAGE-ARCHITECTURE.md` §9.4 says it in one sentence: *"one vector attached
+    to the `:Source` node, whose embedded text is the S1 narrative read from
+    `public.session_narrative` — ⛔ never from `:Source.summary`"*. That narrative
+    lives in the record's own table (`#9555`), NOT in the journal line this fold
+    reads, so the derivation cannot compose it — and encoding the node's topic
+    LEXICON instead (which is what `_searchText` holds for a session, `#10000`)
+    would write the wrong text into a column the narrative arm must later own.
+    The skip is therefore the decision-preserving answer, and it is NAMED rather
+    than silent.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceCreated",
+        "url": "session:abc123",
+        "sourceKind": "agentSession",
+        "title": None,
+        "_searchText": "pricing, discount, renewal",
+        "summary": "session capture topics: pricing, discount, renewal",
+        "topics": ["pricing", "discount", "renewal"],
+        "sessionId": "abc123",
+    })
+    assert out.columns == {}, (
+        "a session `:Source` derived a vector from the journal line — its text "
+        "is the S1 narrative (§9.4), which this fold cannot read")
+    assert encoder.calls == []
+    assert "narrative" in out.skipped, (
+        f"the skip must name §9.4's rule, not read as 'no rule for this type' "
+        f"(got {out.skipped!r})")
+
+
+def test_a_session_source_KEYED_BY_ID_is_still_a_session_source(encoder):
+    """The skip must resolve the identity the way the record and the fold do.
+
+    `is_episodic_source_node` reads `props["url"]` (the cache side's vocabulary),
+    while a `:Source` key is `url OR id` on both other layers —
+    `record_projection._key_value` ("`add_document` emits `id` and no `url` at
+    all") and `projection/entities.py:7081` (`raw_key = url or sid`). A payload
+    that carries the identity in `id` therefore reached the predicate with no `url`
+    and was classified as a PLAIN source: `public.source.embedding` would then hold
+    the topic LEXICON, which is the one text §9.4 forbids for a session `:Source`.
+    Latent today (both in-tree emitters pass `url=`), closed here.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceCreated", "id": "session:abc123",
+        "sourceKind": "agentSession",
+        "_searchText": "pricing, discount, renewal",
+    })
+    assert out.columns == {} and encoder.calls == [], (
+        "an `id`-keyed session source must be skipped like a `url`-keyed one")
+    assert "session :Source" in out.skipped, out.skipped
+
+
+def test_a_carried_source_vector_is_HONOURED_and_not_recomputed(encoder):
+    """`_upsert_source` computes none, so a carried vector is the node's own.
+
+    `_SOURCE_EXTRA_PROPS` (`projection/entities.py:2111`) declares `embedding` a
+    caller passthrough, so a caller-supplied vector lands on the node. Deriving
+    over it in the record would give the two stores different vectors for the
+    same source; the `EventRecorded` precedent is the same shape.
+
+    ⛔ THE PAYLOAD CARRIES `_searchText`, AND THAT IS LOAD-BEARING — a review
+    found the earlier cut of this test non-discriminating. With no derivable text
+    the no-`_searchText` arm answers `{}`/`[]` on its own, so DELETING the
+    carried-vector arm left both assertions green: the test named a guard it could
+    not defend. With a text present, the only thing that can keep `columns` empty
+    is the arm under test, and `skipped` names it — the same shape its sibling uses
+    (`tests/test_13220_record_label_embeddings.py`:
+    `test_a_carried_event_vector_is_HONOURED_and_not_recomputed`, whose payload
+    carries `subject`/`eventKind`/`object`).
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceCreated", "url": "https://example.com/a",
+        "title": "Acme pricing page",
+        "_searchText": "acme pricing discounts renewal",
+        "embedding": [0.5] * 384,
+    })
+    assert out.columns == {}, (
+        "the derivation recomputed over the caller's vector — `public.source` "
+        "would then hold a vector the node does not (#5004)")
+    assert encoder.calls == []
+    assert out.skipped == "the record carries a vector", (
+        f"the skip must name the CARRIED vector, not the absent text — otherwise "
+        f"this test passes for the wrong arm (got {out.skipped!r})")
+
+
+def test_a_source_written_to_an_armed_record_CARRIES_a_vector(encoder):
+    """The #13418 indicator, at the plan level: `public.source.embedding` is bound.
+
+    Drives the real writer seam (`derived_embedding_columns` → `replay_plan`), so
+    the value is asserted where it lands — the `INSERT INTO public.source` — and
+    in the JSON-text form a `jsonb` column requires (`_jsonb_or_scalar`), not as
+    a Python list the driver would adapt as an ARRAY.
+    """
+    record = {"type": "SourceCreated", "url": "https://example.com/pricing",
+              "title": "Acme pricing page",
+              "_searchText": "acme pricing discounts renewal"}
+    derived = rw.derived_embedding_columns(record)
+    assert derived.columns, (
+        "the record derived no embedding for a plain `:Source` — the served "
+        "label (`LABEL_SERVED['source']`) would answer from a column nothing "
+        "writes (#13418)")
+    plan = rp.replay_plan([record], org_id="org", graph_id="g",
+                          derived={0: derived.columns})
+    upserts = [s for s in plan if s.sql.startswith("INSERT INTO public.source ")]
+    assert len(upserts) == 1
+    assert "embedding" in upserts[0].param_columns, (
+        "the derived vector never reached the `public.source` INSERT")
+    bound = upserts[0].params[upserts[0].param_columns.index("embedding")]
+    assert isinstance(bound, str), (
+        f"the {type(bound).__name__} vector was bound directly to a jsonb column")
+    assert bound.startswith("[0.125, 0.125,"), bound[:40]
+    assert bound.count("0.125") == 384
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #13418 (review F1) — the VERSION TRANSITION moves the text, so it moves the vector
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_version_transition_reembeds_from_the_version_it_moves_to(encoder):
+    """`SourceVersioned` is the ONE `:Source` record that moves a row's text.
+
+    `create_source` emits it with `**payload` on a content-hash change
+    (`sdk.py:58641`) and that payload carries `_searchText` — the retitle is a
+    named, in-tree write (`sdk._index_source_merge` →
+    `create_source(…, _searchText=_source_search_text(title=title))`). The split
+    rebinds `public.source._search_text` from that same key, so a version line with
+    no derivation left the row's dense leg on the PRIOR version's vector while its
+    FTS leg searched the new text: one served label, two texts. That is the class
+    `#13412` closes for `DocumentCreated`, and nothing would repair it — a STALE
+    vector is not a VECTORLESS one, so `#13417`'s counting pass cannot see it.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceVersioned",
+        "id": "https://example.com/a", "url": "https://example.com/a",
+        "_searchText": "acme pricing 2024 renewal",
+        "contentHash": "h2", "previousContentHash": "h1",
+        "previousValidTo": "2026-11-18T00:00:00Z",
+    })
+    assert out.columns, (
+        "a version transition derived no vector — the row's `_search_text` moves "
+        "to the new version while its vector stays on the old one")
+    assert encoder.text == "acme pricing 2024 renewal", (
+        f"the version arm encoded {encoder.text!r}, not the text it moved the row "
+        "to — the dense and sparse legs of one served row would disagree")
+    assert out.skipped == "", out.skipped
+
+
+def test_the_version_transition_binds_the_vector_with_the_text_it_binds(encoder):
+    """Plan level: `[SourceCreated(old), SourceVersioned(new)]` on one row.
+
+    The `SourceVersioned` statement is where the two legs must move TOGETHER: the
+    split binds `_search_text` from the payload and the derivation binds
+    `embedding` after it (`_declared_mutations`), so both columns appear on the
+    SAME `INSERT INTO public.source`. Asserting only the derivation would leave the
+    join in `replay_plan` unpinned for this record type.
+    """
+    created = {"type": "SourceCreated", "url": "https://example.com/a",
+               "_searchText": "acme pricing"}
+    versioned = {"type": "SourceVersioned", "url": "https://example.com/a",
+                 "_searchText": "acme pricing 2024",
+                 "contentHash": "h2", "previousContentHash": "h1"}
+    plans = rp.replay_plan(
+        [created, versioned], org_id="org", graph_id="g",
+        derived={0: rw.derived_embedding_columns(created).columns,
+                 1: rw.derived_embedding_columns(versioned).columns})
+    upserts = [s for s in plans if s.sql.startswith("INSERT INTO public.source ")]
+    assert len(upserts) == 2, [s.sql[:60] for s in upserts]
+    assert "embedding" in upserts[0].param_columns
+    assert "embedding" in upserts[1].param_columns, (
+        "the version transition bound the new `_search_text` but not a vector, so "
+        "one row answers from two versions of its own text")
+    bound = upserts[1].params[upserts[1].param_columns.index("embedding")]
+    assert isinstance(bound, str) and bound.startswith("[0.125, 0.125,"), (
+        "the version arm's vector was bound as a Python list, not the jsonb text "
+        "`_jsonb_or_scalar` requires")
+    assert upserts[1].params[
+        upserts[1].param_columns.index("_search_text")] == "acme pricing 2024"
+
+
+def test_a_version_that_states_NO_text_keeps_its_old_pair_rather_than_guessing(encoder):
+    """The third skip arm applies to the version line, and it is the RIGHT answer.
+
+    A version record that carries no `_searchText` binds no `_search_text` either
+    (`create_source`'s same-hash extras arm, and any caller that omits it), so the
+    row keeps the previous text; deriving from `title` here would move the vector
+    onto a text the column does not hold. The skip must NAME that root rather than
+    read as `no embedding rule for this record type` — the reason this arm is
+    checked in the caller and not inside the rule.
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceVersioned", "url": "https://example.com/a",
+        "title": "Acme pricing page", "contentHash": "h2",
+        "previousContentHash": "h1",
+    })
+    assert out.columns == {} and encoder.calls == [], (
+        "a text-less version line derived a vector — its own column did not move")
+    assert "_searchText" in out.skipped and "#13474" in out.skipped, out.skipped
+
+
+def test_a_versioned_session_source_derives_NOTHING_too(encoder):
+    """§9.4 survives the transition: a session `:Source`'s text is the narrative.
+
+    Without the shared skip branch, `SourceVersioned` reaches the composition and
+    derives the node's topic LEXICON into `public.source.embedding` — the one text
+    §9.4 forbids for a session `:Source` (`#10000`), and the arm whose absence the
+    `SourceCreated` sibling pins. Same record family, same rule (§14.3 V2).
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceVersioned", "url": "session:abc123",
+        "sourceKind": "agentSession", "sessionId": "abc123",
+        "_searchText": "pricing, discount, renewal",
+        "contentHash": "h2", "previousContentHash": "h1",
+    })
+    assert out.columns == {} and encoder.calls == [], (
+        "a versioned session `:Source` derived its topic lexicon — §9.4 says the "
+        "text is the S1 narrative, which this fold cannot read")
+    assert "narrative" in out.skipped, out.skipped
+
+
+def test_a_versioned_source_CARRYING_a_vector_still_honours_it(encoder):
+    """The carried-vector arm reaches the transition too — the one arm uncovered.
+
+    The three skip arms are shared with `SourceCreated`, but only two have a sibling
+    pin above (no text, session). A version line CAN carry `embedding` — the payload
+    is `ev` splatted and `_SOURCE_EXTRA_PROPS` declares `embedding` a caller
+    passthrough — and the wrong answer here is worse than on a create: the row
+    already holds text, so deriving over a carried vector would REPLACE the vector
+    the node kept (`#5004`) on the very write that moves the column.
+
+    ⛔ THE PAYLOAD STATES `_searchText`, AND THAT IS LOAD-BEARING: with no derivable
+    text the no-`_searchText` arm answers `{}`/`[]` on its own, so this test would
+    stay green with the carried-vector arm removed — the same non-discrimination the
+    `SourceCreated` sibling was hardened against in the `#13473` review (P2).
+    """
+    out = rw.derived_embedding_columns({
+        "type": "SourceVersioned", "url": "https://example.com/a",
+        "_searchText": "acme pricing 2024 renewal",
+        "contentHash": "h2", "previousContentHash": "h1",
+        "embedding": [0.5] * 384,
+    })
+    assert out.columns == {}, (
+        "the version arm recomputed over the caller's vector — `public.source` "
+        "would then hold a vector the node does not (#5004)")
+    assert encoder.calls == []
+    assert out.skipped == "the record carries a vector", (
+        f"the skip must name the CARRIED vector, not the absent text (got {out.skipped!r})")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# The scope of the table: every served label has a writer
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_every_served_source_side_label_has_a_derivation_rule():
+    """#13418's indicator: `public.source.embedding` is written for what is served.
+
+    `record_vector.LABEL_SERVED` maps the labels the dense leg answers from the
+    RECORD. `source` and `document` are two filters over ONE table
+    (`public.source`), and `event` is its own — so all three need a rule here.
+    `point`/`operator` live on `public.point`, whose vector is record-TRUTH
+    written by the Point path (`#5004`), not by this table.
+    """
+    assert {"source", "document", "event"} <= set(rv.LABEL_SERVED)
+    assert {"SourceCreated", "DocumentCreated", "EventRecorded"} <= set(
+        rw._RECORD_EMBEDDING_TEXT), (
+        "a served label's record row has no derivation rule — the `#13220` "
+        "scope sentence ('every served label's embeddings live in Postgres') "
+        "has no writer behind it")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# :Event — covered by the SAME rule, pinned against the graph fold's source
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_event_rule_is_the_graph_folds_own_composition():
+    """`:Event` shares this seam already — pinned so a fourth rule cannot appear.
+
+    The owner's 2026-11-18 ruling puts `:Event` and `:Source` on the same
+    treatment as `:Object`/`:Subject`. For `:Event` that was already true: the
+    graph composes `" ".join(filter(None, [subject, eventKind, object]))`
+    (`projection/entities.py:5803-5807`) and the record's rule names exactly
+    those three keys in that order. This reads the GRAPH's own source rather than
+    restating the literal, so a change on either side reds.
+    """
+    text = _ENTITIES.read_text()
+    start = text.index('event_content = " ".join(filter(None, [')
+    block = text[start:text.index("]))", start)]
+    keys = re.findall(r'inner\.get\("(\w+)"', block)
+    assert keys == ["subject", "eventKind", "object"], (
+        f"the graph's event composition changed to {keys!r} — the record's rule "
+        "must be re-derived from it, not left on the old keys")
+    rule = rw._RECORD_EMBEDDING_TEXT["EventRecorded"]
+    composed = tuple(name for name, _ in rule(
+        {"subject": "s", "eventKind": "k", "object": "o"}))
+    assert composed == tuple(keys), (
+        f"the record's event rule composes {composed!r} while the graph composes "
+        f"{keys!r} — two stores, two texts")
+
+
+def test_an_event_still_derives_the_graphs_text(encoder):
+    rw.derived_embedding_columns({
+        "type": "EventRecorded", "eventId": "e1",
+        "subject": "Daniel", "eventKind": "met", "object": "Acme Corp",
+    })
+    assert encoder.text == "Daniel met Acme Corp"

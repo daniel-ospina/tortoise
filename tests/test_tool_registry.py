@@ -160,19 +160,29 @@ class TestRegistryEquivalence:
             68 − 14 + 6 = 60   lane B (WRITE/MUTATE containers)
             60 −  7 + 6 = 59   lane C (SOURCES/MINE/SESSION)
             59 −  9 + 5 = 55   #12951 (READ/QUERY)              = origin/main @ 486f5ca
-            55 −  7 + 0 = 48   THIS PR (door retirement, lane E) = measured at this head
+            55 −  7 + 0 = 48   #13052 (door retirement, lane E)
+            48 −  2 + 0 = 46   THIS PR (#11609 lane P1 — the two POINT-shaped doors)
 
         Retired composes the same way, and it is a UNION — no wave drops another's
-        rows: 23 + 7 + 14 = 44 at main, + 9 = **53** after #12951, + 7 = **60** here.
-        The lane-E wave adds NO container rows: it removes doors whose containers
-        were already advertised by the three Phase 2 waves, so the live delta is
-        exactly −7 and the arithmetic has no `+ n` term.
+        rows: 23 + 7 + 14 = 44 at main, + 9 = **53** after #12951, + 7 = **60** after
+        #13052, + 2 = **62** here. Neither door-retirement wave adds a container row:
+        they remove doors whose containers were already advertised by the three
+        Phase 2 waves, so each live delta is a bare `− n` with no `+ n` term.
+
+        #11609 lane P1 (THIS PR): `tortoise_create_point` and `tortoise_diary_write`
+        retire FORWARD into `create_entity`'s new `type="point"` / `type="diary"`
+        arms. This is the batch that makes their recorded reason false — the
+        `PROTECTED` table in `tests/test_11609_door_retirement.py` held them as
+        *"create_entity has no point arm"* / *"…no diary arm"*, and a door may only
+        leave that table in the change that makes its reason false. No container
+        arrives: the two arms are built on a tool that was already live, so the
+        live delta is exactly −2.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
         # lane C composes on top of lane B (59), then the READ/QUERY wave (55), then
         # THIS PR's door-retirement wave: 55 - 7 + 0 = 48.
-        assert len(TOOL_REGISTRY) == 48, f"Expected 48, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 46, f"Expected 46, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated, the 5 #4282 container members, the 14 #11609 lane B
@@ -180,7 +190,7 @@ class TestRegistryEquivalence:
         # members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
 
-        assert len(retired) == 60, f"Expected 60 retired, got {len(retired)}"
+        assert len(retired) == 62, f"Expected 62 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -747,10 +757,18 @@ class TestFastMCPAdapter:
 
             adapter.register_all(TOOL_REGISTRY, handlers)
 
-            # Spot-check: create_point is readOnly=False, idempotentHint=True
+            # Spot-check: a WRITE that carries the idempotency hint, i.e. the
+            # annotation triple that used to be read off `tortoise_create_point`.
+            # ⛔ The spot-check moved off that door in #11609 lane P1, when it
+            # retired forward into `create_entity` (its `type="point"` arm): the
+            # row above derives `handlers` from `TOOL_REGISTRY`, so naming a
+            # retired tool here is a `KeyError` on the retirement rather than on
+            # an annotation — the same failure #13052 fixed one door over.
+            # `tortoise_register_source` is live, `risk="write"`,
+            # `idempotent=True`, so all three hints are still exercised.
             tools = await mcp._list_tools()
             by_name = {t.name: t for t in tools}
-            cp = by_name["tortoise_create_point"]
+            cp = by_name["tortoise_register_source"]
             assert cp.annotations.readOnlyHint is False
             assert cp.annotations.idempotentHint is True
             assert cp.annotations.destructiveHint is False
@@ -2423,9 +2441,13 @@ class TestToolIdentity:
         # (`get_session`, `list_batch`, `find_cross_lens_candidates`). They keep their
         # #3883 shims, so SERVED stays 54 (24 live + 30 retired writer shims) while LIVE
         # falls 28 -> 24 with NO container row arriving (the container was already live).
+        # #11609 lane P1 then retires TWO MORE writers — `tortoise_create_point` and
+        # `tortoise_diary_write` (both `risk="write"`, absorbed by `create_entity`'s
+        # point-shaped arms). Both keep their #3883 shims, so the SERVED census does not
+        # move at all: 54 (22 live + 32 retired writer shims) while LIVE falls 24 -> 22.
         assert len(WRITE_TOOL_NAMES) == 54, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 24, f"live write census moved: {len(live)}"
+        assert len(live) == 22, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.

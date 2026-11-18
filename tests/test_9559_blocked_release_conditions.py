@@ -1691,8 +1691,9 @@ def test_the_restore_verb_still_exists():
 #    and the sort is by version, never by the whole name.
 # 2. THE BODY IS THE FUNCTION'S OWN, not first-function-to-last-function in the
 #    file. Multi-function migrations are ordinary here — measured at this head,
-#    `20260915000001_tenancy_team_to_org.sql` defines 13 functions, and three
-#    others define 3–5 — so a slice from the file's first `AS $$` to its last `$$`
+#    `20260915000001_tenancy_team_to_org.sql` defines 13 functions, and TWELVE
+#    other files define 3–5 (13 files define three or more) — so a slice from the
+#    file's first `AS $$` to its last `$$`
 #    lets a SIBLING function's `RAISE WARNING` satisfy the assertion.
 # 3. THE SELECTOR IS CLOSED OVER THE DEFINITION'S SPELLING SPACE. `CREATE
 #    [OR REPLACE] FUNCTION [schema.]name` tolerates an optional `OR REPLACE`, an
@@ -1714,7 +1715,7 @@ _DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 
 
 def _strip_sql_comments(sql: str) -> str:
-    """``sql`` with every `--` line comment and `/* … */` block comment removed.
+    r"""``sql`` with every `--` line comment and `/* … */` block comment removed.
 
     ⛔ BOTH COMMENT FORMS, because PostgreSQL accepts both and the server executes
     neither. An earlier cut stripped only `--` and declared the residual closed on
@@ -1729,31 +1730,118 @@ def _strip_sql_comments(sql: str) -> str:
     false PASS the selection exists to close, reachable from the comment form the
     residual claimed could only RED.
 
-    String literals are NOT parsed — single-quoted (#13382's unlanded hardening) or
-    dollar-quoted. For the TWO COMMENT FORMS MODELLED ABOVE the direction is
-    fail-closed: a `--` inside a literal truncates that line, which can only REMOVE
-    text an assertion needs.
+    ⛔ AND A STRING LITERAL IS NOT A COMMENT. PostgreSQL's lexer ends a `'…'`
+    literal only at an unescaped `'` (`''` is the escape inside one), so a `/*` or
+    `--` INSIDE a literal is DATA the server executes. An earlier cut of this
+    function did not model that and the direction was NOT fail-closed, which the
+    review measured: `_strip_sql_comments` feeds the CANDIDATE scan too, so a
+    correction migration whose string literal contained `/*` had its tail deleted,
+    stopped matching `_RESIDENCY_DEFS_RX`, and dropped OUT of `candidates` — the
+    gate then asserted over the SUPERSEDED body and went GREEN over a live,
+    unguarded function. Removing text can hide a file as easily as it can hide a
+    comment, so the literal is now skipped verbatim.
 
-    ⛔ THE DOLLAR-QUOTED CASE IS NOT FAIL-CLOSED, and an earlier cut of this
-    docstring claimed the whole function was. A migration whose sole content is
-    `SELECT $x$ … CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()
-    … $$ … $$ … $x$;` is left INTACT here, so the declaration inside the literal
-    survives the candidate scan in `_defining_migrations`, and `_function_body`
-    then anchors on it and returns the `$$…$$` quoted INSIDE the literal — a body
-    that is never executed. That is fail-OPEN: it can ADD an arm the live function
-    does not have, the opposite of the residual above.
+    ⛔ AND AN ESCAPE STRING IS STILL A LITERAL, closed one rule further in. `E'…'`
+    (and `e'…'`) lets a BACKSLASH escape the next character, so `E'\''` — FIVE glyphs,
+    `E`, quote, backslash, quote, quote — spells ONE quote character and closes at its
+    THIRD `'`: quote 1 opens, the escaped quote is quote 2, quote 3 closes.
+    An earlier cut modelled only the `''` doubling, so it paired quote 2 with quote 3
+    as one escaped quote and left the literal OPEN past the closing point — the scan
+    then stayed in literal state, so the comments below it SURVIVED, a `/* … */` note
+    quoting a guarded body satisfied the assertion, and the gate went GREEN over a
+    live function with no fail-closed arm. ⛔ THREE qualifications, each measured,
+    because each one is how a later reader concludes the bug was imaginary: the whole
+    file is NOT returned (text ABOVE the escaped literal is still processed, so a
+    migration carrying its usual leading `-- header` loses that header and LOOKS
+    stripped), the survival below stops at the first `'` — a below-comment with an
+    ODD number of apostrophes closes the pseudo-literal and stripping RESUMES, so the
+    note under such a comment is removed — and the survival is therefore NOT "nothing
+    below is processed". What survives is the below-text whose
+    quotes pair up, which is exactly what a `/* … ->'orgs' … */` note looks like.
+    Measured on `eb233604ac` (the head that carried the defect), on a body carrying
+    `E'\''` before such a note:
+    `note_survived=True`, `GUARD_IN_BODY=True`; with the `E'\''` replaced by `'x'`,
+    `note_survived=False`. That is the same false PASS as the row above reached
+    through the other door, so the escape is MODELLED here rather than disclosed.
 
-    ⛔ NOT FIXED HERE, and deliberately: making `$tag$` regions opaque would also
-    hide the plpgsql bodies this whole window exists to read, because a plpgsql
-    body IS dollar-quoted (#13390). That makes it a design change, not a strip
-    tweak. Open, reproduced on `main`, and recorded as item 1 of #13393 (P2
-    fail-open) — which is why that issue stays OPEN after #13398: the selector
-    order was one of its items, this literal case is not.
+    ⛔ THE DOLLAR-QUOTED CASE IS STILL NOT FAIL-CLOSED, in TWO ways, and an earlier cut
+    of this docstring claimed the whole function was. Both are tracked as #13425
+    (P2 fail-open) — its live home, because #13393 (which originally carried the
+    first as "item 1") closed on 2026-11-18 with its ordering item fixed and this
+    one unaddressed, so a reader following that pointer reached a closed issue.
+
+    1. **A `$tag$` region is NOT opaque, and that is deliberate** — a plpgsql body IS
+       dollar-quoted, and its `--`/`/* */` comments are exactly what the body scan
+       has to remove. The price is that a migration whose sole content is
+       `SELECT $x$ … CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()
+       … $$ … $$ … $x$;` is left INTACT, so the declaration inside the literal survives
+       the candidate scan in `_defining_migrations`, and `_function_body` then anchors
+       on it and returns the `$$…$$` quoted INSIDE the literal — a body that is never
+       executed. That is fail-OPEN: it can ADD an arm the live function does not have.
+    2. **A BARE `'` inside a `$tag$` region is still read as a literal OPENER**, so a
+       dollar-quoted region that is not plpgsql — free text carrying an apostrophe,
+       e.g. `SELECT $x$it's$x$` — enters literal state and, with no closing quote,
+       BLINDS THE STRIP TO END OF FILE: every comment below it survives, which is the
+       same fail-open the `E'…'` rule above closes, reached through the other door.
+
+    ⛔ NOT FIXED HERE, and neither fix is a strip tweak. Making `$tag$` regions opaque
+    wholesale would hide the plpgsql bodies this whole window exists to read; refusing
+    to open a literal inside one would let `RAISE NOTICE 'scanning /*'` in a plpgsql
+    body start a block comment that deletes the rest of the body, guard included.
+    Telling a plpgsql body from a dollar-quoted text blob needs a real parser and a
+    design decision, so the direction taken is DISCLOSURE plus a pin: the row
+    `test_a_bare_quote_inside_a_dollar_tag_region_blinds_the_strip` asserts the CURRENT
+    imperfect behaviour and fails loudly if the residual moves. Measured on this head:
+    88 files in `supabase/migrations`, **0** change stripped output and **0** end inside
+    a literal — latent on today's tree, which is why it is P2 and not P1.
+
+    A `"…"` QUOTED IDENTIFIER has no such caveat, and IS modeled below (`""` escapes
+    one `"`): `SELECT "it's" FROM t` is legal PostgreSQL, and without that arm the
+    apostrophe inside the identifier would open a literal and blind the strip the same
+    way. Pinned by `test_a_quoted_IDENTIFIER_is_not_a_literal_and_cannot_blind_the_strip`.
+
+    Not modelled, stated so the next reader does not have to guess: `U&'…'`
+    unicode-escape strings need NO special case here and must NOT get the `E` rule —
+    that spelling writes a quote by DOUBLING (`''`), which the literal branch already
+    models, and its `\XXXX` / `\+XXXXXX` escapes are hex-digit escapes that cannot
+    move a literal boundary, so its boundaries are already correct and only the escapes
+    stay undecoded (measured: 0 `U&'` occurrences in `supabase/migrations`, and
+    `SELECT U&'a''b' -- c` loses its comment as it should).
     """
     out: list[str] = []
     i, n, depth = 0, len(sql), 0
+    in_literal = escape_literal = in_ident = False
     while i < n:
+        ch = sql[i]
         pair = sql[i:i + 2]
+        if in_ident:
+            # `"…"` is an IDENTIFIER: `""` escapes one `"`, and a comment marker or
+            # a quote inside it is its own name, not syntax. Postgres admits both.
+            out.append(ch)
+            if ch == '"':
+                if sql[i + 1:i + 2] == '"':
+                    out.append('"')
+                    i += 2
+                    continue
+                in_ident = False
+            i += 1
+            continue
+        if in_literal:
+            out.append(ch)
+            if escape_literal and ch == "\\":
+                # `\x` in an E'' string is ONE character, whatever `x` is — so the
+                # escaped quote cannot close the literal
+                out.append(sql[i + 1:i + 2])
+                i += 2
+                continue
+            if ch == "'":
+                if sql[i + 1:i + 2] == "'":
+                    out.append("'")
+                    i += 2
+                    continue
+                in_literal = escape_literal = False
+            i += 1
+            continue
         if depth:
             if pair == "/*":
                 depth += 1
@@ -1767,6 +1855,45 @@ def _strip_sql_comments(sql: str) -> str:
             else:
                 i += 1
             continue
+        if ch == '"':
+            in_ident = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            in_literal = True
+            # `E'…'` / `e'…'` — the `E` must abut the quote and start its own token,
+            # which it does unless the preceding character CONTINUES an identifier or
+            # a number: `_`, `$`, or an alnum. ⛔ `$` is in that set because §4.1
+            # admits it in an unquoted identifier after the first character, so
+            # `a$E'…'` is ONE identifier and not an escape string — the same rule
+            # `tortoise/record_projection.py:2380` already encodes as `in "_$"`, and
+            # omitting it here stripped `SELECT a$E'\'' AS q; -- c`.
+            # ⛔ WHAT THIS TEST CANNOT SEE, stated rather than glossed: the check is a
+            # bare character test, so it also suppresses the rule after a `$` that
+            # CLOSES a `$tag$` (`$q$x$q$E'…'`) or stands alone (`$E'…'`) — where PG's
+            # lexer does start a fresh token. Which direction the resulting
+            # mis-lexing takes depends on the literal's SPELLING, and both were
+            # measured: with this file's adjacent-row spelling `E'\''` the literal never
+            # closes again and a `--` comment below it SURVIVES (over-inclusion — the
+            # server calls it a comment, the strip keeps it as data: benign); with a
+            # single escaped quote `E'a\'-- c'` the literal closes EARLY and the `--`
+            # the server would treat as data is DELETED (fail-open). Neither is
+            # reachable from VALID SQL: adjacent constants need an operator or
+            # whitespace, so the shape is a parse error; measured 0 `$E'`/`$e'` in all
+            # 88 `supabase/migrations` files and byte-identical stripped output under
+            # both set members. The shipped lexer carries the same corner BY
+            # CONSTRUCTION, which is why the model matching it is the correct side of
+            # this trade.
+            # ⛔ A closing `"` is NOT such a character: it ENDS a quoted identifier,
+            # so `"a"E'…'` starts a fresh token and the escape rule must still apply —
+            # excluding `"` here left that form blind to EOF (`SELECT "a"E'\'' AS q;
+            # -- c` kept its comment), which is this fix's own fail-open in miniature.
+            escape_literal = bool(i) and sql[i - 1] in "Ee" and (
+                i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] in "_$"))
+            out.append(ch)
+            i += 1
+            continue
         if pair == "/*":
             depth = 1
             i += 2
@@ -1775,7 +1902,7 @@ def _strip_sql_comments(sql: str) -> str:
             line_end = sql.find("\n", i)
             i = n if line_end < 0 else line_end
             continue
-        out.append(sql[i])
+        out.append(ch)
         i += 1
     return "".join(out)
 
@@ -2026,7 +2153,7 @@ def test_the_body_scan_is_bounded_to_the_named_function():
 
     The slice this replaces ran from the file's FIRST `AS $$` to its LAST `$$`,
     so in a multi-function migration (ordinary here: one file defines 13
-    functions, three others 3–5) the snapshot's own `RAISE WARNING` could be
+    functions, twelve others 3–5) the snapshot's own `RAISE WARNING` could be
     deleted and the assertion would still pass on a neighbour's. Measured
     consequence of the old shape: `code` below matched `RAISE WARNING`.
     """
@@ -2094,8 +2221,18 @@ def test_the_body_scan_honours_a_named_dollar_tag():
     assert code is not None
     assert "RAISE WARNING" in code
     assert "after" not in code, f"the scan ran past the closing tag: {code!r}"
+    # ⛔ THE OTHER HALF OF THE DOCSTRING, and the half a naive closer fails: with
+    # `code.find("$$", opener.end())` the slice ends at the literal inside the
+    # string, so `code` becomes "\nBEGIN\n  RAISE WARNING 'mentions " — which
+    # satisfies BOTH assertions above (the warning is inside the truncated prefix)
+    # while every statement AFTER the literal goes unasserted: a fail-open for the
+    # exact regression class this test exists to catch. These two live past it.
+    assert "RETURN;" in code, f"the scan stopped at the literal $$ in the body: {code!r}"
+    assert "END;" in code, f"the scan stopped at the literal $$ in the body: {code!r}"
 
 
+# --------------------------------------------------------------------------- #
+# The live-definition WINDOW: the last declaration in the file is the live one.
 # --------------------------------------------------------------------------- #
 def test_the_body_window_is_the_LIVE_definition_not_the_first_one():
     """A file that defines the function twice leaves the SECOND definition live.
@@ -2132,10 +2269,9 @@ def test_the_body_window_is_the_LIVE_definition_not_the_first_one():
         f"the window missed the live (last) definition: {live_guarded!r}")
 
 
-
+# --------------------------------------------------------------------------- #
 # The two REVIEW findings on this selector — both "the gate asserts over text the
 # server does not execute", one spelling further in than the defect it replaced.
-# --------------------------------------------------------------------------- #
 def test_the_selector_is_closed_over_the_definition_spelling_space(tmp_path):
     """The gate's OWN pattern sees every legal spelling of the definition.
 
@@ -2186,7 +2322,7 @@ def test_the_selector_is_closed_over_the_definition_spelling_space(tmp_path):
         "a file that merely MENTIONS the function was selected as defining it — "
         "the body scan would then read a file that has no body")
 
-    # Non-vacuity: the pattern this replaces MISSES three of the five, so the row
+    # Non-vacuity: the pattern this replaces MISSES four of the five, so the row
     # reddens the moment the space narrows back.
     narrower = re.compile(
         r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.postgres_residency_snapshot\b")
@@ -2271,3 +2407,336 @@ def test_a_block_comment_cannot_supply_the_live_body(tmp_path):
         "A /* outer /* inner */ still-outer */ B").split() == ["A", "B"], (
         "block comments do not NEST — the scan ends at the first `*/`, so text the "
         "server never executes is read as SQL")
+
+
+def test_a_string_literal_is_not_a_comment_and_cannot_hide_a_migration(tmp_path):
+    """REVIEW FINDING (P2, fail-open): stripping without modelling `'…'` deletes DATA.
+
+    PostgreSQL ends a `'…'` literal only at an unescaped `'` (`''` escapes one), so
+    a `/*` or `--` inside a literal is text the server executes. `_strip_sql_comments`
+    feeds the CANDIDATE scan as well as the body scan, so a correction migration
+    whose literal contained an UNCLOSED `/*` had its tail deleted — including its own
+    `CREATE … FUNCTION` — stopped matching `_RESIDENCY_DEFS_RX`, and dropped out of
+    `candidates`; the gate then asserted over the SUPERSEDED file and went GREEN
+    over a live, unguarded function.
+
+    ⛔ The literal with the `/*` sits ABOVE the declaration on purpose. A `/*` placed
+    after it leaves the declaration intact, so a literal-blind strip still selects
+    the file and the candidate assertions stay green — the row would then pin only
+    the body half and its own message would name a state the fixture cannot reach.
+    Measured: with the `/*` moved below the declaration, restoring the pre-fix strip
+    keeps BOTH candidate assertions green.
+
+    Both halves are pinned here because they fail in opposite directions: removing
+    text can HIDE A FILE (this row), and failing to remove comment text can FAKE A
+    BODY (the row above).
+    """
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    live_name = "20261118000001_postgres_residency_fix.sql"
+    (migrations / "20261117000003_postgres_residency_zero_vanished.sql").write_text(
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "    RAISE WARNING 'guarded';\n"
+        "    RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "  END IF;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n",
+        encoding="utf-8")
+    (migrations / live_name).write_text(
+        "-- correction: the guard is gone, and the run's log line quotes a glob\n"
+        "DO $$ BEGIN RAISE NOTICE 'scanning /*'; END $$;\n"
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  RAISE WARNING 'wrote /* not a comment */ to the ledger';\n"
+        "  RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n",
+        encoding="utf-8")
+
+    got = [p.name for p in _defining_migrations(migrations, _RESIDENCY_DEFS_RX)]
+    assert live_name in got, (
+        "the correction dropped OUT of the candidate set because a `/*` inside a "
+        "string literal was read as a comment and its tail deleted — the gate "
+        f"would assert over the superseded file. candidates={got}")
+    assert got[-1] == live_name, f"newest-first is broken: {got}"
+
+    # Non-vacuity: the LITERAL-BLIND cut is what hides the file, and this asserts
+    # the fixture can actually show it. The pre-fix strip removed `--` tails and
+    # `/* … */` spans but knew nothing about literals, so at the literal's `/*` it
+    # entered block-comment mode and deleted to EOF (nothing closes that `/*`) —
+    # including the declaration below it. Reconstructed here as "text before the
+    # first `/*`", which is exactly what that strip leaves for this file.
+    raw = (migrations / live_name).read_text(encoding="utf-8")
+    blind = raw[:raw.index("/*")]
+    assert _RESIDENCY_DEFS_RX.search(blind) is None, (
+        "the fixture's literal-blind cut still contains the declaration — the "
+        "candidate half has lost its subject, so it cannot attribute the fix")
+    code = _function_body(
+        (migrations / live_name).read_text(encoding="utf-8"), _RESIDENCY_DEFS_RX)
+    assert code is not None
+    assert "not a comment" in code, (
+        "the literal's own text was deleted from the body — the server executes it")
+    assert not re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)", code), (
+        "the live body's lost guard was satisfied by another file — false PASS")
+
+    # The escape rule, spelled out: `''` inside a literal does not end it.
+    assert _strip_sql_comments("SELECT 'it''s /* kept */'; SELECT 2;").strip() == (
+        "SELECT 'it''s /* kept */'; SELECT 2;"), "`''` must not end the literal"
+    assert _strip_sql_comments("SELECT 'a -- b' AS x").strip() == (
+        "SELECT 'a -- b' AS x"), "`--` inside a literal must not start a comment"
+
+
+def test_a_block_comment_inside_the_BODY_cannot_satisfy_the_assertion():
+    """REVIEW FINDING (P2): the BODY-scan call site of the strip had no mutant.
+
+    `_function_body` strips comments itself, and reverting that ONE call site (to
+    the pre-diff `--`-only strip, or to raw text) reddened nothing: the candidate
+    rows all exercise `_defining_migrations`, not the body window. So the most
+    load-bearing half of the fix was unattributable.
+
+    The subject: a live body that has LOST its guard but keeps a `/* … */` note
+    quoting the guarded text — the shape a migration writes when it explains what
+    it removed. With the strip, the note is gone and the assertion REDs (correct);
+    without it, the note satisfies the guard and the gate is GREEN over a live
+    function with no fail-closed arm.
+    """
+    sql = (
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $$\n"
+        "BEGIN\n"
+        "  /* was: IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "     RAISE WARNING 'the audit reported nobody'; */\n"
+        "  RAISE WARNING 'wrote rows';\n"
+        "  RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "END;\n"
+        "$$ LANGUAGE plpgsql;\n"
+    )
+    code = _function_body(sql, _RESIDENCY_DEFS_RX)
+    assert code is not None
+    assert "RAISE WARNING" in code, "the live arm must survive the strip"
+    assert not re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0",
+        code), (
+        "a `/* … */` NOTE inside the body satisfied the guard assertion — the gate "
+        "reports a fail-closed arm the executed function no longer has")
+
+    # Non-vacuity: the strip is what removes it. The `--`-only cut this replaces
+    # (and raw text) both still contain the guard, so both would pass the wrong way.
+    line_only = "\n".join(
+        ln.split("--", 1)[0] for ln in sql.splitlines())
+    assert re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0",
+        line_only), (
+        "the `--`-only strip no longer keeps the note's guard text — this row has "
+        "lost its subject, so it cannot attribute the body-scan call site")
+
+
+def test_an_E_string_escape_cannot_blind_the_strip_to_end_of_file():
+    """REVIEW FINDING (P2, fail-open): `E'\\''` spells ONE quote and closes at its 3rd.
+
+    `E'…'` lets a BACKSLASH escape the next character, so a body that legitimately
+    carries the quote character as `E'\\''` closes that literal at its THIRD `'`
+    (quote 1 opens, the escaped quote is quote 2, quote 3 closes). The pre-fix scan
+    modelled only the `''` doubling, paired quote 2 with quote 3 as one escaped quote,
+    and stayed in literal state past the closing point — so `_strip_sql_comments`
+    stopped processing BELOW it (text above it still is; a leading `-- header` is
+    removed, which is what makes the failure look like a working strip). The comments
+    below it then SURVIVED — up to the first `'`, which closes the pseudo-literal and
+    resumes stripping; a below-comment with an ODD number of apostrophes therefore
+    hides nothing, while the note's paired `'…'` survives — including a `/* … */` note
+    quoting a guarded body, and the guard assertion was satisfied by the NOTE while the
+    executed function had lost the arm. Same false PASS as the row above, one spelling
+    further in.
+
+    ⛔ Both halves are pinned: the lexical rule, and the gate-level consequence it
+    exists for — a lexer row nobody can connect to a verdict is how the rule above
+    got disclosed as "not modelled" instead of fixed.
+    """
+    # 1. The lexical rule. Measured on this head before the fix: the whole input
+    #    came back verbatim, so the trailing `--` below survived.
+    one_quote = "SELECT E'\\'' AS q; -- comment to remove\n"
+    assert _strip_sql_comments(one_quote) == "SELECT E'\\'' AS q; \n", (
+        "the E-string's escaped quote did not close the literal — the strip stayed "
+        "in literal state to end of file and removed nothing")
+    assert _strip_sql_comments("SELECT E'it\\'s -- kept' AS x").strip() == (
+        "SELECT E'it\\'s -- kept' AS x"), (
+        "`--` inside an E-string is DATA the server executes, not a comment")
+
+    # 2. The consequence: a live body that LOST its guard and keeps only a note,
+    #    with the quote character spelled the E-string way a migration would.
+    sql = (
+        "CREATE OR REPLACE FUNCTION public.postgres_residency_snapshot()\n"
+        "RETURNS void AS $q$\n"
+        "BEGIN\n"
+        "  RAISE NOTICE 'quote char: ' || E'\\'';\n"
+        "  /* was: IF jsonb_array_length(v_audit->'orgs') > 0 THEN\n"
+        "     RAISE WARNING 'the audit reported nobody'; */\n"
+        "  RAISE WARNING 'wrote rows';\n"
+        "  RETURN QUERY SELECT v_written + v_zeroed;\n"
+        "END;\n"
+        "$q$ LANGUAGE plpgsql;\n"
+    )
+    code = _function_body(sql, _RESIDENCY_DEFS_RX)
+    assert code is not None
+    assert "RAISE WARNING 'wrote rows'" in code, (
+        "the live arm must survive the strip")
+    assert "was: IF jsonb_array_length" not in code, (
+        "the note survived the strip despite the `E''` escape — the strip is blind "
+        "to end of file again")
+    assert not re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0",
+        code), (
+        "a `/* … */` NOTE satisfied the guard assertion — the gate reports a "
+        "fail-closed arm the executed function no longer has")
+
+    # 3. Non-vacuity: the subject IS in the input, and the pre-fix scan left this
+    #    file byte-identical (no comment removed), so both halves above would pass
+    #    the wrong way if the escape rule were dropped again.
+    assert re.search(
+        r"IF\s+jsonb_array_length\s*\(\s*v_audit\s*->\s*'orgs'\s*\)\s*>\s*0", sql)
+    assert _strip_sql_comments(sql) != sql, (
+        "the fixture removed no comment — the pre-fix cut would pass this row too")
+
+    # 4. The scope of the rule, which is the part a reader is most likely to get
+    #    wrong: only an escape string (`E'…'` / `e'…'`) lets a backslash escape a
+    #    quote. A BARE literal (and the
+    #    `U&'…'` spelling, which writes its quote by DOUBLING) ends at that quote —
+    #    so the `--` after it is still a comment and must still be removed.
+    #    ⛔ These three are the row's defence against applying the `E` rule to every
+    #    literal, and that mutant is fail-OPEN on valid SQL (it keeps the comment), so
+    #    they are pinned here rather than in prose. Measured: with the prefix test
+    #    replaced by `escape_literal = True`, this row reddened; without these
+    #    assertions the whole file stayed green (33 passed) under that mutant.
+    assert _strip_sql_comments("SELECT 'a\\' AS x; -- c\n") == "SELECT 'a\\' AS x; \n", (
+        "a bare literal ends at the quote after a backslash (standard_conforming_"
+        "strings is on) — if the `E` rule leaked onto it, the tail comment survives")
+    assert _strip_sql_comments("SELECT U&'a\\' AS x; -- c\n") == "SELECT U&'a\\' AS x; \n", (
+        "`U&'…'` is not an escape string: its quote is written by DOUBLING, so a "
+        "backslash does not reach past the closing quote")
+    assert _strip_sql_comments("SELECT U&'a''b' -- c\n") == "SELECT U&'a''b' \n", (
+        "a `U&'…'` literal closes on `''` like a bare one; if it stopped doing so, a "
+        "comment in the tail would survive")
+
+    # 5. BOTH halves of the escape rule, because dropping one is a partial revert
+    #    nothing else observes: the docstring claims `E'…'` AND `e'…'`, so the
+    #    lowercase spelling is pinned on its own. Measured: with the prefix test
+    #    narrowed to `sql[i - 1] == "E"`, this row reddened; before this assertion the
+    #    whole file stayed green (33 passed) under that mutant, while a body spelling
+    #    the quote `e'\''` went back to blinding the strip to end of file.
+    assert _strip_sql_comments("SELECT e'\\'' AS q; -- c\n") == "SELECT e'\\'' AS q; \n", (
+        "the lowercase `e'…'` spelling must escape its quote too — if only `E'` is "
+        "recognised, a body written `e'\''` blinds the strip to end of file again")
+
+    # 6. The prefix test must not SUPPRESS the rule after a CLOSED quoted identifier.
+    #    A single `"` ends an identifier — it is `""` that ESCAPES one, so the two
+    #    quotes are an escaped quote and not a close (see the `"…"` row below) — so
+    #    `"a"E'…'` starts a fresh token and the escape still applies. An earlier cut
+    #    listed `"` among the characters that continue a token, which turned the rule
+    #    off for exactly that form and left `SELECT "a"E'\'' AS q; -- c` with its
+    #    comment INTACT — the E-escape fail-open restored by one set member. Measured:
+    #    with `"` in that set this row's input came back verbatim; without it the
+    #    comment is removed.
+    assert _strip_sql_comments('SELECT "a"E\'\\\'\' AS q; -- c\n') == (
+        'SELECT "a"E\'\\\'\' AS q; \n'), (
+        "a closing `\"` does not continue a token: `\"a\"E'…'` must still be read as "
+        "an escape string, or the comment after it survives")
+    # Non-vacuity, both ways round: the `E` rule is still SUPPRESSED where the `E`
+    # really is the tail of a longer word, so the assertion above cannot be satisfied
+    # by simply deleting the prefix test altogether.
+    assert _strip_sql_comments("SELECT aE'\\'' AS q; -- c\n") == (
+        "SELECT aE'\\'' AS q; -- c\n"), (
+        "`aE'…'` is an identifier tail, not an escape string — if the prefix test is "
+        "gone entirely this strips, and the row above stops discriminating")
+    # `$` CONTINUES an identifier too (§4.1), so `a$E'…'` is ONE identifier and the
+    # escape must not arm there. Pinned because omitting `$` from the set is silent:
+    # the true lexing keeps `-- c` inside a literal that never closes, so a stripping
+    # scanner has DELETED text that belongs inside an unterminated literal — a
+    # statement PostgreSQL REJECTS rather than executes (§4.1.2.1: a constant must be
+    # BOUNDED by quotes), so the loss is latent. With `standard_conforming_strings` off
+    # (§4.1.2.2) the literal closes early instead and the server discards `-- c` as a
+    # comment, so neither mode executes that text. Measured: with `== "_"` (the pre-fix
+    # set) this input came back stripped.
+    assert _strip_sql_comments("SELECT a$E'\\'' AS q; -- c\n") == (
+        "SELECT a$E'\\'' AS q; -- c\n"), (
+        "`a$E'…'` is an identifier tail, not an escape string — a `$`-blind prefix "
+        "test strips the comment that PostgreSQL keeps inside the open literal")
+
+
+def test_a_quoted_IDENTIFIER_is_not_a_literal_and_cannot_blind_the_strip():
+    r"""REVIEW FINDING (P2): a `"…"` identifier is not a `'…'` literal.
+
+    PostgreSQL admits an apostrophe and a comment marker inside a QUOTED
+    IDENTIFIER — `SELECT "it's" FROM t` is legal, and `"a""b"` names `a"b`
+    (`""` escapes one `"`). A scan that opens a `'…'` literal without first
+    recognising `"…"` reads the apostrophe in `"it's"` as an OPENER, never finds a
+    closing quote, and goes blind to END OF FILE — so every comment below it
+    survives and a `/* … */` note quoting a guarded body satisfies the guard
+    assertion. Measured before this row's fix: `_strip_sql_comments('SELECT
+    "it\'s" FROM t;\n/* note */\nSELECT 2;\n')` returned the input with the note
+    intact; now the note is removed.
+
+    ⛔ This is pinned in both directions, because the two are one line apart in the
+    scan: an identifier must not be read as a literal (this row), and a literal must
+    not be read as an identifier (the `'…'` rows above, which would redden if the
+    `"` branch were hoisted above the literal branch).
+    """
+    assert _strip_sql_comments('SELECT "it\'s" FROM t;\n/* note */\nSELECT 2;\n') == (
+        'SELECT "it\'s" FROM t;\n \nSELECT 2;\n'), (
+        "the apostrophe inside a quoted identifier opened a literal and blinded the "
+        "strip to end of file — comments below it survived")
+    # `""` escapes one `"`, so the identifier does not end there, and the `--` inside
+    # it is part of the NAME — while the `--` after it is a comment.
+    assert _strip_sql_comments('SELECT "a""b -- c" FROM t; -- gone\n') == (
+        'SELECT "a""b -- c" FROM t; \n'), (
+        "`\"\"` must not close the identifier, and the comment AFTER it must still go")
+    # Non-vacuity: the subject really is in the input, and the pre-fix scan left the
+    # note present — so both assertions above would pass the wrong way if the `"` arm
+    # were dropped again.
+    raw = 'SELECT "it\'s" FROM t;\n/* note */\nSELECT 2;\n'
+    assert "/* note */" in raw
+    assert "/* note */" not in _strip_sql_comments(raw)
+
+
+def test_a_bare_quote_inside_a_dollar_tag_region_blinds_the_strip():
+    r"""KNOWN RESIDUAL, pinned so it cannot move silently — NOT a passing behaviour.
+
+    ⛔ This row asserts the CURRENT, IMPERFECT behaviour on purpose. `$tag$` regions
+    are deliberately NOT opaque here (a plpgsql body IS dollar-quoted and its
+    comments are what the body scan removes — see `_strip_sql_comments`), so a BARE
+    `'` inside a dollar-quoted region that is NOT plpgsql — free text carrying an
+    apostrophe, `SELECT $x$it's$x$` — is still read as a literal OPENER, and with no
+    closing quote the strip goes blind to END OF FILE. That is the same fail-OPEN
+    class the `E'…'` rule closes, reached through a region this strip refuses to
+    treat as opaque.
+
+    Both directions of the obvious "fix" are wrong, which is why it is filed rather
+    than patched here: skipping `$tag$` regions wholesale, or refusing to open a
+    literal inside one, would stop the strip from seeing the plpgsql string literals
+    that legitimately carry `/*` — reintroducing the candidate-hiding defect the
+    whole change exists to close. So the direction chosen is DISCLOSURE plus this
+    pin, and the fix is tracked as its own issue.
+
+    If someone makes `$tag$` opacity work safely, THIS row is the one to change —
+    and its failure is the signal that the residual moved, not a build break.
+    """
+    sql = "SELECT $x$it's$x$;\n/* note */\nSELECT 2;\n"
+    got = _strip_sql_comments(sql)
+    assert "/* note */" in got, (
+        "the residual appears FIXED: a bare quote inside a `$tag$` region no longer "
+        "blinds the strip. That is good news — delete this row and move the pin to a "
+        "positive assertion, after checking the plpgsql case still keeps its literals")
+    assert got == sql, (
+        "the strip changed something below the dollar-quoted region, so the residual's "
+        f"shape is no longer what this row documents: {got!r}")
+    # The contrast that makes the residual legible: the SAME shape with the
+    # apostrophe inside the region removed IS stripped, so the blindness is
+    # attributable to the unclosed quote and not to the `$tag$` text itself.
+    assert _strip_sql_comments("SELECT $x$its$x$;\n/* note */\n") == (
+        "SELECT $x$its$x$;\n \n"), (
+        "the control case did not strip either, so this row cannot attribute the "
+        "blindness to the unclosed quote inside the dollar-quoted region")

@@ -27,7 +27,7 @@ import numpy as np
 
 from . import embed_gate  # #5008: the S5 EMBED gate (which rows earn a vector)
 from .env_truthy import env_flag  # #4097: the declared truthy contract
-from .exceptions import EmbedderUnavailableError  # #4861: the REQUIRED contract
+from .exceptions import FAILURE_KINDS, EmbedderUnavailableError  # #4861: the REQUIRED contract
 from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
     import_sentence_transformer,
     import_tfidf_vectorizer,
@@ -909,7 +909,7 @@ class EmbeddingModel:
         return env_flag("TORTOISE_EMBEDDING_MODEL_REQUIRED", False)
 
     @classmethod
-    def _unavailable(cls, *, context: str) -> None:
+    def _unavailable(cls, *, context: str, kind: str | None = None) -> None:
         """The single exit for "no model": ``None``, or raise when REQUIRED.
 
         #4861 — every ``None`` exit in :meth:`get` returns through here, so its
@@ -924,16 +924,92 @@ class EmbeddingModel:
         broke). A REQUIRED process does not accept ``not_installed`` as an
         excuse: "designed absence" is only designed for a process that did not
         ask for the embedder.
+
+        ``kind`` (#13528) lets a caller that has ALREADY resolved the cause —
+        :meth:`await_read_ready_reason`, whose decline is its own reason
+        because the load it declined to wait for is still IN FLIGHT and has
+        therefore recorded no failure — say it on the refusal. ``None`` keeps
+        the historical read of that field, so every existing exit is unchanged.
+
+        ⛔ THE TWO FIELDS ARE NOT THE SAME VOCABULARY (#13528 review P1-1).
+        ``kind`` arrives in the LEG-TRACE terms (``absent_reason``'s), while
+        ``failure_kind`` is the CLOSED set :class:`EmbedderUnavailableError`
+        defines (``not_installed`` / ``load_failed`` / ``load_timeout`` /
+        ``model_unavailable``). Passing the trace term straight through made an
+        ARMED process refuse with ``failure_kind="no_embedder"`` — a kind that
+        set does not contain, and precisely the designed-absence term #5275
+        forbids an armed refusal from carrying. The mapping below is that
+        translation, in ONE place, so a caller never has to know it exists and
+        the two vocabularies cannot be conflated again: a reason already in the
+        vocabulary passes through unchanged, a trace-only word yields the kind
+        that WAS recorded, and only when nothing was recorded is
+        ``model_unavailable`` the honest answer.
         """
         if not cls._embedder_required():
             return None
+        failure_kind = None
+        if kind is not None:
+            failure_kind = cls._as_failure_kind(kind)
         raise EmbedderUnavailableError(
-            failure_kind=cls._last_failure_kind or "model_unavailable",
+            failure_kind=(failure_kind or cls._last_failure_kind
+                          or "model_unavailable"),
             model=EMBEDDING_MODEL,
             revision=EMBEDDING_MODEL_REVISION,
             last_error=cls._last_error,
             context=context,
         )
+
+    @classmethod
+    def _as_failure_kind(cls, reason: str) -> str:
+        """Translate a LEG-TRACE reason into ``failure_kind`` (#13528 review P1-1).
+
+        The trace and the refusal answer different questions, and this module is
+        the only place that knows both vocabularies. ``no_embedder`` is the
+        trace word for the designed absence, so the CAUSE is whatever kind was
+        recorded — ``not_installed`` in the missing-extra state the word is
+        published for. A reason outside the vocabulary names no cause OF ITS OWN
+        (``load_in_flight`` is the read's own decline, not a failure), so the
+        kind that WAS recorded is the operator's answer whenever there is one —
+        a load that broke since the decline is exactly that case — and only when
+        nothing was recorded is the contract's documented ``model_unavailable``
+        fallback the honest answer.
+
+        A reason already IN the vocabulary is returned unchanged (no translation
+        needed). The ``get()`` exits are preserved by a different mechanism:
+        each passes ``kind=None``, so this function never runs on them — which
+        is why the historical ``failure_kind`` values cannot drift here.
+
+        ⛔ THE DICT'S UNCONDITIONAL ``no_embedder -> not_installed`` ARM IS
+        DELIBERATELY GONE (#13543 review). It translated the designed-absence
+        word whatever had been recorded, so a ``no_embedder`` decline with
+        NOTHING recorded claimed ``not_installed`` — asserting that the extra is
+        absent, a fact no producer had recorded. A TRACE WORD is not evidence of
+        a cause; the recorded kind is. The ``not_installed``-RECORD route is
+        unaffected — ``absent_reason()`` publishes ``no_embedder`` for it and the
+        recorded-cause arm translates that record back to ``not_installed``, pinned
+        end-to-end by ``test_a_designed_absence_is_refused_with_not_installed``. The
+        route where NOTHING was recorded is the deliberate change declared in the
+        paragraph below: it answers ``model_unavailable``, not an assertion that
+        the extra is absent.
+
+        ⛔ THE SECOND BEHAVIOUR CHANGE, RECORDED HERE BECAUSE IT IS NOT THE ONE
+        THE ``no_embedder`` NOTE NAMES. ``main`` published an UNMAPPED reason as
+        ITSELF (``_READ_DECLINE_FAILURE_KIND.get(kind, kind)``), so
+        ``_unavailable(kind="encode_failed")`` put ``failure_kind="encode_failed"``
+        on the wire — a value outside the closed set the class documents, and
+        indistinguishable from a newly added kind. That arm exists on ``main``
+        only for a caller that has not been written yet; with this rule it cannot
+        be reached at all. It is pinned by
+        ``tests/test_embedding_model_required.py::
+        test_an_unmapped_trace_reason_is_never_published_as_itself``, which is the
+        row #13543's comment asks for: without it, a future refactor that
+        special-cased only ``no_embedder``/``load_in_flight`` and restored the
+        pass-through for everything else would re-open the trap silently.
+        """
+        if reason in FAILURE_KINDS:
+            return reason
+        recorded = cls._last_failure_kind
+        return recorded if recorded in FAILURE_KINDS else "model_unavailable"
 
     @classmethod
     def absent_reason(cls) -> str:
@@ -1269,6 +1345,125 @@ class EmbeddingModel:
             if cls._warm_up_thread is not None and cls._warm_up_thread.is_alive():
                 return
             cls._warm_up_started = False
+
+    @classmethod
+    def await_read_ready_reason(cls, budget: float) -> str | None:
+        """``None`` when the model is loaded — else WHY the read declines it (#13528).
+
+        The READ-side twin of :meth:`await_write_ready_reason`, and the same
+        answer shape for the same reason (#13229 review F2): the caller needs a
+        CAUSE, not a boolean, because the four states need opposite operator
+        responses (install the extra / repair a load / retry later / wait
+        longer). The one difference is the SHAPE of the answer: it is the
+        LEG-TRACE term the read publishes next to the ones already there
+        (``absent_reason``'s vocabulary, plus ``load_in_flight`` for the state
+        that has recorded no failure), NOT the write path's private decline
+        tokens — and ``_unavailable`` translates that term into the
+        ``failure_kind`` set on the refusal, so one string never serves two
+        fields (#13528 review P1-1).
+
+        ⛔ THE DEFECT THIS EXISTS TO REMOVE (#13528). ``get()`` blocks its caller
+        for the WHOLE one-time load, and when the load is already in flight it
+        blocks on ``cls._lock`` — which the loading thread holds ACROSS
+        ``__init__`` — so the caller's own ``load_timeout`` cannot bound it (the
+        time is spent waiting for a lock, not in its own join). Measured on the
+        hosted box: ``GET /v1/search`` and ``POST /v1/context`` answered 504 with
+        ``stage=embed_get`` at t=11.52 s against an 8 s bound.
+
+        ⛔ AND IT IS NOT ONE REQUEST'S LATENCY, IT IS THE LANE. The read runs on
+        8 daemon workers (``monitoring.CONTROL_PLANE_READ_WORKERS``, reached
+        through ``hosted_api._read_offload``). A blocking ``get()`` parks each of
+        them in that lock for the whole load, so the reads QUEUED behind them pay
+        the wait a second time before their first stage mark — which is what the
+        ``pre_handler: 9295.0`` in the measurement was, and why an 8-worker lane
+        failed reads that had not started yet.
+
+        So the answer is a BOUNDED WAIT, not a removal (the identical trade
+        #13224 made for writes): a read kicks the load (``start_warm_up``,
+        idempotent — a no-op while the lifespan pre-warm is already running),
+        waits ``budget`` for it, and then reads WITHOUT the dense leg rather than
+        stalling. The degradation is already a declared one every consumer of the
+        vector leg handles — the leg trace records ``ran=False`` with this reason
+        and ``search_engine.declared_degraded_read`` marks the read — so nothing
+        new is traded: what IS traded is that reads inside the cold window are
+        keyword-only, in exchange for a read that cannot be parked behind setup
+        it did not trigger.
+
+        ⛔ ``TORTOISE_EMBEDDER_WARMUP=0`` (the declared test/dev opt-out) keeps
+        the PRE-#13528 behaviour EXACTLY: with no background lane to kick there is
+        nothing to bound, so this returns ``None`` and the caller's ``get()``
+        loads synchronously as it always did. ``tests/conftest.py`` pins that flag
+        off for the whole suite, so every existing retrieval test keeps its
+        synchronous path and cannot be raced by a background load — and a lane
+        that opts out of the warm-up does not silently stop producing vectors.
+
+        This does NOT re-open #4055. That ruling is about the wait bound not
+        CHARGING process initialization to a request, and it is untouched (and
+        unaffected): with the acquire bounded, a read never creates a
+        request-owned load, so there is no cold setup of its own to exempt — the
+        exemption is preserved in ``hosted_api._read_offload`` for the seams that
+        still can create one. Declining setup is the same principle applied one
+        step earlier: neither charged, and now not waited for either.
+        """
+        inst = cls._instance
+        if inst is not None and inst._model is not None:
+            return None
+        # ⛔ THE OPT-OUT IS DECIDED FIRST, exactly as #13224 decided it on the
+        # write side: "no background lane ⇒ nothing to bound" is a statement
+        # about the CONFIGURATION, so it must not depend on WHY the model is not
+        # warm — otherwise the opt-out would only hold in some states and the
+        # pre-#13528 synchronous contract would silently not apply in the
+        # others.
+        if not _embedder_warmup_enabled():
+            return None
+        # A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
+        # `embeddings` extra absent the model can never load, so neither waiting
+        # nor retrying can help — answering instantly is what keeps the budget
+        # from costing 0.25 s on every read of the DOCUMENTED DEFAULT install.
+        if cls._last_failure_kind == "not_installed":
+            return cls.absent_reason()
+        now = time.monotonic()
+        if cls._last_failed_at is not None and \
+                (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+            return cls.absent_reason()
+        # Idempotent: a no-op while the lifespan pre-warm is already running, and
+        # the thing that starts one when a read is first past the post.
+        if cls.start_warm_up() is None:
+            # Nothing is in flight and the once-per-process attempt is spent
+            # (``start_warm_up`` latches). Re-arm ONE background attempt — the
+            # same arm the write path takes — so a load that failed for a
+            # transient reason is retried, and SPAWN it before answering, which
+            # is what makes the answer honest (#13528 review P2-2).
+            #
+            # ⛔ Answering ``absent_reason()`` here was wrong: with
+            # ``_last_failed_at`` unset that returns ``no_embedder``, the
+            # DESIGNED-ABSENCE term, for a state where nothing was ever absent —
+            # a load was merely not running and is now restarting. That is the
+            # same conflation this whole method exists to close, one arm over.
+            # With the attempt re-armed and started the truthful term is
+            # ``load_in_flight``; only a lane that cannot start one at all (the
+            # warm-up switched off underneath us) falls back to
+            # ``absent_reason()``.
+            cls._rearm_warm_up()
+            if cls.start_warm_up() is not None:
+                return _READ_DECLINE_LOAD_IN_FLIGHT
+            return cls.absent_reason()
+        deadline = now + max(0.0, budget)
+        while True:
+            inst = cls._instance
+            if inst is not None and inst._model is not None:
+                return None
+            now = time.monotonic()
+            # A load that FAILED inside the budget has a recorded cause, and
+            # reporting the recorded one beats reporting the wait: the operator
+            # needs "the load broke", not "I waited and gave up".
+            if cls._last_failed_at is not None and \
+                    (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
+                return cls.absent_reason()
+            remaining = deadline - now
+            if remaining <= 0:
+                return _READ_DECLINE_LOAD_IN_FLIGHT
+            time.sleep(min(_WRITE_READY_POLL_S, remaining))
 
     @classmethod
     def loaded(cls) -> bool:
@@ -1725,6 +1920,43 @@ _WRITE_DECLINE_BUDGET_EXPIRED = "budget_expired"
 #: becomes ready mid-budget is used, coarse enough not to spin (<= 25 wakeups).
 _WRITE_READY_POLL_S = 0.01
 
+#: #13528: how long a READ will wait for a COLD embedder before answering
+#: without its dense leg. The read-side twin of ``WRITE_EMBED_BUDGET_S``, and
+#: deliberately the same number for the same reason: a warm ``get()`` is the
+#: fast path (no load, no lock) and a warm encode is 25-43 ms, while the load it
+#: would otherwise wait for is 13.5 s on a warm model cache and ~57 s cold
+#: (#13224/#1349) — two orders of magnitude above this, so the steady state is
+#: untouched and the budget is a ceiling on a WAIT, never on the vector.
+#:
+#: ⛔ What it protects is not one request's latency but the READ LANE. The read
+#: runs on 8 daemon workers (``monitoring.CONTROL_PLANE_READ_WORKERS``); the
+#: blocking ``get()`` parks every one of them in ``EmbeddingModel._lock`` for the
+#: whole load, so the reads behind them queue — which is what the 7.2-9.3 s
+#: ``pre_handler`` in the #13528 measurement actually was. It sits far below the
+#: lane's own 8 s wait bound (``CONTROL_PLANE_READ_TIMEOUT_S``) because a budget
+#: near that would just move the stall behind a different number.
+READ_EMBED_BUDGET_S = 0.25
+
+#: #13528 — how a READ declines the embedder. ``load_in_flight`` is the state
+#: nothing in this module could express before: a load is RUNNING (started by the
+#: lifespan pre-warm, or re-armed here), the read waited its budget and gave up.
+#: It is a LEG-TRACE term (``absent_reason``'s vocabulary), because that is where
+#: a read publishes its decline, next to the terms already there.
+#:
+#: ⛔ IT IS DELIBERATELY NOT ``load_timeout`` (#13528 review P2-1).
+#: ``__init__`` records ``load_timeout`` when the load ATTEMPT ran out of its
+#: ``_LOAD_TIMEOUT_S`` and ``absent_reason()`` publishes that — a load that
+#: BROKE. This one did not break; it is still running and may well succeed on the
+#: next read. The two need opposite operator responses ("repair a broken load"
+#: vs "read again in a moment"), so one word cannot mean both — the same rule that
+#: kept ``embed_get`` and ``embed_encode`` apart on #10893.
+_READ_DECLINE_LOAD_IN_FLIGHT = "load_in_flight"
+
+#: The ``EmbedderUnavailableError.failure_kind`` vocabulary is declared by its
+#: owner (``exceptions.FAILURE_KINDS``) and imported above — never re-typed here,
+#: or this module becomes the second hand copy of a vocabulary it translates into
+#: (the drift class ``MEMORY.md`` records under ``[vocab]``).
+
 def _in_replay_scope() -> bool:
     """True when this fold is a journal REPLAY, not a live door (#13224).
 
@@ -1764,8 +1996,18 @@ def _in_replay_scope() -> bool:
         return True
 
 
+#: The two LEGS a bounded write belongs to — they have DIFFERENT repairs, so
+#: the count is never summed across them (#13417).
+BOUNDED_SCOPE_GRAPH_FOLD = "graph_fold"
+BOUNDED_SCOPE_RECORD_DERIVATION = "record_derivation"
+
+
 def encode_for_row(
-    content: str, expected_dim: int | None, *, bounded: bool = False,
+    content: str,
+    expected_dim: int | None,
+    *,
+    bounded: bool = False,
+    bounded_scope: str = BOUNDED_SCOPE_GRAPH_FOLD,
 ) -> list[float] | None:
     """The EMBED-gated submission step for a WRITTEN row (#5008).
 
@@ -1817,6 +2059,30 @@ def encode_for_row(
     recompute their vector from the payload text, so a live decline is
     repairable from the graph and `derived = replay(journal)` still holds.
 
+    ⚠️ **The decline is COUNTED, not merely logged (#13417).** Every bounded
+    decline increments `monitoring.metrics()["derived_embed_declines"]` under
+    the LEG it belongs to and the cause it declined for, because §17.2 requires
+    that the truth↔derived divergence the bound creates be checkable, and
+    `#13156` rules out inferring it from the read side (a budget-cancelled dense
+    leg reads like a slow store). The count is emitted from THIS seam rather
+    than from each caller, so a new writer cannot leave it behind — the same
+    reason the gate lives here.
+
+    ⛔ **`bounded_scope` is a CALLER's fact, not this seam's**, and it is
+    required because the seam cannot infer it: the two legs are repaired
+    differently. `graph_fold` (the four folds, the default) is repaired by
+    `graph-scripts/backfill_embeddings.py`; `record_derivation`
+    (`record_writer.derived_embedding_columns`, #13220) leaves the RECORD's
+    `embedding` column NULL, and that tool reads graph nodes — it would report
+    zero residual over this population. The seam also cannot see whether the row
+    already held a vector, so `graph_fold` counts a cold RE-write that stored the
+    SAME text and lost nothing — and, for `Event`/`Document` (whose folds rewrite
+    their text on match), a re-write of CHANGED text leaves a STALE vector that
+    the null-only repair reads CLEAN over (#13451).
+    `monitoring.DERIVED_EMBED_DECLINE_COUNT` states both limits; its repair
+    reading is exact for `embedding IS NULL`, and is NOT a proof of "no
+    divergence here".
+
     ⚠️ **Deliberately NOT routed through here**, so the boundary is written
     down rather than inferred: `encode_batch_for_store` (the session TURN
     writers — a `Turn` is not an extracted row, and the batched form has one
@@ -1852,15 +2118,53 @@ def encode_for_row(
     if bounded and not _in_replay_scope():
         decline = EmbeddingModel.await_write_ready_reason(WRITE_EMBED_BUDGET_S)
         if decline is not None:
-            # Visible, not silent: counted on the existing "ran no model work"
-            # metering term (#4488) and logged once per process PER CAUSE — a bulk
-            # write must not storm the log with one line per row, and the cause
-            # travels with the line so the one entry an operator reads names what
-            # actually happened (#13229 review F2).
+            # Visible, not silent, on THREE channels — they answer different
+            # questions and none is redundant: the metering term (#4488) counts
+            # "no model work ran" per org; the counter (#13417) counts the WRITES
+            # that stored no vector — the LEG and the cause, on
+            # `monitoring.metrics()`, and an UPPER BOUND on rows the dense leg is
+            # missing rather than a row count (a cold re-write of an
+            # already-embedded row with the SAME text counts and loses nothing;
+            # a changed-text re-write leaves a stale vector the null-only repair
+            # reads clean over — #13451); and
+            # the line below explains once per process PER CAUSE what the two
+            # numbers mean — a bulk write must not storm the log with one line
+            # per row, and the cause travels with the line so the one entry an
+            # operator reads names what actually happened (#13229 review F2).
             _note_embed_skip(1)
+            _note_vectorless_write(bounded_scope, decline)
             _note_cold_write(WRITE_EMBED_BUDGET_S, reason=decline)
             return None
     return encode_for_store(content, expected_dim)
+
+
+def _note_vectorless_write(scope: str, reason: str) -> None:
+    """Count the WRITE this bounded decline leaves without a vector (#13417).
+
+    TOTAL, and every occurrence — unlike `_note_cold_write`, which is latched to
+    one line per process per cause so a bulk write cannot storm the log. The log
+    line explains WHAT happened; this counter is the number an operator can
+    alert on, and a number that only moves once per process cannot answer "how
+    many rows is the dense leg missing?".
+
+    Imported lazily so this module stays import-order-independent and an unarmed
+    process pays one function call, not a module import (the
+    `_note_embed_encode` shape). A measurement fault must NEVER fail a write, so
+    this is swallowed: monitoring is an observation, not a dependency.
+
+    ⛔ It does NOT count `#5008`'s gate declines — those are a DESIGNED absence
+    (identifier-only text), permanent and unrepairable — nor a post-bound refusal
+    (a wrong-width store, or an encoder that raised). Both are permanent and
+    operator-actionable in a different way, and parking either beside a real cold
+    window would make the channel's non-zero value unattributable. See
+    `monitoring.DERIVED_EMBED_DECLINE_COUNT` for the full boundary and for the
+    two limits this seam cannot see.
+    """
+    try:
+        from .monitoring import record_derived_embed_decline
+        record_derived_embed_decline(scope, reason)
+    except Exception:
+        pass
 
 
 def _note_cold_write(budget: float, *, reason: str) -> None:

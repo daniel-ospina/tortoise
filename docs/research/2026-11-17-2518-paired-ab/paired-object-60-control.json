@@ -1,0 +1,748 @@
+{
+  "arms": {
+    "object": {
+      "derived_note": "LEGACY // NOT RE-DERIVABLE: these runs recorded no per-item seed rank and no per-item ranked-list id digests, so `seed_effect`, `expansion_fired_items` and `ranked_lists_compared` are this run's own OUTPUT but cannot be recomputed from the artifact \u2014 a consistent re-staling of the figure in the artifact AND the brief is invisible to the suite (`#13267` review 5 F1). `off_topk_displacement` is NOT RE-DERIVABLE even for the new generation: it needs the ranked-list IDS, and the artifact records only their digests. The tool now records `per_item.off_seed_rank` / `on_seed_rank` and declares, per arm, which derived figures it makes re-derivable (`derived_recomputable`).",
+      "derived_recomputable": [],
+      "derived_unpinned": [
+        "items_whose_read_grew",
+        "expansion_fired_items",
+        "expansion_identical_items",
+        "ranked_lists_compared"
+      ],
+      "expansion_fired_items": null,
+      "expansion_identical_items": null,
+      "expansion_provenance_entries": {
+        "off": 0,
+        "on": 0
+      },
+      "identity_measured": false,
+      "identity_note": "UNMEASURED, and it was reported as measured (#13267 F1): `read_arm` recorded each item's ranked list for the `point` arm only, so on this arm both sides were `None` and `(ids or [])` made that `[] == []` for every item \u2014 'the identical ranked list for all N items' from a constant no retrieval behaviour can move. The conclusion still holds and rests on the CALL SITE: `TortoiseSDK.tortoise_fts_query` arms the expansion only behind `entity_key_expansion and entity_type == \"point\"`, so this arm's two switch states are one code path. The tool now records ids for every arm and derives this count from the comparison, so a re-run measures it.",
+      "items_whose_read_grew": null,
+      "per_item": {
+        "item-000000": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000001": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000002": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000003": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000004": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000005": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000006": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000007": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000008": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000009": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000010": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000011": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000012": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000013": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000014": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000015": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000016": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000017": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000018": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000019": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000020": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000021": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000022": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000023": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000024": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000025": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000026": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000027": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000028": {
+          "off_rank": 1,
+          "on_rank": 1,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000029": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000030": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000031": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000032": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000033": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000034": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000035": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000036": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000037": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000038": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000039": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000040": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000041": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000042": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000043": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000044": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000045": {
+          "off_rank": 1,
+          "on_rank": 1,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000046": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000047": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000048": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000049": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000050": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000051": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000052": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000053": {
+          "off_rank": 2,
+          "on_rank": 2,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000054": {
+          "off_rank": 1,
+          "on_rank": 1,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000055": {
+          "off_rank": 1,
+          "on_rank": 1,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000056": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000057": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000058": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        },
+        "item-000059": {
+          "off_rank": 0,
+          "on_rank": 0,
+          "provenance_off": {},
+          "provenance_on": {}
+        }
+      },
+      "per_k": {
+        "k=10": {
+          "bootstrap": {
+            "ci95": [
+              0.0,
+              0.0
+            ],
+            "delta": 0.0,
+            "resamples": 2000,
+            "seed": 20261117
+          },
+          "correlation": {
+            "rho": null,
+            "se_reduction": null
+          },
+          "discordance": 0.0,
+          "discordant_hit_to_miss": 0,
+          "discordant_miss_to_hit": 0,
+          "mcnemar_exact_p": 1.0,
+          "mde_independent": null,
+          "mde_note": "NOT ESTIMABLE: no discordant pair was observed, so this n carries no information about the difference \u2014 an MDE of 0 here would read as 'infinitely powered', which is the opposite of what an all-agree run means",
+          "mde_paired": null,
+          "n": 60,
+          "off_hits": 60,
+          "off_recall": 1.0,
+          "on_hits": 60,
+          "on_recall": 1.0
+        },
+        "k=15": {
+          "bootstrap": {
+            "ci95": [
+              0.0,
+              0.0
+            ],
+            "delta": 0.0,
+            "resamples": 2000,
+            "seed": 20261117
+          },
+          "correlation": {
+            "rho": null,
+            "se_reduction": null
+          },
+          "discordance": 0.0,
+          "discordant_hit_to_miss": 0,
+          "discordant_miss_to_hit": 0,
+          "mcnemar_exact_p": 1.0,
+          "mde_independent": null,
+          "mde_note": "NOT ESTIMABLE: no discordant pair was observed, so this n carries no information about the difference \u2014 an MDE of 0 here would read as 'infinitely powered', which is the opposite of what an all-agree run means",
+          "mde_paired": null,
+          "n": 60,
+          "off_hits": 60,
+          "off_recall": 1.0,
+          "on_hits": 60,
+          "on_recall": 1.0
+        },
+        "k=3": {
+          "bootstrap": {
+            "ci95": [
+              0.0,
+              0.0
+            ],
+            "delta": 0.0,
+            "resamples": 2000,
+            "seed": 20261117
+          },
+          "correlation": {
+            "rho": null,
+            "se_reduction": null
+          },
+          "discordance": 0.0,
+          "discordant_hit_to_miss": 0,
+          "discordant_miss_to_hit": 0,
+          "mcnemar_exact_p": 1.0,
+          "mde_independent": null,
+          "mde_note": "NOT ESTIMABLE: no discordant pair was observed, so this n carries no information about the difference \u2014 an MDE of 0 here would read as 'infinitely powered', which is the opposite of what an all-agree run means",
+          "mde_paired": null,
+          "n": 60,
+          "off_hits": 60,
+          "off_recall": 1.0,
+          "on_hits": 60,
+          "on_recall": 1.0
+        },
+        "k=5": {
+          "bootstrap": {
+            "ci95": [
+              0.0,
+              0.0
+            ],
+            "delta": 0.0,
+            "resamples": 2000,
+            "seed": 20261117
+          },
+          "correlation": {
+            "rho": null,
+            "se_reduction": null
+          },
+          "discordance": 0.0,
+          "discordant_hit_to_miss": 0,
+          "discordant_miss_to_hit": 0,
+          "mcnemar_exact_p": 1.0,
+          "mde_independent": null,
+          "mde_note": "NOT ESTIMABLE: no discordant pair was observed, so this n carries no information about the difference \u2014 an MDE of 0 here would read as 'infinitely powered', which is the opposite of what an all-agree run means",
+          "mde_paired": null,
+          "n": 60,
+          "off_hits": 60,
+          "off_recall": 1.0,
+          "on_hits": 60,
+          "on_recall": 1.0
+        }
+      },
+      "ranked_lists_compared": 0,
+      "reads": {
+        "off": 60,
+        "on": 60
+      },
+      "repeat_check": {
+        "basis": "target_rank",
+        "compared": 60,
+        "identical": true,
+        "note": "LEGACY (not a determinism check of the READ): this run's `repeat` was compared on each item's TARGET RANK. On this arm every item's target is present in both reads, so the comparison is a real 60-of-60 equality \u2014 but it still only witnesses target PRESENCE, not window order or id set, so the determinism of the read is unmeasured here too (`#13267` review 4 F2). `repeat_identical` is null; the tool now compares ranked-list digests."
+      },
+      "repeat_identical": null,
+      "structurally_blind": true,
+      "why": "this arm is `object` and the expansion is armed only for `entity_type == 'point'` at the call site, so the two switch states are the SAME code path and the ON==OFF identity is the GATE, not a null effect \u2014 \u26d4 and this particular run did not MEASURE that identity (see `identity_note`); it is a call-site fact.",
+      "window_modes": {
+        "off": {
+          "keyword_only": 60
+        },
+        "on": {
+          "keyword_only": 60
+        }
+      }
+    }
+  },
+  "construction": {
+    "arm": "point = the leg the expansion arms; object = the leg the published comparison measured",
+    "declared_not_a_production_census": true,
+    "distractors": 500,
+    "graph": {
+      "anchors": 60,
+      "distractors": 500,
+      "linked_points": 120,
+      "points_total": 620
+    },
+    "keys_source": "the target record's own salient tokens \u2014 the SHIPPED harvest's own shape (the pool is the linked points' search_keys), so the lift measured here is the mechanism's ceiling under a clean key set",
+    "per_k_from_one_read": true,
+    "read_limit": 30
+  },
+  "construction_unrecorded": {
+    "fields": [
+      "query_chars",
+      "key_tokens",
+      "min_query_tokens"
+    ],
+    "note": "this run predates the tool recording these knobs, so they are NOT evidence here. The two knobs each arm ran with ARE in the brief: the robustness arm's `--query-chars 200` and `--read-limit 60`, against the headline's `--read-limit 30` and default query cap (500) (\u00a73 and \u00a78). \u26d4 `key_tokens` 4 and `min_query_tokens` 3 are the TOOL'S argparse DEFAULTS, not recorded run values \u2014 this run could have overridden either and the artifact would not show it, so they are NOT cited as what it ran with. \u26d4 The two point arms differ in BOTH `query_chars` and `read_limit`, so the robustness arm's difference cannot be attributed to the query cap alone (#13267 F5). The tool records `construction.query_chars`/`key_tokens`/`min_query_tokens` from this version onward."
+  },
+  "environment": {
+    "db_uri_scheme": "docker",
+    "elapsed_s": 47.7,
+    "embedder": false,
+    "graph": "(run-scoped)",
+    "graph_nodes": 1885,
+    "load_delta_1m": -0.01,
+    "load_end": {
+      "cpus": 16,
+      "load_15m": 11.43115234375,
+      "load_1m": 11.24755859375,
+      "load_5m": 11.572265625
+    },
+    "load_start": {
+      "cpus": 16,
+      "load_15m": 11.43212890625,
+      "load_1m": 11.25439453125,
+      "load_5m": 11.5849609375
+    },
+    "same_load_note": "both arms ran back to back in ONE process on ONE box, so the loads below bracket the whole comparison rather than one arm \u2014 and the delta is reported so a reader can see whether the box moved under it"
+  },
+  "git_head": "9b537d875a3ee27e6abdb7ccac07b28ef71a78cd",
+  "items": {
+    "dropped": {},
+    "id_digest": "9eeb9c4fe2049168be0c674f7483a70ed4690baebe27e2195d51f6e286feb805",
+    "id_digest_note": "sha256 over the synthetic `item-NNNNNN` ids every draw assigns \u2014 a function of the sample SIZE only, NOT pairing evidence; use name_digest",
+    "median_target_overlap_with_query": 0.0,
+    "name_digest": "1776aaa9af4527e840c81160b40fd62c770234e2cdc0043449715e24262d8f0f",
+    "sampled": 60,
+    "with_item": 60
+  },
+  "measured_at": "2026-11-17T17:52:43.145068+00:00",
+  "pairing": {
+    "items_read_per_arm": {
+      "object": 60
+    },
+    "same_item_list_is_structural": "one `items` list is built once and handed to every arm in the same process, so a different sample per arm is not reachable; `items.name_digest` (and `population.names_sha256`) is the discriminating record of WHICH names those items came from. `items.id_digest` is NOT: it digests the synthetic `item-NNNNNN` ids, so it is a function of the sample SIZE only (#13267 F6).",
+    "unit": "the item"
+  },
+  "population": {
+    "names_sha256": "1776aaa9af4527e840c81160b40fd62c770234e2cdc0043449715e24262d8f0f",
+    "population": 1000,
+    "sample": 60,
+    "schema": "paired-expansion-ab-2518.population.v1",
+    "seed": 20261117,
+    "snapshot_digest": "18ab6174e440f7b38dbd49b00b519409cedaacef58647f2cf29532b825f325d0"
+  },
+  "population_file": "/tmp/snap-2518/population-60.json",
+  "provenance": {
+    "git_head": "9b537d875a3ee27e6abdb7ccac07b28ef71a78cd",
+    "git_head_note": "`git_head` is the repo commit the run sat on, and it does NOT identify the producing code: ALL THREE artifacts carry the `mde_note` key, and the object control's is populated beside a `mde_paired` that the run wrote as `NaN` and this file encodes as strict `null` \u2014 the cell is PRESENT and null, and the note beside it is what distinguishes it from a field that was never recorded. The two point artifacts' `mde_note` is `\"\"` and their `mde_paired` is finite, so that cell carries no token; the `NaN` their runs wrote sits in `correlation.rho` / `correlation.se_reduction`, which are `null` here for the same reason. The tool emits `mde_note` only from 5898385f2e onward, and that fix was UNCOMMITTED when the run happened. `tool_sha256` is null because this run predates the field; a run from this tool version records the digest of its own bytes and whether they were committed (#13267 F4).",
+    "tool_path": "tools/paired_expansion_ab_2518.py",
+    "tool_sha256": null,
+    "tool_uncommitted": true
+  },
+  "refusal_kinds": [
+    "structurally_blind"
+  ],
+  "refusals": [
+    "EVERY arm is structurally blind to the lever \u2014 no arm read the leg the expansion arms (`entity_type == 'point'`), so no verdict on 'does it help or hurt' can be drawn from this run"
+  ],
+  "schema": "paired-expansion-ab-2518.artifact.v1",
+  "snapshot": {
+    "digest": "18ab6174e440f7b38dbd49b00b519409cedaacef58647f2cf29532b825f325d0",
+    "file_count": 23,
+    "files": [
+      {
+        "bytes": 1235,
+        "lines": 1,
+        "name": "2026-10-26.jsonl",
+        "sha256": "68895e970dc8875c10c99488d8669e91d0fc4c3ec4402ba6847f30117632098a"
+      },
+      {
+        "bytes": 1114377,
+        "lines": 214,
+        "name": "2026-10-27.jsonl",
+        "sha256": "642168e337c9d48e78ace87f5de6c944299c0ed168f33018291eff1609f430b0"
+      },
+      {
+        "bytes": 678969,
+        "lines": 133,
+        "name": "2026-10-28.jsonl",
+        "sha256": "ce369133e5600f4d3ccc273c8bfc0750a5edc28b5fac5344aff68c40b710e0db"
+      },
+      {
+        "bytes": 1597575,
+        "lines": 322,
+        "name": "2026-10-29.jsonl",
+        "sha256": "94542b693a0afcd3a63c69e6da42647ccbc88e715556beaac12976f3829632e6"
+      },
+      {
+        "bytes": 1834159,
+        "lines": 369,
+        "name": "2026-10-30.jsonl",
+        "sha256": "c0ded1246d518bbff5aafdd9fadca9205eef539282611cf08b205c71db908e49"
+      },
+      {
+        "bytes": 4109816,
+        "lines": 724,
+        "name": "2026-10-31.jsonl",
+        "sha256": "3770244e56413c9f14b5da1f00909d7435a737a3ad6232bbfb52436ea41233ea"
+      },
+      {
+        "bytes": 3071662,
+        "lines": 482,
+        "name": "2026-11-01.jsonl",
+        "sha256": "97f33405826fcbe7801861a5b2b14f3e605702843265c6705cbdf3e1d8d9da19"
+      },
+      {
+        "bytes": 3606525,
+        "lines": 560,
+        "name": "2026-11-02.jsonl",
+        "sha256": "5ce3cb0cffdbc758b397da0e7d72026a6fc1ac052ce3debd96d28884ae60743f"
+      },
+      {
+        "bytes": 4901788,
+        "lines": 756,
+        "name": "2026-11-03.jsonl",
+        "sha256": "4b2fac8b12befb2a13eef3d5d36b5196290a41d212dcc62d8998b286364adf91"
+      },
+      {
+        "bytes": 2399587,
+        "lines": 308,
+        "name": "2026-11-04.jsonl",
+        "sha256": "5e5647a41c64408a95843f896b1ad8f4c726db684854dec94176ec8a38536e1d"
+      },
+      {
+        "bytes": 3033250,
+        "lines": 478,
+        "name": "2026-11-05.jsonl",
+        "sha256": "cfa677bd9dc682f26fe3ae08f6389636747b412130501583b723e151511eccec"
+      },
+      {
+        "bytes": 6561694,
+        "lines": 986,
+        "name": "2026-11-06.jsonl",
+        "sha256": "f89d180d264de25213ce03be5a09acb0dcd4b985fff9c37b08416b2fe34c38b6"
+      },
+      {
+        "bytes": 5386962,
+        "lines": 798,
+        "name": "2026-11-07.jsonl",
+        "sha256": "907420b2ba51adea7f2bf1da199e573fbec02194834879b1fa36951d9c364967"
+      },
+      {
+        "bytes": 3552681,
+        "lines": 637,
+        "name": "2026-11-08.jsonl",
+        "sha256": "7c2e2afc69d1a73a9f34df6423cdda3c0b11b34096721058ec2f4d8b52e87c17"
+      },
+      {
+        "bytes": 3759608,
+        "lines": 928,
+        "name": "2026-11-09.jsonl",
+        "sha256": "2599b7aa98b6169d18e27b4af37ecdd75116f4de99fa56f591ece8df460c68b7"
+      },
+      {
+        "bytes": 5918713,
+        "lines": 1261,
+        "name": "2026-11-10.jsonl",
+        "sha256": "c9b63d0ba457c2694cf92fc99439909820f9a088a14326314ec4ee0dcf442b8c"
+      },
+      {
+        "bytes": 4772943,
+        "lines": 1029,
+        "name": "2026-11-11.jsonl",
+        "sha256": "1665b86ee4b8c7ffd3b4a44c66fcde87b0ec6e910efe5656bde302a7f8d90c71"
+      },
+      {
+        "bytes": 7906219,
+        "lines": 1487,
+        "name": "2026-11-12.jsonl",
+        "sha256": "e2a5c50c1a5225dfa8b798a040365ae0c6c841bd23f0688811653e4d927e68ac"
+      },
+      {
+        "bytes": 6097037,
+        "lines": 1243,
+        "name": "2026-11-13.jsonl",
+        "sha256": "b3322f8b326749179aa66b25044084418df2f51eed5174f37cd82a194119bf78"
+      },
+      {
+        "bytes": 3515322,
+        "lines": 609,
+        "name": "2026-11-14.jsonl",
+        "sha256": "7f6ebca79e37ad3d7312a74a3c89cee8db3c5f08989386dca380f65818a47383"
+      },
+      {
+        "bytes": 767050,
+        "lines": 123,
+        "name": "2026-11-15.jsonl",
+        "sha256": "1dad7f4048a2d4ad3b6a5dbb2e14f0c1b5df99fe8c67d3a3ab92febf0c3ba6a8"
+      },
+      {
+        "bytes": 1179614,
+        "lines": 217,
+        "name": "2026-11-16.jsonl",
+        "sha256": "54f9ac0719b60bc9165ab239122be72036a7118431075ef3b564663d91a6df5e"
+      },
+      {
+        "bytes": 2804575,
+        "lines": 560,
+        "name": "2026-11-17.jsonl",
+        "sha256": "8563bec5ea8407685acb34a29a5385e66c8221ac8d40558204ccbd8a61f01f00"
+      }
+    ],
+    "schema": "paired-expansion-ab-2518.snapshot.v1",
+    "total_bytes": 78571361,
+    "total_lines": 14225
+  }
+}

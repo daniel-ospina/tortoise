@@ -42,6 +42,7 @@ from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any, ClassVar
 
+from . import derived_embedding
 from .domain_loader import known_kinds, register_kind
 # #9572: the "nothing was named" predicate for the identity doors, ONE home
 # shared with the hosted REST/commit doors and the eval lane (stdlib-only leaf,
@@ -1136,9 +1137,14 @@ def _record_vector_searcher(sdk=None, timeout_ms=None):
 
     ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET, AND IT IS BOUND HERE (#11691).
     ``record_vector.searcher`` threads it into the returned closure, which divides
-    it once (``record_vector.record_statement_ms``: two bounded statements per
-    read, so each gets a third) and hands the quotient to the door, where the
-    applied ``statement_timeout`` is ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``.
+    it once (``record_vector.record_statement_ms``) and hands the quotient to the
+    door, where the applied ``statement_timeout`` is
+    ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``. ⚠️ The divisor is PER-ARM
+    (`#13466` cycle 5, P3): a column-filtered label issues two bounded statements
+    and divides by `record_vector.RECORD_LEG_STATEMENTS_PER_READ`, while a
+    folded-status label (`object`/`subject`) issues three and divides by
+    `record_vector.FOLD_ARM_DIVISOR` — so "each gets a third" is the column arm's
+    arithmetic, not the folded one's.
     The division is what leaves the graph branch time to answer after a
     cancellation; see that function for the arithmetic. The reason it is bound at
     CONSTRUCTION rather than passed per call: the callable's FOUR-argument shape is
@@ -4812,12 +4818,14 @@ CROSS_LENS_ANN_TOP_K = 20
 CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the Point lifecycle — ONTOLOGY §5's transition
-# table in code, PLUS one code-review decision the doc does not carry: a DRAFT
-# may terminalize before it is ever live (``draft -> deprecated/superseded``), so
-# the map is a SUPERSET of §5's `draft` row and an exact match of its `live`
-# row. ``tests/test_claim_lifecycle.py`` cross-checks the terminal words and the
-# doc's declared transitions; the `draft` widening is pinned there as the #432
-# decision, not as doc↔map equality.
+# table in code. The four MODEL rows match the doc ROW FOR ROW since v3.37; the
+# three legacy keys below (``retracted``, ``outdated``, ``archived``) are READ
+# deltas whose value is ``{}`` — that emptiness is what makes a stored word
+# terminal — so the map is a SUPERSET of the table BY KEY SET and an exact match
+# on every row the table states. ⛔ THAT ROW EQUALITY IS PINNED by
+# ``tests/test_claim_lifecycle.py::test_ontology_transitions_column_matches_the_
+# guard_map``, which compares every ``Transitions to`` cell against this map:
+# narrowing §5's `draft` cell to ``live`` reds it — the doc is not a subset.
 # NOT consulted by update_point per-call (update_point only promotes
 # draft→live; every claim transition is observable via a Task 3 emit hook, and
 # no transition can slip through update_point unemitted).
@@ -4856,6 +4864,15 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "outdated": frozenset(),
     "archived": frozenset(),
 }
+
+#: ``live``'s declared target set, RENDERED for the refusal messages that must
+#: state it. ⛔ DERIVED from the map ON PURPOSE (v3.37 review): the reviewers found
+#: THREE hand-written copies of this set in this one function, and two of them had
+#: already gone stale — one still said ``{retracted, superseded}`` and told a
+#: caller `archived` was "REFUSED as reserved" on a Point, which both the map and
+#: the synonym normalisation refute. A message may NAME a set; it may not keep a
+#: second copy of one.
+_LIVE_DECLARED_TEXT = "{" + ", ".join(sorted(_ALLOWED_TRANSITIONS["live"])) + "}"
 
 
 def _lifecycle_meaning(word: str) -> str:
@@ -6642,23 +6659,44 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                     # the same clause the sibling successor repair carries. The
                     # `superseded` arm was made carrier-aware in an earlier
                     # round and the `abandoned` arm was left carrier-BLIND, so
-                    # its first-named repair was `status='archived'` — which
-                    # `_ALLOWED_TRANSITIONS` REFUSES on a `:Point` (*"terminal
-                    # (reserved — no v1 write path)"*, ONTOLOGY §5), i.e. the
+                    # its first-named repair was `status='archived'` — which on a
+                    # `:Point` GOAL is refused by the #13035 goalState-coherence arm
+                    # (`status='archived'` ends the goal while `goalState='active'`
+                    # still describes a live commitment — measured), NOT by any §5
+                    # reservation: that row was deleted in v3.37, and `archived` is
+                    # only `deprecated`'s synonym on a plain Point (measured:
+                    # `update_knowledge(<fact>, status='archived')` -> `deprecated`),
+                    # i.e. the
                     # first thing this message told a Point caller to do, the
-                    # same door then refused. Measured in the new suite
-                    # (`test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal`):
-                    # the pre-fix text raised `update_entity refused the status
-                    # transition 'live' -> 'archived'` from the call it
-                    # prescribed. `retracted` is a declared transition from
-                    # every live state on BOTH carriers, so it is named first on
-                    # the one carrier where `archived` is not reachable.
+                    # same door then refused.
+                    # ⛔ v3.37 ALSO CORRECTED THE REASON THIS COMMENT GAVE, measured
+                    # at this head: the refusal above is the #13035
+                    # goalState-coherence arm, NOT `update_entity refused the
+                    # status transition 'live' -> 'archived'` — that message is
+                    # UNREACHABLE for `archived`, because the `_update_entity` door —
+                    # the one that raises that message, NOT this helper — calls
+                    # `_read_caller_status(_status, kind=":Point")`, which normalises
+                    # the word to `deprecated`, BEFORE it reads
+                    # `_ALLOWED_TRANSITIONS.get(...)`. ⛔ NAMED, NOT NUMBERED, and
+                    # named by its DOOR: a line-number pointer here went stale twice in
+                    # one review cycle (a sibling lane's +9 lines, then this comment's
+                    # own +1), and a first cut of this rewrite named the call without
+                    # naming the function it belongs to — which read as this helper's
+                    # own call and resolved nowhere (rounds 7-8).
+                    # And `retracted`
+                    # is not a declared target of `live` either: it is a spelling
+                    # that normalises to `deprecated`, which IS a declared target.
+                    # So the message prescribes the DECLARED word on each carrier,
+                    # discloses the spellings, and names both fields — instead of
+                    # prescribing a spelling and calling the canonical word
+                    # unperformable (the sibling arm's own fix, `364ea06d`).
                     "status='archived' on an Object/Subject goal, or "
-                    "status='retracted' on a :Point goal (whose declared "
-                    "transitions from a live state are exactly "
-                    "{retracted, superseded}, so 'archived' is REFUSED there as "
-                    "reserved); the legacy 'deprecated' spelling is accepted on "
-                    "goals whose door carries it")
+                    "status='deprecated' on a :Point goal (the transitions this "
+                    "door DECLARES from a live state are "
+                    f"{_LIVE_DECLARED_TEXT}; 'retracted' and 'archived' are "
+                    "the spellings that normalise to it, so either lands "
+                    "the same ending) — and set BOTH fields: the word ends the "
+                    "goal and `goalState` never ends it alone (#13035)")
                 + f";\n"
                 f"  2. drop the ending from `goalState` — pass a word that "
                 f"describes a live commitment {sorted(GOAL_LIVE_STATES)} (or "
@@ -6694,14 +6732,13 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
                 f"that resolves it to the name;\n"
                 f"  2. if nothing replaced it, say so — pass "
                 f"goalState='abandoned' with a status that ENDS it on the door "
-                f"you are using: status='retracted' on a :Point goal (its "
-                f"declared transitions from a live state are exactly "
-                f"{{retracted, superseded}}, so the 'archived' ending is REFUSED "
-                f"there as reserved), or status='archived' on an "
-                f"Object/Subject goal. ⛔ Not the legacy 'deprecated' spelling: "
-                f"no Point door accepts it, so prescribing it would send a "
-                f"caller in a circle (measured: `ValueError: Invalid status "
-                f"'deprecated'`)."
+                f"you are using: status='deprecated' on a :Point goal (the "
+                f"transitions this door DECLARES from a live state are "
+                f"{_LIVE_DECLARED_TEXT}; 'retracted' is the legacy spelling "
+                f"that normalises to it, and 'archived' likewise), or "
+                f"status='archived' on an "
+                f"Object/Subject goal. ⛔ Set BOTH fields: the word ends the "
+                f"goal and `goalState` never ends it alone (#13035)."
             )
         return
 
@@ -6816,12 +6853,17 @@ def _refuse_inconsistent_goal_ending(props: dict, *, surface: str,
             f"over it: the node keeps the ending it had.\n"
             f"Two ways to fix it, either is accepted:\n"
             # ⛔ ROUND 22, findings 1 and 2: the same two defects the arms above
-            # fixed, in the family's LAST refusal. `archived` is not reachable
-            # on a `:Point` (ONTOLOGY §5), and `supersededBy` holds a NAME.
+            # fixed, in the family's LAST refusal. `archived` is not a DISTINCT
+            # word on a `:Point` — since ONTOLOGY v3.37 §5 carries no `archived`
+            # row and the word is only `deprecated`'s write-side synonym, so a
+            # write of it is ACCEPTED and STORED as `deprecated` (measured at this
+            # head; the "reserved on Points" row this clause used to cite was
+            # deleted) — and `supersededBy` holds a NAME.
             f"  1. keep the ending — pass status='archived' with "
             f"goalState='abandoned' on an Object/Subject goal, or "
-            f"status='retracted' with goalState='abandoned' on a :Point goal "
-            f"(whose 'archived' ending is REFUSED there as reserved); or "
+            f"status='deprecated' with goalState='abandoned' on a :Point goal "
+            f"('retracted' and 'archived' are its legacy spellings, normalised "
+            f"to `deprecated` and landing the same ending); or "
             f"status='superseded' plus supersededBy=<successor name> (the column "
             f"holds the successor's name, not its id);\n"
             f"  2. if this is genuinely a NEW goal, give it its own id "
@@ -10618,8 +10660,28 @@ def _item_type_text(item: dict) -> str:
     return _type_text(item.get("type"))
 
 
+#: The label each ENTITY-ITEM `type=` writes — and, load-bearing, ingest's
+#: PHASE-1 VOCABULARY: `_validate_bundle` uses this map as the `entities[]` type
+#: ALLOW-LIST (`:31120`), step 3 dispatches on the same labels, and the
+#: connection-endpoint gate resolves an item's label through it.
+#: ⛔ IT DECIDES THINGS — so a key added here must come with a step-3 writer
+#: branch in the SAME batch (#13556 review N1). `point`/`diary` were added here
+#: for a `create_entity` MESSAGE, and the bundle path then accepted items that
+#: step 3 refused with `Phase2Error` — after step 2 had already committed the
+#: bundle's points, the #2422/#7925 partial-mutation class this file closes in
+#: half a dozen comments. They live in `_CREATE_ENTITY_TYPE_ARMS` only; both
+#: land on `:Point` (ONE belief kind, #10977), never on a label of their own.
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
                        "event": "Event", "document": "Source"}
+
+
+#: The `type=` values `TortoiseSDK.create_entity` DISPATCHES on — its arms, and
+#: the whole vocabulary of its `unknown type` message.
+#: ⛔ SEPARATE FROM `_ENTITY_ITEM_LABELS` ON PURPOSE (#13556 review N1): that map
+#: is ingest's Phase-1 allow-list and `point`/`diary` have no ingest writer, so
+#: adding them there opens a validation gate instead of extending a message. A
+#: message may name a type the ingest bundle cannot carry; a gate may not.
+_CREATE_ENTITY_TYPE_ARMS = (*_ENTITY_ITEM_LABELS, "point", "diary")
 
 
 def _indefinite(phrase: str) -> str:
@@ -12369,13 +12431,13 @@ def canonical_org_graph_name(tenant: str) -> str:
 def _uri_graph_name(db_uri: str | None) -> str | None:
     """The URI's own graph name, or ``None`` for an embedded construction.
 
-    The `urlparse(...).path.lstrip("/") or "tortoise"` step had THREE verbatim
-    copies in this module (`_get_proj`, `_graph_census`'s read, and
-    `_cache_graph_name`) — and `_derive_graph_name`'s own docstring exists
-    because a caller that names a graph outside a projection must derive it
-    IDENTICALLY. A drift in this step makes a caller compare against a name the
-    projection never opens (a false mismatch, or a missed one), so it is one
-    function now, used by all three.
+    The `urlparse(...).path.lstrip("/") or "tortoise"` step was copied at two
+    sites in this module (`_get_proj`, and `check_connection`'s census read)
+    before `_cache_graph_name` became the third consumer — and
+    `_derive_graph_name`'s own docstring exists because a caller that names a
+    graph outside a projection must derive it IDENTICALLY. A drift in this step
+    makes a caller compare against a name the projection never opens (a false
+    mismatch, or a missed one), so it is one function now, used by all three.
     """
     if db_uri is None:
         return None
@@ -12568,8 +12630,11 @@ _GUARDED_LIFECYCLE_PROPS = frozenset({"status"}) | _TEMPORAL_RESTAMP_PROPS
 #: this arm is the door a caller promotes one through.
 #:
 #: The SECOND conjunct is the fix. The legacy ``outdated=true`` flag is a
-#: TERMINALITY signal — §5's ``outdated`` row: "Terminal on every read surface
-#: and for every lifecycle transition" — and ``update_entity``'s guard already
+#: TERMINALITY signal — the row that used to say so ("Terminal on every read
+#: surface and for every lifecycle transition") was deleted from §5 in v3.37, and
+#: it now says the same thing as a note: the boolean "remains a second, flag-based
+#: dead marker (#2498) that readers — including EP's currency predicate — must
+#: continue to honour" — and ``update_entity``'s guard already
 #: read it, so without this conjunct this door ACCEPTED a flag-dead point and
 #: stored ``status='live'`` beside the flag: a claim that reads terminal to
 #: every reader while carrying a live status. That is the two-facts-disagree
@@ -16225,7 +16290,29 @@ class TortoiseSDK:
         # Cheap: a name derivation that opens nothing (no projection, no
         # socket) plus one regex on the name.
         if _note_tenant_graph is not None:
-            _note_tenant_graph(cache_graph=self._cache_graph_name(),
+            # ⛔ THE DERIVATION IS INSIDE THE GUARD, not just the call: the hook
+            # cannot raise, but its ARGUMENT is evaluated first — and
+            # `_cache_graph_name` parses the URI, which raises `ValueError` on a
+            # malformed one (`docker://[::1/db`). #5148 protects the call, not
+            # the argument (review cycle 2, finding 4).
+            #
+            # ⛔ NAMED RESIDUAL (review cycle 8, P3): when the derivation raises,
+            # `cache_graph=None` reaches `cache_leg.tenant_graph_reason`, whose
+            # `if not cache_graph: return None` arm is its "no bind shape decided
+            # yet" silence — so the tenant/cache GRADE does not run and NOTHING
+            # records that it did not. That is the honest bound rather than a
+            # claim: the alternative was a 500 on a bind that otherwise
+            # succeeded, and the silence is pinned by
+            # `tests/test_12943_cache_leg.py::
+            # test_a_malformed_uri_does_not_turn_binding_a_tenant_into_a_failure`.
+            # The repair is a counter for a grade that COULD NOT RUN (which the
+            # health block would then have to publish), not a different except
+            # clause here.
+            try:
+                _cache_graph = self._cache_graph_name()
+            except Exception:  # noqa: BLE001, RUF100
+                _cache_graph = None
+            _note_tenant_graph(cache_graph=_cache_graph,
                                org_id=org_id, graph_id=graph_id)
 
     def _cache_graph_name(self) -> str:
@@ -16333,6 +16420,10 @@ class TortoiseSDK:
             type_, id=id_, recorded_ts=recorded_ts,
             **_journal_record_payload(event))
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): the record write and the fold below both
+    # encode this row's text; the decorator binds one memo across the pair, so the
+    # second encode is free (`derived_embedding.one_encode_scope`).
+    @derived_embedding.one_encode_scope
     def _apply_and_journal(self, proj, event: dict, *,
                            journal: bool = True) -> None:
         """THE live-write door for a pre-built Object/Subject/Event record.
@@ -44590,6 +44681,16 @@ class TortoiseSDK:
         # ``exclude_status``. Default None = byte-identical to pre-#4509.
         exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
+        # #13302: the ENDED SCOPE — the read whose QUESTION is "what ended, and
+        # how?". Default False = byte-identical (every existing caller keeps the
+        # current-picture read it has). When True the population is the OTHER
+        # half of the one determinant (design §6): the records
+        # ``live._terminal_expression`` treats as ended, served with the ending
+        # the record itself carries (its lifecycle word, the successor it names,
+        # its terminal stage + outcome) and the time it ended. See
+        # ``tortoise/ended.py`` — no new state, no visibility field, no second
+        # vocabulary, and no per-call guess about which knob a surface accepts.
+        ended_scope: bool = False,
         _elevated_timeout_ms: int | None = None,
         # #7953 (§17.3): PRIVATE — the residency COORDINATE a NODE-naming read
         # asked about, as ``label:key`` (``cache_projection.declared_key``).
@@ -44753,6 +44854,59 @@ class TortoiseSDK:
         True to surface them (audit/history queries); a prior/resolution leg
         that must still SEE a terminal node (link-before-create, anchor
         resolution) opts in here too.
+
+        ended_scope (#13302): the OTHER question — default False, and the whole
+        current-picture read above is unchanged. `include_terminal` answers "the
+        same read, without the currency filter", which still needs a query that
+        MATCHES; this answers "what has ENDED", which is a question about STATE
+        and cannot be asked of a text match at all (a customer's
+        "has anything we relied on been withdrawn?" shares no word with
+        "the beach club confirmed our booking"). When True the population is the
+        records `live._terminal_expression` treats as ended — the SAME shared
+        predictor every read filters on, taken in the positive direction, so no
+        status set, slot literal or per-family deny-list lives here — served
+        newest ending first, each row carrying the ending the record itself
+        holds: its lifecycle `status` (``deprecated`` = nothing replaced it,
+        ``superseded`` = see the successor), the successor as the TWO facts the
+        model records — `successorId`/`allSuccessorIds` from a Point's `CORRECTS`
+        edge and `successorName` from the `supersededBy` carrier (an
+        Object/Subject names its successor; the carrier holds a NAME, so it is
+        never served under an `…Id` key) — the `stage` block (`slot` +
+        `outcome`) for a record ended on the POSITION axis, and `endedAt`.
+        `linkedEvents` carries the events wired to the record, which is what
+        makes "planned and never happened" answerable without knowing a kind's
+        stage names: a plan is ``stage.slot == "terminal"`` with an empty
+        `linkedEvents`.
+        ⛔ A `query` beside it is REFUSED, not ignored: a state enumeration that
+        silently dropped the caller's words would serve a whole population as if
+        it were their answer. The refusal is a CLOSED LIST, and it names EVERY
+        retrieval keyword the normal path uses to shrink, expand, re-rank,
+        re-weight, time-scope or enrich the row set: `query`, `threshold`,
+        `min_confidence`, `order_by`, `relationship_filter`, `traversal_path`,
+        `claim_class`, `exclude_status`, `exclude_turn_echo_session`, `graph_ranker`,
+        `structural_kind`, `structural_hops`, `pool_size`, `fusion_weights`,
+        `fusion_k`, `recency_field`, `recency_boost`, `query_date`, `time_aware`,
+        `keep_numeric`, `search_keys_prf`, `entity_key_expansion` and `w4_enrich`
+        (`exclude_turn_echo_session` would have returned rows the caller asked to
+        exclude, in silence — the failure the sentence above cites). A new
+        retrieval keyword must be classified in that list, because the list IS the
+        contract. `include_terminal` is the one keyword accepted beside it and it
+        is a NO-OP here rather than a drop: the ended population is already the
+        terminal one, so that flag can neither add nor remove a row. `entity_type`
+        (point/object/subject — the kinds with a lifecycle), `kind` and `limit`
+        scope and bound it.
+        `ended_scope` is not a visibility field on the record and adds no word
+        to the model: it is design §6's "option on the call", and the default
+        keeps every existing surface answering exactly what it answered before.
+        The scan it issues is BOUNDED by `ended.ENDED_SCAN_BUDGET_MS`
+        (10 000 ms — FalkorDB's own general-query default, not the 500 ms leg
+        budget: #13302 review F1), overridable by the caller's own budget. A
+        budget it overruns degrades — zero rows, `incomplete`, a `degraded`
+        leg — **when the caller passes a sink that can carry that marking**
+        (`leg_trace`, `read_status_out` or `_truncation_out`); with none there
+        is nowhere for the marking to go, so it raises the store's error
+        instead of returning a bare `[]` that would claim "nothing of that
+        family ever ended" (#13302 review round 2).
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -45004,6 +45158,77 @@ class TortoiseSDK:
                 f"'operator'), or omit claim_class — ignoring it here would "
                 f"return the rows the caller asked to exclude."
             )
+        # #13302: an ENDED-SCOPE read is the STATE population, not a match set, so
+        # every retrieval knob beside it is REFUSED rather than dropped. A silent
+        # drop is the defect class this file names repeatedly ("a keyword the
+        # chosen arm cannot RECORD is refused, never dropped"): a caller who
+        # passed a query and got the whole ended population back would read a
+        # state enumeration as an answer to their question, and a caller who
+        # passed ``min_confidence`` and got rows below it would never learn the
+        # floor was not applied. ``limit`` (the page bound), ``entity_type`` and
+        # ``kind`` (the population's scope) DO apply and stay served.
+        #
+        # ⛔ THE REFUSED SET IS CLOSED AND EVERY MEMBER IS NAMED BELOW. A knob that
+        # is not named here is NOT reached by this arm either, so it may only be
+        # admitted when dropping it cannot change which rows a caller receives. A
+        # knob the normal path uses to SHRINK, EXPAND, RE-RANK, RE-WEIGHT, TIME-SCOPE
+        # or ENRICH the row set is refused: silently dropping it serves a state
+        # population as if the caller's scope had been applied, which is the
+        # failure the comment above cites for ``query``. That is why the whole
+        # retrieval vocabulary is here and not just the eight filters first
+        # listed (#13416 review F4: ``structural_hops``/``structural_kind``/
+        # ``graph_ranker``/``pool_size``/``fusion_*``/``recency_*``/``query_date``/
+        # ``time_aware``/``keep_numeric``/``search_keys_prf``/
+        # ``entity_key_expansion``/``w4_enrich`` were dropped in silence).
+        # ⛔ ``include_terminal`` is deliberately NOT refused and is the ONE
+        # exception, by construction rather than by omission: the ended population
+        # is already the terminal one, so the flag can neither add nor remove a
+        # row here — refusing it would refuse a caller for asking for what they
+        # are getting. ``limit``, ``entity_type`` and ``kind`` scope and bound the
+        # read and stay served; the sink/plumbing keywords (``leg_trace``,
+        # ``read_status_out``, ``_truncation_out``, ``_elevated_timeout_ms``) are
+        # how the caller receives or times the answer, not what it contains.
+        if ended_scope:
+            _refused_ended = sorted(
+                name for name, _supplied in (
+                    ("query", query is not None),
+                    ("threshold", threshold not in (0.0, 0)),
+                    ("min_confidence", min_confidence not in (0.0, 0)),
+                    ("order_by", order_by != "relevance"),
+                    ("relationship_filter", relationship_filter is not None),
+                    ("traversal_path", traversal_path is not None),
+                    ("claim_class", claim_class is not None),
+                    ("exclude_status", bool(exclude_status)),
+                    ("exclude_turn_echo_session",
+                     exclude_turn_echo_session is not None),
+                    ("graph_ranker", graph_ranker is not None),
+                    ("structural_kind", structural_kind is not None),
+                    ("structural_hops", structural_hops not in (0, None)),
+                    ("pool_size", pool_size is not None),
+                    ("fusion_weights", fusion_weights is not None),
+                    ("fusion_k", fusion_k != 60),
+                    ("recency_field", recency_field is not None),
+                    ("recency_boost", recency_boost not in (0.0, 0)),
+                    ("query_date", query_date is not None),
+                    ("time_aware", bool(time_aware)),
+                    ("keep_numeric", bool(keep_numeric)),
+                    ("search_keys_prf", bool(search_keys_prf)),
+                    ("entity_key_expansion", bool(entity_key_expansion)),
+                    ("w4_enrich", w4_enrich is not True),
+                ) if _supplied
+            )
+            if _refused_ended:
+                raise ValueError(
+                    f"ended_scope is a STATE enumeration, not a relevance read, "
+                    f"so it cannot apply {', '.join(_refused_ended)}. It answers "
+                    f"\"what ended, and how\" from the records' own state: omit "
+                    f"{', '.join(_refused_ended)} and read the returned rows' "
+                    f"`status` / `successorId`+`successorName` / `stage` (with its "
+                    f"`slot` and `outcome`) / `endedAt`. Narrow the population with "
+                    f"entity_type= and kind=, and bound the page with limit=; "
+                    f"for a relevance read of what is still CURRENT, drop "
+                    f"ended_scope and search as before."
+                )
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
             annotate_ep_batch, get_relationships_bounded,
@@ -45358,6 +45583,114 @@ class TortoiseSDK:
         # takes the read-filter set (descendants, never ancestors).
         expanded_kinds = self._read_filter_kinds(kind) if kind else None
 
+        # ── #13302: the ENDED SCOPE is served HERE ────────────────────────────
+        # Placed after the projection is obtained and its reachability proven
+        # (so `_with_read_status` records a status the store actually answered
+        # for), and after `label`/`kind_field`/`expanded_kinds` are resolved (so
+        # the enumeration reads each family by its OWN carriers and honours the
+        # same kind EXPANSION every other read filter uses). It returns before
+        # the retrieval machinery: this is a state enumeration, and running the
+        # legs first would either waste them or — worse — let a degraded FTS
+        # fallback fill an answer to a question that was never about words.
+        if ended_scope:
+            from .ended import ENDED_SCAN_BUDGET_MS, enumerate_ended
+
+            # ONE row beyond the page, so the TRUNCATION marker is PROVEN rather
+            # than guessed: a population wider than ``limit`` is the only way a
+            # caller learns rows were cut, and asking for the extra row costs one
+            # slot in a bounded scan. Without it the marker would have to report a
+            # full page as complete (the #8447 defect) or an unfilled one as cut.
+            _ended_bound = int(_elevated_timeout_ms or ENDED_SCAN_BUDGET_MS)
+            try:
+                _fatter = enumerate_ended(
+                    graph, entity_type=entity_type, kind=kind,
+                    kinds=expanded_kinds, limit=limit + 1,
+                    # BOUNDED like every other statement this read issues: the
+                    # caller's own budget (the capstone's `_elevated_timeout_ms`)
+                    # or `ENDED_SCAN_BUDGET_MS`, never an unbounded query. ⛔ That
+                    # budget is the SCAN's own, not `VECTOR_LEG_BUDGET_MS`
+                    # (#13302 review F1): 500 ms is calibrated for the single-hop
+                    # legs (the `RETURN 1` probe, `_read_declaration`, the vector
+                    # legs), and a family-wide `MATCH … collect() … ORDER BY …
+                    # LIMIT` is not one of them — under it this arm degraded to an
+                    # empty answer on the population the read exists for.
+                    timeout_ms=_ended_bound)
+            except ValueError:
+                # ⛔ NOT a store failure: the door REFUSES a family with no
+                # lifecycle before it ever queries (`ended.py`'s `FAMILIES`
+                # check), and that refusal is the answer — swallowing it here
+                # would serve `ended_scope` on an Event as a degraded empty
+                # population, i.e. "nothing of that family ended", which is the
+                # claim the two must never share. Only the STORE's failure is
+                # degradable; a contract refusal keeps rising.
+                raise
+            except Exception as e:  # noqa: BLE001, RUF100
+                # ⛔ The degradation must be CARRIED, or it is a lie (#13302
+                # review round 2, P2). The marking below reaches the caller only
+                # through a sink: the leg entry through `status_trace`, the
+                # `incomplete` flag through `_truncation_out` (which
+                # `_with_read_status` publishes ONLY when that sink exists).
+                # With NEITHER, `[]` would arrive bare, byte-identical to the
+                # factual claim "nothing of that family ever ended" — the one
+                # reading `ended.py`'s docstring and this arm's own comment
+                # forbid. Measured before the guard: a no-sink caller got `[]`
+                # and a log line, nothing else.
+                #
+                # The SIBLING store-failure arm above answers it the same way —
+                # degrade when a sink exists, otherwise `raise` — so a caller
+                # with no vocabulary for "could not answer" gets the store's
+                # error, exactly as a direct `enumerate_ended` caller does.
+                # `status_trace` IS the "can this be carried?" test, and it is
+                # the only one needed: it is the caller's `leg_trace` when one
+                # was asked for, and is normalised to `[]` whenever a truncation
+                # sink exists without one (the #8447 round-5 seam just above).
+                # So `status_trace is None` is exactly `no sink at all` — do NOT
+                # key this on `read_status_out` alone the way the sibling arm can
+                # afford to: a trace-only or truncation-only caller HAS a
+                # vocabulary for "could not answer" and must keep degrading
+                # (`test_a_truncation_only_caller_still_degrades`,
+                # `test_a_trace_only_caller_sees_the_ended_leg_did_not_answer`).
+                if status_trace is None:
+                    raise
+                # FAIL-SAFE (#13302 review F1). FalkorDB's `timeout` is a MAXIMUM
+                # QUERY RUNTIME: the server aborts the statement and the client
+                # RAISES. This is the most expensive statement the read issues,
+                # so on a production-sized family it is the arm most likely to
+                # hit the budget — and without this handler a store that could
+                # not answer would throw OUT of a public read whose every
+                # sibling bounded statement degrades (the reachability probe
+                # above, the vector legs, `_read_declaration`). Degrade exactly
+                # as they do: zero rows, a leg entry that says the leg ran and
+                # did NOT answer, and a truncation marker that forbids reading
+                # the empty answer as COMPLETE. Never an unmarked empty list
+                # passed off as "nothing ever ended" — and, that being
+                # impossible without a sink, never a raise either once one is
+                # present (the guard above is what makes both true at once).
+                _logger.warning(
+                    "ended-scope enumeration did not answer within %s ms (%s) "
+                    "— degraded", _ended_bound, e)
+                # ⛔ APPEND IN PLACE, never rebind: `status_trace` IS the
+                # caller's `leg_trace` whenever no `read_status_out` was asked
+                # for (`45129`), and a rebind to a copy would send this entry to
+                # a list nobody reads — the sibling vector arm above
+                # (`45617`) appends in place for exactly that reason. A
+                # trace-only caller must see that the leg ran and did not
+                # answer, or the one record of the degradation is a throwaway.
+                if status_trace is not None:
+                    status_trace.append(_trace_entry(
+                        "ended", ran=True, degraded=True,
+                        reason="query_failed", count=0))
+                _trunc["incomplete"] = True
+                return _with_read_status([])
+            _ended_rows = _fatter[:limit]
+            # ``candidates`` is what this read could SEE and it may be BOUNDED
+            # (exactly the hosted ``GET /v1/points`` ``limit+1`` probe shape), which
+            # is why ``exact`` is the separate input: 3 here means "more than
+            # limit", never "exactly 3".
+            _trunc["candidates"] = len(_fatter)
+            _trunc["exact"] = len(_fatter) <= limit
+            return _with_read_status(_ended_rows)
+
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the
         # sparse/structural legs keep the original query. ``query=None``
@@ -45389,7 +45722,7 @@ class TortoiseSDK:
         query_vec = None
         _vec_reason: str | None = None
         if strategies.get("vector") and query and query.strip():
-            from .embeddings import EmbeddingModel
+            from .embeddings import READ_EMBED_BUDGET_S, EmbeddingModel
             from .exceptions import EmbedderUnavailableError
             # #10893: stage marks for the wait-bound breach. `mark` is a NO-OP
             # when no timeline is bound (every CLI/test/SDK-user process), so
@@ -45402,18 +45735,65 @@ class TortoiseSDK:
             # them is how the two got argued as one thing on #10893.
             _mark_read_stage(STAGE_EMBED_GET)
             model = None
-            try:
-                model = EmbeddingModel.get()
-            except EmbedderUnavailableError:
-                raise  # #5275: REQUIRED — fail loud, never an FTS-only read
-            except Exception:  # noqa: BLE001, RUF100
-                model = None
-            if model is None:
+            # ⛔ #13528 — THE ACQUIRE IS BOUNDED, AND IT IS BOUNDED HERE. This
+            # used to be a bare ``EmbeddingModel.get()``, which blocks for the
+            # WHOLE one-time load (13.5 s on a warm model cache, ~57 s cold) and
+            # — when a load is already in flight — blocks on the class LOCK the
+            # loading thread holds across ``__init__``, so the caller's own
+            # ``load_timeout`` could not bound it. Production measured the result
+            # as ``stage=embed_get`` with HTTP=504 at t=11.52 s against this
+            # lane's 8 s bound.
+            #
+            # The cost was never one request's latency: the read lane is 8 daemon
+            # workers (``monitoring.CONTROL_PLANE_READ_WORKERS``), so every
+            # worker parked in that lock makes the reads behind it QUEUE — the
+            # ``pre_handler: 9295.0`` in the same measurement, i.e. reads that
+            # had not started yet paying the wait before their first mark.
+            #
+            # ⛔ THE DECLINE IS THE SAME SHAPE THE READ ALREADY HAS: with no
+            # model the vector strategy is never submitted and the leg trace
+            # records WHY (``ran=False``, ``reason=<the cause>``), which
+            # ``search_engine.declared_degraded_read`` turns into the read's
+            # declared single-leg marker. Nothing new is traded — a read inside
+            # the cold window is keyword-only, exactly as it is on a host with no
+            # embeddings extra, and the dense leg returns on the next read after
+            # the load lands.
+            _read_decline = EmbeddingModel.await_read_ready_reason(
+                READ_EMBED_BUDGET_S)
+            if _read_decline is not None:
+                # Not warm and the read declined to wait. It still goes through
+                # the ONE absent exit, so ``TORTOISE_EMBEDDING_MODEL_REQUIRED``
+                # (#4861/#5275) keeps failing LOUD rather than degrading
+                # silently, and the refusal names the cause this read actually
+                # resolved (a load still IN FLIGHT has recorded no failure of its
+                # own, so ``_last_failure_kind`` alone would answer the
+                # designed-absence term).
+                # ⛔ ``kind`` is a LEG-TRACE reason, and ``_unavailable``
+                # translates it into the refusal's ``failure_kind`` vocabulary
+                # (#13528 review P1-1). The rule, not a fixed pair: a reason
+                # already in that vocabulary (``load_failed`` / ``load_timeout``)
+                # IS the cause and passes unchanged; ``no_embedder`` /
+                # ``load_in_flight`` are trace-only words and are translated to
+                # the RECORDED kind, else ``model_unavailable``. So a recorded
+                # kind outranks the in-flight term — reconcile a refusal against
+                # ``_last_failure_kind``, never against a trace-word mapping.
+                EmbeddingModel._unavailable(
+                    context="read: embedder not warm within the read's budget",
+                    kind=_read_decline)
+                _vec_reason = _read_decline
+            else:
+                try:
+                    model = EmbeddingModel.get()
+                except EmbedderUnavailableError:
+                    raise  # #5275: REQUIRED — fail loud, never an FTS-only read
+                except Exception:  # noqa: BLE001, RUF100
+                    model = None
+            if model is None and _read_decline is None:
                 # #5275: a present-but-BROKEN embedder (load_failed /
                 # load_timeout) is not the designed absence the
                 # ``no_embedder`` term names — carry the recorded cause.
                 _vec_reason = EmbeddingModel.absent_reason()
-            else:
+            elif model is not None:
                 _mark_read_stage(STAGE_EMBED_ENCODE)
                 try:
                     query_vec = model.encode([_dense_query])[0].tolist()
@@ -45562,8 +45942,11 @@ class TortoiseSDK:
         _mark_read_stage(STAGE_RETRIEVAL)
         # #11691: the SAME budget `degradation_chain` gives every leg's
         # `timeout_ms` below, so the RECORD dense leg's statement bound is
-        # `min(record door, a third of this)` instead of the door's 15 s — the
-        # third is `record_vector.record_statement_ms`, which reserves the rest of
+        # `min(record door, a share of this)` instead of the door's 15 s — the
+        # share is `record_vector.record_statement_ms`, the read divided by the
+        # ARM's statement count plus one (a third for a column-filtered label's
+        # two statements, a quarter for a folded label's three), which reserves
+        # the rest of
         # the read for the graph branch after a cancellation. Derived with the
         # identical expression degradation_chain uses (`int(elevated or
         # VECTOR_LEG_BUDGET_MS)`) rather than a second guess at it.
@@ -50948,6 +51331,14 @@ class TortoiseSDK:
 
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): this door runs the record write and the
+    # fold in BOTH orders depending on the LABEL — its Object/Subject/Event blocks
+    # fold before they journal (contract exception 2's neighbour), while
+    # `DocumentCreated` journals first and folds after — so the scope spans the
+    # PAIR order-independently; either way the second encode of the same text is
+    # free (`derived_embedding.one_encode_scope`, whose docstring states the
+    # per-label rule this comment must not contradict).
+    @derived_embedding.one_encode_scope
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None,
@@ -51005,13 +51396,15 @@ class TortoiseSDK:
                                    journal_armed=bool(self._event_log_path))
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
-        # ``create_entity("Point", …)`` raises `unknown type`
-        # (``_ENTITY_ITEM_LABELS``) — so a ``pointKind`` riding it is a stray
-        # property on a label the calibration gate never reads
-        # (``_CALIBRATION_GATED_LABELS = ("Point",)``), and refusing it failed an
-        # unrelated write (measured: ``create_object(..., props={'point_kind':
-        # padded})``) over a name this gate has no business with. The Point doors
-        # are where it belongs.
+        # this funnel never receives a `:Point` write — since #11609 the
+        # `type="point"`/`"diary"` arms RELAY to `create_point` and never reach
+        # here at all, which is the same shape as before (they did not exist, and
+        # ``create_entity("Point", …)`` was an `unknown type`) — so a
+        # ``pointKind`` riding it is a stray property on a label the calibration
+        # gate never reads (``_CALIBRATION_GATED_LABELS = ("Point",)``), and
+        # refusing it failed an unrelated write (measured: ``create_object(...,
+        # props={'point_kind': padded})``) over a name this gate has no business
+        # with. The Point doors are where it belongs.
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the
@@ -52213,8 +52606,9 @@ class TortoiseSDK:
         # ⛔ POINT WINS THE WORDING, not the first nameless row (#12592 review
         # P2). `nameless` is built Object→Subject→Point, so a `:Point:Object`
         # hybrid whose Object arm is nameless while its Point arm is satisfied
-        # would otherwise be told to `archived` — a word §5 declares RESERVED on
-        # Points and that this door REFUSES on the Point arm — while the
+        # would otherwise be told to `archived` — which on a Point is only
+        # `deprecated`'s write-side SYNONYM (`lifecycle_vocabulary.py:95`), not the
+        # tombstone verb, and carries no CORRECTS edge — while the
         # recovery actually available to it (`retract_point`, or the CORRECTS
         # edge `supersede_knowledge()` writes through the Point path) is not offered. The
         # prescription must be performable on every label it is spoken from.
@@ -52233,15 +52627,19 @@ class TortoiseSDK:
         # explicit pair is what a caller who knows only the successor's NAME can
         # send; and the successorless retirement is named with the word the model
         # gives it — `archived` for an Object/Subject (§4.3/§4.2), and for a
-        # Point `retract_point`, because §5 declares `archived` RESERVED on
-        # Points ("no v1 write path") and naming it there would advertise a
-        # write the model does not offer.
+        # Point `retract_point`. ⛔ NOT because `archived` would be REFUSED:
+        # measured at this head, `update_knowledge(<point>, status='archived')` is
+        # ACCEPTED and stored as `deprecated`, because it is a declared SYNONYM on
+        # every kind (`lifecycle_vocabulary.py:95`) and normalisation runs before
+        # `_ALLOWED_TRANSITIONS` is consulted. What a Point needs here is a VERB —
+        # the tombstone, which journals the transition and writes no successor —
+        # and a status word alone provides none (AX rule 2).
         if first == "Point":
             model_clause = (
                 "That is not a supersession at all: a Point retired with no "
                 "successor is 'retracted' (`retract_point`), and 'deprecated' is "
-                "an independent terminal state that needs none (`archived` is "
-                "RESERVED on Points — ONTOLOGY §5: no v1 write path). ")
+                "an independent terminal state that needs none (`archived` is only "
+                "its write-side synonym, so it names no verb). ")
             retirement_word = f"`retract_point({_refusal_repr(id_val)})`"
             retirement = f"or, if nothing replaced it, {retirement_word}."
             # ⛔ THE CARRIER CLAUSE IS LABEL-CONDITIONAL, because the carrier IS.
@@ -53421,19 +53819,23 @@ class TortoiseSDK:
                     # actually take. The DECLARED targets are named, the two
                     # verbs that reach them are named where they exist, and the
                     # mint-and-supersede route covers the case the status itself
-                    # was wrong. `archived` gets its own sentence because it is
-                    # *"reserved — no v1 write path"* on a Point (ONTOLOGY §5),
-                    # so naming it in a transition list would advertise a write
-                    # the model does not offer. For a declared target the verbs
+                    # was wrong. `archived` gets its own sentence because §5 has no
+                    # `archived` ROW — the word is only `deprecated`'s write-side
+                    # synonym (`lifecycle_vocabulary.py:95`), so a transition list
+                    # naming it would advertise a target the model does not carry
+                    # (the "reserved — no v1 write path" row that used to say so was
+                    # deleted in v3.37). For a declared target the verbs
                     # are named too (`retract_point` / `supersede_point`) even
                     # though this door would accept the status: they are the
                     # routes that also journal the transition and, for
                     # `superseded`, mint the successor (#12403).
-                    _reserved = (
-                        " `archived` is reserved on Points (ONTOLOGY §5: no v1 "
-                        "write path) — `retract_point(...)` is the SDK route to "
-                        "retirement."
-                        if _status == "archived" else "")
+                    # ⛔ THE `_reserved` SENTENCE IS GONE (v3.37 review, round 2).
+                    # It claimed "`archived` is reserved on Points (ONTOLOGY §5: no
+                    # v1 write path)" and was DEAD CODE twice over: `_status` is
+                    # normalised above (`_read_caller_status`), so it can never be
+                    # `"archived"` here, and the claim itself is false —
+                    # `update_knowledge(<point>, status='archived')` is ACCEPTED and
+                    # stored as `deprecated` (measured at this head).
                     # AX rule 2's third part, and it must be PERFORMABLE: the
                     # prescription names the RESOLVED id, not the address the
                     # caller typed. A `:Point:Event` addressed by its `eventId`
@@ -53465,10 +53867,11 @@ class TortoiseSDK:
                         f"{_refusal_repr(_named_id)}{_addressed_as}: "
                         f"this door's declared Point transitions from "
                         f"{_refusal_repr(_stored)} are {{{_declared_text}}} "
-                        f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table, plus "
-                        f"#432's decision that a draft may terminalize before it "
-                        f"is ever live), so {_refusal_repr(_status)} is not a "
-                        f"declared transition through this door.{_reserved} Use "
+                        f"(`_ALLOWED_TRANSITIONS` — ONTOLOGY §5's table in code, "
+                        f"which since v3.37 carries #432's decision that a draft "
+                        f"may terminalize before it is ever live), so "
+                        f"{_refusal_repr(_status)} is not a "
+                        f"declared transition through this door. Use "
                         f"a declared transition, or — "
                         f"if the claim itself changed — mint a new Point and "
                         f"supersede this one with "
@@ -54603,6 +55006,21 @@ class TortoiseSDK:
             required; D10 (ONTOLOGY v3.15 §4.4) retires ``:Document`` — a
             document is a ``:Source``, so this routes through the deprecated
             label alias and journals ``DocumentCreated``)
+          - point    → a ``:Point`` claim. ``props={"pointKind": …}`` is the
+            kind (the same way ``subjectKind``/``objectKind`` are carried, and
+            for the same reason: the container has no per-kind parameters), and
+            an UNSENT kind defaults to ``statement`` — ONE belief kind, so a
+            point is ``:Point {pointKind: statement}``, never a new kind
+            (#10977). ``name`` is the claim's CONTENT (the point door's
+            ``content``), and the write RELAYS to ``create_point`` so every gate
+            on that path is reached unchanged. ``dedup`` defaults to ``True``
+            here because the retired ``tortoise_create_point`` door declared it
+            so; ``create_point``'s own default is ``False`` (#11609).
+          - diary    → a ``:Point {pointKind: 'diary'}``. ``name`` is the entry
+            and ``props`` carries ``authoredBy`` (REQUIRED — the retired
+            ``tortoise_diary_write`` named the agent as its first argument),
+            plus ``topic``/``wing``. A caller-supplied ``pointKind`` that
+            contradicts ``diary`` is REFUSED, never silently re-filed.
 
         Write nudges (nudge, don't enforce): returns ``{node, nudges}`` where
         ``nudges`` lists top related Points (by name/content token overlap) with
@@ -54613,6 +55031,12 @@ class TortoiseSDK:
         (``no_source`` only for documents, where its remedy is real;
         ``extracted_from_inert`` on any type that declares an unwired ref).
         Advisory only: never a block, and it never changes what is stored.
+
+        The ``point``/``diary`` arms return the SAME ``{node, nudges}`` shape
+        and compute their nudges, but their ``node`` is whatever
+        ``create_point`` returned (minus its transient ``advisories``, which
+        move to the top level) — a Point's node is its property bag, including
+        the ``valid_to_shaped`` receipt (#9202).
 
         #9964 — THE KIND DECIDES THE LAYER. The classifier's entity partition
         merges objects and subjects, so a kind it returns can belong to the
@@ -55187,10 +55611,19 @@ class TortoiseSDK:
             node = self._create_entity("Document", did, {
                 "title": name, "documentKind": documentKind, **props},
                 "DocumentCreated", is_episodic=is_episodic)
+        elif t == "point" or t == "diary":
+            # ONE branch, not two: the arms differ in NOTHING here — the door's own
+            # `dedup` semantics are replayed inside `_absorbed_point_write` from the
+            # `t` it receives, so a split body would be two copies of one call that
+            # ruff reds as SIM114 (agent-infra-ci / lint). `t` still rides through
+            # unchanged, which is what lets the two arms disagree later without this
+            # line deciding anything.
+            return self._absorbed_point_write(
+                t, name, props, is_episodic=is_episodic, guard=_guard)
         else:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
-                f"{', '.join(_ENTITY_ITEM_LABELS)}")
+                f"{', '.join(_CREATE_ENTITY_TYPE_ARMS)}")
         # ── #8171: MATERIALIZE the provenance a caller declared inline ──────
         # `extractedFrom` is a recognised prop on this door — it rides the
         # generic passthrough and is stored on the node.
@@ -55566,6 +55999,28 @@ class TortoiseSDK:
         Nudges are advisory only — surfaced in the write response, never
         enforced (the agent acts via create_operator + mitigate_operator, or
         create_edge, if it wants; #4282 deleted ``operator_action``).
+
+        ⚠️ **COST — MEASURED, and nothing about it is optimised (#13436 P7).** The
+        scan returns the FULL ``content`` of all 400 rows and the only product is
+        the advisory below: **12.3-13.3 ms per call at 1,000 Points AND at 5,000**
+        (the 400-row cap is constant), moving **117.1 KiB** of content, and the
+        CALLER pays **+11.1 to +12.8 ms** of a 16.8-18.8 ms ``create_entity`` (~65-68 %
+        of it). ⚠️ The two blocks are SEQUENTIAL, not interleaved. The
+        CONTENT LENGTH is a real term once the seed is realistic: 60 / 300 / 1,200
+        chars per row measured **9.1 / 12.8 / 23.4 ms** (run 1) and **10.0 / 14.6 /
+        23.4 ms** (run 2) — 20x the length costs 2.57x (run 1) / 2.35x (run 2) the call, close to linear. ⚠️ A first
+        cut of the instrument seeded a repeated character and concluded the
+        opposite; that seed holds TOKENISATION constant while varying bytes, and
+        this method scores by token overlap, so the reading was an artefact.
+        ⛔ **Do not "fix" it from this docstring**: `#13436`'s mandate is *"an
+        optimisation off an unmeasured cost is the regression path"*, so a change
+        here starts from `docs/evidence/13436-write-path-costs/README.md`
+        (instrument: `tools/measure_13436_write_costs.py`), which states what was
+        measured, what it does not decide, and who owns which half. **Ownership:**
+        the ``ingest`` half is `#11796` (a placeholder keyed on the literal word
+        ``related``, one scan PER WRITTEN POINT); the ``create_entity`` /
+        ``create_edge`` half — one scan per write, measured above — is UNOWNED,
+        and that absence is the finding.
         """
         tokens = {w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower())}
         if not tokens:
@@ -55602,6 +56057,139 @@ class TortoiseSDK:
         scored.sort(key=lambda r: (-r["score"], r["candidate"]))
         return [{k: r[k] for k in ("candidate", "suggested_relation", "reason")}
                 for r in scored[:limit]]
+
+    def _absorbed_point_write(self, t: str, name: str, props: dict, *,
+                              is_episodic: bool | None = None,
+                              guard: object | None = None) -> dict:
+        """The `type="point"` and `type="diary"` arms of `create_entity` (#11609).
+
+        `tortoise_create_point` and `tortoise_diary_write` retire FORWARD into
+        `create_entity`, and these arms are what make that retirement legal: the
+        `PROTECTED` table in `tests/test_11609_door_retirement.py` records
+        *"create_entity has no point arm"* / *"…no diary arm"* as the reason
+        neither door could retire, and a door may only leave that table in the
+        batch that makes its stated reason FALSE.
+
+        ⛔ BOTH ARMS RELAY TO `create_point` — they do not re-implement it. The
+        point write path is ~600 lines of gates with their own recorded rulings
+        (kind approval #5475, invisible-kind #9287, narrative #10000, the status
+        vocabulary #11824, the validity window #5352, content-hash dedup #6110,
+        provenance inference #3263 …). A second spelling of any of it here would
+        be the drift this file keeps paying for, and the ONE promise the
+        retirement makes is "the same node" — which is only provable by
+        reaching the same code. `create_point` STAYS an SDK method (it is the
+        door's SDK surface, and this arm makes no surface change); only the MCP
+        NAME retires.
+
+        ⛔ THE ARMS RETURN BEFORE THE ENTITY POST-PROCESSING, and that is
+        load-bearing rather than tidy. The code below the dispatch materialises
+        `extractedFrom` for the labels in `_ENTITY_SOURCE_LABELS` and otherwise
+        reports the ref as INERT — but `create_point` DOES wire a declared
+        `extractedFrom` (and infers one from `session_id`, #3263), so falling
+        through would duplicate that work and attach an `extracted_from_inert`
+        advisory to a write whose source was in fact materialised.
+
+        ⛔ TWO ARMS, ONE BODY — the split is for
+        `_create_entity_dispatch_arms()`, which reads the dispatch as
+        `^        (?:el)?if t == "([a-z_]+)":$` and would not see a combined
+        `elif t in (…):`. Each `type=` value must therefore be its OWN one-line
+        branch; the behaviour they share lives here.
+        """
+        # ⛔ THE KIND IS THE CALLER'S, NOT THIS ARM'S — except where the
+        # discriminator already decided it. `type="point"` is a DOOR, not a kind:
+        # `props={"pointKind": …}` says which kind, exactly as
+        # `subjectKind`/`objectKind` do one arm up, and an UNSENT kind defaults to
+        # `statement` (the ontology's claim default, #10977 — a point is
+        # `:Point {pointKind: statement}`, ONE belief kind, never a new kind).
+        # `type="diary"` pins the kind, so a caller-supplied `pointKind` that
+        # CONTRADICTS it is refused rather than silently re-filing the write: the
+        # retired `tortoise_diary_write` took no kind argument at all, and a
+        # container that answers `type="diary"` with a `statement` is exactly
+        # the "deletes the door and keeps the name, with no capability behind
+        # either" failure the door-retirement suite exists to catch.
+        declared_kind = props.pop("pointKind", None)
+        if declared_kind is None:
+            declared_kind = props.pop("point_kind", None)
+        if t == "diary":
+            # `_type_text` is the ONE primitive both sides of this seam read a
+            # `type`/kind with (content, lowercased, no subclass dispatch), so a
+            # `" Diary "` spelling is the same kind and a NON-STR reads as blank
+            # — "not supplied", the same rule `named_kind` applies. Either way
+            # the write below is a `pointKind='diary'`, which is exactly what
+            # `type='diary'` promised.
+            if declared_kind is not None and _type_text(declared_kind) not in (
+                    "", "diary"):
+                raise ValueError(
+                    "create_entity(type='diary') pins the kind — the write "
+                    f"declares pointKind={declared_kind!r}. A diary entry is "
+                    "a :Point {pointKind: 'diary'}; write a different kind "
+                    "with type='point'.")
+            # `tortoise_diary_write(agent_name, …)` could not be called without
+            # its author, so neither can the arm that absorbs it. A NAMED
+            # refusal, not a silent default: `authoredBy` is what makes a diary
+            # entry attributable. `None` (absent) is the only value refused — a
+            # blank string is accepted exactly as the retired door accepted it
+            # (#1934: never invent a refusal).
+            if props.get("authoredBy") is None:
+                raise ValueError(
+                    "create_entity(type='diary') requires authoredBy — the "
+                    "agent the entry is written by. The retired "
+                    "tortoise_diary_write named it as its first argument.")
+            point_kind = "diary"
+        else:
+            point_kind = "statement" if declared_kind is None else declared_kind
+            # ⛔ The retired door's DEDUP DEFAULT, not `create_point`'s. They
+            # differ and the difference is a silent behaviour change: the MCP
+            # `tortoise_create_point` declares `dedup: bool = True`, so a
+            # migrating caller that omits it FOLDS (the door's own docstring is
+            # largely about that fold), while `create_point`'s SDK default is
+            # False. Carrying `create_point`'s default here would turn every
+            # migrated re-write into a duplicate Point.
+            # ⛔ `tortoise_diary_write` passed NO dedup, so the diary arm does
+            # not acquire one: it keeps `create_point`'s default, which is what
+            # the door did.
+            props.setdefault("dedup", True)
+        point = self.create_point(
+            point_kind, name, is_episodic=is_episodic, **props)
+        return self._absorbed_point_result(point, name, guard)
+
+    def _absorbed_point_result(self, point: dict, text: str,
+                               guard: object | None = None) -> dict:
+        """The container's reply for a POINT-shaped arm (#11609).
+
+        The two arms that relay to `create_point` (`type="point"` and
+        `type="diary"`) get the container's `{node, nudges}` shape, not the
+        point's own flat dict — the same asymmetry `_flat_entity_result`
+        resolves in the other direction for the legacy `create_*` aliases.
+        Neither the retired door nor `create_point` is changed by this: they keep
+        answering exactly as they did, which is what the shipped shim serves.
+
+        ⛔ THE TRANSIENT KEYS MOVE, THEY ARE NOT COPIED. `create_point` returns
+        two things that are NOT node properties — `advisories` (the #8171/#9964
+        note, never journaled) and the `valid_to_shaped` receipt (#9202) — and
+        leaving `advisories` inside `node` would put it where every other arm
+        does not, so a caller switching on `result.get("advisories")` would see
+        nothing on the point arm alone. The receipt stays ON the node: it is a
+        statement about THIS caller's `validTo`, which is exactly where the point
+        door puts it.
+
+        Nudges are COMPUTED here rather than returned empty. An empty list is
+        indistinguishable from "this claim relates to nothing", and a claim is
+        the write most in need of the IMPL/NAND suggestion — the cost of the
+        scan is documented on `_nudge_candidates` (#13436: 12.3-13.3 ms at both
+        1,000 and 5,000 Points; its 400-row cap is constant) and it is the price
+        of the CONTAINER's shape, which the door it absorbed never paid because
+        the door does not promise nudges at all.
+        """
+        node = dict(point)
+        advisories = node.pop("advisories", None)
+        return {
+            "node": node,
+            **_kind_guard_payloads(guard),
+            "nudges": self._nudge_candidates(
+                text, exclude_ids=[node.get("id")]),
+            **({"advisories": advisories} if advisories else {}),
+        }
 
     def _flat_entity_result(self, result: dict) -> dict:
         """Bare node a legacy ``create_*`` alias returns, plus #8171 advisories.

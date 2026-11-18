@@ -41,8 +41,12 @@ consumer must NOT hard-code this list):
   UNION over the five labels a bare value can name in the cache
   (``ENTITY_UNION_JURISDICTION``), so it has no ONE coordinate — and it is served
   only for ``ENTITY_UNION_LABELS`` (the labels whose record row reproduces the
-  cache node), abstaining with ``residency: "not-hot"`` for the rest through
-  :func:`entity_absent_wire`'s coverage rule. Its absence verdict is therefore
+  cache node), abstaining with ``residency: "not-hot"`` rather than claiming an
+  absence it cannot establish (:func:`entity_absent_wire`'s coverage rule is the
+  one home of that decision — ⚠️ it asks with NO label, so the abstention is the
+  DOOR's, not a partition over labels: today every absent NAMED id on an ARMED
+  deployment abstains, including a miss on a label that IS served). Its absence
+  verdict is therefore
   CONSERVATIVE on purpose: see :data:`ENTITY_UNION_ADDRESS_RESIDUALS`.
 
 **Not served, with the reason** — a decision that does not name its exclusions
@@ -343,9 +347,12 @@ READ_ENTITY_UNION_BY_ID = "entity-union-by-id"
 #: Subject / Object by ``id``, Source by ``id`` and by ``url``, Event by
 #: ``eventId``), and a union that answers `{}` for a node one of its labels
 #: holds is the "cannot see it" / "does not exist" conflation #7952 forbids.
-#: So a label is served only where a record row reproduces the cache answer,
-#: and everywhere else the door ABSTAINS (`residency: "not-hot"`) instead of
-#: claiming an absence it cannot see. The verdict itself is
+#: So a label is served only where a record row reproduces the cache answer;
+#: on an armed deployment, for a bare id the door ABSTAINS
+#: (`residency: "not-hot"`) instead of claiming an absence it cannot see.
+#: ⛔ THAT ABSTENTION TAKES NO LABEL — it is
+#: the DOOR's, so while coverage is incomplete a miss on a label that IS served
+#: abstains too, not just one on a label that is not. The verdict itself is
 #: :func:`entity_absent_wire` — one home for the coverage rule.
 #:
 #: WHY EACH MEMBER IS HERE — the parity evidence, per label:
@@ -519,12 +526,12 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "events in the record, `tortoise_get_entity(id=<goal id>)` -> "
                "`{}`). Served for the labels whose row reproduces the cache "
                "answer — :data:`ENTITY_UNION_LABELS`, i.e. the labels #9634's "
-               "`FOLD_ON_CREATE_DEFAULTS` covers, plus `Point` — and ABSTAINS "
-               "(`residency: \"not-hot\"`) for the rest rather than answering "
+               "`FOLD_ON_CREATE_DEFAULTS` covers, plus `Point` — and, on an armed "
+               "deployment, ABSTAINS (`residency: \"not-hot\"`) rather than answering "
                "an absence it cannot establish: `Event` and `Source` carry the "
                "OPEN parity gap in #9721 (a served `:Event` would lose the "
                "fold-written keys its row does not carry — per column, so the "
-               "count rides the row: up to eight, seven of them measured), and "
+               "count rides the row: up to eight), and "
                "`Source` ALSO sits in "
                ":data:`ENTITY_UNION_ADDRESS_RESIDUALS` (its record key is `url`, "
                "while the cache resolves one by `id` too — so a bare Source id "
@@ -532,7 +539,8 @@ ANCHORED_READS: dict[str, AnchoredRead] = {
                "ABSTENTION IS THE POINT, not a shortfall: a union read that "
                "served only what it covers and answered `{}` for the rest "
                "would invent an absence for a whole label class — the "
-               "§17.2 inversion this module exists to prevent. "
+               "§17.2 inversion this module exists to prevent. ⚠️ It takes NO "
+               "label: a miss on a SERVED label abstains too. "
                "⛔ `TortoiseSDK._get_entity` — the accessor the write paths and "
                "the internal read paths call — stays CACHE-ONLY: it is the "
                "`internal-accessor` shape, and serving it would make a writer "
@@ -888,10 +896,15 @@ FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_TENANT_UNRESOLVED, FALLBACK_RECORD_LANE_REFUSED,
     FALLBACK_RECORD_BOUND_MISS, FALLBACK_RECORD_LABEL_NOT_SERVED)
 
-#: The ONE reason under an armed mode that means the record **was asked and
-#: answered "no row"**. Every OTHER reason means the record could not be asked
-#: (down, unasked, too slow to answer inside the bound, or no tenant to ask for)
-#: — and then an empty answer is **`not-hot`**, never a finding of absence.
+#: The reason that makes an empty answer an ESTABLISHED ABSENCE. ⛔ NOT the only
+#: reason the record answered `no row`: `record-label-not-served` is the other
+#: one (the record WAS asked and answered no row among the served labels), and it
+#: is deliberately EXCLUDED here because that answer cannot settle the
+#: coordinate. So "which reasons mean the record was asked" and "which reasons
+#: establish an absence" are DIFFERENT questions, and this tuple answers only the
+#: second. Reading an absence off `served_from` instead of asserting membership
+#: here is how the reasons that produced no answer (down, unasked, abandoned at
+#: the bound, no tenant) would be turned into findings of absence.
 #:
 #: ⚠️ This is the whole distinction #7952 draws, applied to the seam that can
 #: finally see both stores: an empty CACHE answer means *"we cannot see it from
@@ -1327,7 +1340,7 @@ def read_entity(conn: Any, *, org_id: str, graph_id: str, id_val: str,
     per-label addressing is measured — and it deliberately does NOT re-check
     parity: a caller that names ``Event`` gets the Event ROW, which is missing the
     fold-written keys ITS COLUMNS do not carry — per column, never a fixed count
-    (measured over every column subset: all optional columns NULL → 8 lost,
+    (measured: all optional columns NULL → 8 lost,
     ``event_kind`` set and the rest NULL → the seven #9721 measured, every column
     set → 0). See this module's ``Event`` bullet for why the count rides the row.
     Only :func:`serve_entity` decides what may be SERVED, and it
@@ -2092,7 +2105,12 @@ class ParityDiff:
                              column the projection must not materialise is the
                              state the deny exists to create, and calling it an
                              invention would make the rule forbid its own fix.
-    ``changed``              fields both stores answer, with different values.
+    ``changed``              fields both stores answer, with different values,
+                             decided by `reconciliation._props_relation` (the ONE
+                             comparison home: it applies the stored-form rules —
+                             vectors narrowed to the cache's width, #8615/#9184 —
+                             and reports a pair that agrees only after the
+                             narrowing as `FIELD_FORM`, which this arm ACCEPTS).
                              Non-empty = RED.
     ``explained_missing``    a DECLARED asymmetry at work. Every member comes
                              from one of FOUR declarations, and the member's
@@ -2423,10 +2441,27 @@ def parity_difference(cache_props: Mapping[str, Any],
         invented[field_name] = value
 
     changed: dict[str, Any] = {}
+    # ⛔ ONE COMPARISON RULE, ONE HOME (#13447 review cycle 3, issue 2). This arm used
+    # a bare `!=`, and `#13447` makes an `Object`/`Subject` pair carry `embedding` on
+    # BOTH sides: the record's as the float64 `jsonb` payload (#13220's column), the
+    # cache's as `vecf32($embedding)`. An exact `!=` between a float64 value and its
+    # float32 rounding fires on essentially EVERY real vector, so the served-read
+    # parity instrument would have false-REDded on exactly the vectors this change
+    # makes round-trip — the defect `#8615`/`#9184` already recorded for this pair in
+    # `reconciliation._props_relation` (the truth side is narrowed to the width the
+    # cache stores and the pair is reported as `FIELD_FORM`). Routing the arm through
+    # that function rather than inventing a second stored-form rule here is the same
+    # §12.2a "one rule set" this whole change is about.
+    #
+    # ⚠️ `FIELD_FORM` is an AGREEMENT for this arm — `ParityDiff.changed` is RED when
+    # non-empty, and a pair that agrees after the storage narrowing is what the
+    # instrument exists to accept. The narrowing is one-sided (the CACHE side is never
+    # narrowed), so a genuinely different vector is still a divergence.
+    from .reconciliation import FIELD_DIVERGENT, _props_relation
     for field_name, value in record_props.items():
         if field_name not in cache_props:
             continue
-        if cache_props[field_name] != value:
+        if _props_relation(field_name, record_props, cache_props) == FIELD_DIVERGENT:
             changed[field_name] = {"cache": cache_props[field_name],
                                    "record": value}
 
