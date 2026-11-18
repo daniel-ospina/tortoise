@@ -16260,3 +16260,139 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
                 f"capstone_measure.py:{num} is cited for {symbol!r}, but that line is "
                 f"{'a definition' if line.startswith('def ') else 'not a definition'} — the "
                 "entry names the two CALLS whose order it argues from, never a definition")
+
+
+# ── The D5 row must stay ONE table row (docs-check cascade) ──────────────────
+#
+# ⛔ WHY THIS EXISTS (MEASURED, #13489 — the required `docs` check was RED at
+# `62611368` with `docs-lint baseline: 178 new, 0 known`). Every one of those 178
+# markdownlint findings sat on the SAME markdown LINE: `05-verify.md:102`, the D5
+# deviation row. They were not 178 defects — they were TWO raw `|` characters,
+# inside a `` `git ls-remote origin | grep -c 2584a86ec1` `` probe, splitting the
+# row into 6 cells where its header carries 4 (MD056). GFM splits cells before
+# inline parsing, so the split ALSO broke the backtick pairing for the remaining
+# ~1,250 backticks on that 35,202-character line and every mis-paired code span
+# emitted its own MD038 (`Spaces inside code span elements`). Escaping the two
+# pipes (`\|`, the form this row already used three times) collapsed the cascade
+# to zero:
+#
+#   before: Linting: 15 files / Summary: 178 issues in 1 file
+#   after:  Linting: 15 files / Summary:   0 issues in 0 files
+#
+# So the failure mode is asymmetric and worth a pin: a 35,202-character artifact
+# row is ONE keystroke away from 178 findings, and NONE of the cite pins in this
+# file can see it — `_pin_row_failures` scopes to a markdown LINE, so a row of
+# numbers stays satisfied however badly the row's own table structure breaks.
+# The pin is structural rather than numeric (no count, no line number): every
+# table row in the document must carry its own header's cell count.
+
+_TABLE_ROW_RE = re.compile(r"^\|.*\|$")
+_TABLE_DELIM_RE = re.compile(r"^[:\- ]+$")
+
+
+def _table_cells(line: str) -> list[str]:
+    """Split a GFM table row on UNESCAPED pipes.
+
+    GFM splits cells BEFORE inline parsing, so a pipe inside a code span is
+    still a separator — which is exactly the defect: a `` `… | …` `` probe reads
+    as an escaped pipe to the author and as a cell boundary to the parser. Only
+    a backslash-escaped `\\|` is literal.
+    """
+    cells: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and index + 1 < len(line):
+            current.append(line[index:index + 2])
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    cells.append("".join(current))
+    # A GFM row is delimiter-prefixed and -suffixed (`| a | b |`), so the outer
+    # pipes yield an empty leading and trailing segment. Drop those ONE each —
+    # they are the row's borders, not cells — so a rectangular 4-column row
+    # reads as 4 and a row split by one raw `|` reads as 5.
+    if cells and not cells[0].strip():
+        cells = cells[1:]
+    if cells and not cells[-1].strip():
+        cells = cells[:-1]
+    return cells
+
+
+def test_every_bundle_table_row_carries_its_headers_cell_count():
+    """A raw `|` in a cell is 178 docs-check findings, not one typo (#13489).
+
+    Measured on the pre-fix tree: `05-verify.md:102` split into 6 cells against a
+    4-cell header, and the required `docs` check reddened with 178 MD038/MD037/
+    MD049/MD056 findings all on that line. Measured after the two pipes were
+    escaped: `Summary: 0 issues in 0 files`, and every row of every table in the
+    document is rectangular.
+    """
+    path = _EPIC_CITE_DOCS["05-verify.md"]
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    mismatches = []
+    parsed_rows = 0
+    header = None
+    for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not _TABLE_ROW_RE.match(stripped):
+            header = None
+            continue
+        cells = _table_cells(stripped)
+        parsed_rows += 1
+        if header is None:
+            header = len(cells)
+            continue
+        # The delimiter row (`|---|---|`) is part of the header, not a body row.
+        if _TABLE_DELIM_RE.match(cells[1].strip()):
+            continue
+        if len(cells) != header:
+            mismatches.append((number, header, len(cells)))
+
+    # ⛔ A parser that found nothing is not a pass — the population is asserted
+    # so a reworded document cannot satisfy this pin by carrying no tables at all.
+    assert parsed_rows >= 60, (
+        f"this pin read {parsed_rows} table row(s) in 05-verify.md — the document "
+        "carries ~62, so the parser is no longer reading the tables it guards and "
+        "a green here would mean nothing")
+
+    assert not mismatches, (
+        "these 05-verify.md table rows carry a different cell count than their "
+        f"header (line, header cells, row cells): {mismatches}. A raw `|` splits "
+        "the row — GFM splits cells before inline parsing, so it ALSO mis-pairs "
+        "every backtick after it and the docs check reds with one MD038 per "
+        "mis-paired code span (measured: 178 findings from two pipes on D5). "
+        "Escape it as `\\|`")
+
+
+def test_the_D5_row_is_still_one_table_row():
+    """D5 is the row this bundle re-derives ~50 numbers on, and it is ONE line.
+
+    ⛔ THE MEASUREMENT THAT MAKES THIS A PIN RATHER THAN A NICETY: the row is
+    35,202 characters long, and every cite arm in this file is line-scoped, so
+    the row can be broken structurally — 6 cells against a 4-cell header — while
+    all 47 `_PINS` rows, the spelling loop and the `_honours` clause pin stay
+    GREEN (measured at `62611368`: `test_7949_capstone_measure.py` was green on
+    the tree whose required `docs` check carried 178 new findings).
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, (
+        f"D5 must be exactly ONE markdown line — found {len(d5)}. Splitting the row "
+        "moves half of it out of every line-scoped pin in this file")
+    assert len(_table_cells(d5[0].strip())) == 4, (
+        "the D5 row must carry the 4 cells its header declares (got "
+        f"{len(_table_cells(d5[0].strip()))}). The row is 35,202 characters of "
+        "citations; one unescaped `|` splits it and reds the REQUIRED `docs` check "
+        "with ~178 findings (#13489). Escape a pipe in a cell as `\\|`")
