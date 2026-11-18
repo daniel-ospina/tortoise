@@ -181,9 +181,13 @@ rationale drift, or the 2 pre-existing absence reds.
 
 Run: `TORTOISE_TEST_CARVE_OUT=1 uv run --frozen python -m pytest tests/test_doc_affiliation_frontmatter.py -q`
 
-1. **Unfixed tree** (this test file against `origin/main` content): `3 failed, 6 passed` — measured at
-   `268737ae6cd9` (this branch's first commit) against `main`'s then-content, and **not reproducible
-   from this head**: the file has since grown to 14 tests and `main`'s docs have moved. The research
+1. **Unfixed tree** (this test file against `origin/main` content): `3 failed, 6 passed` — this figure
+   was measured by the earlier round on the tree it then held, and it is **recorded as a historical
+   claim, not re-verified here**: the nearest reproducible measurements DISAGREE with it, and both are
+   named so a reader can see the gap rather than inherit a number — `268737ae6cd9` (this branch's
+   first commit) in its OWN tree measures `2 failed, 8 passed` (10 collected), and the pre-fix file
+   against `c0463806db` (main's then-parent) measures `2 failed, 7 passed` (9 collected). What
+   reproduces at every head is the SUBSTANCE below. The research
    arm reds on **exactly the 8** `aboutObjects` values, each carrying the **RAW-vs-parsed length pair**
    (`len 82 → 48`, `81 → 67`, `93 → 73`, `119 → 75`, `107 → 92`, `155 → 46`, `115 → 87`, `141 → 57`);
    the other 2 failures are the pre-existing absence reds. **(B) fires 8 times — counted from the
@@ -459,8 +463,10 @@ finding, and neither is an escape: `:828-829` assert `measured` and `compared` B
 affiliation value at all — re-point this guard"* — advice that points at the guard instead of at
 the value; and `:733` skips `escaped` before `compared += 1` (`:743`), so a tree whose affiliated
 values are all escaped leaves the counter legitimately empty and fires the same message. (Line
-numbers are as of this head; the rebase onto `f6793959a2` moved them — `#13485` inserted ~109 lines
-above the arm — and an earlier revision of this section still cited the pre-rebase `:751-752`,
+numbers are as of this head; the rebase onto `f6793959a2` moved them by **+113** in total
+(`assert measured` went 715 → 828: **+77** from `#13485` rewriting the arm above it, and **+36** from
+this branch's own `_closing_quote` and its docstring) — and an earlier revision of this section still
+cited the pre-rebase `:751-752`,
 `:753`, `:658`, `:666`, which after the rebase land on unrelated code. The sequence branch carries
 the same pair at `:699` / `:703`.) Both are
 false blocks of an author's tree, not fail-opens — nothing escapes measurement, they fail closed
@@ -483,13 +489,19 @@ PyYAML is the consumer this arm exists to model, so for that consumer it is a fa
 cannot ship a defect (it fails closed and names a remedy), and it is the same class as the (C)
 truncation case this PR deliberately keeps red, so clearing it means teaching the arm to accept a
 non-space-separated trailing comment after a close — a lexer widening, out of this issue's scope.
-Measured scale, so it is not read as larger than it is: differential over **15,548 YAML-parseable
+Measured scale, so it is not read as larger than it is. ⚠️ The differential below was run by the
+round that found this, over a **generator it did not commit**, so the figure is a historical
+measurement: an independent re-run at `4be2f9a959` over 81,243 YAML-parseable generated raws found
+**0** cases where the one declining branch (`escaped`) hid a truncation and **2** pre-GREEN →
+post-RED rows, both in this declared family — the same direction, on a different alphabet, so the
+counts are not comparable and only the direction is corroborated: differential over **15,548 YAML-parseable
 generated raws**, exactly **1** where the arm was green before and is red now; and **0** where the
 new predicate splits at a space-preceded `#` the old one refused — i.e. no fail-open was introduced on the path
 this PR touches.
 
 **Recorded, not fixed — #13476's `470 values compared` figure.** At this head the same probe
-prints **90 measured / 94 compared**; the counter now counts affiliation values only. The
+prints **90 measured / 94 compared** at `4be2f9a959` (reproduced with an instrumented copy); the
+counter now counts affiliation values only. The
 substance — 8 of 8 flagged, every length pair exact — reproduces unchanged. That body is NOT
 edited: it carries the review attestation the gate reads, and an unrelated edit wipes that proof
 (the rule is in `AGENTS.md`). The corrected figure is recorded here instead.
