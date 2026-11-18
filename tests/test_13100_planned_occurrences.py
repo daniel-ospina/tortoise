@@ -1663,6 +1663,14 @@ class TestAMentionIsNotAnOccurrence:
 
             __hash__ = str.__hash__
 
+            def __str__(self):
+                # ⛔ A LYING `__str__` on purpose (#13586 review, observation 2):
+                # `str.__str__` ignores this override, which is WHY it is the
+                # right primitive. Without the override a mutant that wrote
+                # `str(event_kind)` here would keep this row green (both are
+                # exact `str`) while re-opening the "`__str__` can lie" hole.
+                return "held"
+
         class _Door:
             """The sdk with `create_entity` observed, everything else delegated."""
 
