@@ -394,6 +394,42 @@ def test_a_wrapped_result_also_stamps_the_meta_marker():
             "must be re-measured before it is cited")
 
 
+def test_the_hand_built_row_envelope_stamps_the_same_marker():
+    """§1.1(iv)'s ONE exception, pinned where it can rot: `graph_overview` stamps `_meta` BY HAND.
+
+    The four-wire-fact answer says the `_meta` marker IS a delta for every container S1 would
+    annotate, and is NOT one for `tortoise_graph_overview`, whose row-section arms reach the
+    same envelope through `_row_section_envelope` (`mcp_server.py:7806`, marker at `:7842`,
+    #10085). That exception is the qualifier that keeps §1.1(iv) and §2.1 true, so it has to be
+    ASSERTED rather than cited.
+
+    ⛔ It was cited in three places and pinned NOWHERE until this test existed, and the gap is
+    silent by construction: `meta={"fastmcp": {"wrap_result": True}}` reads like dead weight to
+    a reader who does not know #10085, so the plausible "cleanup" is `meta=None` — which left
+    every pin in this file green (measured: 41 passed with the line deleted) while §1.1(iv)'s
+    qualifier, §1.1's "not a universal" note and §2.1's exception all became FALSE. The sibling
+    pin `test_a_wrapped_result_also_stamps_the_meta_marker` measures FastMCP's CONTRACT on a
+    synthetic tool; it cannot see this helper at all, which is why the two are not the same pin.
+    """
+    marker = {"fastmcp": {"wrap_result": True}}
+    rows = [{"ns": "a"}]
+
+    envelope = ms._row_section_envelope(rows)
+    assert envelope.structured_content == {"result": rows}, (
+        f"the hand-built envelope now ships {envelope.structured_content!r} — the ROW arm "
+        "would reach a client as a bare text block again, which is the #10085 defect itself")
+    assert envelope.meta == marker, (
+        f"`_row_section_envelope` now stamps meta={envelope.meta!r}, not {marker!r}. §1.1(iv) "
+        "and §2.1 both say THIS tool already carries the marker, so for it the marker is not a "
+        "delta (its dict arms and the other five containers are) — re-measure that qualifier "
+        "before deleting the claim, because a client that unwraps keys off this marker")
+    # A MAPPING section is returned UNTOUCHED (no output schema ⇒ already structured), so the
+    # exception is scoped to the ROW arms and §1.1(iv)'s delta still holds for the dict arms.
+    assert ms._row_section_envelope({"a": 1}) == {"a": 1}, (
+        "the mapping arm is now wrapped — that nests a caller's payload one level deeper and "
+        "changes a shape that already worked")
+
+
 def test_the_list_arm_does_not_change_for_a_migrating_caller():
     """Why the union is the SMALLEST change: a retiring door already answered wrapped.
 
