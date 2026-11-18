@@ -1062,7 +1062,7 @@ def test_a_double_quoted_backslash_escape_before_a_comment_is_measured(
     Non-vacuity: deleting the two-line backslash skip in ``_closing_quote``
     leaves the rest of this file GREEN while ``_quoted_style`` returns
     ``('malformed', None)`` here, so the ``style`` assertion below is the only
-    thing that notices. (No file-wide pass count is quoted: §9 carries it, and a
+    thing that notices. (No file-wide pass count is quoted: §7 item 2 carries it, and a
     count printed here goes stale the moment another test is appended to this
     file — which has already happened twice.)
     """

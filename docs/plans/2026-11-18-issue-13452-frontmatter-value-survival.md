@@ -403,7 +403,7 @@ now pins the parity half: with the skip deleted it reds and the sibling stays gr
 
 `"a\"" # c` is legal YAML — `parse_frontmatter` returns `a"` — and the TRUE close sits
 immediately before the space-then-hash that introduces the comment (for that raw the escaped quote
-is at index 3, the true close at 4, the `" #"` at 5). A close found WITHOUT skipping backslash
+is at index 3, the true close at 4, and the `" #"` at indices 4-6). A close found WITHOUT skipping backslash
 escapes lands on the escaped quote at index 3 instead, so NO space-then-hash satisfies the split predicate:
 nothing is stripped, the raw text reaches `_quoted_style` still ending in `# c`, and
 `value.endswith(q)` fails — the arm reports `('malformed', None)`, the same
@@ -479,15 +479,20 @@ Found by the fresh-context review at `7d4514f39e` and re-measured here. `aboutOb
 (raw `"\" #"# c`) is loadable YAML — `yaml.safe_load` returns `" #`, and `parse_frontmatter` agrees
 — but the arm now reports `('malformed', None)` where the pre-fix helper reported
 `('escaped', None)`. The cause is the fix's own predicate, working as designed on one half and
-meeting a lenient consumer on the other: the space-preceded `#` at index 3 sits INSIDE the scalar, so
+meeting a lenient consumer on the other: the space at index 3 and the `#` at index 4 both sit
+INSIDE the scalar, so
 `_split_comment` correctly refuses to split there (the text before it does not end at the parity
 close, which is index 5), and with no space-separated `#` after that close nothing is stripped, so
 the raw text reaches `_quoted_style` with a trailing `# c` and `value.endswith(q)` fails. Note the
 arm is the SPEC-CORRECT side here (YAML 1.2.2 §6.6: *"Comments must be separated from other tokens
 by white space characters"*, so `"…"# c` is not a comment), and PyYAML is the lenient one — but
 PyYAML is the consumer this arm exists to model, so for that consumer it is a false block. It
-cannot ship a defect (it fails closed and names a remedy), and it is the same class as the (C)
-truncation case this PR deliberately keeps red, so clearing it means teaching the arm to accept a
+cannot ship a defect — it fails CLOSED, the value is REPORTED rather than silently skipped — and it
+is the same class as the (C) truncation case this PR deliberately keeps red. ⚠️ But for this shape the
+remedy it names is itself the class this PR removes: the arm says *"the value is TERMINATED there —
+remove the inner quote"* when `yaml.safe_load` reads the value whole, so a reader is told to delete a
+legal inner quote. That is a mis-worded remedy behind a closed gate, not a fail-open, and it is
+recorded here rather than presented as a harmless note. Clearing it means teaching the arm to accept a
 non-space-separated trailing comment after a close — a lexer widening, out of this issue's scope.
 Measured scale, so it is not read as larger than it is. ⚠️ The differential below was run by the
 round that found this, over a **generator it did not commit**, so the figure is a historical
