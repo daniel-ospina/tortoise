@@ -1508,6 +1508,15 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         "tools/gen_ask_transcripts.py",     # shipped reader, i.e. the lever ON
         "tools/candidate_recall_11901.py",  # measures the rerank itself
         "tools/rerank_calibration_12297.py",  # ditto
+        # #13038's capstone VALUE instrument asks the six customer questions of
+        # the read the product actually SERVES (`Capstone.search` — "The
+        # product's search surface"), so the lever must be ON for the same
+        # reason the two ask MIRRORS above keep it on: opting out would score a
+        # surface no customer gets. This half of the census (the derived walk
+        # over `tools/`) is keyed by FILE, which is why the row belongs here and
+        # not in `runs_the_lever` — that dict is the `tortoise/` scan's exact
+        # membership assert.
+        "tools/capstone_state_value.py",
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,

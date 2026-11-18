@@ -1,3 +1,14 @@
+---
+title: "#13436 P7 — the three write-path costs, measured (diagnosis only)"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-18
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#13436, #5475, #5444, tools/measure_13436_write_costs.py, projection._schema_is_current, pack_state.graph_installed_namespaces"
+---
+
 # `#13436` P7 — the three write-path costs, measured (diagnosis only)
 
 **Nothing here is optimised, and nothing here proposes an optimisation.** `#13436` names the failure
