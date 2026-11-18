@@ -16113,11 +16113,29 @@ class TortoiseSDK:
         # (after event.update(extra)), matching the graph branch order.
         if _jsonl_actor is not None:
             event["actor_user_id"] = _jsonl_actor
+        # #13331 — ONE CHOKEPOINT (epic #7879 surface S2). The append, the
+        # record projection and the cache fold are now ONE call, so this door
+        # cannot order them differently from the SDK's or the miner's. The
+        # append stays inside the caller's `try` (it is the commit point; a
+        # failure is this door's accounting, not a record refusal) and the
+        # chokepoint never withdraws it: the truth store does not wait for a
+        # derived store (see `tortoise/live_write.py`).
+        from . import live_write
+
         try:
             # #9190: the append's return value IS the record's journal position;
             # it is threaded to the record so layer 1 stops being empty on live
             # writes. `None` (an in-memory log) means there is nothing to number.
-            seq = log.append(event)
+            live_write.write(
+                # ⛔ NO `tenant=` HERE (#13345 review P3-2): it is consumed only by
+                # `live_write`'s DEFAULT project, and this door supplies its own
+                # (`_write_record_projection`), which reads `self._record_tenant`
+                # itself and hands it to `write_live_record` by value. Passing it
+                # here was inert and read as load-bearing.
+                event, log=log, fold=False,
+                record_sink=record_sink,
+                project=self._write_record_projection,
+                scope_label="sdk._emit_event")
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -16159,19 +16177,12 @@ class TortoiseSDK:
             # before/after delta can be moved by another thread's failure.
             return False
         # ── the Postgres record (#9188, epic #7879) ────────────────
-        # The append COMMITTED at this line (§17.1), so the record write runs
-        # after it and before any cache fold: truth first, then the projection.
-        # It is fail-soft for the SAME reason the append's own failure is — the
-        # graph write stands, and raising here would hand the caller a failure
-        # for a record that persisted while killing the fold too. The loss is
-        # observable instead (``monitoring.metrics()["record_write_failures"]``)
-        # and ``replay`` heals it from the journal.
-        if record_sink is not None:
-            # #10000: the outcome travels to the caller that has to decide
-            # whether the record holds this write (`_write_capture_turns`).
-            record_sink.append(self._write_record_projection(event, seq=seq))
-        else:
-            self._write_record_projection(event, seq=seq)
+        # #13331: the record write and the `record_sink` hand-off now happen
+        # INSIDE `live_write.write` (step 2 of the chokepoint), after the append
+        # and before the fold this door does not own. `_write_record_projection`
+        # is still the SDK's own record half (its import guard, durability read
+        # and fail-soft accounting have one home), it is just no longer
+        # ORDERED here.
         return True
 
     def _write_record_projection(self, record: dict,

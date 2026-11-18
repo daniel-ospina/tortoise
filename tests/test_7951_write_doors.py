@@ -47,10 +47,28 @@ directly callable, and the remaining doors are still open (documented, not
 fixed). A non-projection `.apply` must be declared as `not-a-projection`.
 Doors with a
 reversibility-risky reason carry a dedicated pin: the connector `ingest` class,
-the two connector webhooks, the indexer backfill, mining, `_cmd_verify`, and the
+the two connector webhooks, the indexer backfill, `_cmd_verify`, and the
 `_create_entity` deviation. The **replay** sites are carried by the map itself —
 their pin is membership plus the exact call count, not a separate behavioural
 test.
+
+⛔ #13331 CHANGED THIS MAP. `EventAPI._emit` and `ConversationMiner._emit_event`
+no longer hold an `.apply` of their own: the append, the record projection and
+the fold are ONE call (`tortoise/live_write.py::write`), classified `chokepoint`
+below. The two former `journal-first-door` / `journal-first-own-envelope` entries
+were therefore **removed, not re-counted** — their sites are gone. (The SDK's
+`_emit_event` never held one either — at `origin/main` it appends the journal
+record itself and folds nowhere, and at this head it appends through
+`live_write.write(..., fold=False)` and still owns no fold, so it was never a
+fold site in this map. `_apply_and_journal` is the SDK CLASS's own fold site for
+its other live doors, and stays in the map. Calling the SDK door a former one
+would be the same overclaim the review rounds in this file's header catalogued.)
+The map tracks the fold SITES, so a door that stops folding is no longer a door
+— which means those two directions are no longer covered HERE, and are pinned
+instead by
+`test_9078_record_written_by_production_path.py::test_only_the_shipped_package_can_satisfy_the_wiring_gate`,
+which asserts `api.py` and `mining.py` both reach the seam through
+`live_write.write(`.
 
 The six remaining doors, and what this lane did with each:
 
@@ -60,7 +78,8 @@ door                    why it cannot route today                    disposition
 ``sdk.py::_doc_write``  it could — the record is built pre-fold     **CLOSED** (journal-first)
 ``indexer`` backfill    production passes ``sdk=``; the ``None``     **DOCUMENTED** (test seam)
                         arm is a test helper's seam
-``mining.py``           it already appends before it folds         **DOCUMENTED** (order-compliant)
+``mining.py``           #13331: it folds through the one chokepoint  **CLOSED** (one chokepoint)
+                        (`live_write.write`), not a bare `.apply`
 ``connectors/github``   ``ingest(proj)`` holds no journal handle     **DOCUMENTED** (no journal handle)
 ``connectors/linear``   same                                        **DOCUMENTED**
 ``connectors/slack``    same                                        **DOCUMENTED**
@@ -132,13 +151,21 @@ _APPLY_VALUE_USES: dict[tuple[str, str], tuple[str, int]] = {
 #: number of calls in that function. `(file, enclosing-qualname)` → (class, n).
 _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # ── JOURNAL-FIRST DOORS — each appends before it folds ───────────────
-    # `EventAPI._emit`: `self.log.append(event)` precedes `projection.apply`.
-    # It is a journal-first door in its OWN right — the contract names it
-    # alongside `_apply_and_journal` — and it does NOT route through that
-    # method (so it is not labelled `chokepoint`).
-    ("tortoise/api.py", "EventAPI._emit"): ("journal-first-door", 1),
-    # `TortoiseSDK._apply_and_journal`: the CHOKEPOINT itself. The append is the
-    # commit point; a failed append returns before the fold.
+    # #13331: the ONE write chokepoint. `tortoise/live_write.py::write` performs
+    # append → record projection → cache fold as one call, in that order. It is
+    # where `EventAPI._emit` and `ConversationMiner._emit_event` now fold WITHOUT
+    # holding an `.apply` of their own — which is why those two rows were REMOVED
+    # from this map (their `.apply` sites are gone). `TortoiseSDK._emit_event`
+    # passes `fold=False` and owns no fold at all, so it was never a fold site
+    # here; `_apply_and_journal` below is the SDK class's own fold site for its
+    # other live doors, not that door's.
+    # The append is the commit point: `write` raises out of a failed append
+    # before the record or the fold is reached.
+    ("tortoise/live_write.py", "write"): ("chokepoint", 1),
+    # `TortoiseSDK._apply_and_journal`: the SDK class's OWN fold site (the fold
+    # half the SDK's other live doors keep — NOT `_emit_event`, which passes
+    # `fold=False`). The append is the commit point; a failed append returns
+    # before the fold.
     ("tortoise/sdk.py", "TortoiseSDK._apply_and_journal"): ("chokepoint", 1),
 
     # ── CLOSED BY THIS LANE: journal-first, then the fold ─────────────────
@@ -178,14 +205,6 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # (`test_indexer_production_backfill_route_passes_an_sdk`).
     ("tortoise/indexer/github_indexer.py", "GitHubIndexer.backfill_legacy_closed"):
         ("exempt:test-seam", 1),
-
-    # ── EXEMPT: ALREADY JOURNAL-FIRST, ITS OWN ENVELOPE ───────────────────
-    # `ConversationMiner._emit_event` does `api.log.append(record)` BEFORE
-    # `api.projection.apply(record)` — the contract's ORDER holds. It is not
-    # routed through `_emit_event` because its envelope differs (`version`,
-    # nested `event`), and re-shaping it would change the journal line.
-    ("tortoise/mining.py", "ConversationMiner._emit_event"):
-        ("exempt:journal-first-own-envelope", 1),
 
     # ── EXEMPT: NO JOURNAL HANDLE — the connector `ingest` class ──────────
     # (the two WEBHOOK sites below are exempt for a different reason:
@@ -964,8 +983,20 @@ def test_indexer_backfill_with_sdk_reaches_the_journal(sdk_with_journal):
 
 
 def test_mining_emit_is_journal_first():
-    """`ConversationMiner._emit_event` is exempt because its ORDER already
-    complies — it appends before it folds. FAILS IF that order is swapped."""
+    """The miner's door is journal-first — this pins the ORDER, not the routing.
+
+    It used to hold its own `api.log.append(record)` + `api.projection.apply(record)`
+    pair and this test pinned that pair's ORDER by observation alone. It now
+    hands both to `tortoise/live_write.py::write` (#13331), and this test still
+    pins the order it OBSERVES — nothing more. ⛔ It must not claim more: the
+    doubles below are duck-typed, so a miner reverted to its own direct
+    append+apply pair keeps this assertion GREEN (measured, not assumed). The
+    routing is pinned where it can be — by
+    `test_every_apply_call_site_is_classified` in this file (a re-appearing
+    `.apply` in `mining.py` is unclassified, so the map reds) and by
+    `test_9078_record_written_by_production_path.py::test_only_the_shipped_package_can_satisfy_the_wiring_gate`
+    (asserts `live_write.write(` in `mining.py`).
+    FAILS IF the observed order is swapped (append after fold, or either dropped)."""
     from tortoise.mining import ConversationMiner
 
     order: list[str] = []
@@ -986,8 +1017,8 @@ def test_mining_emit_is_journal_first():
         _API(), {"eventId": "e-1", "eventKind": "meeting", "subject": "s"})
 
     assert order == ["journal", "fold"], (
-        "mining's emitter is no longer journal-first — it may no longer be "
-        f"exempt: observed order {order}"
+        "mining's emitter is no longer journal-first through the chokepoint — "
+        f"the fold led the append, or one of them is gone: observed order {order}"
     )
 
 

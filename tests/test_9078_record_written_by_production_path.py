@@ -85,6 +85,7 @@ from tortoise import (  # noqa: E402
     monitoring,
     postgres_bytes,
     record_projection,
+    record_vector,
     record_writer,
 )
 from tortoise.record_writer import use_record_tenant  # noqa: E402
@@ -606,20 +607,41 @@ def test_the_write_half_has_a_production_caller(wiring):
 
 
 def test_only_the_shipped_package_can_satisfy_the_wiring_gate(wiring):
-    """The gate's caller set is EXACTLY the three shipped doors — no probe can join.
+    """The gate's caller set is EXACTLY the shipped seam callers — no probe can join.
 
     Production is the installed package, not a path a probe could join, so the
-    claim is that the caller list is the expected door set and nothing else.
+    claim is that the caller list is the expected set and nothing else.
     Asserting `module.startswith("tortoise/")` alone is true by construction:
     `find_production_callers` builds every path from `PACKAGE = REPO_ROOT/
     "tortoise"`, so it could never fail and proved nothing (#9231 review P2).
+
+    ⛔ #13331 MOVED THE DOOR SET, DELIBERATELY, and this expectation moves with
+    it. The seam had THREE direct callers — one per live door — which is the
+    shape S2 of the epic's test design names as the defect ("a bypass ⇒ a
+    derived cache that is also written to directly is not derived"): three
+    spellings of one ordering contract. The doors now go through ONE chokepoint
+    (`tortoise/live_write.py`), so the direct callers are the chokepoint and the
+    SDK's own record half (`_write_record_projection`, which keeps the SDK's
+    import guard and durability read). `api.py` and `mining.py` are asserted
+    BELOW to reach the seam only through the chokepoint — the property the old
+    expectation actually cared about.
     """
     _, _, report = wiring
     modules = {caller["module"] for caller in report["production_callers"]}
-    assert modules == {"tortoise/api.py", "tortoise/mining.py", "tortoise/sdk.py"}, (
-        "the door set moved — a door was added or removed without this gate "
-        "learning the new place: " + repr(sorted(modules))
+    assert modules == {"tortoise/live_write.py", "tortoise/sdk.py"}, (
+        "the seam's caller set moved — a door was added or removed without this "
+        "gate learning the new place: " + repr(sorted(modules))
     )
+    # The doors that no longer call the seam directly must go through the ONE
+    # chokepoint, or a write could skip the ordering contract entirely.
+    for rel in ("tortoise/api.py", "tortoise/mining.py"):
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "live_write.write(" in source, (
+            f"{rel} no longer routes its live write through the chokepoint — the "
+            f"journal→record→cache order would be local knowledge again (#13331)")
+        assert "write_live_record(" not in source, (
+            f"{rel} calls the record seam DIRECTLY — that is the second spelling "
+            f"of the ordering contract #13331 removed")
 
 
 def test_every_layer_has_a_writer_in_the_one_registry(wiring):
@@ -931,7 +953,13 @@ def test_env_example_declares_the_record_tenant_pair():
                  # tenant pair. Added here in the same commit as the declaration
                  # — the tuple is hand-maintained, so a declaration alone would
                  # drift silently.
-                 record_writer.RECORD_ALLOCATE_ENV):
+                 record_writer.RECORD_ALLOCATE_ENV,
+                 # #13345 review P2: `RECORD_JOURNAL_ENV` is the ONLY record
+                 # switch that decides whether the dense leg can be served from
+                 # the record at all, and it shipped with no declaration — the
+                 # operator's only prose about it was the runtime warning they
+                 # read AFTER the fall-back. Same tuple, same reason.
+                 record_vector.RECORD_JOURNAL_ENV):
         assert name in env, (
             f"{name} (the #9078 single-tenant arming surface) decides whether an "
             "armed record write is filed or refused, and is not declared in "
@@ -1262,15 +1290,21 @@ def test_the_ordinal_argument_rule_fires_on_every_way_a_door_drops_it(
 
 
 def test_every_real_door_still_passes_the_ordinal(wiring):
-    """The three shipped doors, measured — the revert the rule exists to catch.
+    """The shipped seam callers, measured — the revert the rule exists to catch.
 
-    Each door's real source is mutated to drop `seq=`, and the rule must fire for
-    that exact file. This is the non-vacuity half of the leg above: it proves the
-    rule sees the call sites that actually ship, not only a synthetic module.
+    Each module's real source is mutated to drop `seq=`, and the rule must fire
+    for that exact file. This is the non-vacuity half of the leg above: it proves
+    the rule sees the call sites that actually ship, not only a synthetic module.
+
+    ⛔ #13331: the set is the seam's DIRECT callers (the chokepoint and the SDK's
+    record half), not the three doors — the doors hand the ordinal to the
+    chokepoint instead (see `test_only_the_shipped_package_can_satisfy_the_wiring
+    _gate`). The property is unchanged: a shipped call to the seam that drops the
+    ordinal is still caught.
     """
     module, _, report = wiring
     assert report["position_problems"] == [], report["position_problems"]
-    for rel in ("tortoise/sdk.py", "tortoise/api.py", "tortoise/mining.py"):
+    for rel in ("tortoise/sdk.py", "tortoise/live_write.py"):
         source = (REPO_ROOT / rel).read_text(encoding="utf-8")
         tree = ast.parse(source, filename=rel)
         assert module.ordinal_argument_problems(tree, rel) == [], (
