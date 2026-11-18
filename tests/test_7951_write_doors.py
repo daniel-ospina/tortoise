@@ -972,8 +972,13 @@ def test_indexer_backfill_with_sdk_reaches_the_journal(sdk_with_journal):
 
 
 def test_mining_emit_is_journal_first():
-    """`ConversationMiner._emit_event` is exempt because its ORDER already
-    complies — it appends before it folds. FAILS IF that order is swapped."""
+    """The miner's door is journal-first — through the ONE chokepoint (#13331).
+
+    It used to hold its own `api.log.append(record)` + `api.projection.apply(record)`
+    pair and this test pinned that pair's ORDER by observation alone. It now
+    hands both to `tortoise/live_write.py::write`, so the order it observes is
+    the chokepoint's, not a convention this door repeats — the stronger claim.
+    FAILS IF that order is swapped (append after fold, or either dropped)."""
     from tortoise.mining import ConversationMiner
 
     order: list[str] = []
@@ -994,8 +999,8 @@ def test_mining_emit_is_journal_first():
         _API(), {"eventId": "e-1", "eventKind": "meeting", "subject": "s"})
 
     assert order == ["journal", "fold"], (
-        "mining's emitter is no longer journal-first — it may no longer be "
-        f"exempt: observed order {order}"
+        "mining's emitter is no longer journal-first through the chokepoint — "
+        f"the fold led the append, or one of them is gone: observed order {order}"
     )
 
 
