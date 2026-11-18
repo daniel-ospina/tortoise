@@ -1,11 +1,19 @@
 """Claim lifecycle tests — #432 Task 1 (state vocabulary + transition guards).
 
-State vocabulary: draft → live → retracted → superseded (plus outdated/archived
-reserved). challenged is DERIVED (NAND-operator edge on a live point), NOT a
-state. update_point only promotes draft→live; retract/supersede are the
-lifecycle-transition paths and are terminal.
+State vocabulary since #11824 S0 and ONTOLOGY v3.36/v3.37: **four** words,
+draft → live → deprecated/superseded (`superseded` names its successor; if
+nothing replaced it the word is `deprecated`). `retracted`/`outdated`/`archived`
+are NOT states — they are read-side legacy over stored rows, and the
+`retracted` one is still produced by `retract_point`'s own CAS until #11824 S2
+migrates that verb (the §5 note discloses exactly that residual). challenged is
+DERIVED (NAND-operator edge on a live point), NOT a state. update_point only
+promotes draft→live; retract/supersede are the lifecycle-transition paths and
+are terminal.
 """
 from __future__ import annotations
+
+import re
+from pathlib import Path
 
 import pytest
 
@@ -214,8 +222,11 @@ def test_all_documented_transitions_allowed(sdk_factory, tmp_path):
     # stored rows hold. A stored word with NO row would DEFER — i.e. silently
     # become transitionable — which is the opposite of terminal.
     #
-    # ⚠️ ONTOLOGY §5 still documents `retracted`, because removing it from that
-    # document needs the owner's exact-text approval and is NOT this slice's.
+    # ONTOLOGY §5 now states the same four words (owner-approved as v3.37), so
+    # this map's legacy rows are the CODE side of a disclosed delta, not a delta
+    # the canonical table contradicts. `tests/test_claim_lifecycle.py`'s
+    # `test_ontology_status_table_matches_the_code_vocabulary` below keeps the
+    # two from drifting apart again in either direction.
 
     assert "live" in _ALLOWED_TRANSITIONS["draft"], \
         "draft → live must be allowed"
@@ -242,6 +253,90 @@ def test_all_documented_transitions_allowed(sdk_factory, tmp_path):
         "deprecated is terminal — no outgoing transitions (#11824 S0)"
     assert _ALLOWED_TRANSITIONS["archived"] == frozenset(), \
         "archived is terminal — no outgoing transitions"
+
+
+#: ONTOLOGY §5's model table — the heading, and the next top-level section that ends it.
+_ONTOLOGY = Path(__file__).resolve().parent.parent / "docs" / "ONTOLOGY.md"
+_STATUS_HEADING = "### Point Status Vocabulary"
+
+
+def _ontology_status_section() -> str:
+    """§5's *Point Status Vocabulary* section, from its heading to the next ``## ``."""
+    text = _ONTOLOGY.read_text(encoding="utf-8")
+    try:
+        tail = text[text.index(_STATUS_HEADING):]
+    except ValueError as e:  # a renamed heading must FAIL, never silently skip
+        raise AssertionError(
+            f"ONTOLOGY.md no longer contains the §5 heading {_STATUS_HEADING!r}; "
+            "update this guard's anchor rather than dropping the check") from e
+    end = re.search(r"\n## ", tail)
+    return tail if end is None else tail[: end.start()]
+
+
+def _ontology_status_table_words() -> frozenset[str]:
+    """The status words §5's canonical model table lists, one per row."""
+    section = _ontology_status_section()
+    rows = [ln for ln in section.splitlines() if ln.startswith("|")]
+    assert len(rows) >= 3, (
+        f"§5's status table parsed to {len(rows)} table line(s) — no header + rows; "
+        f"got {rows!r}")
+    words: set[str] = set()
+    for row in rows[1:]:  # rows[0] is the header
+        first = row.split("|")[1].strip()
+        if set(first) <= set("-: "):  # the |---|---| separator
+            continue
+        m = re.fullmatch(r"`([a-z_]+)`", first)
+        assert m is not None, (
+            f"§5's status table has a Status cell this guard cannot read: {first!r}")
+        words.add(m.group(1))
+    assert words, "§5's status table parsed to zero status words"
+    return frozenset(words)
+
+
+def test_ontology_status_table_matches_the_code_vocabulary():
+    """The canonical §5 table states exactly the four words the code accepts.
+
+    This is the leg that would have caught the drift ONTOLOGY v3.37 fixed: §5's
+    table called itself canonical while listing **six** statuses and offering
+    `live → retracted`, contradicting §4.1's approved closed set of four. Nothing
+    parsed the table, so the two canonical statements disagreed for months and
+    the code map was the only side anyone checked.
+
+    NON-VACUOUS on the pre-v3.37 doc: it listed draft/live/retracted/superseded/
+    outdated/archived, so this assertion fails on it in BOTH directions
+    (`retracted`/`outdated`/`archived` declared but not accepted; `deprecated`
+    accepted but undeclared).
+    """
+    declared = _ontology_status_table_words()
+    assert declared == POINT_STATUS_VALUES, (
+        "§5's canonical status table has drifted from the code's write vocabulary "
+        f"(#11824).\n  in the table but not accepted: "
+        f"{sorted(declared - POINT_STATUS_VALUES)}\n  accepted but not in the "
+        f"table: {sorted(POINT_STATUS_VALUES - declared)}")
+
+
+def test_ontology_discloses_the_legacy_words_it_no_longer_lists():
+    """The three retired words stay NAMED in §5 as read-side legacy.
+
+    Dropping them from the table without the note would be indistinguishable from
+    "the engine never stored them" — and it does: `retract_point` still writes
+    `retracted` (#11824 S2 migrates that verb), readers still fold `outdated`, and
+    stored rows still hold `archived`. The note is what makes that residual
+    DISCLOSED rather than discovered, so it is pinned here: a lane that tidies the
+    three words out of §5 entirely fails this test instead of quietly deleting the
+    record of a live divergence.
+    """
+    section = _ontology_status_section()
+    for word in ("retracted", "outdated", "archived"):
+        assert f"`{word}`" in section, (
+            f"§5 no longer names {word!r} anywhere — the retired words are read-side "
+            "legacy over stored rows and must stay disclosed (#12855)")
+    assert "read-side legacy" in section, (
+        "§5's note no longer calls the retired words read-side legacy — without it "
+        "the table reads as 'the code never produced these'")
+    assert "`retract_point`" in section and "still writes `retracted`" in section, (
+        "§5 no longer discloses that `retract_point` still writes `retracted` — that "
+        "is the one place the code diverges from this model (#11824 S2)")
 
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):
