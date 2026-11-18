@@ -957,6 +957,13 @@ def test_a_single_quoted_escape_before_a_hash_is_measured_not_broken(tmp_path) -
     ``('broken', None)`` for this value, so the ``style`` assertion below fails
     (the ``classified`` assertion before it passes — ``_values`` is unchanged by
     this fix).
+
+    This value pins the close-POSITION half of the fix. The parity half — the
+    ``''`` skip in ``_closing_quote`` — is NOT exercised by it: here the escape
+    sits immediately before the `` #``, so the position test alone refuses the
+    wrong split. It has its own pin in
+    ``test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured``
+    (found in review: deleting the parity skip left this test green).
     """
     from tortoise.file_indexer import parse_frontmatter
 
@@ -979,6 +986,49 @@ def test_a_single_quoted_escape_before_a_hash_is_measured_not_broken(tmp_path) -
     assert expected == "the 'KEEP' #11395 ruling", expected
     # …and the measured expectation is the value the real consumer parses, so
     # the arm is not merely self-consistent.
+    assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == expected
+
+
+def test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured(
+    tmp_path,
+) -> None:
+    """The ``''`` PARITY skip, pinned separately from the close-position test.
+
+    ``'it''s' # comment`` is legal YAML (``parse_frontmatter`` returns ``it's``)
+    and the ``''`` sits MID-body, so the close-POSITION test (``len(raw[:i]
+    .rstrip()) - 1 == close``) cannot decide it — only ``_closing_quote``'s skip
+    of a doubled quote can say where the scalar really ends. Without that skip
+    the close is found INSIDE the body, the split lands on the wrong `` #`` and
+    the arm reports ``('malformed', None)`` — the same *delete a legal escape*
+    class of false remedy this whole change removes.
+
+    Why it needs its own test: measured with the skip deleted, the sibling
+    single-quote test stays GREEN (its escape sits immediately before the
+    `` #``), so the parity half shipped unpinned and a future simplification of
+    ``_closing_quote`` would reintroduce the false block with green CI.
+
+    Non-vacuity: with the ``''`` skip removed, ``_quoted_style`` returns
+    ``('malformed', None)`` here and the ``style`` assertion below fails.
+    """
+    from tortoise.file_indexer import parse_frontmatter
+
+    value = "'it''s' # comment"
+    doc = tmp_path / "dossier.md"
+    doc.write_text(
+        f"---\ntitle: x\naboutObjects: {value}\n---\n\nbody\n", encoding="utf-8"
+    )
+    classified = {(key, kind): payload for key, kind, payload in _values(_frontmatter(doc))}
+    assert ("aboutObjects", "scalar") in classified, (
+        "`_values` no longer classifies this as a scalar — re-point this guard: "
+        f"{classified!r}"
+    )
+    style, expected = _quoted_style(classified[("aboutObjects", "scalar")])
+    assert style == "single-quoted", (
+        "a `''` escape MID-body is legal YAML, but this arm reports "
+        f"{style!r} — the parity scan lost the close and the printed remedy "
+        "would ask for a legal escape to be deleted"
+    )
+    assert expected == "it's", expected
     assert parse_frontmatter(doc.read_text(encoding="utf-8"))["aboutObjects"] == expected
 
 

@@ -341,15 +341,16 @@ surface.
 
 ## 9. Review-round residuals — each closed, fixed, or recorded with its reason
 
-THREE head-bound review rounds ran past the recorded attestation (`5fc01193de` → `e488d2adcc`
-→ `7963c4a851` → `9f25dc79c9`). The first of them is the one that matters: reviewing the attested
+Head-bound review rounds ran past the recorded attestation (`5fc01193de` → `e488d2adcc`
+→ `7963c4a851` → `9f25dc79c9`; this branch's own commit messages number the reviews of those
+heads 1, 3, 4 and 5). The first of them is the one that matters: reviewing the attested
 head `5fc01193de`, a fresh-context reviewer found a **FAIL-OPEN in check (D)** — the arm whose
 entire job is "no affiliation value escapes measurement" — not a message defect; it is closed in
 `e488d2adcc` and listed below. The later rounds found no further fail-open, but the last of them —
-the review of `9f25dc79c9` — found a **false block**: a wrong VERDICT, not only a message. Legal
-YAML `'the ''KEEP'' #11395 ruling'` was read as an unbalanced quote and check (C) failed it; that
-one is fixed at this head and pinned below. Where a finding was applied it was measured first, and
-where it was falsified the record was corrected in place
+the round-5 review of `9f25dc79c9` — found a **false block**: a wrong VERDICT, not only a message.
+Legal YAML `'the ''KEEP'' #11395 ruling'` was read as an unbalanced quote and check (C) failed it;
+that one is fixed in `268737ae6cd9` (this branch's first commit) and pinned below. Where a finding
+was applied it was measured first, and where it was falsified the record was corrected in place
 rather than restated. What is left is listed here so the next reader inherits the measurement
 instead of repeating it.
 
@@ -376,6 +377,16 @@ agrees; the (C) mutant `"STORAGE-ARCHITECTURE.md, "#11901" KEEP"` has no space-t
 close and STILL reds `broken`, so the truncation check is unchanged. Pinned by
 `test_a_single_quoted_escape_before_a_hash_is_measured_not_broken`, which fails on the pre-fix
 helper (`('broken', None)`) — verified by re-applying the old body.
+
+The fix has TWO halves, and the first pin only covers one of them (found in the next review).
+That value's `''` sits immediately before the space that introduces the comment, so the
+close-POSITION test alone refuses the wrong split and `_closing_quote`'s `''` skip never decides
+anything — measured: deleting the skip
+left that test GREEN, while a legal mid-body escape under a trailing comment, `'it''s' # comment`,
+regressed from `('single-quoted', "it's")` to `('malformed', None)` (the same *delete a legal
+escape* remedy), with green CI. `test_a_single_quoted_escape_mid_body_under_a_trailing_comment_is_measured`
+now pins the parity half: with the skip deleted it reds and the sibling stays green
+(`1 failed, 1 passed`), so each half names its own falsifier.
 
 **Already fixed — the sequence branch's false diagnosis.** `- 13452` (int) once reported "a
 sequence item has no legal transform, so this is a truncation" while the scalar branch said
