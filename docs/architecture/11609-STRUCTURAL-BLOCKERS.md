@@ -67,7 +67,8 @@ Probe (`FastMCP("p").add_tool` + `call_tool`, a fake arm returning a list and a 
 **Answer to (a).** The envelope adds exactly three wire facts: (i) `structuredContent`
 becomes `{"result": <value>}`, (ii) `result` is in `required`, and (iii) where a **wrapped**
 annotation declares one, `result` also carries a `type` (`array` for `list[dict]`, `object`
-for `dict | bool`). A union declares `anyOf` and no `type`, and `object` declares `{}` and no
+for the `object`-annotated form). A UNION declares `anyOf` and no `type` regardless of its
+members (`list[dict] | dict` and `dict | bool` alike), and `object` declares `{}` and no
 `type` — which is precisely why `_violates_wrap_envelope` is type-blind for both. A container
 **can** return a pageable shape
 while preserving the envelope — `list[dict] | dict` does it, which is the shape
@@ -103,7 +104,7 @@ tortoise_check_structure        mcp_server.py:5215
 tortoise_calibrate_summary      mcp_server.py:5744
 ```
 
-`rest_spec` doors — the row and the route it owns:
+`rest_spec` doors — the row and the route it **nominally** owns (it does not serve it; §1.5):
 
 ```
 tortoise_search          tool_registry.py:518   GET /v1/search         (also list[dict] -> both reasons)
@@ -123,7 +124,7 @@ warning shim with `None` schemas and are excluded because they are not advertise
 
 ### 1.3 Why the containers are `Any` — it is not laziness
 
-`TortoiseSDK.list_knowledge` (`sdk.py:30295`) returns **different shapes per `kind`**:
+`TortoiseSDK.list_knowledge` (`sdk.py:30300`) returns **different shapes per `kind`**:
 
 - `claim` → `paginated_query` → `{results, total, hasMore}` (already paged, AIP-158)
 - `batch` (no `id`) → `list_batches` → **list**; `batch` with `id` → `list_batch` → dict
@@ -176,11 +177,15 @@ Measured on `main`:
 
 ```
 $ rg -n 'FastAPIRouterAdapter' --glob '!.venv/*' .
-./tortoise/tool_registry.py:2343  # a comment about it
-tortoise/tool_registry.py:2367  # the class itself
+./tortoise/tool_registry.py:2343:# 9 REST tool-ops classified for the FastAPIRouterAdapter:
+./tortoise/tool_registry.py:2367:class FastAPIRouterAdapter:
+./tests/test_tool_registry.py:809:class TestFastAPIRouterAdapter:
+./tests/test_tool_registry.py:814:        from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter
+./tests/test_tool_registry.py:818:        adapter = FastAPIRouterAdapter(router)
 ```
 
-There is no instantiation outside a test, and `tortoise/hosted_api.py` does not import
+The only **instantiation** is in a test (`tests/test_tool_registry.py:818`); the product has
+a comment and the class definition, and nothing else. And `tortoise/hosted_api.py` does not import
 `TOOL_REGISTRY` for routes at all (its only registry import is `capability_catalog`, an
 unrelated indexer table). The **served** routes are hand-written decorators that call the
 **SDK** directly:
@@ -200,9 +205,10 @@ finding is already recorded at `docs/scoping/2026-09-17-3863-scope-output.md:309
 … `FastAPIRouterAdapter` is used only in a test."*
 
 What `rest_spec` actually feeds today: the unwired adapter, `tools/dod_5090_probe.py`'s
-reporting (`:8729-8745`, which classifies a row without a `rest_spec` as "MCP only" — a fact
-about the surface, not a route), and comments in `tools/surface_manifest.py:341` and
-`config/surface-manifest.yml:98`. **None of them deletes a route when a row goes.**
+reporting (`:8923` builds the `name → rest_spec` map; `:8939-8942` classifies a row without
+one as "MCP only (no REST route)" — a fact about the surface, not a route), and comments in
+`tools/surface_manifest.py:341` and `config/surface-manifest.yml:98`. **None of them deletes a
+route when a row goes.**
 
 ⛔ This is a **correction to a recorded reason**, so it is reported and not acted on: the
 three names stay in `PROTECTED` until the batch that changes the code moves them, with this
@@ -300,7 +306,7 @@ the `brave-search` MCP closed the connection twice), so primary sources were fet
   field — not a wrapper object — and the protocol applies it to `*/list` operations, **not** to
   `tools/call`. So there is no MCP-native "paged envelope" for a tool result: the `tools/call`
   result is *already* a wrapper (`content` / `structuredContent` / `_meta`), which is why this
-tree's established out-of-band channel is `_meta` (`_SCHEMA_ERROR_META_KEY`, `mcp_server.py:2016`).
+tree's established out-of-band channel is `_meta` (`_SCHEMA_ERROR_META_KEY`, `mcp_server.py:2012`).
 - **Gateway Routing** (`learn.microsoft.com/azure/architecture/patterns/gateway-routing`):
   *"If a service is consolidated, decomposed or replaced, the client doesn't necessarily
   require updating… only the routing changes."* — the canonical shape for keeping a REST route

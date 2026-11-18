@@ -24,8 +24,10 @@ WHAT IS PINNED, AND WHAT IS DELIBERATELY NOT
   · the union form does carry the envelope, so the design in the plan is actually available;
   · the union DOES re-wrap an existing dict arm (the cost that gates S1 on approval);
   · `-> dict` cannot be the answer (FastMCP refuses a list return);
-  · the three REST routes are derived from the registry row, so retiring the row deletes
-    the route — the property the `rest_spec` half of the plan must remove;
+  · the three REST routes are NOT derived from the registry row — nothing in product code
+    instantiates the only thing that would derive one (`FastAPIRouterAdapter`), and the
+    served routes are hand-written decorators that call the SDK. `PROTECTED`'s `rest_spec`
+    reason is therefore STALE, and THAT is what is pinned below;
   · the nine `NO_CONTAINER_YET` destinations are still not MCP doors.
 
 ⛔ NOT pinned here: the retired-forward population, the pointer one-hop rule, and the
@@ -37,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -298,26 +301,45 @@ def test_the_served_route_is_hand_written_and_never_reads_the_registry_row(door,
     assert entry.rest_spec.path == path, (
         f"{door}'s `rest_spec` moved to {entry.rest_spec.path}, not {path}")
 
-    # (1) the adapter that would derive the route is not wired into the product
-    for module in (hosted_api, selfhost_api):
-        src = inspect.getsource(module)
-        assert "FastAPIRouterAdapter" not in src, (
-            f"{module.__name__} now uses FastAPIRouterAdapter — REST routes ARE registry-"
-            "derived again, so `PROTECTED`'s `rest_spec` reason became TRUE and the plan's"
-            " §1.5 (and S3) must be re-derived")
+    # (1) the adapter that would derive the route is wired into NO product module.
+    # ⛔ Repo-wide, not the two apps: an instantiation in a third module (a startup hook,
+    # `hosted_app.py`) would make the recorded reason TRUE again, and scanning only the
+    # two files would report "nowhere" for a claim about the whole product.
+    repo = Path(__file__).resolve().parent.parent
+    offenders = [
+        source.name
+        for source in sorted((repo / "tortoise").glob("*.py"))
+        if "FastAPIRouterAdapter(" in source.read_text(encoding="utf-8", errors="replace")
+    ]
+    assert offenders == [], (
+        "FastAPIRouterAdapter is instantiated in product module(s) "
+        f"{offenders} — REST routes ARE registry-derived again, so `PROTECTED`'s "
+        "`rest_spec` reason became TRUE and §1.5 / S3 must be re-derived. (The class is "
+        "DEFINED in `tool_registry.py` as `class FastAPIRouterAdapter:`, which this scan "
+        "does not match — only a call does.)")
 
-    # (2) the route is SERVED anyway, by a hand-written decorator
-    decorator = re.compile(
-        r'@(?:app|router)\.(?:get|post)\(\s*"' + re.escape(path) + r'"')
-    serves_full = decorator.search(inspect.getsource(hosted_api)) is not None
-    # the self-hosted app mounts its router under a `/v1` prefix and spells the suffix
-    serves_prefixed = decorator.search(
-        inspect.getsource(selfhost_api).replace(
-            '"/' + path.split("/v1/", 1)[-1] + '"',
-            '"' + path + '"')) is not None
-    assert serves_full or serves_prefixed, (
-        f"{path} is not served by a hand-written decorator in {hosted_api.__name__} or "
-        f"{selfhost_api.__name__} — if the route is really gone, this pin's premise changed")
+    # (2) the route is SERVED anyway, by a hand-written decorator. The METHOD and the PATH
+    # must both match, on a DECORATOR line. Measured: matching the path alone false-PASSes
+    # on a comment (`hosted_api.py:5568` is `# ... @app.post("/v1/context") ...`) and on a
+    # DIFFERENT operation sharing the path with another verb (`:37939` is a POST where this
+    # row is GET), and on the self-hosted `volunteer_context` POST (`selfhost_api.py:480`).
+    pattern = re.compile(
+        r'^\s*@(?:app|router)\.(get|post|put|patch|delete)\(\s*"([^"]+)"')
+
+    def served(app_module, prefix: str) -> bool:
+        for line in inspect.getsource(app_module).splitlines():
+            match = pattern.match(line)
+            if (match and match.group(1).upper() == entry.rest_spec.method
+                    and prefix + match.group(2) == path):
+                return True
+        return False
+
+    # `hosted_api` mounts at the full path; `selfhost_api`'s router carries a `/v1` prefix
+    # (`selfhost_api.py:28`) and spells the suffix.
+    assert served(hosted_api, "") or served(selfhost_api, "/v1"), (
+        f"{path} is not served by a hand-written {entry.rest_spec.method} decorator in "
+        f"{hosted_api.__name__} or {selfhost_api.__name__} — if the route is really gone, "
+        "this pin's premise changed")
 
 
 def test_register_all_would_derive_the_route_from_the_row():
