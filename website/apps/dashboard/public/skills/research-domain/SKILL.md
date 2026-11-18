@@ -64,11 +64,13 @@ claim:
 
 1. `tortoise_create_entity(type="point", name=<the claim>,
    props={"pointKind": "statement", "sourceKind": "T1"})` — file the claim
-   with its tier. ⛔ NOT `extractedFrom=`: that leg belonged to the retired
-   `create_point` door, and the arm `create_entity` does not take it
-   (`signature (type, name, props, goalState)` — passing it raises
-   `TypeError: got an unexpected keyword argument`). The provenance gap is
-   #13577. Tiers are the SourceKind taxonomy in
+   with its tier. ⛔ NOT `extractedFrom=` as a top-level argument: that leg
+   belonged to the retired `create_point` door. `create_entity` takes the claim's
+   fields in `props`, and materialising a `:Source` from a ref is DOCUMENT-ONLY —
+   for `type="document"` pass `props={"extractedFrom": ...}` and the `:Source`
+   is created; for a point a declared ref is INERT (the response carries an
+   `extracted_from_inert` advisory and NO source is created). The provenance gap
+   for points is #13577. Tiers are the SourceKind taxonomy in
    `how-to-use-tortoise`: T0 direct observation … T4 speculative. A claim with
    no tier is a claim you cannot grade later.
 2. Connect it to **itself** — the claims in this round support or contradict
