@@ -45,6 +45,7 @@ document.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -54,6 +55,7 @@ _SUBSTRATE = "docs/architecture/SUBSTRATE-REBUILD-MAP.md"
 _M3_BRIEF = "docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md"
 _CENSUS = "docs/evidence/13083-capability-census/README.md"
 _EVIDENCE = "docs/architecture/ENTITY-VERDICT-BANDS.md"
+_INDEX = "docs/00_index.md"
 _SE = "tortoise/search_engine.py"
 _CP = "tortoise/cache_projection.py"
 _AU = "tortoise/audit.py"
@@ -112,13 +114,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6923-6939`", _PI, 6923, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6933`", _PI, 6933, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6934`", _PI, 6934, '("Subject", ["name"])'),
-    # ⛔ The Object half of the same declaration had NO row, and that absence is ISSUE 1 of the
-    # `#13489` review: §2.5's header cited `:6869`, which `:6933`/`:6934`/`:6939` had left 64/65/70
-    # lines behind — and `:6938` is the `("Object", ["name"])` row that had no pin at all, so the
-    # one sibling a reader would actually chase was the uncovered one. An absent pin is not
-    # coverage; the header now names it beside its three siblings and this row resolves it.
-    (_AUDIT, "`:6938`", _PI, 6938, '("Object", ["name"])'),
     (_AUDIT, "`:6939`", _PI, 6939, '("Source", ["_searchText"])'),
+    # The FIFTH declaration in the same block, and the one the re-derivation missed: §2.5 row 8's
+    # `("Object", ["name"])` cite kept the pre-merge `:6869` while its four siblings in the same
+    # sentence were re-pointed, and `:6869` is `"pointKind",` inside `_POINT_RANGE_INDEX_PROPS` at
+    # this head (it IS `("Object", ["name"])` at `main` `ae54df166d`, which is why the enumeration
+    # in §1 keeps `:6869` as correct HISTORY — see the `hosted_api.py:33583` precedent). Unpinned,
+    # the row sent a reader to the wrong line in the document that tells them to distrust numbers.
+    (_AUDIT, "`:6938`", _PI, 6938, '("Object", ["name"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
     (_AUDIT, "sdk.py:24059", _SDK, 24059, "(n:Point {id:$id})-[:TAGGED]->()"),
@@ -139,47 +142,49 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # and `2976-3000` is the `build_or_query` byte-identity comment block, not the filter. The pin below
     # is anchored on the line that IS the filter, so the next offset-only edit reds instead of shipping.
     (_EVIDENCE, "search_engine.py:3081-3096", _SE, 3081, "if label in _STATUS_FILTERED_LABELS"),
+    # --- the D-1 dedup filter, in BOTH documents that promise to carry the SAME address.
+    # ⛔ `#13345`'s re-derivation moved these to `27866` / left them at `27861` by adding a line delta,
+    # and the pair then named two different lines, neither of which was the filter (measured at
+    # `d1bfef778f` and at every later head: `27866` is prose and `27861` is the PRE-`#13290` value).
+    # The row above is what makes "carries the same number" a fact instead of a promise; these two are
+    # what make the NUMBER the live site rather than merely a matching one.
+    (_EVIDENCE, "sdk.py:28014", _SDK, 28014, "n.dedup_reviewed IS NULL"),
+    (_INDEX, "sdk.py:28014", _SDK, 28014, "n.dedup_reviewed IS NULL"),
     # --- docs/evidence/13083-capability-census/README.md
     (_CENSUS, "cache_projection.py:2755", _CP, 2755, "tail_denied = forbidden | {"),
-    # ⚠️ Row 13b's Source-writer cite, added because the site had NO pin at all — the same shape
-    # the `:6938` row above was added for. It sat at `:19637` (a comment about provenance loss in
-    # the `sessionCaptured` stamp block) for merges without a red, because
-    # `rg -n '19637' docs/ tests/ tools/ config/` reached this one row and no `_PINS` /
-    # `_TOKEN_OCCURRENCES` entry covered it. ⛔ `#13486` moved the writer under this row, so it is
-    # re-derived here to the line that actually carries `search_text = _source_search_text(`
-    # (`grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py`), not carried.
-    (_AUDIT, 'sdk.py:21703', _SDK, 21703, 'search_text = _source_search_text(topics=topics)'),
     (_AUDIT, 'sdk.py:21745', 'tortoise/sdk.py', 21745, 's.summary=CASE WHEN $sum'),
     (_AUDIT, '`:21868`', 'tortoise/sdk.py', 21868, 's.summary, s.topics, s.'),
     (_AUDIT, 'hosted_api.py:22925', 'tortoise/hosted_api.py', 22925, 'MERGE (s:Source {url:$did})'),
     (_AUDIT, '`:22737`', 'tortoise/hosted_api.py', 22737, 'def _execute_commit_writes'),
+    # ⛔ The document carries TWO addresses for this one statement on purpose: `:33583` is the number
+    # at the `main` head the paragraph names (`ae54df166d`, verified: that line IS the MERGE there),
+    # and `:33601` is the live one after this branch's own insert above it. The pin follows the LIVE
+    # one, because a pin on the historical number would be reshaped by every future insert above it.
     (_AUDIT, '`:33601`', 'tortoise/hosted_api.py', 33601, 'MERGE (p:PackInstall {namespace: $ns})'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
-#: header must carry, target file, 1-based line **on this branch's tree**, verbatim fragment on that
-#: line). Five of these
+#: header must carry, target file, 1-based line in the WORKING TREE (`_resolve` reads `REPO`, so a branch
+#: that moves `.py` files shifts these with it), verbatim fragment on that line). Five of these
 #: are reached by `_PINS` already; `:2464`, `:2521` and `projection/entities.py:5666` were in NO pin at all
 #: before this one, and the header named none of the eight — which is the defect
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
-#: ⚠️ The sdk/hosted_api rows here were `main`'s figures until `#13363` re-derived them: that branch's
-#: own inserts move `sdk.py` by +22 and `hosted_api.py` by +6, so the line is THIS tree's and the header
-#: records the delta and main's figure beside it. A row here is a claim about a line in the tree the
-#: test reads (`REPO / path`), never about `main`'s copy of it.
 _ENT = "tortoise/projection/entities.py"
 _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":2464", _CP, 2464, "def _episodic_source_search_text_is_the_lexicon"),
     (":2521", _CP, 2521, 'return summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"'),
-    (":2693-2660", _CP, 2693, "it is the ONLY field the Source FTS index"),
+    (":2693-2700", _CP, 2693, "it is the ONLY field the Source FTS index"),
     (":2693-2694", _CP, 2694, "un-indexes a restored session"),
     (":2703-2705", _CP, 2703, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     (":2755", _CP, 2755, "tail_denied = forbidden | {"),
     (":3778", _CP, 3778, 'if table == "point"'),
     (":5666", _ENT, 5666, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
-    # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:23982` is a DELETE
-    # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
-    # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
+    # sent readers to the pin. ⛔ The pin is wrong for all six, and the earlier form of this comment was
+    # itself wrong about HOW: it said `sdk.py:24010` is a DELETE and `hosted_api.py:22925` is
+    # `if is_subject_kind(...)`, "both executable". Measured at `ccb49741b2ec`: `sdk.py:24010` is
+    # `# creates a PARALLEL edge on attribute change; the two-` and there is NO `DELETE` in 23990-24040;
+    # `hosted_api.py:22925` is the `)` closing `create_entity(...)`, the guard being `:22919`.
     ("sdk.py:24059", _SDK, 24059, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:6723", _SE, 6723, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:21745", _SDK, 21745, "s.summary=CASE WHEN $sum"),
@@ -225,12 +230,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6923-6939`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6933`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6934`'): 1,
-    # 2: `:6938` is BOTH the §1 label-scan table row's own key (already in this document) and the
-    # §2.5 header enumeration's disclosure of THIS tree's Object declaration, added by `#13489` beside
-    # its three siblings. Two sites, one spelling — a single pin resolves the line, and the count is
-    # what stops a third occurrence appearing unannounced.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6939`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6938`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24059'): 2,
@@ -242,8 +243,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:4906'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4825`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3081-3096'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'sdk.py:28014'): 1,
+    ('docs/00_index.md', 'sdk.py:28014'): 1,
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2755'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21703'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21745'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21868`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22925'): 3,
@@ -275,6 +277,60 @@ def test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence() -> None:
     assert declared == pinned, (
         f"_TOKEN_OCCURRENCES and _PINS disagree: {sorted(declared - pinned)} is declared with no pin; "
         f"{sorted(pinned - declared)} is pinned with no count."
+    )
+
+
+def test_the_dedup_filter_is_one_address_in_both_documents_that_promise_it() -> None:
+    """The CROSS-DOCUMENT arm — `_PINS` cannot see it.
+
+    `docs/00_index.md`'s D-1 row states the promise in as many words: *"the filter it names is at
+    `sdk.py:<n>` at this head, and `ENTITY-VERDICT-BANDS.md` carries the same number"*. Every row in
+    `_PINS` is satisfied by its OWN document, so two documents naming two DIFFERENT lines both pass every
+    pin — which is the shipped `#13345` state, measured: `docs/00_index.md` `sdk.py:27866` (prose at the
+    head, and the filter at no head) against `ENTITY-VERDICT-BANDS.md` `sdk.py:27861` (the value before
+    `#13290` moved it). The row that claims agreement was the only thing that had to hold, and nothing
+    checked it: the `+5` delta was applied to one document and not the other, and the promise broke
+    while reading as a correction.
+
+    NON-VACUOUS on that tree: the two addresses differ (`27866` vs `27861`), so the first assertion reds;
+    and neither opens on `dedup_reviewed IS NULL`, so the second reds independently. The address is
+    read out of each document by regex rather than hardcoded, so this arm survives a legitimate future
+    re-derivation of BOTH rows together (which is the only edit that keeps the promise true).
+    """
+    def address_beside(doc_rel: str) -> str:
+        lines = (REPO / doc_rel).read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if "dedup_reviewed" not in line:
+                continue
+            # `ENTITY-VERDICT-BANDS.md` puts the address on the line AFTER the marker; `00_index.md`
+            # carries both on one line. One line of slack covers both, and the regex is anchored on
+            # the qualified `sdk.py:` form so a bare `:NNNN` elsewhere on the line cannot be picked up.
+            window = " ".join(lines[i:i + 2])
+            found = re.search(r"sdk\.py:(\d{4,5})", window)
+            if found:
+                return found.group(1)
+        raise AssertionError(
+            f"{doc_rel} carries no `sdk.py:NNNN` address beside its `dedup_reviewed` marker — the D-1 "
+            "filter cite was dropped rather than re-derived."
+        )
+
+    index_addr = address_beside(_INDEX)
+    bands_addr = address_beside(_EVIDENCE)
+    assert index_addr == bands_addr, (
+        f"the two documents disagree on the D-1 dedup filter: `docs/00_index.md` says `sdk.py:{index_addr}` "
+        f"and `ENTITY-VERDICT-BANDS.md` says `sdk.py:{bands_addr}`, while `docs/00_index.md` promises the "
+        "latter \"carries the same number\". Only one address can open at any head, so one of the two "
+        "readers is sent to the wrong line. Re-derive BOTH from the statement "
+        "(`grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py`) rather than re-pointing one by a delta."
+    )
+    target = (REPO / _SDK).read_text(encoding="utf-8").splitlines()
+    assert 0 < int(bands_addr) <= len(target), (
+        f"`sdk.py:{bands_addr}` is out of range ({len(target)} lines) — the file shrank under the cite."
+    )
+    assert "dedup_reviewed IS NULL" in target[int(bands_addr) - 1], (
+        f"both documents agree on `sdk.py:{bands_addr}`, but that line is "
+        f"{target[int(bands_addr) - 1].strip()[:100]!r} — agreeing on the wrong line is still wrong, and "
+        "it is the reason this arm checks content as well as agreement."
     )
 
 
@@ -367,17 +423,28 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
 
 
 def test_the_resolver_reds_on_a_double_applied_offset() -> None:
-    """Negative control — the exact defect: 4906 + 3 = 4909 is the `#7704` note, not the loop.
+    """Negative control — the exact defect: the pre-fix `+3` pointed the loop's cite at the `#7704` note.
 
     Reachable: it is the shipped pre-fix state of the m3 brief, reintroduced here by mutating a COPY of
     the shipped row with the cite token LEFT INTACT, so the failure is reported by the CONTENT arm and
     cannot be satisfied by the token arm (which is what a re-pointed token would trip first).
+
+    The spurious line is DERIVED FROM CONTENT, not hardcoded: the note it must land on has moved twice
+    since this control was written, and a hardcoded `4907` rotted into a line that no longer holds the
+    note — the do-nothing control then failed for the wrong reason (the note check, not the content arm).
     """
-    row = (_M3_BRIEF, "tortoise/search_engine.py:4906", _SE, 4906, "for rank, (pid, _score) in enumerate(ranked)")
-    doubled = (row[0], row[1], row[2], 4909, row[4])
+    loop_line = 4906
+    note_line = next(
+        i + 1
+        for i, line in enumerate((REPO / _SE).read_text(encoding="utf-8").splitlines())
+        if "#7704 (MEASURED MECHANISM" in line
+    )
+    assert note_line > loop_line, "the `#7704` note must sit BELOW the loop it annotates"
+    row = (_M3_BRIEF, "tortoise/search_engine.py:4906", _SE, loop_line, "for rank, (pid, _score) in enumerate(ranked)")
+    doubled = (row[0], row[1], row[2], note_line, row[4])
     errors = _resolve((doubled,))
     assert errors, "a spurious +3 must red the resolver"
-    assert ":4909" in errors[0] and "#7704" in errors[0]
+    assert f":{note_line}" in errors[0] and "#7704" in errors[0]
     assert "is gone" not in errors[0], "the content arm must be the one that fires"
 
 
@@ -396,13 +463,14 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     count both move together only when a row is added on purpose.
     """
     docs = {row[0] for row in _PINS}
-    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE}
-    # 48: `#13489`'s review added the `:6938` row (`("Object", ["name"])`, the §2.5 address that
-    # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6933`/`:6934`/`:6939`
-    # sit 64/65/70 lines below `:6869`, while `:6938`, the row that had no pin, is the 69th), and row
-    # 13b's Source-writer pin (`sdk.py:21703` — `:21648` before `#13486` moved the writer) is the
-    # same shape added again, for the same reason.
-    assert len(_PINS) == 48
+    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX}
+    assert len(_PINS) == 49, (
+        "47 before the `#13345` review added the D-1 dedup filter's two addresses (one per document that "
+        "promises to carry the same number). The bound is not a target: a row DELETED to make the suite "
+        "pass is the failure mode, so this number moves only when a row is added on purpose — the `:6938` "
+        "row was added because §2.5 row 8's `(\"Object\", [\"name\"])` cite was the one address in that "
+        "block no pin reached (it kept the pre-merge `:6869` while its four siblings were re-pointed)."
+    )
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -485,7 +553,7 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     `#13124`'s header said the enumeration was "the WHOLE of the `main` set" and that every other
     `file:line` "is at the pin `ccb49741b2ec`". The `#13124` REVIEW measured both false: eight addresses
-    open at `main` and are named in neither list — `cache_projection.py` `:2464`, `:2521`, `:2693-2660`,
+    open at `main` and are named in neither list — `cache_projection.py` `:2464`, `:2521`, `:2693-2700`,
     `:2693-2694`, `:2703-2705`, `:2755`, `:3778` and `projection/entities.py`:5666. `:3778` is a
     `MERGE (n:…) SET n += $props` at the pin and the `cache_tier` arm at `main`, so a reader who followed
     the rule opened the pin and landed on a statement their row does not quote: "cite rotated, reader
@@ -493,14 +561,10 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     Two arms, because the defect was two-sided:
 
-    * CONTENT — each of the eight carries, **on this branch's tree** (the tree this test reads),
-      the fragment the document quotes for it. `_PINS` reaches five of them; `:2464`, `:2521` and
-      `projection/entities.py:5666` were in NO pin before this one. ⛔ The earlier form of this
-      bullet justified the same rows as "at `main` (the working tree: this branch is docs-only, so
-      `main`'s `.py` files are this tree's)" — that was true when it was written and is FALSE for
-      the rows `#13363` re-derived: `sdk.py` moved `+22` and `hosted_api.py` `+6`/`+18`, so those
-      rows carry THIS tree's figures, not `main`'s. A row here is a claim about `REPO / path`, never
-      about `main`'s copy of it — the same thing `_MAIN_SET_MISSED`'s own comment says.
+    * CONTENT — each of the eight carries, in the WORKING TREE (`_resolve` reads `REPO`, so these rows are
+      branch coordinates: on the docs-only branch that wrote them that was identical to `main`, and a branch
+      that moves `.py` files must move these rows with it), the fragment the document quotes for it. `_PINS` reaches
+      five of them; `:2464`, `:2521` and `projection/entities.py:5666` were in NO pin before this one.
     * CLAIM — the header still NAMES them, and no longer states the three absolutes the review measured
       false, nor the "pin-written remainder" label whose denominator contradicted it.
 
@@ -510,17 +574,6 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
     discriminating: `:2464`, `:2521` and `:2755` DO appear later in the document (row 13, §2.5), so an
     unbounded `in text` check would pass on the broken file.
     """
-    # ⛔ THE POPULATION HAS AN ANTI-SHRINK ARM (#13509), the mirror of the one the sibling
-    # `_MAIN_HEAD_FIGURES` guard carries. BOTH use sites below ITERATE this tuple, so a row deleted to
-    # silence a re-point red simply stops existing in both: its content pin and the "the header names
-    # it" assertion vanish together and nothing reds — the false PASS the sibling arm was added for,
-    # one table over. Fourteen is the `main`-set group the `#13124` review measured; a fifteenth is a
-    # re-derivation to make deliberately, not silently.
-    assert len(_MAIN_SET_MISSED) == 14, (
-        f"_MAIN_SET_MISSED carries {len(_MAIN_SET_MISSED)} rows, not 14 — both use sites iterate this "
-        "tuple, so a row deleted to make a re-point pass is the coverage loss neither arm below can "
-        "see. Restore the row (the addresses are enumerated in the audit header's `main` set) or "
-        "update this count with the re-derivation that justifies it")
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     header = text.split("## 1. The population", 1)[0]
 
@@ -553,71 +606,3 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
             f"the header still claims {stale!r}, which the `#13124` review measured false ({why}). "
             "A claim a reader can act on has to hold for the file it is written in."
         )
-
-
-def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> None:
-    """The header enumeration's numbers are bound to the `main` head the paragraph announces — `:6869` is
-    that head's cite.
-
-    ⚠️ This region is the HEADER, not §1: the binding sentence sits in the preamble, ABOVE `## 1.`, which
-    opens a hundred-odd lines below it. The file's own name for the region is "the header region — every line
-    before `## 1.`" (see `test_the_main_set_enumeration_names_the_group_it_was_missing`), and §1 is 18 rows of
-    writers, which carries no enumeration of cites at all. ⛔ No line numbers are asserted here on purpose:
-    the first cut of this docstring said "line 113" and "`## 1.` at line 209", and the very text it was
-    describing moved both — a positional claim about the document, inside the document's own guard.
-
-    The header paragraph opens with its own binding: *"All sixteen were re-derived at `main` (`ae54df166d`)
-    — ⚠️ **so they do NOT open at the pin above** — and each is named here by the cite it became"*. Every
-    number in that sentence is therefore an address AT `ae54df166d`, not at this tree.
-
-    `#13489`'s first cut re-pointed the Object entry from `:6869` to `:6938` — this tree's value, correct
-    for §2.5's row — the Object declaration there is `:6938`, which is `:6869` + 69 IN
-    `projection/__init__.py` (an address delta, not a document distance) — and WRONG under a sentence
-    that announces the other head. A
-    `⚠️ CORRECTED` marker records that the text changed, never that the change was right: the
-    FALSE CORRECTION this file's own docstring is built around, one head over.
-
-    NON-VACUOUS on the pre-fix document (`git show 26a68370b327:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`):
-    the header carries `:6938` after the fragment and `:6869` nowhere, so this assertion reds there. The
-    measurement that settles which number belongs to the announced head is
-    `git show ae54df166d:tortoise/projection/__init__.py | sed -n '6869p;6938p'` ->
-    `("Object", ["name"]),` and then `# background RDB/AOF child in the fork slot, and a hung un-reaped`.
-
-    ⚠️ The assertion is on the `:6869` ADJACENCY, not on `:6938`'s absence — but it does NOT follow
-    that disclosure is free, and an earlier form of this docstring said it was. The declaration must sit
-    DIRECTLY above `` :6869`; ``; anything between them breaks the adjacency this arm reads. And
-    disclosing this tree's figure appends a SECOND `:6938` occurrence, which
-    `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` counts at 1. So a header that
-    names both heads is a TWO-file edit, not a rewrite of this one: keep the declaration above
-    `` :6869`; ``, put the disclosure AFTER the semicolon, and move `_TOKEN_OCCURRENCES[':6938']` to 2
-    in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
-    deletes the only protection on the entry that actually suffered the false correction. The document's
-    own shape puts the branch figure FIRST with the head in parens (`:33601` **on this branch**
-    (`:33583` at the head named above)), not the reverse.
-    """
-    text = (REPO / _AUDIT).read_text(encoding="utf-8")
-    assert '`("Object", ["name"])`\n`:6869`;' in text, (
-        "the header enumeration no longer names the Object declaration at `:6869` — the address it holds "
-        "at the `main` head that paragraph announces (`ae54df166d`). `:6938` is THIS tree's value (and "
-        "§2.5's row); putting it here re-points a history cite to a working-tree address, the "
-        "`⚠️ CORRECTED` failure this file exists to stop. Restore `:6869` directly above a `;`. To ALSO "
-        "disclose this tree's figure, keep the declaration where it is, append the disclosure AFTER the "
-        "semicolon, and bump `_TOKEN_OCCURRENCES[':6938']` to 2 in the same change — otherwise "
-        "`test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` reds. Do not loosen either arm."
-    )
-
-
-#: ⛔ THE `main`-HEAD FIGURE COUNT GUARD IS GONE, and its removal is recorded rather than silent.
-#: This revision used to carry `_MAIN_HEAD_FIGURES` — twelve addresses AT `ae54df166d` written BESIDE
-#: this tree's figure for the same site, with a `len(...) == 12` anti-shrink arm. That guard existed
-#: because the branch could not resolve `main`'s own re-derivation, so the header kept a dual-head
-#: narrative. `#13486` (`0186df59`) has since landed that re-derivation on `main` at `main`'s
-#: numbering, and the merged header now states ONE set of figures — every one of them this tree's,
-#: each resolved by a `_PINS` row above. With no `main`-head figure left in the document the dict had
-#: an EMPTY population, so keeping the arm would have meant re-manufacturing the narrative it guarded.
-#: Deleting it therefore removes no coverage that has a subject: the figures it counted (`:6854-6870`,
-#: `:36985`, `:37008`, `:23982`, `:21668`, `:21791`, `:22919`, `:22731`, `:33583`) no longer appear in
-#: the header, and the addresses that REPLACED them (`:6923-6939`, `:37051`/`:37085`, `:24048`,
-#: `:21745`/`:21868`) are pinned to their content by `_PINS`, which is the stronger arm — a pin
-#: resolves the line, a count only counts a spelling. #13508 still owns the head-selecting arm for a
-#: figure that has no working-tree line.
