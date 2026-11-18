@@ -306,23 +306,29 @@ ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 #: gap is named here rather than implied to be observable.
 RECORD_LEG_STATEMENTS_PER_READ = 3
 
-#: What the FOLDED arm DIVIDES the read by — one MORE than
-#: :data:`RECORD_LEG_STATEMENTS_PER_READ`, giving the graph branch its reserve share.
-#: ⚠️ The divisor and the statement count are DIFFERENT numbers and conflating them
-#: is the defect this pair of constants exists to stop (``#13466`` cycle 4, P3): the
-#: folded arm ISSUES three data statements (its two prefetches — rows, then lifecycle
-#: events — then the kNN) and therefore divides by FOUR, because a divisor equal to
-#: the count spends the whole read and leaves nothing. Spelled as a literal ``3`` in
-#: the pin and ``RECORD_LEG_STATEMENTS_PER_READ + 1`` in the code, both numbers were
-#: tied to nothing: a fourth data statement in the arm could spend the read and hand
-#: the graph branch a 0 ms reserve while a pin multiplying by ``3`` still passed.
-FOLD_ARM_DIVISOR = RECORD_LEG_STATEMENTS_PER_READ + 1
+#: How many data statements the folded arm actually ISSUES — its two prefetches
+#: (the label's rows, then the tenant's status-bearing journal events) and the kNN.
+#: ⛔ THIS IS A WRITTEN LITERAL ON PURPOSE, and the dependency runs FROM it TO
+#: :data:`FOLD_ARM_DIVISOR` — never the other way. Spelled as
+#: ``FOLD_ARM_DIVISOR - 1`` it was an EXPECTED VALUE DERIVED FROM THE SAME
+#: DECLARATION AS THE ACTUAL ONE, so the reserve pin could not fail for any
+#: divisor (`#13466` cycle 5, P2 — the third recurrence of this class): with
+#: ``statements := divisor - 1`` the inequality
+#: ``budget - share*statements >= share`` reduces to ``budget mod divisor >= 0``,
+#: which is true for every value. A written ``3`` is a datum the source cannot
+#: move, so `tests/test_13422_object_subject_dense_leg.py` can derive the REAL
+#: count from the folded path's statement sites and red when the two disagree —
+#: which is the drift a constant merely related to the divisor cannot see.
+FOLD_ARM_STATEMENTS = 3
 
-#: How many data statements the folded arm actually ISSUES — its two prefetches and
-#: the kNN — i.e. one FEWER than :data:`FOLD_ARM_DIVISOR`. Asserted against the
-#: reserve in `tests/test_13422_object_subject_dense_leg.py`, so the declaration and
-#: the arithmetic cannot drift apart silently again.
-FOLD_ARM_STATEMENTS = FOLD_ARM_DIVISOR - 1
+#: What the FOLDED arm DIVIDES the read by — one MORE than the
+#: :data:`FOLD_ARM_STATEMENTS` it issues, giving the graph branch its reserve
+#: share.
+#: ⚠️ The divisor and the statement count are DIFFERENT numbers and conflating them
+#: is the defect this pair of constants exists to stop (``#13466`` cycle 4, P3):
+#: the folded arm ISSUES three data statements and therefore divides by FOUR,
+#: because a divisor equal to the count spends the whole read and leaves nothing.
+FOLD_ARM_DIVISOR = FOLD_ARM_STATEMENTS + 1
 
 
 def record_statement_ms(read_budget_ms: int | None,
@@ -966,22 +972,28 @@ def searcher(
     cap does not save the caller: one slow record query turned a 500 ms search
     into a multi-second one and the leg was recorded as ``timeout``, discarding a
     result it may have had. With the budget bound here the statement timeout is
-    ``min(RECORD_STATEMENT_TIMEOUT_MS, record_statement_ms(timeout_ms))`` — the
-    door's ceiling, tightened, and then DIVIDED by
-    :data:`RECORD_LEG_STATEMENTS_PER_READ` — so the query is cancelled with part
-    of the read's budget still on the clock, the graph branch answers inside that
-    remainder (``run_vector_query`` pins it to
-    ``search_engine.remaining_read_ms`` of the record leg's own start, #11691
-    review P2), and the trace records the NAMED fallback (``scan_fallback``)
-    instead of a ``timeout`` with no rows.
+    ``min(RECORD_STATEMENT_TIMEOUT_MS, record_statement_ms(timeout_ms, statements))``
+    — the door's ceiling, tightened, and then DIVIDED by the count of statements
+    THIS label's arm issues — so the query is cancelled with part of the read's
+    budget still on the clock, the graph branch answers inside that remainder
+    (``run_vector_query`` pins it to ``search_engine.remaining_read_ms`` of the
+    record leg's own start, #11691 review P2), and the trace records the NAMED
+    fallback (``scan_fallback``) instead of a ``timeout`` with no rows.
 
     ⚠️ ``timeout_ms`` IS THE READ'S BUDGET, NOT THE STATEMENT'S, and the
-    difference is not cosmetic: the leg may issue TWO bounded statements (the kNN
-    read and, on the short path, the shortfall ``count(*)``), so a budget applied
-    whole to each of them would let one leg spend twice the read. The division
-    happens in ONE place (:func:`record_statement_ms`), so the arithmetic that
-    keeps the fallback inside the deadline has a single home rather than a
-    constant copied into every caller.
+    difference is not cosmetic: a budget applied whole to each statement would
+    let one leg spend the whole read. ⛔ HOW MANY STATEMENTS IS PER-ARM, and the
+    divisor is NOT always :data:`RECORD_LEG_STATEMENTS_PER_READ` (`#13466`
+    cycle 5, P3): a **column-filtered** label issues two (the kNN and, on the
+    short path, the shortfall ``count(*)``) and divides by
+    :data:`RECORD_LEG_STATEMENTS_PER_READ`; a **folded-status** label
+    (`object`/`subject`) issues three (its two prefetches, then the kNN) and
+    divides by :data:`FOLD_ARM_DIVISOR`. Reading only this paragraph is how a
+    lane diagnosing a folded ``scan_fallback`` gets sent to the wrong arm's
+    arithmetic. The division happens in ONE place
+    (:func:`record_statement_ms`), so the arithmetic that keeps the fallback
+    inside the deadline has a single home rather than a constant copied into
+    every caller.
 
     ``None`` (the default) leaves the door's own bound in place, unchanged — the
     reconstruction reads (health, replay, backup, restore) legitimately need

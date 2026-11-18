@@ -1136,9 +1136,14 @@ def _record_vector_searcher(sdk=None, timeout_ms=None):
 
     ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET, AND IT IS BOUND HERE (#11691).
     ``record_vector.searcher`` threads it into the returned closure, which divides
-    it once (``record_vector.record_statement_ms``: two bounded statements per
-    read, so each gets a third) and hands the quotient to the door, where the
-    applied ``statement_timeout`` is ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``.
+    it once (``record_vector.record_statement_ms``) and hands the quotient to the
+    door, where the applied ``statement_timeout`` is
+    ``min(RECORD_STATEMENT_TIMEOUT_MS, quotient)``. ⚠️ The divisor is PER-ARM
+    (`#13466` cycle 5, P3): a column-filtered label issues two bounded statements
+    and divides by `record_vector.RECORD_LEG_STATEMENTS_PER_READ`, while a
+    folded-status label (`object`/`subject`) issues three and divides by
+    `record_vector.FOLD_ARM_DIVISOR` — so "each gets a third" is the column arm's
+    arithmetic, not the folded one's.
     The division is what leaves the graph branch time to answer after a
     cancellation; see that function for the arithmetic. The reason it is bound at
     CONSTRUCTION rather than passed per call: the callable's FOUR-argument shape is

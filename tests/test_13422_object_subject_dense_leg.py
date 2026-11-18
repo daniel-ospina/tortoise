@@ -396,6 +396,64 @@ def test_the_budget_is_a_bound_and_it_is_positive():
 
 # ── 5. the folded arm leaves the graph its #11691 reserve ────────────────
 
+def _folded_path_statement_sites() -> int:
+    """How many DATA statements the folded path really issues — read from SOURCE.
+
+    ⛔ THE ORACLE MUST NOT MOVE WITH THE IMPLEMENTATION (`#13466` cycle 5, P2).
+    The count this returns is derived from the folded path's own statement sites,
+    so it reds when a FOURTH data statement is added to the arm — which is the
+    drift the previous pin could not see, because its expected value was
+    `FOLD_ARM_DIVISOR - 1` while the code divided by `FOLD_ARM_DIVISOR`: both
+    sides came from one declaration, so `budget - share*(divisor-1) >= share`
+    reduced to `budget mod divisor >= 0`, true for every divisor.
+
+    What counts, and why: `_folded_terminal_keys` issues the ROWS prefetch
+    (`cur.execute`) and the JOURNAL read (`read_lifecycle_events`, a single
+    statement inside `cache_projection`); `vector_search` issues the kNN
+    (`cur.execute(sql, params)`). `set_config` is a session setting, not a data
+    statement, and the `count(*)` arm is the COLUMN arm's shortfall probe
+    (the folded arm already holds `available`) — neither is charged to this arm.
+    """
+    tree = ast.parse(MODULE.read_text())
+    functions = {node.name: node for node in ast.walk(tree)
+                 if isinstance(node, ast.FunctionDef)}
+
+    def _calls(node: ast.AST, attr: str) -> int:
+        """Calls to ``<anything>.attr(...)`` OR a bare ``attr(...)``.
+
+        The journal read is written as a bare name (`read_lifecycle_events` is
+        imported into this module), while the prefetch is a `cur.execute` — the
+        counter must see BOTH, or it silently reports one fewer statement than
+        the arm issues and the `FOLD_ARM_STATEMENTS` assertion above it becomes
+        the same kind of blind oracle this fix exists to remove.
+        """
+        return sum(
+            1 for child in ast.walk(node)
+            if isinstance(child, ast.Call)
+            and ((isinstance(child.func, ast.Attribute)
+                  and child.func.attr == attr)
+                 or (isinstance(child.func, ast.Name)
+                     and child.func.id == attr)))
+
+    fold = functions["_folded_terminal_keys"]
+    prefetch_and_journal = (_calls(fold, "execute")
+                            + _calls(fold, "read_lifecycle_events"))
+
+    # The kNN, and ONLY it: `set_config` carries a literal SQL string, and the
+    # `count(*)` probe is inside the column arm's `available is None` branch.
+    knn = 0
+    for child in ast.walk(functions["vector_search"]):
+        if not (isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == "execute"):
+            continue
+        sql = ast.unparse(child.args[0]) if child.args else ""
+        if "set_config" in sql or "count(*)" in sql:
+            continue
+        knn += 1
+    return prefetch_and_journal + knn
+
+
 def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
     """⛔ THE `#11691` RESERVE, for a leg that issues three statements.
 
@@ -407,37 +465,45 @@ def test_the_folded_arm_divides_the_budget_by_one_MORE_than_it_issues():
     `#13466` review P3 measured that the old pin
     (`test_11691_vector_leg_budget.py`) asserts the COLUMN arm's arithmetic and
     stays green for the folded one.
+
+    ⛔ THE COUNT IS MEASURED, NOT DECLARED (`#13466` cycle 5, P2). Three cycles
+    of this pin read the statement count back out of a constant that was itself
+    spelled `divisor - 1`, so the reserve inequality was a tautology for every
+    divisor and a fourth data statement left it green. `statements` below comes
+    from the folded path's STATEMENT SITES; `FOLD_ARM_STATEMENTS` is a written
+    literal; and the reserve is computed from the measured count. Each of the
+    three can now fail independently.
     """
     budget = 500
     column_share = record_vector.record_statement_ms(budget)
     assert column_share * 2 < budget, (
         "the column arm's two statements must fit strictly inside the read")
-    # ⛔ BOTH SIDES READ THE ONE DECLARATION of how many statements the folded arm
-    # issues (`#13466` cycle 4, P3): the divisor and the count it is multiplied by
-    # were tied to nothing — the pin multiplied by a literal `3` while the code
-    # spelled the divisor `constant + 1`, so a FOURTH data statement in the arm
-    # could spend the whole read and leave a 0 ms reserve while this pin still
-    # passed. `FOLD_ARM_STATEMENTS` is now the arm's real count in both places.
+    # ⛔ THE ACTUAL SIDE, measured from the code path…
+    statements = _folded_path_statement_sites()
+    assert statements == record_vector.FOLD_ARM_STATEMENTS, (
+        "the folded arm no longer issues the number of data statements its "
+        f"declaration names: measured {statements} site(s) in "
+        f"_folded_terminal_keys + vector_search, declared "
+        f"{record_vector.FOLD_ARM_STATEMENTS}. Update the declaration AND the "
+        "divisor's reserve arithmetic together, or the graph branch loses the "
+        "read's remainder")
+    # …and the EXPECTED side, from an independent written literal.
     divisor = record_vector.FOLD_ARM_DIVISOR
-    statements = record_vector.FOLD_ARM_STATEMENTS
-    assert statements == divisor - 1, (
-        f"the folded arm issues {statements} statements and divides by {divisor} — "
-        "the divisor must be exactly one more, or the reserve below is arithmetic "
-        "over a count the arm does not actually run")
+    assert divisor == statements + 1, (
+        f"the folded arm issues {statements} statements and divides by {divisor} "
+        "— the divisor must be exactly one more, or the reserve below is "
+        "arithmetic over a count the arm does not actually run")
     folded_share = record_vector.record_statement_ms(budget, divisor)
-    # ⛔ THE RESERVE'S SIZE, not merely that it is positive (`#13466` cycle 3, P3):
-    # `folded_share * 3 < budget` is TRUE at the FAILING divisor too
-    # (`record_statement_ms(500, 3) == 166`, and 498 < 500) — so it measured
-    # nothing. What the `#11691` guarantee actually is, is that at least ONE FULL
-    # statement share is left for the graph branch: at the failing divisor that is
-    # 500 - 498 = 2 ms, which is the empty-result path this pin exists to prevent.
+    # ⛔ THE RESERVE'S SIZE, over the MEASURED count. A fourth data statement
+    # with the divisor left at 4 now spends the whole read (`500 - 125*4 = 0`)
+    # and this reds — the mutation the two previous versions of this pin missed.
     reserve = budget - folded_share * statements
     assert reserve >= folded_share, (
         f"the folded arm leaves only {reserve} ms of a {budget} ms read for the "
-        f"graph branch after three {folded_share} ms statements — less than one "
-        "full share, so a cancelled kNN hands the label's real path a floored "
-        "timeout and it returns nothing")
-    # …and the divisor really is one more where it is decided.
+        f"graph branch after {statements} × {folded_share} ms statements — less "
+        "than one full share, so a cancelled kNN hands the label's real path a "
+        "floored timeout and it returns nothing")
+    # …and the divisor really is the one the arm decides with.
     tree = ast.parse(MODULE.read_text())
     func = next(node for node in ast.walk(tree)
                 if isinstance(node, ast.FunctionDef)

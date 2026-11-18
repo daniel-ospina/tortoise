@@ -637,11 +637,15 @@ def test_object_and_subject_ARE_record_served_once_the_cage_is_paid():
     assert "subject" in rv.LABEL_SERVED
     assert "event" in rv.LABEL_SERVED
     assert "document" in rv.LABEL_SERVED and "source" in rv.LABEL_SERVED
-    # …and both are terminal-filtered on the graph leg, which is WHY serving
-    # them needed the cage rather than two dict entries.
-    from tortoise.search_engine import _STATUS_FILTERED_LABELS
-
-    assert set(_STATUS_FILTERED_LABELS) >= {"Object", "Subject"}
+    # ⛔ NO `assert set(_STATUS_FILTERED_LABELS) >= {"Object", "Subject"}` HERE.
+    # It pinned an unchanged constant in a module this diff does not touch, so no
+    # mutation of this change could red it — dead weight that reads as coverage
+    # (`#13466` cycle 5, P2; rule 3). The property that actually MATTERS — that a
+    # graph-terminal-filtered family has a record-side status source, which is the
+    # reason serving these two needed the cage rather than two dict entries — is
+    # witnessed by a REACHABLE pin over both declarations:
+    # `tests/test_13422_object_subject_dense_leg.py::
+    # test_every_graph_terminal_filtered_label_has_a_record_status_source`.
 
 
 def test_the_graph_still_writes_object_and_subject_embeddings():

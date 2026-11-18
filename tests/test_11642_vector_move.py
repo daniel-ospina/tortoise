@@ -69,6 +69,40 @@ def test_every_served_label_is_a_real_entity_type():
     assert set(record_vector.LABEL_SERVED) <= set(VALID_ENTITY_TYPES)
 
 
+def test_an_unserved_label_answers_None_not_empty():
+    """⛔ `None` ≠ `[]` — the arm that decides whether the graph answers at all.
+
+    `vector_search`'s THREE outcomes are a contract, not a detail: `None` means
+    "no record table serves this label — the caller MUST take its graph branch",
+    while `[]` is a genuine empty answer from a served label. Collapsing the two
+    turns every unserved label's real path into an empty dense result, which
+    renders as "the corpus holds nothing" (`#4999`).
+
+    ⛔ THIS PIN IS RE-ESTABLISHED HERE (`#13466` cycle 5, P3). This file's
+    docstring advertises "what an unserved label does" as pinned without a
+    database, and the test that did it —
+    `test_an_unserved_label_answers_None_not_empty`, deleted when `object`/
+    `subject` became served — left the `mapping is None` arm
+    (`record_vector.py:1105-1110`) with ZERO witnesses. `LABEL_SERVED` is now
+    exactly the seven `security.VALID_ENTITY_TYPES`, so `None` is reachable only
+    for a label OUTSIDE that set — which is what this asks for.
+
+    No DSN, no driver: the arm returns before any connection is opened, so a
+    regression there would be caught here rather than as a mystery timeout.
+    """
+    scope = record_vector._Scope(org_id="o", graph_id="g")
+    # `session` is a real entity type the runner knows and the record does not
+    # serve, so this is the exact shape a caller hits today.
+    assert record_vector.vector_search(scope, "session", [0.0] * 384, 10) is None, (
+        "an unserved label must answer None (take your graph branch) and "
+        "never an empty list, which reads as 'the store holds nothing'")
+    # …and the served arm still answers a LIST, so the two are distinguishable.
+    assert isinstance(
+        record_vector.vector_search(scope, "point", [0.0] * 384, 0), list), (
+        "a served label must never answer None — the caller would take its "
+        "graph branch for a label the record serves")
+
+
 def test_the_id_column_matches_the_runners_id_field():
     """#448's three-way `id_field` derivation, restated in SQL.
 

@@ -609,9 +609,16 @@ def test_a_caged_short_answer_does_not_raise_a_shortfall(tenant):
     The shortfall assertion exists to catch a truncated ANN answer; a row the
     CAGE removed is not truncation. `_folded_terminal_keys` returns the
     non-terminal-with-vector count from the same prefetch, so `available` and the
-    returned rows are measured on the same predicate — if the leg fell back to a
-    `count(*)` over the PRE-cage rows, this read would raise `VectorShortfall` for
-    a corpus that is complete.
+    returned rows are measured on the same predicate.
+
+    ⛔ THE MUTANT THIS CATCHES IS NOT "a pre-cage `count(*)`" (`#13466` cycle 5,
+    P3 — the earlier docstring named that, and it is UNREACHABLE: on the folded
+    path `available` is always non-None, so the `count(*)` branch in
+    `vector_search` never runs). The reachable mutant is counting a terminal row
+    into `available` — i.e. incrementing it before
+    `_folded_terminal_keys`'s status check's `continue` instead of after — which
+    makes the filter's material figure exceed the rows it returned and raises
+    `VectorShortfall` for a corpus that is complete.
     """
     _seed_semantic(tenant, "Object", "o_13422_short_super", embedding=_vec(7),
                    superseded_by="o_13422_short_live")
