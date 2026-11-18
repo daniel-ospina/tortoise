@@ -24,24 +24,24 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **301** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **299** files scanned |
 | files carrying at least one statement site | **100** |
-| **statement sites (this census)** | **1336** |
-| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **878** (597 read, 281 write) |
-| **`plain` READS — the migration candidates** | **597** |
-| `adjacency` (edge pattern, fixed length) | 296 |
+| **statement sites (this census)** | **1314** |
+| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **860** (579 read, 281 write) |
+| **`plain` READS — the migration candidates** | **579** |
+| `adjacency` (edge pattern, fixed length) | 292 |
 | `ep` (the epistemic scalars) | 32 |
 | `traversal` (variable length) | 3 |
 | `fulltext` | 2 |
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 108 |
 | non-Cypher door calls (excluded from every shape total) | 259 |
-| **AST door calls** = census + non-Cypher | **1595** |
+| **AST door calls** = census + non-Cypher | **1573** |
 
-> **The finding, with its count: 597 of 1336 product statements (44.7 %) need none of the
+> **The finding, with its count: 579 of 1314 product statements (44.1 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
-> not an adjective; it is 597 statements.
+> not an adjective; it is 579 statements.
 
 ---
 
@@ -65,8 +65,8 @@ the box, are:
 
 | mode | statement sites | files | note |
 |---|---|---|---|
-| product surface (this census) | **1336** | **100** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,329** | **828** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,329 here, none of which reproduces at this tree; the number beside this row names the tree it does) |
+| product surface (this census) | **1314** | **100** | `tortoise/**/*.py`, test modules excluded |
+| every tracked surface (`--all-surface`) | **8,951** | **826** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -97,29 +97,29 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,649 occurrences of the door predicate across 111 files
-2,374 occurrences of the verb predicate across 147 files   (upper-bound shape, see below)
+1,627 occurrences of the door predicate across 109 files
+2,346 occurrences of the verb predicate across 145 files   (upper-bound shape, see below)
 
-1,649  regex door-pattern occurrences
+1,627  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,595  occurrences on a line carrying a door CALL          [measured]
+= 1,573  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,595  AST door calls
-= 1336  classified Cypher statements + 259 non-Cypher door calls
+= 1,573  AST door calls
+= 1314  classified Cypher statements + 259 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (301 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (299 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 301 files>` → **1,649** across **111** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 299 files>` → **1,627** across **109** files: exactly the
 tool's number. A bare `rg … tortoise/` gives 1,633 / 110, the 6 extra occurrences living in
-`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,649 / 111 on this tree, because
+`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,627 / 109 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 301 files>` → **2,361** across **146** files, while the tool
-reports 2,374 / 147. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 299 files>` → **2,333** across **144** files, while the tool
+reports 2,346 / 145. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -131,19 +131,18 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 301 files finds exactly 13 — the verb-at-end-of-line scan alone finds **180**,
+predicate over the same 299 files finds exactly 13 — the verb-at-end-of-line scan alone finds **178**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
-enumerated, and the other **167** are a COMMENT or docstring line that simply ENDS on the word (“any
-failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, and one `#13399` line
-ending “post-merge”, …) with nothing following, which the case-insensitive predicate counts and which
-is why the predicate has to be stated
+enumerated, and the other **165** are a COMMENT or docstring line that simply ENDS on the word (“any
+failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, …) with nothing following,
+which the case-insensitive predicate counts and which is why the predicate has to be stated
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,066, and `-i` without the exclusion 2,405 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 301
-`.py` files the same two predicates read **2,091** and **2,361**; with `-t py` and the test-module
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 299
+`.py` files the same two predicates read **2,063** and **2,333**; with `-t py` and the test-module
 exclusion dropped they read **2,065** and **2,336**. The 69-occurrence 2,336→2,405 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
 `tortoise/pi-hooks/tortoise-capture.test.ts` 14, `tortoise/pi-hooks/store-sync.test.mjs` 3,
@@ -151,7 +150,7 @@ exclusion dropped they read **2,065** and **2,336**. The 69-occurrence 2,336→2
 `tortoise/claude-hooks/volunteer-turn.sh` 1 — so a bare `rg -o` that reads as one number is THREE, and the population decides which.)
 
 The first three rows of the block are measured by the tool (`--json` → `rg_totals`); the **−54** and
-the **= 1,595 on a door-call line** are both counts, not differences.⛔ The **residual** row is
+the **= 1,573 on a door-call line** are both counts, not differences.⛔ The **residual** row is
 the only derived one — it is the gap between the regex's own line-based count and the AST's node
 count, printed so a reader can see the arithmetic close, and a NON-zero there is the signal that the
 two measurements have stopped agreeing. It is also the value the first version of this tool silently
@@ -215,8 +214,8 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 
 | shape | total | roles |
 |---|---|---|
-| `plain` | **878** | read=597, write=281 |
-| `adjacency` | **296** | read=192, write=104 |
+| `plain` | **860** | read=579, write=281 |
+| `adjacency` | **292** | read=192, write=100 |
 | `ep` | **32** | read=21, write=11 |
 | `ddl` | **17** | ddl=17 |
 | `traversal` | **3** | read=3 |
@@ -234,7 +233,7 @@ migration candidates: `tortoise/projection/__init__.py` loops over `("db.idx.ful
 as a `plain` READ — the one direction a verdict flips. Both of its un-folded spellings classify
 `ddl`, which is what showed the loss was in the folding and not in the DDL arm. They are not
 "probably fine" — they are exactly the sites a flip would have to re-derive by
-hand, so they are counted and named rather than classified by guesswork. 319 further sites
+hand, so they are counted and named rather than classified by guesswork. 315 further sites
 are **partial**: the literal half carries the shape (e.g.
 `"MATCH (op:Point)-[:" + safe_rel + "]->(t)"` is an adjacency read) and the digest shows `{}`/`???`
 where the folded part was.
@@ -248,7 +247,6 @@ where the folded part was.
 | 92 | `tortoise/projection/__init__.py` |
 | 54 | `tortoise/projection/entities.py` |
 | 42 | `tortoise/projection/edges.py` |
-| 33 | `tortoise/indexer/github_indexer.py` |
 | 32 | `tortoise/hosted_backup.py` |
 | 25 | `tortoise/search_engine.py` |
 | 24 | `tortoise/metering.py` |
@@ -447,25 +445,6 @@ Regenerated here with `uv run python tools/cypher_inventory.py --markdown` at th
 `file:line`-versus-SCALAR gap this section describes, reached from the other side: the pins were
 GREEN over the stale appendix, and only re-running the generator shows it.
 
-**This re-cut's merge:** `origin/main` **`895d4dde3d`**, forward-merged into
-`fix/13422-record-dense-read` (PR #13466) — re-derived by RUNNING the tool on the merged tree, never
-by arithmetic on the markers, and this is the THIRD round of it (`501270a4bf` and `130e20fdaf` before
-it, each of which moved product files under the pins). What this branch adds to the census is ONE
-**non-Cypher** door call and NO Cypher statement site — the record leg's Postgres `cur.execute(` in
-`tortoise/record_vector.py`, whose statement is not Cypher and is therefore excluded from every shape
-total — so against `main` alone, `non_cypher_door_calls` moves 258→259 and `ast_door_calls`
-1572→1573 while `sites` holds. ⛔ That is the scalar the shape totals structurally CANNOT see: a lane
-that re-cut by copying `main`'s pins would carry 258 forward, and `--check` would red on a number the
-PR's own diff explains. §1's `rg` reconciliation is re-measured here (door **1,649 / 111**, verb
-**2,374 / 147** whole-text, **2,361 / 146** line-based, bare **1,633 / 110**, case-sensitive over the
-301 `.py` files **2,091**), `--all-surface` reads **9,329 / 828**, Appendix A is regenerated with
-`--markdown`, and `--check` reports **`25 pinned counts match`**. ⛔ The
-`non_cypher_door_calls` bump is also why the record leg's prefetch is written AT the call site rather
-than behind the module's `_rows_as_dicts` helper: a helper taking `sql` as a parameter makes every
-call site an UNRESOLVABLE door call, which lands in `unresolved` and reads as an unclassified CYPHER
-statement in the bucket a migration candidate is searched for (measured: the helper form reported
-`unresolved` 108→109, `sites` +1 and `files` +1).
-
 **This PR's cut:** `origin/main` **`48585c94ff`**, forward-merged into `fix/13302-ended-and-how`
 (PR #13416) — re-derived by RUNNING the tool on the final merged tree, never by arithmetic on the
 markers. This PR adds **one** Cypher statement site and **no** non-Cypher door call:
@@ -506,25 +485,10 @@ byte-compare arm.
 commit, `main`'s **`1afeab3763`** (`#13454`), which touched `tortoise/monitoring.py` `30 +/9 −` — net
 **+21** lines, of which **19 are above the site** in three hunks (`@@ -818,7 +818,9 @@` **+2**,
 `@@ -826,9 +828,24 @@` **+15**, `@@ -884,8 +901,10 @@` **+2**) and **2 are below** it
-(`@@ -7742,9 +7761,11 @@` **+2**), which moves nothing.
-
-**Cut by `#13447` (PR #13456), at the merge of `origin/main` `b2760e4fe8`:** `files_scanned`
-298→**299**, and NOTHING else moves. The seam module `tortoise/derived_embedding.py` is a new
-product-surface file, so the population grows by one, while it carries **0** statement sites, **0**
-door calls and **0** `MATCH|MERGE` predicate matches — measured at this tree, `rg -n 'MERGE'
-tortoise/derived_embedding.py` finds nothing: the header comment that used to quote
-`MERGE (s:Source {url:$id})` was removed when main's callable-table resolution rewrote that header,
-so the module contributes nothing to the `rg` side either. So `sites`, `files_with_sites`,
-`unresolved`, `candidates`, `partial` and both door totals are unchanged and `--check` re-derives
-`25 pinned counts match`. §1's reconciliation is re-measured at this tree: door **1,626 / 109**
-(unchanged, exactly as the paragraph above predicted), and the verb predicate reads **2,333 / 144**
-against the tool's **2,346 / 145** — the same one-file, 13-occurrence WHOLE-TEXT gap, which this
-module neither widens nor narrows. ⛔ `#13447`'s review asked for this re-pin
-because the required `differential` leg (`tools/cypher_inventory.py --check`) reads the two numbers
-against each other and reds on `DRIFT files_scanned: doc=298 tool=299`. Appendix A is regenerated with
-`--markdown` on this merged tree, so every paragraph above and the table it describes are one cut. ⛔
-That is now **two** merges in a row on which the appendix rotted green — the `b8723c0f16` paragraph
-above is the first — which is the argument for the byte-compare arm, not for re-cutting by hand.
+(`@@ -7742,9 +7761,11 @@` **+2**), which moves nothing. Appendix A is regenerated with `--markdown` on
+this merged tree, so this paragraph and the table it describes are one cut. ⛔ That is now **two**
+merges in a row on which the appendix rotted green — the `b8723c0f16` paragraph above is the first —
+which is the argument for the byte-compare arm, not for re-cutting by hand.
 
 **Where these SCALARS were last cut:** `origin/main` **`9d13dc1bf7`**, the last of this branch's
 forward merges (`0774035055`, then `9d13dc1bf7`) — re-derived by RUNNING the tool on the FINAL
@@ -757,22 +721,73 @@ LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers
 it must not be able to mask whether the harness can fail at all — which is exactly what it did before
 the order was fixed (`#13098` review F8).
 
-<!-- cypher-inventory:sites = 1336 -->
+⛔ **This cut adds ONE non-Cypher door call and no statement site (`#13422`).** The folded arm of
+`record_vector.vector_search` prefetches the label's rows before its kNN, and that prefetch is a
+Postgres `SELECT` issued through the shared `execute` door — so it lands in `non_cypher_door_calls`
+(258→259) and `ast_door_calls` (1572→1573), exactly the bucket that exists for a Postgres statement
+sharing a graph door, while `sites`, `files` and every `shape_*` pin are unchanged. It is written AT
+the call site rather than behind the module's `_rows_as_dicts` helper for that reason: a helper taking
+`sql` as a parameter makes every call site an UNRESOLVABLE door call, which lands in `unresolved` and
+reads as an unclassified CYPHER statement in the bucket a migration candidate is searched for
+(measured: the helper form reported `unresolved` 108→109, `sites` 1314→1315 and `files` 100→101).
+
+**This cut's base:** `origin/main` **`130e20fdaf`**, merged here (the PR had gone `CONFLICTING` on this
+very file, and the conflict was resolved by REGENERATING it, never by picking a side: the pins and
+Appendix A are that merged tree's own `--markdown` output, and §0/§1's prose was re-measured at that base with
+the predicates it states — whole-text **`2,374 / 147`**, line-based **`2,361 / 146`** — not carried
+from either parent and not shifted by a delta applied to a number that was already there). The prose
+is the THIRD carrier with no check behind it — exactly the defect the paragraph above names — so the
+quoted counts are re-derived here and the bare/`.py`/`-t py` variants with them.
+
+**This merge's cut (`51ab22cb1c` integrating `origin/main` `501270a4bf`):** the CONFLICT was resolved by
+REGENERATING this file, never by picking a side. Two things were measured rather than assumed, and the
+first one is a defect this cut REPAIRS:
+
+* ⛔ **The pins were 22 sites stale at the pre-merge head, and the appendix had rotted with them — as a
+  matched pair, which is why nothing inside the doc disagreed.** Measured on a detached worktree at
+  `51ab22cb1c` with this branch's own tool: `sites` **1314**, `files` **100**, `files_scanned` **298**,
+  `partial` **315**, `non_cypher_door_calls` **259** — against pins that read **1336** and an Appendix A
+  of exactly **1336** data rows. `--check` printed **9 DRIFT lines** there. §7's own neighbouring
+  paragraph already said `1314`, so the document contradicted ITSELF: the pins and the table had been
+  re-cut at a tree that no longer exists on this branch, and the prose had not. A matched pin/table pair
+  is not evidence of a fresh cut — it is what a stale cut looks like from the inside.
+* ✅ **The merges themselves move no statement site.** `origin/main` at `501270a4bf`, measured alone,
+  reads **1314 / 100 / 298** with **315** partial and **258** non-Cypher; this branch pre-merge reads
+  **1314 / 100 / 298**, **315** partial and **259** non-Cypher. `main` then advanced to
+  **`895d4dde3d`** while this lane worked, and integrating it moves exactly ONE scalar — `files_scanned`
+  **298→299** — because it adds one product module (`tortoise/derived_embedding.py`) that carries **no**
+  Cypher statement site (`files_with_sites` stays **100**, every `shape_*` and `partial` pin unchanged).
+  So the only census delta in this whole PR is the one the paragraph above already attributes
+  (`#13422`'s prefetch `SELECT`, non-Cypher 258→259 / `ast_door_calls` 1572→1573). A PEER lane's own
+  integration commits (`033f82b0a1`, `56ab87e73a`) were then merged on top, and they move no census
+  scalar either — measured on this final tree, which reads **1314 / 100 / 299** exactly as it did
+  before they were taken. Every number in this section is therefore re-derived at ONE tree, the one
+  that carries them.
+
+Re-measured on the merged tree with the predicates §1 states, NOT carried and NOT shifted by a delta:
+door **1,627 / 109**; verb **2,346 / 145** whole-text and **2,333 / 144** line-based (the 13-occurrence,
+one-file whole-text gap unchanged); bare `rg … tortoise/` door **1,633 / 110**; bare case-sensitive verb
+**2,066** and `-i` without the exclusion **2,405**; over the 298 product `.py` files **2,063 / 2,333**;
+with `-t py` and the test-module exclusion dropped **2,065 / 2,336** (the 69-occurrence, six-file
+`.ts`/`.mjs`/`.sh` gap is unchanged, enumerated in §1); verb-at-end-of-line **178**. Appendix A is this
+tree's own `--markdown` output (**1314** rows), and `--check` reports **`25 pinned counts match`**.
+
+<!-- cypher-inventory:sites = 1314 -->
 <!-- cypher-inventory:files = 100 -->
-<!-- cypher-inventory:files_scanned = 301 -->
+<!-- cypher-inventory:files_scanned = 299 -->
 <!-- cypher-inventory:unresolved = 108 -->
-<!-- cypher-inventory:candidates = 597 -->
-<!-- cypher-inventory:shape_adjacency = 296 -->
+<!-- cypher-inventory:candidates = 579 -->
+<!-- cypher-inventory:shape_adjacency = 292 -->
 <!-- cypher-inventory:shape_ddl = 17 -->
 <!-- cypher-inventory:shape_ep = 32 -->
 <!-- cypher-inventory:shape_fulltext = 2 -->
-<!-- cypher-inventory:shape_plain = 878 -->
+<!-- cypher-inventory:shape_plain = 860 -->
 <!-- cypher-inventory:shape_traversal = 3 -->
 <!-- cypher-inventory:shape_unresolved = 108 -->
-<!-- cypher-inventory:shape_plain_read = 597 -->
+<!-- cypher-inventory:shape_plain_read = 579 -->
 <!-- cypher-inventory:shape_plain_write = 281 -->
 <!-- cypher-inventory:shape_adjacency_read = 192 -->
-<!-- cypher-inventory:shape_adjacency_write = 104 -->
+<!-- cypher-inventory:shape_adjacency_write = 100 -->
 <!-- cypher-inventory:shape_ep_read = 21 -->
 <!-- cypher-inventory:shape_ep_write = 11 -->
 <!-- cypher-inventory:shape_ddl_ddl = 17 -->
@@ -780,8 +795,8 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 108 -->
 <!-- cypher-inventory:non_cypher_door_calls = 259 -->
-<!-- cypher-inventory:ast_door_calls = 1595 -->
-<!-- cypher-inventory:partial = 319 -->
+<!-- cypher-inventory:ast_door_calls = 1573 -->
+<!-- cypher-inventory:partial = 315 -->
 
 ---
 
@@ -1244,37 +1259,15 @@ the order was fixed (`#13098` review F8).
 | `tortoise/hosted_backup.py:3299` | `count_data_nodes` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) AND …` |
 | `tortoise/hosted_backup.py:3438` | `_restore_into_temp_verify_swap` | plain | read | candidate:SQL-shaped | `MATCH (n) RETURN labels(n), properties(n)` |
 | `tortoise/indexer/github_indexer.py:493` | `_current_statement_rows` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) WHERE {} RETURN n.id, n.content_ha…` |
-| `tortoise/indexer/github_indexer.py:493` | `_current_statement_rows` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) WHERE {} RETURN n.id, n.content_ha…` |
-| `tortoise/indexer/github_indexer.py:493` | `_current_statement_rows` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) WHERE {} RETURN n.id, n.content_ha…` |
-| `tortoise/indexer/github_indexer.py:1012` | `GitHubIndexer._event_exists` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventId` |
-| `tortoise/indexer/github_indexer.py:1012` | `GitHubIndexer._event_exists` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventId` |
 | `tortoise/indexer/github_indexer.py:1012` | `GitHubIndexer._event_exists` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventId` |
 | `tortoise/indexer/github_indexer.py:1057` | `GitHubIndexer._entity_registered` | plain | read | candidate:SQL-shaped | `MATCH (n:{} {id:$id}) RETURN n.id` |
-| `tortoise/indexer/github_indexer.py:1057` | `GitHubIndexer._entity_registered` | plain | read | candidate:SQL-shaped | `MATCH (n:{} {id:$id}) RETURN n.id` |
-| `tortoise/indexer/github_indexer.py:1057` | `GitHubIndexer._entity_registered` | plain | read | candidate:SQL-shaped | `MATCH (n:{} {id:$id}) RETURN n.id` |
-| `tortoise/indexer/github_indexer.py:1121` | `GitHubIndexer._frozen_created_payload` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventKind, e.endedAt` |
-| `tortoise/indexer/github_indexer.py:1121` | `GitHubIndexer._frozen_created_payload` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventKind, e.endedAt` |
 | `tortoise/indexer/github_indexer.py:1121` | `GitHubIndexer._frozen_created_payload` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventKind, e.endedAt` |
 | `tortoise/indexer/github_indexer.py:1177` | `GitHubIndexer._next_transition_id` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId STARTS WITH $prefix RETURN e.eventId` |
-| `tortoise/indexer/github_indexer.py:1177` | `GitHubIndexer._next_transition_id` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId STARTS WITH $prefix RETURN e.eventId` |
-| `tortoise/indexer/github_indexer.py:1177` | `GitHubIndexer._next_transition_id` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId STARTS WITH $prefix RETURN e.eventId` |
-| `tortoise/indexer/github_indexer.py:1248` | `GitHubIndexer._project_issue` | adjacency | write | stays:graph-maintenance | `MATCH (o:Object {id:$oid}) MATCH (s:Subject {id:$sid}) MERGE (o)-[:a…` |
-| `tortoise/indexer/github_indexer.py:1248` | `GitHubIndexer._project_issue` | adjacency | write | stays:graph-maintenance | `MATCH (o:Object {id:$oid}) MATCH (s:Subject {id:$sid}) MERGE (o)-[:a…` |
 | `tortoise/indexer/github_indexer.py:1248` | `GitHubIndexer._project_issue` | adjacency | write | stays:graph-maintenance | `MATCH (o:Object {id:$oid}) MATCH (s:Subject {id:$sid}) MERGE (o)-[:a…` |
 | `tortoise/indexer/github_indexer.py:1360` | `GitHubIndexer._object_state_to_issue_state` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$id}) RETURN o.status, o.isClosed, o.pipelineSlo…` |
-| `tortoise/indexer/github_indexer.py:1360` | `GitHubIndexer._object_state_to_issue_state` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$id}) RETURN o.status, o.isClosed, o.pipelineSlo…` |
-| `tortoise/indexer/github_indexer.py:1360` | `GitHubIndexer._object_state_to_issue_state` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$id}) RETURN o.status, o.isClosed, o.pipelineSlo…` |
-| `tortoise/indexer/github_indexer.py:1730` | `GitHubIndexer._next_version` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) RETURN count(n)` |
-| `tortoise/indexer/github_indexer.py:1730` | `GitHubIndexer._next_version` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) RETURN count(n)` |
 | `tortoise/indexer/github_indexer.py:1730` | `GitHubIndexer._next_version` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) RETURN count(n)` |
 | `tortoise/indexer/github_indexer.py:1743` | `GitHubIndexer._link_about_object` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) MERGE (p)-[:aboutObj…` |
-| `tortoise/indexer/github_indexer.py:1743` | `GitHubIndexer._link_about_object` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) MERGE (p)-[:aboutObj…` |
-| `tortoise/indexer/github_indexer.py:1743` | `GitHubIndexer._link_about_object` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) MERGE (p)-[:aboutObj…` |
 | `tortoise/indexer/github_indexer.py:1785` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId ENDS WITH '-created' AND (e.eventKin…` |
-| `tortoise/indexer/github_indexer.py:1785` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId ENDS WITH '-created' AND (e.eventKin…` |
-| `tortoise/indexer/github_indexer.py:1785` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId ENDS WITH '-created' AND (e.eventKin…` |
-| `tortoise/indexer/github_indexer.py:1795` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (x:Event) RETURN x.eventId` |
-| `tortoise/indexer/github_indexer.py:1795` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (x:Event) RETURN x.eventId` |
 | `tortoise/indexer/github_indexer.py:1795` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (x:Event) RETURN x.eventId` |
 | `tortoise/ingest.py:214` | `_run_ep_propagation` | plain | read | candidate:SQL-shaped | `MATCH (o:Point) WHERE o.is_operator = true RETURN o.id` |
 | `tortoise/ingest.py:220` | `_run_ep_propagation` | ep | read | stays:ep-carveout (§6.3) | `MATCH (n:Point) WHERE n.is_operator = false RETURN n.id, n.confidenc…` |

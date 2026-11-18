@@ -1380,11 +1380,9 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
      "`:3098-3107`"),
     ("tortoise/search_engine.py", 2728, "def recency_tie_clause(",
      "`search_engine.py:2728`"),
-    # ⛔ RE-DERIVED at every `#13422` merge (`origin/main` `130e20fdaf`, then
-    # `501270a4bfd3`, then `895d4dde3d`): each main-move puts this loop somewhere
-    # else on ITS tree, and this branch's own change moves it again — measured on
-    # the merged tree each time, never nudged. The brief's §1 cell carries the
-    # same number and moves with it.
+    # #13422 (PR #13466) inserts inside `search_engine.py` above this loop, so the
+    # row is +15 against `main`'s own re-derived value. Measured on the MERGE tree,
+    # not nudged by a constant.
     ("tortoise/search_engine.py", 4919,
      "for rank, (pid, _score) in enumerate(ranked):",
      "`tortoise/search_engine.py:4919`"),

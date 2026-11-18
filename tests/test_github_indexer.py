@@ -3219,8 +3219,9 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # ⛔ RE-DERIVED THREE TIMES on the way into `main` (`#13447`), always BY CONTENT.
     # Every input block was stale by the time it was read: this branch's was derived
     # at its own base, and `main`'s at `f6793959a2ae` (`#13486`) — and each forward
-    # merge (`130e20fdaf`, then `501270a4bf`, whose `sdk.py` moves the same region
-    # again) left both sides wrong against the merged tree. So NO number here is an
+    # merge (`130e20fdaf`, then `501270a4bf`, then `895d4dde3d` — whose `sdk.py` moves
+    # this region a further +5 and the NOT MONOTONE bullet +1 — left both sides wrong
+    # against the merged tree. So NO number here is an
     # offset or a carry: every address was found by searching for its own pinned
     # FIRST-line text (and, where the row has one, its own LAST-line text) at the tree
     # that was about to be committed. `entities.py` happened to keep this branch's
@@ -3234,7 +3235,7 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("sdk.py", 54283, 54285): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 54435, 54444): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22459, 22635): ("def update_knowledge(", None),
+    ("sdk.py", 22459, 22634): ("def update_knowledge(", None),
     ("sdk.py", 54884, 54884): ("SET n += $props", None),
 }
 
