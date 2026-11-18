@@ -32,7 +32,7 @@ the place to amend it (#10044).
 The owner approved these; no `def` exists on `TortoiseSDK` under the canonical name.
 Phase 2 implements them.
 
-*(none)*
+- (none)
 
 ## Live and NOT approved — the migration backlog
 
