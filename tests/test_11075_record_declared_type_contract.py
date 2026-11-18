@@ -1135,6 +1135,58 @@ def test_comment_stripping_is_what_keeps_a_DOWN_direction_out_of_the_read():
     plain = ("COMMENT ON COLUMN public.point.id IS 'C:" + chr(92) + "';\n"
              "/* ALTER COLUMN search_keys TYPE jsonb */\n")
     assert "TYPE jsonb" not in rp._strip_sql_comments(plain)
+    # ⛔ POSTGRESQL NESTS BLOCK COMMENTS, so the FIRST `*/` does not end one.
+    # `find("*/")` (the whole implementation until #13354) closed the outer
+    # comment at the INNER terminator, leaving a commented-out declaration in the
+    # text as CODE — measured on the props-ban pin, whose read then took a
+    # disabled `ADD CONSTRAINT` for an executed one. The nesting case is pinned
+    # HERE, with the function it belongs to, rather than only in that pin's file.
+    # ⛔ A DOUBLE-QUOTED IDENTIFIER IS DATA: `'`, `;`, `--`, `/*` inside one must
+    # not open a literal, a statement or a comment. Before the scanner skipped them,
+    # `"a--b"` became a line comment and deleted the rest of its line — measured on
+    # the props-ban read, where a real DROP on that line vanished from both the
+    # parse and the guard's count (silent green).
+    for hostile in ('a--b', 'a;b', "a'b", 'a/*b'):
+        # The DDL after the identifier sits on the SAME line, so a `--` (which ends
+        # at the newline) can actually be exercised — round 14 P3 measured that a
+        # next-line-only template stayed green for `--`.
+        ident = ('ALTER TABLE public.t RENAME COLUMN "' + hostile
+                 + '" TO c; ALTER TABLE public.q DROP CONSTRAINT k;\n-- tail\n')
+        stripped = rp._strip_sql_comments(ident)
+        assert "DROP CONSTRAINT k" in stripped, (
+            f"a double-quoted identifier containing {hostile!r} swallowed real DDL "
+            f"on its own line: {stripped!r}")
+        assert "tail" not in stripped, (
+            f"the comment after the identifier was not stripped ({hostile!r})")
+
+    # ⛔ THE `E` OF A PRECEDING WORD IS NOT AN ESCAPE PREFIX: `LIKE'C:\'` armed
+    # backslash-escapes, so the literal swallowed the rest of the file and DDL
+    # after it became invisible (round 11, measured on the props-ban read). The
+    # prefix must be a free-standing `e`/`E`.
+    word_prefix = "SELECT 1 FROM n WHERE x LIKE'C:" + chr(92) + "';\n-- later\n"
+    # Under the bug the literal stays OPEN to EOF, so the comment is inside it and
+    # `later` survives; when the literal ends at its closing quote the comment is
+    # stripped, which is what must happen.
+    assert "later" not in rp._strip_sql_comments(word_prefix), (
+        "a word-final `E` (`LIKE`) armed escapes and the literal swallowed the "
+        "rest of the file")
+    real_escape = "SELECT E'a" + chr(92) + "'--b';"
+    assert "--b" in rp._strip_sql_comments(real_escape), (
+        "a real `E'…'` escape stopped escaping — the `--` inside the literal was "
+        "read as a comment")
+
+    nested = (
+        "ALTER TABLE public.point\n"
+        "    ALTER COLUMN search_keys TYPE text;\n"
+        "/* history:\n"
+        "   /* moved here from 2026-10 */\n"
+        "   ALTER TABLE public.point ALTER COLUMN search_keys TYPE jsonb;\n"
+        "*/\n")
+    stripped = rp._strip_sql_comments(nested)
+    assert "TYPE jsonb" not in stripped, (
+        "a NESTED block comment ended at the inner `*/`, so its body stayed in the "
+        f"text as code: {stripped!r}")
+    assert "TYPE text" in stripped, "the nesting scan swallowed the live statement"
 
 
 def test_the_stripper_is_load_bearing_at_the_PARSE_level(tmp_path):
