@@ -3930,12 +3930,13 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
 _13_8_ENUMERATION = (
     "sites are customer-callable",
     # ⚠️ the marker follows the sentence that ACTUALLY starts the tail — it was re-worded to
-    # "Outside this seventeen, ..." to stop a re-verifier counting those five inside the
-    # enumeration (#12901 moved the numeral 18 -> 17 when it retired row 32, so this marker
-    # moves WITH it). The numeral in it is a LOCATOR, not the figure under test: the figure is
+    # "Outside this eighteen, ..." to stop a re-verifier counting those five inside the
+    # enumeration — the numeral in it moves WITH the count (it went 18 -> 17 when #12901
+    # retired row 32, and 17 -> 18 when #8542 added the `ended.py::build_cypher` row), so this
+    # marker tracks it). The numeral is a LOCATOR, not the figure under test: the figure is
     # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
     # with it cannot make a wrong count pass.
-    "Outside this seventeen, two are default-ON on the ingestion path",
+    "Outside this eighteen, two are default-ON on the ingestion path",
 )
 
 #: `` `token` `` — the unit §13.8 names a reader (or a door) with.
