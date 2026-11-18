@@ -3294,6 +3294,12 @@ def read_lifecycle_events(conn: Any, *, org_id: str, graph_id: str,
     ``target`` narrows to the events that could name one Object, so a
     single-row read folds only the events that could POSSIBLY name it.
 
+    ``limit`` is a ROW bound, forwarded as-is: a page that comes back FULL raises
+    :class:`LifecycleEventStreamTruncated` — this function can therefore
+    RAISE, and a caller that passes a ``limit`` must handle it. See
+    :func:`_lifecycle_events` for why the witness is the row count and not the
+    number of events returned.
+
     ⚠️ What that buys is bounded, and it is not "avoids a scan": the predicate
     is on `payload` expressions, while the table's only index is
     `idx_journal_event_node (org_id, graph_id, node_label, node_key)`

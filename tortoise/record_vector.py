@@ -255,11 +255,15 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: backfilled FIRST, not after.
 ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 
-#: How many bounded STATEMENTS the record leg may issue inside one read's budget,
-#: and therefore what the read's budget is divided by (#11691).
+#: How many bounded STATEMENTS the COLUMN-FILTERED arm may issue inside one
+#: read's budget, and therefore ITS divisor (#11691). ⛔ NOT the folded arm's:
+#: `object`/`subject` issue :data:`FOLD_ARM_STATEMENTS` (three) and divide by
+#: :data:`FOLD_ARM_DIVISOR` (four) — see `vector_search`, which picks the
+#: divisor per arm before any statement runs.
 #:
 #: ⛔ WHY THE LEG DOES NOT SIMPLY GET THE WHOLE BUDGET. ``statement_timeout``
-#: bounds EACH STATEMENT, not the transaction (Postgres semantics), and this leg
+#: bounds EACH STATEMENT, not the transaction (Postgres semantics), and this
+#: COLUMN-FILTERED arm
 #: may issue TWO of them: the kNN read, and — on the SHORT path, which is the
 #: COMMON one, because a live tenant legitimately holds fewer rows than the limit
 #: — the shortfall ``count(*)``. Handing each the read's full budget would let the
@@ -1174,8 +1178,10 @@ def vector_search(
         # unbudgeted path is byte-identical (and the pins that stub `open_record`
         # with a one-argument double stay honest about what the leg asks for).
         # A budget is the READ's, so it is divided here and only the quotient
-        # reaches the door — see `record_statement_ms` for why (two statements,
-        # one deadline).
+        # reaches the door — see `record_statement_ms` for why (the divisor is
+        # the ARM's, and it counts one share to leave behind for the graph
+        # branch, so a folded label divides by four and a column-filtered one by
+        # three; not a flat "two statements").
         conn = (open_record(record_dsn) if timeout_ms is None
                 else open_record(record_dsn,
                                  statement_timeout_ms=record_statement_ms(
