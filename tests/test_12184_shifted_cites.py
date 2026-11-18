@@ -244,6 +244,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     for claimed in (
         "124 of this document's 211",
         "dedupes the 314 as-written spellings to 211 — 103",
+        "314 written spellings → 211 pairs → 103 collisions → 124 drifters of the 211 comparable",
         "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
@@ -368,9 +369,11 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
     gave TWO addresses for one reader — and only one of them can open at any head. The `#13124`
     post-merge review found exactly that (`:4350-4351` in the verdict, `:4511-4513` in the table).
 
-    NON-VACUOUS: the pre-fix document carries the second spelling
-    (`git show origin/main:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md |
-    grep -c '`none`: `search_engine.py:4350-4351`'` -> 1), so the second assertion reds on that tree.
+    NON-VACUOUS, and WITNESSED AT A COMMIT, not a moving ref: the pre-fix document carries the second
+    spelling (`git show 8ba6de4438:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md |
+    grep -c '`none`: `search_engine.py:4350-4351`'` -> 1; `43028d178b` also -> 1). ⚠️ `origin/main` reads
+    **0** here — it has since been re-pointed — so a ref would have made this witness vacuous while still
+    looking like evidence.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     assert "`none`: `search_engine.py:4708-4710`, a plain label scan" in text, (
@@ -431,6 +434,11 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
     for stale, why in (
         ("the WHOLE of the `main` set", "eight addresses open at `main` and sat outside it"),
         ("pin-written remainder", "its own population counts the `main`-set addresses too"),
+        (
+            "every other `file:line` here was written at the pin and opens at `ccb49741b2ec`",
+            "it is the third absolute the review measured false: a `main`-set address opens at `main`, "
+            "not at the pin, and the sentence contradicted the enumeration two lines above it",
+        ),
     ):
         assert stale not in text, (
             f"the header still claims {stale!r}, which the `#13124` review measured false ({why}). "
