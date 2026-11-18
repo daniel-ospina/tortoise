@@ -1688,7 +1688,7 @@ follows is the evidence each ruling rests on, which is design.
 
 **What #13610 landed (R1 step 2), and what it did NOT.** The graph copy of `:Object`/`:Subject`'s
 derived vector is now RETIRED on a deployment whose RECORD proves coverage, and RETAINED — written
-AND read — until it does. Concretely, four facts a reader can hold against the code:
+AND read — until it does. Concretely, five facts a reader can hold against the code:
 
 1. **The arm is the DEFAULT.** `TORTOISE_RECORD_VECTOR_LEG` unset = armed; an explicit `0` is the
    ROLLBACK, and it restores the pre-#13610 posture whole (graph answers, mirror written, no stored
@@ -1706,6 +1706,30 @@ AND read — until it does. Concretely, four facts a reader can hold against the
    stop ENCODING once the count proves the record holds the vector (nothing is deleted — the property
    is simply not written); the other five folds keep writing their graph vector. That is option 2's
    transitional double-storage: the round trip is always "the read stops trusting the graph last".
+   ⛔ **And both halves resolve ONE tenant.** A fold has no SDK handle, so the write door installs
+   the request's by-value tenant (`sdk._record_tenant`, the hosted REST lane) as the ambient carrier
+   for the length of that one graph write (`TortoiseSDK._record_tenant_scope`) — the same
+   `use_record_tenant` primitive the MCP lane installs per request. Without it the write gate would
+   answer "no tenant" on every hosted write and keep the mirror for ever, while the read half of the
+   same request cut over.
+5. **The index retirement needs a record TENANT, not just a DSN.** `vector_index_retired()` is
+   `VECTOR_INDEX_RETIRED ∧ DSN ∧ cutover_armed() ∧ a resolvable record tenant`, and with the arm
+   defaulting ON the tenant is the conjunct that decides it. ⚠️ Consequence, and it is a real
+   behaviour change on upgrade: on a store that RESOLVES a tenant, the next setup takes the DROP
+   branch (the in-graph `embedding` index is removed) and the `#4997` gap report is downgraded
+   WARNING→INFO; on a request that resolves NONE, the index is kept and `#4997` keeps its WARNING.
+
+⚠️ **The ROLLBACK is complete only while coverage is UNVERIFIED.** `TORTOISE_RECORD_VECTOR_LEG=0`
+restores the pre-#13610 posture (the graph answers the dense read, the mirror is written) — but only
+a graph that still holds the payload can answer. Once a label's coverage has verified, the mirror
+stops, so flipping the switch hands that label's dense read to a graph whose population is FROZEN at
+the contract instant: everything created since is invisible to the dense leg while the trace reads
+`scan`/`index`, `reason=ok`, `degraded=False` — `#5090` Q2 in the mirror direction. The post-contract
+rollback is therefore a SEQUENCE — repopulate the graph (`graph-scripts/backfill_embeddings.py`, or a
+re-fold of each node), confirm the count, then flip — and the same mechanism, with no operator action
+at all, is a ROLLING DEPLOY: instances that have closed the write gate stop writing graph vectors
+while instances still on pre-#13610 code serve those labels from the graph. Nothing compares versions;
+the graph-side sweep is the repair.
 
 ⚠️ **Stated residuals, not oversights.** The count compares SIZES, so it is a coverage claim and not
 a membership proof (a cardinality-preserving mismatch verifies; the graph keys on `id` while the

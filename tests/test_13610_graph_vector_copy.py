@@ -77,7 +77,7 @@ class _Graph:
         self.queries: list[str] = []
         self.rows = list(rows)
 
-    def query(self, sql, params=None, timeout=None):  # noqa: ARG002
+    def query(self, sql, params=None, timeout=None):
         self.queries.append(sql)
         if "queryNodes" in sql:
             # This store carries no VECTOR index for the label — the MEASURED
@@ -289,7 +289,6 @@ def test_post_contract_a_record_failure_is_reported_and_not_answered_from_graph(
     """
     monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
     _stub_record(monkeypatch, count=4, rows=[])
-    searcher = _searcher(4)  # 4 >= 4 → verified
 
     def _boom(*_a, **_k):
         raise record_vector.RecordVectorError("the record went away")
@@ -314,6 +313,84 @@ def test_post_contract_a_record_failure_is_reported_and_not_answered_from_graph(
     rows, graph, trace = _run(_searcher(3),
                               graph=_Graph([("obj-legacy", 1.0 / 1.5)]))
     assert [row[0] for row in rows] == ["obj-legacy"], (rows, trace)
+    assert trace[-1]["mechanism"] == "scan_fallback", trace
+
+
+def test_an_unmeasurable_graph_denominator_keeps_the_graph_branch(monkeypatch):
+    """⛔ THE SUPPLIER'S FAIL-SAFE, driven through the READ path (#13610 review F6).
+
+    `_safe_population` turns a RAISING supplier into ``None``, and ``None`` is
+    UNVERIFIED — which keeps the graph branch AND the graph write. Nothing below is
+    subtle; what was missing is an assertion: the guard could be changed to
+    ``return 0`` and every other case in this file stayed green, because they all
+    hand the coverage a NUMBER.
+
+    Read as ``0`` the comparison becomes ``record >= 0``, i.e. VERIFIED on no
+    evidence at all: the write gate stops mirroring and the read stops declining,
+    for a graph nobody measured. That is the fail-open the docstring says it
+    prevents, so the pin drives the raising supplier through `searcher` and asserts
+    the graph answered.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    _stub_record(monkeypatch, count=3, rows=[("obj-in-record", 0.10, None)])
+
+    def _explode(_entity_type):
+        raise RuntimeError("the graph's count could not be taken")
+
+    searcher = record_vector.searcher(
+        carried=_SCOPE, timeout_ms=500, graph_population=_explode)
+    graph = _Graph([("obj-graph-only", 1.0 / 1.5)])
+    rows, graph, trace = _run(searcher, graph=graph)
+
+    assert [row[0] for row in rows] == ["obj-graph-only"], (
+        "an unmeasurable graph count VERIFIED coverage — the record's partial answer "
+        f"was served as the corpus and the graph was never asked: {rows}")
+    assert graph.queries, "the graph branch did not answer an unmeasured denominator"
+    assert trace[-1]["mechanism"] == "scan_fallback", trace
+    assert record_vector.coverage_verified(
+        "object", record_vector._Scope(*_SCOPE)) is False
+
+
+def test_a_contracted_empty_answer_is_the_answer(monkeypatch):
+    """⛔ POST-CONTRACT, AN EMPTY RECORD ANSWER IS NOT A REASON TO ASK THE GRAPH.
+
+    Three outcomes come back from the record leg and the middle one is the trap:
+    ``None`` (no table serves the label), rows, and **``[]`` — a complete, honest
+    "nothing matches"**. Before the contract an empty answer legitimately meant
+    "the record is a fold with no backfill, ask the graph", so `run_vector_query`
+    falls through on ``[]``. AFTER the contract the mirror has stopped, so the
+    graph's cohort is frozen at the contract instant and that fall-through answers
+    with a SMALLER population labelled `scan_fallback` — #13610's Indicator (2),
+    still reachable while the fall-through stayed unconditional.
+
+    So the searcher stamps the contracted answer (`RecordAnswer`), and both
+    directions are pinned here: sealed-empty answers empty, unsealed-empty still
+    falls through to the graph.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+
+    # ── contracted + empty → the answer is empty, and the graph is not asked ──
+    _stub_record(monkeypatch, count=3, rows=[])
+    graph = _Graph([("obj-graph-only", 1.0 / 1.5)])
+    rows, graph, trace = _run(_searcher(3), graph=graph)  # 3 >= 3 → verified
+
+    assert rows == [], (
+        "a contracted empty answer fell through to the graph and returned its "
+        f"post-contract frozen cohort: {rows}")
+    assert graph.queries == [], (
+        f"the graph was asked after the contract had frozen its cohort: {graph.queries}")
+    assert trace[-1]["mechanism"] == "pgvector", trace
+    assert trace[-1]["degraded"] is False, trace
+    assert trace[-1]["reason"] == "empty_results", trace
+
+    # ── the PRE-contract direction, unchanged: the graph still answers ──────
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=1, rows=[])  # 1 < 3 → unverified
+    rows, graph, trace = _run(_searcher(3),
+                              graph=_Graph([("obj-legacy", 1.0 / 1.5)]))
+    assert [row[0] for row in rows] == ["obj-legacy"], (
+        "an UNVERIFIED label's empty record answer stopped falling through to the "
+        f"graph — that is the pre-contract answer and it is correct: {rows}")
     assert trace[-1]["mechanism"] == "scan_fallback", trace
 
 
@@ -719,6 +796,94 @@ def test_the_object_fold_is_gated_too(proj, monkeypatch):
 
 
 # ── 6. the wiring and the SQL shapes ─────────────────────────────────────
+
+
+def test_the_sdk_door_installs_the_carried_tenant_so_the_mirror_retires_on_the_hosted_lane(
+        tmp_path, monkeypatch):
+    """⛔ THE WRITE GATE COULD NOT SEE THE CARRIED TENANT (#13610 review, P1).
+
+    `mirror_required` resolves the tenant through
+    `record_writer.record_tenant_effective`, whose ambient door is the
+    `use_record_tenant` ContextVar. The MCP lane installs it per request; the
+    hosted REST lane deliberately does NOT (its auth seam is a plain dependency —
+    `record_writer.use_record_tenant`'s own docstring), it carries the tenant BY
+    VALUE on the SDK (`_bind_record_tenant`). A FOLD has no SDK handle, so on that
+    lane the write gate answered "no tenant" on every write and kept the graph
+    mirror FOR EVER — while the READ half of the same request cut over, which is
+    the double storage this issue exists to end, on the lane built for
+    multi-tenancy.
+
+    The door closes it by installing what it holds for the length of ONE graph
+    write. Both halves are pinned here, because either alone can pass vacuously:
+
+    1. the SDK's scope makes the gate answer ``False`` (mirror retired), while
+       outside it the same cached verdict answers ``True`` — that is the pre-fix
+       behaviour and it is why step 2 is a behaviour change, not a rename;
+    2. a real `add_object` through the SDK's own write door encodes NOTHING once
+       coverage is verified, with no ambient scope anywhere on the request.
+    """
+    from tortoise import derived_embedding
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    _install_verified(monkeypatch, "object")
+
+    # 1. the carrier, asked directly: no ambient scope on this request at all.
+    sdk = TortoiseSDK(str(tmp_path / "graphvec_hosted.db"))
+    try:
+        sdk._bind_record_tenant(*_SCOPE)
+        assert record_vector.mirror_required("object") is True, (
+            "with no tenant carrier visible, the gate must keep the mirror — this "
+            "is the conservative answer and the pre-fix behaviour on this lane")
+        with sdk._record_tenant_scope():
+            assert record_vector.mirror_required("object") is False, (
+                "the SDK's carried tenant did not reach the write gate, so the "
+                "graph mirror is kept for ever on the hosted REST lane")
+
+        # 2. the same answer through the REAL fold, on a real graph.
+        calls: list[str] = []
+        monkeypatch.setattr(
+            derived_embedding, "encode",
+            lambda text, dim, **kw: (calls.append(text), [0.05] * _DIM)[1],
+            raising=True)
+        # The record seam itself is not this test's subject (it would open a
+        # socket): the fold runs under the write door, the projection write is
+        # stubbed out.
+        monkeypatch.setattr(sdk, "_write_record_projection",
+                            lambda *a, **k: None, raising=True)
+        sdk.create_entity("object", "gadget",
+                          _server_id="obj-13610-hosted")
+        assert calls == [], (
+            "the SDK write door did not carry its tenant into the fold, so the "
+            f"graph copy was encoded and written on the hosted lane: {calls}")
+        assert _embedding_of(sdk._get_proj().g, "Object",
+                             "obj-13610-hosted") is None
+    finally:
+        sdk.close()
+
+
+def test_the_graph_denominator_is_bounded_by_the_reads_own_budget(proj, monkeypatch):
+    """The denominator runs on the dense read path, so it carries the read's budget.
+
+    `:Object`/`:Subject` have no graph vector index (`#4997`), so this count is a
+    full-label scan taken on the gate's miss path. Left unbounded it runs on the
+    door's default while every other graph statement on that path is bounded by
+    `run_vector_query`'s `timeout=_graph_timeout_ms` — the same 30x mismatch
+    `#11691` closed for the record half of this gate. The supplier is handed the
+    budget by `_record_vector_searcher`, and this pins that it reaches the query.
+    """
+    seen: list[int | None] = []
+
+    class _Recorder:
+        def query(self, sql, params=None, timeout=None):
+            seen.append(timeout)
+            return _Result([(3,)])
+
+    monkeypatch.setattr(proj, "g", _Recorder(), raising=True)
+    assert proj._label_vector_count("object", timeout_ms=500) == 3
+    assert seen == [500], (
+        f"the graph's coverage aggregate ran with timeout={seen} — it must carry "
+        "the read's own budget, like every other graph statement on that path")
 
 
 def test_every_searcher_construction_site_passes_a_graph_population():

@@ -74,6 +74,7 @@ __all__ = [
     "READINESS_TTL_SECONDS",
     "RECORD_JOURNAL_ENV",
     "Coverage",
+    "RecordAnswer",
     "RecordVectorDeclined",
     "RecordVectorError",
     "RecordVectorWithoutFallback",
@@ -827,10 +828,30 @@ def mirror_required(entity_type: str) -> bool:
     vector is not the store being read.
 
     The answer is conservative in EVERY unknown: an unarmed deployment, an
-    unresolvable DSN, no tenant scope on this request (the hosted lane carries its
-    tenant BY VALUE, so an ambient read finds none — see `_resolve_scope`), and a
-    label nobody has verified all answer ``True``. Writing the mirror is the safe
-    error: it costs storage, while skipping it costs the row.
+    unresolvable DSN, no tenant on this request AT ALL, and a label nobody has
+    verified all answer ``True``. Writing the mirror is the safe error: it costs
+    storage, while skipping it costs the row.
+
+    ⛔ THE ``(org_id, graph_id)`` RESOLUTION IS THE ONE GAP THIS GATE USED TO HAVE,
+    and it is closed at the write door rather than here. A fold runs inside the
+    SDK's own graph write, which has no tenant of its own to hand down — while the
+    REQUEST may carry the tenant BY VALUE (`sdk._record_tenant`, the hosted REST
+    lane) instead of ambiently (`use_record_tenant`, the MCP lane). Asking
+    :func:`_resolve_scope` with no carried value would therefore answer "no
+    tenant" for every hosted write and keep the mirror for ever — the double
+    storage this issue exists to end, on the lane built for multi-tenancy, while
+    the READ half of the same request cut over. So the SDK installs its carried
+    tenant as the ambient carrier for the duration of ONE graph write
+    (``TortoiseSDK._record_tenant_scope``), which is the same tenant the request
+    already files its record row under — one carrier, two doors, no second
+    predicate. An ambient read that finds none (a non-SDK door that holds no
+    carrier) still answers ``True``, which is the safe direction.
+
+    ⚠️ ``coverage_verified`` is CACHE-ONLY: a process that has served no gated
+    dense read since boot holds no verdict and keeps the mirror until it does. That
+    is deliberate — re-taking the count on the write path would put a full-label
+    aggregate on every write — and it is bounded by the first dense read for the
+    label.
     """
     if entity_type not in COVERAGE_GATED_LABELS:
         return True
@@ -1846,6 +1867,29 @@ DenseSearcher = Callable[
 ]
 
 
+class RecordAnswer(list):
+    """The record's dense answer, CARRYING that it is the whole answer (#13610).
+
+    A ``list`` subclass, not a new result type: every consumer already reads the
+    leg as a list of rows, and the only new fact is one the caller cannot
+    otherwise see — **whether an EMPTY answer is the answer**.
+
+    ⛔ WHY A MARKER IS NEEDED AT ALL. Before the contract the record is a fold
+    with no backfill, so an empty record answer legitimately meant "ask the
+    graph, which holds the payload" — `run_vector_query` falls through on
+    ``[]`` and records ``scan_fallback``. After the contract (`coverage`
+    verified) the mirror has stopped, so the graph's cohort is FROZEN at the
+    contract instant: falling through on an empty record answer returns a
+    SMALLER cohort, labelled as an index fallback. ``coverage()`` verified and
+    ``vector_search()`` returning ``[]`` is a complete, honest "nothing
+    matches", and the two cases are indistinguishable from the rows alone.
+
+    So the searcher stamps the contracted case, and only that case. A caller
+    that does not know this class (a graph-only leg, a test double) is
+    unaffected: it sees a plain list.
+    """
+
+
 def searcher(
     record_dsn: str | None = None,
     carried: tuple[str, str] | None = None,
@@ -2044,13 +2088,21 @@ def searcher(
                     f"({verdict.reason}) — the graph branch answers")
             contracted = True
         try:
-            return vector_search(scope, entity_type, query_vec, limit,
+            rows = vector_search(scope, entity_type, query_vec, limit,
                                  record_dsn=record_dsn,
                                  excluded_statuses=excluded_statuses,
                                  # The read's budget, captured HERE (on the
                                  # request's thread, at construction) rather
                                  # than passed per call — see (#11691).
                                  timeout_ms=timeout_ms)
+            # ⛔ POST-CONTRACT, THE ANSWER IS THE ANSWER — EMPTY INCLUDED (#13610).
+            # `RecordAnswer` is how that reaches the caller: an empty plain list is
+            # the PRE-contract "ask the graph" signal, and after the contract the
+            # graph's cohort is frozen, so a fall-through would answer with a
+            # smaller population and call it a fallback.
+            if contracted and rows is not None:
+                return RecordAnswer(rows)
+            return rows
         except RecordVectorDeclined as e:
             if not contracted:
                 raise

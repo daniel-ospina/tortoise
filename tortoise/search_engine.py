@@ -3587,6 +3587,25 @@ class _NeverRaised(Exception):
     """A never-matching `except` target for import-failure resilience (#13610)."""
 
 
+def _record_answer_marker() -> type:
+    """`record_vector.RecordAnswer`, resolved LAZILY (#13610).
+
+    The class that says *the record's dense answer is the WHOLE answer, empty
+    included*. Lazy for the same reason as :func:`_record_without_fallback` —
+    `record_vector` imports THIS module — and `_NeverRaised` is a safe stand-in:
+    nothing can be an instance of it, so an unimportable `record_vector` reads as
+    "no contracted answer was handed to me", which is the pre-contract behaviour
+    (an empty leg falls through to the graph) and cannot be reached here anyway,
+    because no searcher could have been built without that import.
+    """
+    try:
+        from .record_vector import RecordAnswer
+
+        return RecordAnswer
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring
+        return _NeverRaised
+
+
 def _record_without_fallback() -> type[BaseException]:
     """`record_vector.RecordVectorWithoutFallback`, resolved LAZILY (#13610).
 
@@ -4034,6 +4053,14 @@ def run_vector_query(
     #             recorded as a failure and the graph leg (which can see the
     #             whole label) is allowed to answer instead.
     if pg_vector is not None:
+        # ⛔ THE POST-CONTRACT LEG STAMPS ITS ANSWER (#13610). A sealed answer —
+        # `record_vector.RecordAnswer` — is the record's COMPLETE cohort for this
+        # label, because its coverage has been verified: the mirror has stopped, so
+        # the graph's population is frozen at the contract and is NOT a fallback.
+        # Both cases exist side by side below: an UNSEALED empty list keeps the
+        # pre-contract behaviour (ask the graph — the record is a fold with no
+        # backfill), a SEALED one is returned, empty or not.
+        _sealed = _record_answer_marker()
         try:
             pg_rows = pg_vector(entity_type, query_vec, limit,
                                 excluded_statuses)
@@ -4069,7 +4096,20 @@ def run_vector_query(
                 "record dense leg did not answer (%s: %s) — falling back to "
                 "the graph", type(e).__name__, e)
         else:
-            if pg_rows is not None and not pg_rows:
+            if isinstance(pg_rows, _sealed):
+                # ⛔ AN EMPTY ANSWER FROM THE LABEL'S ONLY SOURCE IS THE ANSWER
+                # (#13610, Indicator (2) of the issue). The contract retired the
+                # graph WRITE, so the graph's dense cohort stopped growing at the
+                # moment coverage verified — answering from it now would replace
+                # the record's authoritative "nothing matches" with a SMALLER
+                # cohort labelled `scan_fallback`. Recorded as the HEALTHY
+                # `empty_results` it is (`degraded=False`), with `pgvector` as the
+                # mechanism: no fallback ran.
+                if not pg_rows:
+                    _record(ran=True, degraded=False, reason="empty_results",
+                            count=0, mechanism=MECHANISM_PGVECTOR)
+                    return []
+            elif pg_rows is not None and not pg_rows:
                 # ⛔ AN EMPTY RECORD ANSWER IS NOT A COMPLETE ONE (#11642
                 # review P1). The record is a journal FOLD with no backfill, so
                 # a live tenant's record legitimately holds ZERO rows while the

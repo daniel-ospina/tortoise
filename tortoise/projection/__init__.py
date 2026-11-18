@@ -20290,7 +20290,8 @@ class FalkorProjection(
             return ("server", str(own_host), None)
         return ("instance", id(self))
 
-    def _label_vector_count(self, entity_type: str) -> int | None:
+    def _label_vector_count(self, entity_type: str, *,
+                            timeout_ms: int | None = None) -> int | None:
         """How many nodes of ``entity_type``'s label carry an `embedding`? (#13610)
 
         The DENOMINATOR of the dense cutover's coverage count, measured on THIS
@@ -20318,6 +20319,16 @@ class FalkorProjection(
         `#689` terminal cage here would compare two different populations and
         leave a store permanently unverified. Terminal nodes carry vectors too, in
         both stores.
+
+        ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET AND IT MUST BE PASSED (#13610
+        review). This aggregate runs on the gate's miss path, on the DENSE READ
+        path, and `:Object`/`:Subject` carry no graph vector index (`#4997`), so
+        it is a full-label scan. Left unbounded it inherits the door's default
+        while every other graph statement on that path carries the read's budget
+        (`run_vector_query` passes `timeout=_graph_timeout_ms`) — the exact
+        30x-mismatch class `#11691` closed for the record half. ``None`` keeps the
+        historical behaviour for the reconstruction callers (health, restore),
+        which legitimately need seconds.
         """
         from ..security import ENTITY_TYPE_LABELS, entity_label
 
@@ -20336,7 +20347,7 @@ class FalkorProjection(
             label = entity_label(entity_type)
             rows = self.g.query(
                 f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
-                "RETURN count(n)").result_set
+                "RETURN count(n)", timeout=timeout_ms).result_set
         except Exception:  # noqa: BLE001, RUF100 — unmeasurable, never zero
             logging.getLogger(__name__).debug(
                 "#13610: the graph's `%s` vector count could not be measured — "
