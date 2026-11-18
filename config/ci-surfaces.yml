@@ -3531,6 +3531,22 @@ surfaces:
   # `--integrity` classify the file at all. The `eval` row is the `tortoise/embeddings.py` +
   # `graph-scripts/backfill_embeddings.py` arm and the `api` row the hosted-door arm.
   - test_13417_vectorless_rows.py
+  # #13447: the derive-and-encode seam. `core` is the arm that owns
+  # `tortoise/derived_embedding.py`, `tortoise/record_writer.py` and
+  # `tortoise/cache_projection.py` — all three select `core` by the same fallback the
+  # #13417 row records, and the record column and the restore door are theirs. The DB-free
+  # file is a `carve_out:` member (its own row below), so THIS row is the classification
+  # record that makes `--integrity` classify it at all.
+  - test_13447_derived_embedding_seam.py
+  # #13447: the ENGINE half — the restore landing a `vecf32` vector on a real node, which the
+  # plan-level assertion in the DB-free file cannot substitute for (`vecf32` is the write #4524
+  # measured being silently discarded). It imports `tortoise/cache_projection.py` and
+  # `tortoise/projection/` (both `core`) and SKIPS visibly when no live URI is configured, so
+  # it is a normal pool member rather than a `uri_requiring` one: `uri_requiring` is for
+  # modules that COLLECT nothing on a URI-empty leg, and this one collects
+  # (`tests/test_uri_requiring_selection.py` re-derives that behaviourally and would red on a
+  # collecting module listed there).
+  - test_13447_restore_lands_vectors.py
   # #10687: `tools/attest_census.py` owns its own suite — the hermetic arms pin the
   # RESTORE/RE-REVIEW partition (repair separated from fabrication), the 0/2-never-1
   # exit contract, and the report shape the REQUIRED `docs` check lints whole. `core`
@@ -10606,6 +10622,13 @@ surfaces:
   # `encode_for_row` bounded seam the counter is emitted from) — the same module
   # arm the #13224 rows record.
   - test_13417_vectorless_rows.py
+  # #13447: both seam files reach `tortoise/embeddings.py` — the seam delegates to
+  # `embeddings.encode_for_row` and the pins count `compute_embedding` calls on the model
+  # seam — so an `embeddings.py`-only diff must select them (a non-`core` match REPLACES the
+  # `core` fallback, #2938). Cross-surface registration is deliberate; a second row on ONE
+  # surface is what `--integrity` reds.
+  - test_13447_derived_embedding_seam.py
+  - test_13447_restore_lands_vectors.py
   # #4194: the write path now embeds turns via tortoise/embeddings.py's
   # compute_embeddings (the batch form of compute_embedding); a change to
   # that module selects `eval`, so this file is dual-registered here and in
@@ -11535,6 +11558,13 @@ carve_out:
 # `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
 # the raw construction is allowlisted in `test_embedded_lifecycle.py`.
 - test_document_source_ingested_at_5140.py
+# #13447: the DB-free half of the seam's proof — `compute_embedding` is a lambda, so it needs
+# no connection, no graph and no model. Routed here so the URI-unset carve-out job runs it as
+# designed; mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` and in `tests/test_markers.py`
+# (the three-way mirror; `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`
+# asserts the first two are the SAME set). The engine half is deliberately NOT here: it needs
+# a live URI and skips visibly without one.
+- test_13447_derived_embedding_seam.py
 # #8488: the in-process Okapi BM25 lexical arm. Module-level `embedded_only`
 # (its subject is the embedded lane + the shipped read), so a `core`-only
 # registration would make the manifest green and run NOTHING on a docker leg.

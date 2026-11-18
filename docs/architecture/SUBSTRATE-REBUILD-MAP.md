@@ -274,11 +274,11 @@ it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and 
 reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **73** lines across **22**
-files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 73 lines,
-`git grep -l ':Document' -- tortoise/` → 22 files — the file count is not the line count).
+and the reason is measured: `:Document` occurs on **74** lines across **23**
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 74 lines,
+`git grep -l ':Document' -- tortoise/` → 23 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
-eight moves have since been made, one per workstream: the #10976
+nine moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
 (`cache_eviction.py:956`, which is also one of those that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
@@ -298,18 +298,25 @@ the two files this population had never reached: the KIND and STATUS rules that
 now say which layers carry a `status` family, and name the retired label where
 they say what does NOT (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
 docstring, and `_entity_label`'s record of why the local copy of the canonical
-map had to go). That move is the same kind as the five before it — prose that
+map had to go) — measured at this head as `tortoise/live.py:1237,1247` and
+`tortoise/why.py:200`. That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:4281`, IS a retirement. The eighth
+retirement prose in `tortoise/mcp_server.py:4382`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:33175`, one line in a file this population already reached, whose
+`tortoise/sdk.py:36676,36718`, one line each in a file this population already
+reached, whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the
 old name will have in hand. Like the first seven it is prose that NAMES the
 retired label to explain a rule about it; the line count is `git grep -n`'s, not
-a mint. All eight are the point
+a mint. The ninth is #13447's `tortoise/derived_embedding.py:3` — the seam
+module's opening paragraph names `:Object`/`:Subject`/`:Event`/`:Document`/`:Source`
+to say which labels the one derive-and-encode rule spans, i.e. prose that names
+the retired label to state a rule about it, in a file this population had not
+previously reached, so it lifts the FILE count as well as the line count
+(like #10976 and #11729 before it). All nine are the point
 rather than an accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**

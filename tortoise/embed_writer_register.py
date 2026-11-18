@@ -212,6 +212,7 @@ claim and a slogan:
   `projection.entities::_upsert_point_props`, `projection.entities::_upsert_subject`,
   `projection.entities::_upsert_object`, `projection.entities::_upsert_document`,
   `projection.entities::_upsert_event`, `record_writer::derived_embedding_columns`,
+  `cache_projection::fill_missing_row_vectors`, `derived_embedding::encode`,
   `sdk::create_point`, `sdk::update_point`. ⛔ That list is
   not counted here and is not its own authority — the INSTRUMENT is:
   `tests/test_embed_writer_register.py::test_the_seam_CALL_population_is_the_one_the_register_names`
@@ -230,7 +231,15 @@ claim and a slogan:
   `#13220`, which added the tenth member — `record_writer::derived_embedding_columns`, the record's
   own derivation (`RecordWriter.write` is its only caller) — and the pin below is what made that
   edit unavoidable rather than optional: the new writer reached the seam by CALL while the sentence
-  still said "every". Membership and visibility are different
+  still said "every". ⚠️ AND A THIRD TIME by `#13447`, which added the last two — and the way it
+  added them is the point: the four derived-entity folds now reach the gate through the ONE seam
+  (`derived_embedding.encode`, itself `gated` because it IS `encode_for_row` plus the per-write
+  memo), so the census credits a MODULE-QUALIFIED reach rather than a bare `encode` name
+  (`probe.SEAM_MODULE`; a bare name would credit `client.encode(…)`, and not crediting it at all
+  would have dropped four gated writers out of the population — the fail-open direction). The two
+  new members are the seam itself (`derived_embedding::encode`) and the rebuild's fill
+  (`cache_projection::fill_missing_row_vectors`, the `record-restore` half that puts a row's vector
+  back or derives it through that same seam). Membership and visibility are different
   questions; the writers whose membership the AST pass actually bought are `api::add_point`,
   `consistency::_graph_fingerprint`, `sdk::_index_gate_read` and `sdk::_write_capture_turns` (the
   four named at the start of this bullet), and nothing else.
