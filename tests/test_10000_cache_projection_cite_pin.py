@@ -49,27 +49,27 @@ PIN_HEADING = "### The pin"
 TESTS = ROOT / "tests"
 
 #: A bare `test_*` NAME. The lookbehind skips a path (`tests/this_file.py` — the
-#: section cites module paths too) and the lookahead skips a FILENAME, so the arm
-#: resolves the thing that must exist rather than the file it lives in. Measured:
-#: matching the bare shape without those guards red the guard on its own path
-#: instead of on a cited leg (the same arm the write-site guard carries in
+#: section cites module paths too) and the lookahead skips an in-class FILENAME,
+#: so the arm resolves the thing that must exist rather than the file it lives in.
+#: Measured: matching the bare shape without those guards red the guard on its own
+#: path instead of on a cited leg (the same arm the write-site guard carries in
 #: `tests/test_10000_source_prose.py`).
 #:
 #: ⛔ `[A-Za-z0-9_]` and the closing `(?![A-Za-z0-9_])` are load-bearing together,
 #: for two different reasons. A name-only `[a-z0-9_]` class TRUNCATES a cite that
 #: carries an uppercase letter (`test_theWidget` matched as `test_the`, measured),
 #: which reports a name the author never wrote; and allowing uppercase alone is
-#: not enough, because the alternation-free class lets the engine BACKTRACK to a
-#: shorter match that satisfies `(?!\.py)`, so `test_foo_cites.py` would still
-#: describe a fragment. The alnum lookahead makes the match MAXIMAL over
-#: `[A-Za-z0-9_]`, so the answer is never a prefix of the cited name or of a
-#: `.py` filename, and the `.py` lookahead then skips the filename whole.
-#: ⚠️ Two NAMED residuals, both measured with the same regex:
+#: not enough, because the engine BACKTRACKS to a shorter match that still
+#: satisfies `(?!\.py)`, so `test_foo_cites.py` would describe a fragment. With
+#: both, the match is maximal WITHIN the class: `test_theWidget` resolves whole,
+#: `tests/test_foo.py` and `test_foo_cites.py` match nothing.
+#: ⚠️ Measured residuals, where the real name ESCAPES the class — each one
+#: truncates, and the truncation could resolve against the wrong leg:
 #:   `` `test_foo.bar` `` -> `test_foo` (a dotted suffix that is not `.py`), and
-#:   `` test_foo-v2.py `` -> `test_foo` (a filename stem carrying a character
-#:   outside the class). Either could resolve against the wrong leg. A wider class
-#: is deliberately NOT adopted: rejecting a trailing `.` would also drop a cite
-#: that a sentence ends on (`see test_foo. It` must keep resolving).
+#:   `` test_foo-v2.py `` -> `test_foo` (a filename stem carrying a hyphen, so the
+#:   `.py` guard never sees a `.py` immediately after the match).
+#: A wider class is deliberately NOT adopted: rejecting a trailing `.` would also
+#: stop `see test_foo. It` from resolving, and that cite is more likely than these.
 _CITED = re.compile(r"(?<![/\w])(test_[A-Za-z0-9_]+)(?!\.py)(?![A-Za-z0-9_])")
 
 #: A `def test_…(` at the start of a line, allowing indentation and `async`.
