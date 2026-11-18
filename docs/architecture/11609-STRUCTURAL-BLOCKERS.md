@@ -85,12 +85,13 @@ Two consequences the decision turns on:
 - `tortoise/mcp_server.py:2118` `_violates_wrap_envelope` treats a **missing `result`** as a
   violation for *every* wrap envelope, including `anyOf` — so a union keeps the wait-bound
   refusal repair.
-- A dict `result` is a violation only under a **declared scalar/array `type`** (`array`,
-  `string`, `boolean`, `number`, `integer` — every `_WRAP_ENVELOPE_TYPE_CHECKS` member); under
-  `anyOf`, or an undeclared `type`, it is
-  admissible (`:2144-2150`). So under a union, a `_safe` failure payload **stops** being
-  repaired by #8482 and is left to **#11153** (`_payload_refusal_result`, defined `:2420`,
-  applied `:3290`), which flips `isError` and keeps the payload byte-identical. That is the protocol-correct verdict channel
+- A dict `result` is a violation only under a **declared scalar/array `type`**: five of
+  the six `_WRAP_ENVELOPE_TYPE_CHECKS` members (`array`, `string`, `boolean`, `number`,
+  `integer`). The sixth, `object`, *expects* a dict, so a dict `result` is admissible there
+  too — as it is under `anyOf` or an undeclared `type` (`:2144-2150`). So under a union, a
+  `_safe` failure payload **stops** being repaired by #8482 and is left to **#11153**
+  (`_payload_refusal_result`, defined `:2420`, applied `:3290`), which flips `isError` and
+  keeps the payload byte-identical. That is the protocol-correct verdict channel
   (`isError` is the only failure signal uniform across clients), but it is *weaker* than the
   array envelope, which makes the failure unreadable as data at all.
 

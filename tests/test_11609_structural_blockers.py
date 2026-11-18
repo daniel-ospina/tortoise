@@ -62,6 +62,12 @@ ENVELOPE_DOORS = (
     "tortoise_calibrate_summary",
 )
 
+#: The NINE doors S1 unblocks: the eight envelope-only ones plus `tortoise_search`, which
+#: `PROTECTED` holds under TWO reasons — the envelope *and* the (stale) `rest_spec` row. S1's
+#: sufficiency claim is about all nine, so the loop that measures it iterates this tuple; a
+#: loop over `ENVELOPE_DOORS` alone left `search`'s door→container edge unpinned (§4: 9).
+S1_DOORS = (*ENVELOPE_DOORS, "tortoise_search")
+
 #: The containers S1 would annotate, and the reason each is `Any` measured: its arms do
 #: not share one shape. `list_knowledge` is the sharp case — its `claim` arm returns
 #: ``{results, total, hasMore}`` while `namespace`/`diary` return bare lists.
@@ -150,17 +156,22 @@ def test_the_container_still_advertises_no_envelope(name):
 
 
 def test_every_envelope_door_destination_is_one_of_the_six_containers():
-    """S1's SUFFICIENCY: annotating these six unblocks exactly those eight doors.
+    """S1's SUFFICIENCY: annotating these six unblocks exactly those NINE doors.
 
     Without this edge, the two populations are pinned independently and nothing notices a
     door re-pointed at a container outside S1's six — the door would keep its `list[dict]`,
     that other container would keep its `None` schema, and S1 would silently stop
     unblocking it while every pin stayed green. `tools/bridge_table.py`'s `DESTINATION` is
     the map that decides it, so it is read rather than restated.
+
+    ⛔ It iterates `S1_DOORS` (nine), NOT `ENVELOPE_DOORS` (eight): the plan's headline
+    count and `16 → 7` both rest on `tortoise_search` landing in one of these six
+    containers, and a review round found that edge unpinned — re-pointing `search` in
+    `DESTINATION` left every pin green while the count went wrong.
     """
     from tools.bridge_table import DESTINATION
 
-    for door in ENVELOPE_DOORS:
+    for door in S1_DOORS:
         destination = DESTINATION.get(door)
         # `DESTINATION` records the bare method name (`search_knowledge`); S1's list is door
         # names. Normalise rather than keeping a second bare-name list that can drift.
@@ -352,13 +363,24 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, path):
         f"{hosted_api.__name__} or {selfhost_api.__name__} — if the route is really gone, "
         "this pin's premise changed")
 
-    # (3) and neither app reads a `rest_spec` to build routes. Without this, a hand-rolled
-    # `for e in TOOL_REGISTRY: app.add_api_route(e.rest_spec.path, …)` would leave every
-    # assertion above green while making the doc's headline finding false again.
-    for module in (hosted_api, selfhost_api):
-        assert "rest_spec" not in inspect.getsource(module), (
-            f"{module.__name__} now reads `rest_spec` — routes may be registry-derived again; "
-            "re-derive §1.5 before trusting the `rest_spec` half of the plan")
+    # (3) and NO product module reads a `rest_spec` to build routes. Without this, a
+    # hand-rolled `for e in TOOL_REGISTRY: app.add_api_route(e.rest_spec.path, …)` would
+    # leave every assertion above green while making the doc's headline finding false again.
+    # ⛔ REPO-WIDE, not the two apps: `tortoise/` carries THREE FastAPI apps
+    # (`hosted_api.py:3536`, `selfhost.py:1040`, `__main__.py:17211`), and the vector named
+    # here needs only one of them — a two-module scan reported "nothing reads it" for a
+    # claim about the product while the third app was unread. `tool_registry.py` DEFINES
+    # the field, so it is the one module this arm excludes by name.
+    readers = [
+        str(source.relative_to(repo))
+        for source in scanned
+        if source.name != "tool_registry.py"
+        and "rest_spec" in source.read_text(encoding="utf-8", errors="replace")
+    ]
+    assert readers == [], (
+        f"product module(s) {readers} now read `rest_spec` — routes may be "
+        "registry-derived again; re-derive §1.5 before trusting the `rest_spec` half of "
+        "the plan")
 
 
 # ── what the SERVING HANDLER does — the other half of S3's premise ───────────
