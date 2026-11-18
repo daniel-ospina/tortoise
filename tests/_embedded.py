@@ -399,6 +399,14 @@ def _worker_stem_embedded_probe(results: list, path: str) -> None:
 # lane. (Post-P3 reconciliations grew the set past 17 — graph-integrity,
 # eval_* and longmem stems below are each dated additions.)
 TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
+    # #13417: the counter/backfill loop drives real DERIVED-entity folds and the
+    # backfill against its OWN embedded `FalkorProjection` per test
+    # (`tempfile.mkdtemp` + `graph_name=`), so a URI-set lane would redirect that
+    # construction into the shared container and grade a graph shared with every
+    # other run — the measured shape recorded on #5084. Mirrors the ``carve_out``
+    # row in ``config/ci-surfaces.yml``; a stem in only one of the two is the
+    # silent hole ``test_carve_out_mirrors_test_no_redirect_stems`` catches.
+    "test_13417_vectorless_rows",
     # #4921: the construct-lock pin builds TWO real embedded servers (one per
     # arm) under a forced check-then-act interleave and skips under the docker
     # redirect. Its stem is already in config/ci-surfaces.yml's carve-out list,
