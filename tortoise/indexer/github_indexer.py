@@ -73,7 +73,8 @@ Lifecycle decision table (THE rule):
   unless the word maps to `open`, which is withheld (a close against a row with no
   live holder re-fires for ever). ⛔ NOT "the POSITION, per direction", and not
   "the WORD where it has none" either: both are one case short. The cases are
-  enumerated once, in ``_object_state_to_issue_state``'s docstring.
+  summarised here and enumerated in full at
+  ``_object_state_to_issue_state``'s docstring.
   ⛔ FAMILIES 1 AND 2 ARE ANSWERED BEFORE THE POLARITY (closed/open) ARMS, on
   purpose: their answer therefore does not depend on ``isClosed``. It must not,
   because ``is_position_ended`` short-circuits on the marker alone and never looks
@@ -1317,12 +1318,13 @@ class GitHubIndexer:
 
         None = "no opinion": the Object is ABSENT or was never folded on either
         axis, OR one of the guards below applies — a latched word (always), an
-        unplaceable position, or a WIDE (`outdated`) term. ⚠️ The WIDE term is the
-        per-direction case, not a blanket `None`: its CLOSE fold is never dispatched
-        (no live holder), so it answers the POSITION where the row has an ENDED one,
-        `None` where that position is LIVE (it must get no opinion, and a close minted
-        against a row with no live holder re-fires for ever), and `"closed"` where the
-        row has no position at all — UNLESS the word maps to `open` (`_STATUS_TO_STATE`:
+        unplaceable position, or a WIDE (`outdated`) term whose POSITION leaves no
+        opinion (below). ⚠️ The WIDE term is the per-direction case, not a blanket
+        `None`: its CLOSE fold is never dispatched (no live holder), so it answers the
+        POSITION where the row has an ENDED one, `None` where that position is LIVE (it
+        must get no opinion, and a close minted against a row with no live holder
+        re-fires for ever), and `"closed"` where the row has no position at all —
+        UNLESS the word maps to `open` (`_STATUS_TO_STATE`:
         `in_progress`, `live`, `open`), which is withheld as `None` for that same
         reason. A word OUTSIDE the map (`outdated`, NULL) is therefore answered
         `"closed"`: it names no state to withhold on, and only a reopen can fold.

@@ -1114,7 +1114,8 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     POSITION where the row HAS one — `"closed"` once that position is ENDED, `None`
     while it is LIVE (nothing could ever close it) — and, where the row has NO
     position, `"closed"` unless the word maps to `open`, which is withheld as `None`.
-    The cases are enumerated once, on `_object_state_to_issue_state`'s docstring;
+    The cases are summarised here and enumerated in full on
+    `_object_state_to_issue_state`'s docstring;
     ⛔ NOT "per DIRECTION — the POSITION where the row HAS one, the WORD where it has
     none", which is one case short in BOTH halves. Round-4 finding 2 found that
     answering `None` for them silently dropped a reopen the projection WOULD apply.
