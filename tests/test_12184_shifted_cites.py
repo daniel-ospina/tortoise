@@ -607,10 +607,20 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
                 f"exactly ONE pair (the two-code-span `cache_projection.py` `:2485` form), so over "
                 f"{published_pairs} it is {published_pairs + 1}"
             )
-        if alt_drifters < drifters:
+        # ⛔ A BAND, not a lower bound. The two bases are one measurement under two counting decisions
+        # (`122 and 123 are one measurement under two counting decisions, not two findings`), and adding
+        # that one pair adds AT MOST one drifter — so the only legal numerators are `drifters` and
+        # `drifters + 1`. `alt_drifters < drifters` saw the downward violation and was blind to every
+        # overstatement: a numerator inflated by +8 or +67 over the primary's read `problems == []`, which
+        # is the exact direction a stale figure takes when a denominator moves under it (`#13599` review,
+        # finding 1 — measured on this head before the fix). It is the ONLY guard on this figure: the
+        # three-mention agreement arm cannot reach the alternative basis, because the document publishes
+        # `123` in that sentence alone, so there is no second mention to agree with.
+        if alt_drifters not in (drifters, drifters + 1):
             problems.append(
-                f"the alternative basis reads {alt_drifters} drifters, FEWER than the primary basis's "
-                f"{drifters} — adding a pair cannot remove a drifter"
+                f"the alternative basis reads {alt_drifters} drifters against the primary basis's "
+                f"{drifters} — one added pair can add at most one drifter, so it is {drifters} or "
+                f"{drifters + 1}"
             )
     return problems
 
@@ -658,8 +668,14 @@ def test_a_carried_forward_figure_is_reported() -> None:
 
     What cannot rot is the RELATION each mutant breaks: a pair count one under the measured one, an
     arithmetic figure that stops following its pair count, a ratio naming a denominator it does not carry,
-    one of the three mentions of the ratio disagreeing with the others, and an alternative basis level with
-    the primary. Each is applied to the sentence AS SHIPPED, by capture-group position.
+    one of the three mentions of the ratio disagreeing with the others, an alternative basis level with the
+    primary, and an alternative basis whose numerator is inflated past the one drifter that added pair can
+    contribute. Each is applied to the sentence AS SHIPPED, by capture-group position.
+
+    ⛔ The alternative basis is mutated on BOTH capture groups (`:1` pairs, `:2` drifters) on purpose: the
+    drifter half used to be read and thrown away (`_alt_drifters`), so the guard on the only figure in this
+    sentence without a second witness was never exercised by the control that exists to prove it works —
+    which is how a one-sided bound survived a round that found two other reachability defects here.
     """
     raw = (REPO / _AUDIT).read_text(encoding="utf-8")
     assert _figure_problems(raw) == [], "the shipped document must measure clean before it is mutated here"
@@ -693,7 +709,7 @@ def test_a_carried_forward_figure_is_reported() -> None:
     triple_pairs, triple_collisions = map(int, triple.groups()[1:])
     written, pairs, collisions, drifters, comparable = map(int, quadruple.groups())
     ratio_drifters, ratio_pairs = map(int, ratio.groups())
-    alt_pairs, _alt_drifters = map(int, alt.groups())
+    alt_pairs, alt_drifters = map(int, alt.groups())
 
     for match, overrides, why in (
         (
@@ -720,6 +736,18 @@ def test_a_carried_forward_figure_is_reported() -> None:
             alt,
             {1: alt_pairs - 1},
             "the alternative basis is one pair over the primary, not level with it",
+        ),
+        (
+            alt,
+            {2: alt_drifters + 7},
+            "the alternative basis's numerator is overstated past the one drifter its added pair can "
+            "contribute — the direction a stale figure takes when a denominator moves under it",
+        ),
+        (
+            alt,
+            {2: alt_drifters - 2},
+            "the alternative basis reads FEWER drifters than the primary — adding a pair cannot remove one "
+            "(the direction the one-sided bound used to be the only guard for, never exercised)",
         ),
     ):
         stale = _mutate(match, overrides)
