@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from . import derived_embedding
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
 
@@ -1580,6 +1581,10 @@ class EventAPI:
         refuse_unapproved_kinds_in_payload(
             payload, graph_approval_namespaces(g), spells=spells)
 
+    # ⛔ ONE ENCODE PER WRITE (#13447): the record write and the fold below both
+    # encode this row's text; the decorator binds one memo across the pair, so the
+    # second encode is free (`derived_embedding.one_encode_scope`).
+    @derived_embedding.one_encode_scope
     def _emit(self, type_: str, *record: dict, corrects=None,
               actor: str | None = None, **payload) -> dict:
         # ⛔ THE RECORD PAYLOAD IS POSITIONAL (`*record`), and only

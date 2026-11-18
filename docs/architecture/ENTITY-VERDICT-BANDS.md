@@ -41,7 +41,7 @@ names a file, not a blog.
 | the merge writes no `status` | `entity_resolver.apply_entity_merge` — the candidate's only props are `resolved_from`, `dedup_reviewed='merge'`, `reviewed` (~`:909-913`) | the retired carrier stays a live node |
 | the carrier keeps its `name` | `entity_resolver.apply_entity_merge` — the SURVIVOR gains `aliases[]` (~`:890-901`); nothing rewrites the carrier's `name` | both rows carry the same spelling |
 | the FTS index is `name`-only | `_FULLTEXT_INDEX_LABEL_FIELDS`'s `("Subject", ["name"])` / `("Object", ["name"])` | a name query matches both |
-| the retrieval filter is `status`-only | `search_engine.py:3079-3094` (`_STATUS_FILTERED_LABELS`, `:148`) — `resolved_from` count in `search_engine.py`, `ranking.py`, `session_link.py`, `assembly.py`: **0** | the carrier is search-visible and ranked |
+| the retrieval filter is `status`-only | `search_engine.py:3081-3096` (`_STATUS_FILTERED_LABELS`, `:148`) — `resolved_from` count in `search_engine.py`, `ranking.py`, `session_link.py`, `assembly.py`: **0** | the carrier is search-visible and ranked |
 | the capture path never consulted the resolver | `extractor_v2` S3 → `_fts_rows` → `sdk.tortoise_fts_query(..., include_terminal=True)` | and it opts *back into* the wider status view |
 | the tie rule | rows land in **id-keyed dicts**, order DISCARDED — `search_graph`'s id-keyed accumulator (`results[bucket[…]][rid] = row`; the comment in `_fts_rows` says the same) | carrier and survivor **tie** on the name-only index |
 
@@ -185,7 +185,7 @@ still a dedup candidate. Two reasons it is not a verdict value here:
 2. ⛔ **Writing `dedup_reviewed='link'` is worse than inert — it silently
    DEQUEUES.** The write is one call (`sdk.update_entity` → `_update_entity`'s `SET n
    += $props`), but the content review queue filters `dedup_reviewed IS NULL`
-   (`sdk.py:27861`), so any non-NULL value removes the row from review with
+   (`sdk.py:28014`), so any non-NULL value removes the row from review with
    **no verdict applied**. A `link` band that shipped only its writer would delete
    a review nobody counts.
 

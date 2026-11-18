@@ -255,6 +255,14 @@ def _derivation_pinned_off(monkeypatch: pytest.MonkeyPatch) -> None:
     pinned by `test_the_derived_columns_are_the_plans_own_binding` below, with a
     STUBBED derivation — the real encoder's values are
     `tests/test_13220_record_label_embeddings.py`'s subject, not this file's.
+
+    ⛔ THIS SUBSUMES `main`'s `_no_embedder` (`#13447`), which pinned the same
+    hazard one seam lower (`EmbeddingModel.get()` → `None`, so
+    `compute_embeddings` answers one `None` per text). Both make the file
+    hermetic; pinning `derived_embedding_columns` is the stronger of the two
+    because it cannot depend on how the real encoder arm handles a `None`, and
+    it is the reference `record_writer.write` actually resolves (`:2205`).
+    Keeping both autouse fixtures would be two pins on one hazard.
     """
     monkeypatch.setattr(rw, "derived_embedding_columns",
                         lambda record: rw._DerivedEmbedding())
