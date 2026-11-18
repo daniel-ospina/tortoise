@@ -302,9 +302,9 @@ map had to go) — measured at this head as `tortoise/live.py:1237,1247` and
 `tortoise/why.py:200`. That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:4382`, IS a retirement. The eighth
+retirement prose in `tortoise/mcp_server.py:4426`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:36687,36718`, one line each in a file this population already
+`tortoise/sdk.py:36707,36718`, one line each in a file this population already
 reached, whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
