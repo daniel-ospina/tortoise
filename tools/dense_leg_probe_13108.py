@@ -601,10 +601,25 @@ def measure_windows(sdk, names: list[str], concurrency: int, limit: int,
                     _sanitise_query_text(names[i % len(names)]),
                     entity_type="object", limit=limit, include_terminal=True,
                     _record_reads=False, _valid_time_rerank=False,
-                    # #12297's census: this probe's OUTPUT is the page the lever
-                    # moves, so it opts out for the same reason it already opts
-                    # out of `_valid_time_rerank` above — inheriting the rerank
-                    # would re-pick which rows survive `limit`, undisclosed.
+                    # #12297's census requires an opt-out or an intentional-keep
+                    # row here. Opt out — but NOT for the reason the page moves:
+                    # this call's return value is never bound, the mode share is
+                    # read through `require_hybrid_read` (which filters the
+                    # `rerank` trace entry out) and the only outputs are the
+                    # `leg == "vector"` entries and `latency_ms`. So the ONE
+                    # quantity the lever can move here is the measured WALL CLOCK
+                    # of the shipped read — the `latency_ms` this probe records
+                    # and #13108 quotes against the 500 ms budget. Pinning it off
+                    # is a RECORDED-BASELINE choice (`sdk.py`'s
+                    # `_rerank_candidates` docstring names the class), and it is
+                    # byte-identical to the default-OFF behaviour it was measured
+                    # under.
+                    # ⚠️ KNOWING DIVERGENCE: the eval's `window()`
+                    # (`tools/candidate_recall_11901.py`) and
+                    # `extractor_v2._fts_rows` both INHERIT the rerank, so this
+                    # read is not flag-for-flag the pair the mode share claims to
+                    # mirror — the share is unaffected (the `rerank` entry is
+                    # filtered), the latency would be.
                     _rerank_candidates=False,
                     leg_trace=trace)
             except Exception as e:  # a raised read is a SAMPLED failure
