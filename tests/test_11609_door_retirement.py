@@ -144,11 +144,14 @@ def _create_entity_dispatch_arms() -> tuple[str, ...]:
 
     ⛔ READ FROM THE DISPATCH, NEVER FROM `_ENTITY_ITEM_LABELS` (#13052 review at
     `2c3c9acc` — the second site of the class the round before it closed 100 lines above).
-    That map is interpolated into the `unknown type` message and decides NOTHING, which
-    was measured both ways: adding a real `elif t == "point":` arm to the dispatch leaves
-    it untouched (a false GREEN on exactly the drift these rows exist to catch), and
-    adding `"point"` to it alone changes no behaviour (a false RED). The arms are the
-    `if t == "<kind>":` / `elif t == "<kind>":` branches at the method's own body indent.
+    That map is ingest's PHASE-1 `entities[]` TYPE ALLOW-LIST (and the label map the
+    endpoint gate reads), so it is NOT the dispatch: adding a real arm to
+    `create_entity` leaves it untouched (a false GREEN on exactly the drift these rows
+    exist to catch), and adding a key to it alone opens a validation gate rather than a
+    writer branch (a false RED — and, at #13556 review N1, a real partial-mutation bug
+    when `point`/`diary` were added there for a MESSAGE; the message now reads
+    `_CREATE_ENTITY_TYPE_ARMS`). The arms are the `if t == "<kind>":` /
+    `elif t == "<kind>":` branches at the method's own body indent.
 
     ⛔ BOTH ACCEPTED SHAPES ARE READ (added by #11609 lane P1): a single arm
     `if t == "point":`, and a COMBINED arm `elif t == "point" or t == "diary":` — two
@@ -584,9 +587,10 @@ class TestProtectedDoorsStayLive:
         through it. ⛔ THE OTHER TWO OF THE FOUR ARE GONE, and how they left is the
         contract working: the two write doors were CALLED with their kind and had to
         still refuse it (that is `create_entity`'s dispatch branch — not its
-        `_ENTITY_ITEM_LABELS` map, which only interpolates into the `unknown type`
-        message and decides nothing); lane P1 made that call STOP refusing by building
-        the arms, which is exactly the signal the row existed to produce.
+        `_ENTITY_ITEM_LABELS` map, which is ingest's Phase-1 allow-list and carries no
+        `point`/`diary` key at all: #13556 review N1); lane P1 made that call STOP
+        refusing by building the arms, which is exactly the signal the row existed to
+        produce.
 
     The other NINE (`NO_CONTAINER_YET`) have no live container at all, so the only thing
     to measure is "still live, still not retired" — pinned below for them too. The two
