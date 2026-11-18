@@ -168,8 +168,15 @@ def test_the_published_decomposition_names_the_measured_operands():
     with `--check` printing `25 pinned counts match` over both (`#13368` R2-R4).
 
     ⛔ WHAT IT DOES NOT GRADE, stated rather than implied (`#13249` review,
-    handover item 2): it pins §0's decomposition, §0's count TABLE, §0's narrative
-    pair and §1's PRODUCT-surface row. It does NOT pin the `--all-surface` row that
+    handover item 2): it pins §0's decomposition, §0's narrative
+    pair and §1's PRODUCT-surface row, plus FOUR rows of §0's count TABLE —
+    `statement sites`, `` `plain` READS``, `non-Cypher door calls` and `AST door calls`.
+    It does NOT pin the shape-split rows under them (`860 (579 read, 281 write)`,
+    `adjacency` / `ep` / `traversal` / `fulltext` / `ddl` / `unresolved`, the two file
+    counts): those are DERIVED from the four that ARE graded, so a re-cut that moves
+    them without moving a graded row is not a stale publication, and pinning nine more
+    scalars buys a wider re-cut obligation for no false-PASS it would catch. It does
+    NOT pin the `--all-surface` row that
     sits beneath that row in §1's mode table: that population includes `tests/`, so
     a pin on it would red an unrelated PR for a number this document does not rest
     on, and NOT pinning it is a recorded decision (`#13098` review P2) — do not
@@ -207,8 +214,27 @@ def test_the_published_decomposition_names_the_measured_operands():
     table_ast = re.search(
         r"^\| \*\*AST door calls\*\* = census \+ non-Cypher \| \*\*(\d+)\*\* \|$",
         doc_text, re.MULTILINE)
-    assert table_non_cypher and table_ast, (
+    # The two OPERAND rows, not just the two derived ones: `non-Cypher` and `AST` are
+    # both COMPUTED from the pair below, so a re-cut that moved only the operands would
+    # red (a)/(b) and this arm alike — but the reverse is what shipped at `ffe10dd198`:
+    # the table published its own operands, and nothing here read them. Pinning the
+    # operands adds NO new failure surface: (a) and (b) already require a re-cut to move
+    # `sites` and `candidates` in the block and the narrative, so a re-cutter is already
+    # obliged to touch these rows. It closes the remaining way THIS table can go stale
+    # while every other publication is right — the exact class the arm exists for.
+    table_sites = re.search(
+        r"^\| \*\*statement sites \(this census\)\*\* \| \*\*(\d+)\*\* \|$",
+        doc_text, re.MULTILINE)
+    table_candidates = re.search(
+        r"^\| \*\*`plain` READS — the migration candidates\*\* \| \*\*(\d+)\*\* \|$",
+        doc_text, re.MULTILINE)
+    assert table_non_cypher and table_ast and table_sites and table_candidates, (
         "§0's count table rows moved or changed shape; re-cut this pin with them")
+    assert int(table_sites.group(1)) == sites, (
+        f"§0's table says {table_sites.group(1)} statement sites, the census measures {sites}")
+    assert int(table_candidates.group(1)) == candidates, (
+        f"§0's table says {table_candidates.group(1)} `plain` migration candidates, the census "
+        f"measures {candidates}")
     assert int(table_non_cypher.group(1)) == non_cypher, (
         f"§0's table says {table_non_cypher.group(1)} non-Cypher door calls, the census "
         f"measures {non_cypher}")
@@ -218,8 +244,19 @@ def test_the_published_decomposition_names_the_measured_operands():
 
     # (b) §0's narrative: `N of M product statements (P %)` — N is the candidate
     # count (plain READS), M is the statement sites, and P is DERIVED from them.
+    #
+    # ⛔ SCOPED TO §0's OWN TEXT. The pattern is deliberately loose about the line's
+    # PREFIX (a legitimate reword must not red) but it must not be loose about WHERE:
+    # searched over the whole document it takes the first occurrence anywhere, so any
+    # earlier prose that quotes the same phrase silently re-points this arm at the
+    # wrong region while §0's real narrative rots green — a false PASS, which is the
+    # failure mode every guard in this test exists to refuse (`#13249` review). The
+    # section bounds below make the shape guard do its job instead: if §0 stops
+    # publishing the pair, the arm REDS rather than matching some other section.
+    section0 = re.search(r"^## 0\..*?^## 1\.", doc_text, re.MULTILINE | re.DOTALL)
+    assert section0, "§0's section bounds moved (no `## 0.` … `## 1.`); re-cut this pin with them"
     narrative = re.search(
-        r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)", doc_text)
+        r"([\d,]+) of ([\d,]+) product statements \(([\d.]+) %\)", section0.group(0))
     assert narrative, "§0's 'N of M product statements (P %)' line moved; re-cut this pin with it"
     doc_candidates = int(narrative.group(1).replace(",", ""))
     doc_statement_sites = int(narrative.group(2).replace(",", ""))
