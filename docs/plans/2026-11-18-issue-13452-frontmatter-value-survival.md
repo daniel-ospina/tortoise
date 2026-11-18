@@ -533,6 +533,21 @@ substance — 8 of 8 flagged, every length pair exact — reproduces unchanged. 
 edited: it carries the review attestation the gate reads, and an unrelated edit wipes that proof
 (the rule is in `AGENTS.md`). The corrected figure is recorded here instead.
 
+**Recorded, not fixed — THIS PR's OWN body carries two stale present-tense figures.** Both were
+measured at `ae275460df93` by the fresh-context review and re-measured here:
+
+- *"contains exactly one commit"* — false at this head: `git log --oneline origin/main..HEAD | wc -l`
+  = **23**. The sentence was true when the body was written (the PR was rebased onto `main` as a
+  single commit); the review rounds then appended the rest. A merger reading "exactly one commit"
+  against a 23-commit branch is being told something false about the diff's SHAPE, which is why this
+  is recorded rather than left implicit in §7's moving-count rationale.
+- *"`pytest …` → **8 passed, 2 failed**"* — stale for the same reason §7 item 2 gives: tests are
+  appended to this file every round. At `ae275460df93` the same command reports **13 passed, 2
+  failed** (`15 collected`), the 2 being the pre-existing absence reds named above.
+
+The body is **not** edited — it carries the review attestation the gate reads, and editing it wipes
+that proof (`AGENTS.md`; the same rule that left #13476's `470` figure in place above).
+
 **Recorded, not fixed — a comment with NO space after the close is a PRE-EXISTING false block.**
 Found by the fresh-context review at `23cfffc260` and re-measured there. `aboutObjects: "x"# note`
 is loadable YAML — `yaml.safe_load` returns `"x"`, and `parse_frontmatter` agrees — but the arm
