@@ -6715,7 +6715,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-tense one is re-pointed wrongly (measured: 413 passed). `:10353`/`:10406`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
-        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` on `main`'s numbering) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which resolve at NO head this row names: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
+        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` at `d741bd4a5a`, changing the `register_source(..., raw_state=...)` rename that sits at `:9683` at this head) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which resolve at NO head this row names: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
         "(the same pair at the branch head `2584a86ec1`, `:10353`/`:10406` at the MERGE head)",
     ):
         assert _d5.count(_spelling) == 1, (
