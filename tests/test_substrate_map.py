@@ -1669,7 +1669,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to the figure §5 states, in eight moves, one per workstream:
+    moved to the figure §5 states, in nine moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
     `REFUSED_NOT_FOUND` enum docstring), #11729's runtime-label writers
@@ -1689,7 +1689,11 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     retirement prose in `tortoise/mcp_server.py:4281`, the seventh, whose point IS
     a retirement — and **#12915**'s (`#4282` Phase 2, lane B) `record_decision`
     docstring at `tortoise/sdk.py:33175`, the eighth, whose `Args:` block for
-    `artifact_id` names the retired label to state the D10 rule. Each move is the mechanism
+    `artifact_id` names the retired label to state the D10 rule — and **#13447**'s
+    `tortoise/derived_embedding.py:3`, the ninth: the seam module's opening paragraph
+    spells the five labels it spans, which is prose naming the retired label to state a
+    rule about it, in a file this population had not reached before (it lifts the FILE
+    count too, like #10976 and #11729). Each move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 
