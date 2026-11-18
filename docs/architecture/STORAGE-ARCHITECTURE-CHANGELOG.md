@@ -2696,3 +2696,23 @@ this document (`tests/_cite_resolution.py`, `tests/test_10191_record_move_doc_pi
 `tests/test_10000_source_prose.py`, `tests/test_10122_point_name_not_indexed.py`,
 `tests/test_11821_journal_vector_width.py`, `tests/test_7951_create_point_outbox.py`,
 `tests/test_7951_delete_point_outbox.py`, `tests/_about_call_time_census.py`).
+
+## §14.3 V2's `Source`-vector row — the delivery narration moves here (`#13490`)
+
+The V2 row in §14.3 stated its own rule as *"The rule that FILLS it landed at PR `#13473`,
+closing `#13418`"* — a change record inside a document that must state the design, which is the
+defect `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_
+or_change_narration` refuses (`<n> … landed … #<n>`), and it red-ed `test (a)` on `main`. The
+design sentence is unchanged in substance: the FILLING rule is
+`record_writer._RECORD_EMBEDDING_TEXT["SourceCreated"]`, derived from the payload's `_searchText`
+**ALONE**, with the `SourceVersioned` version transition served by the same entry and the same skip
+arms. What moved is only the delivery half, which belongs here per #8542:
+
+* PR `#13473` landed that rule and closed `#13418`;
+* the `#13412` document-vector text rule rode the same PR — it now CALLS
+  `projection.entities._build_search_text` instead of composing `title + content`.
+
+The row keeps every design claim it carried (the three `:Source` populations that derive nothing,
+the caller-vector passthrough, the live≠rebuild difference on a SERVED label); only the "landed at
+PR X, closing Y" clause became "is X", and "closed by the same PR" was dropped from the `#13412`
+clause for the same reason.

@@ -638,6 +638,36 @@ def test_every_leg_query_carries_a_secondary_sort_key():
         ("_query_nodes", ""):
             "cypher returned by the nested _sig_cypher helper; ranked in PYTHON "
             "by recency_tie_key — no ORDER BY by design",
+        # ⛔ #13490 — TWO EXISTENCE PROBES, which are not legs. Neither RANKS
+        # anything, so neither can leave its order to DB row order: each answer
+        # is `bool(result_set)`, and one row is the whole proof.
+        #   * `run_vector_query`'s readable-embedding probe (#8430): the census
+        #     sees `MATCH (n:) WHERE n.embedding IS NOT NULL` (the label and the
+        #     width expression are interpolated) with `… RETURN 1 LIMIT 1` — the
+        #     question is "is ANY row readable at this query's width", and the
+        #     row is then DISCARDED. ⛔ THE KEY IS THE CENSUS'S OWN 40-CHAR
+        #     PREFIX, so exactly ONE sibling shares it: the reason-count probe,
+        #     which is an anchored read in its own right (`RETURN count(*)`).
+        #     RESIDUAL, stated so it is not discovered as a surprise: a LEG
+        #     added INSIDE `run_vector_query` whose literal text begins with that
+        #     same prefix would inherit this declaration instead of being judged.
+        #     Nothing today does, and the shape is narrow — the prefix pins the
+        #     label interpolated and the `n.embedding IS NOT NULL` guard, i.e. an
+        #     embedding read, not a Point leg — but the declaration is by
+        #     (function, prefix), so a reader adding such a leg must re-read this
+        #     entry rather than assume the census judged it.
+        #   * `_index_yields_any_node` (#8429 review F2): `graph.query(probes[sig])`
+        #     — a SUBSCRIPT, so the census cannot see the two index signatures at
+        #     all. Both are `YIELD node … RETURN node.<id> LIMIT 1` and the caller
+        #     returns `bool(...)`.
+        # ⛔ WHAT WOULD MAKE THESE DECLARATIONS LIE: giving either probe a consumer
+        # that ranks or truncates its rows. Both callers are a boolean today,
+        # which is exactly what "no ORDER BY by design" claims and no more.
+        ("run_vector_query", "MATCH (n:) WHERE n.embedding IS NOT NULL"):
+            "readable-embedding existence probe — answer is bool(result_set), never a ranked list",
+        ("_index_yields_any_node", ""):
+            "index existence probe; the cypher arrives as probes[sig] (a subscript), both "
+            "signatures are YIELD node … RETURN node.<id> LIMIT 1, consumer is bool()",
     }
 
     checked = 0
@@ -726,7 +756,12 @@ def test_every_leg_query_carries_a_secondary_sort_key():
     assert anchored, (
         "FIXTURE NOT REACHED: not one id-anchored/aggregate read was recognised, "
         "so the no-ORDER-BY arm of this census judged nothing")
-    assert len(UNORDERED_ALLOWED) == 1, (
+    # ⛔ THE COUNT IS PINNED SO A THIRD ENTRY HAS TO BE ARGUED, NOT APPENDED. It
+    # moved 1 → 3 in #13490, and both additions are EXISTENCE PROBES whose whole
+    # answer is `bool(result_set)` — reasons spelled out on the entries above.
+    # An entry here is a read this census can no longer see, so a quiet append is
+    # how the #3019 guard stops guarding; the number is the review's prompt.
+    assert len(UNORDERED_ALLOWED) == 3, (
         "the no-ORDER-BY allow-list grew — every ADDED entry is a read this "
         f"census can no longer see: {UNORDERED_ALLOWED}")
     assert len(DYNAMIC_ALLOWED) == 1, (
