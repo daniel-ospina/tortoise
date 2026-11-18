@@ -630,6 +630,20 @@ def test_the_main_head_figures_the_header_names_are_still_counted() -> None:
     written is the figure this file last measured. A wrong-but-stable number passes; #13508 carries the
     head-selecting arm that would actually open it.
     """
+    # ⛔ THE POPULATION HAS AN ANTI-SHRINK ARM, and it is the file's own precedent applied to a new
+    # dict (`assert len(_PINS) == 47` below, `declared == pinned` in the sibling pin test). Without
+    # it the guard above is defeatable exactly the way an absent pin is not coverage: re-point a
+    # `main`-head figure in the document AND delete its row here, and the loop has nothing to check
+    # — measured on a copy of this tree at `25b0fd5f` (`:6854-6870` -> `:6855-6871` in the audit doc
+    # plus the row deleted) -> `1 passed, 10 deselected`, GREEN over a false correction. With the
+    # row present the same re-point reds. The count is the twelve addresses the header names beside
+    # this tree's figures, and a thirteenth is a re-derivation to make deliberately, not silently.
+    assert len(_MAIN_HEAD_FIGURES) == 12, (
+        f"_MAIN_HEAD_FIGURES carries {len(_MAIN_HEAD_FIGURES)} rows, not 12 — this dict is the only "
+        "reader of the `main`-head figures the audit header names, so a row deleted to make the "
+        "count guard pass is the coverage loss the loop above cannot see. Restore the row (the "
+        "figures are listed beside this tree's in the header) or update this count with the "
+        "re-derivation that justifies it")
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for token, expected in _MAIN_HEAD_FIGURES.items():
         actual = text.count(token)
