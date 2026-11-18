@@ -432,16 +432,28 @@ suite RE-DERIVES every declared one; the committed files declare none, and say s
 protection they do not have.
 
 ⛔ **These three files were RE-SERIALIZED once, mechanically, and it is not a seventh annotation group.**
-Their runs wrote `NaN` tokens into four cells per `k` (`mde_paired`, `mde_independent`, `correlation.rho`,
-`correlation.se_reduction`), and RFC 8259 does not admit `NaN` in its number grammar, so the committed
-evidence could not be loaded by any strict parser at all (node's `JSON.parse` rejected the whole file) and
-the tolerant ones mapped the token to `null` — the same cell an unrecorded field occupies (`#13267`
-review 12, P2). They were re-encoded with the tool's own writer (`_write_json` → `_json_safe`), which
-maps every non-finite float to `null`; **it changes no other byte, adds no field and loses no
-information** — the value a `NaN` stood for is carried by the `mde_note` that sits beside it
+Their runs wrote `NaN` tokens into four KINDS of cell (`mde_paired`, `mde_independent`,
+`correlation.rho`, `correlation.se_reduction`) — all four per `k` in the control (16 tokens), but only
+the two correlation cells per `k` in each point artifact (8 each: their `mde_paired` /
+`mde_independent` are finite, `0.0383…` at k=15) — and RFC 8259 does not admit `NaN` in its number
+grammar, so the committed evidence could not be loaded by any strict parser at all (node's `JSON.parse`
+rejected the whole file) and the tolerant ones mapped the token to `null` — the same cell an unrecorded
+field occupies (`#13267` review 12, P2). They were re-encoded with the tool's own writer (`_write_json`
+→ `_json_safe`), which maps every non-finite float to `null`; **it changes no other byte, adds no field
+and loses no information** — the value a `NaN` stood for is carried by the `mde_note` that sits beside it
 ("NOT ESTIMABLE: no discordant pair was observed …"). So the count above stays SIX annotation FIELD
 groups: this is a re-encoding of run output, not an annotation of it, and a reader can verify it by
 diffing the three files against the run that produced them.
+
+⚠️ The re-encoding corrected the FILES; the three artifacts' own `provenance.git_head_note` went on
+describing the old bytes — it said the control's populated `mde_note` "sits beside a `nan`
+`mde_paired`" while the cell beside it is `null`, i.e. the one carrier a reader uses to tell WHICH
+null a cell is named a token the file no longer contains (`#13267` review 13 F2). Those three notes
+were corrected BY HAND and are the only part of this change that is not mechanical: they are
+hand-carried, nothing regenerates them (the tool's current writer emits a different, generic note), so
+this is a semantic correction of the evidence's prose, not a re-serialization.
+`test_no_artifact_note_claims_a_token_the_file_no_longer_carries` holds a note that names the token
+to the `null` encoding it became.
 
 The tool records, in the artifact's own `provenance` block, the sha256 of its own bytes and whether those
 bytes were committed (`tool_sha256` / `tool_uncommitted`) — because `git_head` alone does **not** identify

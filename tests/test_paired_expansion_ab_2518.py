@@ -1253,13 +1253,20 @@ def _strict_round_trip(text: str) -> dict:
 
 
 def test_every_committed_artifact_is_strict_json():
-    """F1 — the evidence had four cells per `k` that no strict reader could load.
+    """F1 — the evidence carried cells no strict reader could load.
 
     Measured before the fix (`#13267` review 12): 16 bare `NaN` tokens in the
     control, 8 in each point artifact, and `node -e 'JSON.parse(...)'` on the
     control raised `SyntaxError: Unexpected token 'N', … "rho": NaN,`. The
     suite could not see it *by construction* — it reads through Python's lenient
     decoder — so the invalid encoding was invisible to every assertion here.
+
+    ⛔ The blast radius is four *kinds* of cell, not "four cells per `k` in every
+    file" (`#13267` review 13 F3): the control holds all four per `k` (4 × 4 = 16),
+    while each point artifact holds only the two correlation cells per `k` (4 × 2 =
+    8) because its `mde_paired` / `mde_independent` are finite. The counts below are
+    the measured ones; `test_the_briefs_blast_radius_count_matches_the_cells_that_were_nulled`
+    holds §8's prose to the same shape.
     """
     seen = set()
     for path in sorted(_DOCS.glob("*.json")):
@@ -1307,7 +1314,7 @@ def test_the_writer_encodes_a_not_estimable_mde_as_strict_null(tmp_path):
     assert cell["correlation"] == {"rho": None, "se_reduction": None}
 
 
-def test_a_null_cell_is_distinguishable_from_an_unrecorded_one():
+def test_a_null_cell_is_distinguishable_from_an_unrecorded_one(tmp_path):
     """F1's second half: the encoding must not collapse into "never recorded".
 
     `_ids_digest(None)` is *unrecorded* while `_ids_digest([]) == sha256(b"")` is
@@ -1315,6 +1322,18 @@ def test_a_null_cell_is_distinguishable_from_an_unrecorded_one():
     null count cannot read as a measured one. The MDE needs the same separation,
     and it has it: the cell is PRESENT and null, and the `mde_note` beside it names
     the reason — so an absent key and a not-estimable value are different facts.
+
+    ⛔ `#13267` review 13 F1: the contrast used to be asserted with
+    `assert "no_such_field" not in cell` — the absence of a key *literally named*
+    `no_such_field`, a value no mutation of the fix can move, so it read as a
+    presence-vs-absence guard while testing nothing. The contrast is now made where
+    it can fail, in both places it lives: at the DATA level `cell.get(…, "ABSENT")`
+    separates absent / recorded-null / the pre-fix lenient-parsed `nan`, and at the
+    WRITER level a real cell (present, null) is written beside a copy with the field
+    genuinely absent and the two must stay distinguishable in BOTH directions — the
+    writer may neither drop the null (`{k: v for k, v in … if v is not None}` reds
+    the first row with `KeyError`) nor manufacture the key for the stripped copy (a
+    writer that back-fills known fields reds the third).
     """
     control = _artifact("paired-object-60-control.json")
     cell = control["arms"]["object"]["per_k"]["k=15"]
@@ -1323,6 +1342,15 @@ def test_a_null_cell_is_distinguishable_from_an_unrecorded_one():
     # as None — and the pre-fix `NaN` bytes (lenient-parsed to nan) read as neither
     assert cell.get("mde_paired", "ABSENT") is None
     assert "NOT ESTIMABLE" in cell["mde_note"]
+
+    stripped = {key: value for key, value in cell.items() if key != "mde_paired"}
+    assert "mde_paired" not in stripped      # genuinely ABSENT, not null
+    out = tmp_path / "null-vs-absent.json"
+    P._write_json(out, {"present_null": cell, "absent": stripped})
+    written = _strict_round_trip(out.read_text())
+    assert written["present_null"]["mde_paired"] is None        # kept as null
+    assert "mde_paired" not in written["absent"]                # not invented
+    assert written["absent"] != written["present_null"]
     # a finite MDE keeps its number and needs no note
     point = _artifact("paired-point-300.json")
     finite = point["arms"]["point"]["per_k"]["k=15"]
@@ -1341,6 +1369,79 @@ def test_json_safe_maps_only_non_finite_floats_to_null():
     assert P._json_safe({"a": [float("nan"), 1.5]}) == {"a": [None, 1.5]}
     assert P._json_safe((float("inf"),)) == [None]
     assert P._json_safe("NaN") == "NaN"   # a string is not a non-finite float
+
+
+def test_no_artifact_note_claims_a_token_the_file_no_longer_carries():
+    """F2 — the re-encoding left three `git_head_note`s describing a `nan` cell.
+
+    ⛔ `git_head_note` is THE carrier a reader uses to decide *which* null a cell is
+    — the job F1's cell-level encoding exists to do, one layer up — so a note naming
+    a `NaN` the file no longer contains collapses exactly that distinction. Measured
+    at the pre-fix head (`#13267` review 13 F2): all three artifacts said the
+    control's populated `mde_note` "sits beside a `nan` `mde_paired`" while the cell
+    alongside it is `null`.
+
+    The pin is written against the defect's *shape* rather than one sentence: a note
+    that still names the token must also say the file encodes it as strict `null`,
+    so the two can never disagree again. A note that does not mention the token (a
+    future run's generic writer text) is unaffected.
+    """
+    for name in _ARTIFACTS:
+        note = _artifact(name)["provenance"]["git_head_note"]
+        assert note, f"{name} records no `git_head_note`"
+        if "nan" in note.lower():
+            assert "encodes" in note and "`null`" in note, (
+                f"{name}'s `git_head_note` names the `NaN` token without saying the "
+                f"file encodes it as strict `null` — a reader cannot tell which "
+                f"null the cell is: {note!r}")
+
+
+#: The cell kinds the runs wrote `NaN` into (§8's blast radius).
+_NAN_CELL_PATHS = ("mde_paired", "mde_independent",
+                   "correlation.rho", "correlation.se_reduction")
+
+
+def _null_cell_paths(cell: dict) -> list[str]:
+    """The `_NAN_CELL_PATHS` entries this cell records as `null` (not estimable)."""
+    nulled = []
+    for path in _NAN_CELL_PATHS:
+        value = cell
+        for part in path.split("."):
+            value = value[part]
+        if value is None:
+            nulled.append(path)
+    return nulled
+
+
+def test_the_briefs_blast_radius_count_matches_the_cells_that_were_nulled():
+    """F3 — §8 said "four cells per `k`" for all three files; two of them held two.
+
+    ⛔ Measured on the pre-fix blobs (`#13267` review 13 F3): 16 bare `NaN` tokens in
+    the control and **8** in each point artifact, because a point artifact's
+    `mde_paired` / `mde_independent` are finite (`0.0383…` at k=15). The paragraph
+    exists so a reader can verify the re-encoding, which makes it the one place a
+    50 % overstatement must not stand — and the same count was restated in this
+    file's own docstring, so the shape is pinned here instead of living in prose.
+    """
+    measured = {}
+    for name in _ARTIFACTS:
+        art = _artifact(name)
+        per_k = [cell for block in art["arms"].values()
+                 for cell in block["per_k"].values()]
+        shapes = {tuple(_null_cell_paths(cell)) for cell in per_k}
+        assert len(shapes) == 1, f"{name}: the null cells are not the same in every `k`: {shapes}"
+        measured[name] = len(next(iter(shapes)))
+    assert measured == {"paired-object-60-control.json": 4,
+                        "paired-point-300.json": 2,
+                        "paired-point-300-short-query.json": 2}, measured
+
+    brief = (_DOCS / "research-brief.md").read_text()
+    assert "all four per `k` in the control (16" in brief, (
+        "§8 must state the control's four-per-`k` count (16) where a reader verifying "
+        "the re-encoding finds it")
+    assert "the two correlation cells per `k` in each point artifact (8 each" in brief, (
+        "§8 must state the point artifacts' two-per-`k` count (8 each) — the sentence "
+        "that used to claim four per `k` for all three files")
 
 
 # ── the brief's own tables, parsed as a reader sees them ────────────────────
