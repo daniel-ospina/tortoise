@@ -284,7 +284,7 @@ R2 changes an **invariant**, not a ruling sentence. Two recorded statements, bot
   then write without a vector, **on the four derived-entity folds only** (`tortoise/embeddings.py:1712`, the arm
   at `:1852`). ⚠️ The sentence *"the decision to embed synchronously IS structural"* is **`#13232`'s synthesis
   comment** (2026-11-17), not `#13229`'s; the decision it names has its recorded home at
-  `docs/architecture/STORAGE-PICTURE-2026-11-17.md:178` → **§12.2a / `#5008`**, and `#13229` is the PR that
+  `docs/architecture/STORAGE-PICTURE-2026-11-17.md:177` → **§12.2a / `#5008`**, and `#13229` is the PR that
   implemented the bounded form. Attribute it there, not to the PR.
 
 ### 3.2 What has changed since — and what has *not*
