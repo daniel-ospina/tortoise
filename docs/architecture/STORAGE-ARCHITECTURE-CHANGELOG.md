@@ -2540,9 +2540,10 @@ comment recording the correction.
 **⚠️ And every location above is cited by heading NAME, not by line number — a review finding, and the fix for its
 root.** Earlier revisions of this entry cited `:1241`, `:1244`, `:1206–1211`, then `:1250` and `:1213–1217` (plus
 §12.1b's `:1080–1168`). ⚠️ **Those cites did not fail the same way, and the difference is the point:**
-`:1241` — the entry's FIRST version — was **wrong on arrival** (§12.2 was already at `:1244` on this base); `:1244` and
-`:1206–1211` were **correct when written and rotted** under later commits in this same PR — a rebase plus this PR's own
-insertions above them — the first arriving at §12.1d's *"the index earns very little today"* item, a LATENCY paragraph,
+`:1241` — the entry's FIRST version — was **wrong on arrival**: §12.2 sat at `:1234` on the base that revision was
+written against (`6264dc670c`, the PR's stated base) and at `:1244` in its own tree, so `:1241` matched neither; `:1244` and
+`:1206–1211` were **correct when written and rotted** under this PR's own later insertions above them — the first
+arriving at §12.1d's *"the index earns very little today"* item, a LATENCY paragraph,
 in the entry whose whole purpose is to establish that §12.2 is not the latency section, and the second ending one line
 before the clause it named; while `:1169`, `:1250`, `:1213–1217` and `:1080–1168` were each **correct when written and
 still correct at this head**. So the failure is not "a later commit moved every number": line numbers in a document
@@ -2578,8 +2579,10 @@ than on one of them as it was.
 and this edit alters neither. ⚠️ **That is a claim about the argument, not about the sentence's text** — the ledger
 sentence immediately following the changed ones — same paragraph, not the next one — was itself revised on `main` by
 `#13435` in the same window (it now says *“held for a row the record already has”* and carries the two-population
-clause; it opens *"size is the ledger rather than the latency: the graph-side copy is bytes on provisioned, unevictable
-RAM held for a row"*), and this rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
+clause; its greppable span *"size is the ledger rather than the latency: the graph-side copy is bytes on provisioned,
+unevictable RAM held for a row"* **continues** the sentence opening *"What holds at EVERY size is the ledger rather than
+the latency"* — split after "EVERY" by the hard wrap, which is why a contiguous span inside it is quoted rather than
+the opening words), and this rebase kept `main`'s version of it rather than re-asserting the older wording. The three-line figure pair and the
 ledger/sequencing conclusion are what this entry claims survived; nothing here re-states the neighbouring sentence as
 though it were unchanged. No decision was reopened, no figure was retired, and nothing here authorises removal — the
 record-first sequencing and its release boundary are untouched (§12.1c's DECIDED block, `#11395` comment `6956793300`).
