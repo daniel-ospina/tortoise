@@ -159,20 +159,21 @@ class TestRegistryEquivalence:
 
             68 − 14 + 6 = 60   lane B (WRITE/MUTATE containers)
             60 −  7 + 6 = 59   lane C (SOURCES/MINE/SESSION)
-            59 −  9 + 5 = 55   #12951 (READ/QUERY)              = origin/main @ 486f5ca
-            55 −  7 + 0 = 48   THIS PR (door retirement, lane E) = measured at this head
+            59 −  9 + 5 = 55   #12951 (READ/QUERY)
+            55 −  7 + 0 = 48   #13052 (door retirement, lane E)
+            48 −  2 + 0 = 46   THIS PR (#11609 P2 confidence arms)
 
         Retired composes the same way, and it is a UNION — no wave drops another's
-        rows: 23 + 7 + 14 = 44 at main, + 9 = **53** after #12951, + 7 = **60** here.
-        The lane-E wave adds NO container rows: it removes doors whose containers
-        were already advertised by the three Phase 2 waves, so the live delta is
-        exactly −7 and the arithmetic has no `+ n` term.
+        rows: 23 + 7 + 14 = 44 at main, + 9 = **53** after #12951, + 7 = **60** after the
+        door-retirement wave, + 2 = **62** here. The confidence-arms wave adds NO
+        container rows either: `tortoise_check_confidence` was already advertised and the
+        arms are PARAMETERS on it, so the live delta is exactly −2 and the arithmetic has
+        no `+ n` term.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
-        # lane C composes on top of lane B (59), then the READ/QUERY wave (55), then
-        # THIS PR's door-retirement wave: 55 - 7 + 0 = 48.
-        assert len(TOOL_REGISTRY) == 48, f"Expected 48, got {len(TOOL_REGISTRY)}"
+        # …then THIS PR's confidence-arms wave: 48 - 2 + 0 = 46.
+        assert len(TOOL_REGISTRY) == 46, f"Expected 46, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated, the 5 #4282 container members, the 14 #11609 lane B
@@ -180,7 +181,7 @@ class TestRegistryEquivalence:
         # members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
 
-        assert len(retired) == 60, f"Expected 60 retired, got {len(retired)}"
+        assert len(retired) == 62, f"Expected 62 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -254,7 +255,11 @@ class TestRegistryEquivalence:
         # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
         # `tortoise_overview` left this set when #4282 retired it into
         # `tortoise_graph_overview` — the container is the W3 consolidation now.
-        w_consolidations = {"tortoise_recall", "tortoise_delete",
+        # #11609 P2: W1's `tortoise_recall` left the same way — the confidence
+        # container grew a `recall=True` arm and the door retires FORWARD into it, so
+        # the capability assertion follows the container (asserting the NAME would
+        # re-assert the surface shape the approved target removes).
+        w_consolidations = {"tortoise_check_confidence", "tortoise_delete",
                             "tortoise_create_edge",
                             "tortoise_graph_overview", "tortoise_get_entity",
                             "tortoise_ingest",
@@ -264,6 +269,11 @@ class TestRegistryEquivalence:
                             "tortoise_adjust_relationship"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
+        # …and the arm that keeps W1's recall capability reachable by name.
+        assert "recall=True" in _rui["tortoise_recall"], (
+            "#888 W1's recall capability must name the arm that serves it — a pointer "
+            "without `recall=True` lands the caller on the calibration view, a "
+            "different read")
         # #454-era surface tools covered by this PR's tests
         for name in ("tortoise_query", "tortoise_suggest_entry_points",
                      "tortoise_graph_overview"):

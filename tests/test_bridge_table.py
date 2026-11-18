@@ -818,7 +818,10 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # 53 -> 60: #11609's DOOR-RETIREMENT wave (lane E) retires seven doors FORWARD into
     # containers that were already advertised, so seven rows gain a `use_instead` and no
     # container row arrives: 53 + 7 = 60, the same number `counts.retired` derives.
-    assert len(retired) == 60, f"expected 60 retired rows, got {len(retired)}"
+    # 60 -> 62: #11609 P2's CONFIDENCE-ARMS wave retires `compute_confidence` and `recall`
+    # forward into `tortoise_check_confidence`, which was already advertised — two rows
+    # gain a `use_instead`, no container row arrives: 60 + 2 = 62.
+    assert len(retired) == 62, f"expected 62 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "
