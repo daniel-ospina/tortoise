@@ -411,6 +411,33 @@ def test_the_budget_is_a_bound_and_it_is_positive():
     assert record_vector._FOLDED_TERMINAL_KEY_BUDGET > 0
 
 
+def test_the_bind_budget_is_DRIVEN_and_the_decline_is_NAMED(monkeypatch):
+    """⛔ THE THRESHOLD MUST BE ABLE TO FIRE — mentioning it is not a bound.
+
+    The AST pin above (`test_the_bind_budget_DECLINES_rather_than_answering_None`)
+    only sees that the guard EXISTS: it reads the constant out of an `ast.If` and
+    the `raise` out of its body, so widening the threshold to a value no fold can
+    reach — `> _FOLDED_TERMINAL_KEY_BUDGET` to `> _FOLDED_TERMINAL_KEY_BUDGET +
+    10**9` — left this whole file green (`#13466` review, mutation survivor: 71
+    passed). The constant would still be named, the raise would still be the
+    branch body, and the guard would be an enforcer that can never fire.
+
+    This DRIVES `budget + 1` keys through `vector_search` and requires the NAMED
+    decline, which is the behaviour the docstrings claim.
+
+    RED if the threshold stops being reachable, and RED if the arm stops raising
+    `RecordVectorDeclined` (a `return None` or a silently clamped list is the
+    fail-OPEN direction `#689` exists to refuse).
+    """
+    budget = record_vector._FOLDED_TERMINAL_KEY_BUDGET
+    keys = [f"o_13422_terminal_{index}" for index in range(budget + 1)]
+    with pytest.raises(record_vector.RecordVectorDeclined) as declined:
+        _run_folded_read(monkeypatch, (keys, len(keys)))
+    message = str(declined.value)
+    assert str(budget) in message, message
+    assert "bind budget" in message, message
+
+
 # ── 5. the folded arm leaves the graph its #11691 reserve ────────────────
 
 def _folded_path_statement_sites() -> int:
@@ -673,6 +700,64 @@ def test_the_prefetch_row_budget_declines_instead_of_truncating():
         "row set")
     assert "LIMIT %s" in cur.sql, cur.sql
     assert cur.params[-1] == budget + 1, cur.params
+
+
+def test_the_probe_column_is_POPPED_before_the_projection(monkeypatch):
+    """⛔ THE POP IS LOAD-BEARING, AND NOTHING PINNED IT (`#13466` review).
+
+    `node_from_row` refuses an unclassified column by design, so handing it the
+    prefetch's `has_embedding_vec` probe makes EVERY read of these two labels
+    raise `UnknownRecordColumn` — i.e. a silent graph fallback for `object` and
+    `subject` on every read, the exact `#689`-cage-not-being-served failure this
+    PR exists to remove.
+
+    Mutation survivor that made this test necessary: `row.pop("has_embedding_vec")`
+    to `row.get("has_embedding_vec")` left **71 tests green** in this file,
+    `test_13220` and `test_11691` — every DB-free pin either stubs
+    `node_from_row` (so the extra key is invisible) or returns before the pop.
+
+    Written as a spy on the row the projection RECEIVES, not as a call into the
+    real projection: the claim is about the row's SHAPE, and a realistic
+    `object` row would make this pin depend on the placement table instead of on
+    the pop it is here to protect.
+    """
+    import tortoise.cache_projection as cp
+
+    seen: list[dict] = []
+
+    class _Node:
+        """The only two attributes the fold reads — a double, not a projection."""
+
+        def __init__(self, key):
+            self.key = key
+            self.props: dict = {}
+
+    def _spy(label, row):
+        seen.append(dict(row))
+        return _Node(row.get("id"))
+
+    monkeypatch.setattr(record_vector, "_rows_as_dicts",
+                        lambda cur: [{"id": "o_13422_probe",
+                                      "has_embedding_vec": True}])
+    monkeypatch.setattr(cp, "node_from_row", _spy)
+    monkeypatch.setattr(cp, "read_lifecycle_events", lambda conn, **kwargs: [])
+
+    class _NoopCursor:
+        """The prefetch's `execute` — the rows it returns are stubbed above."""
+
+        def execute(self, sql, params=None):
+            pass
+
+    record_vector._folded_terminal_keys(
+        object(), _NoopCursor(),
+        record_vector._Scope(org_id="org", graph_id="graph"), "object", None)
+
+    assert seen, "the projection was never reached — the fold returned early"
+    assert "has_embedding_vec" not in seen[0], (
+        "the probe column reached `node_from_row`, which refuses an "
+        "unclassified column: every `object`/`subject` read would raise "
+        "`UnknownRecordColumn` and fall back to the graph, silently")
+    assert "id" in seen[0], seen[0]
 
 
 def test_the_prefetch_event_budget_declines_and_bounds_the_event_read(monkeypatch):
