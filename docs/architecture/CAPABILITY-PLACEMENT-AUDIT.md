@@ -123,12 +123,16 @@ above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
 `cache_projection.py` `:2485`, `:2542`, `:2714`, `:2714-2715`, `:2724-2726`, `:2776`, `:3841` and
 `projection/entities.py` `:5666` — **eight addresses that open at `main` and not at the pin** (measured,
-`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `ae54df166d`: the pin's `:3841` is
+`git show <head>:<path> | sed -n '<N>p'` at `ccb49741b2ec` vs `ae54df166d`: the pin's `:3735` is
 `for prop in sorted(STORED_VECTOR_PROPS):` — the `MERGE (n:…) SET n += $props` this document quotes is the
-pin's `:3732` — and `:3841` carries the `cache_tier` arm at `main`; the pin's `:2776` is
-`if k not in tail_denied})` — the `tail_denied = forbidden | {` this document quotes is the pin's `:2710` —
-and `:2776` carries `tail_denied = forbidden | {` at `main`; `projection/entities.py`
-`:5666` is a comment at the pin and the `s.summary=coalesce($summary, s.summary, '')` write at `main`).
+pin's `:3732` — and that pair reads `:3837` / `:3834` at `main`, where the `cache_tier` arm is `:3735` (the
+pin's `:3633`); the pin's `:2715` is `if k not in tail_denied})` — the `tail_denied = forbidden | {` this
+document quotes is the pin's `:2710` — and `main` holds those two at `:2720` / `:2715`; and
+`projection/entities.py` `:5666` is a comment at the pin AND at `main` (the
+`s.summary=coalesce($summary, s.summary, '')` write sits at `:5598` there and `:5646` at `main`) and is
+the write on this tree — ⛔ every number in this clause was taken with `grep -n` on the tree that names
+it, never by applying a delta: the two states are DIFFERENT files at DIFFERENT offsets, so a single shift
+cannot describe the pair, and one applied here is what turns a pin-side description into a false one).
 Five of the eight are already asserted at `main` by `_PINS` in `tests/test_12184_shifted_cites.py`, and the
 test beside this paragraph pins all eight to the content they quote. They are listed here now. ⚠️ **So the
 enumeration is what has been RE-DERIVED, each entry carrying the head it was measured at — never a claim

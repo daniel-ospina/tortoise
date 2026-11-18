@@ -283,10 +283,12 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
 
     The drift figures and the two pin-side descriptions below were each corrected by the `#13083` review:
     the counts still read `322`/`216`/`106` for a file that measures `326`/`214`/`112`, and the pin-side
-    prose described `:3778` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; `:3778`
-    is `for prop in sorted(STORED_VECTOR_PROPS):`) and `:2755` as `placement_spellings()` (that function is
-    the pin's `:1798`; `:2755` is `if k not in tail_denied})`). Nothing asserted them, so both could revert
-    silently — that is what this test stops.
+    prose described `:3778` as the `MERGE … SET n += $props` (that statement is the pin's `:3732`; the
+    `for prop in sorted(STORED_VECTOR_PROPS):` line is the pin's `:3735`, and `:3778` names neither — ⛔
+    measured with `grep -n` on `ccb49741b2ec`, because the `:3778` in this sentence is the address the
+    prose used to name, not the statement it claimed sat there) and `:2755` as `placement_spellings()`
+    (that function is the pin's `:1798`; `:2755` is `if k not in tail_denied})`). Nothing asserted them, so
+    both could revert silently — that is what this test stops.
 
     ⛔ It does NOT prove the figures are CURRENT: a figure goes stale the moment this file gains or loses a
     cite, and this test would happily pass over a newly-wrong number. Re-measuring is the header's own
@@ -300,7 +302,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
-        "the pin's `:3841` is",
+        "the pin's `:3735` is",
         "for prop in sorted(STORED_VECTOR_PROPS):",
     ):
         assert claimed in text, (
@@ -530,7 +532,7 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     assert "cache_projection.py" in header, (
         "the header's `main` set names no `cache_projection.py` address, but that module carries eight "
-        "cites in this document that open at `main` and NOT at the pin (the pin's `:3841` is "
+        "cites in this document that open at `main` and NOT at the pin (the pin's `:3735` is "
         "`for prop in sorted(STORED_VECTOR_PROPS):`; the `MERGE … SET n += $props` this document "
         "quotes is the pin's `:3732`). An enumeration that omits them is not the set it claims to be."
     )
