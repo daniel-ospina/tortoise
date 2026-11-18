@@ -308,11 +308,18 @@ class TestTheArmArgumentsNameTheirArm:
         against NOTHING armed, so an explicitly-armed call carrying the other arm's
         arguments was served with them on the floor."""
         sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
-        sdk2, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
+        _sdk2, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
         with pytest.raises(ValueError) as exc:
             sdk.check_confidence(**kwargs)
         assert arg in str(exc.value), str(exc.value)
         assert f"{off}-arm argument(s)" in str(exc.value), str(exc.value)
+        # ⛔ AND THE REFUSAL IS BEFORE DISPATCH. Both arms' methods are stubbed, not just
+        # the armed one: a refusal that ran AFTER reaching a handler would have written
+        # before raising, and an assertion on the message alone cannot see that. Measured
+        # this way, the two logs also keep the second stub from being a dead assignment.
+        assert calls == [] and calls2 == [], (
+            f"the off-arm refusal dispatched anyway: recall_state={calls}, "
+            f"compute_confidence={calls2}")
 
     @pytest.mark.parametrize("kwargs,arg", [
         ({"recall": True, "query": "q", "factors": [{"id": "f1"}]}, "factors"),
