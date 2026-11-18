@@ -237,16 +237,16 @@ def test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node():
                 "own docstring. Point at the artifact that says it")
 
 
-# NOTE (reconciliation, `#10852`): the projection-door doc guard that briefly
-# lived here as `test_the_projection_door_doc_does_not_claim_a_re_capture_repairs_a_legacy_node`
-# now lives in `tests/test_10000_cache_projection_doc_pin.py`. Two lanes reached
-# the same fix; the surviving guard is the DB-free one registered in `tier1`,
-# because the guarded artifact is under `docs/` and a docs-only diff runs `tier1`
-# ONLY — in this file (the `core` surface, one throwaway FalkorDB per case) the
-# doc arm would sleep on exactly the diff that re-arms the claim. Nothing is
-# lost: that file asserts the same absence/presence pair, over the WHOLE doc,
-# plus the doc<->module-docstring agreement and the resolvability of every
-# `test_*` the doc's "### The pin" section cites.
+# NOTE (reconciliation, `#10852`, retired by `#13439`): a projection-door DOC
+# guard once lived here and then in `tests/test_10000_cache_projection_doc_pin.py`.
+# `#13439` retired it: it asserted the doc's wording, and the behaviour it stood in
+# for is asserted here — `test_a_re_capture_does_not_heal_a_pre_fix_node` (below)
+# measures that a replay writes nothing, which is the mechanism the doc's
+# "a re-capture does not repair" sentence rests on. The document is the TARGET
+# (`docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md`); this test
+# is what makes the claim true or false, so it does not need the prose pinned back
+# at it (see `CONTRIBUTING.md`, "A test asserts behaviour; a document states the
+# target").
 
 
 def _capture(sdk, session_id: str) -> dict:

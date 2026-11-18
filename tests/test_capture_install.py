@@ -3108,13 +3108,16 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     assert "hooks are ide-only" not in listing.stdout.lower(), listing.stdout
 
 
-# ⛔ THE DOC↔MESSAGE PIN LIVES IN ITS OWN `tier1`-REGISTERED MODULE
-# (`tests/test_11810_platform_seams_doc_pin.py`, #11810 review r7 P2). It was
-# here first, and that is why it was asleep: `docs/` is in `NON_PYTHON_PREFIXES`,
-# so a docs-only edit of `platform-seams.md` takes the tier1-only early return —
-# and THIS file is registered on `api` + `core`, not `tier1`. The pin ran zero
-# times on exactly the change it exists to catch. Do not move it back: a pin on a
-# doc must live on the surface that tests docs the diff selects.
+# ⛔ THE DOC↔MESSAGE PIN THAT USED TO LIVE IN ITS OWN `tier1`-REGISTERED MODULE
+# (`tests/test_11810_platform_seams_doc_pin.py`) was RETIRED by `#13439`: its
+# behaviour arm is the install-message assertion ABOVE (both mentions of the
+# HOSTED scoping, plus the absence legs on the unscoped form), which this file
+# already carried. The record (`docs/research/2026-09-01-gbrain-learnings/
+# platform-seams.md`) is the TARGET, not the subject: re-wording it must not red
+# the suite, and dropping `hosted` from the shipped message must (see
+# `CONTRIBUTING.md`, "A test asserts behaviour; a document states the target").
+# ⚠️ The surviving arm runs on the `api` surface — a `tortoise/__main__.py` diff
+# selects it — which is the diff that can break the message.
 
 
 def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
