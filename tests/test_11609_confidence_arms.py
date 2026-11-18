@@ -307,6 +307,9 @@ class TestTheArmArgumentsNameTheirArm:
         """P3 from the architecture review: the no-arm refusal compared the two sets
         against NOTHING armed, so an explicitly-armed call carrying the other arm's
         arguments was served with them on the floor."""
+        # Both handlers are stubbed so NEITHER arm can silently answer: only
+        # `sdk` is called, and the other bindings exist for their side effect
+        # (the monkeypatch), so they carry the `_` prefix ruff's RUF059 wants.
         sdk, _calls = _sdk_stub(monkeypatch, "recall_state", [])
         _sdk2, _calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
         with pytest.raises(ValueError) as exc:
