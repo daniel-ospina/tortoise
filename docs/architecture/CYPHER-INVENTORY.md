@@ -131,9 +131,11 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 298 files finds exactly 13 — the verb-at-end-of-line scan alone finds **178**
-(every one of them a COMMENT or docstring line whose next line opens a parenthetical, which the
-case-insensitive predicate counts), which is why
+predicate over the same 298 files finds exactly 13 — the verb-at-end-of-line scan alone finds **178**,
+and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
+enumerated, and the other **165** are a COMMENT or docstring line that simply ENDS on the word (“any
+failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, …) with nothing following,
+which the case-insensitive predicate counts and which is why the predicate has to be stated
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
@@ -443,6 +445,26 @@ Regenerated here with `uv run python tools/cypher_inventory.py --markdown` at th
 `file:line`-versus-SCALAR gap this section describes, reached from the other side: the pins were
 GREEN over the stale appendix, and only re-running the generator shows it.
 
+**This re-cut's merge:** `origin/main` **`501270a4bf`**, forward-merged into
+`fix/13422-record-dense-read` (PR #13466) — re-derived by RUNNING the tool on the merged tree, never
+by arithmetic on the markers. This branch adds **no** Cypher statement site: `sites` **1314**,
+`files_scanned` **298**, `files_with_sites` **100**, `plain` **860** (read **579** / write **281**),
+`candidates` **579**, `unresolved` **108**, `partial` **315** are all the values `main`'s own cut
+recorded, and `--check` would have accepted either side's. What it does add is ONE **non-Cypher**
+door call — the record leg's Postgres `cur.execute(` in `tortoise/record_vector.py`, whose statement
+is not Cypher and is therefore excluded from every shape total — so `non_cypher_door_calls`
+**258→259** and `ast_door_calls` **1572→1573** while `sites` holds. ⛔ This is the scalar that the
+shape totals structurally CANNOT see: a lane that re-cut by copying `main`'s pins would have carried
+258 forward, and `--check` would have reddened on a number the PR's own diff explains. §1's `rg`
+reconciliation is re-measured here (door **1,627 / 109**, verb **2,346 / 145** whole-text, bare
+**1,633 / 110**, case-sensitive over the 298 `.py` files **2,063**), `--all-surface` reads
+**9,075 / 827**, Appendix A is regenerated with `--markdown`, and `--check` reports **`25 pinned
+counts match`**. ⛔ The `non_cypher_door_calls` bump is also why the record leg's prefetch is written
+AT the call site rather than behind the module's `_rows_as_dicts` helper: a helper taking `sql` as a
+parameter makes every call site an UNRESOLVABLE door call, which lands in `unresolved` and reads as
+an unclassified CYPHER statement in the bucket a migration candidate is searched for (measured: the
+helper form reported `unresolved` 108→109, `sites` 1314→1315 and `files` 100→101).
+
 **This PR's cut:** `origin/main` **`48585c94ff`**, forward-merged into `fix/13302-ended-and-how`
 (PR #13416) — re-derived by RUNNING the tool on the final merged tree, never by arithmetic on the
 markers. This PR adds **one** Cypher statement site and **no** non-Cypher door call:
@@ -718,29 +740,6 @@ non-Cypher door calls are the whole difference from `97fd713ffb`'s re-derivation
 LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers are then wrong), but
 it must not be able to mask whether the harness can fail at all — which is exactly what it did before
 the order was fixed (`#13098` review F8).
-
-⛔ **This cut adds ONE non-Cypher door call and no statement site (`#13422`).** The folded arm of
-`record_vector.vector_search` prefetches the label's rows before its kNN, and that prefetch is a
-Postgres `SELECT` issued through the shared `execute` door — so it lands in `non_cypher_door_calls`
-(258→259) and `ast_door_calls` (1572→1573), exactly the bucket that exists for a Postgres statement
-sharing a graph door, while `sites`, `files` and every `shape_*` pin are unchanged. It is written AT
-the call site rather than behind the module's `_rows_as_dicts` helper for that reason: a helper taking
-`sql` as a parameter makes every call site an UNRESOLVABLE door call, which lands in `unresolved` and
-reads as an unclassified CYPHER statement in the bucket a migration candidate is searched for
-(measured: the helper form reported `unresolved` 108→109, `sites` 1314→1315 and `files` 100→101).
-
-**This cut's base:** `origin/main` **`501270a4bfd3`**, merged here (the PR has gone `CONFLICTING` on
-this very file TWICE — first against `130e20fdaf`, now against `501270a4bfd3` — and both conflicts
-were resolved by REGENERATING it, never by picking a side: the pins and Appendix A are this merged
-tree's own `--markdown` output, and §0/§1's prose was re-measured here with the predicates it states —
-whole-text **`2,346 / 145`**, line-based **`2,333 / 144`**, verb-at-end-of-line **`178`** — not
-carried from either parent and not shifted by a delta applied to a number that was already there).
-The prose is the THIRD carrier with no check behind it — exactly the defect the paragraph above names
-— so the quoted counts are re-derived here and the bare/`.py`/`-t py` variants with them. ⛔ Measured
-consequence of carrying them rather than re-deriving: the branch's own cut at `51ab22cb1c` carried
-`1,336 / 300` against a tree that measured `1,314 / 298`, so `--check` printed **nine `DRIFT` lines**
-and `tests/test_13098_cypher_inventory.py` reddened in **13** places while §7 claimed the pins were
-green.
 
 <!-- cypher-inventory:sites = 1314 -->
 <!-- cypher-inventory:files = 100 -->
