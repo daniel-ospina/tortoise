@@ -9,12 +9,15 @@ sentence in a design doc:
    (``record_projection.TENANT_GUC_SQL``, one statement, R6) followed by
    ``record_projection.replay_plan(records, …)``. That equality is also the
    duplication pin: a second, hand-written Postgres writer would drift from the
-   fold, and it would show up here as an extra or missing statement. The
-   expectation is built with the SAME ``derived`` map the seam threads
-   (#13220), and the derivation is STUBBED — see `_derivation_pinned_off`, which
-   also records why: with the real derivation in play the statement set followed
-   the runner's embedder cache, so this file read as green on a cold box and red
-   on a warm one. The seam
+   fold, and it would show up here as an extra or missing statement. These
+   plan-equality expectations are built with NO ``derived`` map, because the
+   derivation is pinned OFF for the whole file — see `_derivation_pinned_off`,
+   which also records why: with the real derivation in play the statement set
+   followed the runner's embedder cache, so this file read as green on a cold
+   box and red on a warm one. The ONE test that observes the derivation
+   (`test_the_derived_columns_are_the_plans_own_binding`) overrides that pin with
+   its own stub and builds its expectation with the SAME ``derived`` map the
+   seam threads (#13220). The seam
    issues TWO statements outside the plan — the prologue, and the
    ``TENANT_SCOPE_SQL`` verify that reads the GUC back and the connecting role's
    posture; ``FakeConnection.statements()`` filters the latter because it is a
@@ -50,6 +53,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -282,7 +286,7 @@ def test_the_derived_columns_are_the_plans_own_binding(
     """
     vector = "[0.125, -0.5, 1.0]"
 
-    def _stub(record: dict[str, Any]) -> Any:
+    def _stub(record: Mapping[str, Any]) -> Any:
         if record.get("type") == "ObjectRegistered":
             return rw._DerivedEmbedding(columns={"embedding": vector})
         return rw._DerivedEmbedding()
@@ -303,8 +307,12 @@ def test_the_derived_columns_are_the_plans_own_binding(
     assert conn.statements() == expected
 
     # …and the derived value really reached the object's own row, in its own
-    # column: without this, an equality against a plan that ALSO dropped the
-    # column would pass while the vector was lost.
+    # column. ⛔ The equality above cannot carry this: its expectation IS
+    # `replay_plan`'s output — the same function the product calls — so a plan
+    # that ALSO dropped the column would satisfy the equality while the vector
+    # was lost. These three asserts are the anti-loss power: they go RED on a
+    # dropped column or a `props`-merged vector, and deleting them re-vacuums
+    # this test.
     object_upsert = next(
         (sql, params) for sql, params in conn.statements()
         if sql.startswith("INSERT INTO public.object"))
