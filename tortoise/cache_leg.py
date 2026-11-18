@@ -230,7 +230,7 @@ def cache_store_fingerprint(endpoint: object) -> str:
 
 
 def note_cache_write_target(endpoint: object, graph_name: str | None) -> str:
-    """Record one LIVE write ATTEMPT against the store+graph it reached.
+    """Record one LIVE write lane operation at the store+graph it reached.
 
     SEVEN call sites, and the list is maintained rather than implied:
     ``projection.note_live_write_target`` is the ONE helper they all go through,

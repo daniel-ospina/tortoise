@@ -950,7 +950,11 @@ def test_an_UNREADABLE_target_registry_is_NULL_and_never_an_empty_map(monkeypatc
 
 
 def test_a_SKIPPED_fold_is_not_recorded_as_a_landed_write(monkeypatch, tmp_path):
-    """The registry counts folds that RETURNED, not folds that were attempted.
+    """The registry counts folds that RETURNED HAVING WRITTEN.
+
+    Not folds that merely started (an interrupted fold is a landed write the
+    registry does not count — `_skip`'s bound), and not folds a `_skip()` arm
+    marked as issuing no statement (they return and are deliberately not counted).
 
     A malformed event is logged and skipped (`FalkorProjection.apply`'s own type
     guard) — nothing is written — so counting it would tell an operator the cache
@@ -1181,7 +1185,14 @@ def test_apply_keeps_the_signature_the_replay_engines_introspect(
 ])
 def test_the_OTHER_writing_nothing_exits_are_not_counted(
         monkeypatch, tmp_path, event):
-    """`_skip()` must cover every exit that issues no write — measured, not assumed.
+    """`_skip()` must cover every exit whose OWN return says nothing was written.
+
+    Not "every exit that issues no write": the arms whose folds return NO COUNT
+    (`_upsert_subject` / `_upsert_object` / `_upsert_document`) are deliberately
+    unmarked — marking them would need an invented predicate and would produce
+    the UNDER-report direction `_skip`'s bound forbids. So the corpus here is the
+    DECIDABLE population, and `test_the_0_row_capable_arms_STILL_count_a_fold_that_LANDED`
+    is the other half of it.
 
     Review cycle 3 measured the draft counting all three of these (registry
     `{'embedded:…|tortoise': 1}`) while the fold logged that the record was

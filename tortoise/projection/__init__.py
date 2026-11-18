@@ -12759,7 +12759,10 @@ class FalkorProjection(
         """Fold one record into the cache, recording WHERE it landed (#12943).
 
         A THIN WRAPPER, and the wrap is the point: the registry counts a fold
-        that RETURNED, never one that was attempted. `_apply_event` has several
+        that RETURNED HAVING WRITTEN — not one that merely started (a fold that
+        raises after its first statement is a landed write it does not count),
+        and not one a `_skip()` arm marked as issuing no statement (a marked arm
+        returns, and is deliberately not counted). `_apply_event` has several
         early returns (a malformed event is skipped and writes nothing — measured,
         `{"type": 123}` logged "skipping malformed event" and still left
         `{'embedded:…|tortoise': 1}` in the registry) and every statement in it
@@ -12820,7 +12823,7 @@ class FalkorProjection(
                      journal_existence=None,
                      journal_object_established=None,
                      about_links_deferred: bool = False,
-                     _wrote: list[bool] | None = None) -> None:
+                     _wrote: list[bool] | None = None):
         def _skip() -> None:
             """This call folded NOTHING — say so, then return.
 
@@ -12858,7 +12861,8 @@ class FalkorProjection(
 
             ⛔ ONE BOUND ON THAT "never", so it is not read as more than it is:
             the hook runs on the fold's RETURN (`apply` counts a fold that
-            returned, never one that was attempted), so a fold that issues its
+            returned having written — not one that merely started, and not one a
+            `_skip()` arm marked), so a fold that issues its
             statements and then RAISES is counted as nothing. It can land and
             still raise — `_upsert` writes props and THEN edges, and
             `_fold_session_deleted` deletes the Source and THEN the Session — so

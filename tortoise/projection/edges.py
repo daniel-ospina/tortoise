@@ -1560,8 +1560,10 @@ class _EdgeHandlers:
         # `create_edge` is counted once per mint, which is defensible (a write
         # was issued and landed) but is NOT the stronger "only a genuinely new
         # row" claim this comment used to make (#12943 review cycle 3, P3).
-        # Replay is excluded below, before the recorder gate (a projection with
-        # no recorder still WROTE the cache).
+        # Replay is excluded by the helper ITSELF, before any target is recorded
+        # (a projection with no recorder still WROTE the cache, so the count must
+        # not depend on the recorder gate below). The local `replay_window_open()`
+        # check further down is the RECORDER's, and it sits AFTER that gate.
         # Lazy import: `tortoise.projection` imports THIS module, and this
         # mixin's `self` IS the projection. The helper is total and excludes a
         # replay itself.
