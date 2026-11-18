@@ -19461,6 +19461,16 @@ class FalkorProjection(
                 if (r.src_label, r.src_key) not in refused
                 and (r.tgt_label, r.tgt_key) not in refused)
 
+        # ⛔ THE REBUILD HALF OF THE ONE SEAM (#13447). `node_from_row` may not
+        # encode — it is also the map `record_serve.read_node` answers a
+        # graph-engine-down READ from, and a read must never pay a model call — so
+        # the derivation of a missing DERIVED vector happens HERE, where a build
+        # legitimately computes what the live write would have. A node whose row
+        # already HOLDS its vector was filled by the record-held door in
+        # `_props_from_row`, and this pass leaves it untouched.
+        from tortoise.cache_projection import fill_missing_row_vectors
+        nodes = fill_missing_row_vectors(
+            nodes, width=getattr(self, "required_embedding_dim", None))
         plan = record_plan(nodes, relations)  # raises BEFORE any wipe
 
         self._assert_destructive_confirmed(confirm_destructive,

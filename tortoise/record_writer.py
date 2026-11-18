@@ -213,7 +213,8 @@ from enum import StrEnum
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from . import postgres_bytes, record_projection, status_vocabulary
+from . import (derived_embedding as _derived_embedding, postgres_bytes,
+               record_projection, status_vocabulary)
 from .env_truthy import env_flag
 
 _logger = logging.getLogger(__name__)
@@ -1699,40 +1700,14 @@ def _release_pooled_connections() -> None:
                 conn.close()
 
 
-#: The record types whose node carries an embedding the JOURNAL does not, and the
-#: carried keys its text is composed from — the RECORD half of #13220.
-#:
-#: ⛔ THIS TABLE IS THE WHOLE RULE, AND IT IS A PARITY TABLE RATHER THAN A
-#: PREFERENCE. Each text expression is the one the GRAPH fold already composes for
-#: the same label, so the record's vector and the node's vector are the same
-#: function of the same datum:
-#:
-#:   * `ObjectRegistered` / `SubjectAdded` — `encode_for_row(name)`
-#:     (`projection/entities.py::_upsert_object`, `::_upsert_subject`, #7845);
-#:   * `EventRecorded` — `" ".join(filter(None, [subject, eventKind, object]))`
-#:     (`projection/entities.py::_upsert_event` — the `filter(None, …)` is part
-#:     of the expression, not decoration: a FALSY part is dropped and the rest
-#:     still composes);
-#:   * `DocumentCreated` — `" ".join(filter(None, [title, content]))`
-#:     (`projection/entities.py::_upsert_document`, which computes it
-#:     UNCONDITIONALLY on the legacy path).
-#:
-#: ⚠️ `SourceCreated` IS DELIBERATELY ABSENT, and the reason is measured rather
-#: than assumed. A Document IS a `:Source` (`D10`) and DOES carry `s.embedding`
-#: — `_upsert_document` writes it through `set_embedding_clause("s")` on the
-#: very same `MERGE (s:Source {url:$id})` node — so the measured figure is
-#: scoped to the population it was actually taken over: the graph holds **0**
-#: `:Source` embeddings on NON-DOCUMENT rows (`document_kind IS NULL`), because
-#: `_upsert_source` computes none at all. Deriving a vector for a plain
-#: `:Source` row would make the record's dense leg return sources the graph leg
-#: never had — the divergence in the OTHER direction; a document's vector is
-#: exactly what `DocumentCreated` below derives, for the same reason.
-_RECORD_EMBEDDING_TEXT: dict[str, tuple[str, ...]] = {
-    "ObjectRegistered": ("name",),
-    "SubjectAdded": ("name",),
-    "EventRecorded": ("subject", "eventKind", "object"),
-    "DocumentCreated": ("title", "content"),
-}
+#: ⛔ MOVED (#13447). The per-label text rule now lives in the ONE seam both
+#: callers read — :data:`tortoise.derived_embedding.TEXT_PARTS_BY_RECORD_TYPE` —
+#: because the live write and the rebuild cannot be allowed to disagree about the
+#: text they encode (a second copy here is the §12.2a "second rule set" defect).
+#: The name is kept as an alias because the record's own docs and the parity test
+#: (`tests/test_13220_record_label_embeddings.py`) cite it: same dict, one owner.
+_RECORD_EMBEDDING_TEXT: dict[str, tuple[str, ...]] = (
+    _derived_embedding.TEXT_PARTS_BY_RECORD_TYPE)
 
 
 @dataclass(frozen=True)
@@ -1887,26 +1862,17 @@ def derived_embedding_columns(
         if payload.get("suppress_embedding") or record.get("suppress_embedding"):
             return _DerivedEmbedding(skipped="suppress_embedding is set")
 
-    parts: list[str] = []
-    for key in keys:
-        value = payload.get(key)
-        # ⛔ THE GRAPH'S OWN PREDICATE (`filter(None, …)`): a FALSY part is
-        # dropped and composition continues, whatever its type. `is None or
-        # == ""` was narrower than that and refused a falsy non-string
-        # (`0`, `False`, `[]`) the graph happily joins past — a vector on the
-        # node and none in the record, for one event.
-        if not value:
-            continue
-        if not isinstance(value, str):
-            return _DerivedEmbedding(
-                skipped=f"{key} is {type(value).__name__}, which the graph's "
-                        "text composition cannot join (the fold raises there)")
-        parts.append(value)
-    text = " ".join(parts)
-    if not text.strip():
-        return _DerivedEmbedding(skipped="the composed text is blank")
+    # ⛔ THE TEXT RULE IS THE SEAM'S, NOT THIS FUNCTION'S (#13447). One copy of the
+    # per-label composition serves the record's column, the graph fold and the
+    # rebuild, so the three cannot drift — see
+    # `derived_embedding.TEXT_PARTS_BY_RECORD_TYPE`. The falsy/non-string arms and
+    # their reasons ride back on `ComposedText` and are re-tagged below as this
+    # function's own vocabulary, which the DEBUG log reads.
+    composed = _derived_embedding.compose(record_type, payload)
+    if not composed.text:
+        return _DerivedEmbedding(skipped=composed.skipped)
     try:
-        from .embeddings import BOUNDED_SCOPE_RECORD_DERIVATION, encode_for_row
+        from .embeddings import BOUNDED_SCOPE_RECORD_DERIVATION
     except Exception:  # noqa: BLE001, RUF100 — an unimportable seam derives nothing
         return _DerivedEmbedding(skipped="the embedding seam is unimportable")
     try:
@@ -1941,8 +1907,14 @@ def derived_embedding_columns(
         # is a re-derivation/replay. The seam cannot infer that, so the caller
         # states it, and `monitoring.DERIVED_EMBED_DECLINE_COUNT` keeps the two
         # legs apart in one label.
-        vec = encode_for_row(
-            text, None, bounded=True,
+        #
+        # ⛔ ONE ENCODE PER WRITE (#13447): this call and the graph fold's own call
+        # for the SAME text run inside one `derived_embedding.write_scope()` (the
+        # live doors open it), so the second one costs no model call. That is a
+        # change in HOW MANY TIMES the text is encoded, never in whether a decline
+        # may drop a vector — the `bounded` flag is exactly what it was.
+        vec = _derived_embedding.encode(
+            composed.text, None, bounded=True,
             bounded_scope=BOUNDED_SCOPE_RECORD_DERIVATION,
         )
     except Exception:  # noqa: BLE001, RUF100 — every failure is "this row has no vector"

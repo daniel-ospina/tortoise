@@ -399,6 +399,19 @@ def test_a_derived_column_on_a_record_row_projects_nothing():
         column = rp.snake(prop)
         if column not in TABLE_COLUMNS.get(table, ()):
             continue  # no column exists — covered by the test above
+        if column in cp.RECORD_HELD_VECTOR_COLUMNS.get(table, frozenset()):
+            # ⛔ THE ONE DECLARED EXCEPTION (#13447), and it is not a relaxation of
+            # the rule above. #13220 gave these two labels a real COLUMN for a
+            # DERIVED name because the owner requires the vector INDEXED in
+            # Postgres; a value the record HOLDS must come BACK on the way out, or
+            # `record-restore` lands `:Object`/`:Subject` silently vectorless. The
+            # projection writes it in its OWN clause (`vecf32($embedding)`, via
+            # `stored_form.STORED_VECTOR_PROPS`) — never as a `$props` claim — so
+            # the property this test owns ("a recomputed value does not become a
+            # node property with a PRIMARY claim from the props bag") is intact;
+            # `test_13447_derived_embedding_seam.py` pins the clause AND pins that
+            # the `props` tail still refuses the name.
+            continue
         label = next((k for k, v in cp.NODE_TABLES.items() if v == table), None)
         if label is None:
             continue
