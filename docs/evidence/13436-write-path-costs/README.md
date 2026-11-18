@@ -61,8 +61,8 @@ same 1,000-Point population, seeded from a real word list so bytes AND tokenisat
 | 300 | 117.1 KiB | 12.84 ms | 13.62 ms |
 | 1,200 | 468.7 KiB | **23.35 ms** | **24.87 ms** |
 
-⇒ **20× the content length (20× the bytes moved) takes the call from ~9 ms to ~24 ms in BOTH runs — the
-content IS a term, roughly linear above 300 chars.** ⛔ **A first cut seeded `"x" * n` and concluded the opposite
+⇒ **20× the content length (20× the bytes moved) takes the call from 9.1 ms to 23.4 / 24.9 ms in the two
+runs — 2.6× / 2.7× — so the content IS a term, and the shape is close to linear above 300 chars.** ⛔ **A first cut seeded `"x" * n` and concluded the opposite
 (~flat).** That seed varies BYTES while holding tokenisation constant (one repeated character is one
 distinct token), and `_nudge_candidates` scores by TOKEN OVERLAP — so the shape was blind to the
 scoring leg and its "flat within noise" reading was an artefact. Both the seed and the conclusion were
@@ -71,7 +71,7 @@ of sentence that would have been quoted later.
 
 **Internal consistency check:** the point-population arm at 1,000 Points uses the same 300-char seed, and
 it reads 12.77 / 13.92 ms against the content axis's 12.84 / 13.62 ms at 300 chars — the two arms agree
-within ~2–7 %, which is what makes the axis comparison meaningful.
+within 0.5 % (run 1) and 2.2 % (run 2), which is what makes the axis comparison meaningful.
 
 **Who owns this cost — checked, because the first cut of this file said "nobody" and that was wrong.**
 **`#11796` (OPEN)** owns the `ingest` half: *"the write-nudge block runs a placeholder keyed on the
