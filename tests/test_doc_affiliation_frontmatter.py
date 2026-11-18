@@ -58,6 +58,7 @@ Static, no network / DB / graph.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -70,13 +71,16 @@ TEAM_KEYS = ("subjects.team", "ownedBy")
 
 # ── #13452: presence is not SURVIVAL ───────────────────────────────────────
 
-#: A value whose text BEGINS with `#` is **entirely** a YAML comment: the key
-#: resolves to `None` and 100% of the value is gone. This is UNAMBIGUOUS — a key
-#: with a real value never resolves to `None` because of a comment (`null`/`~`
-#: carry no `#`) — so no digit needs to appear for it to be a defect. YAML ends a
-#: plain scalar at any `#` not preceded by a non-space character
-#: (`ns-plain-char(c)`, YAML 1.2.2 §7.3.3; PyYAML here is 6.0.3, a YAML 1.1
-#: resolver whose [154]/[156] productions state the same rule).
+#: A value whose text BEGINS with `#` is **entirely** a YAML comment: 100% of it
+#: is gone. A SCALAR key then resolves to `None`; a SEQUENCE ITEM resolves to
+#: `null` and leaves the key a list holding that null, so which unit is named
+#: matters when the diagnosis is worded (review: "the key resolves to None" was
+#: false for exactly the `- #11395` shape this arm cites as its mutant). This is
+#: UNAMBIGUOUS — a key with a real value never resolves to `None` because of a
+#: comment (`null`/`~` carry no `#`) — so no digit needs to appear for it to be a
+#: defect. YAML ends a plain scalar at any `#` not preceded by a non-space
+#: character (`ns-plain-char(c)`, YAML 1.2.2 §7.3.3; PyYAML here is 6.0.3, a
+#: YAML 1.1 resolver whose [154]/[156] productions state the same rule).
 _WHOLE_VALUE_COMMENT = "#"
 
 #: `key: value` / `key:` / `key:   ` at column 0. Group 2 is the one-line value,
@@ -90,10 +94,13 @@ _ITEM = re.compile(r"^[ \t]*-[ \t]+(\S.*)$")
 #: Characters that open a block scalar (`|`, `>`) or a flow collection (`[`, `{`).
 _BLOCK_OR_FLOW = "|>[{ "
 
-#: The two fields that carry the affiliation itself (#13452). The arms above
-#: check that the KEYS are present; here every one of these VALUES must be
-#: measured by a named check, or the arm fails: an unmeasured affiliation is
-#: exactly the defect (a value at 40% of its length keeps its key and its green).
+#: The two fields that carry the affiliation itself (#13452). PRESENCE is the
+#: OTHER arms' business — they check ``REQUIRED_KEYS`` and ``TEAM_KEYS`` and not
+#: these two, so deleting an affiliation key outright stays green here BY DESIGN
+#: (measured in review: removing the `aboutObjects:` line leaves this arm at
+#: ``1 passed``). What this arm measures is SURVIVAL: every one of these VALUES
+#: must be measured by a named check, or the arm fails — an unmeasured affiliation
+#: is exactly the defect (a value at 40% of its length keeps its key and its green).
 AFFILIATION_KEYS = ("aboutSubjects", "aboutObjects")
 
 #: Styles this arm declines to compare, as explicit ``(path, key)`` pairs.
@@ -466,11 +473,14 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     Both are read through the SAME consumer the index pipeline uses, so this
     measures the real degradation rather than a re-implementation.
 
-    The affiliation VALUE is measured four ways, because one is provably not
+    The affiliation VALUE is measured five ways, because one is provably not
     enough — each of the first three was demonstrated to miss a real truncation:
 
-    (A) a value whose text BEGINS with `#` is entirely a comment: the key
-        resolves to ``None`` and 100% of the value is gone. Checked for EVERY key
+    (A) a value whose text BEGINS with `#` is entirely a comment: 100% of it is
+        gone. A SCALAR key then resolves to ``None``; a SEQUENCE ITEM resolves to
+        ``null`` and leaves the key a list holding that null — and in a MIXED list
+        the other items still survive, so neither "the key is entirely a comment"
+        nor "the key resolves to None" is true of that shape. Checked for EVERY key
         and for sequence items; unambiguous, so it needs no heuristic.
         (`isinstance(value, str)` comparisons miss this — ``None`` is not a str.)
     (B) SURVIVAL for the affiliation keys: the parsed value must equal the RAW
@@ -482,6 +492,18 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
     (D) no silent omission: every declared affiliation value must have been
         measured, or the arm FAILS — a style nobody taught the arm about
         (`|`, `>`, `[...]`, `{...}`) is a failure, not a pass.
+    (E) SEQUENCES, item by item: a `sequence` affiliation value is not covered
+        by (A) alone, which sees only an item whose text BEGINS with `#`. Every
+        item NOT already named by (A) is checked in turn — (C)'s quoting check,
+        then a (B)-style value comparison — and a length mismatch fails. Two
+        deliberate limits, stated so the sentence is not read as more than it is:
+        the item loop STOPS at the key's first defect (one value reports one
+        reason rather than a cascade), and an `escaped` item is cleared by (C)
+        as far as C reaches and then NOT compared, because the parser has
+        already performed the transform `_quoted_style` would have to undo. A
+        mid-item truncation (`, #4333 census, #5380`) and a quoted item cut at
+        an inner quote are both green under (A)-(D) alone (found in review; the
+        population carries 3 affiliation sequences).
 
     Multi-line plain values and continued sequence items are REFUSED (they are
     legal folding, and a continuation line opening with `#` is silently
@@ -543,15 +565,64 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                 texts = [str(it) for it in payload]  # type: ignore[union-attr]
 
             # (A) the whole value is a comment — 100% of it is gone.
-            for text in texts:
-                if text.lstrip().startswith(_WHOLE_VALUE_COMMENT):
-                    bad.append(
-                        f"`{key}` is ENTIRELY a YAML comment — everything after "
-                        f"the leading `#` is discarded and the key resolves to "
-                        f"None. Quote the value."
+            #
+            # The texts (A) has already diagnosed are remembered, because a
+            # 100 %-lost value also resolves to ``None`` and would otherwise
+            # reach the non-string branch below — which explains a NON-string as
+            # "YAML implicit typing, nothing was lost" and so contradicted (A)
+            # inside one failure string (found in review: the `- #11395` item
+            # shape, where both messages were printed for one mechanism).
+            #
+            # EVERY diagnosed text is recorded, not just the first: the message
+            # is appended ONCE per key (a list of issue refs can hold several),
+            # while the skip has to cover all of them or the second and later
+            # items still collect the false clause.
+            wholly_comment: set[str] = {
+                text for text in texts if text.lstrip().startswith(_WHOLE_VALUE_COMMENT)
+            }
+            #
+            # (A)'s TEXT is kind-aware, because one sentence cannot describe both
+            # parse outcomes (found in review): a wholly-commented SCALAR key
+            # resolves to `None`, while a wholly-commented sequence ITEM resolves
+            # to `null` and leaves the KEY a list holding that null — and in a
+            # mixed list a value SURVIVES, so "the key resolves to None" is false
+            # for exactly the `- #11395` shape this arm cites as its mutant. The
+            # remedy is per-unit too: quoting the VALUE cannot clear an item-level
+            # loss (this file's own `_remedy` rule — name the edit that ACTUALLY
+            # clears the red); the edit that clears it is quoting the ITEM, which
+            # is what `_type_mismatch` already says for the same shape.
+            if wholly_comment and kind == "sequence":
+                lost = [text for text in texts if text in wholly_comment]
+                if len(lost) == 1:
+                    head = f"`{key}` sequence item {lost[0]!r} is ENTIRELY a YAML comment"
+                    subject = "that item"
+                    tail = "Quote the item."
+                else:
+                    head = (
+                        f"`{key}` sequence items "
+                        f"{', '.join(repr(text) for text in lost)} are ENTIRELY "
+                        "YAML comments"
                     )
-                    break
+                    subject = "each"
+                    tail = "Quote the items."
+                bad.append(
+                    f"{head} — everything after the leading `#` is discarded, so "
+                    f"{subject} resolves to null and the key keeps a null element "
+                    f"in its place. {tail}"
+                )
+            elif wholly_comment and kind == "scalar":
+                bad.append(
+                    f"`{key}` is ENTIRELY a YAML comment — everything after "
+                    f"the leading `#` is discarded and the key resolves to "
+                    f"None. Quote the value."
+                )
             if kind in ("scalar_multiline", "sequence_multiline"):
+                # NO (A) string for the multiline kinds (review): a value can
+                # SURVIVE past a commented first line — measured, `aboutObjects:
+                # #11395` plus an indented continuation parses to
+                # 'continuation' — so "100% of it is gone" would be false there,
+                # and appending both strings gave ONE value TWO reasons, against
+                # this arm's own rule. The MULTI-LINE reason is the true one.
                 bad.append(
                     f"`{key}` is a MULTI-LINE value — YAML folds it, and a "
                     "continuation line opening with `#` is silently swallowed; "
@@ -580,6 +651,10 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                 # cannot raise here — it states the invariant instead of leaving it
                 # implicit (ruff B905 on origin/main, which reds the required lint).
                 for raw_item, got_item in zip(texts, got_list, strict=True):
+                    if raw_item in wholly_comment:
+                        # (A) already named this item's loss; a second reason from
+                        # _type_mismatch would contradict it in the same string.
+                        continue
                     style, expected = _quoted_style(raw_item)
                     if style in ("broken", "malformed"):
                         bad.append(
@@ -628,6 +703,8 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                 expected = texts[0]  # plain: YAML performs no transform
             got = parsed.get(key)
             if not isinstance(got, str):
+                if texts[0] in wholly_comment:
+                    continue  # (A) already named the 100 % loss; no second reason
                 bad.append(_type_mismatch(key, expected, got, "value"))
                 continue
             compared += 1
@@ -722,6 +799,113 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
         f"the parse ({len(measured)} affiliation values measured, {compared} "
         f"compared): {failures}"
     )
+
+
+#: A frontmatter block the research arm accepts, so a test that injects it can
+#: isolate the ONE affiliation shape under test (used by the diagnosis test below).
+_FM_HEAD = (
+    "---\ntype: research\ndomain: research\ndoc_status: draft\n"
+    "created: 2026-11-18\n"
+)
+
+
+def test_a_wholly_commented_value_gets_ONE_TRUE_diagnosis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#13452 review (2 × P2): the surviving (A) diagnosis must be TRUE, and a
+    committed assertion must notice if it stops being.
+
+    Both halves were review findings against this arm, and both are pinned here
+    because neither was reachable by any existing row:
+
+    * the fix that made a 100 %-lost value report ONE reason was **verdict
+      neutral** — (A)'s own string is what keeps the file in ``failures``, so
+      deleting the skip reddened no row and the only evidence it worked was a
+      by-hand paste in the PR body (and the same defect had already regressed
+      once inside the PR, found by a reviewer reading prose, not by a test);
+    * the string it left standing was **kind-blind**: at the ``- #11395`` mutant
+      it said "the key resolves to None" about a key that resolves to ``[None]``
+      and told the author to "Quote the value", an edit that cannot clear an
+      item-level loss.
+
+    So each case below asserts the diagnosis COUNT and its CONTENT. Non-vacuity:
+    at the pre-fix head (``24fbd46102``) case (a)/(b)/(c) carry the false "the key
+    resolves to None" clause and the ``Quote the value`` remedy, and case (d) —
+    the multiline shape, where a value can SURVIVE a commented first line —
+    carries TWO reasons for one value; every assertion here reds on that tree.
+
+    The docs tree is a ``tmp_path`` one (the arm resolves ``ROOT/docs/research``
+    through the module constant, so it is monkeypatched), and each run carries a
+    control file whose value IS compared: otherwise ``assert compared`` fires
+    before ``assert not failures`` and masks the diagnosis under test.
+    """
+
+    def red(body: str) -> str:
+        """Run the arm over a one-case tmp docs tree and return its failure text."""
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        (root / "docs" / "research").mkdir(parents=True, exist_ok=True)
+        (root / "docs" / "research" / "control.md").write_text(
+            _FM_HEAD + "aboutObjects: tortoise-platform, tortoise-hosted\n---\n\n# c\n",
+            encoding="utf-8",
+        )
+        (root / "docs" / "research" / "case.md").write_text(
+            _FM_HEAD + body + "---\n\n# case\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "ROOT", root)
+        with pytest.raises(AssertionError) as excinfo:
+            test_research_doc_frontmatter_parses_as_yaml()
+        # pytest appends its own rewritten-assert explanation to the exception
+        # text, and that explanation REPEATS the failures dict — so take the
+        # arm's own message (always one line) or every count here doubles.
+        return str(excinfo.value).split("\n", 1)[0]
+
+    def diagnoses(msg: str) -> int:
+        """Every reason this arm emits starts by naming the key."""
+        return msg.count("`aboutObjects`")
+
+    # (a) ONE wholly-commented item: the ITEM is null, the KEY is `[None]`.
+    msg = red("aboutObjects:\n  - #11395\n")
+    assert diagnoses(msg) == 1, msg
+    assert "resolves to null" in msg, msg
+    assert "Quote the item." in msg, msg
+    assert "the key resolves to None" not in msg, msg
+
+    # (b) a MIXED list: two items are wholly comments and one value SURVIVES, so
+    # "the key is ENTIRELY a comment / resolves to None" is doubly false here.
+    msg = red(
+        "aboutObjects:\n  - #11395\n  - tortoise-hosted-platform\n"
+        "  - #13082 KEEP ruling\n"
+    )
+    assert diagnoses(msg) == 1, msg
+    assert "tortoise-hosted-platform" not in msg, msg  # the survivor is not a defect
+    assert "the key resolves to None" not in msg, msg
+    assert "Quote the items." in msg, msg
+
+    # (c) a comment item followed by a GENUINELY truncated one: the skip must not
+    # be too wide — both true diagnoses survive, (A)'s and the truncation's.
+    msg = red(
+        "aboutObjects:\n  - #11395\n"
+        "  - tortoise-hosted-platform, #4333 census, #5380\n"
+    )
+    assert diagnoses(msg) == 2, msg
+    assert "Quote the item." in msg, msg
+    assert "(len 45)" in msg and "(len 25)" in msg, msg
+    assert "a plain sequence item on one line is not folded" in msg, msg
+
+    # (d) a MULTILINE value whose first line is a comment: a continuation makes a
+    # value SURVIVE, so (A)'s "100% of it is gone" cannot be claimed, and one
+    # value must not collect two reasons.
+    msg = red("aboutObjects: #11395\n  continuation\n")
+    assert diagnoses(msg) == 1, msg
+    assert "MULTI-LINE" in msg, msg
+    assert "the key resolves to None" not in msg, msg
+
+    # (e) a wholly-commented SCALAR — the one shape where the original sentence
+    # is true, so its wording and remedy are pinned rather than dropped.
+    msg = red("aboutObjects: #11395\n")
+    assert diagnoses(msg) == 1, msg
+    assert "the key resolves to None" in msg, msg
+    assert "Quote the value." in msg, msg
 
 
 def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
