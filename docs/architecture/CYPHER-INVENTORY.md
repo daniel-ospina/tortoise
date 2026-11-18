@@ -122,16 +122,19 @@ every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODU
 reports 2,343 / 144. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
-example — **nine** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
-“(#329): preserve None”) and **four** are wrapped Cypher EXAMPLES (`projection/__init__.py`,
-`record_projection.py` ×2, `vector_write.py`). Enumerated, not inferred — and ⛔ **BY COMMAND, never by
+example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
+“(#329): preserve None”, and `record_projection.py`'s “an INLINE property MATCH / (`(s:Session
+{id:$sid})`)”, whose parenthesis OPENS a parenthetical rather than continuing a statement) and
+**three** are wrapped Cypher EXAMPLES (`projection/__init__.py`, `record_projection.py`,
+`vector_write.py`), where the predicate's `(` is the next clause of the SAME statement. Enumerated,
+not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
 predicate over the same 298 files finds exactly 13 — the verb-at-end-of-line scan alone finds 176, which is why
 the predicate has to be stated — and none of the 13 is an executable Cypher literal split by implicit
-concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose inside the docstring,
-which is why the tool's verb total is an upper bound.
+concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
+example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,064, and `-i` without the exclusion 2,402 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
 number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 298
@@ -409,15 +412,31 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**Where THESE numbers were cut (the current cut — `origin/main` **`2bf568cf29`** merged into this
+**Where THESE numbers were cut (the current cut — `origin/main` **`48585c94ff`** merged into this
 branch):** re-derived by RUNNING the tool on the merged tree, never by arithmetic on either parent's
-markers. The two parents moved DIFFERENT counters, and neither parent's set is the answer:
-`main`'s cuts move `sites` 1311→**1313**, `plain` 859→**860** (read 578→**579**), `candidates`
-578→**579**, `unresolved` 106→**107** and `partial` 314→**315**; this branch adds
-`tortoise/live_write.py` and routes the three live doors through it, so `files_scanned` **297→298**
-and `non_cypher_door_calls` **258→260**, while the chokepoint issues no Cypher of its own. `--check`
-on the merged tree printed exactly three DRIFTs, and all three are scalars no single parent set
-correctly:
+markers. **No scalar moved at this merge, and that is a measurement rather than an assumption:**
+`--check` on the merged tree reports **`25 pinned counts match`**, §1's reconciliation is re-measured
+here (door **1,627 / 108** whole-text, bare **1,633 / 109**, verb **2,330 / 143** against the tool's
+**2,343 / 144**), and the `--all-surface` row is re-run (**9,058 / 820**). `main`'s `48585c94ff`
+(`#13348`) rewrote `tortoise/indexer/github_indexer.py` without adding or removing a statement site,
+so `sites` **1313**, `plain` **860** (read **579**), `non_cypher_door_calls` **260**,
+`ast_door_calls` **1573** (= 1313 + 260), `files_scanned` **298** and `files_with_sites` **99** are
+this tree's own values — identical to the previous cut's because nothing that feeds them changed.
+
+**Appendix A is a `file:line` table, so it moves whenever ANY commit inserts lines — and the pins are
+green over a stale one.** Regenerated with `--markdown` at this merged tree, all **1,313** rows are
+byte-identical to the committed table (`diff` → 0 lines), because `48585c94ff` touched no file that
+carries a site. The earlier cuts are kept below, each naming the tree it measured: **neither parent's
+set is necessarily the answer at a later merged tree**, which is why the cut above is re-derived
+rather than carried.
+
+**Earlier cut — `origin/main` **`2bf568cf29`** merged into this branch.** The two parents moved
+DIFFERENT counters there: `main`'s cuts moved `sites` 1311→**1313**, `plain` 859→**860** (read
+578→**579**), `candidates` 578→**579**, `unresolved` 106→**107** and `partial` 314→**315**; this
+branch adds `tortoise/live_write.py` and routes the three live doors through it, so `files_scanned`
+**297→298** and `non_cypher_door_calls` **258→260**, while the chokepoint issues no Cypher of its
+own. `--check` on that merged tree printed exactly three DRIFTs, all three scalars no single parent
+set got correctly:
 
 ```text
 DRIFT ast_door_calls: doc=1571 tool=1573
@@ -426,16 +445,18 @@ DRIFT non_cypher_door_calls: doc=258 tool=260
 ```
 
 So the pinned `ast_door_calls` is **1573** (= 1313 + 260) and BOTH parents' **1571** — arrived at by
-two different sums — is retired here. §1's reconciliation is re-measured on this merged tree (door
-**1,627 / 108** whole-text, bare **1,633 / 109**, verb **2,330 / 143** against the tool's
-**2,343 / 144**), the `--all-surface` row is re-run (**9,058 / 820**), Appendix A is regenerated with
-`--markdown`, and `--check` then reports **`25 pinned counts match`**.
+two different sums — was retired there.
 
-**Appendix A is a `file:line` table, so it moves whenever ANY commit inserts lines — and the pins are
-green over a stale one.** `main`'s own regeneration at **`340d500491`** found **226 of its 1,313 rows
-stale**, across three files, **all 226 from ONE commit** — `main`'s **`c51afee5a8`** (`#13392`), which
-inserted lines above hundreds of statement sites. Each file's shift was one hunk, read off the commit
-rather than inferred:
+**Earlier cut — `main`'s own regeneration at `origin/main` **`340d500491`**.** That was the appendix
+base, taken when `main` had not touched `tortoise/` since (`git diff --stat 340d500491 origin/main --
+tortoise/` was empty then), so the cut derived there was the cut at that landing head. No census
+SCALAR moved at that regeneration either (`25 pinned counts match`), and §1's `rg` reconciliation read
+door **1,625 / 108**, verb **2,343 / 144** whole-text, bare **1,631 / 109** at that tree.
+
+**Appendix A's 226 stale rows, from one commit.** At that regeneration `main` found **226 of its
+1,313 rows stale**, across three files, and **all 226 come from ONE commit**: `main`'s
+**`c51afee5a8`** (`#13392`), which inserted lines above hundreds of statement sites. Each file's
+shift is one hunk, read off the commit rather than inferred:
 
 | file | stale rows | shift | the single hunk that moved them |
 |---|---|---|---|
@@ -548,7 +569,9 @@ statement site: `ast_door_calls` **1571→1569** and `non_cypher_door_calls` **2
 `sites`/`plain`/`candidates` are unchanged (1311 / 859 / 578 — the 578 is the `plain` READ half, which
 is also the migration-candidate count). `files_scanned` stays 297 and `files_with_sites` 99: both
 conversions land in a file that already carries sites. The `rg` reconciliation in §1 is re-measured on
-this tree (1,622 / 2,330 / 1,628 bare / 2,064 / 2,402), Appendix A is regenerated with `--markdown`,
+this tree (1,622 / 2,330 / 1,628 bare / 2,064 / 2,402 — measured at THAT tree: `bf3a7b8e77` reads
+1,624 / 1,630 bare, and this branch's two conversions are what take it to 1,622 / 1,628. §1 carries the
+figures at the head you are reading, which later commits have moved by one), Appendix A is regenerated with `--markdown`,
 and `--check` reports **`25 pinned counts match`**.
 
 ⚠️ THREE of those `rg` figures moved by ONE at `#13265` (`34bd33d22a`), for the same reason as the row
@@ -585,12 +608,22 @@ versus a fresh `--markdown`), because `main` inserted lines above hundreds of st
 exact `file:line`-versus-SCALAR gap this section describes, caught by regenerating the appendix
 rather than by trusting the pins: `--check` passes on both trees while the appendix's `file:line`
 column is stale on one of them.
+
+⚠️ **THIS cut's own drift, measured against the appendix `origin/main` carried at `340d500491`:**
+**237 rows added and 237 dropped** of 1,313 (`git show 340d500491:docs/architecture/CYPHER-INVENTORY.md`
+versus a fresh `--markdown` at THIS merged tree). The 226 above are `main`'s; the extra **11** are
+THIS BRANCH's own, and they are a different cause, not a rounding of the same one: these
+comment/docstring hunks add 16 net lines to `tortoise/indexer/github_indexer.py`, which moves every
+row of that file (a fresh cut at `340d500491`'s tree against a fresh cut here differs in exactly those
+11, and in no other file). 226 + 11 is the whole 237, and **not one of the 25 pins moved** in either
+half. ⛔ An earlier revision of this paragraph attributed the indexer's 11 to `main`'s insertions —
+`main` inserted nothing into that file — which is the defect class this section exists to name.
 ⚠️ Earlier revisions of this sentence are RETIRED rather than reconciled, because each named a unit,
 a metric or a base it did not measure: one said "31 of 1,313 rows" (`1,313` is the table's LINE
 count — the table carries **1,313 rows over 1,315 lines** here — and `31` was attributed to no
 metric), and another said "137 of 1,311 rows", measured against a `origin/main` that `#13317` has
 since regenerated. The counts above are the only ones in this paragraph a reader can reproduce from
-THIS tree (`git show 34bd33d22a:docs/architecture/CYPHER-INVENTORY.md` versus a fresh `--markdown`).
+THIS tree (`git show 340d500491:docs/architecture/CYPHER-INVENTORY.md` versus a fresh `--markdown`).
 A count taken off the wrong unit, off a base that has since moved, or off an unnamed metric is the
 defect class this paragraph exists to name.
 **The cut before that, `main`'s own, kept as the record of it** — the PINS by `main`'s
@@ -1151,17 +1184,17 @@ the order was fixed (`#13098` review F8).
 | `tortoise/hosted_backup.py:3106` | `_restore_copy_settled` | adjacency | read | measure:across shapes (#13083 owns placement) | `MATCH ()-[r]->() RETURN count(r)` |
 | `tortoise/hosted_backup.py:3299` | `count_data_nodes` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE NOT any(l IN labels(n) WHERE l IN $skip_labels) AND …` |
 | `tortoise/hosted_backup.py:3438` | `_restore_into_temp_verify_swap` | plain | read | candidate:SQL-shaped | `MATCH (n) RETURN labels(n), properties(n)` |
-| `tortoise/indexer/github_indexer.py:484` | `_current_statement_rows` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) WHERE {} RETURN n.id, n.content_ha…` |
-| `tortoise/indexer/github_indexer.py:1003` | `GitHubIndexer._event_exists` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventId` |
-| `tortoise/indexer/github_indexer.py:1048` | `GitHubIndexer._entity_registered` | plain | read | candidate:SQL-shaped | `MATCH (n:{} {id:$id}) RETURN n.id` |
-| `tortoise/indexer/github_indexer.py:1112` | `GitHubIndexer._frozen_created_payload` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventKind, e.endedAt` |
-| `tortoise/indexer/github_indexer.py:1168` | `GitHubIndexer._next_transition_id` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId STARTS WITH $prefix RETURN e.eventId` |
-| `tortoise/indexer/github_indexer.py:1239` | `GitHubIndexer._project_issue` | adjacency | write | stays:graph-maintenance | `MATCH (o:Object {id:$oid}) MATCH (s:Subject {id:$sid}) MERGE (o)-[:a…` |
-| `tortoise/indexer/github_indexer.py:1339` | `GitHubIndexer._object_state_to_issue_state` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$id}) RETURN o.status, o.isClosed, o.pipelineSlo…` |
-| `tortoise/indexer/github_indexer.py:1699` | `GitHubIndexer._next_version` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) RETURN count(n)` |
-| `tortoise/indexer/github_indexer.py:1712` | `GitHubIndexer._link_about_object` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) MERGE (p)-[:aboutObj…` |
-| `tortoise/indexer/github_indexer.py:1754` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId ENDS WITH '-created' AND (e.eventKin…` |
-| `tortoise/indexer/github_indexer.py:1764` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (x:Event) RETURN x.eventId` |
+| `tortoise/indexer/github_indexer.py:489` | `_current_statement_rows` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) WHERE {} RETURN n.id, n.content_ha…` |
+| `tortoise/indexer/github_indexer.py:1008` | `GitHubIndexer._event_exists` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventId` |
+| `tortoise/indexer/github_indexer.py:1053` | `GitHubIndexer._entity_registered` | plain | read | candidate:SQL-shaped | `MATCH (n:{} {id:$id}) RETURN n.id` |
+| `tortoise/indexer/github_indexer.py:1117` | `GitHubIndexer._frozen_created_payload` | plain | read | candidate:SQL-shaped | `MATCH (e:Event {eventId:$eid}) RETURN e.eventKind, e.endedAt` |
+| `tortoise/indexer/github_indexer.py:1173` | `GitHubIndexer._next_transition_id` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId STARTS WITH $prefix RETURN e.eventId` |
+| `tortoise/indexer/github_indexer.py:1244` | `GitHubIndexer._project_issue` | adjacency | write | stays:graph-maintenance | `MATCH (o:Object {id:$oid}) MATCH (s:Subject {id:$sid}) MERGE (o)-[:a…` |
+| `tortoise/indexer/github_indexer.py:1349` | `GitHubIndexer._object_state_to_issue_state` | plain | read | candidate:SQL-shaped | `MATCH (o:Object {id:$id}) RETURN o.status, o.isClosed, o.pipelineSlo…` |
+| `tortoise/indexer/github_indexer.py:1715` | `GitHubIndexer._next_version` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {externalId:$eid}) RETURN count(n)` |
+| `tortoise/indexer/github_indexer.py:1728` | `GitHubIndexer._link_about_object` | adjacency | write | stays:graph-maintenance | `MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) MERGE (p)-[:aboutObj…` |
+| `tortoise/indexer/github_indexer.py:1770` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (e:Event) WHERE e.eventId ENDS WITH '-created' AND (e.eventKin…` |
+| `tortoise/indexer/github_indexer.py:1780` | `GitHubIndexer.backfill_legacy_closed` | plain | read | candidate:SQL-shaped | `MATCH (x:Event) RETURN x.eventId` |
 | `tortoise/ingest.py:214` | `_run_ep_propagation` | plain | read | candidate:SQL-shaped | `MATCH (o:Point) WHERE o.is_operator = true RETURN o.id` |
 | `tortoise/ingest.py:220` | `_run_ep_propagation` | ep | read | stays:ep-carveout (§6.3) | `MATCH (n:Point) WHERE n.is_operator = false RETURN n.id, n.confidenc…` |
 | `tortoise/ingest.py:432` | `_do_upgrade` | plain | read | candidate:SQL-shaped | `MATCH (s:Source {url: $id}) WHERE s.documentKind IS NOT NULL RETURN …` |
