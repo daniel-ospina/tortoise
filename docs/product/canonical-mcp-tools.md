@@ -395,8 +395,9 @@ answered, and an arm-only ARGUMENT with no arm named is refused too (a call that
 `query=` but lost `recall=True` would otherwise have returned the calibration audit and read
 as a successful migration); (b) `limit` is resolved PER ARM — the `topic` arm keeps 50 and the
 recall arm keeps `recall_state`'s 10 — because one shared default would have widened every
-migrating recall caller's answer 5× with no error. SDK stays **94**: the arms are parameters,
-not methods.
+migrating recall caller's answer 5× with no error. The SDK count is NOT moved by this wave —
+both arms are parameters, not methods (it reads **105** at this head only because main's P3
+implemented its eleven approved names; the composed figure below is the authority).
 
 **Composed at this head — ALL THREE waves.** The records above describe waves that are now on the
 SAME tree, so they COMPOSE rather than replace one another, and no single wave's number is the
