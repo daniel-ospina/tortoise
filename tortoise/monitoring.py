@@ -818,7 +818,9 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #: declined and it does NOT know whether the row already held a vector. Two
 #: consequences, both measured (2026-11-17) rather than assumed:
 #:
-#: * **A cold RE-WRITE counts and loses nothing.** Every DERIVED fold's write
+#: * **A cold RE-WRITE of the SAME text counts and loses nothing** — where the
+#:   fold cannot change its text on match (see the ⛔ bullet below for the two
+#:   that can). Every DERIVED fold's write
 #:   clause preserves a stored vector against a null incoming one
 #:   (`vector_write.set_embedding_clause`, ``preserve_on_null=True``; only the
 #:   `Event` CREATE arm passes False). So `_upsert_subject`/`_upsert_object`
@@ -826,9 +828,24 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #:   this counter while the dense leg loses NOTHING — measured: warm create →
 #:   vector present; cold re-write of the same id → counter +1, vector still
 #:   present. ``graph_fold`` is therefore an **UPPER BOUND** on new holes, never
-#:   an exact row count. The exact end state is the repair's own reading
-#:   (`graph-scripts/backfill_embeddings.py --dry-run` /
-#:   `_residual_missing`), which is what actually reconciles the graph.
+#:   an exact row count. The end state is the repair's own reading
+#:   (`graph-scripts/backfill_embeddings.py --dry-run` / `_residual_missing`),
+#:   which is what actually reconciles the graph.
+#:   ⛔ **"Loses nothing" holds only where the fold cannot change the text on
+#:   match** — `_upsert_subject`/`_upsert_object`, whose `ON MATCH` never rewrites
+#:   `name`. `_upsert_event` (`ON MATCH SET e += $props`, carrying
+#:   `subject`/`object`) and `_upsert_document`
+#:   (`s._searchText=coalesce($st, …)`) DO rewrite their text, and they preserve
+#:   the stored vector while doing it — so a cold re-write of changed text leaves
+#:   a **STALE** vector, describing text the node no longer holds. That is not a
+#:   missing vector and not a counted hole above: the null-only repair cannot
+#:   collect it, and `_residual_missing` / `--dry-run` therefore read CLEAN over
+#:   it. Measured 2026-11-18. Of the repair tool's two modes only
+#:   `--force-re-embed` collects it — the null-only default cannot — while a
+#:   later WARM re-write of the same row re-derives the vector and self-heals it
+#:   (measured), so the staleness lasts until either happens; the fold-level fix
+#:   is #13451. Read the repair's reading as exact for `embedding IS NULL`,
+#:   never as "no divergence here".
 #: * **ONE live create can decline once per LEG.** There are TWO bounded call
 #:   sites, not one: the four graph folds (`projection/entities.py`) and the
 #:   RECORD's own derivation (`record_writer.derived_embedding_columns`, #13220),
@@ -884,8 +901,10 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
     "DERIVED-entity embedding writes that produced no vector because the write "
     "bound skipped a cold embedder (#13417). Unit = a declined WRITE: "
     "graph_fold is an UPPER BOUND on rows the dense leg lost (an ON MATCH "
-    "re-write preserves a stored vector), and one live create can decline once "
-    "per leg.",
+    "re-write preserves a stored vector, and for Event/Document a changed-text "
+    "re-write leaves a STALE one that the null-only repair reports clean, "
+    "#13451), record_derivation has no operator repair CLI yet, and one live "
+    "create can decline once per leg.",
     ["decline"],
 )
 
@@ -7742,9 +7761,11 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
     #13417 adds ``derived_embed_declines`` — the DERIVED-entity embedding WRITES a
     bounded write declined, keyed ``"<leg>:<cause>"``. It is an UPPER BOUND on
     rows missing a vector (a cold re-write of an already-embedded row counts and
-    loses nothing), and its two legs have different repairs; see the counter's
-    own docstring for both, and read the repair's ``_residual_missing`` for the
-    exact end state.
+    loses nothing where the fold cannot rewrite its text on match), and its two
+    legs have different repairs; see the counter's own docstring for both. The
+    repair's ``_residual_missing`` is exact for ``embedding IS NULL`` rows and
+    BLIND to a stale vector left by a changed-text re-write (#13451), so read it
+    as "no NULL vectors here", not as "no divergence here".
 
     ``db`` is the deep-check result ({ok, observed, latency_ms, error}) added
     by #1384 (#3683 added ``observed``); ``falkordb`` keeps the legacy message
