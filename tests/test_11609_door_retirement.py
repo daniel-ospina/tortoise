@@ -16,12 +16,13 @@ those are what this file measures:
      reach it — not by reading a docstring. A container that answers with something else
      is the failure mode this wave exists to avoid: it would delete the door and keep the
      name, with no capability behind either.
-     ⛔ ALL ELEVEN, and the shapes differ on purpose:
+     ⛔ ALL THIRTEEN, and the shapes differ on purpose:
        · the three READ doors (`get_session`, `list_batch`, `get_cross_lens_candidates`)
          are substituted at their container's own METHOD — the pointer's `type=`/`kind=`
          is what selects the arm, so the read is measured through `tortoise_get_entity` /
          `tortoise_list_knowledge` / `tortoise_review_link_candidates`;
-       · the four `create_*` doors share ONE container method (`create_entity`) whose
+       · the six doors on `create_entity` (five `create_*` — subject, object, event,
+         document, point — plus `diary_write`) share ONE container method whose
          `type=` selects a per-label WRITE, so substitution goes one level deeper: the
          test drives `create_entity(type=..., props={"<kind>": ...})` and records the
          `_create_entity` call it lands on. That is the only seam that can catch an arm
@@ -31,7 +32,7 @@ those are what this file measures:
 
 ⛔ AND THE HALF THAT IS A RECORDED DECISION, NOT A CHOICE THIS FILE MAKES
 -----------------------------------------------------------------------
-Twenty-three live names are absent from the approved 27-target and are STILL LIVE
+Seventeen live names are absent from the approved 27-target and are STILL LIVE
 after this wave, each for a reason already recorded elsewhere.
 `TestProtectedDoorsStayLive` asserts the reasons hold in the code — if one stops
 holding, that door becomes retirable and this test should be updated IN THE BATCH
@@ -40,8 +41,9 @@ THAT UNBLOCKS IT, not silently:
   · six READ doors + `check_structure` + `calibrate_summary` declare `-> list[dict]`,
     the array envelope that carries the #8482 `_safe` failure repair
     (`tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`, #10914);
-  · `issue_insight`, `session_context`, `search` carry a `rest_spec`, so retiring the
-    registry entry deletes a public REST route with it;
+  · `search` carries a `rest_spec` (and a list envelope as well). `issue_insight` and
+    `session_context` were held on the `rest_spec` reason until #11609 lane P6 measured
+    it FALSE — the row is not the route — and retired both; see below;
   · `query` is the PAGED destination two ALREADY-retired pointers name
     (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
     not a door removal;
@@ -55,11 +57,12 @@ THAT UNBLOCKS IT, not silently:
     test behind it, not silently and not in two steps.
 
   8 (envelope) + 1 (rest_spec: `search` — the other two retired in lane P6) + 1 (paged
-  destination) + 0 (no arm) + 9 (destination not an MCP door yet) = 19, and
+  destination) + 0 (no arm) + 7 (destination not an MCP door yet) = 17, and
   `TestProtectedDoorsStayLive` reads EVERY protected name back from the code — a name that
   lands in this list without an assertion behind it is the shape the #13052 review caught.
 
-⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, AND 19 UNTIL LANE P6. `create_point` and
+⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, 21 UNTIL LANE P6, 19 AFTER THAT
+LANE'S `rest_spec` PAIR, AND 17 AFTER ITS DELETE PAIR — the count at this head. `create_point` and
 `diary_write` were two of those twenty-five, held by ONE reason each — "create_entity has
 no point arm" / "…no diary arm". That is the reason this file's own contract is written
 around: a door may leave `PROTECTED` only in the batch that makes its stated reason FALSE,
@@ -70,9 +73,11 @@ their arms (`check_confidence(recompute=True)` / `check_confidence(recall=True)`
 retired both. `issue_insight` and `session_context` were two of the remaining twenty-one
 and left on the same terms in lane P6: their recorded reason (`rest_spec` — *the row IS the
 REST route*) was MEASURED FALSE by lane P4, and P6 is the batch that acts on that
-measurement. The arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the
-population 25 became 23 became 19 — a count left at 21 would have been a table claiming
-two names that are no longer live, which is the rot the population check exists to red.
+measurement; `delete_point` and `delete_entity` were two of the remaining nineteen, and
+left on the #9660 ruling that KEEPS `tortoise_delete` and widens it. The arithmetic moved
+with each wave: 4 (no arm) became 2 became 0, and the population 25 became 23 became 21
+became 19 became 17 — a count left at 19 would have been a table claiming two names that
+are no longer live, which is the rot the population check exists to red.
 
 NO ARCHIVE ROW IS EXPECTED HERE. `archive/mcp-tools/` holds doors with NO destination
 (owner ruling 2026-11-12, `archive/README.md`); a forwarded name is STILL SERVED, so the
@@ -97,10 +102,11 @@ from tortoise.tool_registry import (
 #: This wave's doors. name -> the container whose method must be REACHED, and the
 #: discriminator the pointer names. The discriminator is the container's OWN dispatch
 #: value (`docs/product/bridge-table.md` Part A), never invented here.
-#: ⛔ TWO WAVES SHARE THIS TABLE. `tests/test_11609_door_retirement.py` was written for
+#: ⛔ THREE WAVES SHARE THIS TABLE. `tests/test_11609_door_retirement.py` was written for
 #: lane E's seven; #11609 lane P1 added `tortoise_create_point` and
 #: `tortoise_diary_write` to it in the change that BUILT the arms they were waiting for
-#: (`create_entity`'s `type="point"`/`type="diary"`). Every assertion here is
+#: (`create_entity`'s `type="point"`/`type="diary"`), and lane P6 added four more in two
+#: units (the `rest_spec` pair, then the DELETE pair). Every assertion here is
 #: parametrized over this table, so a door added here is covered without a second edit.
 RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
     "tortoise_get_session": ("get_session", 'type="session"'),
@@ -244,7 +250,7 @@ PROTECTED = {
     # grew the arms. Do not restore them without first removing those arms.
 }
 
-#: The other NINE of the registry block's 19: live, off the 27-target, and held for a
+#: The other SEVEN of the registry block's 17: live, off the 27-target, and held for a
 #: reason with no PROPERTY to assert — their recorded destination is not live on `main`
 #: yet, so there is no container to answer through and nothing that can be measured
 #: beyond "still live, still not retired" (which `TestProtectedDoorsStayLive` pins for
@@ -252,7 +258,7 @@ PROTECTED = {
 #: `PROTECTED`, because `PROTECTED`'s contract is a retaining artefact this file READS
 #: BACK from the code; a name here has none, and pretending otherwise would make the
 #: table's own docstring false. What the split buys: `len(PROTECTED) + len(NO_CONTAINER_YET)
-#: == 25` turns the registry's prose enumeration into a checked POPULATION, so a live
+#: == 17` turns the registry's prose enumeration into a checked POPULATION, so a live
 #: door dropped from either table reds here instead of surviving as a comment.
 NO_CONTAINER_YET = {
     # ⛔ `tortoise_delete_point` / `tortoise_delete_entity` USED to sit here (held by
@@ -343,7 +349,7 @@ class TestThePointerIsCallableAtTheContainer:
     and refuses the write without one). `tortoise_create_subject`/`_object` named the
     kind NOWHERE, which is quieter and worse: `entities.py` defaults it to `'other'`.
 
-    ⛔ Scoped to THIS WAVE's seven — and NOT because a global scan finds a defect, because it
+    ⛔ Scoped to THIS FILE's thirteen — and NOT because a global scan finds a defect, because it
     does not. The reason is mechanical: this assertion attributes every `name=` kwarg to ONE
     target (`_POINTER_TARGET.match`), and a pointer may be COMPOUND. There is exactly one such
     pointer — `tortoise_mine_conversations` names BOTH arms (*"…from_directory(directory=…,
@@ -351,8 +357,8 @@ class TestThePointerIsCallableAtTheContainer:
     <transcript>, source_id=…)"*) — and every named argument is accepted by ITS OWN target
     (`from_directory(directory, extract_entities=True)`, `from_session(conversation=None, …,
     source_id=None, …)`), so the pointer is correct and was adjudicated so at #12984's P2-1.
-    Scoping to the seven keeps this assertion's reading of the pointer unambiguous instead of
-    teaching it to parse prose; a one-target scan over all 60 pointers is a different change.
+    Scoping to the thirteen keeps this assertion's reading of the pointer unambiguous instead of
+    teaching it to parse prose; a one-target scan over all 68 pointers is a different change.
     """
 
     #: The kind each retired `create_*` door REQUIRED, and the container takes inside
@@ -404,7 +410,7 @@ class TestThePointerIsCallableAtTheContainer:
 
 class TestEveryPointerResolvesInOneHop:
     def test_every_retired_name_points_at_a_live_tool(self):
-        """The property, over the WHOLE population — not only this wave's seven."""
+        """The property, over the WHOLE population — not only this file's thirteen."""
         live = set(_live())
         strays = []
         for name, pointer in RETIRED_USE_INSTEAD.items():
@@ -416,14 +422,14 @@ class TestEveryPointerResolvesInOneHop:
             f"lands on another shim (aliases are not transitive): {strays}")
 
     def test_the_live_count_moved_strictly_lower(self):
-        """#11609's arithmetic: 55 → 48 → 46 → 44 advertised, no container row arriving.
+        """#11609's arithmetic: 55 → 48 → 46 → 44 → 42 → 40 advertised, no row arriving.
 
         Each retiring wave removes doors into arms its container had to grow for them
         (#11609 P1: `create_entity`'s `point`/`diary`; P2: `check_confidence`'s
         `recompute=True` / `recall=True`), so the count can only fall and no container is
-        added. The two waves are independent subtractions on the same base surface —
-        48 minus 2 minus 2 — because each merged on its own; the pin is the SUM, which is
-        what the merged registry actually advertises.
+        added. The waves are independent subtractions on the same base surface —
+        48 minus 2 minus 2, then 42 minus 2 minus 2 — because each merged on its own; the
+        pin is the SUM, which is what the merged registry actually advertises.
         """
         assert len(TOOL_REGISTRY) == 40, (
             f"live surface is {len(TOOL_REGISTRY)}, not 40 — these waves remove doors only "
@@ -724,7 +730,9 @@ class TestProtectedDoorsStayLive:
     named 25 live doors off the 27-target; TWO of them (`create_point`, `diary_write`) were
     retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO more
     (`issue_insight`, `session_context`) by lane P6 in the change that acted on P4's
-    measurement that their `rest_spec` reason was false, so the population is 19 and TEN
+    measurement that their `rest_spec` reason was false, and TWO more (`delete_point`,
+    `delete_entity`) by that same lane on the #9660 ruling that KEEPS `tortoise_delete`
+    and widens it, so the population is 17 and TEN
     of them carry a retaining PROPERTY, and EVERY ONE is read back from the code below —
     none is a name that only appears in the `PROTECTED` dict,
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052
@@ -748,10 +756,10 @@ class TestProtectedDoorsStayLive:
         which prove the reason false AT the container instead of trusting the table's
         silence.
 
-    The other NINE (`NO_CONTAINER_YET`) have no live container at all, so the only thing
+    The other SEVEN (`NO_CONTAINER_YET`) have no live container at all, so the only thing
     to measure is "still live, still not retired" — pinned below for them too. The two
     tables together are what make the enumeration checkable as a POPULATION; neither
-    alone is 21 of 21.
+    alone is 17 of 17.
     """
 
     def test_the_two_tables_cover_the_enumerated_population_and_do_not_overlap(self):
