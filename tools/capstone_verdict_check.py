@@ -724,7 +724,16 @@ def _record_conditional(repo: Path, prereg_sha: str | None,
                       f"step declaration lives only in {RECORD_ARTIFACT!r} — a "
                       "conditional set read from any other file is not the frozen "
                       "record, whatever it contains")
-    blob = _git(repo, "show", f"{prereg_sha}:{normalised}")
+    # A WIDER clock than the object probes: in a partial clone this read is a
+    # network fetch of the blob, not a local lookup (#13800).
+    blob = _git(repo, "show", f"{prereg_sha}:{normalised}", timeout=BLOB_TIMEOUT)
+    if blob.returncode == 124:
+        # A clock that ran out is NOT evidence that the object is missing — and
+        # the caller turns this string into a V5 refusal, so naming the wrong
+        # cause would charge the record with a defect the checkout caused.
+        return None, (f"{prereg_sha}:{artifact} could not be read here: `git show` "
+                      f"exceeded {BLOB_TIMEOUT:g}s, which is a slow blob fetch in a "
+                      "partial clone rather than a missing object")
     if blob.returncode != 0:
         return None, f"{prereg_sha}:{artifact} does not resolve in this checkout"
     try:
@@ -881,17 +890,112 @@ def _step_accounting(repo: Path, run: dict, observed: tuple,
     return out
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
-                          text=True, check=False)
+# Every git invocation here is BOUNDED (#13800). A probe that cannot answer is a
+# verdict, but a probe that never returns is a hung gate — and this tool gates a
+# merge. `GIT_TIMEOUT` is generous for the operations bounded by it (a commit or
+# ref lookup is ~8 ms even on a 2.4 M-file repo) and small enough that a wedged
+# `git` cannot outlive a `pytest-timeout` budget; the ONE network read (a
+# `show <sha>:<path>` blob fetch in a partial clone) passes its own wider bound.
+GIT_TIMEOUT = 15.0
+BLOB_TIMEOUT = 60.0
+
+
+def _git(repo: Path, *args: str, timeout: float = GIT_TIMEOUT) -> subprocess.CompletedProcess:
+    """Run git, and never block for longer than ``timeout`` seconds.
+
+    Expiry is reported the way a FAILED invocation is (rc 124, the shell's
+    ``timeout`` convention) rather than raised, so every caller's existing
+    ``returncode`` read keeps working: ``_resolves`` reads it as "this sha does
+    not resolve", ``_is_ancestor`` reads it as "cannot answer" (its 128/None
+    arm), and neither invents a verdict it did not earn.
+
+    ⚠️ Why a clock is needed at all: in a `blob:none` partial clone, proving that
+    a sha is ABSENT costs ~85 s of git CPU — `cat-file -e` on `"a"*40` was
+    measured at 85.1 s against 0.008 s for a PRESENT sha in the same checkout,
+    and `GIT_NO_LAZY_FETCH=1`, `rev-parse --verify`, `rev-list --max-count=1`
+    and `cat-file --batch-check` all cost the same 82-84 s (#13800). Ten tests in
+    `tests/test_7949_capstone_verdict_check.py` build a record around a
+    deliberately unresolvable sha, so an unbounded probe turned all ten into
+    `pytest-timeout` reds that named no citation at all — a false red on a green
+    tree, on the clone shape this repo recommends.
+
+    ⛔ Measured and REJECTED as faster answers, so nobody spends the hour again:
+    `GIT_NO_LAZY_FETCH=1` (82.5 s — git 2.43 does not honour it),
+    `rev-parse --verify --quiet` (82.8 s), `rev-list --max-count=1` (83.7 s),
+    `cat-file --batch-check` (82.9 s), and `-c remote.origin.promisor=false
+    -c extensions.partialClone=` (86.2 s — the lazy-fetch path is not where the
+    time goes on this git). ⚠️ One MEASUREMENT ARTIFACT is worth recording
+    because it looks exactly like a cure: spelling both overrides as ONE `-c`
+    value (`-c "remote.origin.promisor=false -c extensions.partialClone="`) makes
+    the probe exit in 0.011 s with rc 128 — `fatal: bad boolean config value`,
+    a PARSE ERROR that reads as "this sha resolves to nothing" at the call
+    sites. Always read stderr on a suspiciously fast probe; a clock is the only
+    lever this checkout actually has.
+    """
+    try:
+        return subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
+                              text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            ["git", *args], returncode=124, stdout="",
+            stderr=f"git {' '.join(args)} exceeded {timeout:g}s")
 
 
 def _is_git_repo(repo: Path) -> bool:
     return _git(repo, "rev-parse", "--is-inside-work-tree").returncode == 0
 
 
+def _repo_refusal(repo: Path) -> str:
+    """Why ``repo`` is not a usable work tree, or "" when it is one.
+
+    Two causes, two sentences (#13800 review): a bounded probe that ran out of
+    clock must not be reported as "not a git work tree", which is a claim about
+    the checkout rather than about the clock.
+    """
+    proc = _git(repo, "rev-parse", "--is-inside-work-tree")
+    if proc.returncode == 0:
+        return ""
+    if proc.returncode == 124:
+        return (f"git could not answer within {GIT_TIMEOUT:g}s whether this is a "
+                "work tree (a wedged git, not a missing checkout)")
+    return "not a git work tree"
+
+
+# Object-existence answers, memoised per (checkout, sha) for the life of the
+# PROCESS (#13800). One gate run asks the same question once per ROW — five rows
+# share the log's `head` — and in a partial clone each unanswerable probe costs
+# the full `GIT_TIMEOUT`, so a per-call probe paid it five times over.
+#
+# ⚠️ This is a process-lifetime cache and it is NOT invalidated: a long-lived
+# process that fetched objects between two `check()` calls on the same checkout
+# would be served a stale answer. The consequence is bounded and stated rather
+# than hidden — a stale False SKIPS V5's ancestry arm for that row (reported as
+# unresolved provenance, never failed) instead of inventing a `PREDATES`
+# finding. The CLI is one shot (`main()` calls `check()` once), so no shipped
+# path reaches it, and clearing per call would restore the very cost this exists
+# to remove.
+_OBJECT_DB_MEMO: dict[tuple[str, str], bool] = {}
+
+
 def _resolves(repo: Path, sha: str) -> bool:
-    return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+    """True when ``sha`` is a commit this checkout carries.
+
+    Two readings were considered for the EXPIRY case (#13800) and this one is
+    deliberate: a probe that runs out of clock reads as False, i.e. "not in this
+    object DB" — the same answer a full clone reaches in milliseconds for a sha
+    that is genuinely absent, which is the case every caller actually poses.
+    `False` also keeps ONE return type, so no caller has to learn a third state
+    (the three call sites read truthiness, so a `None` would have flowed through
+    unchanged — the reason for `False` is the type, not the plumbing). The cost
+    is that an expiry is indistinguishable from absence AT THE CALL SITES, which
+    is why each message below a probe names the clock where it can.
+    """
+    key = (str(repo), sha)
+    hit = _OBJECT_DB_MEMO.get(key)
+    if hit is None:
+        hit = _OBJECT_DB_MEMO[key] = (
+            _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0)
+    return hit
 
 
 def _is_ancestor(repo: Path, maybe_ancestor: str, of: str) -> bool | None:
@@ -1020,7 +1124,7 @@ def check(record: dict, *, repo: Path,
             f.add("V3", where, f"sha {sha!r} is not a commit sha — every row "
                                "is measured AT a sha")
         elif not _is_git_repo(repo):
-            f.unresolved.append(("row", sha, "not a git work tree"))
+            f.unresolved.append(("row", sha, _repo_refusal(repo)))
         elif not _resolves(repo, sha):
             # ⛔ EVERY row, not only the green ones (#9089 review). The resolve
             # check used to sit inside the GREEN branch, and the shipped table
@@ -1147,8 +1251,17 @@ def check(record: dict, *, repo: Path,
                 else:
                     ancestry = _is_ancestor(repo, prereg_sha, sha)
                     if ancestry is None:
+                        # Reaching here means BOTH operands resolve, so the
+                        # cause is not a missing object: `merge-base` exited
+                        # neither 0 nor 1 (a bounded probe that ran out of
+                        # clock, #13800, lands here). Saying "not in this
+                        # object DB" would name a cause this branch has just
+                        # disproved.
                         f.unresolved.append(
-                        ("prereg", prereg_sha, "not in this object DB"))
+                        ("prereg", prereg_sha,
+                         "git could not answer whether the evidence predates "
+                         "the pre-registration (both commits resolve here, but "
+                         "`merge-base --is-ancestor` exited neither 0 nor 1)"))
                     elif ancestry is False:
                         f.add("V5", where, "evidence PREDATES the "
                                            f"pre-registration ({sha} is not a "
