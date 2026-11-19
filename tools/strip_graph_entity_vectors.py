@@ -2115,9 +2115,13 @@ def write_gate(entity_type: str, *,
     MEASURED in a fresh process instead of "this process has served no dense read". See
     `graph_vector_population` for why only a caller holding a handle can supply the
     denominator, and `record_vector.mirror_verdict` for why a non-request caller must
-    declare its tenant rather than hope one is ambient. Omit all three and the read
-    degrades to the pre-`#13796` one: a cache-only boolean with no account, which is what
-    a write fold wants and what this tool must not settle for.
+    declare its tenant rather than hope one is ambient. Omit all three and the read degrades
+    to the pre-`#13796` one: a CACHE-ONLY verdict that takes no count. ⛔ It is not
+    ACCOUNT-LESS — `mirror_verdict` still names the arm that answered ("no tenant is
+    installed on this process …", "the record has not proved it holds this label's vectors
+    in this process"), which is a different state from the version-skew fallback below,
+    where the tree has no measured form at all and the reason says so. A cache-only verdict
+    is what a write fold wants and what this tool must not settle for.
 
     ⚠️ The qualifier is load-bearing: the reads BELOW the gate read — this module's
     `from tortoise.security import ENTITY_TYPE_LABELS` and `parity.affected_entity_types`
