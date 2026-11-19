@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -300,10 +301,19 @@ def test_failed_load_cooldown():
     from tortoise.embeddings import EmbeddingModel
 
     EmbeddingModel._reset()
+
+    def _slow_build(*_a, **_k):
+        # SLOWER than the 1 ms join below, so the worker cannot finish inside it:
+        # the retry half must take the TIMEOUT arm (which re-arms the failure
+        # timestamp), not the success arm. An instant fake would let `get()`
+        # return a model and the assertion below would fail for the wrong reason.
+        time.sleep(0.25)
+        return object()
+
     try:
         with patch.object(embeddings_mod, "pin_embed_threads", lambda: None), \
                 patch.object(embeddings_mod, "import_sentence_transformer",
-                             lambda: (lambda *a, **k: object())):
+                             lambda: _slow_build):
             with patch("tortoise.embeddings.time.monotonic", return_value=1000.0):
                 EmbeddingModel._last_failed_at = 950.0  # load failed 50s ago
                 assert EmbeddingModel.get() is None, "cooldown must return None"
