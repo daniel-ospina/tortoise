@@ -780,11 +780,17 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     # the arms actually present (`b-attempt-key`, `ak-guessed`), so a name-only tuple left a mutant
     # that interpolates `url.searchParams.get(ATTEMPT_KEY_PARAM)` into the copy fully GREEN — and
     # that key is the one secret this page's CSP + `Referrer-Policy` exist to keep out of a third
-    # party's log. Every value the harness can put in the query is covered, so a new arm that
-    # presents a different key is pinned by adding it here rather than by remembering to.
+    # party's log. These are the values a mutant can interpolate into the copy and still slip past
+    # every assertion above — a new arm that presents a different key is pinned by adding it here
+    # rather than by remembering to. ⛔ `redirect_uri` appears only as its SCHEME-LESS tail: the full
+    # literal is `https://client.example/cb`, and #767 already forbids `https://` in the body, so the
+    # whole URL would be a row that can never be the failing one (the red would land on the origin
+    # assertion instead). `scope` ("mcp") and `code_challenge_method` ("S256") are deliberately NOT
+    # here — the copy legitimately renders "MCP client", so a query-value assertion over them would
+    # read as coverage without being able to fire.
     for echoed in (
         _PARAMS["client_id"],
-        _PARAMS["redirect_uri"],
+        "client.example/cb",  # `_PARAMS["redirect_uri"]` minus the scheme #767 already forbids
         _PARAMS["state"],
         _PARAMS["code_challenge"],
         # the attempt keys the arms present (the one credential, #10487/#10884)
@@ -796,7 +802,10 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
         "redirect_uri",
         "client_id",
     ):
-        assert echoed not in body, f"{reason}: the page ECHOES {echoed!r} from the request"
+        assert echoed not in body, (
+            f"{reason}: the page ECHOES {echoed!r} from the request — the copy is compile-time "
+            "constants only (#10884/#13671): an echoed value is a destination or a credential "
+            "this page can be talked into carrying")
 
 
 def _run(scenario: str, **opts) -> dict:
@@ -2046,8 +2055,14 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     (added by this fold), and the bridge record. Test module docstrings are not scanned — the same
     sentence appears there legitimately, as the thing being narrowed.
 
-    Non-vacuous: it REDS on the pre-#10884 `start.ts`, whose header read
-    `**Every hard failure is a PAGE, not a JSON blob**`.
+    Non-vacuous, and where the red actually lands: `origin/main`'s
+    `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
+    answer `json({error, reason})`" — the sentence this change rewrites — so reverting that hunk
+    REDS this guard. ⛔ It does NOT red on a `start.ts` header carrying the absolute: no header of
+    that file ever read `**Every hard failure is a PAGE, not a JSON blob**` (`git log -S 'Every
+    hard failure' -- …/api/consent/start.ts` is empty, and main's header already says "Every
+    REFUSAL is a PAGE"), so `consent-refusal.ts` is the real pre-fix red and the only provenance
+    this docstring may claim.
     """
     corpus = {
         "start.ts": (CONSENT_DIR / "start.ts").read_text(encoding="utf-8"),
