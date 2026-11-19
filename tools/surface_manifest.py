@@ -863,8 +863,9 @@ def cut_commit_verdict(sha: str) -> tuple[str, str]:
       and its absence is PROVEN: either the repository is not shallow (nothing is missing
       for it to hide in), or a promisor remote was asked and answered that it has no such
       object. A fabricated provenance is a refusal.
-    * `unprovable` — git is unavailable, or this clone is shallow and no remote answered.
-      NOT a pass, and never silent: `cmd_check` prints the arm it took.
+    * `unprovable` — git is unavailable, or this clone is shallow and no remote answered, or
+      the probe was abandoned on the clock (`_git`'s bound). NOT a pass, and never silent:
+      `cmd_check` prints the arm it took.
     """
     # ⛔ ONE shape predicate, not two (#11057 review P2): this arm has its own history — an
     # inline 40-char regex — while `cmd_cut`'s write gate and `provenance_report`'s arm used
