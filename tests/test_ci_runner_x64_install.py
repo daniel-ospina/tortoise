@@ -6290,13 +6290,13 @@ def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_pat
     """rc=0 on a target that never had a `.d` directory — and the teardown is not even INVOKED.
 
     ⛔ THE rc=0 IS NOT THE GUARD'S DOING, and this arm used to assert NOTHING ELSE: `sudo rm -f` on an
-    absent path exits 0 and the `rmdir` ENOENT is swallowed by the `2>/dev/null || true` already on
-    that line, so deleting `[ -d "$UNIT_DIR/$unit.d" ] || return 0` left the old assertion GREEN — a
-    proven-green mutant. It pinned "uninstall exits 0", which was equally true before this PR, when
-    no drop-in code existed at all. What the guard actually buys is that a box with nothing of ours to
-    remove runs no `sudo` and no `rmdir`, so THAT is what is asserted here, and it is the thing that
-    reddens when the guard is deleted (mutant: drop the `[ -d ]` line ⇒ `sudo rm -f` and `sudo rmdir`
-    both run, `rmdir.log` appears, the arm reds while rc stays 0).
+    absent path exits 0 and NOTHING in the function lets the `rmdir` ENOENT become the status — the
+    terminal `return 0` decides it — so deleting `[ -d "$UNIT_DIR/$unit.d" ] || return 0` left the old
+    assertion GREEN, a proven-green mutant; and it stays GREEN with the `2>/dev/null || true` deleted
+    too (measured: `set -uo pipefail` carries no `-e`, so the `|| true` is not what decides it). It
+    pinned "uninstall exits 0", equally true before this PR when no drop-in code existed. What the
+    guard buys is that a box with nothing of ours to remove runs no `sudo` and no `rmdir`, so THAT is
+    asserted here (mutant: drop `[ -d ]` ⇒ both run, `rmdir.log` appears, the arm reds while rc is 0).
     """
     env = _uninstall_env(tmp_path)
     # `rmdir` stub: logs its argv and exits 1, exactly as the REAL one does on a missing directory.
