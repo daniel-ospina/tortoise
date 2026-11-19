@@ -878,6 +878,20 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
     OBSERVABILITY surface rather than on the object. And it changes NO decision: the
     read still proceeds and still answers, because with both sides empty the two
     stores answer identically.
+
+    ⛔ "IT CHANGES NO DECISION" IS PINNED HERE, NOT ONLY ASSERTED IN PROSE. An
+    empty `rows` cannot carry that claim on its own: `run_vector_query` returns
+    ``[]`` from the SERVED path (`mechanism=pgvector`, `reason=empty_results`,
+    `degraded=False` — `search_engine.py:4176-4178`) AND from a DECLINE whose
+    fallback leg failed (`search_engine.py:4153-4156`: `mechanism=pgvector`,
+    `reason=query_failed`, `degraded=True`, `return []`). A mutant that raises
+    `RecordVectorDeclined` *after* the marker's debug line therefore keeps
+    `rows == []` and both caplog assertions green — the half of #13798's mandate
+    that says the marker must not turn a serve into a refusal was asserted in prose
+    and pinned by nothing. The trace
+    is the evidence that separates them, and this file already reads it that way
+    for the non-trivial case (`test_a_contracted_empty_answer_is_the_answer`,
+    `:441-445`).
     """
     import logging
 
@@ -885,9 +899,19 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
     _stub_record(monkeypatch, count=0, rows=[])
 
     with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
-        rows, _graph, _trace = _run(_searcher(0), entity_type="object")
+        rows, graph, trace = _run(_searcher(0), entity_type="object")
 
     assert rows == [], rows
+    assert graph.queries == [], (
+        "a trivially-verified read asked the graph — with both sides empty the two "
+        f"stores answer identically, so nothing may be spent on the graph: {graph.queries}")
+    assert trace[-1]["mechanism"] == "pgvector", trace
+    assert trace[-1]["degraded"] is False, (
+        "the trivial marker turned a SERVE into a DEGRADED/declined read — that is "
+        f"the one behaviour #13798 forbids changing: {trace}")
+    assert trace[-1]["reason"] == "empty_results", (
+        "the read did not take the record's healthy empty answer, so `rows == []` "
+        f"is not evidence that anything was served: {trace}")
     assert "TRIVIALLY" in caplog.text, (
         "a trivially-verified label served an empty cohort with nothing in the trace "
         "saying why — `mechanism=pgvector, reason=ok` is then indistinguishable from "
