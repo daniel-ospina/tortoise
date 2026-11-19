@@ -23859,8 +23859,20 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             _holders = [(_r[0] if _r else None) for _r in proj.g.query(
                 f"MATCH (o:Object) WHERE {_space} RETURN o.id",
                 params=_space_params).result_set]
-            _idless = any(
-                not (isinstance(_h, str) and _h) for _h in _holders)
+            # ⛔ An ID-LESS row has no `id` at all; a row whose `id` is present
+            # but NOT a string is a different shape: `link_entity`/the id arm
+            # address ids as strings, so the collapse answers with the string
+            # form and an `o.id IN $ids` match finds nothing — measured: an
+            # `Object {id: 4242}` matched by the name space dropped its edge at
+            # this anchor while the pre-#12244 single MERGE wrote it. It is
+            # addressable by its OWN value, so it rides the same id-keyed MERGE
+            # with the raw value beside the string ones (a raw int matches its
+            # own node and the string form never does, so neither arm can pick
+            # up the other's row).
+            _idless = any(_h is None or _h == "" for _h in _holders)
+            _raw_addressable = [_h for _h in _holders
+                                if _h is not None and _h != ""
+                                and not isinstance(_h, str)]
             try:
                 _targets = attachment_target_ids(proj.g, "Object", _holders)
             except Exception as _col_exc:  # noqa: BLE001, RUF100
@@ -23872,6 +23884,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                     "about-anchor collapse failed for %r: %s: %s — attached "
                     "to every matched carrier",
                     name, type(_col_exc).__name__, _col_exc)
+            _targets = [*_targets, *_raw_addressable]
             if _targets:
                 proj.g.query(
                     "MATCH (p:Point {id:$pid}), (o:Object) "

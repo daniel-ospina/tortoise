@@ -1445,6 +1445,85 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
             session_id="s_12244_c", sdk=sdk)
 
         assert res["linked"] == 2, res
-        assert self._edges(sdk, pt["id"]) == [survivor["id"], None], (
-            "the id-less stub lost its edge, or the merged-away carrier kept "
-            f"one (carrier={carrier['id']})")
+        edges = self._edges(sdk, pt["id"])
+        # ⛔ Ordering is decided HERE, not by `ORDER BY o.id`: the id-less row's
+        # key is NULL, and a NULL's position under an ascending sort is the
+        # backend's to choose — an assertion that leans on it passes on one
+        # engine and inverts on another.
+        assert edges.count(None) == 1, edges
+        assert survivor["id"] in edges, edges
+        assert carrier["id"] not in edges, (
+            "the merged-away carrier kept an edge "
+            f"(carrier={carrier['id']}): {edges}")
+
+    def test_a_TERMINAL_survivor_still_takes_the_edge(self, sdk):
+        """STATUS-BLIND, and it is the flag that buys it (#12244 review P2).
+
+        These sites link a terminal-only holder (`apply_merge_union`'s docstring:
+        "a terminal-only holder IS linked"). The collapse's live filter after a
+        hop is the CREATE path's — #12047 round 9, where a create MERGEd onto a
+        retired incarnation — so an attachment must take the hop WITHOUT it.
+        Measured: with the flag flipped, this same graph answers `[]` and the
+        whole attachment disappears, silently, which is why the disposition gets
+        a pin of its own rather than a sentence.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        survivor, _carrier = self._merged_pair(sdk)
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$sid}) SET o.status = 'superseded'",
+            params={"sid": survivor["id"]})
+        pt = sdk.create_point("statement", "the team meets weekly")
+        sdk._get_proj().g.query(
+            "CREATE (s:Session {id:$sid})", params={"sid": "s_12244_d"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["team"]},
+            session_id="s_12244_d", sdk=sdk)
+
+        assert res["linked"] == 1, (
+            "a terminal SURVIVOR lost its attachment — the collapse's live "
+            f"filter is the create path's, not this site's: {res}")
+        assert self._edges(sdk, pt["id"]) == [survivor["id"]], res
+
+    def test_a_dangling_pointer_links_the_holder_that_STILL_EXISTS(self, sdk):
+        """#12244 review P1: a hop to a node that is GONE must not delete the edge.
+
+        `follow_resolved_from` returns the hop's target without proving it still
+        exists (`entity_resolver.follow_resolved_from` re-reads and, finding no
+        row, returns `current`), and the carrier keeps its `resolved_from` after
+        the survivor is deleted — `_delete_entity` does not sweep dependents. An
+        id-keyed attach against that id writes NOTHING: measured `linked=0` with
+        no edge, no `unresolved` entry and no warning, where the pre-#12244 code
+        wrote the edge to the carrier that is still there. `linked` is documented
+        as what actually LANDED, so a silent zero is the false-PASS shape this
+        module forbids — the attachment path falls back to the holder.
+
+        The CREATE path keeps the opposite answer (a create must never MERGE onto
+        a retired incarnation, #12047 round 9), which is why the fallback lives in
+        the `drop_retired_survivors=False` arm and not in the shared hop.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        survivor, carrier = self._merged_pair(sdk)
+        assert sdk.delete_entity(survivor["id"]) is not False
+        g = sdk._get_proj().g
+        assert g.query("MATCH (o:Object {id:$sid}) RETURN o.id",
+                       params={"sid": survivor["id"]}).result_set == []
+        # The carrier still carries the pointer — that is the state under test.
+        assert g.query("MATCH (o:Object {id:$cid}) RETURN o.resolved_from",
+                       params={"cid": carrier["id"]}).result_set == [
+            [survivor["id"]]]
+        pt = sdk.create_point("statement", "the team meets weekly")
+        g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_e"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["team"]},
+            session_id="s_12244_e", sdk=sdk)
+
+        assert res["linked"] == 1, (
+            "a pointer to a DELETED survivor turned a landed attachment into a "
+            f"silent zero: {res}")
+        assert self._edges(sdk, pt["id"]) == [carrier["id"]], res

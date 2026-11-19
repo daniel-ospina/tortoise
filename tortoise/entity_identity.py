@@ -416,6 +416,23 @@ def _collapse_resolved_holders(g, label: str, holder_ids, *,
     status-blind caller that used it would silently lose an unrelated terminal
     holder it is supposed to link. That is why the flag exists rather than the
     callers re-deriving the hop.
+
+    ⛔ ``False`` also resolves a DANGLING pointer back to its holder (#12244
+    review, P1). ``follow_resolved_from`` returns the hop's target id without
+    proving the target still exists (``entity_resolver.follow_resolved_from`` —
+    its next read finds no row and it returns ``current``), and the target can
+    legitimately be gone: a deleted survivor (``sdk.delete_entity`` does not
+    sweep its dependents' ``resolved_from``), or a CROSS-LABEL pointer
+    (``apply_entity_merge`` resolves the survivor through ``_identity_row``,
+    which tries ``Object`` then ``Subject``). Handing that id to an id-keyed
+    attach writes NOTHING — measured: a merge record naming a merged variant
+    reported ``linked=0`` with no edge, no ``unresolved`` entry and no warning,
+    where the pre-#12244 code wrote the edge to the still-present carrier. A
+    silent zero on a channel documented as "what actually LANDED" is the
+    false-PASS shape these sites forbid, so the attachment path falls back to
+    the holder that DOES exist. The CREATE path must NOT (a create that MERGEd
+    onto a retired incarnation is the round-9 defect), which is why the fallback
+    is inside the same ``drop_retired_survivors=False`` arm.
     """
     # ⛔ #12047 review round 9: the hop DROPS a terminal survivor. The holders
     # were live-only BEFORE the hop, but a merged-away carrier stays live while
@@ -427,13 +444,27 @@ def _collapse_resolved_holders(g, label: str, holder_ids, *,
     # test every other read uses.
     from .entity_resolver import follow_resolved_from
     from .live import _terminal_excluded
-    collapsed: list = []
-    seen: set = set()
+    pairs: list = []
     hopped = False
     for holder in holder_ids:
         resolved = follow_resolved_from(g, label, holder) if holder else None
         if resolved and holder and str(resolved) != str(holder):
             hopped = True
+        pairs.append((holder, resolved))
+    if hopped and not drop_retired_survivors:
+        # #12244 review P1: a pointer whose target no node of THIS label holds
+        # must not DELETE the attachment — see this function's docstring. Only
+        # the attachment path is here; the create path keeps dropping (round 9).
+        ids = [str(res) for _holder, res in pairs if res]
+        if ids:
+            present = {str(row[0]) for row in g.query(
+                f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id",
+                params={"ids": ids}).result_set}
+            pairs = [(holder, res if (res and str(res) in present) else holder)
+                     for holder, res in pairs]
+    collapsed: list = []
+    seen: set = set()
+    for _holder, resolved in pairs:
         key = resolved if resolved else f"id-less:{len(collapsed)}"
         if key in seen:
             continue
@@ -499,8 +530,28 @@ def attachment_target_ids(g, label: str, holder_ids) -> list[str]:
     spelling space reaches a survivor through ``aliases`` only for the fold the
     merge recorded, and the ENTITY is the survivor regardless. Both writers match
     on ``id``, so an id that names no node attaches nothing — never a minted node
-    (``link_entity`` returns 0 when an endpoint is absent).
+    (``link_entity`` returns 0 when an endpoint is absent) — and a pointer whose
+    target is GONE falls back to the holder that exists, so a dangling
+    ``resolved_from`` cannot turn a landed attachment into a silent zero
+    (:func:`_collapse_resolved_holders`).
+
+    ``label`` is validated HERE, in this function's own frame: the helper is
+    public and a caller may pass anything, and the module's rule is that every
+    label reaching a Cypher label position goes through
+    :func:`_require_identity_label` (`entity_resolver` does the same for the same
+    reason). Borrowing the hop's validation is not enough once the hop is optional
+    (an all-id-less holder set never calls it).
+
+    ⚠️ STATED COST, so a later optimisation is a decision and not a surprise:
+    ``_collapse_resolved_holders`` issues ONE read per id-carrying holder (the
+    hop), plus one batched read per call when a hop occurred. On the capture path
+    that is ``1 + H`` reads per attached name (``H`` = holders in the spelling
+    space, normally 1-2). Batching the hop would touch the CREATE path's shared
+    hop as well, which is not this lane's change; a future lane that batches it
+    must keep the presence evidence (it is what the dangling-pointer fallback
+    above is built on).
     """
+    _require_identity_label(label)
     return [str(holder) for holder in _collapse_resolved_holders(
         g, label, holder_ids, drop_retired_survivors=False) if holder]
 
