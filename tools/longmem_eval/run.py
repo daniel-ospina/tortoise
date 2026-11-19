@@ -1363,7 +1363,10 @@ def _retry_failed_skip_reason(entry: dict, *,
                 f"ingest:retries_exhausted entries are re-attempted "
                 f"(reader:/judge: entries stay permanently skipped)")
     if entry.get("retryable") is False:
-        return "retryable=false (deterministic failure — never re-attempted)"
+        return ("retryable=false (not an infra failure — never re-attempted; "
+                "the families this covers are deterministic bugs AND the "
+                "transient-value redis refusals #8486 excludes, see "
+                "errors.py::infra_failure)")
     if entry.get("retryable") is None and not _legacy_repr_match(
             str(entry.get("error") or "")):
         # Legacy entry without a 'retryable' field: the repr-string check is

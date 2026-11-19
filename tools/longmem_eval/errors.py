@@ -184,20 +184,25 @@ def infra_failure(exc: BaseException) -> bool:
     Everything else — a ``TypeError``/``KeyError``/``RuntimeError`` from our
     own code, and the deterministic redis refusals above — is excluded.
 
-    ⚠️ Deliberately NOT in scope, and it IS a change: a bare
-    ``ResponseError('Query timed out')`` (also ``LOADING``, ``READONLY``,
-    ``OOM command not allowed``) matches none of the three families, so it is
-    excluded here. The ``isinstance(exc, RedisError)`` arm this replaced
-    ADMITTED every one of them — base-class membership says nothing about
-    recoverability — so their persisted flag flips ``true`` → ``false`` on this
-    release. That is the intended direction (a persisted ``retryable: true`` is
-    what spends ~25 min per attempt) and the SAFE one: a false ``False`` leaves
-    a retained entry an operator can see and hand-recover, where a false
-    ``True`` silently burns the budget. It is NOT free — a server query timeout
-    at ingest is genuinely transient, and a resume now skips it until someone
-    admits the family explicitly. Naming those families is a separate decision
-    with its own budget question, so it is recorded in the plan (§12) rather
-    than taken here.
+    ⚠️ The one behavioural delta this narrowing makes, in both directions.
+    These three families match none of the three predicates, so they persist
+    ``retryable: false`` where the ``isinstance(exc, RedisError)`` arm this
+    replaced said ``true``: a bare ``ResponseError('Query timed out')``,
+    ``ReadOnlyError`` (a replica refusing writes) and ``OutOfMemoryError``.
+    ⛔ That arm existed only on this PR's own intermediate head — ``main``
+    derives the flag from ``retryable_transient`` alone, which is False for all
+    three — so against ``main`` this is not a flip; it is the fix returning to
+    main's answer for these families. The direction is the safe one (a
+    persisted ``true`` is what spends ~25 min per attempt; a false ``False``
+    leaves a retained entry an operator can see and hand-recover) and it is NOT
+    free: a server query timeout at ingest is genuinely transient, so a resume
+    skips it until someone admits the family on purpose. ``LOADING`` is NOT in
+    that list — ``redis.exceptions.BusyLoadingError`` subclasses
+    ``ConnectionError``, so ``retryable_transient`` admits it and the flag
+    stays ``true``. Admitting the other three is a separate decision with its
+    own budget question, recorded in the plan (§12) and pinned both ways by
+    ``tests/test_longmem_failure_record_coherence.py::
+    test_the_transient_value_redis_families``.
     """
     return (retryable_transient(exc)
             or graph_abort_family(exc)

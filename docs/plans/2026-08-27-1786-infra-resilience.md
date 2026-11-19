@@ -376,19 +376,28 @@ route to `true` is `retryable_aborted_write` — MISCONF reaches `true` through
 that arm deleted. Every arm names `tortoise/retry.py`'s own regexes; none is a
 taxonomy invented here.
 
-**The one narrowing this makes, stated rather than implied — a bare
-`ResponseError` leaves the recoverable set.** Base-class membership admitted
-every redis exception, including a server query timeout. The three named
-families do not, so `ResponseError('Query timed out')` — and `LOADING`,
-`READONLY`, `OOM command not allowed` with it — now persists `retryable: false`
-where the previous head wrote `true`. The direction is deliberate (a persisted
-`true` is what spends ~25 min per attempt, and `false` leaves a retained entry
-an operator can see and hand-recover), and it is NOT a claim of equivalence: a
-query timeout at ingest is genuinely transient, and a `--retry-failed` resume
-skips it until someone admits that family explicitly. That admission is a
-separate decision with its own budget question (`READONLY` is a replica
-configuration and re-attempting it is pointless; `OOM` and `LOADING` usually
-clear on their own), so this amendment records the narrowing instead of
-settling it. Pinned by the REFUSE table in
-`tests/test_longmem_failure_record_coherence.py` (the four deterministic rows
-fail if the base-class arm returns) and by the ADMIT table beside it.
+**The one narrowing this makes, stated rather than implied — three
+transient-VALUE families leave the recoverable set, and `LOADING` does not.**
+The removed `isinstance(exc, RedisError)` arm admitted every redis exception,
+so `ResponseError('Query timed out')`, `ReadOnlyError` and `OutOfMemoryError`
+now persist `retryable: false` where that arm — which existed only on this PR's
+own round-1 head, never on `main`, since `main` derives the flag from
+`retryable_transient` alone — said `true`. `LOADING` is NOT one of them:
+`redis.exceptions.BusyLoadingError` subclasses `ConnectionError`, so
+`retryable_transient` admits it and the flag stays `true`. The direction is
+deliberate (a persisted `true` is what spends ~25 min per attempt, and `false`
+leaves a retained entry an operator can see and hand-recover), and it is NOT a
+claim of equivalence: a query timeout at ingest is genuinely transient, and a
+`--retry-failed` resume skips it until someone admits that family explicitly.
+That admission is a separate decision with its own budget question (`READONLY`
+is a replica configuration and re-attempting it is pointless; `OOM` and
+`LOADING` usually clear on their own), so this amendment records the narrowing
+instead of settling it.
+
+Pinned both ways by
+`tests/test_longmem_failure_record_coherence.py::test_the_transient_value_redis_families`
+(four rows: the three excluded families AND the `LOADING` admission, so neither
+a widened arm nor a blanket `return False` can pass), with the deterministic-
+family REFUSE table and the infra-family ADMIT table beside it as the other two
+halves. The earlier version of this paragraph named `LOADING` as excluded — it
+was false, which is why the rows exist now.

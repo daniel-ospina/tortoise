@@ -67,7 +67,7 @@ TAXONOMY_TABLE = [
 ]
 
 
-def _entry(exc, *, stage="ingest", attempts=1, prior=None,
+def _entry(exc, *, stage="ingest", prior=None,
            r2_attempted=0, resume_reattempt=False):
     return runner._build_failure_entry(
         "q-1", "single-session-user", exc, stage, r2_attempted,
@@ -79,18 +79,15 @@ def _entry(exc, *, stage="ingest", attempts=1, prior=None,
                          ids=[row[0] for row in TAXONOMY_TABLE])
 def test_retryable_agrees_with_the_graded_class(label, exc, site,
                                                 expected_class):
-    """⛔ THE FALSIFIER for finding 1: a recoverable class recorded with
-    ``retryable: false`` — or a non-recoverable class recorded ``true`` —
-    fails this test. Both halves matter: the flag must be a FUNCTION of the
-    class (and of the one infra/determinism gate that the class cannot carry),
-    so neither direction may drift.
-
-    The expectation is computed by ``failure_is_recoverable``, NOT by
-    ``class_is_recoverable`` alone: ``eval_failure_class`` widens every
-    ``unknown``-class exception at ingest to ``ingest:retries_exhausted``, so
-    a deterministic ``RuntimeError`` and a refused query wear the same class.
-    ``test_a_deterministic_bug_stays_excluded`` is the row that pins which way
-    that must fall.
+    """A WIRING pin, not the falsifier: ``_failure_entry`` computes exactly
+    this expression (``run.py:1506``), so the row proves the entry is wired to
+    ``failure_is_recoverable`` rather than to ``class_is_recoverable`` or to a
+    constant -- it reds if that call is replaced. It does NOT pin which
+    failures are recoverable: a mutation of ``infra_failure`` leaves all rows
+    green. The falsifiers for that are the two tables below
+    (``DETERMINISTIC_REDIS_REFUSALS`` and ``INFRA_REDIS_FAMILIES``), and
+    ``test_the_transient_value_redis_families`` pins the families whose flag
+    this PR changes.
     """
     entry = _entry(exc, stage=site)
     assert entry["error_class"] == expected_class
@@ -224,6 +221,53 @@ def test_the_infra_redis_families_are_admitted(label, exc):
     assert entry["error_class"] == "ingest:retries_exhausted"
     assert runner._retry_failed_skip_reason(entry) is None, (
         f"{label}: the resume gate must ADMIT it")
+
+
+#: The families whose persisted flag the round-2 narrowing CHANGES, with the
+#: direction each must land in, so the record and the code cannot drift apart.
+#: Measured, not assumed: ``BusyLoadingError`` is a ``ConnectionError``
+#: subclass, so it is the row that keeps this table from reading "every
+#: ``ResponseError`` is excluded".
+TRANSIENT_VALUE_REDIS_FAMILIES = [
+    ("query-timed-out", redis_exc.ResponseError("Query timed out"), False),
+    ("readonly-replica", redis_exc.ReadOnlyError(
+        "You can't write against a read only replica"), False),
+    ("oom", redis_exc.OutOfMemoryError(
+        "OOM command not allowed when used memory > 'maxmemory'"), False),
+    ("loading", redis_exc.BusyLoadingError(
+        "LOADING Redis is loading the dataset in memory"), True),
+]
+
+
+@pytest.mark.parametrize(
+    "label,exc,expected", TRANSIENT_VALUE_REDIS_FAMILIES,
+    ids=[row[0] for row in TRANSIENT_VALUE_REDIS_FAMILIES])
+def test_the_transient_value_redis_families(label, exc, expected):
+    """⛔ The pin for the ONE behaviour delta the round-2 narrowing makes.
+
+    ``READONLY``, ``OOM`` and a bare query timeout are transient-VALUE
+    conditions: the removed ``isinstance(exc, RedisError)`` arm admitted them
+    and the three named predicates do not, so they must persist
+    ``retryable: false`` — the safe direction (a retained entry an operator can
+    see and hand-recover, versus ~25 min per attempt spent on a flag nobody
+    reads). If a future arm admits one of them, or a future ``return False``
+    costs ``LOADING`` its admission, this table reds instead of the record
+    quietly disagreeing with the code — which is how the previous version of
+    the §12 amendment came to name ``LOADING`` as excluded when
+    ``retryable_transient`` admits it through ``ConnectionError``.
+
+    Admitting the other three is a deliberate non-goal of #8486 (it is a budget
+    decision, not a fix), recorded in the plan's §12.
+    """
+    assert lme_errors.infra_failure(exc) is expected, (
+        f"{label}: infra_failure disagrees with the §12 record")
+    entry = _entry(exc)
+    assert entry["error_class"] == "ingest:retries_exhausted", (
+        "precondition: the class cannot carry the distinction — these families "
+        "all widen to the same key at ingest")
+    assert entry["retryable"] is expected
+    assert (runner._retry_failed_skip_reason(entry) is None) is expected, (
+        f"{label}: the resume gate must agree with the flag")
 
 
 def test_the_smoke_record_is_now_coherent():
