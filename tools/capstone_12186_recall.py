@@ -702,6 +702,59 @@ def _user_door_binding() -> dict:
     }
 
 
+#: The one sentence the artifact makes about the door, DERIVED from the binding —
+#: never a constant. A hand-written "sdk.tortoise_fts_query = MCP tortoise_search /
+#: REST GET /v1/search" asserts the door was measured even when the binding this
+#: same run read says it was not (`present: False`), which is the difference
+#: between a checked fact and prose. `run()` refuses to write an artifact at all
+#: when `matches_measured_call` is not True (see its guard), and this builder is
+#: what makes the recorded sentence carry the binding it was derived from.
+_USER_DOOR_MEASURED_TEMPLATE = "sdk.{sdk_method} = MCP {tool} / REST {rest}"
+
+
+def _user_door_measured(binding: dict) -> str:
+    """The artifact's `user_door_measured` sentence, built from the live binding.
+
+    With today's registry (`tool_registry.py`: `sdk_method="tortoise_fts_query"`,
+    `RestSpec(GET, "/v1/search")`) this renders exactly the string the committed
+    artifact carries, so deriving it changes no evidence — it removes the only
+    way the sentence could survive a binding that no longer matches.
+    """
+    if not (binding.get("present") and binding.get("matches_measured_call")):
+        return ("NOT-MEASURED: the registry binding for `tortoise_search` does "
+                "not resolve to the call the arms make (`sdk.tortoise_fts_query`)")
+    return _USER_DOOR_MEASURED_TEMPLATE.format(
+        sdk_method=binding["sdk_method"], tool=binding["tool"],
+        rest=binding["rest"])
+
+
+def _cleanup(graph: str) -> dict:
+    """The residue this run leaves behind, DECLARED rather than assumed.
+
+    The instrument's only teardown is `sdk.close()`: it does not drop the graph
+    it populated. The same-epic sibling (`tools/window_quality_m2.py`) records a
+    `cleanup` block for exactly this reason — a shared FalkorDB accumulates one
+    full population per run (#5084), and a reader sizing the lane's footprint has
+    no other way to learn that the graph is still there. The convention is
+    `graphs_dropped`, not "cleaned up": claiming a cleanup that did not happen is
+    how residue becomes invisible.
+    """
+    return {
+        "graphs_created": 1,
+        "graphs_dropped": 0,
+        "left_in_place": [graph],
+        "note": ("this run does NOT drop the graph it populated (`sdk.close()` "
+                 "is the only teardown), so a run leaves ONE POPULATED graph "
+                 "behind on whatever FalkorDB `TORTOISE_DB_URI` names. The "
+                 "block declares the residue instead of claiming a cleanup "
+                 "that does not happen (`tools/window_quality_m2.py` records "
+                 "the same shape). Drop it with `redis-cli -h <host> -p <port> "
+                 "GRAPH.DELETE <name>`, or run the lane on its own container "
+                 "(`tools/test_lane.py down` disposes of it) — a shared server "
+                 "accumulates one full population per run (#5084)."),
+    }
+
+
 def _git_head() -> str | None:
     import subprocess
     try:
@@ -723,6 +776,23 @@ def run(args: argparse.Namespace) -> int:
     pin, pin_sha = load_pin(pin_path)
     rows = pin["population_rows"]
     by_id = {r["id"]: r for r in rows}
+
+    # ⛔ REFUSE to measure a door that is not the door the arms call. The
+    # artifact's `user_door_measured` sentence is derived from this binding (never
+    # a constant), so a run whose binding does not resolve to
+    # `sdk.tortoise_fts_query` would record "NOT-MEASURED" beside 21 minutes of
+    # arm figures — a record that cannot say which surface it measured. Checking it
+    # BEFORE the writes also means a registry change costs no graph, no embedder
+    # and no query budget.
+    user_door = _user_door_binding()
+    if not user_door.get("matches_measured_call"):
+        print("REFUSED: the registry binding for `tortoise_search` does not "
+              "resolve to the call the arms make — this run cannot claim it "
+              "measured the USER's door.", file=sys.stderr)
+        print(f"  binding={user_door!r}", file=sys.stderr)
+        print("  expected: sdk_method='tortoise_fts_query' "
+              "(tortoise/tool_registry.py)", file=sys.stderr)
+        return 3
 
     uri = os.environ.get("TORTOISE_DB_URI") or ""
     if not uri.startswith(("docker://", "redis://")):
@@ -844,8 +914,7 @@ def run(args: argparse.Namespace) -> int:
             }
 
         merged_lever_visibility = {
-            "user_door_measured": "sdk.tortoise_fts_query = MCP tortoise_search "
-                                  "/ REST GET /v1/search",
+            "user_door_measured": _user_door_measured(user_door),
             "user_search_retrieval_mode": arms["user_search"]["retrieval_mode"],
             "underscore_terms_shipped_default": "ON",
             "underscore_terms_visible_on_user_door":
@@ -879,10 +948,11 @@ def run(args: argparse.Namespace) -> int:
             "neardup_rule": {"version": NEARDUP_RULE,
                              "jaccard_threshold": NEARDUP_JACCARD,
                              "key": "case+ws+separator fold, leading article dropped"},
-            "user_door": _user_door_binding(),
+            "user_door": user_door,
             "arms": arms,
             "paired": pairs,
             "merged_lever_visibility": merged_lever_visibility,
+            "cleanup": _cleanup(graph),
             "graph": {"name": graph, "indexed_docs": indexed,
                       "index_wait_s": waited,
                       "rows_with_vector": vector_rows,

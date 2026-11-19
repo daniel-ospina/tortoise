@@ -105,9 +105,24 @@ path reach the canonical identically** (0 gains, 0 losses across 272 clean queri
 capture-prior number is also a user-door number — the epic does not need a separate user-only fix for
 reachability.
 
+### Leg degradation, per arm — declared, because it is the raw column's noise
+
+A `timeout` on the dense leg is not a lever difference: the window falls back to keyword-only, or
+returns no rows at all. Both counts are per arm, and no raw arm figure above may be read without
+them.
+
+| arm | keyword-only windows (of 300) | queries with no rows at all | `vector:degraded:timeout` |
+|---|---|---|---|
+| capture prior — `TORTOISE_UNDERSCORE_TERMS=0` (pre-`#12368`) | 16 | 8 | 16 |
+| capture prior — **shipped** | 9 | 2 | 9 |
+| user door — `TORTOISE_UNDERSCORE_TERMS=0` (pre-`#12368`) | 15 | 8 | 15 |
+| user door — **SHIPPED (what a user gets today)** | 18 | 6 | 18 |
+| user door — fused rerank **armed** (NOT the shipped default) | 14 | 8 | 14 |
+
 ⚠️ **Read the paired column, not the raw one, for the rerank.** Its raw arm figure (0.9733 against
-0.9700) looks like a +0.33 pt gain and is not the lever: 18 of its 300 windows were keyword-only and
-6 queries returned nothing at all. On windows clean in both arms it is +1.13 pts, 3 gained / 0 lost.
+0.9700) looks like a +0.33 pt gain and is not the lever: 14 of its 300 windows were keyword-only and
+8 queries returned nothing at all — its OWN row in the table above, not the shipped arm's 18/6. On
+windows clean in both arms it is +1.13 pts, 3 gained / 0 lost.
 
 ---
 

@@ -8104,6 +8104,14 @@
   }
  },
  "capstone": true,
+ "cleanup": {
+  "graphs_created": 1,
+  "graphs_dropped": 0,
+  "left_in_place": [
+   "cap12186-final"
+  ],
+  "note": "this run does NOT drop the graph it populated (`sdk.close()` is the only teardown), so a run leaves ONE POPULATED graph behind on whatever FalkorDB `TORTOISE_DB_URI` names. The block declares the residue instead of claiming a cleanup that does not happen (`tools/window_quality_m2.py` records the same shape). Drop it with `redis-cli -h <host> -p <port> GRAPH.DELETE <name>`, or run the lane on its own container (`tools/test_lane.py down` disposes of it) \u2014 a shared server accumulates one full population per run (#5084)."
+ },
  "code_head": "31bce52ddbb3b3f0bc93093e2988b42c0e5536ba",
  "comparisons": {
   "different_corpus_from": {

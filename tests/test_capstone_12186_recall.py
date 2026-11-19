@@ -245,7 +245,75 @@ def test_the_artifact_carries_the_pin_identity_that_makes_it_reproducible(artifa
     pin = artifact["pin"]
     assert pin["schema"] == cap.PIN_SCHEMA
     assert pin["digest"] and pin["query_digest"] and pin["sha256"]
+    # ⛔ EQUALITY, not presence. The README's headline is `sha256 2486a359…,
+    # pinned in the artifact`, and "pinned" has to mean THIS file: a presence
+    # check passes any digest at all (a foreign sha256 stayed green before this
+    # line), which is the difference between an identity and a field being set.
+    assert pin["sha256"] == hashlib.sha256(PIN.read_bytes()).hexdigest()
     assert pin["queries"] == len(json.loads(PIN.read_text())["query_ids"])
+
+
+def test_the_artifact_declares_the_door_it_measured(artifact):
+    """The sentence and the binding it claims must be the same fact.
+
+    `user_door_measured` is DERIVED from `user_door` (`_user_door_measured`), so
+    an artifact cannot assert it measured the user's door while its own binding
+    says the registry moved. Pinning the committed record here closes the gap the
+    live-registry test leaves: that one checks TODAY's registry, this one checks
+    what the committed run claims.
+    """
+    door = artifact["user_door"]
+    assert door["present"] is True
+    assert door["matches_measured_call"] is True
+    assert artifact["merged_lever_visibility"]["user_door_measured"] == \
+        cap._user_door_measured(door)
+
+
+def test_a_binding_that_is_not_the_measured_call_never_renders_as_measured():
+    # The pre-fix shape was a literal string, so a binding of `present: False`
+    # still produced "we measured the user's door".
+    assert cap._user_door_measured({"present": False}).startswith("NOT-MEASURED")
+    assert cap._user_door_measured({"present": True,
+                                    "matches_measured_call": False,
+                                    "sdk_method": "other",
+                                    "tool": "tortoise_search",
+                                    "rest": "GET /other"}).startswith("NOT-MEASURED")
+    assert cap._user_door_measured({"present": True,
+                                    "matches_measured_call": True,
+                                    "sdk_method": "tortoise_fts_query",
+                                    "tool": "tortoise_search",
+                                    "rest": "GET /v1/search"}) == (
+        "sdk.tortoise_fts_query = MCP tortoise_search / REST GET /v1/search")
+
+
+def test_run_refuses_a_binding_that_is_not_the_users_door(monkeypatch):
+    """`run()` must not write an artifact it cannot back with the binding."""
+    import argparse
+    monkeypatch.setattr(cap, "_user_door_binding",
+                        lambda: {"tool": "tortoise_search", "present": False})
+    args = argparse.Namespace(pin=str(PIN), graph="cap-test", namespace=None,
+                              out=None)
+    assert cap.run(args) == 3
+
+
+def test_the_artifact_declares_the_graph_residue(artifact):
+    """`sdk.close()` is the only teardown, so the residue is DECLARED.
+
+    A run leaves one POPULATED graph on whatever FalkorDB `TORTOISE_DB_URI`
+    names; a shared server accumulates one full set per run (#5084). The
+    sibling instrument (`tools/window_quality_m2.py`) records the same block. A
+    silent run would leave a reader sizing the lane's footprint with no number.
+    """
+    cleanup = artifact["cleanup"]
+    assert cleanup["graphs_created"] == 1
+    assert cleanup["graphs_dropped"] == 0
+    assert cleanup["left_in_place"] == [artifact["graph"]["name"]]
+    assert cleanup["note"].strip()
+    # The tool's own builder is what the next run emits — pin the shape, not just
+    # the committed instance of it.
+    built = cap._cleanup("g1")
+    assert built["graphs_created"] == built["graphs_dropped"] + len(
+        built["left_in_place"])
 
 
 def test_the_artifact_states_the_shipped_state_of_the_rerank_lever(artifact):
@@ -300,24 +368,188 @@ def test_the_paired_block_in_the_artifact_accounts_for_every_query(artifact):
 
 
 # ── the README, against the artifact ─────────────────────────────────────────
+#
+# ⛔ CELL-SCOPED, not substring-scoped. A bare `f"{value}" in text` reads the whole
+# 226-line document, so a misquoted table CELL stays green whenever the same
+# digits survive in prose or in another row (observed: the rerank row's
+# `0.9733` → `0.9533` passed because a sentence quotes `0.9733`; deleting a whole
+# arm row passed because its numbers appeared in the sentence too). Every pin
+# below parses the table it is about, maps each DATA ROW to ONE arm, and compares
+# the cell — so a dropped row and a shifted decimal both red.
+
+#: How a table row is recognised as belonging to one arm. Two markers, both
+#: matched CASE-SENSITIVELY against the row's label cell — `SHIPPED` is the shipped
+#: user-door row and `shipped` (lower case) is the capture prior's, which keeps the
+#: rerank row's "NOT the shipped default" from matching either.
+ARM_ROW_MARKERS: dict[str, tuple[str, ...]] = {
+    "capture_prior_pre_lever": ("capture prior", "TORTOISE_UNDERSCORE_TERMS=0"),
+    "capture_prior": ("capture prior", "shipped"),
+    "user_search_pre_lever": ("user door", "TORTOISE_UNDERSCORE_TERMS=0"),
+    "user_search": ("user door", "SHIPPED"),
+    "user_search_rerank": ("user door", "fused rerank"),
+}
+
+#: The paired table's rows, by the artifact key they carry.
+PAIR_ROW_MARKERS: dict[str, tuple[str, ...]] = {
+    "capture_prior_pre_lever -> capture_prior": ("#12368` on the **capture prior**",),
+    "user_search_pre_lever -> user_search": ("#12368` on the **user door**",),
+    "user_search -> user_search_rerank": ("#12297` rerank on the user door",),
+    "capture_prior -> user_search": ("**the door itself**",),
+}
+
+
+def _tables(text: str, header_contains: str) -> tuple[list[str], list[list[str]]]:
+    """The (header, data rows) of the markdown table whose header matches."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not line.lstrip().startswith("|") or header_contains not in line:
+            continue
+        header = [c.strip() for c in line.strip().strip("|").split("|")]
+        rows: list[list[str]] = []
+        j = i + 2  # skip the `|---|` separator
+        while j < len(lines) and lines[j].lstrip().startswith("|"):
+            rows.append([c.strip() for c in lines[j].strip().strip("|").split("|")])
+            j += 1
+        return header, rows
+    raise AssertionError(f"no markdown table with a header containing {header_contains!r}")
+
+
+def _number(cell: str) -> float:
+    """A table cell as a number: strip emphasis/markup, keep the SIGN."""
+    clean = (cell.replace("*", "").replace("`", "").replace(",", "")
+             .replace("\u2212", "-").replace("\u00a0", " ").strip())
+    return float(clean)
+
+
+def _one_row(rows: list[list[str]], markers: tuple[str, ...], what: str) -> list[str]:
+    matched = [r for r in rows if all(m in r[0] for m in markers)]
+    assert len(matched) == 1, (
+        f"expected exactly one row for {what} (markers {markers}), got "
+        f"{len(matched)} of {len(rows)}: {[r[0] for r in matched]}")
+    return matched[0]
+
+
+def _assert_rows_cover(rows: list[list[str]], markers: dict[str, tuple[str, ...]]) -> None:
+    """Every data row is claimed by an arm, and every arm claims one row.
+
+    This is what makes a DELETED or ADDED row red even if the numbers it carried
+    survive in the prose: the row set itself is pinned.
+    """
+    claimed = set()
+    for arm, marks in markers.items():
+        row = _one_row(rows, marks, arm)
+        claimed.add(id(row))
+    assert len(claimed) == len(rows), (
+        f"{len(rows) - len(claimed)} data row(s) belong to no declared arm: "
+        f"{[r[0] for r in rows if id(r) not in claimed]}")
+
 
 def test_the_readme_quotes_the_recall_the_artifact_holds(artifact):
-    if not README.exists():
-        pytest.skip(f"no README at {README}")
-    text = README.read_text()
-    for arm in _arm_names():
-        for k in cap.KS:
-            value = artifact["arms"][arm]["recall"][str(k)]
-            assert f"{value:.4f}" in text, f"README does not quote {arm}@{k}={value}"
+    """Every arm's row, cell by cell — the epic's headline table."""
+    header, rows = _tables(README.read_text(), "recall@3")
+    assert [h for h in header[1:]] == [f"recall@{k}" for k in cap.KS], header
+    _assert_rows_cover(rows, ARM_ROW_MARKERS)
+    for arm, marks in ARM_ROW_MARKERS.items():
+        row = _one_row(rows, marks, arm)
+        assert len(row) == 1 + len(cap.KS), (arm, row)
+        for col, k in enumerate(cap.KS, start=1):
+            expected = artifact["arms"][arm]["recall"][str(k)]
+            assert _number(row[col]) == pytest.approx(expected), (
+                f"README row {arm!r} quotes recall@{k}={row[col]}, artifact "
+                f"holds {expected}")
+
+
+def test_the_readme_quotes_the_per_class_recall_the_artifact_holds(artifact):
+    """§2's per-class table is the epic's MECHANISM claim — `ident` +53.3 pts.
+
+    Nothing read `arms[*]["by_class"]` before this, so `0.4111` → `0.5111` on the
+    headline mechanism cell reddened nothing (observed).
+    """
+    header, rows = _tables(README.read_text(), "pre-`#12368` @3")
+    assert header[1:] == ["pre-`#12368` @3", "shipped @3",
+                          "pre-`#12368` @15", "shipped @15"], header
+    #: column → (arm, k), in the table's own order.
+    columns = ((1, "user_search_pre_lever", 3), (2, "user_search", 3),
+               (3, "user_search_pre_lever", 15), (4, "user_search", 15))
+    classes = list(cap_class_names(artifact))
+    assert len(rows) == len(classes), (len(rows), classes)
+    for row in rows:
+        cls = next((c for c in classes if f"`{c}`" in row[0]), None)
+        assert cls is not None, f"unmapped per-class row: {row[0]!r}"
+        n = artifact["arms"]["user_search"]["by_class"][cls]["n"]
+        assert f"({n})" in row[0], f"{cls}: README label omits its n={n}"
+        for col, arm, k in columns:
+            expected = artifact["arms"][arm]["by_class"][cls][str(k)]
+            assert _number(row[col]) == pytest.approx(expected), (
+                f"README {cls} col {header[col]} = {row[col]}, artifact holds "
+                f"{arm}@{k}={expected}")
+
+
+def cap_class_names(artifact: dict) -> tuple[str, ...]:
+    return tuple(artifact["arms"]["user_search"]["by_class"])
+
+
+def test_the_readme_quotes_the_leg_degradation_the_artifact_holds(artifact):
+    """The raw column's noise, per arm — the second most-quoted number in the doc.
+
+    The pre-fix doc gave the RERANK arm the shipped arm's counts (18 keyword-only
+    / 6 empty, copied a paragraph down from `user_search`'s own 18/6); the
+    artifact holds 14/8 for the rerank. A count is exactly the kind of figure a
+    paragraph silently reattributes, so it is pinned per arm here.
+    """
+    header, rows = _tables(README.read_text(), "keyword-only windows")
+    assert header[1:] == ["keyword-only windows (of 300)",
+                          "queries with no rows at all",
+                          "`vector:degraded:timeout`"], header
+    _assert_rows_cover(rows, ARM_ROW_MARKERS)
+    for arm, marks in ARM_ROW_MARKERS.items():
+        row = _one_row(rows, marks, arm)
+        expected = (artifact["arms"][arm]["window_modes"]["keyword_only"],
+                    artifact["arms"][arm]["rows_zero"]["3"],
+                    artifact["arms"][arm]["leg_degrade_reasons"].get(
+                        "vector:degraded:timeout", 0))
+        assert tuple(int(_number(c)) for c in row[1:4]) == expected, (
+            f"README degradation row {arm!r} = {row[1:4]}, artifact holds {expected}")
 
 
 def test_the_readme_quotes_the_paired_deltas_the_artifact_holds(artifact):
-    text = README.read_text()
-    for name, block in artifact["paired"].items():
-        cell = block["paired"]
-        assert f"{abs(cell['delta_pts_clean']):.2f}" in text, (
-            f"README does not quote the paired delta for {name} "
-            f"({cell['delta_pts_clean']})")
+    """Signed, cell by cell — a loss written as a gain must red.
+
+    Pre-fix this was `f"{abs(delta):.2f}" in text`, so `+15.47 pts` → `-15.47 pts`
+    (publishing the lever's gain as a loss) stayed green (observed). `abs()` is
+    the one thing a delta's sign cannot survive.
+    """
+    header, rows = _tables(README.read_text(), "clean queries")
+    assert header[1:4] == ["clean queries", "before → after (recall@3)", "Δ"], header
+    _assert_rows_cover(rows, PAIR_ROW_MARKERS)
+    for name, marks in PAIR_ROW_MARKERS.items():
+        row = _one_row(rows, marks, name)
+        cell = artifact["paired"][name]["paired"]
+
+        clean = row[1].replace("*", "")
+        compared, excluded = clean.split("(")
+        assert int(compared.strip()) == cell["queries_compared"], (name, row[1])
+        assert int(excluded.split()[0]) == cell["excluded_degraded_on_either_side"]
+
+        before, after = row[2].replace("*", "").split("→")
+        assert _number(before) == pytest.approx(cell["before_recall_clean"])
+        assert _number(after) == pytest.approx(cell["after_recall_clean"])
+
+        # ⛔ the SIGNED delta: `_number` keeps the sign, so a published loss reds
+        delta = _number(row[3].replace("pts", ""))
+        assert delta == pytest.approx(cell["delta_pts_clean"]), (
+            f"README delta for {name} is {row[3]}, artifact holds "
+            f"{cell['delta_pts_clean']:+}")
+
+        gains, losses = row[4].replace("*", "").split("/")
+        assert int(_number(gains)) == cell["gains"], (name, row[4])
+        assert int(_number(losses)) == cell["losses"], (name, row[4])
+
+        p = row[5].replace("*", "").strip()
+        if p.startswith("<"):
+            assert cell["p"] < float(p[1:].strip())
+        else:
+            assert float(p) == pytest.approx(cell["p"])
 
 
 def test_the_readme_quotes_the_duplicate_rates_the_artifact_holds(artifact):
