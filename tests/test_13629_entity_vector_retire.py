@@ -6361,14 +6361,16 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ AND THE SPLICE'S `Mult` (REPETITION) ARM IS REACHED BY NO ROW OF THE COMMIT THAT
-        # ADDED IT (`#13788` F13): the `BinOp(Add)` twin was pinned, the repetition was not, so
-        # disabling it flipped these two rows from REFUSED to CERTIFIED while the whole suite
-        # stayed green. ⛔ THE ROW MUST BE THE **SPLIT** FORM (`*["embedding", v]` splices to TWO
-        # arguments), not a pair tuple (`*[("embedding", v)]` is refused by the pairs rule
-        # whether the splice flattens it or not — measured: that spelling stays refused with
-        # the `Mult` arm removed, so it pins nothing). The zero-repetition control below
-        # (`*[…] * 0`) is the other half: it must keep certifying.
+        # ⛔ THE SPLICE PATH'S OWN USE OF THE REPETITION ARM (`#13788` F13). ⚠️ THE ARM WAS
+        # ALREADY PINNED, and this comment used to say otherwise: deleting `_sequence_options`'
+        # `ast.Mult` arm reddens the PRE-EXISTING row `props |= (2 * [{"embedding": …}])[0]`
+        # (measured by the review of `86d6c74a5`), so "reached by no row / the suite stayed
+        # green" was false. What these two rows add is the SPLICE path: `_spliced_sequence_elements`
+        # projects `_sequence_options`, and a `Starred` around a repetition reaches the arm
+        # through that projection rather than through the const-index route the pre-existing row
+        # uses. ⛔ AND THE ROW MUST BE THE **SPLIT** FORM (`*["embedding", v]` splices to TWO
+        # arguments): the pair-tuple form `*[("embedding", v)]` is refused by the pairs rule
+        # whether the splice flattens it or not (measured), so it would pin nothing here.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -6380,6 +6382,53 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props._set(x, *(1 * ["embedding", _encode(ev)]))
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE KEY RULE MUST REACH EVERY **CHANNEL** THE PROPERTY TRAVELS, not only the
+        # positional and literal ones (`#13788` F11 seam, measured by the review of
+        # `86d6c74a5`). The keyword legs and the pair-with-extras legs kept the inline
+        # `ast.Constant` test while the positional legs moved to `_names_property_key`, so
+        # `_set(key=key, value=vec)` and `{k: v for k, v, _z in [(key, vec, 1)]}` CERTIFIED
+        # beside their literal twins refused — the same key, one channel over. Each of these
+        # was runtime-checked to place `props["embedding"]`.
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props._set(key=key, value=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props._set(x, **{"key": key, "value": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.setdefault(key=key, default=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= {k: v for k, v, _z in [(key, _encode(ev), 1)]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= {k: v for k, v, _z in [(key, _encode(ev), 1)].copy()}
         return None
     _write(props)
 """,
