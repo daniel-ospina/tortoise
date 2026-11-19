@@ -3085,7 +3085,9 @@ _POINTER_RESOLVED_AFTER_A_SEMICOLON = (
     "the defect it names.")
 # ⛔ THE SHAPE THE ARM MUST IGNORE (review F1), kept as a CONTROL: a release that records
 # NO owner approval owes no citation. The first cut asserted `len(records) == 1`, which
-# fires on ZERO as well, so it refused 36 of the 43 landed blocks — the same
+# fires on ZERO as well, so it refused the 37 of the 43 landed blocks that carry no
+# record at all (re-derived at this head, where the arm's own numbers are pinned: 43
+# blocks, 6 carrying exactly one record to the SHIPPED detector) — the same
 # measured false-block the §4.3 pin above rejects, reintroduced under a new predicate.
 # ⛔ AND THIS CONTROL IS HONEST ABOUT WHY IT IS GREEN (review @ 95a8df2f, then #13669):
 # its negative sentence's paragraph OPENS with a bold *changelog header*, not an approval
@@ -3266,6 +3268,16 @@ _NESTED_QUOTED_APPROVAL_WITHOUT_AN_ID = (
     "> **Changelog v3.39 (2026-11-19 — x):**\n"
     ">\n"
     "> > **Owner approval of the exact changes** — given in-session.")
+# ⛔ THE HTML LABEL IS A DECLARED FAIL-OPEN (#13669 cycle 5), and the declaration is
+# DRIVEN here: an HTML-bold label renders as the label but is not an emphasis RUN to this
+# reader, so it is ACCEPTED. Closing it silently would make the residual list over-claim.
+_HTML_LABEL_IS_NOT_A_RECORD = (
+    "> <b>Owner approval of the exact changes</b> — given in-session.")
+# ⛔ THE POINTER'S FORWARD FORM NAMING A CONTAINER (#13669 cycle 5): ``its own issue
+# tracker`` is a container, not a home, and is REFUSED — the stop-list binds only the
+# reversed form, so this cost is driven as a fixture rather than left to be discovered.
+_POINTER_NAMING_A_CONTAINER = (
+    "> Each extractor keeps its own issue tracker.")
 
 
 def _quoted_paragraphs(block: str) -> list[str]:
@@ -3333,11 +3345,14 @@ def _opening_approval_label(paragraph: str) -> str | None:
     """The bold label that OPENS `paragraph`, when it is an owner-approval label.
 
     The corpus states its own structure: every bolded approval label in
-    `docs/ONTOLOGY-CHANGELOG.md` opens the paragraph it labels, and a denial or an
-    incidental mention of approval never does. Reading THAT is what makes the detector
-    structural rather than another phrasing (#13669); the rendered form inside the run
-    is what is matched, so a doubled space, emphasis on the label's last word, `__…__`
-    and TITLE/ALL-CAPS casing all read as the same label.
+    `docs/ONTOLOGY-CHANGELOG.md` opens the paragraph it labels, a denial never does, and
+    no incidental mention of approval OPENS *with the phrase* (three paragraph-opening
+    bold runs mention approval without being labels — v3.37 ``Corrected in review, after
+    the approval was given…``, v3.32's build record, v3.31's rulings — and none of them
+    begins with the label, which is what the code reads). Reading THAT is what makes the
+    detector structural rather than another phrasing (#13669); the rendered form inside
+    the run is what is matched, so a doubled space, emphasis on the label's last word,
+    `__…__` and TITLE/ALL-CAPS casing all read as the same label.
 
     ⛔ IT RETURNS THE RENDERED RUN, not a boolean, so a caller (and a failure message)
     can show the lane what it read; `None` means "this paragraph records no approval",
@@ -3375,10 +3390,10 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     An id in a LATER sentence belongs to whatever that sentence says.
     ⛔ THE SCOPE IS THE SENTENCE, NOT THE ATTRIBUTED-QUOTATION FORM, and the two were
     measured against the landed text before choosing. The attributed ``comment <id>:
-    "…"`` form the §4.3 pin demands would refuse the file's own whole practice (only
-    **2** of the accepted records carry it, measured — #13669 corrected this comment's
-    earlier "none"); the sentence scope accepts a bare ``comment <id>`` and still
-    refuses the borrow.
+    "…"`` form the §4.3 pin demands would refuse FOUR of the six accepted records (only
+    **2** carry it — v3.38 and v3.36, measured; #13669 corrected this comment's earlier
+    "none"); the sentence scope accepts a bare ``comment <id>`` and still refuses the
+    borrow.
     ⛔ WHAT A RECORD *IS* WAS RE-DECIDED IN #13669, because the phrase detector this arm
     shipped with was measurably vacuous. The shipped detector keyed on ``owner approval``
     followed by a COLON inside one sentence. Measured at the merged head ``6d761643``
@@ -3450,7 +3465,8 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     if not records:
         # ⛔ RETURN, DO NOT ASSERT (review F1). This release records no owner approval,
         # so it owes no citation: the unconditional demand was measured to false-block
-        # 36 of the 43 landed blocks.
+        # the 36 of the 43 landed blocks that carry no comment id (re-derived by the
+        # corpus block in the test below).
         return
     # ⛔ EVERY record is checked, and the multiplicity assert the shipped cut carried is
     # GONE (#13669). That assert refused any block carrying two labelled paragraphs on a
@@ -3555,6 +3571,11 @@ def _refuse_an_unresolvable_pointer(block: str) -> None:
     pointer with no number at all. ⛔ AND the same widening is why `;` is no longer a
     terminator (a semicolon is not a sentence break to a reader) — stated HERE, next to
     the window it widens, rather than left to be discovered.
+    ⛔ AND THE FORWARD FORM'S OWN COST IS NAMED (#13669 cycle 5): the idiom stop-list binds
+    the REVERSED form only, so a forward ``own … issue`` followed by a QUALIFIER NOUN
+    (``Each extractor keeps its own issue tracker``, ``their own issues list``) names a
+    container rather than a home and is REFUSED — fail-CLOSED, driven by
+    ``_POINTER_NAMING_A_CONTAINER`` below so the cost cannot be closed silently.
     ⛔ AND ONE QUOTED SHAPE IS STILL REFUSED, named because the approval arm names its
     own: text inside a nested ``> > `` run is a QUOTATION OF DEFUNCT PROSE, not a claim
     this release makes, and this arm reads it as a claim — so an entry quoting the old
@@ -3669,6 +3690,17 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     assert sorted(refused_versions) == ["3.33", "3.35"], (
         "the landed entries this arm refuses changed — its docstring names v3.35 (cites "
         f"nothing) and v3.33 (cites an issue, not a comment); read: {refused_versions}")
+    # ⛔ THE TWO RETAINED NUMERALS ARE RE-DERIVED TOO (#13669 cycle 5): the unconditional
+    # demand's 36 and the claim that no <b>/<strong> label appears in the corpus.
+    landed_blocks = _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    assert len([landed for landed in landed_blocks
+                if not _CITATION_RE.search(_unfold_block(landed))]) == 36, (
+        "the unconditional demand's false-block count changed (the arm's docstring says "
+        "36 of the 43 landed blocks carry no comment id)")
+    landed_text = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
+    assert "<b>" not in landed_text and "<strong>" not in landed_text, (
+        "the corpus now writes an HTML label — the arm's docstring states it never does, "
+        "which is why an HTML label is a declared fail-OPEN rather than a handled shape")
     # NON-VACUITY: both shapes this release shipped are refused, verbatim.
     with pytest.raises(AssertionError) as refused:
         _refuse_an_approval_record_with_no_resolvable_home(_PREFIX_APPROVAL_RECORD)
@@ -3741,6 +3773,9 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # not the multiplicity assert the test docstring used to promise.
     _refuse_an_approval_record_with_no_resolvable_home(
         _NESTED_QUOTED_APPROVAL_WITH_ITS_OWN_ID)
+    # …and the declared HTML fail-OPEN is ACCEPTED, which is what the residual list says
+    # (#13669 cycle 5): an HTML-bold label is not an emphasis run to this reader.
+    _refuse_an_approval_record_with_no_resolvable_home(_HTML_LABEL_IS_NOT_A_RECORD)
     with pytest.raises(AssertionError) as nested_without_an_id:
         _refuse_an_approval_record_with_no_resolvable_home(
             _NESTED_QUOTED_APPROVAL_WITHOUT_AN_ID)
@@ -3839,6 +3874,11 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                        "volition"):
         _refuse_an_unresolvable_pointer(
             f"> That was an issue of our own {idiom_head}.")
+    # ⛔ AND THE FORWARD FORM NAMING A CONTAINER IS REFUSED (#13669 cycle 5), the cost the
+    # arm's docstring now names: the stop-list binds the reversed form only.
+    with pytest.raises(AssertionError) as container_pointer:
+        _refuse_an_unresolvable_pointer(_POINTER_NAMING_A_CONTAINER)
+    _assert_refused_by(container_pointer, "_refuse_an_unresolvable_pointer")
 
 
 def test_the_approval_arm_refuses_a_bare_or_disclaimed_citation() -> None:
