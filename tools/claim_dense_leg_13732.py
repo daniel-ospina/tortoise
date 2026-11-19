@@ -1003,16 +1003,21 @@ def require_graph_population(matched: int | None, population_n: int) -> None:
     if matched is None:
         raise Refused(
             "graph_population_unmeasurable",
-            "how many of this population's ids the graph holds an embedding for "
-            "could not be measured — unmeasured is not zero, and it is not a "
-            "verdict",
+            "how many of this population's rows the graph holds THIS RUN'S TEXT "
+            "and a vector for could not be measured — unmeasured is not zero, "
+            "and it is not a verdict",
         )
     if matched < population_n:
         raise Refused(
             "graph_population_absent",
-            f"the graph holds an embedding for {matched} of the {population_n} "
-            f"population row(s) this run would score — reachable causes, and only "
-            f"these: an embedding-WIDTH mismatch (the fold leaves the node's "
+            f"the graph holds THIS RUN'S TEXT and a vector for {matched} of the "
+            f"{population_n} population row(s) this run would score — ⛔ THE COUNT "
+            f"IS NOT A VECTOR COUNT: it is the id-AND-text pair, so a row whose "
+            f"text is not this run's is not counted even though the graph holds a "
+            f"vector for it (that pairing is DEFENSIVE — the seed writes every "
+            f"row — so it is not a cause to look for). On this write path the "
+            f"reachable causes, and only these: an embedding-WIDTH mismatch (the "
+            f"fold leaves the node's "
             f"vector alone rather than write one the index cannot hold, #5004), a "
             f"vector the fold refuses as unusable (`_writable_journalled_vector` "
             f"answers None for empty, over-long, or non-finite values, so nothing "

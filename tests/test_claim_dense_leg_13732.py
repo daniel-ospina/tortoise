@@ -2154,6 +2154,24 @@ class TestGraphMembership:
             assert "this run's vector" not in summary, summary
             assert "this run's text" in summary, summary
 
+    def test_the_message_reports_the_two_numbers_it_was_given(self, tool_mod):
+        """⛔ THE ARITHMETIC IS PINNED, AND THE COUNT IS DESCRIBED AS WHAT IT IS.
+
+        `matched` is the id-AND-text count, but the message used to report it as
+        "the graph holds an EMBEDDING for N of M rows" — so in the one case where
+        the halves disagree (the graph holds a vector for a row whose text is not
+        this run's) the message named a cause that is not true and sent the
+        operator to the embedder (`#13745` review round 10).
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_graph_population(785, 786)
+        msg = ei.value.message
+        # the numbers the caller passed, not a recomputation
+        assert "785" in msg and "786" in msg, msg
+        # and the count is the PAIR, said so in the message itself
+        assert "NOT A VECTOR COUNT" in msg, msg
+        assert "THIS RUN'S TEXT" in msg, msg
+
     def test_guard_refuses_an_unmeasurable_graph(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
             tool_mod.require_graph_population(None, 786)
