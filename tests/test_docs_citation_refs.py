@@ -534,9 +534,11 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           `_note_paths` returns — the two `tortoise/` notes the verb grades and the test
           and tool rows it also lists — which is WHICH files the verdict is about;
       (c) RETIRED SPELLINGS — the phrasings that were FALSE against this tree are
-          refused by name, so a hand edit cannot quietly restore one. If a future head
-          really does empty that path list, re-scope (c) deliberately instead of letting
-          the old sentence back in.
+          refused by name, so a hand edit cannot quietly restore one. ⛔ (c) is SIGN-FREE
+          (#13728 review, P1): it refuses a typed present-tense ANSWER to the command in
+          EITHER direction, because the set it answers printed two modules at one head
+          and NOTHING at the next. Re-scoping (c) to one sign is itself the frozen-
+          measurement defect it exists to catch.
     """
     from tools.hosted_api_cite_census import _note_paths, _sweep, census
 
@@ -591,20 +593,35 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "`tortoise/` modules the verdict is about; the empty-list reading that stood "
             "here before was FALSE at this head (#13750 review, cycle 1)")
 
-    # (c) RETIRED SPELLINGS — each was measured FALSE against the tree at this head.
-    for _negation in (
+    # (c) RETIRED SPELLINGS — a typed ANSWER to that command, refused in BOTH directions.
+    # ⛔ THIS ARM IS SIGN-FREE (#13728 review, P1): the previous cut refused only the
+    # EMPTY-set direction, because the tree then printed two modules. At the head this
+    # repair was cut on, the same command prints NOTHING — the graded notes' text is
+    # `main`'s own, `#13728`'s squash-merge having put them there — so a
+    # POSITIVE membership claim is the direction the tree refutes there, and pinning
+    # either sign is the frozen-measurement defect this whole test exists to refuse.
+    # What is refused is ANY typed present-tense answer; the command is the authority.
+    for _typed_set in (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is NOT empty",
         f"{_tortoise_cmd}` returns exactly those two",
         f"{_tortoise_cmd}` -> empty",
         f"{_tortoise_cmd}` prints NOTHING",
+        f"{_tortoise_cmd}` prints the two COMMENT-ONLY modules",
+        f"{_tortoise_cmd}` prints exactly `tortoise/activation_scorecard.py`",
+        "the `tortoise/` set above is the two COMMENT-ONLY modules",
+        "which two `tortoise/` paths this diff carries",
     ):
-        assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints the two "
-            "comment-only modules this branch's `--refresh` re-took, so the sentence is "
-            "refuted by the very command it quotes (#13489 review, P1; #13750 review, "
-            "cycle 1 — the empty claim was true of an earlier head and is not true of "
-            "this one)")
+        assert _typed_set not in doc, (
+            f"05-verify.md asserts {_typed_set!r} — a typed ANSWER to "
+            f"`{_tortoise_cmd}`. That set is a head-bound fact: it printed two "
+            "comment-only modules at the head the empty-set spellings above were retired "
+            "at, and it printed NOTHING at `ba3c4a7559`, the head this repair was "
+            "dispatched on, where `#13728`'s squash-merge had already put both graded "
+            "notes on `main`. A guard that pins "
+            "a MEASUREMENT must not pin its SIGN either — state the COMMAND and let the "
+            "reader run it at the head being merged (#13489 review, P1; #13750 review, "
+            "cycle 1; #13728 review, P1)")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
