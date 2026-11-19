@@ -530,8 +530,9 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           census module's OWN checker, run in-process here. A green claim reds on a
           stale tree and a red claim reds on a current one, so neither sign is carryable;
       (b) POINTERS — the document still names the verb (deleting a false verdict must
-          send the reader to the command, never away from it) and names the `tortoise/`
-          modules `_note_paths` returns, which is WHICH modules the verdict is about;
+          send the reader to the command, never away from it) and names every path
+          `_note_paths` returns — the two `tortoise/` notes the verb grades and the test
+          and tool rows it also lists — which is WHICH files the verdict is about;
       (c) RETIRED SPELLINGS — the phrasings that were FALSE against this tree are
           refused by name, so a hand edit cannot quietly restore one. If a future head
           really does empty that path list, re-scope (c) deliberately instead of letting
@@ -549,15 +550,23 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "--check` reports every stated figure `== measured`",
         "--check` reports both figures `== measured`",
     )
+    # ⛔ BOTH DIRECTIONS ARE FALSIFIABLE BY THE TEXT THAT SURVIVES (#13750 review, cycle 2).
+    # An earlier cut tested the red branch only against three frozen `_green_claims`
+    # spellings, and the document's LIVE green sentence was not one of them — so a stale
+    # tree passed over a document still asserting a green (measured: `_sweep` red on a
+    # mutated census, all three spellings absent, `exits 0` present). The two strings below
+    # are the ones the document actually uses, so each direction now has a real witness.
+    _green_witness = "every stated figure is the measured one"
     if verdict == 0:
-        assert "exits 0" in doc, (
+        assert _green_witness in doc, (
             "`tools/hosted_api_cite_census.py --check` exits 0 at this head (measured "
             "here, in-process, with the module's own `_sweep`), and 05-verify.md does "
-            "not say so. State the verdict the verb prints at the head being merged; a "
-            "document that keeps a red it no longer measures sends the next reader to "
-            "repair drift that does not exist (#13750 review, cycle 1)")
+            f"not carry its own output line {_green_witness!r}. State the verdict the verb "
+            "prints at the head being merged; a document that keeps a red it no longer "
+            "measures sends the next reader to repair drift that does not exist "
+            "(#13750 review, cycle 1)")
     else:
-        for green in _green_claims:
+        for green in _green_claims + ("exits 0", _green_witness):
             assert green not in doc, (
                 f"05-verify.md asserts {green!r} while `--check` exits {verdict} here "
                 "(measured in-process with the module's own `_sweep`). A merge would put "
