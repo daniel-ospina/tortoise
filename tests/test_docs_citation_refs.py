@@ -600,32 +600,20 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # the TRUE statement — the same class of error as the frozen sign this arm replaced
     # (a guard that pins a MEASUREMENT has to READ it). The prohibition is therefore applied
     # only where the measurement supports it.
-    # ⛔ THE BASE'S READABILITY IS CHECKED HERE TOO (#13802 review, finding 1 — P1).
-    # This leg used to take `.stdout` and drop the exit status, so on the depth-1 PR
-    # checkout `python-ci.yml` uses (`origin/main` unresolvable) the command failed with
-    # rc=128 and printed nothing, `_tortoise_set` came back EMPTY, and every spelling
-    # below was `.continue`d over — the arm asserted NOTHING in the only job that gates
-    # merges, while every other base-dependent leg reported UNPROVABLE. Measured by the
-    # reviewer on a real `--depth 1` clone: `11 passed, 2 skipped`, the census leg green
-    # and silent. An empty set is now only usable when it was MEASURED:
-    _tortoise_probe = subprocess.run(
-        ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
-        cwd=REPO, capture_output=True, text=True, check=False)
-    if _tortoise_probe.returncode != 0:
-        # NOT the unconditional direction the cite-set arms take: those have a fallback
-        # that still catches their defect class when the base is unreadable (no cite set
-        # can show a re-point here, so no attribution may be asserted). This leg has no
-        # such fallback — its prohibition is a claim about a DIFF, and with no base there
-        # is no diff to read, while asserting either direction unconditionally reds a
-        # document that is true at the head being merged. So it reports UNPROVABLE, by
-        # name, and the caller re-derives with the command rather than trusting a green.
-        pytest.skip(
-            "`git diff --name-only origin/main...HEAD -- tortoise/` cannot run in this "
-            f"checkout ({_base_ref_absent_detail() or 'the base ref does not resolve'}), "
-            "so the `-- tortoise/` membership leg is UNPROVABLE here — this is NOT a "
-            "pass: re-derive it with `git fetch origin main` then the command "
-            "(#13802 review, finding 1)")
-    _tortoise_set = _tortoise_probe.stdout.split()
+    # ⛔ THIS IS A TEXT BAN, NOT A MEASUREMENT (#13802 review, findings 1 and 2 — P1+P2).
+    # Two failures met in the version this replaces, and they were the same defect read
+    # from both sides. It MEASURED the diff and refused a spelling only where the set was
+    # non-empty, so: on the depth-1 PR checkout `python-ci.yml` uses (`origin/main`
+    # unresolvable) the probe exited rc=128, printed nothing, the set came back EMPTY and
+    # every spelling was `.continue`d over — the arm asserted NOTHING in the only job that
+    # gates merges (measured on a real `--depth 1` clone: `11 passed, 2 skipped`, green
+    # and silent) — while on a full clone whose diff DOES carry a `tortoise/` path it
+    # refused a sentence that was true at the head it was written for. A prohibition that
+    # depends on the diff is inert in one checkout and a false red in the other.
+    # So the prohibition is on the DOCUMENT'S TEXT: a direction claim about that command
+    # is head-bound by construction (the set moves whenever `main` lands the same
+    # re-derivation), which is this row's own thesis one table up. Naming the command and
+    # refusing the direction claim therefore holds in EVERY checkout, and needs no base.
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is NOT empty",
@@ -633,14 +621,12 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         f"{_tortoise_cmd}` -> empty",
         f"{_tortoise_cmd}` prints NOTHING",
     ):
-        if not _tortoise_set:
-            # The empty claim is the measured one here; asserting it is not a defect.
-            continue
         assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints "
-            f"{' '.join(_tortoise_set)!r}, so the sentence is refuted by the very command "
-            "it quotes (#13489 review, P1; #13750 review, cycle 1 — the empty claim was "
-            "true of an earlier head and is not true of this one)")
+            f"05-verify.md asserts {_negation!r} — a DIRECTION claim about the "
+            f"`-- tortoise/` set is a head-bound figure: read it with `{_tortoise_cmd}` "
+            "at the head you merge. State the command and let the reader run it; a set "
+            "named here rots the moment `main` lands the same re-derivation "
+            "(#13489 review, P1; text ban by #13802 review, findings 1 and 2)")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
@@ -817,10 +803,11 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     # asserts NOTHING in the only place the rail reads it. MEASURED on a real depth-1
     # clone of this branch with the document's attribution flipped back to "and THAT
     # shift is this repair's, not `main`'s": `11 passed, 2 skipped` — green, defect
-    # swallowed. The fallback is the UNCONDITIONAL direction instead, which is what
-    # this file's own `config/ci-surfaces.yml` row already prescribes for the sibling
-    # `-- tortoise/` leg: with the base unreadable, NOTHING shows this diff moves a
-    # cite, so no attribution may be asserted. It keeps the file hermetic (its row
+    # swallowed. The fallback is the UNCONDITIONAL direction instead — the same
+    # shape this file's own `config/ci-surfaces.yml` row now records for these two
+    # legs: with the base unreadable, NOTHING shows this diff moves a cite, so no
+    # attribution may be asserted. (The sibling `-- tortoise/` leg needs no base at
+    # all any more — it is a TEXT BAN, `#13802` review findings 1 and 2.) It keeps the file hermetic (its row
     # promises "no network", so fetching a base ref inside the suite is not available
     # to it) and the trade it buys is an OVER-BLOCK — a head whose diff really does
     # move a cite would red in a depth-1 checkout — which outranks a false PASS.
@@ -1079,7 +1066,7 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
         _why = (f"the live three-dot diff is UNPROVABLE here — `git diff -U0 "
                 f"--word-diff=plain origin/main...HEAD` exits {proc.returncode} "
                 f"({proc.stderr.strip()!r}); "
-                f"{_base_ref_absent_detail() or 'the base ref does not resolve'}, so "
+                f"{_base_ref_absent_detail() or 'the base ref resolves but has no merge base with HEAD in this clone — `git fetch origin main` alone does not fix that, the HISTORY is what is missing'}, so "
                 "nothing shows this diff adds a cite token at all")
     else:
         moved = _added_cite_tokens(proc.stdout)
