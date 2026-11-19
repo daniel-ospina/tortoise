@@ -276,16 +276,35 @@ def test_the_duplicate_rate_never_exceeds_the_window(artifact):
             assert cell["rate"] is None or 0.0 <= cell["rate"] <= 1.0
 
 
-def test_the_artifact_carries_the_pin_identity_that_makes_it_reproducible(artifact):
-    pin = artifact["pin"]
-    assert pin["schema"] == cap.PIN_SCHEMA
-    assert pin["digest"] and pin["query_digest"] and pin["sha256"]
+def test_the_artifact_carries_the_pin_identity_that_makes_it_reproducible(artifact, pin):
+    rec = artifact["pin"]
+    assert rec["schema"] == cap.PIN_SCHEMA
+    assert rec["digest"] and rec["query_digest"] and rec["sha256"]
     # ⛔ EQUALITY, not presence. The README's headline is `sha256 2486a359…,
     # pinned in the artifact`, and "pinned" has to mean THIS file: a presence
     # check passes any digest at all (a foreign sha256 stayed green before this
     # line), which is the difference between an identity and a field being set.
-    assert pin["sha256"] == hashlib.sha256(PIN.read_bytes()).hexdigest()
-    assert pin["queries"] == len(json.loads(PIN.read_text())["query_ids"])
+    assert rec["sha256"] == hashlib.sha256(PIN.read_bytes()).hexdigest()
+    assert rec["queries"] == len(json.loads(PIN.read_text())["query_ids"])
+    # ⛔ The OTHER three identities the record publishes were left on the presence
+    # check above, and a presence check is not an identity: a mutation probe
+    # (`rec["digest"] -> 'deadbeefdeadbeef'` with the README edited to agree) stayed
+    # GREEN, so the artifact could publish a digest that contradicts the very file
+    # the suite has already recomputed one function up. The committed pin file is the
+    # authority for all three — compare against ITS values, never against themselves.
+    assert rec["digest"] == pin["digest"], (
+        "the artifact's `pin.digest` must be the pin file's own recomputed digest "
+        "(`test_the_pin_digest_recomputes_from_its_own_rows` is the authority)")
+    assert rec["query_digest"] == pin["query_digest"], (
+        "the artifact's `pin.query_digest` must be the pin file's own recomputed "
+        "query digest")
+    assert rec["shares"] == pin["rules"]["shares"], (
+        f"the artifact publishes class shares {rec['shares']!r} that are not the "
+        f"pin file's {pin['rules']['shares']!r} — the population is re-identifiable "
+        f"only if these are the same partition")
+    assert rec["population"] == len(pin["population_rows"])
+    assert rec["queries"] == len(pin["query_ids"])
+    assert rec["path"] == "docs/evidence/12186-capstone/queries.json"
 
 
 def test_the_artifact_declares_the_door_it_measured(artifact):
@@ -302,6 +321,119 @@ def test_the_artifact_declares_the_door_it_measured(artifact):
     assert door["matches_measured_call"] is True
     assert artifact["merged_lever_visibility"]["user_door_measured"] == \
         cap._user_door_measured(door)
+
+
+def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(artifact):
+    """The note must not call this fixture's arguments "the tool's own defaults".
+
+    ⛔ MEASURED DEFECT this pins. The note read
+
+        sdk.tortoise_fts_query(entity_type='object') at the MCP tool
+        `tortoise_search`'s own defaults — the USER door (REST GET /v1/search)
+
+    which is false about TWO default values, and it sat under the README row
+    labelled "user door — SHIPPED (what a user gets today)". The doors' own
+    defaults are `entity_type='point'` and `limit=10`
+    (`tortoise/mcp_server.py::tortoise_search`); the arms call
+    `entity_type='object'` (the population IS `:Object` names) at `limit=KMAX`=15.
+
+    The VERB really is the user door's — both doors resolve to this SDK method,
+    which is what `test_the_artifact_declares_the_door_it_measured` checks. The
+    ARGUMENTS are not. `_user_door_binding` compares only `sdk_method`, so nothing
+    could catch an argument claim; this is that check.
+    """
+    import inspect
+
+    from tortoise import mcp_server
+
+    sig = inspect.signature(mcp_server.tortoise_search)
+    door_entity = sig.parameters["entity_type"].default
+    door_limit = sig.parameters["limit"].default
+
+    note = cap.DOOR_NOTES["user_search"]
+
+    # The divergence is REAL, and this is the control: if a future change made
+    # either door default to what the arms pass, the note would be wrong the other
+    # way and must be re-stated. A note asserting a difference that no longer
+    # exists is the same defect mirrored.
+    assert door_entity != "object", (
+        f"the MCP tool now defaults `entity_type` to {door_entity!r}, which is what "
+        f"the arms pass — DOOR_NOTES['user_search']'s verb/argument split is stale")
+    assert door_limit != cap.KMAX, (
+        f"the MCP tool now defaults `limit` to {door_limit!r} == KMAX, so the "
+        f"\"limit=15 is not a shipped window\" caveat is stale")
+
+    # …and the note says so, in the terms a reader needs.
+    assert f"entity_type='object'" in note, (
+        f"the note must state the `entity_type` the arms actually pass: {note!r}")
+    assert f"limit={cap.KMAX}" in note, (
+        f"the note must state the `limit` the arms actually pass: {note!r}")
+    assert f"default to '{door_entity}'" in note, (
+        f"the note must name the doors' real `entity_type` default ({door_entity!r}) "
+        f"so the reader can see the divergence: {note!r}")
+    assert f"default to {door_limit}" in note, (
+        f"the note must name the doors' real `limit` default ({door_limit!r}): {note!r}")
+    # The exact falsehood, asserted ABSENT — the phrase is what made two defaults
+    # wrong while the sentence read as a checked fact.
+    assert "own defaults" not in note, (
+        "the note claims the tool's \"own defaults\" while diverging from two of "
+        f"them ({door_entity!r}, {door_limit!r}): {note!r}")
+
+    # The COMMITTED record must carry the same prose — the artifact is the evidence
+    # a reader opens, and a corrected constant beside a stale artifact is the same
+    # claim/evidence split this file exists to close.
+    for arm in ("user_search", "user_search_pre_lever", "user_search_rerank"):
+        assert artifact["arms"][arm]["door_note"] == note, (
+            f"the committed artifact's `{arm}.door_note` is not the tool's current "
+            f"note — the record would keep publishing the corrected-away sentence")
+
+
+def test_the_artifact_names_a_reachable_head_to_run_its_commands_against(artifact):
+    """`code_head` is truthful but UNREACHABLE, so the record must name a stand-in.
+
+    ⛔ MEASURED DEFECT this pins. `code_head` is the run head `31bce52ddb`, which
+    predates the rebase onto `origin/main`; the rebase REWROTE that sha, so it is an
+    ancestor of no ref on the published branch:
+
+        $ git merge-base --is-ancestor 31bce52ddb HEAD   -> exit 1
+        $ git branch -a --contains 31bce52ddb           -> (empty)
+        $ git show 31bce52ddb:tools/capstone_12186_recall.py
+        fatal: invalid object name '31bce52ddb'.
+
+    README §6 and this module both present that `git show` as the evidence for the
+    `cleanup` hand-edit, so the record's reproduction anchor resolved only on the
+    machine that held the pre-rebase lane ref. Re-anchoring `code_head` itself would
+    be a lie about which run this is; naming a reachable commit whose INPUTS are the
+    same blobs is the fix that needs no re-run.
+    """
+    note = artifact["code_head_note"]
+    assert note and isinstance(note, str), (
+        "`code_head_note` must be present: `code_head` alone is a dead anchor after "
+        "a rebase rewrites it")
+    assert artifact["code_head"][:12] in note, (
+        "the note must name the run head it is explaining")
+    # An alternative commit a reader can actually resolve, distinct from the run head.
+    # 10 hex, not 12: a short sha is what a reader is handed (`318950c6e0`), and a
+    # `\b`-bounded 10-run will not match inside a longer sha.
+    import re
+
+    shas = set(re.findall(r"\b[0-9a-f]{10}\b", note))
+    alternatives = {s for s in shas
+                    if not artifact["code_head"].startswith(s)}
+    assert alternatives, (
+        f"the note names no reachable alternative commit, so it still leaves the "
+        f"reader with a sha they cannot resolve: {note!r}")
+    # The README must carry the same alternative: a corrected artifact beside a
+    # README still handing out the dead sha is the claim/evidence split again.
+    readme = README.read_text()
+    assert any(s in readme for s in alternatives), (
+        f"README carries none of the alternative commits {sorted(alternatives)!r} "
+        f"that `code_head_note` offers, so the prose still yields an unresolvable "
+        f"`git show`")
+    # And the reproduction command the record documents must be the reachable form.
+    assert any(f"{s}:tools/capstone_12186_recall.py" in readme for s in alternatives), (
+        "README §6's reproduction command must run against the reachable commit, "
+        "not the rebased-away run head")
 
 
 def test_a_binding_that_is_not_the_measured_call_never_renders_as_measured():
@@ -613,7 +745,50 @@ def test_the_readme_quotes_the_leg_degradation_the_artifact_holds(artifact):
             f"README degradation row {arm!r} = {row[1:4]}, artifact holds {expected}")
 
 
-def test_the_readme_quotes_the_paired_deltas_the_artifact_holds(artifact):
+def test_the_two_restated_prose_figures_are_pinned_and_not_only_the_tables(artifact):
+    """The rows were pinned; the PROSE beside them was not — and it had regressed.
+
+    ⛔ MEASURED DEFECT this pins. README §2a's commentary says "14 of its 300 windows
+    were keyword-only and 8 queries returned nothing at all — its OWN row in the table
+    above, not the shipped arm's 18/6". That sentence IS the previous round's P2 (it
+    had given the rerank arm the shipped arm's 18/6), and the correction was left
+    UNPINNED: the table row one line above is cell-checked by
+    `test_the_readme_quotes_the_leg_degradation_the_artifact_holds`, so reverting the
+    prose to 18/6 — or to any other pair — stayed GREEN.
+
+    §5's "The 53.3 % mint rate is therefore an upper bound" is the same shape, and was
+    not even in the declared NOT-PINNED enumeration: a THIRD restatement of a
+    tabulated rate (after §3b and §4) able to contradict both with a green suite.
+
+    Both are DERIVED here, never hard-coded, so the prose cannot drift from the record.
+    """
+    text = README.read_text()
+    n_queries = artifact["pin"]["queries"]
+
+    rerank = artifact["arms"]["user_search_rerank"]
+    shipped = artifact["arms"]["user_search"]
+    r_kw = rerank["window_modes"]["keyword_only"]
+    r_zero = rerank["rows_zero"]["3"]
+    s_kw = shipped["window_modes"]["keyword_only"]
+    s_zero = shipped["rows_zero"]["3"]
+
+    # §2a — the rerank arm's OWN pair…
+    own = (f"{r_kw} of its {n_queries} windows were keyword-only and "
+           f"{r_zero} queries returned nothing at all")
+    assert own in text, (
+        f"README §2a must quote the rerank arm's own degradation pair {own!r} "
+        f"(artifact holds {r_kw} keyword-only / {r_zero} empty, NOT the shipped "
+        f"arm's {s_kw}/{s_zero}) — this is the exact figure that regressed once")
+    # …and it must say which arm's pair it is NOT, so a reader cannot reattribute it.
+    not_shipped = f"not the shipped arm's {s_kw}/{s_zero}"
+    assert not_shipped in text, (
+        f"README §2a must name the shipped arm's pair ({not_shipped!r}) as the one "
+        f"this sentence is NOT quoting; otherwise the two pairs are indistinguishable")
+
+    # §5 — the mint rate restated as an upper bound, derived from the record.
+    rate = f"{artifact['arms']['mint_rate']['shipped']['rate'] * 100:.1f} %"
+    assert f"The {rate} mint rate is therefore an" in text, (
+        f"README §5 must restate the mint rate as {rate!r} (the artifact's 
     """Signed, cell by cell — a loss written as a gain must red.
 
     Pre-fix this was `f"{abs(delta):.2f}" in text`, so `+15.47 pts` → `-15.47 pts`

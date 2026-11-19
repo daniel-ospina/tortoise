@@ -13,7 +13,8 @@ aboutObjects: "#12186, #11901, #12368, #12304, #12343, #12297, #12348, #12349, S
 
 **Instrument:** `tools/capstone_12186_recall.py` · **Fixed query set:**
 [`queries.json`](./queries.json) (sha256 `2486a359…`, pinned in the artifact) · **Artifact:**
-[`measurement.json`](./measurement.json) · **Code head:** `31bce52ddb` · **Measured:** 2026-11-19.
+[`measurement.json`](./measurement.json) · **Code head:** `31bce52ddb` (run head; see §6 — a
+reachable equivalent is `318950c6e0`) · **Measured:** 2026-11-19.
 
 **Plain language:** one of the merged levers is visible to a user, one is not, and one is only
 visible on the write path. The `_`-preserving OR terms (`#12368`) move the user's own search from
@@ -194,6 +195,16 @@ the population.
 
 ## 5. What this measurement does NOT establish — declared, never skipped
 
+⛔ **First, the boundary on the door itself: the measured call is the user door's VERB, not its
+ARGUMENTS.** Both doors (MCP `tortoise_search`, REST `GET /v1/search`) resolve to
+`sdk.tortoise_fts_query`, which is what makes this the user's door — but the arms call it with
+`entity_type='object'` and `limit=15`, while both doors default to `entity_type='point'` and
+`limit=10`. `entity_type='object'` is required because the population **is** `:Object` names;
+`limit=15` widens the window. So **`recall@k` is a shipped-window figure only for `k <= 10`** — the
+`@15` column is this instrument's window, not something a user's default call returns. No conclusion
+depends on the difference (the `@3`/`@5`/`@10` figures carry every claim), but the row above must
+not be read as "a user's call verbatim".
+
 1. **Not a production census.** The population is a harvest sample (§1). A production duplicate rate
    needs a tenant's real `:Object` population, which no lane can reach.
 2. **Phase 2 (the LLM verdict, `#12348`) is not measured.** It fires only with a model, on a real
@@ -241,9 +252,19 @@ over 5 arms × 300 queries, 145 s for the 411 variant reads.
 ⛔ **The committed [`measurement.json`](./measurement.json) is not byte-identical to a run at its
 `code_head`** — one block was inserted by hand afterwards, and the record declares it in
 `post_run_edits`: the `cleanup` block was added by hand, because the tool at `code_head` has no
-`cleanup` builder at all (`git show 31bce52ddb:tools/capstone_12186_recall.py | grep -c cleanup`
+`cleanup` builder at all (`git show 318950c6e0:tools/capstone_12186_recall.py | grep -c cleanup`
 → `0`). **Every figure in the record is run output**; a reproduction at `code_head` yields the same
 numbers without that one declaration block, and any later run writes the block itself and records
 `post_run_edits: []`.
+
+⛔ **`code_head` `31bce52ddb` is the RUN head and is not reachable from this branch.** It predates
+the rebase onto `origin/main`, which rewrote it, so `git show 31bce52ddb:…` fails (`fatal: invalid
+object name`) for anyone without the pre-rebase lane ref — including the `cleanup` command above,
+which is therefore written against **`318950c6e0`**: a commit on this branch whose
+`tools/capstone_12186_recall.py` and `docs/evidence/12186-capstone/queries.json` blobs are
+**byte-identical** to the ones the run used. Read `31bce52ddb` for *which run this is*; run the
+commands against `318950c6e0`. The difference cannot move a figure: the tool's only changes after
+`318950c6e0` are comments and new builder functions, not the query/recall computation. The record
+carries the same mapping as `code_head_note`.
 
 Refs `#11901` (harness) · `#12368` (composite terms) · `#12304` (fold + multi-key) · `#12343`/`#12297` (rerank) · `#12348` (verdict) · `#12349` (M3, closed) · `docs/architecture/SEARCH-ARCHITECTURE.md`
