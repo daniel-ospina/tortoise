@@ -4881,9 +4881,9 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
     `exit 4`, or the `STATIC label set` refusal; deleting the `fromJSON` block (or making it static)
     reds the last arm, which is the signal to delete the paragraph in the same change.
     """
-    # Local import: a module-level one shifts this file's line numbers, and five other files cite
-    # `tests/test_ci_runner_x64_install.py:230` by number (pinned by
-    # `test_the_label_assertion_other_files_cite_lands_on_it`).
+    # Local import: a module-level one shifts this file's line numbers, and four other files cite
+    # `tests/test_ci_runner_x64_install.py:236` by number (pinned by
+    # `test_the_label_assertion_other_files_cite_lands_on_it`; the fifth cites the test by symbol).
     import yaml
 
     wf_dir = REPO_ROOT / ".github" / "workflows"
