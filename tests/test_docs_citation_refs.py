@@ -616,13 +616,28 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # modules` head — so a refuted membership claim walked through green. The
             # determiner alternation is therefore INSIDE the loop: stripping stops only
             # when a whole pass changes nothing, whichever filler it removed.
+            # ⛔ ONE FILLER REVERSES THE SENSE OF A ZERO (#13831 review, P2): every other
+            # alternation here preserves it (`at least zero`, `no fewer than zero` and
+            # `exactly zero` are all emptiness), but `more than zero` is a LOWER BOUND of
+            # one. Stripping it and reading the bare `zero` that follows turned the claim
+            # INSIDE OUT, so a refuted membership claim was read as emptiness and passed
+            # green at an empty head — the exact false pass this file exists to refuse.
+            # The flag records that the filler was removed, and the emptiness branch below
+            # honours it.
             _before = None
+            _lower_bound = False
             while _before != low:
                 _before = low
-                low = re.sub(
-                    r"^(?:the|a|an|its|this|that|those|these"
+                _cut = re.match(
+                    r"(?:the|a|an|its|this|that|those|these"
                     r"|just|only|still|now|actually|also|at\s+least|at\s+most"
-                    r"|more\s+than|no\s+fewer\s+than|exactly)\s+", "", low, count=1)
+                    r"|more\s+than|no\s+fewer\s+than|exactly)\s+", low)
+                if _cut is None:
+                    # nothing left to strip — a whole pass changed nothing, so stop.
+                    break
+                if re.match(r"more\s+than\b", _cut.group(0)):
+                    _lower_bound = True
+                low = low[_cut.end():]
             low = re.sub(
                 r"^(?:prints|returns|yields|reports|gives|outputs|carries|lists|shows"
                 r"|names|includes|contains|has)\s+", "", low, count=1)
@@ -636,12 +651,23 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # `prints 0 paths`, `prints exactly zero paths`, `prints 0 files` and
             # `prints 0 lines` are all TRUE at an empty head. The first cut gated it on the
             # following NOUN, so `0 files` fell through to `\d+` and was read as MEMBERSHIP —
-            # refusing a true sentence. Zero is emptiness whatever it counts.
+            # refusing a true sentence. Zero is emptiness whatever it COUNTS.
+            # ⛔ …BUT ONLY WHEN IT IS A COUNT AT ALL (#13831 review, P2): dropping that noun
+            # gate also made `0` emptiness when it is not a count — `prints 0-based offsets`
+            # was read as an emptiness claim, so a TRUE sentence would be REFUSED at a
+            # non-empty head (the over-block direction, the same severity as the false
+            # pass). The lookahead keeps a count (`0 files`, `0 lines`, a bare `prints 0`,
+            # where the window ends) and refuses a token that continues into a hyphen, a
+            # decimal point or an identifier. (`prints 0.5 coverage` reads as `prints 0`
+            # because the window is cut at `.` above — indistinguishable from a bare zero,
+            # and correctly emptiness.)
             _empty = re.match(
-                r"(?:empty\b|nothing\b|none\b|zero\b|blank\b|0\b"
+                r"(?:empty\b|nothing\b|none\b|blank\b"
+                r"|(?:zero|0)\b(?![-.\w])"
                 r"|no\b\s*(?:path|paths|tortoise/))", low)
             if _empty:
-                claims_empty = True
+                # `more than zero` asserts AT LEAST ONE — membership, never emptiness.
+                claims_empty = not _lower_bound
             elif _member:
                 claims_empty = False
             else:
@@ -967,6 +993,25 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the shape detector reads {_zero_spelling!r} as a MEMBERSHIP claim, so it "
             "REFUSES a true emptiness claim at an empty head — the round-2 hedge harm in "
             "the other direction (#13795 review, round-4 P2)")
+    # ⛔ AND THE ZERO RULE'S OWN TWO EDGES (#13831 review, P2), one in each direction. The
+    # first is the false PASS: `more than` is the only listed filler that REVERSES a zero,
+    # so stripping it and reading the bare `zero` that follows inverted the claim — a
+    # refuted membership claim read as emptiness, green at an empty head. The second is the
+    # over-BLOCK: with the noun gate gone, a `0` that is not a count at all was emptiness,
+    # so a TRUE sentence would be refused. Both are pinned here; `no fewer than zero` is
+    # pinned alongside them as the control that must KEEP its emptiness reading.
+    for _edge_spelling, _edge_want in (
+            ("prints more than zero paths", False),
+            ("prints more than 0 files", False),
+            ("prints 0-based offsets", False),
+            ("prints no fewer than zero paths", True)):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_edge_spelling}", _tortoise_cmd
+        ) == [(_edge_spelling, _edge_want)], (
+            f"the shape detector mis-reads {_edge_spelling!r} — `more than zero` is a "
+            "LOWER BOUND of one, so reading it as emptiness passes a refuted membership "
+            "claim green, while a `0` that continues into `-based` is not a COUNT, so "
+            "reading it as emptiness refuses a true sentence (#13831 review, P2)")
     # ⛔ AND FORMATTING IS NOT CONTENT (#13795 review, round 5): the head is normalised once
     # (markdown emphasis and backticks stripped, fillers stripped to a fixpoint, the form
     # matched case-insensitively), because the class this guard declares is "a listed form +
