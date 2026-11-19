@@ -2043,6 +2043,37 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         "route its OVERRIDES marker names and refuses — would re-introduce a "
         "deploy-set value"
     )
+    # ── #13674: the embedder warm-up's EMERGENCY SWITCH ──────────────────────
+    # `TORTOISE_EMBEDDER_WARMUP` gates both warm-up consumers — the engine-init
+    # load (`tortoise/embeddings.py:40-50`, `env_flag(..., True)`) and the boot
+    # pre-warm (`entrypoint.sh:427`) — and production RAN it at `0` while the
+    # embedder could not load, which is what makes it a live operator switch and
+    # not a deploy-set value (#13674 Scope item 3: "`TORTOISE_EMBEDDER_WARMUP=0`
+    # is the *emergency* switch it is, not the steady state"; the merged fix
+    # #13692 records the production state verbatim at `entrypoint.sh:427-430`).
+    #
+    # Pinned by KIND and by DIRECTION for the reason #13209 above is: each wrong
+    # route is one plausible "helpful" edit away.
+    #   * `gh-secret:` would have the deploy set it — an emergency switch a deploy
+    #     overwrites is not out of band, and no such GitHub secret exists today,
+    #     so the declaration would also fail this same gate as ABSENT;
+    #   * `fly-toml-env` would VERSION today's value into `fly.toml [env]`, which
+    #     freezes the emergency setting into every deploy and is the opposite of
+    #     #13674's objective (production warm-up ON) — the operator step that
+    #     returns the shipped default would need a code change instead;
+    #   * `unmanaged` is the #4126 defect the gate exists to refuse.
+    embedder_warmup = "TORTOISE_EMBEDDER_WARMUP"
+    assert declared[embedder_warmup] == "fly-only:#13674", declared[embedder_warmup]
+    assert embedder_warmup not in workflow_refs, (
+        "TORTOISE_EMBEDDER_WARMUP must stay OUT of the deploy payload — it is the "
+        "emergency switch an operator flips on the box (#13674)"
+    )
+    assert embedder_warmup not in env_keys, (
+        "TORTOISE_EMBEDDER_WARMUP is versioned in fly.toml [env], so it is NOT "
+        "out-of-band any more — REVERT the [env] entry: versioning today's value "
+        "freezes the emergency setting into every deploy, which is the opposite "
+        "of #13674's objective"
+    )
     assert debt == set(), f"recorded debt remains: {sorted(debt)}"
     assert r.returncode == 0, r.stdout + r.stderr
 
@@ -2570,6 +2601,70 @@ def test_a_fly_only_name_is_not_shown_as_absent_from_the_app():
         "the Secrets Matrix tells an operator these names are not on the app, "
         "while the manifest declares them `fly-only:` — which the provenance "
         "gate only accepts for a name that IS on Fly:\n  " + "\n  ".join(offenders)
+    )
+
+
+def _reviewer_entry_point() -> str:
+    """The manifest's `ENTRY-POINT FOR A REVIEWER` paragraph, as one string.
+
+    The block runs from its heading until the next block separator (a bare `#`)
+    or the next `⛔` block — the shape the file uses, so the reader follows the
+    file rather than a line range that drifts under every edit above it.
+    """
+    lines = REAL_MANIFEST.read_text().splitlines()
+    for start, line in enumerate(lines):
+        if "ENTRY-POINT FOR A REVIEWER" in line:
+            break
+    else:
+        raise AssertionError(
+            "the manifest has no reviewer entry point — the probe is stale, and a "
+            "stale probe would pass vacuously"
+        )
+    block: list[str] = []
+    for line in lines[start + 1:]:
+        if line.startswith("# ⛔"):
+            break
+        stripped = line.lstrip("#").strip()
+        if not stripped:
+            break
+        block.append(stripped)
+    return " ".join(block)
+
+
+def test_the_reviewer_entry_point_names_every_fly_only_member():
+    """The entry point is the ONE place a reviewer learns which names are out of band.
+
+    `fly-only:`'s existence half is a reviewer's job (the checker validates the
+    ref's SHAPE only, by design), so a member the entry point does not name is a
+    member review never opens — the gate stays green on it and nobody reads the
+    ruling it points at. That has now happened twice: #13370's P2-2 corrected
+    this same paragraph from "the one name" to two, and #13814 added a third
+    member while the paragraph still said TWO.
+
+    Prose is why it recurred, so this derives both halves FROM the manifest —
+    never a list in the test: every `fly-only:` member must be named, and the
+    spelled-out count must equal the number of members. It reds on the pre-fix
+    paragraph in BOTH directions (the missing name, and `TWO` against three).
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    fly_only = sorted(n for n, s in sources.items() if s.startswith("fly-only:"))
+    assert fly_only, "the shipped manifest declares no fly-only: name — the reader is wrong"
+
+    entry = _reviewer_entry_point()
+    missing = [name for name in fly_only if name not in entry]
+    assert not missing, (
+        "the reviewer entry point does not name every `fly-only:` member, so a "
+        "reviewer following it never opens their blocks (the checker validates the "
+        f"ref's shape only): {missing}\n--- entry point ---\n{entry}"
+    )
+
+    number_words = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}
+    match = re.search(r"\b(ONE|TWO|THREE|FOUR|FIVE|SIX)\b\s+names?\b", entry, re.IGNORECASE)
+    assert match, f"the entry point no longer states how many names are out of band: {entry!r}"
+    stated = number_words[match.group(1).upper()]
+    assert stated == len(fly_only), (
+        f"the reviewer entry point says {match.group(1).upper()} name(s) are NOT managed "
+        f"from version control, but the manifest declares {len(fly_only)}: {fly_only}"
     )
 
 
