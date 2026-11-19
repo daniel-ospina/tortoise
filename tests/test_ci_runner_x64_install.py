@@ -2972,40 +2972,40 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     # cited number -> a regex the line at that number must match, i.e. what the sentence names
     anchors: dict[int, str] = {
         111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
-        237: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
-        270: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        274: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        278: r"^fallback_engaged\(\) \{",
-        301: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
-        306: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
-        338: r"^resolve_labels\(\) \{",
-        377: r"label algebra: the UNION",  # "the union's label algebra at"
-        401: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        429: r"── status ──",  # the `--status` block
-        452: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        792: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        800: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        809: r"found NO runs-on label to check",  # zero labels -> exit 4
-        375: r"^\}$",  # "whose body ends at its `}` on"
-        1027: r"exit 5",  # the uncovered verdict
-        1049: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        1074: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1221: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1253: r'MODE" = labels',  # "`--print-labels`"
-        1280: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1285: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1288: r"FORK HEADROOM FIRST",  # "forks"
-        1308: r"DISK NEXT",  # "disk"
-        1315: r"CPU LAST",  # "cpu/memory"
-        1332: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1333: r'MODE" = uninstall',  # "`uninstall`"
-        1458: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1461: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1469: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1472: r"registration-token",  # "token"
-        1477: r"^    set -- --unattended",  # "one argv"
-        1479: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1489: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        256: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
+        375: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        379: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        383: r"^fallback_engaged\(\) \{",
+        406: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
+        411: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
+        443: r"^resolve_labels\(\) \{",
+        482: r"label algebra: the UNION",  # "the union's label algebra at"
+        506: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        534: r"── status ──",  # the `--status` block
+        557: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        897: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        905: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        914: r"found NO runs-on label to check",  # zero labels -> exit 4
+        377: r"^\}$",  # "whose body ends at its `}` on"
+        1132: r"exit 5",  # the uncovered verdict
+        1154: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        1179: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1326: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1358: r'MODE" = labels',  # "`--print-labels`"
+        1385: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1390: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1393: r"FORK HEADROOM FIRST",  # "forks"
+        1413: r"DISK NEXT",  # "disk"
+        1420: r"CPU LAST",  # "cpu/memory"
+        1437: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1438: r'MODE" = uninstall',  # "`uninstall`"
+        1567: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1570: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1578: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1581: r"registration-token",  # "token"
+        1586: r"^    set -- --unattended",  # "one argv"
+        1588: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1598: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -5537,3 +5537,258 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
         "carry the same line on the issue/decision comment the next lane reads — a pin with no "
         "record reads identically to an accident of history."
     )
+
+
+# ── 9. the unit's survival drop-in: a death is retried, and one unit's memory is bounded (#13774) ──
+def _dropin_env(tmp_path: Path, *, unit_present: bool, **extra: str) -> dict[str, str]:
+    """An INSTALL-mode env whose unit directory is hermetic and whose `sudo`/`systemctl` are stubs.
+
+    `sudo` LOGS its argv and then EXECs it, so a `sudo install -D` really creates the file — a no-op
+    stub would make every arm about "did the drop-in get written" vacuous. `systemctl` is stubbed on
+    PATH for the same reason: the sudo stub would otherwise exec the REAL `systemctl daemon-reload`
+    against this host's units.
+
+    ⛔ `CI_RUNNER_MEM_PER_RUNNER_GB` IS PINNED TO A NON-ZERO VALUE HERE, and that is not cosmetic:
+    the file-wide `_NEUTRAL_HEADROOM` sets it to `0`, which the installer must read as "no memory
+    sizing" and therefore OMIT `MemoryMax=` (cgroup `memory.max=0` admits nothing, and
+    `daemon-reload` applies it to a RUNNING unit). Leaving the headroom value in place would make the
+    "six keys" assertions unpassable by construction, and the tempting repair — relaxing them to five
+    — would delete the only evidence that a bound is written at all. The sentinel has its own arm.
+    """
+    bin_dir = tmp_path / "bin"
+    _stub_tool(bin_dir, "sudo", f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\nexec "$@"')
+    _stub_tool(bin_dir, "systemctl", f'printf "%s\\n" "$*" >> {tmp_path / "systemctl.log"}\nexit 0')
+    _stub_tool(bin_dir, "gh", 'echo "tok"')
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir(exist_ok=True)
+    base = tmp_path / "base"
+    base.mkdir(exist_ok=True)
+    (base / ".runner").write_text("{}\n")          # configured already: no download, no token
+    # the caller may OVERRIDE the sizing unit (the `0` sentinel arm does exactly that)
+    kwargs = {"CI_RUNNER_MEM_PER_RUNNER_GB": "2", **extra}
+    return _env(
+        base,
+        PATH=f"{bin_dir}:{os.environ['PATH']}",
+        CI_RUNNER_UNIT_DIR=str(unit_dir),
+        **kwargs,
+    )
+
+
+def _svc_stub(runner_dir: Path, unit_dir: Path, unit: str, *, log: Path) -> None:
+    """A `svc.sh` that records its argv and, on `install`, writes the unit file like the real one."""
+    body = (
+        f'printf "svc.sh %s\\n" "$1" >> {log}\n'
+        'case "$1" in\n'
+        f'  install) mkdir -p {unit_dir} && printf "[Unit]\\nDescription=x\\n" > {unit_dir / unit} ;;\n'
+        'esac\n'
+        'exit 0'
+    )
+    _stub_tool(runner_dir, "svc.sh", body)
+
+
+def _unit_for(name: str = "pi-runner-x64-1") -> str:
+    return f"actions.runner.daniel-ospina-tortoise.{name}.service"
+
+
+def _section_of(text: str, key: str) -> str:
+    """The `[Section]` a key sits under — the only way to catch the `[Unit]`-vs-`[Service]` trap."""
+    section = ""
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s
+        elif s.startswith(f"{key}="):
+            return section
+    raise AssertionError(f"{key}= is not in the drop-in at all:\n{text}")
+
+
+def test_install_writes_the_restart_and_memory_dropin_with_its_keys_in_the_right_sections(tmp_path: Path):
+    """`svc.sh install` writes a unit with NO `Restart=` (systemd default: `no`), so a runner that dies
+    for any reason but a clean 0 never comes back. The installer must add a drop-in carrying all six
+    keys — and the two START-LIMIT keys must sit under `[Unit]`, because under `[Service]` systemd
+    applies the burst and SILENTLY ignores the interval, leaving the 10 s default window: a guard that
+    reads as configured and is not (measured on this fleet's boxes).
+
+    Non-vacuity: with the drop-in writer deleted, the file does not exist and this test reds at the
+    existence assertion before reaching the keys.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 0, f"install must succeed, got {r.returncode}: {r.stderr}"
+
+    dropin = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"
+    assert dropin.is_file(), f"no drop-in written — the runner's death is unrecoverable: {r.stderr}"
+    text = dropin.read_text()
+
+    for key, value in (
+        ("Restart", "on-failure"),
+        ("RestartSec", "30s"),
+        ("OOMPolicy", "stop"),
+        ("MemoryMax", "8G"),
+        ("StartLimitIntervalSec", "1h"),
+        ("StartLimitBurst", "20"),
+    ):
+        assert f"{key}={value}" in text, f"{key}={value} missing from the drop-in:\n{text}"
+
+    # ⛔ POSITION, NOT PRESENCE. `StartLimitIntervalSec` under `[Service]` is silently ignored.
+    assert _section_of(text, "StartLimitIntervalSec") == "[Unit]", text
+    assert _section_of(text, "StartLimitBurst") == "[Unit]", text
+    for key in ("Restart", "RestartSec", "OOMPolicy", "MemoryMax"):
+        assert _section_of(text, key) == "[Service]", (key, text)
+
+    # and systemd must be told to read it
+    assert "daemon-reload" in (tmp_path / "systemctl.log").read_text(), "the drop-in is written but systemd never reloaded"
+
+
+def test_the_dropin_is_written_for_an_already_installed_unit_and_before_start(tmp_path: Path):
+    """THE BRANCH THIS FLEET ACTUALLY TAKES. Every box's units already exist, so
+    `if [ ! -f "$UNIT_DIR/$(unit_for …)" ]` is false and `svc.sh install` never runs. If the write sits
+    INSIDE that guard, the drop-in is never written on any existing box — and a negative-only assertion
+    ("nothing was restarted") would not notice.
+
+    Also pins the ORDER: the drop-in must exist before `svc.sh start`, so a fresh unit's first start
+    already carries the keys (no restart is performed to apply them).
+    """
+    env = _dropin_env(tmp_path, unit_present=True)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    (unit_dir / unit).write_text("[Unit]\nDescription=already installed\n")
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 0, f"install must succeed, got {r.returncode}: {r.stderr}"
+    assert (unit_dir / f"{unit}.d" / "10-restart-and-memory.conf").is_file(), (
+        "the drop-in was NOT written for an already-installed unit — this is the branch every existing "
+        f"box takes, so the fix would be inert fleet-wide: {tmp_path / 'sudo.log'}"
+    )
+    log = (tmp_path / "sudo.log").read_text()
+    assert "svc.sh install" not in log, f"svc.sh install must be SKIPPED when the unit exists:\n{log}"
+    order = [ln for ln in log.splitlines() if "install -D" in ln or "svc.sh start" in ln]
+    assert len(order) >= 2, f"expected the drop-in write and the start in the log:\n{log}"
+    assert "install -D" in order[0], f"the drop-in must be written BEFORE svc.sh start:\n{log}"
+    # ⛔ NOT a bare substring check: the drop-in's own FILENAME carries `restart`, so "restart" appears
+    # in the install line by design. What must never appear is a restart/stop COMMAND.
+    assert not [ln for ln in log.splitlines() if re.search(r"(systemctl|svc\.sh)\s+(restart|stop)\b", ln)], (
+        f"installing must never restart or stop a serving runner:\n{log}"
+    )
+
+
+def test_the_dropin_write_is_idempotent_and_reloads_only_on_change(tmp_path: Path):
+    """A pass that rewrites and reloads on every run churns systemd on a live box. The second run must
+    find the file current (`cmp`) and skip both the install and the reload.
+
+    Non-vacuity: replace the `cmp -s` guard with an unconditional write and the reload count becomes 2.
+    """
+    env = _dropin_env(tmp_path, unit_present=True)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    for _ in range(2):
+        r = _run("--count", "1", "--fallback", "off", env=env)
+        assert r.returncode == 0, r.stderr
+    reloads = [ln for ln in (tmp_path / "systemctl.log").read_text().splitlines() if "daemon-reload" in ln]
+    assert len(reloads) == 1, f"expected exactly one daemon-reload over two identical runs, got {reloads}"
+    installs = [ln for ln in (tmp_path / "sudo.log").read_text().splitlines() if "install -D" in ln]
+    assert len(installs) == 1, f"the drop-in was re-installed although unchanged: {installs}"
+
+
+def test_a_failing_dropin_write_exits_3_and_leaves_the_install_and_registration_intact(tmp_path: Path):
+    """A half-applied change is worse than none: if the drop-in cannot be written the run must REPORT it
+    (rc=3, an OPERATION failure) and must not deregister or delete anything.
+    """
+    env = _dropin_env(tmp_path, unit_present=True)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    base = Path(env["CI_RUNNER_BASE"])
+    _svc_stub(base, unit_dir, unit, log=tmp_path / "sudo.log")
+    # make `install -D` fail the way a permission problem does
+    _stub_tool(
+        tmp_path / "bin",
+        "sudo",
+        f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\ncase "$*" in *"install -D"*) exit 1 ;; esac\nexec "$@"',
+    )
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 3, f"a failed drop-in write must be an OPERATION failure (rc=3), got {r.returncode}: {r.stderr}"
+    assert (base / ".runner").exists(), "the install (and its registration) must be left intact"
+    assert "drop-in" in r.stderr, f"the failure must name what failed: {r.stderr}"
+
+
+def test_a_zero_sizing_unit_omits_memorymax_instead_of_writing_zero(tmp_path: Path):
+    """⛔ `MEM_PER_RUNNER_GB=0` IS A REAL VALUE — the capacity gate reads it as "do not size from
+    memory", and this file's own headroom dict pins it. `0 × factor = 0` must NOT become
+    `MemoryMax=0G`: cgroup `memory.max=0` admits no memory at all, and `daemon-reload` applies it to a
+    RUNNING unit, so that write would kill every runner it touches. The key is OMITTED instead, which
+    leaves systemd's default (`infinity`) — today's behaviour, with no claim that a bound exists.
+    """
+    env = _dropin_env(tmp_path, unit_present=True, CI_RUNNER_MEM_PER_RUNNER_GB="0")
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 0, r.stderr
+    text = (unit_dir / f"{unit}.d" / "10-restart-and-memory.conf").read_text()
+    assert "MemoryMax=" not in text, f"MemoryMax must be OMITTED for a zero sizing unit, not written as 0G:\n{text}"
+    assert "Restart=on-failure" in text, "the restart keys are independent of the sizing unit"
+
+
+def test_the_unit_value_knobs_refuse_values_systemd_would_silently_drop(tmp_path: Path):
+    """An unvalidated bad value is the same class as a key in the wrong section: systemd DROPS a value it
+    cannot parse, so the guard visibly disappears. Both refusals are exit 1 (usage), never a silent pass.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    bad_interval = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_START_LIMIT_INTERVAL": "banana"})
+    assert bad_interval.returncode == 1, bad_interval.stderr
+    assert "START_LIMIT_INTERVAL" in bad_interval.stderr, bad_interval.stderr
+    bad_factor = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_MAX_FACTOR": "x"})
+    assert bad_factor.returncode == 1, bad_factor.stderr
+    assert "MEM_MAX_FACTOR" in bad_factor.stderr, bad_factor.stderr
+
+
+def test_uninstall_removes_only_our_dropin_and_never_another_operators(tmp_path: Path):
+    """The drop-in must go with the unit (a leftover silently governs a future unit of the same name),
+    but the `.d` directory is SHARED: pi-cell-4 carries a hand-written `restart.conf` in exactly that
+    directory which sorts AFTER `10-` and wins every shared key. So `rm -rf .d/` would delete another
+    operator's work — our file goes, foreign files stay.
+    """
+    env = _uninstall_env(tmp_path)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    _stub_tool(runner, "svc.sh", "exit 0")
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    foreign = unit_dir / f"{unit}.d" / "restart.conf"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("[Service]\nRestart=on-failure\n")
+    ours = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"
+    ours.write_text("[Service]\nRestart=on-failure\n")
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 0, f"a clean uninstall must exit 0, got {r.returncode}: {r.stderr}"
+    assert not ours.exists(), "our drop-in must be removed with the unit"
+    assert foreign.exists(), "another operator's drop-in must SURVIVE our uninstall"
+
+
+def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_path: Path):
+    """⛔ `rmdir --ignore-fail-on-non-empty` ignores ONLY `ENOTEMPTY`. On a target that never had a `.d`
+    directory it exits 1 ("No such file or directory") — so an unguarded teardown would report a clean
+    uninstall as rc=3 on every box this installer has ever touched. Measured: rc=1 for a missing dir,
+    rc=0 for a non-empty one.
+    """
+    env = _uninstall_env(tmp_path)
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    _stub_tool(runner, "svc.sh", "exit 0")
+    (Path(env["CI_RUNNER_UNIT_DIR"]) / _unit_for()).write_text("[Unit]\nDescription=x\n")
+    assert not (Path(env["CI_RUNNER_UNIT_DIR"]) / f"{_unit_for()}.d").exists()
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 0, f"no `.d` dir is not a failure: rc={r.returncode}: {r.stderr}"

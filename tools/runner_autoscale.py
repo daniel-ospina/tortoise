@@ -351,7 +351,7 @@ class ProvisionerRefused(ActionFailed):
     `verdict=fill-refused-by-provisioner` and exits 5 instead of a green timer over a box that
     cannot grow — the false PASS that a "a refusal is an answer, exit 0" reading created.
     ⛔ TWO KINDS OF REFUSAL ARRIVE HERE, AND THEY ARE NOT THE SAME FACT: `die()` in
-    `tools/install-ci-runner-x64.sh:234` exits 2 for EVERY guard arm, so this is either the
+    `tools/install-ci-runner-x64.sh:253` exits 2 for EVERY guard arm, so this is either the
     sizing disagreement (`cpu headroom` / `memory headroom` — the tool computed a count the
     callee's `COUNT*2 + 2 <= ncpu` / `COUNT*2 + 4 <= MemAvailable` guard rejects, open at #9672)
     or one of the callee's other arms (architecture, forks, disk, an unreadable measurement, gate
@@ -947,7 +947,7 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
     fallback is engaged right now, and the OS fact whenever the operator opted into it.
 
     This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels`
-    (`tools/install-ci-runner-x64.sh:338`, in this tree since #9639) instead of inventing a
+    (`tools/install-ci-runner-x64.sh:443`, in this tree since #9639) instead of inventing a
     second rule, and it is `auto`: the gate's state is the source of truth, so a runner never
     acquires a permanent claim on the pool. The reader CAN open it, which is why this file
     re-derives NOTHING it cannot check: the arch marker is this box's own `uname -m`, and the
@@ -1657,7 +1657,7 @@ def converge(
         except ProvisionerRefused as exc:
             record["problem_kind"] = "refusal"
             # ⛔ THE INSTALLER'S `die` EXITS 2 FROM EVERY GUARD, NOT JUST THE SIZING ONE.
-            # `tools/install-ci-runner-x64.sh:234` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
+            # `tools/install-ci-runner-x64.sh:253` is `die() { say "REFUSED: $1"; exit "${2:-2}"; }`,
             # so the wrong arch, an unreadable fork cap, a FULL DISK, an unreadable core count and
             # an unreadable gate state all arrive here as rc=2 exactly like the cpu/memory arms do.
             # Only `cpu headroom` / `memory headroom` are the two-models disagreement (#9672), and
