@@ -3336,10 +3336,15 @@ surfaces:
   # rate, and §4's `OFF by default` / `NO` verdict WORDS were never read — all three measured).
   # ⛔ The claim stops at that boundary, and the boundary is broader than §5/§6: NARRATIVE
   # PROSE elsewhere in §1-§4 is NOT pinned either (the per-arm degradation counts in §2a's
-  # commentary, `~2.3 %`, `+1.7 and +6.7 points`, `0 gains, 0 losses across 272`, `282/300`,
+  # commentary, `+1.7 and +6.7 points`, `0 gains, 0 losses across 272`, `282/300`,
   # `34 of 300`) — the three §2/§3 narrative restatements that DO repeat a tabulated figure
-  # (`+53.3 points`, the `0.8` Jaccard, `192 of 411`) are pinned by a separate pin. §5's
-  # declared limits and §6's run metadata are not pinned. Read this row as "these tables and
+  # (`+53.3 points`, the `0.8` Jaccard, `192 of 411`) are pinned by a separate pin, which
+  # also pins the DIRECTION of the `192 of 411` restatement (the figure is the ATTACH bucket,
+  # so a one-word `attach` -> `mint` inversion reds). §5's items 5-7 ARE pinned (the
+  # `30 % / 10 %` oversampling, `n = 300`, the `±0.33 pts` quantum, `35 of 300` excluded —
+  # §5's DOOR paragraph was already pinned); what is NOT pinned is §5's items 1-4, item 5's
+  # EXTERNAL production share (no artifact holds it), and §6's run metadata. `~2.3 %` /
+  # `1.4 %` (the k=3 / k=10 duplicate cells) are PINNED. Read this row as "these tables and
   # clauses are enforced", never as "the document is enforced". BOTH subjects live outside
   # every SOURCE_PATTERNS row (`tools/capstone_12186_recall.py` and `docs/evidence/**` are
   # `NON_PYTHON_PREFIXES`), so a tools-or-evidence-only diff takes the tier-1 early return and

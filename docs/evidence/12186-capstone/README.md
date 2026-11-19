@@ -252,7 +252,9 @@ over 5 arms × 300 queries, 145 s for the 411 variant reads.
 
 ⛔ **The committed [`measurement.json`](./measurement.json) is not byte-identical to a run at its
 `code_head`** — **four** things were done by hand afterwards, and the record declares every one of
-them in `post_run_edits`:
+them in `post_run_edits` (the ledger block itself is a FIFTH hand-added thing, and it declares only
+the four: a reproduction at the run head carries no such block at all — see the paragraph after
+this list):
 
 1. **`cleanup`** — the block was added by hand, because the tool at `code_head` has no `cleanup`
    builder at all: `git show 318950c6e0:tools/capstone_12186_recall.py | grep -c 'def _cleanup'`
@@ -278,8 +280,10 @@ them in `post_run_edits`:
 
 **Every figure in the record is run output**, and none of the four touches one. A reproduction at
 the run head yields the same numbers, with the `cleanup` block absent, the false `door_note` on
-three arms, the `paired` cap unmarked, and no `code_head_note`. Any later run writes all four itself
-and records `post_run_edits: []`.
+three arms, the `paired` cap unmarked, and no `code_head_note` — and no `post_run_edits` ledger
+either, because that block is the fifth thing added by hand: the tool at the run head emits no
+`post_run_edits` key at all, so a reproduction cannot list its own divergences. Any later run
+writes all four edits itself, emits the ledger, and records `post_run_edits: []`.
 
 ⛔ **`code_head` `31bce52ddb` is the RUN head and is a LABEL, not a runnable anchor.** This
 branch is rebased onto `origin/main` before it lands, and a rebase rewrites `31bce52ddb`,

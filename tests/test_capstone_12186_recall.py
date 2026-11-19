@@ -93,6 +93,29 @@ ARTIFACT = EVIDENCE / "measurement.json"
 README = EVIDENCE / "README.md"
 
 
+def _committed_json(path: Path) -> dict:
+    """A COMMITTED input, read — and a MISSING one is a FAILURE, never a skip.
+
+    ⛔ MEASURED FAIL-OPEN (round 18, F1). Both fixtures below used `pytest.skip` when
+    their path did not exist, under a comment that read "skipped until the run
+    lands" — true while this PR was being developed, FALSE the moment the record was
+    committed by it. With `measurement.json` removed and nothing else changed, **26 of
+    the 48 pins turned into SKIPS** and the suite reported `22 passed, 26 skipped`,
+    exit 0: a lost evidence record (a bad merge, a re-cut that drops the file, a docs
+    move) would take every figure pin with it and still read green.
+
+    That is the shape this file's own docstring rules out two paragraphs down ("a
+    gate that runs only where it cannot answer is a no-op gate"), so the record is
+    treated as what it is: an input of this branch, present in every checkout, whose
+    absence means the evidence was lost.
+    """
+    assert path.exists(), (
+        f"the committed record {path} is MISSING. It is an input of this branch, not "
+        f"an optional lane: its absence means the evidence was lost, and every figure "
+        f"pin in this file would otherwise skip and report the suite green")
+    return json.loads(path.read_text())
+
+
 # ── the near-duplicate rule ──────────────────────────────────────────────────
 
 def test_the_key_folds_case_whitespace_and_the_separator_class():
@@ -153,9 +176,7 @@ def test_duplicate_in_window_does_not_double_count_a_three_way_cluster():
 
 @pytest.fixture(scope="module")
 def pin() -> dict:
-    if not PIN.exists():
-        pytest.skip(f"no committed pin at {PIN}")
-    return json.loads(PIN.read_text())
+    return _committed_json(PIN)
 
 
 def test_the_committed_pin_is_the_schema_this_tool_measures(pin):
@@ -259,13 +280,40 @@ def test_the_measured_door_is_the_one_the_search_tool_is_registered_to():
     assert binding["rest"] == "GET /v1/search"
 
 
-# ── the artifact (skipped until the run lands) ───────────────────────────────
+def test_a_missing_committed_record_is_a_failure_and_not_a_skip(tmp_path):
+    """F1's own pin: the reader's refusal, asserted rather than trusted by inspection.
+
+    ⛔ A SKIP IS NOT A FAILURE, AND `pytest.raises(AssertionError)` CANNOT SEE THE
+    DIFFERENCE (measured): restoring the old `pytest.skip(...)` on the absent path made
+    this test SKIP rather than red, and the suite still exited 0 at
+    `48 passed, 1 skipped`. The mutant is precisely the 26-pin fail-open, so the pin
+    asserts the CLASS of the exit — anything that is not an AssertionError (a skip, a
+    `return {}`, no raise at all) fails here.
+    """
+    absent = tmp_path / "absent.json"
+    try:
+        _committed_json(absent)
+    except AssertionError as exc:
+        assert "is MISSING" in str(exc), exc
+    except BaseException as exc:  # the FAIL-OPEN arms: a skip, a SystemExit, anything else
+        pytest.fail(
+            f"a missing committed record raised {type(exc).__name__} instead of failing "
+            f"the suite — `pytest.skip` is the fail-open this pins (26 figure pins "
+            f"turned into skips and the suite reported green)")
+    else:
+        pytest.fail(
+            "a missing committed record returned instead of failing the suite — every "
+            "figure pin in this file would then assert against an empty dict")
+    present = tmp_path / "present.json"
+    present.write_text('{"ok": true}')
+    assert _committed_json(present) == {"ok": True}
+
+
+# ── the artifact (committed by this branch — see `_committed_json`) ───────────
 
 @pytest.fixture(scope="module")
 def artifact() -> dict:
-    if not ARTIFACT.exists():
-        pytest.skip(f"no committed artifact at {ARTIFACT}")
-    return json.loads(ARTIFACT.read_text())
+    return _committed_json(ARTIFACT)
 
 
 def _arm_names() -> list[str]:
@@ -1259,6 +1307,28 @@ def test_every_declared_post_run_edit_is_named_in_the_readme(artifact):
             f"README §6 claims **{word}** hand edits; the artifact declares {n} "
             f"({[e['field'] for e in edits]})")
 
+    # ⛔ AND THE LEDGER ITSELF IS A DIVERGENCE A REPRODUCTION SHOWS (round 18, F3).
+    # The four declared edits describe themselves; they cannot describe the block that
+    # declares them, and that block is hand-added too: the tool at `code_head` has no
+    # `post_run_edits` builder at all (`git show <code_head>:tools/capstone_12186_recall.py
+    # | grep -c post_run_edits` -> 0, measured), so a reproduction's artifact carries no
+    # ledger. §6's reproduction paragraph said "four things" and listed four deltas,
+    # which reads as the complete set of differences from a reproduction when it is
+    # four-of-five. The word `five` is NOT the fix (§6 leads with the LEDGER's count),
+    # so the fifth thing is named in the paragraph that enumerates the deltas.
+    repro = _paragraph(README.read_text(), "yields the same numbers")
+    # ⛔ THE PHRASE, NOT THE WORD (measured): `"post_run_edits" in repro` stayed GREEN through
+    # a mutation that deleted this clause, because the very next sentence also names
+    # `post_run_edits` ("the tool at the run head emits no `post_run_edits` key at all").
+    # The assertion must be the CLAIM — that a reproduction carries no ledger — which is
+    # the flattened phrase `no post_run_edits ledger`.
+    assert "nopost_run_editsledger" in repro, (
+        "§6's reproduction paragraph must state that a reproduction carries NO "
+        "`post_run_edits` LEDGER — the four declared edits cannot declare the block that "
+        "declares them, so an enumeration of four reads as the complete set of "
+        "divergences when it is four-of-five. A bare `post_run_edits` mention is not "
+        "the claim: the paragraph names the field again in a different sentence")
+
 
 def test_the_readme_quotes_the_paired_deltas_the_artifact_holds(artifact):
     """Signed, cell by cell — a loss written as a gain must red.
@@ -1449,6 +1519,23 @@ def _paragraph(text: str, marker: str) -> str:
         f"expected exactly one paragraph mentioning {marker!r}, got "
         f"{len(blocks)}")
     return _flat(blocks[0])
+
+
+def _block(text: str, marker: str) -> str:
+    r"""The same BLOCK as `_paragraph`, but UNFLATTENED — spaces and newlines intact.
+
+    ⛔ `_flat` deletes every space, and that is exactly what a POLARITY check cannot
+    survive: `_phrase_re` is whitespace-tolerant (`\s+` between words) and `_negates`
+    reads a privative's distance from its phrase, so a flattened block matches neither
+    — `intoanattach` contains no `\s` at all. Use `_paragraph` for a token/count
+    assertion and this for a phrase/polarity one (it is also what `_negates`
+    documents: "matched on the unflattened sentence where `\\b` survives").
+    """
+    blocks = [b for b in text.split("\n\n") if marker in " ".join(b.split())]
+    assert len(blocks) == 1, (
+        f"expected exactly one block mentioning {marker!r}, got "
+        f"{len(blocks)}")
+    return blocks[0]
 
 
 def _count(cell: str) -> int:
@@ -2126,3 +2213,30 @@ def test_the_readme_narrative_cannot_contradict_its_own_tables(artifact):
             f"expected exactly one occurrence of {token!r} in the README, found "
             f"{text.count(token)} — a second occurrence can mask a drifted first")
     _assert_mentions(text, tokens, "the README's §2/§3 narrative")
+
+    # ⛔ AND THE SENTENCE'S DIRECTION, NOT ONLY ITS TWO NUMBERS (round 18, F4,
+    # measured). `192 of 411` is the ATTACH bucket — `mint_rate.shipped.attached` —
+    # so the verb *attach* IS the claim; a bare token count cannot see it. Measured:
+    # `into an attach` -> `into a mint` left every pin above untouched and the suite
+    # at `48 passed`, while the sentence then stated the OPPOSITE of §3b's own row
+    # (`shipped matcher ... 397 | 192 | 0.5328`: 192 attached, 219 minted) and of §4's
+    # `1.0000 -> 0.5328`. This test's title claims the narrative "cannot contradict
+    # its own tables" — for this restatement it could, which is the same one-word
+    # inversion the abstract's clauses already close with `_negates`.
+    attached = mint["shipped"]["attached"]
+    assert attached == int(tokens[2].split("of")[0]), (
+        "the `N of M` token must be the ATTACHED count (`mint_rate.shipped.attached`) "
+        "— if it were the minted count the word `attach` below would be the wrong one")
+    assert attached != mint["pairs"] - attached, (
+        "the two buckets are equal, so `attach` and `mint` are not distinguishable "
+        "in this sentence and its direction cannot be pinned")
+    sentence = _block(README.read_text(), f"{attached} of {mint['pairs']}")
+    assert re.search(_phrase_re("into an attach"), sentence), (
+        f"the `{tokens[2]}` restatement no longer says the duplicates become an "
+        f"ATTACH — the figure is `mint_rate.shipped.attached`")
+    assert not re.search(_phrase_re("into a mint"), sentence), (
+        f"the `{tokens[2]}` restatement now says those duplicates are MINTED, which "
+        f"contradicts §3b's own row: {sentence!r}")
+    assert not _negates(sentence, "into an attach"), (
+        f"the `{tokens[2]}` restatement NEGATES the attach, so the record claims the "
+        f"fold did not attach the duplicates it counts: {sentence!r}")
