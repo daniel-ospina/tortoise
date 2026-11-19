@@ -1454,6 +1454,56 @@ def test_the_coverage_contract_says_the_numerator_applies_the_kind_predicate():
     assert "except the label's own KIND predicate" in collapsed
 
 
+def test_the_operator_claim_holds_in_the_numerator_and_denominator_contracts_too():
+    """F1's THIRD and FOURTH copies: both counting functions still said "those two".
+
+    Round 13 corrected `Coverage` and §14.3, but the two functions that actually
+    take the counts kept saying the transition is not automatic for *"those two"*
+    (`document`/`source`) — omitting `operator`, which is the label the finding is
+    about, and for the same inverted reason. That is the failure this repo's own
+    changelog names: a correction that fixes one wording and leaves the copies is
+    how a retracted absolute gets re-derived — and these two are the copies a lane
+    diagnosing *"why does `operator` never verify?"* actually opens.
+
+    Non-vacuity: on the pre-fix tree this reddens on `"those two" not in doc` for
+    both functions. The population is DERIVED from :data:`LABEL_SERVED`, so a fourth
+    kind-split label reddens here as well, forcing the prose — and this test — to be
+    re-derived rather than silently stale.
+    """
+    kind_split = {label for label, served in record_vector.LABEL_SERVED.items()
+                  if served[2]}
+    assert kind_split == {"document", "operator", "source"}, kind_split
+
+    for fn in (record_vector._record_vector_count,
+               FalkorProjection._label_vector_count):
+        # Collapsed, because the phrase wraps: `_label_vector_count` broke it as
+        # "for those\n two" on the pre-fix tree, and a line-scoped check would be a
+        # pin on the formatter rather than on the claim.
+        flat = " ".join((fn.__doc__ or "").lower().split())
+        assert "those two" not in flat, (fn.__name__, flat)
+        for label in kind_split:
+            assert label in flat, (fn.__name__, label, flat)
+
+    numerator = record_vector._record_vector_count.__doc__ or ""
+    assert "THOSE THREE" in numerator, numerator
+    # `operator`'s own reason, not merely its name: the denominator is the PARENT
+    # label, and the non-operator Points are the population that carries vectors.
+    assert 'ENTITY_TYPE_LABELS["operator"]' in numerator, numerator
+    assert "_upsert_point_props" in numerator, numerator
+    # ...and the DENOMINATOR's docstring carries the same reason, because that is
+    # the function whose `MATCH (n:Point)` makes the comparison unreachable.
+    denominator = FalkorProjection._label_vector_count.__doc__ or ""
+    assert "_upsert_point_props" in denominator, denominator
+
+    # ...and §14.3's residuals paragraph puts the same three in the same set. The
+    # comparison is on the collapsed text so it is a check on the claim and not on
+    # the formatter's wrap.
+    collapsed = " ".join(_STORAGE_DOC.read_text(encoding="utf-8").split())
+    assert "And for all three it is UNREACHABLE" in collapsed, (
+        "§14.3's residuals paragraph no longer puts all three kind-split labels "
+        "in the unreachable set")
+
+
 def test_the_record_numerator_counts_only_vector_bearing_rows():
     """The numerator's predicate, which is the other half of the same comparison.
 

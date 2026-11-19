@@ -815,20 +815,26 @@ def _record_vector_count(label: str, scope: _Scope, *,
     not evidence of an empty table, and reporting it as one would be the exact
     "an absence is not a verdict" error this module's readers exist to avoid.
 
-    ⛔ THE KIND PREDICATE IS APPLIED (#13630). `operator` ⊂ `public.point` and
-    `document` ⊂ `public.source`, and the SERVE applies `LABEL_SERVED[label][2]`
-    (`if kind_filter: where.append(kind_filter)` in :func:`vector_search`) — so a
-    numerator taken over the whole table would let a record holding only plain
-    points verify `operator` on a SURPLUS of plain points, and the kind-filtered
-    read would then be served from the record with zero rows of that kind while
-    reporting `mechanism=pgvector, reason=ok`. One-sided on purpose: the graph
-    DENOMINATOR is the whole label (the graph has no per-kind vector property to
-    count), so the comparison for those two labels is not merely HARDER to pass —
-    for `document`/`source` it is UNREACHABLE whenever the other kind carries an
-    embedding, because one `public.source` table splits into two labels while the
-    graph's `:Source` label holds BOTH kinds and the denominator counts all of it.
+    ⛔ THE KIND PREDICATE IS APPLIED (#13630). `operator` ⊂ `public.point`, and
+    `source`/`document` are both ⊂ `public.source`, and the SERVE applies
+    `LABEL_SERVED[label][2]` (`if kind_filter: where.append(kind_filter)` in
+    :func:`vector_search`) — so a numerator taken over the whole table would let a
+    record holding only plain points verify `operator` on a SURPLUS of plain
+    points, and the kind-filtered read would then be served from the record with
+    zero rows of that kind while reporting `mechanism=pgvector, reason=ok`.
+    One-sided on purpose: the graph DENOMINATOR is the whole label (the graph has
+    no per-kind vector property to count), so for the THREE kind-split labels the
+    comparison is not merely HARDER to pass — it is UNREACHABLE whenever the other
+    kind carries any embedding. For `source`/`document` that is because one
+    `public.source` table splits into two labels while the graph's `:Source` label
+    holds BOTH kinds and the denominator counts all of it; for `operator` it is
+    because the denominator is EVERY vector-bearing `:Point`
+    (`security.ENTITY_TYPE_LABELS["operator"] == "Point"`, :func:`_label_vector_count`)
+    while the numerator is only operators — and non-operator Points are exactly the
+    population that carries embeddings by default (`projection.entities._upsert_point_props`
+    computes OR restores the vector for NON-operator Points, `#7778`).
 
-    ⛔ SO THE TRANSITION IS NOT AUTOMATIC FOR THOSE TWO, and that is stated rather
+    ⛔ SO THE TRANSITION IS NOT AUTOMATIC FOR THOSE THREE, and that is stated rather
     than implied: a deployment whose only shortfall is the other kind's rows stays
     UNVERIFIED and keeps double-storing that label until an operator acts (or a
     kind-aware denominator exists — the graph cannot answer one today). The cost is

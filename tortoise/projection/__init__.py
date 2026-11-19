@@ -20345,8 +20345,14 @@ class FalkorProjection(
         compare two different populations and
         leave a store permanently unverified. Terminal nodes carry vectors too, in
         both stores. ⛔ The one-sided KIND predicate has its own consequence for the
-        sub-kind labels (`document`/`source`): see `Coverage`'s docstring — for those
-        two `record >= graph` can be unreachable, so their cut-over is an operator act.
+        THREE kind-split labels (`operator` ⊂ `:Point`, and `source`/`document` both
+        ⊂ `:Source`): see `Coverage`'s docstring — for all three `record >= graph`
+        can be UNREACHABLE, so their cut-over is an operator act and never something
+        that happens by itself. For `operator` that is this method's own shape: the
+        label resolves to `:Point` (`security.ENTITY_TYPE_LABELS`), so the count
+        includes every NON-operator Point — the population
+        `entities._upsert_point_props` embeds by default (`#7778`) — while the
+        numerator is only operators.
 
         ⛔ ``timeout_ms`` IS THE READ'S OWN BUDGET AND IT MUST BE PASSED (#13610
         review). This aggregate runs on the gate's miss path, on the DENSE READ
