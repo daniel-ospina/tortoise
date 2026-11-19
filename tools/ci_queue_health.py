@@ -282,6 +282,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -1337,10 +1338,14 @@ class QueueHealth:
             # four conditions at a 5 400 s floor — nothing independent of the target
             # witnesses congestion. The repo-wide `congests_pr` stays `None`, so no
             # repo-wide destructive act is authorised on the strength of an exclusion.
-            # ⛔ THE CONJUNCT IS LOAD-BEARING: a truncated or unwitnessed reading can ALSO
-            # have an empty witness set, and it must keep failing closed.
+            # ⛔ THE TRUNCATION GUARDS ARE THE LOAD-BEARING CONJUNCTS: a cut reading can
+            # also reach this shape, and it must keep failing closed. (`wait_witness_ids`
+            # is NOT tested here — `PR_NEVER_DISPATCHED` is returned only from the
+            # `not wait_runs` clause and the witness tuple is built exclusively from
+            # `wait_runs`, so a conjunct on it could never vary. A guard that cannot fire
+            # is dead weight masquerading as protection — the M20 class this very change
+            # removed from the escalation arm.)
             if (self.verdict == PR_NEVER_DISPATCHED and self.pr_never_dispatched
-                    and not self.wait_witness_ids
                     and not self.truncated and not self.pending_truncated):
                 return False
             return None
@@ -1699,6 +1704,14 @@ def classify_queue(
             continue
         global_tally[run.name] = global_tally.get(run.name, 0) + 1
     global_max_live = max(global_tally.values()) if global_tally else 0
+    # ⛔ THE DENOMINATOR FOR EVERY "largest share" SENTENCE, FROM THE SAME TALLY AS THE
+    # NUMERATOR (#13825 review round 4). `global_leader` is a max over the LIVE tally, so
+    # pairing it with the FEED count (`global_max`) minted a share nobody holds — measured,
+    # a residue-dominated shape printed "Largest share: 'python-ci' (20 of 24)" where
+    # `python-ci` held 2 live runs and the 20 belonged to the excluded `Python CI`. It is
+    # byte-identical when nothing is excluded (the two populations coincide), which is the
+    # condition R6's byte-identical arm holds this to.
+    live_total = sum(global_tally.values())
     feed_tally: dict[str, int] = {}
     for run in queued:
         feed_tally[run.name] = feed_tally.get(run.name, 0) + 1
@@ -1891,6 +1904,15 @@ def classify_queue(
         # Positive claims are untouched — a FLOOD or a PR-STARVED needs only what was
         # read (this offender, this waiting run), and an executing PR run is observed
         # in the in_progress read regardless of the queued window.
+        #
+        # ⛔ `PR-NEVER-DISPATCHED` IS NOT REACHED HERE, AND THAT IS DELIBERATE (review
+        # round 4): its clause refuses a cut feed ITSELF, before it constructs the verdict
+        # (`classify_queue`, the `truncated or pending_truncated` branch inside the residue
+        # clause — same doctrine, distinct reason line), so a `verdict in (OK,
+        # PR_NEVER_DISPATCHED)` arm here would be unreachable — the dead weight the M20 row
+        # in the plan doc removed from the escalation guard. Extending one of the two
+        # places would create a second answer to one question; the clause owns it because
+        # it can name WHICH leg was cut and how many run(s) the refusal is declining.
         if verdict == OK and truncated and pr_running == 0:
             verdict = PR_UNWITNESSED
             reasons.append(
@@ -2184,7 +2206,8 @@ def classify_queue(
             f"{backlogged_wait:.0f}s "
             f"(> max_pr_wait_seconds={max_pr_wait_seconds:.0f}s), so the REQUIRED "
             f"checks cannot answer inside that wait. Largest share: "
-            f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
+            f"'{global_leader or 'unknown'}' ({global_tally.get(global_leader, 0)} of "
+            f"{live_total}); "
             f"the witness is "
             + (
                 f"a '{oldest_wait_leg}' leg run (#{_oldest_wait[0].id}) — a "
@@ -2234,7 +2257,8 @@ def classify_queue(
             f"PR-STARVED: no PR-event run is executing and the oldest waiting "
             f"PR-event run (queued/pending/requested) has waited {starved_wait:.0f}s "
             f"(> {min_age_seconds:.0f}s), so PR CI is NOT RUNNING. Largest share: "
-            f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
+            f"'{global_leader or 'unknown'}' ({global_tally.get(global_leader, 0)} of "
+            f"{live_total}); "
             f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
             f"no run is trimmed in this reading, and the reason line above names "
             f"the condition that declined to act (a cancellation this invocation "
@@ -2789,11 +2813,14 @@ def _load_queue_proofs(
         ``[]`` must all be rejected, because a truthiness test is how a store's schema drift
         becomes an exclusion;
       * ``run_id`` is an ``int`` (``type(...) is int``, so ``True`` is not 1 here either);
-      * ``proved_at`` is a number and ``0 <= now - proved_at < NEVER_DISPATCHED_REPROOF_SECONDS``
+      * ``proved_at`` is a number that CONVERTS to a **finite** float, and
+        ``0 <= now - proved_at < NEVER_DISPATCHED_REPROOF_SECONDS``
         — ⛔ A FUTURE STAMP IS REJECTED OUTRIGHT, because ``now - proved_at < TTL`` is
         satisfied FOR EVER by a clock-skewed or hand-edited future value, which would make a
         wrong proof immortal. (Same rule as the skill-enforcer's `READ_PERSIST_FUTURE_SKEW_MS`
-        and `_settled_still`'s own future-stamp note.)
+        and `_settled_still`'s own future-stamp note.) A non-finite stamp (``NaN``, ``inf``)
+        or one too large for a float is the SAME immortality by another route — every
+        comparison against it is ``False`` — so it is a DROP, not an honour.
       * ``updated_at`` is a ``str`` that PARSES, and equals the run's CURRENT stamp in the
         feed — a stamp that has moved means something happened, so re-prove now;
       * the run is STILL IN THE QUEUED FEED (pruned here, on LOAD, so a foreign or stale file
@@ -2846,10 +2873,26 @@ def _load_queue_proofs(
         if type(proved_at) is not int and type(proved_at) is not float:
             invalid += 1
             continue
+        # ⛔ THE STAMP MUST CONVERT TO A FINITE FLOAT (#13825 review round 4), checked
+        # HERE because this function's contract is "never raises" and both escapes are
+        # real, not theoretical: a hand-edited `proved_at` of 400 digits raises
+        # `OverflowError` out of `float()`, and JSON's `NaN` passes the type gate while
+        # making BOTH comparisons below `False` — which honours a wrong proof FOR EVER,
+        # the exact immortality the future-stamp rule above exists to forbid. A stamp
+        # the clock arithmetic cannot represent is not a proof; it is a dropped record
+        # (the run counts as WAITING again — the safe direction).
+        try:
+            proved_at_f = float(proved_at)
+        except (OverflowError, ValueError):
+            invalid += 1
+            continue
+        if not math.isfinite(proved_at_f):
+            invalid += 1
+            continue
         if type(proven) is not str or _parse_time(proven) is None:
             invalid += 1
             continue
-        age = now_epoch - float(proved_at)
+        age = now_epoch - proved_at_f
         if age < 0 or age >= NEVER_DISPATCHED_REPROOF_SECONDS:
             continue
         if feed_stamps.get(run_id) != proven:

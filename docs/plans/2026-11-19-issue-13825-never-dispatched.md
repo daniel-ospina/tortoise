@@ -363,7 +363,8 @@ progressive-job-creation lag"). Two instruments must not answer the same questio
 (0-300 / 300-900 / 900-1800 / 1800-3600 / 3600-5400 s), **every one holds ≥1 job record** — including
 two at 143-145 s with `updated_at == created_at` (`total_count: 1`) — and **no live queued run reaches
 5 400 s**. The zombie population is 7.9-14 d. So at the floor the two populations do not overlap, and
-condition 3 (a 90-minute window) is ~14× the measured p95 queue wait.
+condition 3 (a 90-minute window) sits ~1.2× the measured p95 queue wait (4 620 s) and ~1.1× the
+measured max (4 914 s) — a slim margin, which is why it is the safety guard and must not be lowered.
 
 **Consequence, stated:** a run becomes *provable* at exactly the age at which it becomes *alarming*. The
 first pass that can prove it may already have warned. That is intended: the alarm fires, then the proof

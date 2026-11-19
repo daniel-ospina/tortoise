@@ -163,8 +163,37 @@ def test_the_queue_reading_is_the_repo_level_state(monkeypatch):
     import tools.ci_queue_health as Q
 
     health = Q.classify_queue([], [], None)
-    monkeypatch.setattr(Q, "read_health", lambda repo: health)
+    monkeypatch.setattr(Q, "read_health", lambda repo, **k: health)
     assert R.read_queue_health("o/r") is health
+
+
+def test_round4_the_queue_read_hands_the_proof_store_to_read_health(monkeypatch, tmp_path):
+    """The repair pass runs every 30 min, more often than the job that owns the store. A
+    pass that never reads it starts from empty and re-proves the SAME oldest-first prefix,
+    so the population can never accumulate and the frozen 14-day `oldest` this issue is
+    about survives in the pass that runs most.
+
+    Mutation: call `read_health(repo)` without `state_file` — the first assert reds (and a
+    wired environment would be silently ignored).
+    """
+    import tools.ci_queue_health as Q
+
+    seen = {}
+
+    def fake(repo, **kwargs):
+        seen["repo"] = repo
+        seen.update(kwargs)
+        return "READING"
+
+    monkeypatch.setattr(Q, "read_health", fake)
+    state = str(tmp_path / "never-dispatched.json")
+    monkeypatch.setenv("CI_QUEUE_HEALTH_STATE", state)
+    assert R.read_queue_health("o/r") == "READING"
+    assert seen == {"repo": "o/r", "state_file": state}
+    # An unwired environment is the PRE-#13825 reading, never a broken one.
+    monkeypatch.delenv("CI_QUEUE_HEALTH_STATE")
+    assert R.read_queue_health("o/r") == "READING"
+    assert seen["state_file"] is None
 
 
 def test_all_required_present_means_no_plan_at_all():
@@ -1860,7 +1889,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
 
     `docs/ops/ci-wall-clock.md` §1 line 50 (54 `python-ci` runs) measures the wait for a
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
-    this floor defers to is `tools/ci_queue_health.py:368`
+    this floor defers to is `tools/ci_queue_health.py:369`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
     and `ci-wall-clock.md` §6 lines 470-472 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal

@@ -2970,7 +2970,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # SHIPPED LEAD-IN, and this leg's RESIDUAL is stated rather than chased (review round
         # 22, the same lesson round 4 learned for `retracted`): ANY contiguous span can be
         # embedded by a correct rewrite, so (i) the bare clause reds a correct re-typing of the
-        # BUDGET-surplus scoping at `tools/ci_queue_health.py:1628` (measured; the coordinate
+        # BUDGET-surplus scoping at `tools/ci_queue_health.py:1629` (measured; the coordinate
         # moves with this file's own line count — it reds nothing if it drifts, so it is
         # cheapest to re-check when the module above it changes), and (ii) a
         # comment that quotes the retracted sentence IN ORDER TO REJECT IT also reds, because
@@ -5253,3 +5253,55 @@ def test_R19_an_eligible_run_reads_ZERO_and_is_then_excluded_end_to_end(monkeypa
     assert health.never_dispatched_ids == (1,)
     assert health.verdict == Q.PR_NEVER_DISPATCHED
     assert health.pr_queued == 1, "the run is STILL counted as queued (feed truth)"
+
+
+# ── review round 4 (#13825): the defects THIS reviewer found that the peer's P1 fix
+# (the cut-feed refusal) did not close. Each arm names its mutation.
+@pytest.mark.parametrize("proved_at", [
+    float("nan"), float("inf"), float("-inf"),
+    10 ** 400,                       # overflows `float()` — `OverflowError`, not a drop
+])
+def test_round4_a_non_finite_or_overflowing_proof_stamp_is_a_DROP(tmp_path, proved_at):
+    """`_load_queue_proofs` says "Never raises", and `0 <= age < TTL` is TRUE FOR EVER for
+    a `NaN` (both comparisons are False) — the exact immortality the future-stamp rule
+    forbids. A 400-digit int escapes `float()` as `OverflowError` out of a function whose
+    contract is to abstain.
+
+    Mutation: drop the `math.isfinite` test — the `nan` row is honoured. Mutation: drop the
+    `try` around `float()` — the big-int row raises out of the loader.
+    """
+    stamp = "2026-10-01T00:00:00Z"
+    state = tmp_path / "proofs.json"
+    state.write_text(json.dumps({"version": 1, "repo": "o/r", "proofs": [
+        {"run_id": 1, "never_dispatched": True, "proved_at": proved_at,
+         "updated_at": stamp}]}))
+    proofs, warning = Q._load_queue_proofs(str(state), "o/r", NOW, {1: stamp})
+    assert proofs == {}, "an unrepresentable stamp proves nothing"
+    assert warning and "could not be honoured" in warning
+
+
+def test_round4_the_largest_share_pairs_a_LIVE_leader_with_a_LIVE_count():
+    """`global_leader` is a max over the LIVE tally; `global_max` is FEED truth. Printing
+    them in one parenthetical minted a share nobody holds — measured, "'python-ci' (20 of
+    22)" where `python-ci` holds 2 live runs and the 20 are excluded `Python CI`.
+
+    Mutation: print `global_max of len(queued)` again — the "(2 of 2)" below becomes
+    "(20 of 22)" and this reds.
+    """
+    residue = [nd_run(100 + i, never_dispatched=True, name="Python CI") for i in range(20)]
+    live = [run(500 + i, "python-ci", event="pull_request", age_seconds=9000)
+            for i in range(2)]
+    health = classify(residue + live)
+    assert health.verdict == Q.PR_STARVED
+    joined = " ".join(health.reasons)
+    assert "Largest share: 'python-ci' (2 of 2)" in joined
+    assert "(20 of" not in joined, "the excluded population is not the leader's share"
+
+
+def test_round4_a_zombie_free_reading_keeps_the_share_sentence_BYTE_IDENTICAL():
+    """R6: with nothing excluded the two populations coincide, so the sentence must not
+    move at all. Mutation: count the leader from a population that is not `len(queued)`
+    without the exclusion case — this reds."""
+    queued = flood_queued(10) + starving_pr_runs(4, age_seconds=9000)
+    joined = " ".join(classify(queued, in_progress=serving_pr_runs(1)).reasons)
+    assert "Largest share: 'finding-provenance' (10 of 14)" in joined

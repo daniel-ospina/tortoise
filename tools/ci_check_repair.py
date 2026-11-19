@@ -192,7 +192,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: THE BUDGET THIS FLOOR DEFERS TO, cited at each place for what it actually says:
 #: `docs/ops/ci-wall-clock.md` §1 line 50 is the MEASUREMENT (the table, 54 `python-ci`
 #: runs: p50 29.9 min, p95 77.0 min, max 81.9 min wait for a run's FIRST job);
-#: `tools/ci_queue_health.py:368` is the DERIVED VALUE,
+#: `tools/ci_queue_health.py:369` is the DERIVED VALUE,
 #: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` (grep the symbol if the line has moved —
 #: it is the identifier that is load-bearing, the number is only a shortcut); and
 #: `docs/ops/ci-wall-clock.md` §6
@@ -222,7 +222,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: and the SAME BULLET, three lines later, supplies the 81.9 → 90 min derivation. Read
 #: as a denial of a queue-wait budget it is a misreading that then discards the one
 #: section that supports this floor. A lane re-deriving 5400 s follows §1
-#: (measurement) → §6 / `ci_queue_health.py:368` (budget).
+#: (measurement) → §6 / `ci_queue_health.py:369` (budget).
 #:
 #: WHY THE ORDERING IS LOAD-BEARING: the repair for this class evaluates to
 #: cancel-then-rerun, and cancelling a run that is merely waiting for a slot discards
@@ -1820,7 +1820,17 @@ def read_queue_health(repo: str):
             sys.path.insert(0, root)
         from tools import ci_queue_health  # optional dependency
 
-        return ci_queue_health.read_health(repo)
+        # ⛔ THE PROOF STORE IS PASSED HERE TOO (#13825 review round 4). This pass runs every
+        # 30 minutes — more often than the queue-health job that owns the store — and a pass
+        # that never reads it starts from ``proofs = {}`` and spends its budget on the SAME
+        # oldest-first prefix every window. The population can then never accumulate: the
+        # reading keeps the frozen 14-day `oldest` and `queue_congested: true` this issue is
+        # about, and pays the probe budget every pass for a prefix it re-proves. Absent or
+        # empty is exactly the pre-#13825 reading (`state_file=None`), so an environment
+        # that does not wire the store degrades to MORE alarming, never less.
+        return ci_queue_health.read_health(
+            repo, state_file=os.environ.get("CI_QUEUE_HEALTH_STATE") or None
+        )
     except Exception:  # a queue read must never fail the repair pass
         return None
 
@@ -1890,8 +1900,11 @@ def queue_congestion_apart_from_measured(queue) -> bool | None:
         return None
     if verdict != _QUEUE_NEVER_DISPATCHED_TOKEN:
         return None
-    if getattr(queue, "wait_witness_ids", ()):
-        return None
+    # ⛔ `wait_witness_ids` IS NOT TESTED (#13825 review round 4): `PR-NEVER-DISPATCHED`
+    # requires `not wait_runs`, and the witness tuple is built exclusively from `wait_runs`,
+    # so a conjunct on it could never vary — dead weight masquerading as protection, the M20
+    # class. The truncation guards below CAN vary and are what keep a cut reading failing
+    # closed.
     if getattr(queue, "truncated", False) or getattr(queue, "pending_truncated", False):
         return None
     return True
