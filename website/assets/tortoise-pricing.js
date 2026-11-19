@@ -21,8 +21,10 @@
  * coverage by copy-pasting this file's shape.
  *
  * The table is a MIRROR of `product/pricing.json` (the first source), pinned
- * against it by `tests/test_website_static.py::TestMirrorNumericParity` and
- * `tests/test_tier_naming.py`. Edit this file and `product/pricing.json`
+ * against it by `tests/test_website_static.py::TestMirrorNumericParity`. (The
+ * tier NAMES are separately held across `product/pricing.json`, product.html's
+ * `labels` map and the dashboard's `TIER_LABELS` by `tests/test_tier_naming.py`;
+ * that module does not read this file.) Edit this file and `product/pricing.json`
  * together, never one of them alone.
  *
  * Serving: `website/assets/` is `public` in

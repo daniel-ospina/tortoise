@@ -489,9 +489,9 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
   // spellings actually depend on. Measured on the head before this arm existed:
   // retarget `/tortoise-for-product-teams.html` to `/nowhere-at-all` in `_redirects`
   // and every arm above (and this whole suite) stayed GREEN, while the COMPANY host
-  // answered a browser-persistent 301 onto a 404. That is the mutant the review at
-  // `da1ab1c1` recorded as the evidence for this gap, and it survived the first fix
-  // because only the product-host walk was added; with this arm it reds.
+  // answered a browser-persistent 301 onto a 404. That is the mutant the first
+  // fix missed — only the product-host walk was added, so nothing could see it —
+  // and with this arm it reds.
   //
   // Derived from `ROOT_PAGE` + the committed file rather than listed here, for the same
   // reason as the population arm above: a new member must bring its twins, and a twin

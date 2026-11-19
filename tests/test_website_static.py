@@ -101,7 +101,8 @@ PRICING_SOURCE = REPO_ROOT / "website" / "assets" / "tortoise-pricing.js"
 #: these is SAME-ORIGIN — the browser loads the same file a relative path would —
 #: so the absolute spelling must not be read as a foreign asset and skipped
 #: (#13696 round 9, P3). `tortoise.premiselabs.co` is the PRODUCT host and serves
-#: this same `website/` tree (`TestOgImages.SITE_ORIGINS` pins the same pair), so
+#: this same `website/` tree (`TestSiteIconAndSocialPreviewContract.SITE_ORIGINS`
+#: pins the same pair), so
 #: leaving it out read `https://tortoise.premiselabs.co/assets/x.js` as foreign
 #: and left a `$25/mo` in it green — measured, #13696 round 10.
 SITE_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
@@ -161,9 +162,11 @@ def _extract_pricing_object() -> dict:
     renders the same prices, and the owner's decision named a second copy as
     the defect: two prices that can drift with nothing red.
     `TestPricingSourceIsShared` holds both pages to this one file; everything
-    below (`TestMirrorNumericParity`, `TestStaticPricingFallback`,
-    `tests/test_tier_naming.py`) now reads the shared source, so the mirror
-    parity it asserts is a property of the ONE table every page renders.
+    below (`TestMirrorNumericParity`, `TestStaticPricingFallback`) now reads the
+    shared source, so the mirror parity it asserts is a property of the ONE table
+    every page renders. (`tests/test_tier_naming.py` does NOT read this file — it
+    holds the tier NAMES across `product/pricing.json`, product.html's `labels`
+    map and the dashboard's `TIER_LABELS`, so it is not part of this list.)
 
     Raises AssertionError (with the source context) when the block cannot be
     located — a renamed/moved constant must fail loudly, not skip.
@@ -7948,8 +7951,10 @@ class TestProductSetIsServedUnderTheOneHost:
 #     the two pages;
 #   * `TestStaticPricingFallback` proves that markup equals the numbers in the
 #     shared source (so the identical copy is also the correct one);
-#   * `TestMirrorNumericParity` + `tests/test_tier_naming.py` prove the shared
-#     source still mirrors `product/pricing.json` and the dashboard's labels.
+#   * `TestMirrorNumericParity` proves the shared source still mirrors
+#     `product/pricing.json`; `tests/test_tier_naming.py` SEPARATELY holds the
+#     tier NAMES across that file, product.html's `labels` map and the
+#     dashboard's `TIER_LABELS` — it does not read `PRICING_SOURCE`.
 
 PRODUCT_PAGES_SHARING_PRICING = (
     ("website/product.html", PRODUCT_HTML),

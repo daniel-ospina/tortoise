@@ -7,7 +7,9 @@
        A GTM EXPERIMENT: the product story told for ONE audience — founders and
        product teams. It is ADDED ALONGSIDE `/tortoise`, which stays the
        canonical product page and does NOT redirect here (owner decision,
-       2026-11-12 — `~/.pi/agent/state/DECISION-product-page-11762.md`).
+       2026-11-12, tracked on #13645; the host-map bullet is in
+       `website/website_architecture.md`, pinned by
+       `test_the_routing_decision_is_recorded_in_the_architecture_doc`).
 
        INDEXED, deliberately, and this meta is the decision written where the
        next reader will find it. A niche page nobody can find has no traffic to
@@ -597,8 +599,10 @@
        `#pricing-grid`/usage-line/selfhost markup, and
        `tests/test_website_static.py::TestPricingSourceIsShared` asserts that:
        edit both together or neither. The static cards are the no-JS fallback
-       (see the long comment there), pinned to the shared source by
-       `TestStaticPricingFallback`. -->
+       (see the long comment there); THIS page's cards are held to the shared
+       source by
+       `TestPricingSourceIsShared::test_the_static_cards_on_both_pages_carry_the_shared_numbers`
+       (`TestStaticPricingFallback` derives product.html's cards only). -->
     <section id="pricing-section" class="content-section">
       <h2>Pricing</h2>
       <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
@@ -617,9 +621,11 @@
              (a crawler, or an AI evaluator reading the page) otherwise sees the
              toggle above an EMPTY grid. The static cards carry the ANNUAL
              figures because that is `display.annual_default`, so there is no
-             flash before the JS runs. Parity with the PRICING mirror is pinned by
-             tests/test_website_static.py::TestStaticPricingFallback — edit both
-             sides together. -->
+             flash before the JS runs. THIS page's cards are held to the shared
+             source by
+             tests/test_website_static.py::TestPricingSourceIsShared
+             (::test_the_static_cards_on_both_pages_carry_the_shared_numbers) —
+             edit both sides together. -->
       <div class="pricing-grid" id="pricing-grid" aria-live="polite">
         <div class="pricing-card">
           <h3>Free</h3>
@@ -733,9 +739,12 @@
                                       parameters (and the referrer) that
                                       carried the visitor
          product_teams_cta_primary    a click that enters the sign-up funnel
-                                      (the hero CTA and the pricing /
-                                      self-host CTAs, which all POST a visitor
-                                      to /auth)
+                                      (the hero's `data-cta="primary"` button,
+                                      plus every /auth link inside
+                                      `#pricing-section` — the four tier cards
+                                      and the self-host block's "Migrate to
+                                      cloud anytime", the only self-host CTA
+                                      that reaches /auth)
          product_teams_cta_secondary  a click on the hero's docs / GitHub /
                                       blog row
 
