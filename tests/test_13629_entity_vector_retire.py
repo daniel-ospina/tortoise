@@ -7790,10 +7790,10 @@ def _upsert_object(props, ev):
         # wrappers and still read a BARE mapping spelling only, so every builder the OPERAND
         # side already refuses (`_is_mapping_constructor`, `fromkeys`) re-opened the hole one
         # view over — and the KEYS source in the same function already reads them, one line
-        # apart from the certified twin:
+        # apart from the twin:
         #
         #     {k: _encode(ev) for k in dict({"embedding": 1})}              refused
-        #     {k: _encode(ev) for k, _v in dict({"embedding": 1}).items()}  CERTIFIED
+        #     {k: _encode(ev) for k, _v in dict({"embedding": 1}).items()}  refused (this block)
         #
         # `dict([("embedding", 1)])` and `dict(**{…})` are the same mapping through the other
         # two constructor forms (`_sequence_options` already reads the first, and a `**`
@@ -7889,6 +7889,50 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update({k: _encode(ev) for k, _v in dict({"embedding": 1}).items()})
+        return None
+    _write(props)
+""",
+        # ⛔ AND A CONSTANT-INDEX / FULL-SLICE RECEIVER IS THE SAME MAPPING (`#13788`, measured
+        # at `84d108e8e2`). The receiver resolver's wrapper chain stopped at the copy and
+        # conditional families while `_sequence_options` — the module's ONE sequence
+        # resolver, whose vocabulary is "a CONSTANT index into an option, a FULL slice" —
+        # already answered the container spellings at every other seam, and the sibling KEYS
+        # source in this same function refused the indexed container. So each of these
+        # CERTIFIED a stop arm that stores the vector, one subscript over the hole the block
+        # above closes. The `[1:2]` PARTIAL slice stays the stated residual (a partial slice
+        # selects a different element, so answering it would answer about the wrong one).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in [{"embedding": 1}][0].items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in [{"embedding": 1}][-1].items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in [{"embedding": 1}][0:].items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in ([{"embedding": 1}] + [])[0].items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in [{"embedding": 1}].copy()[0].items()}
         return None
     _write(props)
 """,
@@ -8993,6 +9037,17 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k, _v in dict({"embedding_model": 1}).items()}
+        return None
+    _write(props)
+""",
+        # ⛔ THE SUBSCRIPT RECEIVER'S CONSTANT-VALUE CONTROL (`#13788`, measured at
+        # `84d108e8e2`): the same indexed receiver as the refused rows above, with a value
+        # that places nothing — the arm must not refuse it. It replaces a byte-identical
+        # duplicate of the `dict({…}).items()` control (the file's own standard at `:6120`).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: 1 for k, _v in [{"embedding": 1}][0].items()}
         return None
     _write(props)
 """,

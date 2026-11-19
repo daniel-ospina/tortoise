@@ -2246,7 +2246,7 @@ def _source_holds_the_store_anywhere(node) -> bool:
             #    `.items()` arm now follows the receiver's wrappers too; the value question is
             #    kept BESIDE it, because a mapping that really does place the vector is still a
             #    store. Both directions only ever REFUSE, so neither can widen acceptance.
-            #    ⚠️ AND REVERTING THIS LEG ALONE MOVES **0** OF THE 491 FIXTURE ROWS — measured,
+            #    ⚠️ AND REVERTING THIS LEG ALONE MOVES **0** OF THE 504 FIXTURE ROWS — measured,
             #    not assumed, and recorded so the next lane does not re-litigate it: for every
             #    spelling in this family the key question is ALSO answered upstream (by the
             #    comprehension terms, or by `_comprehension_key_mentions_the_bound_property` on
@@ -2328,6 +2328,24 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
     here rather than re-spelled, because a vocabulary typed per-resolver is this branch's
     recurring defect.
 
+    ⛔ AND A CONSTANT-INDEX / FULL-SLICE RECEIVER IS THE SAME MAPPING (`#13788`, measured at
+    `84d108e8e2`). The wrapper chain above read the copy and conditional families and stopped,
+    so the container wrappers this module ALREADY resolves at every sequence seam — through
+    `_sequence_options`, whose own docstring names "a CONSTANT index into an option, and every
+    conditional branch" — re-opened the hole one view over. Measured through the tool's own
+    `_writer_consults_gate`, all five CERTIFIED a stop arm that stores the vector:
+
+        props |= {k: _encode(ev) for k, _v in [{'embedding': 1}][0].items()}        CERTIFIED
+        props |= {k: _encode(ev) for k, _v in [{'embedding': 1}][-1].items()}       CERTIFIED
+        props |= {k: _encode(ev) for k, _v in [{'embedding': 1}][0:].items()}       CERTIFIED
+        props |= {k: _encode(ev) for k, _v in ([{'embedding': 1}] + [])[0].items()} CERTIFIED
+        props |= {k: _encode(ev) for k, _v in [{'embedding': 1}].copy()[0].items()} CERTIFIED
+
+    while the bare twin was refused. The sibling KEYS source in the same function already
+    answered the indexed container (`{k: _encode(ev) for k in [{'embedding': 1}][0]}` is
+    refused), so this is the per-resolver-vocabulary asymmetry this branch keeps closing, one
+    subscript over. It is asked through `_sequence_options` rather than re-spelled.
+
     `None` means "not a mapping this check can read", and every caller's other arms plus the
     disclosed residual still apply. Both callers REFUSE on what this returns, so a wider walk
     can only add refusals — it cannot widen acceptance, which is the one direction the
@@ -2350,6 +2368,24 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
         if not readable:
             return None
         return [item for chunk in readable for item in chunk]
+    # ⛔ A CONSTANT-INDEX / FULL-SLICE RECEIVER IS THE SAME MAPPING, asked through the ONE
+    #    sequence resolver (`#13788`, measured at `84d108e8e2`): five spellings CERTIFIED a
+    #    stop arm while the bare twin and the indexed KEYS source were both refused. An
+    #    OPTION is an element list and a const index / full slice narrows it to what is
+    #    actually SELECTED, so every element of every option is a mapping candidate — ANY of
+    #    them placing the property is a store, the same union policy the conditional arm a few
+    #    lines up already applies. A receiver this check cannot read contributes nothing.
+    if isinstance(mapping, ast.Subscript):
+        options = _sequence_options(mapping, _depth + 1)
+        if options is None:
+            return None
+        pairs: list = []
+        for option in options:
+            for element in option:
+                resolved = _mapping_items_pairs(element, _depth + 1)
+                if resolved is not None:
+                    pairs.extend(resolved)
+        return pairs or None
     if isinstance(mapping, ast.Dict):
         pairs: list = []
         for key, value in zip(mapping.keys, mapping.values, strict=False):
