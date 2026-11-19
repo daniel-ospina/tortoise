@@ -754,17 +754,20 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # `.` cannot reach here — the window is cut at the first one.)
             _member = re.match(
                 r"(?:tortoise/|comment-only\b|non[- ]?empty\b"
-                r"|\d+\b(?!-based)|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b"
-                r"|nine\b|ten\b|both\b|single\b)", low)
-            # ⛔ THE `-based` BOUND APPLIES TO EVERY NUMERAL SPELLING (#13831 review, P2):
-            # the negative lookahead above only guards the DIGIT form, so `prints 0-based
-            # offsets` skipped while `prints one-based line numbers` stayed MEMBERSHIP — the
-            # comment's claim ("a numeral that computes an offset is not a member") holding
-            # for one spelling of the numeral. MEASURED at this head before the fix: `1-based`
-            # → `[]`, `one-based` → MEMBERSHIP; at an empty head the second is REFUSED, a
-            # false red for a sentence that asserts no direction. Checked on the MATCHED
-            # token, so it covers `one`…`ten` and `single` without restating the alternation.
-            if _member and low[_member.end():].startswith("-based"):
+                r"|\d+\b(?!-(?:based|indexed))|one\b|two\b|three\b|four\b|five\b|six\b|seven\b"
+                r"|eight\b|nine\b|ten\b|both\b|single\b)", low)
+            # ⛔ THE `-based` BOUND APPLIES TO EVERY NUMERAL SPELLING AND TO `-indexed`
+            # (#13831 review, P2, twice): the negative lookahead above only guards the DIGIT
+            # form, so `prints 0-based offsets` skipped while `prints one-based line numbers`
+            # stayed MEMBERSHIP — the comment's claim ("a numeral that computes an offset is
+            # not a member") holding for one spelling of the numeral. MEASURED at this head
+            # before the fix: `1-based` → `[]`, `one-based` → MEMBERSHIP; at an empty head the
+            # second is REFUSED, a false red for a sentence that asserts no direction. The
+            # SAME class has a second suffix spelling, `-indexed` (`0-indexed offsets`,
+            # `one-indexed line numbers`), which the first cut excluded from neither arm —
+            # also measured, and also fixed here. Checked on the MATCHED token, so it covers
+            # `one`…”ten` and `single` without restating the alternation.
+            if _member and low[_member.end():].startswith(("-based", "-indexed")):
                 _member = None
             # ⛔ A ZERO NUMERAL IS EMPTINESS, FULL STOP (#13795 review, rounds 4 and 5):
             # `prints 0 paths`, `prints exactly zero paths`, `prints 0 files` and
@@ -773,11 +776,12 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # refusing a true sentence. Zero is emptiness whatever it COUNTS.
             # ⛔ …BUT ONLY WHEN IT IS A COUNT AT ALL (#13831 review, P1/P2). Dropping that
             # noun gate made any `0` an emptiness claim, including one that computes an
-            # offset — `prints 0-based offsets` asserts neither direction, so it SKIPS (no
-            # direction is typed). The `-based` bound is deliberately the ONLY hyphenated
-            # suffix excluded: `zero-length` / `0-length` / `zero-count` name a COUNT (they
-            # are emptiness), and a blanket `(?!-)` — which this cut carried for one round —
-            # silently skipped them instead, the fail-open measured above.
+            # offset — `prints 0-based offsets` / `prints 0-indexed offsets` assert neither
+            # direction, so they SKIP (no direction is typed). The two `-based` / `-indexed`
+            # suffixes are deliberately the ONLY hyphenated ones excluded: `zero-length` /
+            # `0-length` / `zero-count` name a COUNT (they are emptiness), and a blanket
+            # `(?!-)` — which this cut carried for one round — silently skipped them instead,
+            # the fail-open measured above.
             # ⛔ ONE LIMIT THIS LEAVES, STATED RATHER THAN IMPLIED: `prints 0.5 coverage`
             # still reads as `prints 0`, because the window is cut at the first `.` — the
             # `0` really is the whole of what the classifier sees, so it is indistinguishable
@@ -790,7 +794,7 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # row below pins that the PLURAL is still read as emptiness.
             _empty = re.match(
                 r"(?:empty\b|nothing\b|none\b|blank\b"
-                r"|(?:zero|0)\b(?!-based)"
+                r"|(?:zero|0)\b(?!-(?:based|indexed))"
                 r"|no\b\s*(?:path|tortoise/))", low)
             if _empty:
                 if re.match(r"(?:zero|0)\s+or\s+more\b", low):
@@ -1185,6 +1189,8 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             ("prints no more than zero paths", True),
             ("prints no more than two paths", None),
             ("prints one-based line numbers", None),
+            ("prints one-indexed line numbers", None),
+            ("prints 0-indexed offsets", None),
             ("prints no fewer than zero paths", None)):
         _edge_expect = [] if _edge_want is None else [(_edge_spelling, _edge_want)]
         assert _typed_answers_to_tortoise_cmd(
