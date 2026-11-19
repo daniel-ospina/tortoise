@@ -1439,12 +1439,20 @@ def _error_detail(exc: BaseException) -> str:
     """
     try:
         text = str(exc) or ""
-    except Exception:  # noqa: BLE001, RUF100 — a broken __str__ is not the failure
+        text = " ".join(text.split())
+        if not text:
+            return ""
+        # ⚠️ The REDACTOR is inside the guard, not after it (#8486 review round
+        # 2). ``redact_secrets`` walks arbitrary provider/FalkorDB text, so it
+        # is the same class of hazard as a broken ``__str__`` — and this
+        # builder's whole invariant is that a failure record never masks the
+        # failure. Failing closed (drop the detail) is safe because
+        # ``error``/``error_class``/``retryable`` still describe the failure;
+        # emitting the text UNSCRUBBED to stay available would trade a masked
+        # failure for a leaked credential, which is strictly worse.
+        text = _scrub(text)
+    except Exception:  # noqa: BLE001, RUF100 — nor is a broken redactor the failure
         return ""
-    text = " ".join(text.split())
-    if not text:
-        return ""
-    text = _scrub(text)
     if len(text) > ERROR_DETAIL_CAP:
         text = text[:ERROR_DETAIL_CAP] + "…<truncated>"
     return text
@@ -1507,7 +1515,16 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
     if prior and prior.get("error_class") == "ingest:retries_exhausted":
         error_class = "ingest:retries_exhausted"
     retryable = failure_is_recoverable(exc, error_class=error_class)
-    err = _scrub(repr(exc))
+    # ⚠️ Guarded for the same reason as ``_error_detail``'s scrub (see there):
+    # an unguarded redactor failure HERE aborts the entry build and loses the
+    # failure record outright — the failure masked by its own report, which is
+    # the worst version of the defect this builder exists to prevent. The
+    # fallback is the exception's CLASS NAME: it cannot carry ``args``, so it
+    # cannot leak a credential, and it keeps the record inspectable.
+    try:
+        err = _scrub(repr(exc))
+    except Exception:  # noqa: BLE001, RUF100 — a broken redactor is not the failure
+        err = type(exc).__name__
     if len(err) > ERROR_REPR_CAP:
         err = err[:ERROR_REPR_CAP] + "…<truncated>"
     entry = {

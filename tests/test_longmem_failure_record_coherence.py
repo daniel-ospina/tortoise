@@ -452,6 +452,43 @@ def test_error_detail_is_bounded_and_collapsed():
     assert detail.endswith("…<truncated>")
 
 
+def test_a_redactor_failure_does_not_mask_the_failure(monkeypatch):
+    """The OTHER half of "a failure record must never mask the failure".
+
+    ``_error_detail`` guards ``str(exc)`` but the round-2 review found the
+    redactor sitting OUTSIDE that guard: ``redact_secrets`` walks arbitrary
+    provider/FalkorDB text, so a raise inside it is the same class of hazard —
+    while ``_failure_entry`` calls ``_scrub(repr(exc))`` for ``error`` at the
+    top level, where a raise aborts the ENTRY BUILD and loses the record
+    entirely.
+
+    Non-vacuity: on the pre-fix head the monkeypatched redactor escapes
+    ``_build_failure_entry``, so this row errors instead of asserting — the
+    failure is masked by its own report. Post-fix it must FAIL CLOSED:
+    ``error`` falls back to the class name (no ``args``, so no credential can
+    ride it), ``error_detail`` is omitted, and the three fields that make the
+    entry actionable are untouched.
+    """
+    def boom(*_a, **_kw):
+        raise RuntimeError("redactor exploded")
+
+    monkeypatch.setattr(runner, "_scrub", boom)
+    exc = redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting "
+        "(redis://u:s3cr3t-pw@h)")
+    entry = _entry(exc)
+
+    assert entry["error_class"] == "ingest:retries_exhausted"
+    assert entry["retryable"] is True
+    assert entry["attempts"] == 1
+    assert "error_detail" not in entry, (
+        "the detail cannot be emitted unscrubbed — fail closed")
+    assert entry["error"] == "ResponseError", (
+        "the class-name fallback keeps the record readable without carrying "
+        "args")
+    assert "s3cr3t-pw" not in entry["error"]
+
+
 def test_an_empty_message_omits_the_key_entirely():
     entry = _entry(redis_exc.ResponseError())
     assert "error_detail" not in entry

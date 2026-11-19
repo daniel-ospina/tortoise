@@ -12,6 +12,7 @@ Run::
 from __future__ import annotations
 
 import math
+import os
 
 from tools.longmem_eval import ingest_profile as prof
 from tools.longmem_eval.ingest import DEFAULT_CHUNK_TURNS, _session_chunks
@@ -48,6 +49,40 @@ def test_the_chunk_leg_is_one_per_chunk_turns_window():
     got = sum(len(list(_session_chunks(s, DEFAULT_CHUNK_TURNS)))
               for s in q["haystack_sessions"])
     assert got == expected == 100
+
+
+def test_the_named_db_wins_over_an_ambient_uri(monkeypatch):
+    """``--db`` must WIN over an exported ``TORTOISE_DB_URI`` — pinned.
+
+    The round-2 review recorded this as a P3: ``_sdk`` was changed from
+    ``os.environ.setdefault`` to an assignment so an ambient variable can no
+    longer redirect the profiler's five throwaway graphs to a server the
+    operator did not name, but nothing reddened if it were reverted.
+
+    ``tools/test_lane.py`` exports exactly that variable on a smoke lane, so
+    ``setdefault`` would silently measure a DIFFERENT server while
+    ``report["db"]`` still said True. The SDK is stubbed: this pins the env
+    contract, not a connection.
+
+    Non-vacuity: with ``setdefault`` restored, the stub observes the ambient
+    URI and the first assertion reds.
+    """
+    seen: dict[str, str | None] = {}
+
+    class _StubSDK:
+        def __init__(self, *_a, **_kw):
+            seen["uri"] = os.environ.get("TORTOISE_DB_URI")
+
+    monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@ambient:6379/other")
+
+    _, cleanup = prof._sdk(db_uri="docker://:pw@named:6379/want",
+                           namespace="profile-test")
+    assert seen["uri"] == "docker://:pw@named:6379/want", (
+        "an ambient TORTOISE_DB_URI must not outrank the --db it was given")
+    cleanup()
+    assert os.environ["TORTOISE_DB_URI"] == "docker://:pw@ambient:6379/other", (
+        "cleanup must restore the ambient value it borrowed the variable from")
 
 
 def test_the_evidence_turn_is_marked_once_per_question():
