@@ -445,7 +445,7 @@ door calls). `files` **100**, `files_scanned` **300**, `unresolved` **108**, `no
 by measurement rather than by arithmetic.** Re-running the tool's own predicate over
 `origin/main` `1b1d108ca423` and over this tree gives **1,636 → 1,639** door occurrences; the block had
 published `1,634` and `= 1,580 AST door calls` against pins that already said `1582` — the same
-staleness, unmasked because the block's numbers were not pinned. The verb predicate reads **2,360
+staleness, unmasked because the block's numbers were not pinned. The verb predicate reads **2,361
 across 146 files** at this tree, and the tool run over that base prints `2,355` / `146` — the block it
 carried published `2,351` / `145`, four occurrences and a file behind the tool on its OWN tree. The
 tool is the authority for both, so both here are re-quoted from its output rather than corrected by
@@ -834,6 +834,18 @@ measured on `7c1df6e7d6` — stayed absorbed only on paper. Measured, not inferr
 1308 with that one file carrying exactly 4, and `tortoise/projection/entities.py` reads 54 at BOTH.
 The numbers above are re-derived from the merged tree; this PR's own two sites and main's two
 non-Cypher door calls are the whole difference from `97fd713ffb`'s re-derivation.
+
+**This re-cut's base:** `origin/main` **`945817d22a`**, merged into `fix/12244-merge-collapse` —
+re-derived by RUNNING the tool on the final merged tree. **No census SCALAR moved** (`sites`
+**1323**, `files` **100**, `files_scanned` **300**, `non_cypher_door_calls` **262**,
+`ast_door_calls` **1585**; `--check` reports **`25 pinned counts match`**), and the door predicate
+is unchanged at **1,639 / 109** — main's `tortoise/` files in between carried no statement site.
+What DID move is the number this document does not pin: the verb predicate reads **2,361 / 146** at
+this tree (it read `2,360` at the branch's own cut), and **Appendix A moved by exactly TWO rows**,
+both in `tortoise/oauth.py` (`sweep_oauth_retention` **3049 → 3112**, **3053 → 3116**, **+63**),
+from `main`'s `oauth.py` `74 +/11 −` — the `file:line`-versus-SCALAR gap this section describes,
+once more: the pins stayed green over a table that had already rotted. `--all-surface` is
+re-measured too (**9,150 / 838**), because its row claims to name this tree.
 
 </details>
 
