@@ -512,12 +512,26 @@ def _statically_falsy(test) -> bool:
 
 
 def _own_walk(node):
-    """`ast.walk`, but a NESTED SCOPE is not this function's code.
+    """`ast.walk`, but a NESTED SCOPE is not this function's code — and neither is a dead branch.
 
     ⛔ `ast.walk` descends into an inner `def`/`class`/lambda, so a store inside a helper
     that never runs "proved" the write-stop, and a `return` inside one satisfied the
     early-exit arm — while `_reachable_ifs` prunes exactly those scopes for the guard. Being
     stricter one level up and laxer one level down is how the same defect walks back in.
+
+    ⛔ AND THE SAME ARGUMENT APPLIES ONE ARM OVER, to a statically dead BRANCH. The GUARD
+    walk already drops `if False:` / `while False:` (`_statically_falsy`), but the STORE and
+    EXIT walks did not — so
+
+        if _derived_mirror_required("object"):
+            if False:
+                embedding = _encode(ev)      # never runs — and it certified the arm
+        props["embedding"] = vec             # …while this runs unconditionally
+
+    was ACCEPTED as gated. A dead store is not evidence of a store; pruning it here makes
+    `_stores_embedding`, `_removes_embedding` and the exit arm answer the same question the
+    guard arm answers, in the same way. Only the BODY of a statically-falsy test is dropped:
+    an `else` still runs, so it is still walked.
     """
     import ast
 
@@ -527,6 +541,9 @@ def _own_walk(node):
         yield current
         if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
                       | ast.ClassDef):
+            continue
+        if isinstance(current, ast.If | ast.While) and _statically_falsy(current.test):
+            stack.extend(current.orelse)      # the dead BODY is not evidence; `else` is live
             continue
         stack.extend(ast.iter_child_nodes(current))
 
