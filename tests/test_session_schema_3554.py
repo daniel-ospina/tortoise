@@ -3560,10 +3560,13 @@ _APPROVAL_RECORD_IN_A_TABLE_ROW = (
 # open a paragraph … the same fail-OPEN as the row", the sentence was true of the break
 # and the fence and FALSE of the row, and it is the row's own half of it that sends a
 # reader at a property the row does not have.
-# ⛔ AND THE REMEDY IS NOT THE ROW'S, MEASURED: the row closes through the STRIPPER
-# (`_LEADING_LIST_MARKER_RE` taught `|\s+` → REFUSED), while these two close only through
-# the SPLITTER — an END-of-paragraph boundary in `_quoted_paragraphs` (the
-# `_HEADING_START_RE` shape, because a break is a whole block, CommonMark §4.1). Teaching
+# ⛔ AND THE CHEAPER REMEDY IS THE ROW'S, MEASURED: the row closes through the STRIPPER
+# (`_LEADING_LIST_MARKER_RE` taught `|\s+` → REFUSED). These two are closed by ONE
+# END-of-paragraph boundary in `_quoted_paragraphs` (the `_HEADING_START_RE` shape, because
+# a break is a whole block, CommonMark §4.1) — ⛔ NOT "only through" the splitter (a
+# stripper reaches each too, with one shape-specific delimiter each; see the measurement
+# below, which is why the boundary is the remedy of CHOICE rather than the only one).
+# Teaching
 # `_PARAGRAPH_START_RE` their STARTS alone moves nothing, and the reason is measured per
 # shape rather than "that pattern is consulted on the NEXT line" (review P2, which was
 # false for both): a start taught for the BREAK sits on the block's FIRST line, where
@@ -4281,6 +4284,10 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                 if not _CITATION_RE.search(_unfold_block(landed))]) == 36, (
         "the unconditional demand's false-block count changed (the arm's docstring says "
         "36 of the 43 landed blocks carry no comment id)")
+    assert len(landed_blocks) == 43, (
+        "the sweep's DENOMINATOR changed — the arm's docstring quotes '43 landed blocks' "
+        "(and '7 of 43' / '36 of the 43'), so the count is derived here rather than "
+        f"restated; read: {len(landed_blocks)}")
     landed_text = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
     assert "<b>" not in landed_text and "<strong>" not in landed_text, (
         "the corpus now writes an HTML label — the arm's docstring states it never does, "
@@ -4606,8 +4613,10 @@ def test_the_block_kind_residuals_are_fail_open_by_a_commonmark_reading() -> Non
     mid-paragraph behind the table's ``|`` and opens nothing, which the assertions below
     state as its own shape rather than folding it into the break's. The completeness word
     mattered because it points the next fix at the wrong half: the row closes through the
-    STRIPPER, while these two close only through an END-of-paragraph boundary in
-    ``_quoted_paragraphs``.
+    STRIPPER, and these two are closed by ONE END-of-paragraph boundary in
+    ``_quoted_paragraphs`` — ⛔ NOT "only through" it (measured: a stripper reaches each
+    with one shape-specific delimiter, `-{3,}\\s+` for the break and a fence-aware strip
+    for the fence; the boundary is the remedy of CHOICE because one rule closes both).
 
     Two facts are derived here, and neither is asserted in prose alone:
 
