@@ -1851,6 +1851,48 @@ class TestTheDeclinedWrite:
         )
         assert seed.record_dsn_fingerprint is None, seed.as_dict()
 
+    def test_the_seed_opens_a_DURABLE_journal(self):
+        """⛔ THE CONSTRUCTOR SPELLING IS THE PROPERTY (#13839 review, rule 3).
+
+        `_journal_double` replaces `EventLog` with a lambda whose double hardcodes
+        `durable = True`, so the realistic revert — `EventLog.scratch(path)` — reds
+        by `AttributeError` on the lambda rather than through any assertion that
+        names durability. It is not a cosmetic distinction: a non-durable journal
+        makes the record seam DECLINE (`no_durable_journal`), and a decline is
+        `applied=False, unprojected=0` — the clean-looking shape `record_declined`
+        exists to undo. Pinned in the SOURCE, where the double cannot mask it.
+        """
+        tree = ast.parse(TOOL.read_text())
+        seed = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "_seed_population"
+        )
+        ctors = [
+            n
+            for n in ast.walk(seed)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "EventLog"
+        ]
+        assert ctors, (
+            "the seed opens no journal through `EventLog(...)` — `EventLog.scratch(...)`"
+            " would make the record seam DECLINE every row"
+        )
+        assert all(len(c.args) == 1 and not c.keywords for c in ctors), [
+            ast.dump(c) for c in ctors
+        ]
+        attrs = {
+            n.func.attr
+            for n in ast.walk(seed)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+        assert "scratch" not in attrs, (
+            "the seed constructs a SCRATCH journal — `durable` is then False, the"
+            " record seam declines every write, and the seed publishes 0 applied / 0"
+            " unprojected, i.e. it reads as clean (#13839 finding 1)"
+        )
+
 
 class TestTheArmBlockage:
     """⛔ THE WRITE SEAM MUST AGREE WITH THE RUN ABOUT ARMING (#13839 finding 1).
