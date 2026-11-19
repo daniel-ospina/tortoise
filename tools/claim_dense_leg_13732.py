@@ -1119,6 +1119,20 @@ def run_measurement(args: argparse.Namespace) -> int:
     population_ids = [row["id"] for row in population]
     coverage: dict = {}
     population_vectors: int | None = None
+    # ⛔ THE GRAPH HALF STAYS RUN-LEVEL. `graph_vectors <= 0` is a fact about the
+    # population THIS TOOL just seeded, not about the record — every arm would be
+    # measuring the lexical leg, so it refuses the run by name (the case
+    # `projection/entities.py` produces by warning and leaving `n.embedding`
+    # unset on an embedding-width mismatch, after `_seed_graph` looked fine).
+    # Caught into `record_blocked` it would have recorded a GRAPH fact as a
+    # record block and stopped refusing the one case it was written for.
+    if graph_vectors <= 0:
+        raise Refused(
+            "graph_unseeded",
+            f"the graph holds {graph_vectors} vector-bearing claim(s) — the "
+            f"population was written without embeddings, so no dense leg can "
+            f"find anything and every arm would measure the lexical leg",
+        )
     if record_blocked is None:
         try:
             coverage = require_coverage(
@@ -1236,9 +1250,14 @@ def run_measurement(args: argparse.Namespace) -> int:
                 "built_n": len(population),
                 "note": (
                     "the run built a different n than the pre-registration "
-                    "declares; the PRE-REGISTERED bar still decides (it is the "
-                    "harder bar at the larger n) and the observed bar is "
-                    "disclosure only"
+                    "declares. BOTH bars bind: the verdict was gated on "
+                    "max(pre-registered bar, this run's own bar), so a corpus "
+                    "change can only make the bar STRICTER — a smaller run "
+                    "cannot buy an easier bar (its own bar is the larger one "
+                    "below n = 786) and a larger run cannot lower the declared "
+                    "one. `detectable_pp_gated` names the one that decided; "
+                    "`detectable_pp_preregistered` and `detectable_pp` carry "
+                    "the two inputs"
                 ),
             }
         ),
@@ -1252,15 +1271,12 @@ def run_measurement(args: argparse.Namespace) -> int:
         ]
         + (
             [
-                f"the `{ARM_RECORD_DENSE}` arm — BLOCKED[{blocked.code}]: "
-                + (
-                    "how much of this population the record holds a vector for "
-                    "could not be MEASURED — unmeasured is not zero, and it is "
-                    "not a verdict"
-                    if blocked.code == "record_population_unmeasurable"
-                    else "the record does not hold this population's cohort, so "
-                    "the arm's recall would be a figure about the seed step"
-                )
+                # ⛔ THE SENTENCE IS THE REFUSAL'S OWN. `blocked` can be any of a
+                # dozen codes (no_record_dsn, no_tenant, coverage_unverified,
+                # record_unseeded, graph_unseeded, …), and only the cohort pair
+                # supports prose about a cohort the record does not hold.
+                # Keying on the code family wrote a false cause for the rest.
+                f"the `{ARM_RECORD_DENSE}` arm — BLOCKED[{blocked.code}]: {blocked.message}"
             ]
             if blocked is not None
             else []
@@ -1273,14 +1289,19 @@ def run_measurement(args: argparse.Namespace) -> int:
         print(f"wrote {out}", file=sys.stderr)
     else:
         print(text)
-        if blocked is not None:
-            # ⛔ THE ARTIFACT IS WRITTEN FIRST, THEN THE REFUSAL IS NAMED. The two
-            # arms that need no record cohort are real measurements and are kept;
-            # the exit says the run is INCOMPLETE, so no caller can mistake it for
-            # the paired answer the pre-registration exists to price.
-            print(f"REFUSED[{blocked.code}]: {blocked.message}", file=sys.stderr)
-        return _exit_code(blocked)
-    return 0
+    # ⛔ THE REFUSAL AND THE EXIT CODE LIVE OUTSIDE THE `if out:` BRANCH.
+    # Nesting them under `else:` — where this sat — made the DOCUMENTED
+    # invocation (`--out …`, README §5 and the PR body) return 0 on a BLOCKED
+    # arm: it wrote the artifact, printed only `wrote …`, and reported success.
+    # The one signal the run promises was dead on every documented invocation,
+    # and it is the false-PASS class this file exists to close.
+    if blocked is not None:
+        # ⛔ THE ARTIFACT IS WRITTEN FIRST, THEN THE REFUSAL IS NAMED. The arms
+        # that need no record cohort are real measurements and are kept; the
+        # exit says the run is INCOMPLETE, so no caller can mistake it for the
+        # paired answer the pre-registration exists to price.
+        print(f"REFUSED[{blocked.code}]: {blocked.message}", file=sys.stderr)
+    return _exit_code(blocked)
 
 
 def _exit_code(blocked: Refused | None) -> int:

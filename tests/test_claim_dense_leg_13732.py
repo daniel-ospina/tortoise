@@ -804,6 +804,42 @@ class TestRecordMembership:
             "the count must be asked about population_ids — the same list arg 2 "
             "measures over, or the guard is answering about a different set"
         )
+        # ⛔ AND IT MUST BE ENCLOSED IN `if arm == ARM_RECORD_DENSE`. Pinning only
+        # the call's POSITION inside the loop left a surviving mutant: hoisting the
+        # guard to the top of the loop body makes it fire for `lexical` too — the
+        # round-2 failure shape, with the suite green.
+        parents = {}
+        for node in ast.walk(run):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        node = guard[0]
+        enclosures = []
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.If):
+                enclosures.append(node)
+            if node is arms_loop[0]:
+                break
+        assert enclosures, "the id guard is not inside any `if` in the arms loop"
+
+        def _arm_eq(test: ast.AST) -> bool:
+            return (
+                isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == "arm"
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.comparators[0], ast.Name)
+                # the source spells it as the module CONSTANT, so accept both
+                # spellings rather than pinning a rename as a failure.
+                and test.comparators[0].id in {"ARM_RECORD_DENSE", "record_dense"}
+            )
+
+        assert any(_arm_eq(e.test) for e in enclosures), (
+            "the id guard must be gated on `arm == ARM_RECORD_DENSE`; ungated in "
+            "the loop body it also blocks the lexical and graph arms, which need "
+            "no record cohort at all"
+        )
 
 
 # ── 5b. the two mechanisms the arms REST on (a mutation survivor is a hole) ──
@@ -996,6 +1032,42 @@ class TestTheWiringTheReviewFixed:
         """The artifact is written, so the exit code is the ONLY incompleteness signal."""
         assert tool_mod._exit_code(None) == 0
         assert tool_mod._exit_code(tool_mod.Refused("record_population_absent", "x")) == 3
+
+    def test_the_exit_code_decision_is_NOT_nested_inside_the_out_branch(self):
+        """⛔ THE CALL SITE, not the helper — this is where the false PASS lived.
+
+        Measured: `_exit_code` was pinned (`0`/`3`) while the call site sat INSIDE
+        the `else:` of `if out:`, so the DOCUMENTED invocation (`--out …`) wrote
+        the artifact, printed only `wrote …`, and returned `0` on a BLOCKED arm.
+        The helper was green; the run reported success. A pin on a pure helper
+        cannot see a branch, so this asserts the SHAPE of `run_measurement`:
+        its final statement returns `_exit_code(...)`, and no bare `return 0`
+        survives anywhere in the function.
+        """
+        tree = ast.parse(TOOL.read_text())
+        run = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        last = run.body[-1]
+        assert isinstance(last, ast.Return), ast.dump(last)[:120]
+        assert isinstance(last.value, ast.Call), ast.dump(last.value)[:120]
+        assert isinstance(last.value.func, ast.Name), ast.dump(last.value)[:120]
+        assert last.value.func.id == "_exit_code", (
+            "run_measurement must END by returning _exit_code(blocked) — a bare "
+            "`return 0` (or a _exit_code call nested in a branch) reports success "
+            "for a blocked run on the --out path"
+        )
+        bare = [n for n in ast.walk(run) if isinstance(n, ast.Return) and n.value is not None]
+        consts = [
+            n for n in bare if isinstance(n.value, ast.Constant) and isinstance(n.value.value, int)
+        ]
+        assert not consts, (
+            "run_measurement still returns a literal int at "
+            f"line(s) {[n.lineno for n in consts]} — every exit must route "
+            "through _exit_code so a blocked arm cannot report 0"
+        )
 
     def test_both_bars_bind_so_a_smaller_population_cannot_loosen_the_gate(self, tool_mod):
         """⛔ A run that built FEWER claims gets a LARGER observed bar.
