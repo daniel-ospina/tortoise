@@ -192,7 +192,6 @@ STATED LIMITS — deliberate, and measured rather than guessed:
 """
 from __future__ import annotations
 
-import inspect
 import re
 import subprocess
 from pathlib import Path
@@ -220,53 +219,6 @@ _PATH_REF = re.compile(r"(?<![\w/])(docs/[A-Za-z0-9_./-]+\.md):(\d+)(?:-(\d+))?"
 #: `(?<![\w-])` refuses a match starting mid-token — mid-NUMBER and mid-DATE —
 #: while leaving `` `317`-scoping:128 `` and `265 scoping:128` intact.
 _SHORT_REF = re.compile(r"(?<![\w-])`?(\d+)`?[-\s](scoping|research):(\d+)(?:-(\d+))?")
-
-#: The command whose output the `#7949` bundle's census paragraph quotes. It is named here
-#: (never interpolated from a measurement) because the arm below is a TEXT ban.
-_TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
-
-#: Spellings the `#7949` bundle used to state a `-- tortoise/` MEMBERSHIP verdict in the
-#: AFFIRMATIVE direction — that the diff carries these modules. Retired by name.
-_TORTOISE_AFFIRMATIVE_SPELLINGS = (
-    "THREE are in this head",
-    "two comment-only `tortoise/` modules",
-    "prints exactly `tortoise/activation_scorecard.py`",
-    "which two `tortoise/` paths this diff carries",
-    "prints the two modules named above",
-    "`activation_scorecard.py` IS in the diff",
-)
-#: Spellings that state the NEGATIVE direction — that the set is EMPTY. Mirror images of the
-#: list above, and every bit as carryable: the set is a property of the HEAD the command was
-#: run at, so a verdict in either direction is stale one merge later.
-_TORTOISE_NEGATIVE_SPELLINGS = (
-    f"neither is `{_TORTOISE_CENSUS_CMD}`",
-    f"{_TORTOISE_CENSUS_CMD}` is NOT empty",
-    f"{_TORTOISE_CENSUS_CMD}` returns exactly those two",
-    f"{_TORTOISE_CENSUS_CMD}` -> empty",
-    f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
-)
-#: Both directions, because a ban that covers one of them is the defect this list records.
-_TORTOISE_MEMBERSHIP_SPELLINGS = (
-    *_TORTOISE_AFFIRMATIVE_SPELLINGS,
-    *_TORTOISE_NEGATIVE_SPELLINGS,
-)
-
-
-def _census_membership_verdicts(doc: str) -> list[str]:
-    """Every retired `-- tortoise/` membership verdict still spelled in `doc`.
-
-    ⛔ A TEXT BAN, AND THAT IS DELIBERATE (#13807 review, F1/F4 — settled together). The
-    set is HEAD-BOUND in both directions: it is a property of the head the command was run
-    at, so `#7949`'s own sentences about it go stale on the next merge. Judging them by
-    re-measuring the CURRENT head is therefore not a guard but a false-red generator — at
-    any head carrying a `tortoise/` path (i.e. essentially every product change) the
-    negative list would red a sentence that is true of the head it names. And under a
-    shallow checkout the measurement is unavailable at all, so a measurement-keyed arm
-    asserted NOTHING in the job that gates the merge (F1, measured: the three-dot walk
-    exits 128 with `fatal: bad revision`). Reading the document's TEXT needs neither the
-    merge base nor a data model, so this arm fires in every environment.
-    """
-    return [spelling for spelling in _TORTOISE_MEMBERSHIP_SPELLINGS if spelling in doc]
 
 
 def _in_scope(target: Path, root: Path) -> bool:
@@ -552,6 +504,180 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
+def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
+    """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
+
+    The SHAPE is what is matched — the command, then an ANSWER FORM immediately after it
+    (`prints`, `returns`, `yields`, `reports`, `gives`, `outputs`, `carries`, `lists`,
+    `shows`, `names`, `includes`, `contains`, `has`, `->`, `→`, `is`, `=`, `:`), then the
+    answer — because a literal list cannot hold the CLASS this exists for (#13728 review,
+    finding 4): `returns nothing` and `is empty at this head` are one-word variations of
+    the refused `prints NOTHING`, and `carries no `tortoise/` path at all`, `lists the two
+    COMMENT-ONLY modules` and `names two `tortoise/` paths` are the same answer in another
+    listed verb.
+
+    ⛔ THE ANSWER-FORM LIST IS FINITE ON PURPOSE, AND THAT IS THE CONTRACT (#13795 review,
+    finding 2). A match on the answer's CONTENT alone — no form required — cannot tell an
+    ASSERTION from a QUOTED RETRACTION, and this document carries both: it quotes
+    `"returns exactly those two"` and marks it FALSE in every half, and it says the command
+    `... and only refuses those spellings when the command actually prints a path`, where
+    the answer sits mid-sentence. Reading either as a live membership claim would red the
+    document for retracting a falsehood. So the class covered here is "the same answer,
+    behind another LISTED form", NOT "any English sentence whose object is the same": a
+    re-wording onto a verb outside this list is not detected. Said plainly because a guard
+    may be narrow, but may not describe itself as complete.
+
+    `claims_empty` says which DIRECTION the answer asserts, and it is read from the HEAD of
+    the answer — an optional leading negation, then the FIRST answer token — never from any
+    word that happens to sit in the window (#13795 review, round 3, C1/C2). Scanning the
+    whole window was wrong in BOTH directions, measured: `prints the two comment-only
+    modules and nothing else` was read as EMPTINESS (the trailing `nothing` won) and a
+    refuted membership claim stayed green; `prints NOTHING at this head, though it was not
+    empty at `2a7f24e241`` was read as MEMBERSHIP (the contrast clause's `not` won) and a
+    TRUE emptiness claim was refused. Both are one defect: a qualifying word that binds a
+    different predicate, or a different head, was deciding the answer's direction.
+
+    So a head negation (`is NOT empty`, `never empty`, `isn't empty`) INVERTS the head
+    token's direction; `nothing but …` / `none other than …` are MEMBERSHIP in their own
+    right; `non-empty`/`nonempty` are MEMBERSHIP without needing the negation rule; and
+    anything after the head token is context, not direction. A window whose head token is
+    none of these (`is the command that answers it`, `is the command that prints the
+    paths`) is not an answer and is skipped — refusing the document's own pointer to the
+    command would be the same class of defect in the other direction.
+
+    ⛔ THE MEMBERSHIP WORD LIST IS THE PART THAT WENT STALE (#13795 review, finding 3). It
+    read `two`/`three`/`four`/`seven`/`both` — no `one` — so changing this document's own
+    `prints NO path at all` to `prints one path at all`, a ONE-WORD edit onto a verb already
+    in the list, restored the refuted membership claim and the guard stayed GREEN. The
+    numerals `one`…`ten` and `single` are therefore IN the class, and the `one`-word
+    mutation is pinned as a witness below.
+    """
+    answers: list[tuple[str, bool]] = []
+    for match in re.finditer(
+            r"`?" + re.escape(cmd)
+            + r"`?[\s*]*(?:(?:still|now|actually|also)\s+)?"
+              r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
+              r"names|includes|contains|has|->|→|is|=|:)", doc):
+        rest = doc[match.end():match.end() + 90]
+        rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
+        window = f"{match.group(1)} {rest}".strip()
+        low = rest.lower()
+        if not rest:
+            continue
+        # ⛔ THE HEAD OF THE ANSWER DECIDES, AND NOTHING ELSE DOES (#13795 review,
+        # round 3). Scanning the whole window was wrong in BOTH directions, measured:
+        # `prints the two comment-only modules and nothing else` was read as EMPTINESS
+        # (the trailing `nothing` won) so a refuted membership claim stayed GREEN, and
+        # `prints NOTHING at this head, though it was not empty at `2a7f24e241`` was read
+        # as MEMBERSHIP (the contrast clause's `not` won) so a TRUE emptiness claim was
+        # REFUSED. Both are one defect: a qualifying word that binds a different predicate,
+        # or a different head, was deciding the answer's direction. Read the head instead.
+        negated = False
+        _head_negation = re.match(r"(?:not|never|n['’]t)\b[\s,]*", low)
+        if _head_negation:
+            negated = True
+            low = low[_head_negation.end():]
+        if re.match(r"(?:nothing\s+but\b|none\s+other\s+than\b)", low):
+            # an emptiness WORD doing membership duty — `nothing but the two modules`
+            claims_empty = False
+        else:
+            low = re.sub(r"^(?:the|a|an|its|this|that|those|these)\s+", "", low)
+            # ⛔ QUANTIFIER FILLERS, AND A BACKTICKED PATH TOKEN (#13795 review, round 4).
+            # The cut before this one matched a BARE `tortoise/` only, so the document's own
+            # spelling — a BACKTICKED path, which is how every path in this file is written
+            # — was skipped and a refuted membership answer stayed green; and a quantifier
+            # before the numeral (`just one`, `only one`, `at least one`, `no fewer than
+            # two`) skipped it the same way. Strip one quantifier, then match the head.
+            low = re.sub(
+                r"^(?:just|only|still|now|actually|also|at\s+least|at\s+most|more\s+than"
+                r"|no\s+fewer\s+than|exactly)\s+", "", low, count=1)
+            # ⛔ AND A DOUBLED FORM (`prints contains …`) — a listed verb can sit where the
+            # answer should start, and the head token is what follows it (#13795 review,
+            # round 4). Only the form words are stripped, so a pointer sentence
+            # (`is the command that answers it`) still starts at `command` and is skipped.
+            low = re.sub(
+                r"^(?:prints|returns|yields|reports|gives|outputs|carries|lists|shows"
+                r"|names|includes|contains|has)\s+", "", low, count=1)
+            _member = re.match(
+                r"(?:`?tortoise/|comment-only\b|non[- ]?empty\b"
+                r"|\d+\b|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b"
+                r"|nine\b|ten\b|both\b|single\b)", low)
+            # ⛔ A ZERO NUMERAL IS EMPTINESS, NOT MEMBERSHIP (#13795 review, round 4):
+            # `prints 0 paths` / `prints exactly zero paths` are TRUE at an empty head, and
+            # reading `\d+` first refused them — the same shape as the round-2 hedge bug,
+            # punishing a true sentence and rewarding its deletion. Tested BEFORE `_member`.
+            _empty = re.match(
+                r"(?:empty\b|nothing\b|none\b|zero\b|blank\b"
+                r"|0\b(?=\s*`?(?:path|paths|tortoise/|module|modules|set))"
+                r"|no\b\s*`?(?:path|paths|tortoise/))", low)
+            if _empty:
+                claims_empty = True
+            elif _member:
+                claims_empty = False
+            else:
+                continue
+            if negated:
+                claims_empty = not claims_empty
+        answers.append((window, claims_empty))
+    return answers
+
+
+#: The command whose output the `#7949` bundle's census paragraph quotes. Named here (never
+#: interpolated from a measurement) because the arm below is a TEXT ban.
+_TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
+
+#: Spellings the `#7949` bundle used to state a `-- tortoise/` MEMBERSHIP verdict in the
+#: AFFIRMATIVE direction — that the diff carries these modules. Retired by name.
+_TORTOISE_MEMBERSHIP_SPELLINGS = (
+    "THREE are in this head",
+    "two comment-only `tortoise/` modules",
+    "prints exactly `tortoise/activation_scorecard.py`",
+    "which two `tortoise/` paths this diff carries",
+    "prints the two modules named above",
+    "`activation_scorecard.py` IS in the diff",
+    f"{_TORTOISE_CENSUS_CMD}` is NOT empty",
+    f"{_TORTOISE_CENSUS_CMD}` returns exactly those two",
+    f"{_TORTOISE_CENSUS_CMD}` prints the two COMMENT-ONLY modules",
+    f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
+    "the `tortoise/` set above is the two COMMENT-ONLY modules",
+)
+#: Spellings that state the NEGATIVE direction — that the set is EMPTY. Mirror images of the
+#: list above, and every bit as carryable: the set is a property of the HEAD the command was
+#: run at, so a verdict in either direction is stale one merge later.
+_TORTOISE_EMPTY_SPELLINGS = (
+    f"neither is `{_TORTOISE_CENSUS_CMD}`",
+    f"{_TORTOISE_CENSUS_CMD}` -> empty",
+    f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
+)
+#: Both directions, because a ban that covers one of them is the defect these lists record.
+_TORTOISE_RETIRED_SPELLINGS = (
+    *_TORTOISE_MEMBERSHIP_SPELLINGS,
+    *_TORTOISE_EMPTY_SPELLINGS,
+)
+
+
+def _census_membership_verdicts(doc: str) -> list[str]:
+    """Every retired `-- tortoise/` membership verdict still spelled in `doc`.
+
+    ⛔ A TEXT BAN, AND THAT IS DELIBERATE (#13807 review, F1/F4 — settled together). The set
+    is HEAD-BOUND in both directions: it is a property of the head the command was run at,
+    so `#7949`'s own sentences about it go stale on the next merge. Judging them by
+    re-measuring the CURRENT head is therefore not a guard but a false-red generator — at
+    any head carrying a `tortoise/` path (i.e. essentially every product change) the
+    emptiness list would red a sentence that is true of the head it names. And under a
+    shallow checkout the measurement is unavailable at all, so a measurement-keyed arm
+    asserted NOTHING in the job that gates the merge (F1, measured: the three-dot walk exits
+    `128` with `fatal: bad revision`). Reading the document's TEXT needs neither the merge
+    base nor a data model, so this arm fires in every environment.
+
+    The classification arm below is the SHAPE half of the same policy
+    (`_typed_answers_to_tortoise_cmd`); this one is the ledger of exact spellings that
+    actually shipped and survived a merge — including the ones that do not sit beside the
+    command, which a shape match cannot reach.
+    """
+    return [spelling for spelling in _TORTOISE_RETIRED_SPELLINGS if spelling in doc]
+
+
 def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     """⛔ A document reported a checker's EXIT CODE as green while the checker was RED.
 
@@ -582,12 +708,28 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           send the reader to the command, never away from it) and names every path
           `_note_paths` returns — the two `tortoise/` notes the verb grades and the test
           and tool rows it also lists — which is WHICH files the verdict is about;
-      (c) RETIRED SPELLINGS — the phrasings that were FALSE against a head are refused by
-          name, in BOTH directions, from the document's TEXT alone. ⛔ It reads no
-          measurement of its own, on purpose (#13807 review, F1): a membership is
-          head-bound, so a measurement-keyed version both asserted nothing in the depth-1
-          checkout the gating job uses AND turned any code PR's head into a false red.
-          Retire a spelling here deliberately instead of letting an old sentence back in.
+      (c) TYPED ANSWERS — the document must type NO answer to the `-- tortoise/` command, in
+          EITHER direction, and it is refused FROM THE TEXT ALONE. Arm `(c-i)` refuses the
+          recorded SPELLINGS by name (`_census_membership_verdicts`, inline below); arm
+          `(c-ii)` refuses the same class by SHAPE — the command followed by one of the
+          LISTED answer forms, then an answer — which catches the one-word re-wordings a
+          literal list cannot (`test_the_bundles_tortoise_set_answers_are_not_typed_against
+          _the_tree`, #13728 review, findings 1 and 4; #13795 review, findings 2 and 3).
+          Both directions, because a membership is HEAD-BOUND: the set is a property of the
+          head the command was run at, so a verdict either way is stale one merge later, and
+          the bundle's own rule is what is enforced — state the COMMAND and read it at the
+          head being merged.
+          ⛔ NEITHER ARM TAKES A MEASUREMENT, AND THAT IS THE POINT (#13807 review,
+          F1 + F4, settled together). A measurement-keyed cut judged a sentence about ONE
+          head by re-measuring ANOTHER, which (F4) turned every head carrying a `tortoise/`
+          path — i.e. essentially every product change — into a red on a sentence that is
+          true of the head it names; and (F1) its direction came from `git diff
+          origin/main...HEAD`, which the depth-1 `test` job cannot answer at all (`rc=128`,
+          empty stdout), so it SKIPPED and asserted NOTHING in the only job that gates the
+          merge — the inert-enforcer defect these arms replace. Reading TEXT needs no merge
+          base, so both arms fire in every shard and no checkout depth can switch them off.
+          The shape class stays FINITE and the docstring above says so: a verb outside the
+          list, or an answer carrying none of the listed words, is not detected.
     """
     from tools.hosted_api_cite_census import _note_paths, _sweep, census
 
@@ -630,9 +772,7 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing a false verdict must send the reader to the verb, not delete the "
         "pointer to it (#13489 review, P0)")
-    #: One source of truth for the command: the module-level constant the retired-spelling
-    #: arm is built from (a second literal here would let the two drift apart).
-    _tortoise_cmd = _TORTOISE_CENSUS_CMD
+    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
     assert _tortoise_cmd in doc, (
         "05-verify.md no longer states the command that shows which `tortoise/` paths "
         "the census verdict is about. Without it the reader cannot tell whether the two "
@@ -644,7 +784,7 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "`tortoise/` modules the verdict is about; the empty-list reading that stood "
             "here before was FALSE at this head (#13750 review, cycle 1)")
 
-    # (c) RETIRED MEMBERSHIP SPELLINGS — BOTH directions, refused BY NAME, from the TEXT.
+    # (c-i) RETIRED SPELLINGS — BOTH directions, refused BY NAME, from the TEXT.
     # ⛔ THE HISTORY THIS ARM MUST CARRY, because each entry is how the other direction went
     # wrong and each was measured on a real head:
     #   • (#13746 review, finding 7) the list was five literals assuming a NON-EMPTY
@@ -665,13 +805,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # command was run at, so `#7949`'s sentences about it are stale one merge later, AND
     # judging a sentence about THAT head by re-measuring THIS one is a false-red generator —
     # at any head carrying a `tortoise/` path (essentially every product change) the
-    # negative list would red a sentence that is true of the head it names. The bundle's own
+    # emptiness list would red a sentence that is true of the head it names. The bundle's own
     # rule is the one enforced here: state the COMMAND and read it at the head being merged,
     # never a verdict — so every recorded verdict spelling, in EITHER direction, is retired
     # by name. Being a text ban, it needs no merge base, so it fires in every environment
     # (including the depth-1 shards) and cannot be satisfied by a checkout that cannot
-    # answer. `_census_membership_verdicts` is the whole arm; the injected-spelling test below
-    # pins that every row of BOTH lists is actually read.
+    # answer. This is the SPELLING half; the SHAPE half of the same policy is (c-ii), in
+    # `test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree`.
     _surviving = _census_membership_verdicts(doc)
     assert not _surviving, (
         f"05-verify.md spells a RETIRED `-- tortoise/` membership verdict: {_surviving!r}. "
@@ -679,11 +819,11 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "run at — so the document states the COMMAND and lets the reader read it at the head "
         "being merged. These are the exact spellings that were FALSE at a head and survived "
         "anyway: the affirmative ones for two merges on `main` because nothing read them "
-        "(#13746 review, finding 7), and the negative ones because no shallow checkout could "
-        "reach the arm that would have read them (#13807 review F1/F2). ⛔ This is a ban BY "
-        "NAME, in both directions: a paraphrase of the same verdict is outside its scope (the "
-        "section's own head-naming rule is what governs those), so the fix for a hit is to "
-        "delete the typed membership and keep the command.")
+        "(#13746 review, finding 7), and the emptiness ones because no shallow checkout "
+        "could reach the arm that would have read them (#13807 review F1/F2). ⛔ This is a "
+        "ban BY NAME, in both directions: a paraphrase of the same verdict is (c-ii)'s "
+        "business, so the fix for a hit is to delete the typed membership and keep the "
+        "command.")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
@@ -700,54 +840,293 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "That count is the MERGE head's; name it beside the claim (`2584a86ec1`, with "
             "the merge-base command that prints its set) or the two module statements stay "
             "uncheckable (#13489 review, P1)")
-def test_the_retired_membership_spellings_are_read_in_both_directions():
-    """Arm (c) is a TEXT ban, so it is live in every clone — pinned, not reasoned about.
 
-    ⛔ TWO defects are pinned here, and neither is observable from the bundle alone:
 
-    1. **The arm must READ each spelling, in BOTH directions, and the lists must not SHRINK**
-       (#13807 review, F1/F3). The cut this replaces keyed the two lists on a live
-       measurement, so in a depth-1 checkout it read neither — and no row anywhere changed
-       colour when it was broken, which is why it took a fresh-context reviewer to find it.
-       Each injected spelling below reds, and the list lengths are pinned: "every row
-       present is read" is satisfied by an EMPTY list, so a deleted spelling — the edit that
-       would silently narrow the ban — is what the counts catch.
-    2. **The arm must not consult the clone** (F1's root, pinned structurally). It is a text
-       ban now; `inspect` on its own source reds if a `git`/`subprocess` probe is ever put
-       back, because that is the shape that asserted nothing in the gating job.
-    3. **The live bundle must carry none of them** (#13807 review, F2). `05-verify.md:147`
-       still described the OLD one-sided arm as vacuous at an empty head — a sentence that
-       licensed exactly the re-insertion the ban exists to stop.
+class _Unmeasurable(RuntimeError):
+    """The `-- tortoise/` set could not be MEASURED here, so its direction is UNKNOWN."""
 
-    The measurement the retired cut took is deliberately NOT re-taken: see
-    `_census_membership_verdicts` on why a head-relative re-measurement is both unreachable
-    in CI and a false-red generator on every code PR.
+
+def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
+    """⛔ Refuse a typed answer to the `-- tortoise/` command in BOTH directions.
+
+    This is arm `(c-ii)`: the SHAPE half of the policy whose SPELLING half is
+    `_census_membership_verdicts` in the sibling test. A literal list cannot hold the class
+    this exists for (#13728 review, finding 4) — `returns nothing` and `is empty at this
+    head` are one-word variations of the refused `prints NOTHING` — so the shape is matched
+    and every answer found is refused, whichever direction it asserts.
+
+    ⛔ IT TAKES NO MEASUREMENT, AND NEITHER DIRECTION IS JUDGED AGAINST A TREE (#13807
+    review, F1 + F4, settled together). The earlier cut read `git diff origin/main...HEAD`
+    to pick the direction, which failed twice over: at a depth-1 checkout (every job that
+    runs this file, `rc=128`) it could not answer, so the test SKIPPED and asserted nothing
+    in the only job that gates the merge — the inert-enforcer defect the arm exists to
+    remove — and at any head whose diff carries a `tortoise/` path it refused a sentence
+    that is TRUE of the head it names, i.e. a tree-wide red on unrelated product PRs. The
+    bundle's own rule settles it: a membership is HEAD-BOUND, so the document states the
+    COMMAND and the reader reads it at the head being merged; a typed verdict is refused in
+    either direction, from the text alone, in every checkout.
+
+    ⛔ THE NON-VACUITY WITNESSES RUN BEFORE THE DOCUMENT ASSERTIONS, on purpose: they are
+    direction-free, so they prove the detector works in every environment. Four paths need a
+    witness, and the MEMBERSHIP branch needs its own — it has one now (#13795 review,
+    finding 1: deleting or inverting it used to red NOTHING, because every document match
+    took the emptiness path).
     """
-    # The lists, pinned by SIZE and by the spellings that actually shipped and survived: a
-    # lost row narrows the ban silently, and nothing else in this file would notice.
-    assert len(_TORTOISE_AFFIRMATIVE_SPELLINGS) == 6, (
-        "the affirmative list holds the six recorded spellings; a lost row is a narrowed ban")
-    assert len(_TORTOISE_NEGATIVE_SPELLINGS) == 5, (
-        "the negative list holds the five recorded spellings; a lost row is a narrowed ban")
-    assert "prints exactly `tortoise/activation_scorecard.py`" in _TORTOISE_AFFIRMATIVE_SPELLINGS
-    assert "which two `tortoise/` paths this diff carries" in _TORTOISE_AFFIRMATIVE_SPELLINGS
-    assert f"{_TORTOISE_CENSUS_CMD}` prints NOTHING" in _TORTOISE_NEGATIVE_SPELLINGS
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
 
-    # The arm must read the document only. A clone-dependent probe here is the F1 defect:
-    # the `test` job is depth-1, so the three-dot walk exits 128 and both directions are
-    # skipped — zero assertions in the job that gates the merge.
-    _arm_source = inspect.getsource(_census_membership_verdicts)
-    assert "subprocess" not in _arm_source and "git " not in _arm_source, (
-        "arm (c) must read the document's TEXT only — a `git`/`subprocess` measurement is "
-        "unreachable at the depth-1 checkout the gating job uses and skips both directions "
-        "there (#13807 review, F1)")
+    # NON-VACUITY (#13728 review, finding 4): the detector must SEE an answer in both
+    # directions and must read a NEGATION as a membership claim, or the arm below is inert
+    # and its silence proves nothing.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` returns nothing", _tortoise_cmd) == [("returns nothing", True)], (
+            "the shape detector does not see `returns nothing` as an EMPTINESS answer, so "
+            "the re-wording class this arm exists for would walk through green")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` is NOT empty", _tortoise_cmd) == [("is NOT empty", False)], (
+            "the shape detector reads `is NOT empty` as an emptiness claim; it is a "
+            "MEMBERSHIP claim, and inverting it would refuse the true sentence and pass "
+            "the false one")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` is the command that answers it", _tortoise_cmd) == [], (
+            "the shape detector treats `is the command that answers it` as a typed answer, "
+            "which would refuse the document's own pointer to the command")
+    # ⛔ THE MEMBERSHIP BRANCH'S OWN WITNESS (#13795 review, finding 1). The three asserts
+    # above reach the emptiness, negation and skip paths only; at this head no sentence in
+    # the document reaches the membership branch either, so DELETE it (or flip it to
+    # `claims_empty = True`) and every row stayed GREEN. `prints the two COMMENT-ONLY
+    # modules` is the false claim the branch exists for.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints the two COMMENT-ONLY modules", _tortoise_cmd
+    ) == [("prints the two COMMENT-ONLY modules", False)], (
+        "the shape detector does not read `prints the two COMMENT-ONLY modules` as a "
+        "MEMBERSHIP answer, so the membership branch is inert and a false `prints two "
+        "modules` claim would walk through green (#13795 review, finding 1)")
+    # ⛔ AND THE SYNONYM CLASS (#13795 review, finding 2). `carries` and `names` are forms
+    # the closed 8-token verb list missed; the ANSWER's content still decides the direction,
+    # so `carries no `tortoise/` path at all` is EMPTINESS while `names two `tortoise/`
+    # paths` is MEMBERSHIP — the same answer behind a different listed verb.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` carries no `tortoise/` path at all", _tortoise_cmd
+    ) == [("carries no `tortoise/` path at all", True)], (
+        "the shape detector does not read `carries no `tortoise/` path at all` as an "
+        "EMPTINESS answer — the one-word re-wording the `(ii)` comment names as the reason "
+        "a shape match exists (#13795 review, finding 2)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` names two `tortoise/` paths", _tortoise_cmd
+    ) == [("names two `tortoise/` paths", False)], (
+        "the shape detector does not read `names two `tortoise/` paths` — a synonym for "
+        "`prints` that the closed 8-token list missed (#13795 review, finding 2)")
+    # ⛔ THE ONE-WORD ANSWER MUTATION (#13795 review, finding 3). The membership word list
+    # stopped at `two`, so this document's own `prints NO path at all` could be edited to
+    # `prints one path at all` — ONE word, a verb already in the list — and the guard stayed
+    # GREEN over a membership claim the empty set refutes. The witness is that mutation.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints one path at all", _tortoise_cmd
+    ) == [("prints one path at all", False)], (
+        "the shape detector does not read `prints one path at all` as a MEMBERSHIP answer, "
+        "so the `NO` -> `one` one-word edit reinstates the refuted claim green "
+        "(#13795 review, finding 3)")
+    # ⛔ AND THE DIGIT SPELLING (#13795 review, round-2 finding 1): the docstring says a
+    # numeral makes a MEMBERSHIP claim, and a spelled-only list left `prints 2 paths`
+    # GREEN over the same refuted claim. Both spellings are the class, so both are pinned.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints 2 paths", _tortoise_cmd
+    ) == [("prints 2 paths", False)], (
+        "the shape detector does not read `prints 2 paths` as a MEMBERSHIP answer, so the "
+        "digit spelling of the `two` claim passes green (#13795 review, round-2 finding 1)")
+    # ⛔ AND A HEDGED, TRUE EMPTINESS CLAIM STAYS AN EMPTINESS CLAIM (#13795 review,
+    # round-2 finding 2): scoping the negation to any `not` in the window re-classified
+    # this document's own house-style hedge as MEMBERSHIP and REFUSED it — pushing an
+    # author to delete a true hedge to go green. The negation must bind the emptiness word.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints NOTHING at this head, and that is not evidence the row "
+        "was left alone", _tortoise_cmd
+    ) == [("prints NOTHING at this head, and that is not evidence the row was left alone",
+           True)], (
+        "the shape detector reads a HEDGED true emptiness claim as a MEMBERSHIP claim "
+        "because an unrelated `not` sits in the window; that refuses the true sentence and "
+        "rewards deleting the hedge (#13795 review, round-2 finding 2)")
+    # ⛔ AND BOTH DIRECTIONS OF THE SAME ORDERING BUG (#13795 review, round 3, C1/C2): the
+    # direction is the HEAD token's, never any word later in the window. A trailing
+    # emptiness word must not turn a membership answer into an emptiness claim (C1), and a
+    # contrast clause about ANOTHER head must not turn a true emptiness claim into a
+    # membership one (C2). Both are pinned because both were measured green/red the wrong
+    # way round before the rewrite.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints the two comment-only modules and nothing else",
+        _tortoise_cmd
+    ) == [("prints the two comment-only modules and nothing else", False)], (
+        "the detector reads a trailing `nothing` as the answer's direction, so a refuted "
+        "MEMBERSHIP claim passes green at an empty head (#13795 review, round-3 C1)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints NOTHING at this head, though it was not empty at "
+        "`2a7f24e241`", _tortoise_cmd
+    ) == [("prints NOTHING at this head, though it was not empty at `2a7f24e241`", True)], (
+        "the detector lets a contrast clause about ANOTHER head decide this head's "
+        "direction, so a true emptiness claim is refused (#13795 review, round-3 C2)")
+    # ⛔ AND THE HEAD-WHITELIST GAPS (#13795 review, round-4 P1/P2). This document writes
+    # every path BACKTICKED, and a quantifier or a doubled form may precede the answer — so
+    # `prints `tortoise/x.py``, `prints just one path` and `prints contains `tortoise/x.py``
+    # were all SKIPPED and a refuted membership answer stayed green. And a ZERO numeral is
+    # an EMPTINESS claim, not a member: `prints 0 paths` / `prints exactly zero paths` are
+    # TRUE at this empty head and were being REFUSED. Each spelling is pinned.
+    for _member_spelling in (
+            "prints `tortoise/activation_scorecard.py`",
+            "prints just one path",
+            "prints only one path",
+            "prints at least one path",
+            "prints no fewer than two paths",
+            "prints contains `tortoise/hosted_api.py`",
+            "still prints the two comment-only modules"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_member_spelling}", _tortoise_cmd
+        ) and _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_member_spelling}", _tortoise_cmd)[0][1] is False, (
+            f"the shape detector skips or mis-reads {_member_spelling!r} — a MEMBERSHIP "
+            "answer spelled the way this document writes it, so the refuted claim passes "
+            "green (#13795 review, round-4 P1)")
+    for _zero_spelling in ("prints 0 paths", "prints exactly zero paths"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_zero_spelling}", _tortoise_cmd
+        ) == [(_zero_spelling, True)], (
+            f"the shape detector reads {_zero_spelling!r} as a MEMBERSHIP claim, so it "
+            "REFUSES a true emptiness claim at an empty head — the round-2 hedge harm in "
+            "the other direction (#13795 review, round-4 P2)")
+    # ⛔ AND THE QUALIFIED NEGATION (#13795 review, finding 3): `non-empty` CONTAINS the
+    # word `empty`, and reading it as an emptiness claim inverts the direction — it passes
+    # a false membership claim at THIS (empty) head and would refuse the true sentence at a
+    # non-empty one. The negation test has to see the qualifier, not just a bare `not`.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` returns a non-empty set", _tortoise_cmd
+    ) == [("returns a non-empty set", False)], (
+        "the shape detector reads `returns a non-empty set` as an EMPTINESS claim because "
+        "the word `empty` sits inside `non-empty`; it is a MEMBERSHIP claim, so the "
+        "direction is inverted (#13795 review, finding 3)")
+    # ⛔ AND ITS THREE SIBLINGS (#13795 review, finding 4): a CONTRACTION, the HYPHENLESS
+    # spelling, and an emptiness word doing membership duty behind `but`. Each carried the
+    # inversion or the skip past the fix above, so each is pinned.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` isn't empty", _tortoise_cmd
+    ) == [("is n't empty", False)], (
+        "the shape detector does not read the CONTRACTION `isn't empty` as a MEMBERSHIP "
+        "claim, so the inversion survives the next spelling (#13795 review, finding 4)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` is nonempty", _tortoise_cmd
+    ) == [("is nonempty", False)], (
+        "the shape detector does not see `is nonempty` at all — no `not` to find and no "
+        "`empty` word boundary inside `nonempty` — so the sentence is skipped and a "
+        "membership claim passes green (#13795 review, finding 4)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints nothing but the two comment-only modules", _tortoise_cmd
+    ) == [("prints nothing but the two comment-only modules", False)], (
+        "the shape detector reads `prints nothing but the two comment-only modules` as an "
+        "EMPTINESS claim; `nothing but` asserts MEMBERSHIP, so a false membership claim "
+        "passes green at an empty head (#13795 review, finding 4)")
+    # ⛔ AND THE POINTER MUST STILL BE SKIPPED (#13795 review, note 5): a bare
+    # `path`/`paths` NOUN is deliberately not a member token, so this sentence is not
+    # refused. Losing this would over-block the document's own pointer to the command.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` is the command that prints the paths", _tortoise_cmd
+    ) == [], (
+        "the shape detector treats the POINTER `is the command that prints the paths` as a "
+        "typed membership answer, which would refuse the document's own pointer to the "
+        "command — the same class of defect in the other direction (#13795 review, note 5)")
 
-    for _spelling in _TORTOISE_MEMBERSHIP_SPELLINGS:
+    # (c-ii) THE DOCUMENT ASSERTIONS — no measurement, so both directions, always.
+    # ⛔ A TYPED VERDICT IS REFUSED IN EITHER DIRECTION (#13807 review, F1 + F4). The set is
+    # HEAD-BOUND: it is a property of the head the command was run at, so no direction is
+    # "the refuted one" at an arbitrary head — a membership claim is false at a head that
+    # prints nothing, and an emptiness claim is false at a head that prints a path, and
+    # `#7949`'s sentences are about ONE head while a PR's diff carries paths at ANOTHER. So
+    # neither is adjudicated against this tree: the document states the command and types
+    # no answer, and this arm enforces exactly that. That is why it needs no merge base and
+    # therefore does not SKIP at the depth-1 checkout the gating job uses.
+    _typed = _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd)
+    assert not _typed, (
+        f"05-verify.md types {[' '.join(_a.split()) for _a, _e in _typed]!r} as the answer "
+        f"to `{_tortoise_cmd}` ({['an EMPTINESS' if _e else 'a MEMBERSHIP' for _a, _e in _typed]}"
+        " at this head). That command is HEAD-BOUND — its output is a property of the head it"
+        " was run at — so a typed verdict is stale one merge later, in EITHER direction, and"
+        " `#7949`'s own sentences about it are true of the head they name rather than of this"
+        " one. State the COMMAND and let the reader read it at the head being merged"
+        " (#13489 review, P1; #13746 review, finding 7; #13728 review, finding 4; #13807"
+        " review, findings 2 and F4)")
+
+
+def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatch):
+    """Arm (c-i) is a TEXT ban, so it fires in every clone — pinned, not reasoned about.
+
+    ⛔ THREE things are pinned here, and none of them is observable from the bundle alone:
+
+    1. **BOTH lists are read, in BOTH directions, and neither may SHRINK** (#13807 review,
+       F1/F3). The cut this replaces keyed the lists on a live measurement, so in the depth-1
+       checkout the `test` job uses it read neither — and no row anywhere changed colour when
+       it was broken, which is why it took a fresh-context reviewer to find it. Each injected
+       spelling below reds.
+    2. **The CONTENT is pinned, not the size** (#13807 review, finding 5). Length assertions
+       left eight of eleven membership rows unpinned: appending one character to an unpinned
+       row kept every count, every membership test and the injection loop green — because the
+       loop iterates the MUTATED list — while that retired phrasing could be re-inserted into
+       `05-verify.md` uncaught. That is the realistic bypass: a fixer loop "fixing" a doc hit
+       by tweaking the spelling. Pinning the tuples WHOLE subsumes the counts.
+    3. **The arm must not consult the clone** (F1's root; #13807 review, finding 4). It is a
+       text ban, and the pin is BEHAVIOURAL rather than a grep of its source: an
+       `inspect.getsource` check was under-inclusive (`subprocess.run` behind an alias, or a
+       `_run_git()` helper, contains neither needle) and over-inclusive (a comment mentioning
+       `git diff` inside the arm false-reds) — so it could not red the regression it claimed
+       to pin. Making `subprocess.run` explode and asserting the arm STILL reds the same
+       spelling is the property that actually matters: the document is its only input.
+
+    The measurement the retired cut took is deliberately NOT re-taken: a membership is
+    head-bound in both directions, so re-measuring THIS head both asserted nothing at depth 1
+    and turned any code PR's head into a false red (#13807 review, F1/F4).
+    """
+    assert _TORTOISE_MEMBERSHIP_SPELLINGS == (
+        "THREE are in this head",
+        "two comment-only `tortoise/` modules",
+        "prints exactly `tortoise/activation_scorecard.py`",
+        "which two `tortoise/` paths this diff carries",
+        "prints the two modules named above",
+        "`activation_scorecard.py` IS in the diff",
+        f"{_TORTOISE_CENSUS_CMD}` is NOT empty",
+        f"{_TORTOISE_CENSUS_CMD}` returns exactly those two",
+        f"{_TORTOISE_CENSUS_CMD}` prints the two COMMENT-ONLY modules",
+        f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
+        "the `tortoise/` set above is the two COMMENT-ONLY modules",
+    ), (
+        "the affirmative (MEMBERSHIP) ledger changed. These are the exact phrasings that were "
+        "FALSE at a head and survived anyway, so a row that is edited, however slightly, is a "
+        "ban the document can be re-inserted past (#13746 review, finding 7; #13807 review, "
+        "finding 5). Retiring a NEW spelling means adding it; it never means re-wording one.")
+    assert _TORTOISE_EMPTY_SPELLINGS == (
+        f"neither is `{_TORTOISE_CENSUS_CMD}`",
+        f"{_TORTOISE_CENSUS_CMD}` -> empty",
+        f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
+    ), (
+        "the emptiness ledger changed — the mirror direction of the same head-bound claim, "
+        "retired for the same reason (#13807 review, F4)")
+
+    for _spelling in _TORTOISE_RETIRED_SPELLINGS:
         _injected = f"… and the earlier cut said {_spelling} about this bundle …"
-        assert _census_membership_verdicts(_injected) == [_spelling], (
-            f"arm (c) does not read the retired spelling {_spelling!r}. An unread row is "
+        assert _spelling in _census_membership_verdicts(_injected), (
+            f"arm (c-i) does not read the retired spelling {_spelling!r}. An unread row is "
             "indistinguishable from a clean document — the inert-enforcer defect this arm "
             "replaces (#13807 review, F1/F3)")
+
+    # ⛔ CLONE-INDEPENDENCE, PINNED BEHAVIOURALLY (#13807 review, finding 4). If a probe is
+    # ever reintroduced, this arm stops answering from the injected text alone — make the
+    # subprocess seam explode and require the SAME verdict.
+    def _explode(*_a, **_k):
+        raise AssertionError("(c-i) shelled out; it must read the document's TEXT only")
+    monkeypatch.setattr(subprocess, "run", _explode)
+    _probe = f"… {_TORTOISE_EMPTY_SPELLINGS[-1]} …"
+    assert _census_membership_verdicts(_probe) == [_TORTOISE_EMPTY_SPELLINGS[-1]], (
+        "arm (c-i) stopped answering from the document's text when `subprocess.run` was "
+        "unavailable — a clone-dependent arm is unreachable at the depth-1 checkout the "
+        "gating job uses and asserts nothing there (#13807 review, F1)")
+
     # The inverse: the COMMAND the document is supposed to keep is never itself a verdict.
     assert _census_membership_verdicts(
         f"read `{_TORTOISE_CENSUS_CMD}` at the head you merge") == [], (
@@ -817,10 +1196,48 @@ def _added_cite_tokens(diff_text: str) -> set[str]:
     return set(re.findall(r"sdk\.py:(\d+)", added))
 
 
+def _measured_index_word_diff(
+        proc: subprocess.CompletedProcess | None = None) -> set[str]:
+    """The `sdk.py:<n>` tokens this diff ADDS to `docs/00_index.md`, or `_Unmeasurable`.
+
+    ⛔ A FAILED `git diff` IS UNKNOWN, NEVER "moved nothing" (#13795 review, finding 2).
+    The cut before this one wrote
+    `moved = _added_cite_tokens(proc.stdout) if proc.returncode == 0 else set()`, so a
+    clone that cannot answer the question — depth 1 has no `origin/main`, so git exits
+    128 with empty stdout — produced the SAME value a successful read of a diff that
+    moves no cite produces. The arm below then reds on a claim that is TRUE there, in
+    `test`, the one job that gates the merge.
+
+    ⛔ THIS IS NOW THE FILE'S ONLY DEPTH-DEPENDENT LEG, AND IT STILL SKIPS (#13807 review,
+    finding 1). The `-- tortoise/` sibling that used to share this rule is GONE with its
+    dependence: that arm is a TEXT ban and takes no measurement, so it fires in every
+    shard. This one cannot — a re-point is a property of the DIFF, not of the document —
+    so an unmeasurable head SKIPS here rather than being read as "moved nothing". Scoping
+    that residual is finding 1's fix, not this PR's: converting this leg to a text ban is
+    a separate change, because the token it checks is derived from the diff.
+    """
+    if proc is None:
+        proc = subprocess.run(
+            ["git", "diff", "-U0", "--word-diff=plain", "origin/main...HEAD", "--",
+             "docs/00_index.md"],
+            cwd=REPO, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise _Unmeasurable(
+            f"exit {proc.returncode}: {detail[0] if detail else '<no output>'}")
+    return _added_cite_tokens(proc.stdout)
+
+
 #: The spellings that assert THIS diff re-points a cite in `docs/00_index.md`. Each was
 #: measured FALSE at the head the arm below was written for (#13746 review, round 3,
 #: finding 4): the file's one changed line is the `#12296` row's DESCRIPTION of its own
 #: `:27861` clause, and no `sdk.py:<n>` token moves.
+#:
+#: ⛔ THIS SIDE IS A FINITE LITERAL LIST, AND IT SAYS SO (#13795 review, round 2,
+#: finding 3). Only the MEASUREMENT half of the arm reads the live diff; a re-worded
+#: re-point claim is NOT detected, so the docstring below must not imply that it is. The
+#: shape match the sibling `-- tortoise/` detector uses is the right fix and is filed as a
+#: follow-up rather than smuggled into a docs PR.
 _INDEX_REPOINT_CLAIMS = (
     "this diff carries ONE `docs/00_index.md` change — the capstone row's",
     "it IS in the set, for ONE cite",
@@ -850,16 +1267,29 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
     DOES move a cite, so an empty reading of the real diff is a fact about this diff and
     not an inert extractor; and on the pre-fix document the three surviving spellings
     are present with `moved` empty, so the loop reds on the first one.
+
+    ⛔ AND IT SKIPS WHEN THE DIFF CANNOT BE TAKEN (#13795 review, finding 2): both legs
+    that shell out to `git diff origin/main...HEAD` report UNKNOWN on a failed read, so
+    the depth-1 `test` job skips this arm instead of reding a true claim.
     """
     assert _added_cite_tokens("a [-sdk.py:21679-]{+sdk.py:21715+} b") == {"21715"}, (
         "_added_cite_tokens cannot read a word-diff patch that DOES move a cite, so the "
         "arm below would pass on an empty set for the wrong reason")
-
-    proc = subprocess.run(
-        ["git", "diff", "-U0", "--word-diff=plain", "origin/main...HEAD", "--",
-         "docs/00_index.md"],
-        cwd=REPO, capture_output=True, text=True, check=False)
-    moved = _added_cite_tokens(proc.stdout) if proc.returncode == 0 else set()
+    with pytest.raises(_Unmeasurable) as _raised:
+        _measured_index_word_diff(subprocess.CompletedProcess(
+            args=["git"], returncode=128, stdout="",
+            stderr="fatal: bad revision 'origin/main...HEAD'\n"))
+    assert "128" in str(_raised.value), (
+        "a failed `git diff` on `docs/00_index.md` is not reported as UNMEASURABLE with "
+        "its exit code, so the reason a skipped arm shows cannot distinguish a shallow "
+        "clone from any other failed read (#13795 review, finding 2)")
+    try:
+        moved = _measured_index_word_diff()
+    except _Unmeasurable as exc:
+        pytest.skip(
+            f"`git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` "
+            f"is unmeasurable here ({exc}), so whether this diff moves a cite is "
+            "UNKNOWN and this arm does not adjudicate against a failure")
 
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
