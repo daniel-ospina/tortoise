@@ -1445,10 +1445,17 @@ def _mapping_stores_the_vector(call) -> bool:
            and not isinstance(keyword.value, ast.Constant)
            for keyword in call.keywords):
         return True
+    # ⛔ AND THE ``**`` OPERAND IS AN OPERAND TOO, THROUGH A WRAPPER (`#13788` F2, measured at
+    # `45b5f88a`). Both ``**`` arms in this file narrowed the operand to `isinstance(value,
+    # ast.Dict)`, so one transparent wrapper round the same literal re-opened the hole the
+    # bare spelling had just closed: `props.update(**{"embedding": vec}.copy())` CERTIFIED
+    # beside `props.update(**{"embedding": vec})` refused — and the same for
+    # `__setitem__(**…)` and the helper spelling `_set(props, **…)`. The operand rule
+    # answers the literal AND the wrappers the pairs rule already follows, so a `**` operand
+    # asks it rather than a type test; a `**` operand that is a PAIRS literal is a spelling
+    # Python rejects (`update(**[…])`), and refusing it is the fail-closed direction.
     return any(_mapping_operand_stores_the_vector(argument) for argument in call.args) or any(
-        keyword.arg is None
-        and isinstance(keyword.value, ast.Dict)
-        and _dict_stores_the_vector(keyword.value, stop_arm=True)
+        keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value)
         for keyword in call.keywords)
 
 
@@ -1770,8 +1777,10 @@ def _third_argument_stores_the_vector(call) -> bool:
     # `_set(props, **{"embedding": vec})` — the ``**`` spelling of the helper argument. The
     # siblings above each have one, and this one did not, so the same call in this spelling
     # certified a stop arm that places the vector.
-    return any(keyword.arg is None and isinstance(keyword.value, ast.Dict)
-               and _dict_stores_the_vector(keyword.value, stop_arm=True)
+    # ⛔ AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
+    # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
+    # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows.
+    return any(keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value)
                for keyword in call.keywords)
 
 

@@ -4125,6 +4125,33 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE ``**`` KEYWORD OPERAND IS AN OPERAND (`#13788` F2, measured at `45b5f88a`).
+        # Both ``**`` arms narrowed the operand to `isinstance(value, ast.Dict)`, so the one
+        # transparent wrapper this branch's OWN pairs rule already follows re-opened the hole
+        # the bare spelling had just closed. All three rows below CERTIFIED a stop arm that
+        # places the vector while `update(**{"embedding": vec})` was refused — the third is
+        # the helper spelling, whose `**` arm is a separate site in the same vocabulary.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**{"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(**{"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -5130,6 +5157,25 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update({"embedding_model": _m()}.copy())
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE ``**`` WRAPPER ARM (`#13788` F2): the new refusal
+        # is still narrowed to an EXACT property name and a NON-CONSTANT value, so the
+        # pre-guard reset (`None`) and the identity triple behind the same wrapper must stay
+        # CERTIFIED — otherwise the widened arm is an over-broad `return True` that costs an
+        # honest writer its gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**{"embedding_model": _m()}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**{"embedding": None}.copy())
         return None
     _write(props)
 """,
