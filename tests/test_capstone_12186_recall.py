@@ -924,6 +924,100 @@ def test_run_refuses_a_binding_that_is_not_the_users_door(monkeypatch, capsys):
         f"guard would leave this test green: {err!r}")
 
 
+def test_the_uri_guard_accepts_every_scheme_the_product_itself_supports():
+    """The accepted set is the PRODUCT's, and `rediss://` is in it (round-22 F1).
+
+    The pre-fix guard was `uri.startswith(("docker://", "redis://"))`, inherited
+    verbatim from `tools/candidate_recall_11901.py:1400`, so a `rediss://` URI —
+    FalkorDB Cloud, the scheme `tortoise/config.py:50 SUPPORTED_URI_SCHEMES`
+    declares and `projection._validate_uri_scheme` reuses — was refused with the
+    sentence *"a backend the product cannot use"*, while the
+    `FalkorProjection.from_uri` three lines below would have connected to it.
+
+    ⛔ BOTH HALVES ARE ASSERTED. The equality pins DRIFT (a scheme added to, or
+    dropped from, the product's own tuple reddens here rather than silently
+    diverging); the loop pins the BEHAVIOUR, so the mutant that matters — deleting
+    `"rediss://"` from `URI_PREFIXES` — fails with the scheme named instead of
+    only on a tuple mismatch.
+    """
+    from tortoise.config import SUPPORTED_URI_SCHEMES
+
+    assert cap.URI_PREFIXES == tuple(f"{s}://" for s in SUPPORTED_URI_SCHEMES), (
+        f"the guard accepts {cap.URI_PREFIXES!r}; the product declares "
+        f"{SUPPORTED_URI_SCHEMES!r} (tortoise/config.py). A scheme the product "
+        f"connects to but this instrument refuses is a refusal that states "
+        f"something false about the product")
+    for scheme in SUPPORTED_URI_SCHEMES:
+        assert cap._uri_refusal(f"{scheme}://:pw@host:6379/g") is None, (
+            f"`{scheme}://` is in SUPPORTED_URI_SCHEMES, so refusing it reports a "
+            f"backend the product cannot use that the product does use")
+
+    # The inverse direction: an unrelated scheme MUST still be refused, or the
+    # acceptance above is satisfied by a predicate that accepts everything.
+    assert cap._uri_refusal("postgres://host/db") is not None
+    assert cap._uri_refusal("") is not None, (
+        "an unset TORTOISE_DB_URI must refuse: a recall figure measured on no "
+        "backend at all is not a figure")
+
+
+def test_run_does_not_refuse_a_rediss_uri_the_product_uses(monkeypatch):
+    """`run()` must not stop at the URI arm for a backend the product connects to.
+
+    Drives the REAL `run()` with the door guard satisfied and a `rediss://` URI,
+    and stubs the projection so the only way to reach it is to have PASSED the URI
+    guard. Exit-code-free on purpose: `run()` has four `return 3` arms, so a test
+    that only asserted `rc != 3` would be satisfied by any other refusal — the
+    assertion here is that execution reached `FalkorProjection.from_uri` at all.
+
+    Mutant: drop `"rediss://"` from `URI_PREFIXES` → the URI arm answers and this
+    test fails on the un-raised sentinel, not on a message.
+    """
+    import argparse
+
+    class _PastTheUriGuard(Exception):
+        pass
+
+    class _Boom:
+        @staticmethod
+        def from_uri(*_a, **_k):
+            raise _PastTheUriGuard("reached FalkorProjection.from_uri")
+
+    import tortoise.projection
+
+    monkeypatch.setattr(tortoise.projection, "FalkorProjection", _Boom)
+    monkeypatch.setenv("TORTOISE_DB_URI", "rediss://:pw@falkordb.example:6379/g")
+    monkeypatch.setattr(cap, "_user_door_binding", lambda: {
+        "tool": "tortoise_search", "present": True,
+        "matches_measured_call": True, "sdk_method": "tortoise_fts_query",
+        "rest": "GET /v1/search"})
+    args = argparse.Namespace(pin=str(PIN), graph="cap-test", namespace=None,
+                              out=None)
+    with pytest.raises(_PastTheUriGuard):
+        cap.run(args)
+
+
+def test_run_refuses_a_uri_the_product_cannot_use(monkeypatch, capsys):
+    """The inverse: a scheme the product cannot use still refuses, with its reason.
+
+    Without this row, `_uri_refusal` returning `None` unconditionally would leave
+    the acceptance pins green while the guard became decorative — the exact shape
+    this file's rule 3 names.
+    """
+    import argparse
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "postgres://host/db")
+    monkeypatch.setattr(cap, "_user_door_binding", lambda: {
+        "tool": "tortoise_search", "present": True,
+        "matches_measured_call": True, "sdk_method": "tortoise_fts_query",
+        "rest": "GET /v1/search"})
+    args = argparse.Namespace(pin=str(PIN), graph="cap-test", namespace=None,
+                              out=None)
+    assert cap.run(args) == 3
+    err = capsys.readouterr().err
+    assert "no live FalkorDB" in err, (
+        f"the URL guard did not refuse an unsupported scheme: {err!r}")
+
+
 def test_the_artifact_declares_the_graph_residue(artifact):
     """`sdk.close()` is the only teardown, so the residue is DECLARED.
 

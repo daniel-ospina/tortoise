@@ -848,6 +848,43 @@ def _code_head_note(run_head: str | None) -> str:
     )
 
 
+# ── the live-backend guard ───────────────────────────────────────────────────
+#
+# ⛔ THE ACCEPTED SET IS THE PRODUCT'S, NOT THIS INSTRUMENT'S OPINION (round-22
+# P3, review F1). `tortoise/config.py:50` declares
+# `SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")`, and
+# `projection._validate_uri_scheme` REUSES that tuple so URI-routing and the
+# connection layer cannot drift (#715 exists for exactly this mistake: `rediss://`
+# was documented-supported but unrecognised). `rediss://` is FalkorDB Cloud —
+# `FalkorProjection.from_uri` accepts it (`ssl=(parsed.scheme == "rediss")`) —
+# so the pre-fix `("docker://", "redis://")` REFUSED a backend the product
+# ships support for, and the refusal stated the opposite ("a backend the product
+# cannot use"). This line was inherited verbatim from
+# `tools/candidate_recall_11901.py:1400`; the repo already carries the corrected
+# tuple in `tools/ax_write_eval.py:363`.
+URI_PREFIXES = ("docker://", "redis://", "rediss://")
+URI_REFUSAL = (
+    "REFUSED: no live FalkorDB in TORTOISE_DB_URI — a recall figure "
+    "measured on a backend the product cannot use is not a figure.\n"
+    "  uri=\"$(uv run python tools/test_lane.py uri)\" && eval \"$uri\""
+)
+
+
+def _uri_refusal(uri: str) -> str | None:
+    """The refusal for a backend the PRODUCT cannot use, else ``None``.
+
+    A function rather than an inline `if` because the guard shipped with NO pin
+    at all (round-22, review F1): the only test that reached `run()` asserted the
+    DOOR arm's reason and that the URI arm did *not* answer, so no mutant of this
+    predicate reddened anything — this file's own rule 3 ("an assertion whose
+    value cannot vary is a FINDING: make it reachable") applied to a guard with
+    no assertion. One call site, one pin, in both directions.
+    """
+    if uri.startswith(URI_PREFIXES):
+        return None
+    return URI_REFUSAL
+
+
 def run(args: argparse.Namespace) -> int:
     from tools.underscore_or_terms_12360 import wait_indexed
     from tortoise.embeddings import EmbeddingModel
@@ -884,11 +921,9 @@ def run(args: argparse.Namespace) -> int:
         return 3
 
     uri = os.environ.get("TORTOISE_DB_URI") or ""
-    if not uri.startswith(("docker://", "redis://")):
-        print("REFUSED: no live FalkorDB in TORTOISE_DB_URI — a recall figure "
-              "measured on a backend the product cannot use is not a figure.\n"
-              "  uri=\"$(uv run python tools/test_lane.py uri)\" && eval \"$uri\"",
-              file=sys.stderr)
+    uri_refusal = _uri_refusal(uri)
+    if uri_refusal is not None:
+        print(uri_refusal, file=sys.stderr)
         return 3
 
     graph = args.graph or f"cap12186_{int(time.time())}_{os.getpid()}"
