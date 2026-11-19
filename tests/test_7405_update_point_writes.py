@@ -56,6 +56,7 @@ and on embedded FalkorDBLite otherwise — the same dual-lane convention as
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import json
 import os
@@ -5303,20 +5304,26 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
         # symbol's DEFINITION is pinned here with the others.
         ("_upsert_point_props", "projection/entities.py", entities),
     ):
-        assert symbol in sdk, (
+        # ⛔ WORD-BOUNDED, not a substring: `plan_point_restamp_folds` surviving
+        # only as the prefix of `plan_point_restamp_folds_v2` used to satisfy a
+        # bare `symbol in sdk`, so a rename reported the symbol as still named.
+        assert re.search(rf"(?<!\w){re.escape(symbol)}(?!\w)", sdk), (
             f"`{symbol}` is no longer named in `tortoise/sdk.py` — the comment "
             "that used to cite it by line now cites nothing, so its claim is "
             "unattributable")
-        # ⛔ DEFINES, not merely NAMES. `symbol in source` is a substring test over
-        # a module that also discusses its own mechanics in prose: a rename of the
-        # DEFINITION alone (`def _upsert_point_props` → `..._v2`) leaves 25 of the
-        # name's 27 occurrences in `entities.py` intact and stayed GREEN, so the
-        # row certified a symbol nothing had checked. Measured: with this row a
-        # definition-only rename REDS at this line; every symbol in the loop above
-        # is a `def` or a `class` (asserted by the row itself, so a symbol that
-        # becomes an assignment reds here for re-derivation, never for a wrong
-        # reason).
-        assert re.search(rf"(?:def|class)\s+{re.escape(symbol)}\b", source), (
+        # ⛔ DEFINES, not merely NAMES — and the test is a PARSE, not a pattern.
+        # `symbol in source` is a substring test over a module that discusses its
+        # own mechanics in prose: a definition-only rename (`def
+        # _upsert_point_props` → `..._v2`) leaves 26 of the name's 27 occurrences
+        # in `entities.py` intact and stayed GREEN. A `(?:def|class)\s+<sym>`
+        # regex fixes that only until some comment quotes the old signature —
+        # measured: the rename PLUS one comment line `# the old \`def
+        # _upsert_point_props(\` lived here` passed again. An AST cannot be
+        # satisfied by prose, so the definition itself is what is asked for.
+        assert any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef))
+            and node.name == symbol for node in ast.walk(ast.parse(source))), (
             f"`tortoise/sdk.py` attributes a claim to `{symbol}` in `{owner}`, but "
             f"`{owner}` no longer DEFINES it (the name may survive in prose) — "
             "re-derive the symbol the mechanic moved to")
