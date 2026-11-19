@@ -185,7 +185,7 @@ still a dedup candidate. Two reasons it is not a verdict value here:
 2. ⛔ **Writing `dedup_reviewed='link'` is worse than inert — it silently
    DEQUEUES.** The write is one call (`sdk.update_entity` → `_update_entity`'s `SET n
    += $props`), but the content review queue filters `dedup_reviewed IS NULL`
-   (`sdk.py:28142`), so any non-NULL value removes the row from review with
+   (`sdk.py:28178`), so any non-NULL value removes the row from review with
    **no verdict applied**. A `link` band that shipped only its writer would delete
    a review nobody counts.
 
@@ -272,7 +272,7 @@ no-merge verdict — `dedup_reviewed='reject'` + `dedup_target_id` /
 `dedup_rejected_targets` — and it is **pair-scoped between two NODES**. A
 name-only mention has no node, so only the target-less form (`target_suppressed`)
 is evaluable here; the targeted form is honoured by the merge verb
-(`entity_resolver.apply_entity_merge`, called at `sdk.py:28506`; `:28431` was the address before this branch's base moved under it — re-derived here, since the pin in `tests/test_12184_shifted_cites.py` is keyed on the phrase that CONTAINS this address and resolves the line it names — so the phrase and the address must be re-derived TOGETHER, and the address alone is never the citation). Line numbers here are a convenience and rot on every merge — the symbol is the citation. Stated rather than approximated.
+(`entity_resolver.apply_entity_merge`, called at `sdk.py:28542`; `:28506` was the address before this branch's base moved under it — re-derived here, since the pin in `tests/test_12184_shifted_cites.py` is keyed on the phrase that CONTAINS this address and resolves the line it names — so the phrase and the address must be re-derived TOGETHER, and the address alone is never the citation). Line numbers here are a convenience and rot on every merge — the symbol is the citation. Stated rather than approximated.
 
 **Phase 1 applies `target_retired` only.** It binds on an exactly-equal folded
 name+kind *or* on a spelling the survivor's `aliases[]` already records
