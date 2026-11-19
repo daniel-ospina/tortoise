@@ -16498,8 +16498,13 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
         "is a bare `#` comment marker",
         "measured at `origin/main`: `:14471` is a docstring line in "
         "`tortoise/hosted_api.py` and a code line in `tortoise/sdk.py` — neither is a "
-        "comment marker (#13794 review, P2). Keep the half that IS true: no cite TOKEN "
-        "for that line exists on `main`",
+        "comment marker (#13794 review, P2). Keep the half that IS true, and keep it "
+        "SCOPED: no cite TOKEN for that line **with the `hosted_api.py` prefix** exists on "
+        "`main` — while one WITHOUT that prefix does, in "
+        "`docs/scoping/3863-surface-enumeration.json` — so a prefix-scoped grep is not a "
+        "tree-wide count, which is the error the D5 row itself retracts (#13489 review, "
+        "P2). ⛔ The token is deliberately not spelled here: the census greps every "
+        "tracked file, so one would join the population it measures",
     ),
     (
         "`:45728`, a DIFFERENT call site",
