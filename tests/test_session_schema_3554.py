@@ -3199,7 +3199,10 @@ _APPROVAL_RECORD_AS_AN_ORDERED_ITEM = (
 # ⛔ …AND THE CITED FORM, kept as the ACCEPT direction (review round 6): the ordered
 # marker ends in a full stop, so the label sentence used to be cut down to `1.` and this
 # record — whose citation IS in the sentence — was refused. `- `, `- [ ] `, `### ` and
-# `1) ` never had the problem; only the `\d+[.)]` family did.
+# `1) ` never had the problem; only the `.`-terminated ordered marker (`\d+\.`) did.
+# (Review round 7 corrected this line: it listed `1)` as never-cut two words before naming
+# `\d+[.)]` as the family — `1)` is a member of that family, and `_sentences` returns ONE
+# sentence for it; the cut comes from the marker's full stop alone.)
 _APPROVAL_RECORD_AS_A_CITED_ORDERED_ITEM = (
     "> 1. **Owner approval of the exact changes**: comment `6993778525`.")
 # ⛔ THE REMAINING CONTAINERS (review round 6), each measured ACCEPTED when its
@@ -3218,7 +3221,8 @@ _APPROVAL_RECORD_BEHIND_A_CHECKED_TASK_LIST_BOX = (
 # FIRST one. A record written as a later bullet was therefore never read, while `main`'s
 # phrase detector refused it — the arm did not reduce the vacuity here, it widened it.
 # The corpus cannot see this (nothing landed records an approval inside a list), so the
-# direction is pinned by fixture; `docs/ONTOLOGY-CHANGELOG.md` has 104 bullet lines and
+# direction is pinned by fixture; `docs/ONTOLOGY-CHANGELOG.md` has 104 list-item lines
+# (86 bullets, 18 ordered) and
 # its lists are compact, so this is the shape the NEXT release reaches.
 _APPROVAL_RECORD_AS_A_LATER_BULLET = (
     "> - Retired the legacy predicate in §4.5.\n"
@@ -3319,6 +3323,27 @@ _HTML_LABEL_IS_NOT_A_RECORD = (
 # reversed form, so this cost is driven as a fixture rather than left to be discovered.
 _POINTER_NAMING_A_CONTAINER = (
     "> Each extractor keeps its own issue tracker.")
+# ⛔ THE MERGED READER'S NEW FALSE BLOCK (#13669 cycle 7, measured): the shared reader now
+# splits at a list item, so a colon-led pointer whose number sits in the NEXT item is
+# REFUSED — while `main`'s fused read ACCEPTED it. Named in the pointer docstring and
+# driven here so the cost is measured rather than discovered.
+_POINTER_RESOLVED_IN_THE_NEXT_LIST_ITEM = (
+    "> Two of the defects this entry records are tracked as issues of their own:\n"
+    "> - #13450 — the stale sentence")
+# ⛔ THE MERGED SPLIT'S OWN ALTERNATIVES, DRIVEN (review round 7): dropping `#{1,6}` or a
+# bullet alternative from `_PARAGRAPH_START_RE` alone left the whole suite GREEN, so a
+# later item written as `* `, `+ ` or under a heading went unread while the harness looked
+# like it covered the case (its mutants rewrite BOTH regexes, so the red came from the
+# strip). Each shape is a fixture so the split is pinned on its own.
+_APPROVAL_RECORD_AS_A_LATER_ASTERISK_BULLET = (
+    "> - Retired the legacy predicate in §4.5.\n"
+    "> * **Owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_AS_A_LATER_PLUS_BULLET = (
+    "> - Retired the legacy predicate in §4.5.\n"
+    "> + **Owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_BEHIND_A_HEADING_AFTER_AN_ITEM = (
+    "> - Retired the legacy predicate in §4.5.\n"
+    "> ### **Owner approval of the exact changes** — given in-session, no comment cited.")
 
 
 # ⛔ THE BLOCK-LEVEL MARKERS THAT START A PARAGRAPH (review round 5):
@@ -3556,7 +3581,8 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         # ends in a full stop, so `_sentences` cut the label sentence down to `1.` and a
         # CITED ordered item — `1. **Owner approval …**: comment `6993778525`.` — was
         # refused for a missing citation that was in the sentence. `- `, `- [ ] `, `### `
-        # and `1) ` never had the problem; only the `\d+[.)]` family did.
+        # and `1) ` never had the problem; only the `.`-terminated ordered marker (`\d+\.`)
+        # did — `1)` is a member of `\d+[.)]` and `_sentences` keeps it whole.
         label = _sentences(_LEADING_LIST_MARKER_RE.sub("", record.strip()))[0]
         assert _CITATION_RE.search(label), (
             f"the changelog block {NO_RESOLVABLE_HOME_DIAGNOSIS} "
@@ -3664,6 +3690,13 @@ def _refuse_an_unresolvable_pointer(block: str) -> None:
     (``Each extractor keeps its own issue tracker``, ``their own issues list``) names a
     container rather than a home and is REFUSED — fail-CLOSED, driven by
     ``_POINTER_NAMING_A_CONTAINER`` below so the cost cannot be closed silently.
+    ⛔ AND A LIST ITEM IS A NEW PARAGRAPH BOUNDARY (#13669 merge, measured): the shared
+    reader now splits at every block-level marker, so a colon-led pointer whose number
+    sits in the NEXT item — ``Two of the defects are tracked as issues of their own:`` /
+    ``- #13450 — the stale sentence`` — is REFUSED where `main`'s fused read accepted it.
+    That follows this arm's per-paragraph scope, but a READER resolves it, so it is a
+    FALSE BLOCK and it is stated here rather than met as a bug; driven by
+    ``_POINTER_RESOLVED_IN_THE_NEXT_LIST_ITEM``.
     ⛔ AND ONE QUOTED SHAPE IS STILL REFUSED, named because the approval arm names its
     own: text inside a nested ``> > `` run is a QUOTATION OF DEFUNCT PROSE, not a claim
     this release makes, and this arm reads it as a claim — so an entry quoting the old
@@ -3851,6 +3884,9 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                             _APPROVAL_RECORD_BEHIND_A_CHECKED_TASK_LIST_BOX,
                             _APPROVAL_RECORD_AS_A_LATER_BULLET,
                             _APPROVAL_RECORD_AS_A_LATER_ORDERED_ITEM,
+                            _APPROVAL_RECORD_AS_A_LATER_ASTERISK_BULLET,
+                            _APPROVAL_RECORD_AS_A_LATER_PLUS_BULLET,
+                            _APPROVAL_RECORD_BEHIND_A_HEADING_AFTER_AN_ITEM,
                             _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS,
                             _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS,
                             _APPROVAL_RECORD_BEHIND_A_HEADING,
@@ -3999,6 +4035,11 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     with pytest.raises(AssertionError) as container_pointer:
         _refuse_an_unresolvable_pointer(_POINTER_NAMING_A_CONTAINER)
     _assert_refused_by(container_pointer, "_refuse_an_unresolvable_pointer")
+    # ⛔ AND THE MERGED READER'S NEW FALSE BLOCK IS DRIVEN (cycle 7): a pointer resolved by
+    # the NEXT list item is refused, which the pointer docstring names.
+    with pytest.raises(AssertionError) as next_item_pointer:
+        _refuse_an_unresolvable_pointer(_POINTER_RESOLVED_IN_THE_NEXT_LIST_ITEM)
+    _assert_refused_by(next_item_pointer, "_refuse_an_unresolvable_pointer")
 
 
 def test_the_approval_arm_refuses_a_bare_or_disclaimed_citation() -> None:
