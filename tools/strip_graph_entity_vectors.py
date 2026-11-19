@@ -1399,15 +1399,20 @@ def _load_plan(path: str, confirmed: str) -> dict:
     # same key twice. Measured against the FRAME, not the raw value: `1` and `1.0` are
     # equal under Python `==` but are two identities the removal matches separately.
     framed = [(label, _digest_key(key)) for label, key in entries]
-    repeated = sorted({label for label, frame in framed if framed.count((label, frame)) > 1})
+    seen_frames: set[tuple[str, str]] = set()
+    repeated: set[str] = set()
+    for label, frame in framed:
+        if (label, frame) in seen_frames:
+            repeated.add(label)
+        seen_frames.add((label, frame))
     if repeated:
         raise Refusal(
             REFUSE_PLAN_UNREADABLE,
-            f"the plan names the same node more than once on {', '.join(repeated)}. A "
+            f"the plan names the same node more than once on {', '.join(sorted(repeated))}. A "
             "digest describes a SET, so duplication cannot be seen in it — while the "
             "expected count would exceed the set it describes. Re-plan. Nothing was "
             "removed.")
-    # ⛔ A DUPLICATE LABEL ROW is invisible to the digest (`sorted(set(entries))`) and makes
+    # ⛔ A DUPLICATE LABEL ROW is invisible to the digest (it describes a SET) and makes
     # the removal strip the same label twice with a reset counter. Refused here because a
     # plan this tool did not print is not the approved artefact.
     rows = plan.get("labels") or []
