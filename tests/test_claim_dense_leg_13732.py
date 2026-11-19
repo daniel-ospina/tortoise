@@ -35,7 +35,8 @@ later run must not be free to choose after it sees the numbers:
 4. **the contradiction test, as a structural pin** — the dense leg comes FROM
    THE RECORD (`#11481` V1: Postgres is the record, FalkorDB is the projection).
    The instrument must therefore never create a graph vector index nor seed
-   record rows; an AST scan refuses either. A future lane that "fixes" the
+   record rows; an AST scan over its CODE literals refuses either. A future lane
+   that "fixes" the
    measurement by indexing `:Object` on the graph would be reversing a landed
    decision, and this test is where that shows up.
 
@@ -602,6 +603,40 @@ class TestRecordMembership:
 # ── 6. the contradiction test, structurally ───────────────────────────────
 
 
+def _code_string_literals(tree: ast.AST) -> list[str]:
+    """Every string LITERAL the module can hand to an engine — docstrings out.
+
+    ⛔ THIS is the scan, not ``snippet in source``: a source-level substring
+    cannot tell a Cypher read from a comment ABOUT that read, so it reds on the
+    prose that explains the refusal while never distinguishing it from the
+    executable string that would actually reverse the decision.
+
+    Covered by construction: an f-string contributes its literal fragments as
+    ``Constant`` nodes, and the parser folds adjacent literals into ONE constant,
+    so ``f"CREATE VECTOR INDEX {name}"`` and ``"CREATE VECTOR " "INDEX"`` are
+    both seen. Residual, stated rather than implied: two constants joined by
+    ``+`` at RUNTIME are not folded, and no literal scan can see that.
+    """
+    docstrings = {
+        ast.get_docstring(node, clean=False)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value not in docstrings
+    ]
+
+
+def _forbidden_snippets(source: str, snippets: tuple[str, ...]) -> list[str]:
+    """Which forbidden snippets appear in ``source``'s CODE string literals."""
+    literals = _code_string_literals(ast.parse(source))
+    return [snippet for snippet in snippets if any(snippet in lit for lit in literals)]
+
+
 class TestContradictionTest:
     """Postgres is the record; FalkorDB is the projection (`#11481` V1).
 
@@ -621,14 +656,42 @@ class TestContradictionTest:
     )
 
     def test_the_instrument_creates_no_graph_vector_index_and_seeds_no_rows(self):
-        source = TOOL.read_text()
-        ast.parse(source)  # it must at least be a module
-        for snippet in self.FORBIDDEN_SNIPPETS:
-            assert snippet not in source, (
-                f"{snippet!r} appears in the instrument — the dense leg comes from "
-                f"the RECORD (#11481 V1), and a graph vector index here would "
-                f"reverse a landed decision inside a measurement tool"
-            )
+        found = _forbidden_snippets(TOOL.read_text(), self.FORBIDDEN_SNIPPETS)
+        assert not found, (
+            f"{found} appear in the instrument's CODE — the dense leg comes from "
+            f"the RECORD (#11481 V1), and a graph vector index here would "
+            f"reverse a landed decision inside a measurement tool"
+        )
+
+    def test_the_scan_reads_code_literals_and_not_comments_or_prose(self):
+        """The claim is "an AST scan" — pin what that buys, in BOTH directions.
+
+        ⛔ An earlier cut asserted ``snippet not in source`` and the PR body still
+        called it an AST scan: a substring over the file reds on a COMMENT or a
+        docstring that explains the refusal (the prose is where a reader learns
+        which index must stay on the record), which is a false block on correct
+        code, and it treats prose and executables as the same event. The scan
+        reads the literals the interpreter would hand to an engine.
+        """
+        snippet = "CREATE VECTOR INDEX"
+        prose = (
+            '"""Module prose: this instrument never issues CREATE VECTOR INDEX."""\n'
+            "# a comment may name CREATE VECTOR INDEX too — that is not a write\n"
+            "def f():\n"
+            '    """Function prose: CREATE VECTOR INDEX.\n'
+            '"""\n'
+            "    return 1\n"
+        )
+        assert _forbidden_snippets(prose, (snippet,)) == []
+        assert _forbidden_snippets('def f():\n    return "CREATE VECTOR INDEX "\n', (snippet,)) == [
+            snippet
+        ]
+        assert _forbidden_snippets(
+            'def f(name):\n    return f"CREATE VECTOR INDEX {name}"\n', (snippet,)
+        ) == [snippet]
+        assert _forbidden_snippets(
+            'def f():\n    return "CREATE VECTOR " "INDEX"\n', (snippet,)
+        ) == [snippet]  # adjacent literals fold into ONE constant
 
     def test_it_reads_the_record_leg_through_its_own_seam(self):
         """The arm is switched by the module that owns the switch, not re-spelt.
@@ -639,20 +702,8 @@ class TestContradictionTest:
         reads.
         """
         source = TOOL.read_text()
-        tree = ast.parse(source)
         assert "record_vector.ARMING_ENV" in source
-        docstrings = {
-            ast.get_docstring(node, clean=False)
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
-        }
-        literals = [
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and node.value not in docstrings
-        ]
+        literals = _code_string_literals(ast.parse(source))
         assert not [lit for lit in literals if "TORTOISE_RECORD_VECTOR_LEG" in lit], (
             "the env var is spelled in CODE as well as in prose — it must be read "
             "through record_vector.ARMING_ENV only"
