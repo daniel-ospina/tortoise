@@ -6606,14 +6606,6 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ And an earlier cut of this comment carried the PRE-`#13589` pair
         # (`:15225`/`:15254`/`:15264`/`:15302`), which names different statements at this
         # head — every one of those four was re-measured against the tree, not inferred.
-        # ⛔ RE-DERIVED AGAIN at `origin/main` `09f5c99afd`, where this pin was RED — `main`'s
-        # `c3309ec656` (`#13819`, the embedder load bound on `/health`) inserts 66 lines above
-        # `org_info`, so the span is `:15328-15405` at this head (+66 at BOTH ends, no other
-        # change). The three offsets (+29 `nodes_used`, +39 `max_nodes`, +77 END) STILL hold
-        # EXACTLY from that START — `:15357`, `:15367`, and the blank line `:15405` immediately
-        # before `return OrgInfoResponse(` at `:15406` — which is what makes this a
-        # re-derivation rather than a two-number bump. Measured with the three greps this
-        # comment names, at `09f5c99afd`, on a tree where the pin above was already red.
         #
         # The `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span
