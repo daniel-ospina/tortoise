@@ -188,14 +188,14 @@ warning shim with `None` schemas and are excluded because they are not advertise
 One annotation cannot honestly describe that. That heterogeneity is the real reason the
 annotation is `Any`, and it is what makes the re-wrap cost asymmetric.
 
-### 1.4 `NO_CONTAINER_YET` — the nine destinations, verified live-or-not
+### 1.4 `NO_CONTAINER_YET` — the seven doors, verified live-or-not
 
 Checked against `TOOL_REGISTRY` **and** `TortoiseSDK` (the pointer must resolve to a live MCP
 door, per `TestEveryPointerResolvesInOneHop`):
 
 | door | destination | MCP door live? | SDK method exists? |
 |---|---|---|---|
-| `tortoise_delete`, `tortoise_delete_point`, `tortoise_delete_entity` | `delete_knowledge` | **no** | yes |
+| `tortoise_delete` | `delete_knowledge` | **no** | yes |
 | `tortoise_create_edge`, `tortoise_create_operator` | `link_entities` | **no** | yes |
 | `tortoise_events_poll` | `poll_events` | **no** | yes |
 | `tortoise_ingest` | `sdk:write_knowledge_batch` | **no** | **no — does not exist** |
@@ -203,8 +203,19 @@ door, per `TestEveryPointerResolvesInOneHop`):
 | `tortoise_list_graphs` | `tenancy:list_memory_graphs` | **no** | yes (`org_id`-scoped) |
 | `tortoise_org_create` / `list_graphs` note | `tenancy:` = hosted API router, not an MCP door | — | — |
 
-**Verdict: all nine reasons hold.** Not one destination is an MCP door today, so none is
-retirable and none of the nine is unblocked by this lane. (`delete_knowledge`/`link_entities`/
+⛔ **THIS TABLE HELD NINE DOORS WHEN IT WAS WRITTEN, AND TWO OF THEM LEFT IN #11609 LANE P6.**
+`tortoise_delete_point` / `tortoise_delete_entity` shared the `delete_knowledge` row here; the
+owner's **#9660** ruling executes that row by KEEPING `tortoise_delete` — which was ALREADY
+live — and WIDENING it (`TortoiseSDK.delete` dispatches by label), so both doors retired FORWARD
+into that kept entry. ⛔ Their recorded destination was and is `delete_knowledge`, which is still
+NOT an MCP door: that is why `tortoise_delete` itself stays in the table above and in
+`NO_CONTAINER_YET`, and why this row count moving 9 → 7 does not falsify the verdict below. The
+population is now 7, pinned by `NO_CONTAINER_YET` in `tests/test_11609_door_retirement.py`
+(10 `PROTECTED` + 7 = the 17 live names off the 27-target) and by `NO_CONTAINER_DESTINATIONS`
+in `tests/test_11609_structural_blockers.py`.
+
+**Verdict: all seven reasons hold.** Not one destination is an MCP door today, so none is
+retirable and none of the seven is unblocked by this lane. (`delete_knowledge`/`link_entities`/
 `poll_events` existing as *SDK methods* does not help: a retirement pointer inside
 `TOOL_REGISTRY` must name a live **tool**, and `tools/bridge_table.py`'s `DESTINATION` map is
 what `_destination()` asserts against.)
@@ -365,7 +376,7 @@ mechanical step:
 - the envelope half needs a `structuredContent` change on six live tools ⇒ approval;
 - the route half needs **no change at all** — the coupling it was written against does not
   exist (§1.5), which is a finding to report, not a change to make;
-- all nine `NO_CONTAINER_YET` destinations are still not MCP doors ⇒ nothing to unblock.
+- all seven `NO_CONTAINER_YET` destinations are still not MCP doors ⇒ nothing to unblock.
 
 What **is** implemented is the executable pin the plan rests on —
 `tests/test_11609_structural_blockers.py` — so that the blockers, the cost and the route
@@ -404,9 +415,11 @@ is the finding that removed three steps from the plan.
 | **S2** | retire those 9 in S1's batch; move them out of `PROTECTED` (12 → 3) in the same change | the 9 above | follows S1 |
 | **S3** | retire `tortoise_issue_insight` and `tortoise_session_context` — **no route work**, because the `rest_spec` reason is stale (§1.5) | `issue_insight`, `session_context` (**2**) | 27/40 ruling batch; update `PROTECTED` with the evidence |
 | **S4** | re-point `paginated_query` / `query_points_by_tag`, then retire `query` | `query` (**1**) | migration decision |
-| **S5** | land the six missing destinations (`delete_knowledge`, `link_entities`, `poll_events`, `write_knowledge_batch`, `create_memory_graph`, `list_memory_graphs`) | the 9 `NO_CONTAINER_YET` | out of scope here |
+| **S5** | land the six missing destinations (`delete_knowledge`, `link_entities`, `poll_events`, `write_knowledge_batch`, `create_memory_graph`, `list_memory_graphs`) | the 7 `NO_CONTAINER_YET` | out of scope here |
 
 Twelve structural doors: **9 in S1/S2** (8 envelope-only + `search`), **2 in S3** (stale
-reason, no work), **1 (`query`) in S4**. Nine `NO_CONTAINER_YET`: all in S5. Nothing is retired
+reason, no work), **1 (`query`) in S4**. Seven `NO_CONTAINER_YET` (nine when this plan was
+written; #11609 lane P6 retired `delete_point`/`delete_entity` forward on the #9660 ruling,
+§1.4): all in S5. Nothing is retired
 by this change, and no door is removed from `PROTECTED` — none of S1–S4 is implemented, so
 none of the twelve reasons has been *acted on* yet (one has been shown false, and is reported).
