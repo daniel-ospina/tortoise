@@ -11490,7 +11490,7 @@ def test_the_sync_step_honours_the_mitigation_ledger():
     # must anchor on the leading AND trailing space: the `case` matches by the
     # ARG's name, so without the delimiters an ENTRY for the LONGER name also
     # matches the SHORTER arg. This payload really carries `TORTOISE_BACKUP_KEY`
-    # next to `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1214 / :1219, pinned
+    # next to `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1231 / :1236, pinned
     # by `test_every_citation_of_the_backup_key_pair_resolves`), and
     # `TORTOISE_BACKUP_KEY_PREVIOUS` is the entry an operator is most likely to
     # write after a rotation — so the LIVE key would silently stop syncing on every

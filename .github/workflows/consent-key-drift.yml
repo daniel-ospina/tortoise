@@ -286,11 +286,13 @@ jobs:
             echo
             echo 'Then re-run `uv run python tools/consent_key_check.py` and require `AGREE`.'
             echo
-            echo '⛔ **BETWEEN STEP 1 AND STEP 3 THIS ALERT IS EXPECTED.** Pages bakes env at deploy time,'
-            echo 'so a correct rotation reads as `MISMATCH` for exactly as long as it takes to redeploy'
-            echo 'Pages. That is the rotation in progress, not a second regression — finish step 3 rather'
-            echo 'than re-rotating. (§2.5 states the same thing, so the alert and the runbook cannot'
-            echo 'disagree.)'
+            echo '⛔ **ON THE SINGLE-SECRET PATH, BETWEEN STEP 1 AND STEP 3 THIS ALERT IS EXPECTED.** Pages'
+            echo 'bakes env at deploy time, so a correct value swap reads as `MISMATCH` for exactly as long'
+            echo 'as it takes to redeploy Pages. That is the rotation in progress, not a second regression —'
+            echo 'finish step 3 rather than re-rotating. ⛔ Under a `kid` set it reads `MISMATCH` only while'
+            echo 'the two halves CURRENT kid key BYTES differ; a kid-only split reads `AGREE`, which does'
+            echo 'NOT mean the halves can complete a flow (§2.3). (§2.5 states the same thing, so the alert'
+            echo 'and the runbook cannot disagree.)'
             echo 'See `docs/engineering/auth/consent-identity-bridge.md` §2.5.'
             echo
             echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

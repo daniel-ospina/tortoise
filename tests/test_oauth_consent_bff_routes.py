@@ -346,6 +346,13 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   if (opts.issuer !== undefined) e.CONSENT_TOKEN_ISSUER = opts.issuer;
   if (opts.appOrigin !== undefined) e.APP_ORIGIN = opts.appOrigin;
   if (opts.asOrigin !== undefined) e.CONSENT_AS_ORIGIN = opts.asOrigin;
+  // The KEY-SET deployment (#10794): the mint's `kid` and its signing bytes both come from this
+  // variable. Without an opt that can set it, EVERY executed mint runs the legacy single-secret
+  // branch, so `const kid = consentCurrentKid(env);` in `token.ts` was unpinned — deleting that
+  // line left the whole suite green while the header named `consent-1` and the HMAC used another
+  // key (the #10488 silent split, one field along).
+  if (opts.keys !== undefined) e.CONSENT_TOKEN_KEYS = opts.keys;
+  if (opts.currentKid !== undefined) e.CONSENT_TOKEN_CURRENT_KID = opts.currentKid;
   const headers = scenario === "mint_no_session" ? {} : { Cookie: "__Host-session=handle-1" };
   if (scenario === "mint_cross_origin") headers.Origin = "https://evil.example";
   const mintBody = opts.omitKey ? { state: "state-xyz" } : { state: "state-xyz", attempt_key: MINT_KEY };
@@ -458,6 +465,39 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   out.cases = cases;
   out.status = cases[0].status;
   out.body = cases[0].body;
+} else if (scenario === "attempt_key") {
+  // #10794 — the SIGNED attempt key, across the two halves in BOTH directions. The Python half mints
+  // (the AS does), the TypeScript half verifies (the app does), and the reverse is checked too
+  // because BOTH halves mint: `start` has to invent a signed key when it is handed none, or the
+  // next leg of the same flow would refuse it.
+  const bridge = await import(CONSENT + "/../../_shared/auth/consent-bridge.ts");
+  out.cases = [];
+  for (const [label, value] of Object.entries(opts.values || {})) {
+    out.cases.push({ label, verified: await bridge.verifyAttemptKey(env({}), value) });
+  }
+  out.minted = await bridge.mintAttemptKey(env({}));
+} else if (scenario === "key_set") {
+  // #10794 — the KEY-SET PARSER, on both halves, over the same table of env shapes. The two
+  // implementations are separate code in separate languages and they decide WHICH BYTES a kid
+  // names; a one-sided edit makes a rotation mint under one key and verify under another, which
+  // presents as `401 invalid_token` on every redemption with no other symptom. So the shapes (not
+  // the results) are the input and the Python half answers the same table in the test.
+  const bridge = await import(CONSENT + "/../../_shared/auth/consent-bridge.ts");
+  out.cases = (opts.shapes || []).map((shape) => {
+    const e = {};
+    if (shape.keys !== undefined) e.CONSENT_TOKEN_KEYS = shape.keys;
+    if (shape.current !== undefined) e.CONSENT_TOKEN_CURRENT_KID = shape.current;
+    if (shape.secret !== undefined) e.CONSENT_TOKEN_SECRET = shape.secret;
+    const set = bridge.consentKeySet(e);
+    return {
+      label: shape.label,
+      kids: set ? [...set.keys.keys()] : null,
+      current: set ? set.currentKid : null,
+      signingSecret: set ? (set.keys.get(set.currentKid) ?? null) : null,
+      secret: bridge.consentSecret(e) ?? null,
+      mintKid: bridge.consentCurrentKid(e) ?? null,
+    };
+  });
 } else if (scenario.startsWith("start_")) {
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
@@ -1154,6 +1194,44 @@ def test_a_token_minted_by_the_bff_is_accepted_by_the_AS(monkeypatch) -> None:
     assert assertion["email"] is None, "email is display-only and must not be invented"
 
 
+def test_the_mint_stamps_the_CURRENT_kid_and_the_AS_verifies_it_under_the_same_set(monkeypatch) -> None:
+    """`token.ts`'s `kid` line is LOAD-BEARING, and this is the only arm that executes it.
+
+    A key set on both halves makes the minter stamp the CURRENT kid and sign with that kid's bytes.
+    If the route stamps anything else — `LEGACY_KID` via a deleted `const kid = consentCurrentKid(env);`
+    — the AS selects a key by a name it does not hold and answers `401 invalid_token` on every
+    redemption while the mint still answers `200`: the #10488 silent split, one field along, and
+    invisible to the fingerprint (§2.5). Every other mint scenario builds its env through `env()`,
+    which never sets `CONSENT_TOKEN_KEYS`, so `input.kid ?? LEGACY_KID` answered `"consent-1"` with
+    or without that line — the mutant left the whole suite green, which is why the pin exists.
+    """
+    keys = f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}"
+    monkeypatch.setenv("CONSENT_TOKEN_KEYS", keys)
+    monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", "new")
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", _ISSUER)
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+
+    out = _run("mint_ok", keys=keys, currentKid="new")
+    assert out["status"] == 200, out
+    token = out["body"]["token"]
+
+    import base64
+
+    header_seg = token.split(".")[0]
+    header = json.loads(base64.urlsafe_b64decode(header_seg + "=" * (-len(header_seg) % 4)))
+    assert header["kid"] == "new", (
+        f"the mint stamped kid {header['kid']!r} while resolving its signing key from a set whose "
+        "current kid is 'new' — the AS selects the verification key BY that name, so every "
+        "redemption would be refused with the mint still answering 200")
+
+    # …and the OTHER half accepts it, under the same set: the stamp and the bytes agree ACROSS the
+    # two languages, which is the property the split breaks and neither half can check alone.
+    from tortoise.consent_token import verify_consent_token
+
+    assertion = verify_consent_token(token, presented=_presented())
+    assert assertion["sub"] == "user-1"
+
+
 def _issuer_claim(token: str) -> str:
     """The minted token's `iss`, decoded but unverified — the exact bytes the AS compares."""
     import base64
@@ -1671,7 +1749,7 @@ def test_a_GENUINE_DDL_fault_PROPAGATES_and_the_duplicate_column_does_not() -> N
         f"`duplicate column name` was PROPAGATED, so an already-evolved database could never mint: {evolved}")
 
 
-def test_the_keys_HOLDER_renews_the_attempt() -> None:
+def test_the_keys_HOLDER_renews_the_attempt(monkeypatch) -> None:
     """The mirror of the test below, and the half nothing pinned.
 
     `CONSENT_ATTEMPT_TTL_S` exists to outlive the sign-in round trip, and the return leg's renewal
@@ -1682,8 +1760,14 @@ def test_the_keys_HOLDER_renews_the_attempt() -> None:
     """
     # The hash is plain SHA-256 hex — computed here independently of the shipped helper, so this
     # also pins the digest choice the row is keyed on.
+    #
+    # ⛔ The key is a MINTED one (#10794): `expires_at` is refreshed only when the presented key
+    # proves ownership, and `start.ts` now establishes that with a MAC. An arbitrary literal here
+    # would be treated as absent — the row would not renew, and this test would red for a reason it
+    # is not about (the refusal arm has its own test).
     import hashlib
-    from_hash = hashlib.sha256(b"holder-key").hexdigest()
+    holder_key = _as_minted_key(monkeypatch)
+    from_hash = hashlib.sha256(holder_key.encode()).hexdigest()
     seeded = [{
         "state": "state-xyz", "client_id": "client-abc",
         "redirect_uri": "https://client.example/cb",
@@ -1692,7 +1776,7 @@ def test_the_keys_HOLDER_renews_the_attempt() -> None:
         "created_at": 0, "expires_at": 1_000, "attempt_key_hash": from_hash,
     }]
     out = _run("start_signed_in", seededAttempts=seeded, sessionUserId="user-1",
-               params=dict(_PARAMS, attempt_key="holder-key"))
+               params=dict(_PARAMS, attempt_key=holder_key))
     row = out["attempts"][0]
     assert row["expires_at"] > 1_000, (
         "the key's HOLDER did not renew the attempt — a sign-in round trip that outlives the TTL "
@@ -2001,7 +2085,26 @@ def _key_from(location: str | None) -> str:
     return keys[0]
 
 
-def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes() -> None:
+def _as_minted_key(monkeypatch) -> str:
+    """A SIGNED attempt key (#10794), minted the way the AS mints it.
+
+    ⛔ THE SECRET IS THE ONE THE DRIVER'S ENV HOLDS (`_TEST_SECRET`), and that is the point: the key
+    is verified by the app half under node, so a key minted here with any other bytes would be
+    refused there and the test would prove nothing about adoption. Setting it explicitly also pins
+    the CROSS-HALF agreement the fix rests on — Python signs, TypeScript verifies, same bytes.
+    """
+    from tortoise import consent_token
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+    minted = consent_token.mint_attempt_key()
+    assert consent_token.verify_attempt_key(minted) is not None, (
+        f"the fixture minted a key the PYTHON half will not verify: {minted!r}")
+    return minted
+
+
+def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes(monkeypatch) -> None:
     """The JOINT seam: the bounce URL the AS actually emits, fed to the route that must adopt it.
 
     The two halves are pinned separately (the bounce carries a key; `start` adopts a presented
@@ -2012,6 +2115,15 @@ def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes() -> 
     is lost or shadowed on the way in.
     """
     from tortoise.oauth import consent_bounce_url
+
+    # ⛔ THE TWO HALVES MUST HOLD THE SAME KEY for the AS-minted value to be adoptable (#10794): the
+    # bounce is signed with THIS process's key and verified under node against the driver's
+    # `CONSENT_TOKEN_SECRET`, which is `_TEST_SECRET`. Before the key was signed this did not matter
+    # — anything non-empty was adopted. Now a split here is exactly what the fix detects, so the test
+    # states the shared key rather than inheriting whatever the host happens to export.
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
 
     emitted = consent_bounce_url("https://app.premiselabs.co", urllib.parse.urlencode(_PARAMS))
     inner_url = urllib.parse.parse_qs(urllib.parse.urlsplit(emitted).query)["next"][0]
@@ -2041,7 +2153,7 @@ def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes() -> 
     assert back["attempts"][0]["user_id"] == "user-1"
 
 
-def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> None:
+def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return(monkeypatch) -> None:
     """#10487: the key must belong to the FLOW, not to one URL the route happened to emit.
 
     Measured in production: a visitor who signed in during the flow came back through the AS
@@ -2051,23 +2163,24 @@ def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> Non
     only leg where none exists yet), and this pins the half that makes that work: a PRESENTED key
     is ADOPTED on the insert rather than replaced by a freshly generated one.
 
-    Non-vacuity: this is a PIN, not the fix's proof. `presentedKey || newAttemptKey()` predates
-    this PR — `website/` is not in its diff at all — so this test passes on the PRE-FIX tree. Its
-    sensitivity is to the browser-side code the harness executes (`start.ts`, the
-    `consent-bridge.ts` store, and the `_shared/auth` modules they import) — given as a CATEGORY
-    on purpose, because two earlier cuts of this sentence named a finite set and each was
-    falsified by the next file measured. The fix's proof is
-    `test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes` above: it crosses the
-    AS→app seam and `KeyError`s on `attempt_key` without the AS mint (measured: reverting
-    `consent_bounce_url` to `origin/main`'s no-mint form reds that test and leaves this one green).
+    ⛔ RE-STATED BY #10794, and the re-statement is the whole reason this test exists twice in
+    different clothes. The presented value below USED TO BE an arbitrary 29-character string,
+    because `start.ts` adopted whatever it was handed — which is the defect. It is now a KEY THE AS
+    MINTED (a MAC over its random part, under the same secret the app half holds), and the ADOPTION
+    this test pins is now conditional on exactly that. What the test asserts is unchanged: a
+    presented key survives the insert and the return leg. What moved is what a "presented key" can
+    be, and the sibling below (`test_start_refuses_a_presented_key_the_AS_did_not_mint`) is the
+    other half of that biconditional — one test would be satisfied by adopting everything, the
+    other by adopting nothing.
 
-    ⛔ NO PYTHON IN THAT LIST, deliberately: `_run` spawns ONE process (`node driver.mjs`), and the
-    TS modules call no Python, so `tortoise/consent_token.py` drift cannot red THIS test. An
-    earlier cut of this paragraph claimed "the Python verifier they call" and that was false on
-    all three of its own terms — not browser-side, not called by them, not executed here. The
-    cross-language half is pinned by the arms that actually import the verifier, not here.
+    Non-vacuity: this one is a PIN, not the fix's proof — and it cannot even RUN on the PRE-FIX tree,
+    in either direction. `_as_minted_key` calls `consent_token.mint_attempt_key()`, which does not
+    exist there (`git show origin/main:tortoise/consent_token.py | grep -c mint_attempt_key` → 0),
+    so the pre-fix tree raises `AttributeError` rather than passing. The fix's proof is the refusal
+    test (`test_start_refuses_a_presented_key_the_AS_did_not_mint`), which reds on that tree because
+    `start.ts` adopted whatever it was handed.
     """
-    presented = "ak-as-minted-0123456789abcdef"
+    presented = _as_minted_key(monkeypatch)
     first = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=presented))
     assert first["status"] == 302, first
     assert _key_from(first["location"]) == presented, (
@@ -2409,81 +2522,91 @@ def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> Non
     )
 
 
-def test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close() -> None:
-    """#10790 review (P2): the THIRD residual must point at an OPEN home too.
+def test_the_whitespace_attempt_key_residual_is_CLOSED_and_says_so(monkeypatch) -> None:
+    """#10790 review (P2) → RE-STATED by #10794: the arm is closed, and the record must move.
 
-    `presented_consent_attempt_key`'s docstring records a residual the AS hop does
-    not close: the page and `start.ts` do not strip, so a whitespace
-    `attempt_key` presented STRAIGHT to `/api/consent/start` — bypassing the AS —
-    is still adopted verbatim (`start.ts::presentedKey || newAttemptKey()`).
-    That residual was written down on #10487,
-    which this fold retires, so the docstring points a reader at #10884 instead.
+    THE RESIDUAL THIS PINNED, verbatim from the version before #10794: "`presented_consent_attempt_key`'s
+    docstring records a residual the AS hop does not close: the page and `start.ts` do not strip, so a
+    whitespace `attempt_key` presented STRAIGHT to `/api/consent/start` — bypassing the AS — is still
+    adopted verbatim (`start.ts::presentedKey || newAttemptKey()`)."
 
-    A pointer is a CLAIM, and the previous review found it was one the artifact
-    did not support: #10884's body recorded the store-fault arm and the
-    keyless-re-entry hole, but not this one. The body now carries it (the
-    decision-relay rule: record the answer where the next lane reads it).
+    That is now FALSE BY CONSTRUCTION: `start.ts` adopts a presented key only when its MAC verifies,
+    so `%20` (or any other value nobody minted) verifies nowhere and is replaced by a MINTED one. The
+    biconditional is therefore re-stated in the direction the new code runs:
 
-    The assertion is a BICONDITIONAL, so the guard cannot rot into a tautology
-    either way: while `start.ts` still adopts a presented key unstripped, the
-    docstring must name the OPEN home; once the adoption strips (or refuses a
-    blank one), the note must be DELETED rather than re-pointed.
+      * the GATE must exist in `start.ts` while the docstring claims the arm is closed → RED if the
+        verification is ever removed (the claim would become the lie this pin exists for);
+      * a well-formed CHOSEN key is proved to be refused END TO END below, so "the gate exists" is
+        not being read as "the gate works".
+
+    ⛔ NOT a deletion and not a weakening: the previous version could be satisfied by a docstring
+    sentence alone. This one requires the shipped code to carry the gate AND requires the behaviour
+    to be measured, which is the only form of this claim that can fail.
     """
     start_ts = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
-    adopted_verbatim = (
-        'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";'
-        in start_ts
+    adopts_verbatim = (
+        'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";' in start_ts
         and "const attemptKey = presentedKey || newAttemptKey();" in start_ts
     )
+    gated_by_a_mac = (
+        "const verifiedPresented = await verifyAttemptKey(env, presentedKey);" in start_ts
+        and "await mintedAttemptKey(env)" in start_ts
+    )
+    assert not adopts_verbatim, (
+        "start.ts still adopts a presented attempt key WITHOUT verifying it — that is the #10794 "
+        "defect (a caller choosing a flow's key), and no docstring can close it")
 
-    # Read the emitting predicate's own docstring, not the module: the pointer
-    # lives beside the predicate a reader lands on when they ask what "present"
-    # means on this hop.
     source = (REPO / "tortoise" / "oauth.py").read_text(encoding="utf-8")
     start = source.index("def presented_consent_attempt_key")
     end = source.find("\ndef ", start + 1)
     docstring = source[start:end if end != -1 else len(source)]
-    declared = "#10884" in docstring
+    declares_it_closed = "THE WHITESPACE ARM IS CLOSED by #10794" in docstring
 
-    assert adopted_verbatim == declared, (
-        "the whitespace-attempt-key residual and its declared home disagree "
-        f"(#10487 is retired; its open home is #10884): "
-        f"start_ts_adopts_a_presented_key_unstripped={adopted_verbatim}, "
-        f"docstring_names_the_open_home={declared}. If the residual is present, keep "
-        "#10884 in `presented_consent_attempt_key`'s docstring AND in #10884's body; "
-        "if it was fixed, DELETE the note instead of re-pointing it."
+    # ⛔ ONE assertion, so both directions of the claim are REACHABLE (#13721 review, rule 3).
+    # A separate unconditional `assert gated_by_a_mac` above this line made the "gate removed ⇒ the
+    # sentence must go" direction unreachable — it fired first, and what survived was equivalent to
+    # `assert declares_it_closed`. The gate's EXISTENCE is not lost by folding: it is measured
+    # behaviourally a few lines down (a well-formed CHOSEN key must not become the row's key), which
+    # is the only form of that claim a source-shape check could not substitute for anyway.
+    assert gated_by_a_mac == declares_it_closed, (
+        "the whitespace-arm record and the code disagree: "
+        f"start_ts_gates_adoption_by_a_mac={gated_by_a_mac}, "
+        f"docstring_declares_the_arm_closed={declares_it_closed}. Both directions are the claim: "
+        "while the gate exists the docstring must say the arm is closed; if the gate is removed the "
+        "sentence must go rather than stand as a false claim."
     )
+
+    # …and the behaviour, not just the source shape: a well-formed CHOSEN key — 43 chars, exactly
+    # what a shape check would accept — must NOT become the row's key.
+    chosen = "a" * 43
+    out = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=chosen))
+    assert out["status"] == 302, out
+    assert _key_from(out["location"]) != chosen, (
+        "a client-CHOSEN key was adopted as the flow's key — RFC 9126 §2 says the flow reference "
+        "must not be client-chosen, and this is the one assertion that measures it end to end")
+    import hashlib
+    assert out["attempts"][0]["attempt_key_hash"] != hashlib.sha256(chosen.encode()).hexdigest(), (
+        "the row is keyed on the value the CLIENT chose: whoever chose it owns the flow")
 
 
 def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -> None:
-    """#10790 review (P2): the security record must not state an absolute the code falsifies.
+    """#10790 review (P2) → RE-STATED by #10794: the entry leg STILL mints, and the record says so.
 
-    `docs/engineering/auth/consent-identity-bridge.md` described the delivered rule
-    as "…ADOPTED by `/api/consent/start` on the insert — the entry leg no longer
-    invents one". The entry leg still invents one: `start.ts` still has
+    `docs/engineering/auth/consent-identity-bridge.md` described the delivered rule as "…ADOPTED by
+    `/api/consent/start` on the insert — the entry leg no longer invents one". It still does: when
+    `start` is handed no key, or a key it cannot verify, it mints one (`mintedAttemptKey`, now SIGNED
+    so the NEXT leg of the same flow accepts it — an unsigned replacement would be refused by the very
+    check this change adds, rebuilding the #10487 dead end). That IS the residual: a caller can begin
+    a flow holding a key only it has, the first-mover dead end tracked on #10884/#10865. A record that
+    denied it would make the residual read narrower than it is.
 
-        const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";
-        const attemptKey = presentedKey || newAttemptKey();
-
-    and `newAttemptKey()` mints 32 CSPRNG bytes. No earlier guard in `onRequestGet`
-    requires a presented key, so a request presented straight to `/api/consent/start`
-    (bypassing the AS) is handed a fresh key — exactly the residual the pins below
-    on `presented_consent_attempt_key` call "the direct-to-`start` residual".
-
-    A wrong absolute in the *delivered security rule* is not cosmetic: the reader
-    concludes no entry-leg-minted key can exist, so the residual tracked OPEN on
-    #10884 reads narrower than it is ("only adopts a whitespace key verbatim",
-    never "mints one when handed none") and the next lane reasons about the
-    ownerless window from a code shape that is not in the tree.
-
-    BICONDITIONAL, so it cannot rot into a tautology in either direction: while
-    `start.ts` mints on the empty path the record MUST say so; once that path is
-    removed, the sentence must be deleted rather than left standing.
+    BICONDITIONAL, re-stated for the new code shape: while the fallback mint exists the record MUST
+    name it; once that path is removed, the sentence must be DELETED rather than left standing.
     """
     start_ts = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
     mints_when_handed_none = (
         'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";' in start_ts
-        and "const attemptKey = presentedKey || newAttemptKey();" in start_ts
+        and "await mintedAttemptKey(env)" in start_ts
     )
 
     doc = (
@@ -2491,11 +2614,11 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
     ).read_text(encoding="utf-8")
 
     assert "the entry leg no longer" not in doc, (
-        "the bridge record claims the ENTRY leg stopped minting an attempt key, but "
-        "`start.ts::presentedKey || newAttemptKey()` still does, and no "
-        "guard before it requires a presented key. Restore the qualifier — the entry "
-        "leg mints one when it is handed none (the direct-to-`start` residual on "
-        "#10884/#10865) — instead of stating an absolute the code falsifies.")
+        "the bridge record claims the ENTRY leg stopped minting an attempt key, but `start.ts` "
+        "still mints one (`await mintedAttemptKey(env)`) when it is handed none or cannot verify "
+        "what it was handed. Restore the qualifier — the entry leg mints one when it is handed none "
+        "(the direct-to-`start` residual on #10884/#10865) — instead of stating an absolute the "
+        "code falsifies.")
 
     declares_the_residual = (
         "the entry leg still mints one when it is handed none" in doc
@@ -2503,9 +2626,9 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
     assert mints_when_handed_none == declares_the_residual, (
         "the entry-leg mint and the record disagree: "
         f"start_ts_mints_when_handed_none={mints_when_handed_none}, "
-        f"record_states_the_residual={declares_the_residual}. While `start.ts` has the "
-        "`||newAttemptKey()` fallback the record must name it; if the fallback is "
-        "removed, DELETE the sentence instead of leaving a stale claim."
+        f"record_states_the_residual={declares_the_residual}. While `start.ts` mints a key it was "
+        "not handed the record must name it; if that path is removed, DELETE the sentence instead "
+        "of leaving a stale claim."
     )
 
 
@@ -2678,3 +2801,225 @@ def test_the_key_route_answers_every_non_GET_verb_itself() -> None:
         assert cases[label]["nextCalled"] is False, (
             f"{label} was handed to next() — the asset server's 404 is what this arm prevents"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #10794 — the `kid`-keyed key set, CROSS-HALF
+#
+# `CONSENT_TOKEN_KEYS` is parsed twice, in two languages: `consent_token.py::parse_consent_token_keys`
+# (the AS, which VERIFIES) and `consent-bridge.ts::consentKeySet` (the app, which MINTS). They decide
+# which BYTES a kid names. A one-sided edit — a trimmed secret, a different split, a different
+# fallback kid — makes a rotation mint under one key and verify under another, and the symptom is
+# `401 invalid_token` on every redemption with the mint still answering 200 (the #10488 class, one
+# field along). So the TABLE below is the input to both implementations and the assertions compare
+# their answers, rather than each half being checked against itself.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_KEY_SET_OLD = "consent-key-OLD-0123456789abcdef0123456789abcdef"
+_KEY_SET_NEW = "consent-key-NEW-0123456789abcdef0123456789abcdef"
+
+#: Every shape an operator (or a typo) can present. Literal on purpose: a computed set would make
+#: the table auto-agree with whatever the code under test does.
+_KEY_SET_SHAPES = [
+    {"label": "legacy_single_secret", "secret": _TEST_SECRET},
+    {"label": "two_kids_declared_order", "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}"},
+    {"label": "current_named", "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}", "current": "new"},
+    # A base64 secret carries its own padding, and each entry splits on its FIRST `=` so it survives.
+    {"label": "base64_padding_kept", "keys": f"k1={_KEY_SET_OLD}=="},
+    {"label": "current_names_nothing", "keys": f"old={_KEY_SET_OLD}", "current": "typo"},
+    {"label": "no_separator", "keys": "no-separator-here"},
+    {"label": "duplicate_kid", "keys": f"k1={_KEY_SET_OLD},k1={_KEY_SET_NEW}"},
+    {"label": "empty_secret", "keys": "k1="},
+    # Absent-or-blank is the LEGACY deployment, not a fault: `None, None` from the Python parser and
+    # the single-secret shape from TypeScript.
+    {"label": "blank_keys_falls_back", "keys": "   ", "secret": _TEST_SECRET},
+    # Whitespace is not a kid name: the strip happens before the membership test on BOTH halves.
+    {"label": "whitespace_current_is_unset",
+     "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}", "current": "   "},
+    # A kid carrying the attempt-key separator could re-select another key (#10794).
+    {"label": "kid_with_dot", "keys": f"k.1={_KEY_SET_OLD}"},
+]
+
+
+def _set_consent_key_env(monkeypatch, shape: dict) -> None:
+    for name in ("CONSENT_TOKEN_KEYS", "CONSENT_TOKEN_CURRENT_KID", "CONSENT_TOKEN_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    if shape.get("keys") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_KEYS", shape["keys"])
+    if shape.get("current") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", shape["current"])
+    if shape.get("secret") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_SECRET", shape["secret"])
+
+
+def test_the_key_set_is_PARSED_the_SAME_WAY_by_both_halves(monkeypatch) -> None:
+    """THE cross-half pin: same shapes in, same kids/current/signing-bytes out.
+
+    `secret` is compared too, because "the same kid" is worthless if the two halves then sign with
+    different bytes — that is precisely the split #10488's fingerprint exists to detect, and a
+    parser that normalised on one side would CREATE it rather than report it.
+    """
+    from tortoise import consent_token
+
+    out = _run("key_set", shapes=_KEY_SET_SHAPES)
+    assert [c["label"] for c in out["cases"]] == [s["label"] for s in _KEY_SET_SHAPES], out
+
+    for shape, ts in zip(_KEY_SET_SHAPES, out["cases"], strict=True):
+        _set_consent_key_env(monkeypatch, shape)
+        # The EFFECTIVE set, i.e. what the verifier will accept — not the raw parse. On the legacy
+        # deployment the parse is `None` and this function synthesises the one key under `LEGACY_KID`,
+        # which is exactly the set the app half must also see.
+        accepted = consent_token.consent_token_keys()
+        py_kids = list(accepted) if accepted else None
+        fault = consent_token.consent_token_secret_problem()
+        py_current = consent_token.consent_token_current_kid()
+        py_secret = consent_token.consent_token_secret()
+
+        assert ts["kids"] == py_kids, (
+            f"{shape['label']}: the two halves disagree about which kids exist — "
+            f"TS {ts['kids']} vs Python {py_kids} (fault={fault!r})")
+        assert ts["current"] == py_current, (
+            f"{shape['label']}: the halves disagree about which kid MINTS — "
+            f"TS {ts['current']!r} vs Python {py_current!r}")
+        assert ts["secret"] == py_secret, (
+            f"{shape['label']}: the halves disagree about the SIGNING BYTES for that kid — "
+            f"TS {ts['secret']!r} vs Python {py_secret!r}")
+        assert ts["mintKid"] == py_current, (
+            f"{shape['label']}: `consentCurrentKid` and `consent_token_current_kid` disagree — "
+            "the mint route would stamp a kid the AS refuses")
+
+
+def test_the_padding_of_a_base64_secret_SURVIVES_the_parse_on_both_halves() -> None:
+    """Named separately because it is the shape a "tidy" edit breaks first.
+
+    Splitting each entry on its LAST `=` (or using a `split("=")` bound to exactly two parts) would
+    strip a secret's own padding — silently signing with different bytes than the other half holds.
+    """
+    shape = next(s for s in _KEY_SET_SHAPES if s["label"] == "base64_padding_kept")
+    out = _run("key_set", shapes=[shape])
+    assert out["cases"][0]["secret"] == _KEY_SET_OLD + "==", out["cases"][0]
+    assert out["cases"][0]["kids"] == ["k1"], out["cases"][0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #10794 — the AS signs `attempt_key`, and the page adopts ONLY a verified key
+#
+# The defect: `/api/consent/start` is directly navigable (it is the one API path `/auth`'s return
+# allowlist admits) and it adopted WHATEVER `attempt_key` it was handed. The row's insert-only hash
+# is the flow's ownership proof, so a caller could choose the key of a flow it did not create —
+# RFC 9126 §2's "must not be client-chosen", and RFC 9700's reused-value detection.
+#
+# ⛔ A SHAPE CHECK IS NOT THE FIX, and the first test below is written to make that visible: the
+# value it presents is a well-formed 43-character base64url string, which any shape gate accepts.
+# What distinguishes a minted key from a chosen one is a MAC only the key holder can produce.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_start_refuses_a_presented_key_the_AS_did_not_mint(monkeypatch) -> None:
+    """⭐ THE FAIL-FIRST TEST: a key the CLIENT chose must not become the row's key.
+
+    MEASURED ON `origin/main` (before this change): the presented value below is adopted — the route
+    returns it in its own return target and the row's `attempt_key_hash` is `sha256(<that value>)`,
+    so whoever chose it owns the flow. This test REDS there and passes here.
+
+    The presented value is deliberately WELL-FORMED — 43 base64url characters, the same length the
+    AS mints — because that is the value a shape-only "fix" would still adopt. What it is missing is
+    a MAC, which is the only thing an unprivileged caller cannot produce.
+
+    AND THE FLOW STILL COMPLETES, which is the other half of the contract: a refused key is treated
+    as ABSENT, so the visitor is handed a MINTED one and their sign-in return leg still works. A
+    refusal that dead-ended here would trade one defect for the #10487 one.
+    """
+    import hashlib
+
+    # ⛔ TWO CHOSEN VALUES, and the SECOND is the one that matters: `well_shaped` has the exact
+    # structure and segment lengths of a minted key (kid, 43-char random part, 43-char MAC) and only
+    # the MAC is wrong. A SHAPE check — the option the standards exclude — accepts it, so a suite
+    # that only tried the first value would let "looks minted" pass as "was minted". Measured: with
+    # `verifyAttemptKey` reduced to a shape check, the first value alone still red the route test by
+    # its LENGTH check, not by its MAC.
+    chosen = "a" * 43
+    well_shaped = "consent-1." + "b" * 43 + "." + "c" * 43
+    for label, presented in (("no_segments", chosen), ("forged_mac", well_shaped)):
+        first = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=presented))
+        assert first["status"] == 302, (label, first)
+        minted_key = _key_from(first["location"])
+        assert minted_key != presented, (
+            f"[{label}] the route ADOPTED a key the client chose — the client now owns this flow, "
+            "and every later leg (the owner fill, the mid-flow return, the mint) will be satisfied "
+            "by a value it holds")
+        assert first["attempts"][0]["attempt_key_hash"] != hashlib.sha256(
+            presented.encode()).hexdigest(), (
+            f"[{label}] the ROW is keyed on the value the client chose, even though the browser was "
+            "handed another one — the two are now split, and the visitor's own return leg will be "
+            "refused")
+        assert first["attempts"][0]["attempt_key_hash"] == hashlib.sha256(
+            minted_key.encode()).hexdigest(), (
+            f"[{label}] the row is keyed on neither the chosen nor the minted value — the attempt "
+            "key is no longer the thing the row is keyed on, which is the whole ownership proof "
+            "(#10208)")
+        # …the caller cannot then walk in on the key it tried to install.
+        foreign = _run("start_signed_in", seededAttempts=first["attempts"],
+                       sessionUserId="user-1", params=dict(_PARAMS, attempt_key=presented))
+        _assert_refusal_page(foreign, "flow_not_yours", 403)
+    # …and the MINTED key works end to end: return leg fills the owner and advances.
+    back = _run("start_signed_in", seededAttempts=first["attempts"],
+                sessionUserId="user-1", params=dict(_PARAMS, attempt_key=minted_key))
+    assert back["status"] == 302, f"the replacement key dead-ended the flow: {back}"
+    assert back["attempts"][0]["user_id"] == "user-1", back["attempts"][0]
+
+
+def test_the_SIGNED_attempt_key_crosses_the_halves_in_BOTH_directions(monkeypatch) -> None:
+    """Python signs and TypeScript verifies (the AS→app leg), and the reverse (the entry leg).
+
+    Both halves mint, so both directions are load-bearing: the AS mints on the bounce, `start` mints
+    when it is handed none or something unverifiable. A one-sided change to the MAC input or to the
+    value's format makes exactly one of these directions fail — silently, since an unverifiable key
+    is replaced rather than refused — so the pair is compared here rather than each half against
+    itself.
+    """
+    from tortoise import consent_token
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+
+    as_minted = consent_token.mint_attempt_key()
+    random_part = as_minted.split(".")[1]
+    chosen = "b" * 43
+    # ⛔ THE MUTATION MUST BE A REAL ONE, AND THE READING THAT MATTERS IS BYTES. The MAC is 43
+    # base64url chars for 32 bytes, so the LAST character carries only 4 significant bits and its
+    # low 2 are padding: an encoder that emitted them non-zero (or a value minted by anything but
+    # `_b64url_encode`) makes `…[:-3] + "AAA"` a different STRING that decodes to the IDENTICAL
+    # signature — `verifyAttemptKey` correctly accepts it, and the arm below reds a correct tree.
+    # Mutating position 0 changes the first 6 bits of the MAC's first byte under EVERY encoding, so
+    # the mutation cannot be a no-op by construction; the decoded-bytes assertion below is what
+    # makes that a MEASUREMENT rather than a claim about the encoder. (Same class, and the same
+    # remedy, as `test_oauth_consent_bridge.py::test_a_TAMPERED_attempt_key_is_refused`, where
+    # `…[:-1] + "A"` collided once in 16.)
+    mac = as_minted.rsplit(".", 1)[1]
+    flipped = ("A" if mac[0] != "A" else "B") + mac[1:]
+    forged_mac = as_minted[:-len(mac)] + flipped
+    assert forged_mac != as_minted, "the test's own mutation was a no-op"
+    assert (consent_token._b64url_decode(flipped, "the forged MAC")
+            != consent_token._b64url_decode(mac, "the minted MAC")), (
+        "the test's own mutation decoded to the SAME 32 bytes — the MAC comparison would accept it "
+        "and the assertion below would red a correct tree")
+
+    out = _run("attempt_key", values={"as_minted": as_minted, "chosen": chosen,
+                                      "empty": "", "forged_mac": forged_mac})
+    got = {c["label"]: c["verified"] for c in out["cases"]}
+    assert got["as_minted"] == random_part, (
+        "the app half did not verify a key the AS half minted — every AS bounce key would be "
+        "replaced (silently) and the mid-flow return would 403, the #10487 dead end")
+    assert got["chosen"] is None, got
+    assert got["empty"] is None, got
+    assert got["forged_mac"] is None, (
+        "a key whose MAC was edited still verified — the MAC is not being compared")
+
+    # …and the OTHER direction: a key the APP minted must verify on the AS half.
+    assert out["minted"], out
+    app_minted = out["minted"]
+    assert consent_token.verify_attempt_key(app_minted) is not None, (
+        "the app half minted a key the AS half cannot verify — the entry leg's own replacement value "
+        "would be refused on the very next leg of the same flow")
+    assert len(app_minted.split(".")[1]) >= 43, app_minted
