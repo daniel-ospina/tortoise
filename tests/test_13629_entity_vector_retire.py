@@ -4080,10 +4080,124 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE MAPPING OPERAND BEHIND THE SAME WRAPPER (`#13788` F1, measured at
+        # `10184e6d`). The unwrapper above was written in the PAIRS rule only, so the one-line
+        # wrapper `.copy()` — whose pairs spelling the row above refuses — CERTIFIED the
+        # mapping spelling of the identical store:
+        # `props.update({"embedding": vec}.copy())` placed the vector on the stop arm while
+        # `props.update([("embedding", vec)].copy())` was refused. Both forms are operands of
+        # the same merge (PEP 584), so a transparent wrapper must not be able to answer one and
+        # not the other; every wrapper arm now asks `_operand_stores_the_vector`. The last row
+        # is the `**` keyword, whose operand was answered by the mapping-only rule and so
+        # missed the wrapper entirely.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": _encode(ev)}.copy()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict({"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(**{"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update([("embedding", _encode(ev))] if _flag(ev) else [])
+        return None
+    _write(props)
+""",
+        # ⛔ THE CONSTRUCTOR OPERAND'S `**` MERGE IS THE SAME STORE (`#13788` F1, measured at
+        # `10184e6d`). `_constructor_stores_the_vector` asked
+        # `_mapping_argument_stores_the_vector` per argument, and THAT helper's dict-literal
+        # arm omits `stop_arm` — so the `{**{…}}` recursion which already refuses
+        # `props |= {**{"embedding": vec}}` was INERT inside a constructor operand. Every row
+        # below CERTIFIED a stop arm that stores, while the identical bare merge was refused.
+        # The operand rule (`_mapping_operand_stores_the_vector`) also carries the pairs tail,
+        # so it answers both operand forms and the ARGUMENT rule is not asked for an operand
+        # at all.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.OrderedDict({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(_collections.OrderedDict({**{"embedding": _encode(ev)}}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.defaultdict(dict, {**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.Counter({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.ChainMap({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        # …and ONE NESTING IN is the same operand: a constructor handed a constructor.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict(_collections.OrderedDict({**{"embedding": _encode(ev)}}))
+        return None
+    _write(props)
+""",
+        # …and the REBUILD position of the `.copy()` wrapper the rows above cover as an
+        # operand: `isinstance(value, ast.Dict)` saw only the bare literal there, so
+        # `props = {"embedding": vec}` was refused beside its `.copy()` CERTIFIED.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {"embedding": _encode(ev)}.copy()
         return None
     _write(props)
 """,
@@ -4093,13 +4207,6 @@ def _upsert_object(props, ev):
         # nothing, and the mapping operand need be neither first nor alone. Each of these was
         # CERTIFIED while the bare literal was refused (measured by the review of this branch,
         # which also runtime-checked that they merge).
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= _collections.OrderedDict({"embedding": _encode(ev)})
-        return None
-    _write(props)
-""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4114,13 +4221,9 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= _collections.ChainMap({"embedding": _encode(ev)})
-        return None
-    _write(props)
-""",
+        # (the `OrderedDict({…})` and `ChainMap({…})` rows this block used to repeat are the
+        # ones above it — the same spelling twice pinned nothing the first row did not, and a
+        # duplicate reads as a second distinct case. Dropped, not reordered.)
         # ⛔ …and a ``**`` MAPPING KEYWORD on a constructor, which merges exactly as
         # `dict(**{"embedding": vec})` does. This row is answered by the MUTATOR arm on the
         # nested `dict(...)` call, not by the constructor scan (whose keyword half was
@@ -4979,6 +5082,42 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props = _collections.OrderedDict({"embedding_model": _m()})
+        return None
+    _write(props)
+""",
+        # ⛔ THE IDENTITY CONTROL FOR THE WRAPPER ARM (`#13788` F1): a `.copy()` operand that
+        # {"embedding_model": …} sets only the IDENTITY triple, so it must still CERTIFY —
+        # otherwise the new refusal costs an honest writer its gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"embedding_model": _m()}.copy())
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE CONSTRUCTOR `**` MERGE (`#13788` F1): the new
+        # refusals are NARROWED to an EXACT property name and a NON-CONSTANT value, so the
+        # pre-guard reset (`None`) and the identity triple must still CERTIFY — otherwise the
+        # added refusal costs an honest writer its gate. The last row pins the same narrowing
+        # one nesting in, so the recursion arm is not an over-broad `return True`.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({**{"embedding": None}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.ChainMap({**{"embedding_model": _m()}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict(_collections.OrderedDict({**{"embedding_model": _m()}}))
         return None
     _write(props)
 """,
