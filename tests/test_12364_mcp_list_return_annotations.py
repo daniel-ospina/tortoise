@@ -60,27 +60,34 @@ def _registry_pairs() -> list[tuple[str, str]]:
         sdk_method = getattr(row, "sdk_method", None)
         if sdk_method:
             pairs.append((row.name, sdk_method))
-    # 33 on the merged surface at this head — MEASURED from a run, and the population is
-    # what moves the floor. `#13550`'s arm-retirement wave was the LAST to take doors that
-    # each NAMED an `sdk_method` (`tortoise_recall` -> `recall_state` and
-    # `tortoise_compute_confidence` -> `compute_confidence`, both now served through
-    # `tortoise_check_confidence(recall=True / …)`); before it, the READ/QUERY, WRITE/MUTATE
-    # and SOURCES/MINE/SESSION container waves each retired rows that DID name one, and
-    # #11609's door-retirement wave retired seven more (44 − 7 = 37 at that edition;
-    # `get_session`, `list_batch`, `find_cross_lens_candidates` and the four `create_*`
-    # aliases all wrapped an SDK method).
-    # ⛔ The population is a MEASUREMENT, not a derivation: `37 − 2 = 35` is NOT this head's
-    # number — an edition-to-edition delta is exactly the offset-not-content arithmetic the
-    # neighbouring arms in this file exist to stop — and the previous edition's `37` was
-    # itself above what `main` produced, which is how it went unnoticed. So the count is
-    # recorded from a run and the RULE beside it is the margin, never a free threshold:
-    # `> 40` sat 4 under 44, `> 33` sat 4 under 37, so `> 29` sits 4 under 33.
-    # The threshold keeps slack on purpose: it is a scan-sanity floor ("did the scan reach
-    # the registry at all?"), not a pin on the surface — a floor left at the pre-consolidation
-    # number would red on a CORRECT retirement, which is exactly what the previous `> 40` did
-    # when the seventh door left. A floor that drifts down by as much as the surface does
-    # stops noticing a scan that has lost an arm of its own.
-    assert len(pairs) > 29, f"registry scan found only {len(pairs)} rows — the scan is broken"
+    # 29 on the merged surface at this head — MEASURED from a run (40 live rows, 11 of which
+    # name no `sdk_method`), and the population is what moves the floor. The edition history,
+    # MEASURED at each head rather than subtracted from the previous number:
+    #   48 rows / 37 pairs   (before #13556)
+    #   46 / 35              #13556 — create_entity's POINT and DIARY arms
+    #   44 / 33              #13550 — `check_confidence`'s RECOMPUTE and RECALL arms
+    #   40 / 29              #13626 — the two `rest_spec` doors
+    # Every one of those waves retired doors that DID name an `sdk_method`; before them, the
+    # READ/QUERY, WRITE/MUTATE and SOURCES/MINE/SESSION container waves and #11609's
+    # seven-door wave did the same (`get_session`, `list_batch`,
+    # `find_cross_lens_candidates` and the four `create_*` aliases all wrapped an SDK method).
+    # ⛔ The population is a MEASUREMENT, not a derivation — and this floor is the proof of
+    # what derivation costs: #13599 (`424368c05d`) re-pinned `> 33` to `> 29` as "4 under 33"
+    # while #13626 had ALREADY taken the population to 29, so the floor landed exactly ON the
+    # population and `29 > 29` reds every shard that runs this file — main-red since, #13678,
+    # and the required `python-ci-gate` with it. The RULE beside the pin is the margin, never
+    # a free threshold: `> 40` sat 4 under 44, `> 33` sat 4 under 37, so `> 25` sits 4 under 29.
+    # ⛔ And it must stay a MEASURED CONSTANT, not a value derived from the registry in code
+    # (#13678 proposes `len(TOOL_REGISTRY) - 4`): this scan reads `tool_registry.TOOL_REGISTRY`
+    # ITSELF, so a scan that reached an empty or truncated registry would shrink a derived
+    # floor along with it and answer `0 > -4` — passing on exactly the failure the line
+    # exists to catch ("did the scan reach the registry at all?"). A floor derived from the
+    # population it guards cannot see that population collapse.
+    # The slack is deliberate: this is a scan-sanity floor, not a pin on the surface — a floor
+    # left at the pre-consolidation number REDS on a CORRECT retirement, which is what the
+    # previous `> 40` did when the seventh door left. A floor that drifts down by as much as
+    # the surface does stops noticing a scan that has lost an arm of its own.
+    assert len(pairs) > 25, f"registry scan found only {len(pairs)} rows — the scan is broken"
     return pairs
 
 
@@ -293,14 +300,24 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # here: `tortoise_compute_confidence` was a pass-through (`return _safe(sdk
     # .compute_confidence, …)`), while `tortoise_recall` RESHAPED (`return {"mode": mode,
     # "results": results}`), so it left the `reshaped` term above instead.
+    # 12 -> 10 with #13626's `rest_spec` wave, MEASURED at `2c1065a52e` (44 rows / 33
+    # pairs / 12 pass-through) against this head (40 / 29 / 10): TWO of its four retired
+    # doors were pass-throughs — `tortoise_session_context` (`return
+    # _safe(_get_org_sdk().session_context)`) and `tortoise_issue_insight` (same shape A,
+    # with the door's own args) — while the two DELETE doors (`tortoise_delete_point`,
+    # `tortoise_delete_entity`) RESHAPED into the kept single entry, so they are the pair
+    # that left `reshaped`.
+    # This is why a count can move by FOUR while the pass-through population moves by TWO:
+    # the two terms are not the same population, and the delta was measured, not assumed.
     # (An earlier cut of this comment claimed all seven subtracted — 16 − 7 = 9 — and
     # that arithmetic put the floor four rows under the population the scan actually
     # produces, which is slack on the one guard whose job is to notice a collapse.)
     # The floor moves DOWN with the surface, exactly ON the measurement (0 slack, as
     # at 16); it is not lowered to whatever a green run last produced, and the two
     # guards ABOVE (`checked > 0`, and `checked + reshaped == len(pairs)`) are what
-    # still make a vacuous scan impossible.
-    assert checked >= 12, (
+    # still make a vacuous scan impossible. Measured at this head: 10 pass-through +
+    # 19 reshaping = the 29 rows the scan above found.
+    assert checked >= 10, (
         f"only {checked} pass-through wrappers were found — the scan is not "
         f"reaching the registry, so a clean result here would be vacuous")
     assert not offenders, (
