@@ -1240,26 +1240,16 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # `10184e6d`): `isinstance(value, ast.Dict)` saw only the bare literal, so the
             # `.copy()` the pairs rule already follows in every OPERAND position CERTIFIED
             # here — `props = {"embedding": vec}` refused beside
-            # `props = {"embedding": vec}.copy()` certified. The wrapper is asked through
-            # the operand rule, which carries the stop-mode Dict recursion; the CONTAINER
-            # forms are deliberately NOT asked, because `props = [{"embedding": vec}]`
-            # raises `ValueError` instead of storing and must keep certifying.
-            # ⛔ …AND THE COMPREHENSION TWIN IS THE SAME STORE: `props = {"embedding":
-            # _encode(ev) for _x in _keys()}` rebuilds the mapping with the vector exactly as
-            # the literal one arm up does, and was CERTIFIED (measured at `45b5f88a`).
-            # Recognised HERE, beside its twin, and NOT inside `_rebuild_stores_the_vector` —
-            # that helper is also handed the OPERANDS of unknown callees, where the same
-            # comprehension is a MENTION (`props = _audit({"embedding": vec for …})` writes
-            # nothing) and refusing it there refused an honest writer (measured).
-            if anywhere and (
-                    (isinstance(value, ast.Dict | ast.DictComp)
-                     and ((isinstance(value, ast.Dict)
-                           and _dict_stores_the_vector(value, stop_arm=True))
-                          or (isinstance(value, ast.DictComp)
-                              and _pairs_operand_stores_the_vector(value))))
-                    or (isinstance(value, ast.Call)
-                        and _callee_name(value) == "copy"
-                        and _mapping_operand_stores_the_vector(value.func.value))):
+            # `props = {"embedding": vec}.copy()` certified. ⛔ AND THE HOLE IS THE SAME ONE
+            # FOR EVERY WRAPPER, AND FOR EVERY TARGET FORM: this arm is shared by `Assign`,
+            # `AnnAssign` and `AugAssign`, so `props |= {…}.copy()` and
+            # `props |= {…} if f else {}` / `props.update({…} if f else {})` were CERTIFIED
+            # too (measured at the review of this branch). `_mapping_literal_stores_the_vector`
+            # follows both wrappers and carries the stop-mode Dict recursion. The CONTAINER
+            # forms are deliberately NOT followed: `props = [{"embedding": vec}]` builds a
+            # LIST (and `|=` rejects it outright), so it places nothing and must keep
+            # certifying.
+            if anywhere and _mapping_literal_stores_the_vector(value):
                 return True
             # ⛔ AN UNPACKED OR CHAINED TARGET IS STILL A STORE (`#13647` round 12). The
             # mirror arm's rule is "EVERY target names the property", which is right where
@@ -1455,11 +1445,59 @@ def _mapping_stores_the_vector(call) -> bool:
            and not isinstance(keyword.value, ast.Constant)
            for keyword in call.keywords):
         return True
+    # ⛔ AND THE ``**`` OPERAND IS AN OPERAND TOO, THROUGH A WRAPPER (`#13788` F2, measured at
+    # `45b5f88a`). Both ``**`` arms in this file narrowed the operand to `isinstance(value,
+    # ast.Dict)`, so one transparent wrapper round the same literal re-opened the hole the
+    # bare spelling had just closed: `props.update(**{"embedding": vec}.copy())` CERTIFIED
+    # beside `props.update(**{"embedding": vec})` refused — and the same for
+    # `__setitem__(**…)` and the helper spelling `_set(props, **…)`. The operand rule
+    # answers the literal AND the wrappers the pairs rule already follows, so a `**` operand
+    # asks it rather than a type test; a `**` operand that is a PAIRS literal is a spelling
+    # Python rejects (`update(**[…])`), and refusing it is the fail-closed direction.
     return any(_mapping_operand_stores_the_vector(argument) for argument in call.args) or any(
-        keyword.arg is None
-        and isinstance(keyword.value, ast.Dict)
-        and _dict_stores_the_vector(keyword.value, stop_arm=True)
+        keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value)
         for keyword in call.keywords)
+
+
+def _mapping_literal_stores_the_vector(node) -> bool:
+    """Is this expression a MAPPING LITERAL that sets the vector — `copy()`/`if` included?
+
+    ⛔ ONE RULE FOR THE MAPPING FORM'S *WRAPPERS*, because the pairs form got them and this
+    one did not. Once `.copy()` / `BinOp` / comprehension were added to
+    `_pairs_operand_stores_the_vector`, `props |= [("embedding", vec)].copy()` was refused
+    while `props |= {"embedding": vec}.copy()` was CERTIFIED (measured at this head by the
+    review of this branch) — the SAME merge, one operand form apart, and the asymmetry was
+    introduced BY the pairs fix. Neither wrapper changes what is placed: `copy()` returns a
+    new dict holding the same keys, and PEP 584's `|=` "behaves like `dict.update()`" (it
+    takes mapping-like objects), while an `if`-expression picks one of two mappings.
+
+    ⛔ ONLY MAPPING SHAPES, deliberately NOT the pairs rule: `props = [("embedding", vec)]`
+    assigns a LIST and places no key, so answering the pairs question here would refuse it.
+    """
+    import ast
+
+    if isinstance(node, ast.Dict):
+        # ⛔ THE `**` MERGE NEEDS THE RECURSIVE FORM, hence `stop_arm=True` — every caller is
+        # the stop arm (see `_mapping_operand_stores_the_vector` and the assignment arm), and
+        # a fix may add refusals, never acceptances.
+        return _dict_stores_the_vector(node, stop_arm=True)
+    if isinstance(node, ast.DictComp):
+        # ⛔ THE COMPREHENSION IS THE SAME MAPPING FORM, so it is answered HERE, once, for
+        # every position this rule is asked from — the ASSIGN arm, the ``**`` operands, and
+        # `update(…)`'s operands. Measured at `45b5f88a`: a comprehension whose KEY is the
+        # property (`{"embedding": _encode(ev) for _x in _keys()}`) placed a real top-level
+        # vector and was CERTIFIED in five of those positions, each beside a refused literal
+        # twin. ⛔ `_pairs_operand_stores_the_vector` is what owns the recognition (it reads
+        # the generator SOURCE and the constant-property key) — this arm only says that a
+        # comprehension is a MAPPING, which is the question this helper asks.
+        return _pairs_operand_stores_the_vector(node)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == "copy" and not node.args and not node.keywords:
+        return _mapping_literal_stores_the_vector(node.func.value)
+    if isinstance(node, ast.IfExp):
+        return (_mapping_literal_stores_the_vector(node.body)
+                or _mapping_literal_stores_the_vector(node.orelse))
+    return False
 
 
 def _mapping_operand_stores_the_vector(node) -> bool:
@@ -1473,8 +1511,13 @@ def _mapping_operand_stores_the_vector(node) -> bool:
 
     if isinstance(node, ast.Starred):
         return _mapping_operand_stores_the_vector(node.value)
-    if isinstance(node, ast.Dict):
-        return _dict_stores_the_vector(node, stop_arm=True)
+    if _mapping_literal_stores_the_vector(node):
+        # ⛔ THE LITERAL THROUGH THE WRAPPERS A REFACTOR PUTS AROUND IT (`.copy()`,
+        # `if…else`), not only the bare `ast.Dict`. The pairs rule below already follows
+        # them, so following them here only for pairs was HALF A RULE:
+        # `props.update({…}.copy())` was CERTIFIED while
+        # `props.update([…].copy())` was refused (measured at this head by the review).
+        return True
     if isinstance(node, ast.List | ast.Tuple):
         return (_pairs_store_the_vector(node)
                 or any(_mapping_operand_stores_the_vector(element) for element in node.elts))
@@ -1542,9 +1585,9 @@ def _constructor_stores_the_vector(call) -> bool:
             # OrderedDict({**{"embedding": vec}})` CERTIFIED beside
             # `props |= {**{"embedding": vec}}` refused — this arm's own reason for
             # existing, un-answered one wrapper in. `_mapping_operand_stores_the_vector`
-            # carries the stop-mode Dict recursion, the `Starred`/List/Tuple arms AND the
-            # pairs tail, so the separate pairs leg this loop used to carry answers nothing
-            # it does not.
+            # carries the stop-mode Dict recursion, the `Starred`/List/Tuple arms, the
+            # `.copy()`/`if…else` mapping wrappers AND the pairs tail, so the separate pairs
+            # leg this loop used to carry answers nothing it does not.
             or any(_mapping_operand_stores_the_vector(argument)
                    # …and a CONSTRUCTOR OPERAND IS AN OPERAND ONE NESTING IN: the operand
                    # of `OrderedDict` may itself be `OrderedDict({**{…}})`, and the operand
@@ -1788,8 +1831,13 @@ def _third_argument_stores_the_vector(call) -> bool:
     # `_set(props, **{"embedding": vec})` — the ``**`` spelling of the helper argument. The
     # siblings above each have one, and this one did not, so the same call in this spelling
     # certified a stop arm that places the vector.
-    return any(keyword.arg is None and isinstance(keyword.value, ast.Dict)
-               and _dict_stores_the_vector(keyword.value, stop_arm=True)
+    # ⛔ AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
+    # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
+    # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows. The
+    # two NAMED scans above stay literal-only on purpose — they read the mapping's VALUES
+    # (`key=`/`value=` spellings), which is a different question from "does this operand
+    # place the vector", and a wrapper has no statically readable values.
+    return any(keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value)
                for keyword in call.keywords)
 
 
@@ -2031,12 +2079,10 @@ def _mapping_argument_stores_the_vector(node) -> bool:
 
     if isinstance(node, ast.Dict):
         return _dict_stores_the_vector(node)
-    # ⛔ A COMPREHENSION NEEDS NO ARM HERE: the tail of this function asks
-    # `_pairs_operand_stores_the_vector`, which owns the `DictComp` recognition (both the
-    # generator source and the constant-property key). An arm here was written, measured
-    # REDUNDANT — removing it changed no verdict on any fixture, because every comprehension
-    # spelling reaches the pairs rule through that tail — and then removed, rather than kept
-    # looking load-bearing.
+    # ⛔ A COMPREHENSION NEEDS NO ARM HERE: `_mapping_literal_stores_the_vector` above answers
+    # it (the mapping form, once, for every position), and this helper's own tail asks the
+    # pairs rule. An explicit arm was written, measured REDUNDANT — removing it changed no
+    # verdict on any fixture — and removed rather than kept looking load-bearing.
     if isinstance(node, ast.Call) and _callee_name(node) == "dict":
         for keyword in node.keywords:
             if keyword.arg == EMBEDDING_PROPERTY and not isinstance(keyword.value, ast.Constant):
@@ -2075,10 +2121,14 @@ def _dict_stores_the_vector(node, *, stop_arm: bool = False) -> bool:
         # while the literal behind the same `**` was refused (measured, and runtime-checked
         # to place the key). One wrapper, one hole — the shape this helper's `.copy()` /
         # `list(…)` / `+ []` history is made of.
-        if stop_arm and key is None and isinstance(value, ast.Dict | ast.DictComp) \
-                and (_dict_stores_the_vector(value, stop_arm=stop_arm)
-                     if isinstance(value, ast.Dict)
-                     else _pairs_operand_stores_the_vector(value)):
+        # ⛔ AND THAT INCLUDES THE WRAPPERS (`#13788` F3, measured at `45b5f88a`): the
+        # narrowing to `ast.Dict | ast.DictComp` still certified `{**{"embedding": vec}.copy()}`
+        # — `props.update({**{…}.copy()})`, `props |= {**{…}.copy()}` and
+        # `props = {**{…}.copy()}` all CERTIFIED beside their unwrapped spellings refused.
+        # The operand rule is the one rule that answers a literal, a comprehension AND the
+        # transparent wrappers, so the `**` value asks IT rather than a type test; the pairs
+        # tail it carries is what already answered the `DictComp` spelling.
+        if stop_arm and key is None and _mapping_operand_stores_the_vector(value):
             return True
         if (isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
                 and not isinstance(value, ast.Constant)):

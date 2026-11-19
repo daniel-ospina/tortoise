@@ -4125,6 +4125,36 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE ``**`` KEYWORD OPERAND IS AN OPERAND (`#13788` F2, measured at `45b5f88a`).
+        # Both ``**`` arms narrowed the operand to `isinstance(value, ast.Dict)`, so the one
+        # transparent wrapper this branch's OWN pairs rule already follows re-opened the hole
+        # the bare spelling had just closed. All three rows below CERTIFIED a stop arm that
+        # places the vector while `update(**{"embedding": vec})` was refused. Attribution
+        # measured one arm at a time: reverting only the mapping-query arm certifies the
+        # `update(**…)` row, reverting only the helper arm certifies the `_set(**…)` row, and
+        # `__setitem__(**…)` is answered by both (it certifies only when BOTH are reverted) —
+        # so the first two are single-arm pins and the third pins the pair.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**{"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(**{"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4198,6 +4228,40 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props = {"embedding": _encode(ev)}.copy()
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE `**` OPERAND OF A DICT DISPLAY IS AN OPERAND TOO (`#13788` F3, measured at
+        # `45b5f88a`). `_dict_stores_the_vector`'s merge recursion narrowed the `**` value to
+        # `ast.Dict | ast.DictComp`, so the same one-line wrapper this branch follows in every
+        # other position re-opened it one display over: all four rows below CERTIFIED while
+        # their unwrapped spellings were refused (measured, and the fix re-measured against
+        # all four — reverting the arm certifies every one of them).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({**{"embedding": _encode(ev)}.copy()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {**{"embedding": _encode(ev)}.copy()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**{"embedding": _encode(ev)}.copy()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({**{"embedding": _encode(ev)}.copy()})
         return None
     _write(props)
 """,
@@ -4857,6 +4921,35 @@ def _upsert_object(props, ev):
         props.update({"embedding_model": _m()})
     _write(props)
 """,
+        # ⛔ …AND THE MAPPING OPERAND'S **`if…else`** WRAPPER, which the rows above (the
+        # `.copy()` family, added with `#13788` F1) do not cover, and which the pairs form
+        # ALREADY refuses (`||= [("embedding", vec)] if f else []`) — so the mapping form
+        # was refused for `.copy()` and still CERTIFIED for `if…else` (measured at the review
+        # of this branch). An `if`-expression picks one of two MAPPINGS, so it places exactly
+        # what the bare literal places, in both the merge (`|=`) and the mutator (`update`)
+        # positions. Rows for the operand forms already present are NOT repeated here: a
+        # duplicate row adds no discriminating power (`#13788` merge).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.OrderedDict({"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": _encode(ev)} if _flag(ev) else {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"embedding": _encode(ev)} if _flag(ev) else {})
+        return None
+    _write(props)
+""",
     )
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -5210,9 +5303,12 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ THE IDENTITY CONTROL FOR THE WRAPPER ARM (`#13788` F1): a `.copy()` operand that
-        # {"embedding_model": …} sets only the IDENTITY triple, so it must still CERTIFY —
-        # otherwise the new refusal costs an honest writer its gate.
+        # ⛔ …AND THE WRAPPER ARMS' TWO NARROWINGS HOLD ONE FORM OVER, or the new refusals
+        # become an inert enforcer that costs a writer its gate: `.copy()` on the IDENTITY
+        # triple (this repo stores `embedding_model` beside the vector) places no vector, an
+        # `if…else` whose mapping holds the PLACEHOLDER places nothing, and a `**` merge of
+        # the placeholder is the pre-guard reset. All of them were CERTIFIED before the fix
+        # and must stay CERTIFIED after it.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -5220,10 +5316,53 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE ``**`` WRAPPER ARM (`#13788` F2): the new refusal
+        # is still narrowed to an EXACT property name and a NON-CONSTANT value, so the
+        # pre-guard reset (`None`) and the identity triple behind the same wrapper must stay
+        # CERTIFIED — otherwise the widened arm is an over-broad `return True` that costs an
+        # honest writer its gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**{"embedding_model": _m()}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**{"embedding": None}.copy())
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE `**`-IN-A-DISPLAY WRAPPER ARM (`#13788` F3): the
+        # operand rule keeps the two narrowings (EXACT property, NON-CONSTANT value) behind the
+        # wrapper, so the pre-guard reset and the identity triple must still CERTIFY.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({**{"embedding": None}.copy()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**{"embedding_model": _m()}.copy()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": None} if _flag(ev) else {}
+        return None
+    _write(props)
+""",
         # ⛔ THE HONEST-STOP CONTROLS FOR THE CONSTRUCTOR `**` MERGE (`#13788` F1): the new
         # refusals are NARROWED to an EXACT property name and a NON-CONSTANT value, so the
         # pre-guard reset (`None`) and the identity triple must still CERTIFY — otherwise the
-        # added refusal costs an honest writer its gate. The last row pins the same narrowing
+        # added refusal costs an honest writer its gate. The last rows pin the same narrowing
         # one nesting in, so the recursion arm is not an over-broad `return True`.
         """
 def _upsert_object(props, ev):
