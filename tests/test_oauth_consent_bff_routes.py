@@ -2186,6 +2186,24 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     return text[max(begin, start - 240):finish]
 
 
+def _false_absolute_in(text: str) -> str | None:
+    """The first false-absolute span in `text` that is NOT the correct form, or None.
+
+    A module-level helper so the exemption is exercised through THIS loop (finditer →
+    `_sentence_around` → both conditions) rather than through a retyped copy of it in the test that
+    pins the exemption's shape.
+    """
+    for m in _FALSE_ABSOLUTE_RE.finditer(text):
+        sentence = _sentence_around(text, m.start(), m.end())
+        # BOTH, never either: without the past marker this is a present-tense absolute that merely
+        # mentions an adverb; without the counted survivor the reader is not told what still answers
+        # JSON (review of #13712, F4).
+        if _PAST_UNIVERSAL_RE.search(sentence) and _SURVIVORS_NAMED_RE.search(sentence):
+            continue
+        return text[m.start():m.end()]
+    return None
+
+
 def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
     claim the route FALSIFIES — and pinning the DENIAL, not a wording, is what keeps it corrected.
@@ -2239,23 +2257,70 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
                                       "consent-identity-bridge.md").read_text(encoding="utf-8"),
     }
     for name, text in corpus.items():
-        for m in _FALSE_ABSOLUTE_RE.finditer(text):
-            sentence = _sentence_around(text, m.start(), m.end())
-            # BOTH, never either: without the past marker this is a present-tense absolute that
-            # merely mentions an adverb; without the counted survivor the reader is not told what
-            # still answers JSON (review of #13712, F4).
-            if _PAST_UNIVERSAL_RE.search(sentence) and _SURVIVORS_NAMED_RE.search(sentence):
-                continue
-            # The message QUOTES the span it matched, out of the ORIGINAL text, so a reader can
-            # tell which sentence earned the red instead of being told what it supposedly claims.
-            raise AssertionError(
-                f"`{name}` states the absolute: it says {text[m.start():m.end()]!r} and names "
-                "nothing that still answers JSON, while `start.ts` returns JSON from TWO "
-                "places (the `400` caller error and the terminal `200` flow state — see "
-                "`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`). Say "
-                "every REFUSAL, or name the "
-                "survivors: the terminal `200` is #10865's recorded decision, and a summary that "
-                "denies it invites converting it.")
+        # The message QUOTES the span it matched, out of the ORIGINAL text, so a reader can tell
+        # which sentence earned the red instead of being told what it supposedly claims.
+        span = _false_absolute_in(text)
+        if span is None:
+            continue
+        raise AssertionError(
+            f"`{name}` states the absolute: it says {span!r} and names nothing that still answers "
+            "JSON, while `start.ts` returns JSON from TWO places (the `400` caller error and the "
+            "terminal `200` flow state — see "
+            "`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`). Say every "
+            "REFUSAL, or state the universal about the PAST and count the survivors (\"before "
+            "#13671, every hard failure … answered raw JSON; two arms still do\"): the terminal "
+            "`200` is #10865's recorded decision, and a summary that denies it invites converting "
+            "it.")
+
+
+def test_the_summary_guard_exempts_ONLY_a_past_universal_with_a_COUNTED_survivor() -> None:
+    """A guard that fails OPEN on one word is worse than no guard: it reads as coverage.
+
+    Measured at `bf5202ce79` (review of #13712, F4): the exemption was a WORD LIST, so any `still` /
+    `surviv…` / `remains?` anywhere in the match's own sentence exempted the exact denial the guard
+    exists to stop — “the consent cookie is still set before the flow starts” was enough. The
+    exemption is now two required conditions (a PAST-framed universal AND a counted, named survivor),
+    and this table runs through the guard's OWN loop — `_false_absolute_in` →
+    `_FALSE_ABSOLUTE_RE.finditer` + `_sentence_around` + both patterns — never a retyped copy of it.
+
+    ⛔ WHY A COMMITTED TABLE, when the exemption had already been measured by hand twice: a
+    measurement that lives only in a commit message is the “reads as coverage it does not have”
+    pattern this PR has corrected twice (review of #13712). The rows below ARE the measurement, and
+    they are executable.
+
+    Non-vacuity, both directions: every BYPASS row is EXEMPT at `bf5202ce79` and RED here (measured),
+    and every CORRECT row is exempt in both — it is the sentence F3 asked this guard to stop
+    reddening, so a red there would be a false block.
+    """
+    bypass = [
+        # The denial itself: the claim `start.ts`'s two `json(...)` returns falsify.
+        "Every hard failure is a page, not a JSON blob.",
+        # The three the review measured at `bf5202ce79` — ordinary English, tied to nothing.
+        "Every hard failure is a page; the consent cookie is still set before the flow starts.",
+        "Every hard failure of the route is a page, and the store remains the source of truth.",
+        "Every hard failure is a page, which still leaves the graph as the source of truth.",
+        # The sentence window is bounded, so a survivor in the NEXT sentence exempts nothing.
+        "Every hard failure is a page. Two arms still answer JSON.",
+        # Counted survivors alone are not enough: without PAST framing it is still the absolute.
+        "Every hard failure is a page, because two arms still answer JSON.",
+        # …and PAST framing alone is not enough: nothing is counted and named as a survivor.
+        "Before #13671, every hard failure is a page, and the store remains the source of truth.",
+    ]
+    correct = [
+        # The sentence this change asks an author to write (F3).
+        "Before #13671, every hard failure of that route answered raw JSON; two arms still do.",
+        # `origin/main`'s header form, with the survivors counted rather than implied.
+        "Every hard failure of that route used to answer `json({error, reason})`; two arms still do.",
+        "Previously every hard failure of that route answered raw JSON; both arms return one.",
+    ]
+    for sentence in bypass:
+        # The span is quoted out of the ORIGINAL text, so compare case-insensitively.
+        assert (_false_absolute_in(sentence) or "").lower() == "every hard failure", (
+            f"the guard FAILS OPEN on {sentence!r}: it states the denial and the exemption let it "
+            "through")
+    for sentence in correct:
+        assert _false_absolute_in(sentence) is None, (
+            f"the guard reds the CORRECT form {sentence!r} — F3's finding, re-opened")
 
 
 def _key_from(location: str | None) -> str:
