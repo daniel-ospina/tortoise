@@ -91,20 +91,23 @@
 # and `create_subject`/`create_object`/`create_event`/`create_document` →
 # `create_entity(type=...)`. NO row was archived: the archive is for doors with NO
 # destination (`archive/README.md`), and a forwarded name is still served.
-# ⛔ WHY ONLY SEVEN. The other 17 live names absent from the 27-target are each protected by a
-# RECORDED decision, and the list is in `tortoise/tool_registry.py` beside the new rows so the
-# next lane does not re-derive it: six READ doors + `check_structure` + `calibrate_summary`
-# keep their `-> list[dict]` envelope (the #8482 repair), `search` keeps that envelope AND a
-# `rest_spec` (`GET /v1/search`) — the ONLY `rest_spec` holder now, because `issue_insight`/
-# `session_context` were RETIRED in lane P6 once lane P4 measured the coupling FALSE (no
-# product module derives a route from a registry row; both routes are hand-written decorators
-# that call the SDK directly) — `query` is the paged destination of two already-retired
-# pointers, the `no arm on their container` category is EMPTY (`create_point`/`diary_write`
-# retired in P1, `compute_confidence`/`recall` in P2 — each in the batch that BUILT the arm its
-# reason denied — and `delete_point`/`delete_entity` in P6 on the #9660 ruling), and SEVEN
-# destinations are not live on `main` yet. Lowering the pin to the LIVE count is what keeps it
-# a growth pin: the pin IS the live 40, so at 55 it would carry fifteen slots of slack and
-# re-adding any of the seven would read green.
+# ⛔ WHY ONLY SEVEN. At that cut the other 25 live names absent from the 27-target were each
+# protected by a RECORDED decision, and the list is in `tortoise/tool_registry.py` beside the
+# new rows so the next lane does not re-derive it. ⛔ IT IS 17 NOW — and a CHECKED POPULATION,
+# not prose: `tests/test_11609_door_retirement.py` asserts that the 10 `PROTECTED` names plus
+# the 7 `NO_CONTAINER_YET` names COVER it (10 + 7 = 17), so a live door dropped from either
+# table reds there instead of surviving as a comment. `PROTECTED` holds a retaining property:
+# six READ doors plus `check_structure` and `calibrate_summary` keep their `-> list[dict]`
+# envelope (the #8482 repair), `search` keeps BOTH that envelope and a `rest_spec`
+# (`GET /v1/search`), and `query` is the paged destination of two already-retired pointers.
+# `NO_CONTAINER_YET` holds a destination that is not live on `main` yet: `delete`,
+# `create_edge`/`create_operator`, `events_poll`, `org_create`, `ingest`, `list_graphs`.
+# ⛔ `issue_insight`/`session_context`, `create_point`/`diary_write` and
+# `compute_confidence`/`recall` are NOT held names any more: #11609 lanes P6, P1 and P2 retired
+# each pair FORWARD in the batch that made its stated reason FALSE, so a lane that restores one
+# reverses a recorded decision and reds the door-retirement file it is editing.
+# Lowering the pin 55 → 48 AT THAT CUT is what keeps it a growth pin: 48 was the live count
+# then, so at 55 the seven slots that wave vacated would have read green if re-filled.
 #
 # THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so
 # drift is visible (tools/surface-guard.py). The approved TARGET is recorded in
