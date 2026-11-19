@@ -1438,6 +1438,42 @@ def _scrub(text: str) -> str:
     return scrubbed
 
 
+def _scrub_exc_repr(exc: BaseException) -> str:
+    """``repr(exc)``, scrubbed WITHOUT repr's escape sequences hiding the secret.
+
+    A credential must not reach ``error`` (it is persisted to the checkpoint and
+    republished by ``report.py``), and scrubbing ``repr(exc)`` is HOW that is
+    done — but ``repr`` ESCAPES first, and the redactor's connection-URL anchor
+    is ``(?<![A-Za-z0-9])``. A newline in the message becomes the two characters
+    ``\\n``, whose trailing ``n`` IS alphanumeric, so a credential that begins a
+    line is invisible to a repr-only pass. Measured, on this head:
+
+    * ``ValueError("connect failed\\nredis://u:s3cr3t-pw@h:6379/0")`` persisted
+      ``s3cr3t-pw`` in cleartext in ``error``;
+    * the SAME message redacts cleanly when the redactor is handed the string
+      itself, and when the URL is preceded by a SPACE — which is why the
+      pre-existing repr pin, whose fixture keeps the URL on the message's first
+      line, never caught it.
+
+    So the MESSAGE is scrubbed BEFORE it is escaped, and the repr is rebuilt from
+    the scrubbed text. The rebuild happens only when that pass actually redacted
+    something: the common case keeps the exact ``repr`` bytes (and so the legacy
+    ``_legacy_repr_match`` substring, and every on-disk record's shape).
+
+    ⚠️ Residual, stated rather than implied: the blind spot is a property of any
+    ESCAPED text, so a credential carried by a non-string ``args`` object — whose
+    ``str`` is itself a repr — is still only reachable by the repr pass. Covering
+    that needs the redactor to anchor after an escape sequence, which is a
+    product-redactor change (the capture path feeds it REAL newlines, where the
+    anchor is correct) and is deliberately not made here.
+    """
+    msg = str(exc) or ""
+    scrubbed_msg = _scrub(msg)
+    if scrubbed_msg != msg:
+        return _scrub(f"{type(exc).__name__}({scrubbed_msg!r})")
+    return _scrub(repr(exc))
+
+
 def _error_detail(exc: BaseException) -> str:
     """The exception's OWN message, secret-scrubbed and bounded (#8486 F2).
 
@@ -1548,7 +1584,7 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
     # fallback is the exception's CLASS NAME: it cannot carry ``args``, so it
     # cannot leak a credential, and it keeps the record inspectable.
     try:
-        err = _scrub(repr(exc))
+        err = _scrub_exc_repr(exc)
     except Exception:  # noqa: BLE001, RUF100 — a broken redactor is not the failure
         err = type(exc).__name__
     if len(err) > ERROR_REPR_CAP:

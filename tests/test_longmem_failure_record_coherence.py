@@ -438,6 +438,131 @@ def test_the_persisted_repr_is_scrubbed_too():
     assert "ValueError" in err
 
 
+# ── the scrub has no input budget that can be bisected (#8486 round 7) ─────
+#: The credential the REVERTED ``SCRUB_INPUT_CAP = 64_000`` let through into the
+#: persisted record, and the windowed fragments a leak is measured by: a
+#: whole-value substring test misses the PREFIX-only leaks a cut produces.
+_LEAK_PW = "s3cr3t-pw-0123456789"
+_LEAK_WINDOWS = tuple(
+    _LEAK_PW[i:i + 8] for i in range(len(_LEAK_PW) - 7))
+_LEAK_URL = "redis://lme:" + _LEAK_PW + "@db.internal:6379/0"
+
+#: A non-secret token placed AFTER the credential. It survives only if the WHOLE
+#: message reached the redactor, which is what makes this assertion independent
+#: of WHERE a budget is drawn: any truncation before the end drops the sentinel,
+#: whatever value the cap has.
+_TAIL_SENTINEL = "SENTINEL-AFTER-THE-CREDENTIAL"
+
+
+def _leak_shaped_message(pem_body: int) -> str:
+    """A TERMINATED PEM block, then a credentialed URL, then the sentinel.
+
+    The block matters: the redactor collapses it to one ~20-char marker (≈3,000×
+    compression at this size), so the text AFTER it still lands inside the
+    stored ``ERROR_DETAIL_CAP``/``ERROR_REPR_CAP`` window once the block is
+    gone. Without that compression a bisected credential would be pushed past
+    the window by the padding and this shape could not leak at all.
+    """
+    return ("-----BEGIN RSA PRIVATE KEY-----\n" + "M" * pem_body
+            + "\n-----END RSA PRIVATE KEY-----\n"
+            + _LEAK_URL + _TAIL_SENTINEL)
+
+
+@pytest.mark.parametrize("pem_body", [200, 63_905, 130_000],
+                         ids=["short", "at-the-reverted-cap", "past-it"])
+def test_the_scrub_scans_the_whole_message_not_a_prefix(pem_body):
+    """Truncating the input BEFORE redacting is a leak, not an optimisation.
+
+    This module tried it once (``SCRUB_INPUT_CAP = 64_000``, reverted by
+    ``516904ad91``). A credential whose TERMINATOR falls past the cut is not
+    recognised at all, so its cleartext prefix was stored: measured on
+    ``pem_body=63_905`` — the value whose password ends exactly at the cut —
+    ALL THIRTEEN windows of the password survived, the full ``s3cr3t-pw-…``
+    text sitting in ``error_detail``.
+
+    ⛔ Two assertions, because either alone is satisfiable by a wrong
+    implementation. The SENTINEL makes the test independent of the cap's value
+    (anything that drops the tail of the message reds it), and the windowed
+    fragments pin the property the sentinel only implies. ``pem_body=63_905``
+    is the exact reproduction, kept so a future cap of the same value cannot be
+    reintroduced green; the other two sizes keep the sentinel assertion honest.
+    """
+    scrubbed = runner._scrub(_leak_shaped_message(pem_body))
+    assert _TAIL_SENTINEL in scrubbed, (
+        f"pem_body={pem_body}: the tail of the message never reached the "
+        "redactor — something truncated the input, and a truncated input is a "
+        "leak (a credential whose terminator falls past the cut is not "
+        "recognised, and the redactor LENGTHENS a connection-URL span, so it "
+        "cannot be assumed to shrink the text back under the window)")
+    leaked = [w for w in _LEAK_WINDOWS if w in scrubbed]
+    assert not leaked, (
+        f"pem_body={pem_body}: {len(leaked)} fragment(s) of the password "
+        f"survived the redactor, e.g. {leaked[:3]}")
+
+
+def test_a_credential_starting_a_line_is_not_hidden_by_repr_escaping():
+    """``repr`` ESCAPES a newline, and the escape is what hid the secret.
+
+    ``error`` is scrubbed from ``repr(exc)``, and the redactor's connection-URL
+    anchor is ``(?<![A-Za-z0-9])``. A newline in the message reaches the
+    redactor as the two characters ``\\n`` — whose trailing ``n`` is alphanumeric
+    — so a credential that BEGINS a line was never matched and its cleartext
+    password was persisted to the checkpoint and republished by ``report.py``.
+
+    Measured on the pre-fix head: this fixture's ``error`` read
+    ``ValueError('redis connect failed\\nredis://user:s3cr3t-pw@db.internal:6379/0')``.
+    The pre-existing repr pin passed throughout because its fixture keeps the
+    URL on the message's FIRST line, where the preceding character is a space.
+    Both are in the table below so neither shape can regress unnoticed.
+    """
+    exc = ValueError(
+        "redis connect failed\nredis://user:s3cr3t-pw@db.internal:6379/0")
+    err = _entry(exc)["error"]
+    assert "s3cr3t-pw" not in err, (
+        "the password reached `error` in cleartext — repr escaping defeated "
+        "the redactor's anchor")
+    assert "REDACTED" in err, "the record must still SAY a credential was stripped"
+    assert "db.internal" in err, "and stay diagnostic about the target host"
+    # the class name the legacy rescue greps for must survive either rendering
+    assert "ValueError" in err
+
+
+def test_a_credential_on_the_second_line_of_a_redis_error_survives_redaction():
+    """The same shape on the family whose repr DROPS ``args``.
+
+    A ``RedisError`` cannot leak through ``error`` (its repr is
+    ``server:ResponseError``), so a pin built only on one proves nothing about
+    ``error_detail``, which is ``str(exc)`` and carries the message verbatim.
+    """
+    exc = redis_exc.ResponseError(
+        "graph was deleted\nredis://user:s3cr3t-pw@db.internal:6379/0")
+    entry = _entry(exc)
+    for field in ("error", "error_detail"):
+        assert "s3cr3t-pw" not in entry[field], f"{field} leaked the password"
+    assert "REDACTED" in entry["error_detail"]
+
+
+def test_the_persisted_record_cannot_carry_a_credential_past_a_cut():
+    """The same shape through the PERSISTED builder, both persisted fields.
+
+    ``error`` and ``error_detail`` are both written to the checkpoint and both
+    republished by ``report.py``, so the leak is measured on the record a reader
+    and a resume actually see — not on ``_scrub``'s return value alone. This is
+    the end-to-end half of the pin above; on the pre-revert code it read
+    ``redis://lme:s3cr3t-pw-0123456789`` in ``error_detail``.
+    """
+    entry = _entry(ValueError(_leak_shaped_message(63_905)))
+    for field in ("error", "error_detail"):
+        leaked = [w for w in _LEAK_WINDOWS if w in entry[field]]
+        assert not leaked, (
+            f"{field}: {len(leaked)} fragment(s) of the password reached the "
+            f"persisted record, e.g. {leaked[:3]}")
+    # ...and the record stays diagnostic: both redactions are NAMED, so a reader
+    # can tell a credential was stripped rather than the text being lost.
+    assert "[REDACTED:private_key]" in entry["error_detail"]
+    assert "[REDACTED:connection_url]" in entry["error_detail"]
+
+
 def test_the_legacy_rescue_still_matches_after_scrubbing():
     """Redaction must not remove the transport CLASS NAME from ``error``.
 
