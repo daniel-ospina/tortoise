@@ -73,7 +73,9 @@ def _isolated(monkeypatch, tmp_path):
     # silently drops that guard: `resolve_db_path()` then falls through to
     # `DEFAULT_DB_PATH` — the OWNER'S or the RUNNER'S REAL `~/.tortoise/tortoise.db`.
     #
-    # Measured (shard `test (b)` at 79eaae021c, self-hosted runner): `doctor`
+    # Measured (shard `test (b)` at `79eaae021c` — the run head of PR #13856, which squash-landed,
+    # so that sha is NOT an ancestor of `main` and cannot be opened on a default clone; the
+    # measurement is run 44605355679, job 135864583112, self-hosted runner). `doctor`
     # probed that real store, FalkorDBLite is single-writer, and a live peer
     # process held it —
     #
@@ -81,7 +83,9 @@ def _isolated(monkeypatch, tmp_path):
     #        '/home/cmux/.tortoise/tortoise.db' is held by a live process (pid 3391344)
     #
     # — so `doctor` exited 1 and six tests that only assert `.env` DISCLOSURE
-    # went red for a reason none of them is about (#13856).
+    # went red for a reason none of them is about. The tracker for these six is #13867 (its Root 1
+    # is this fixture); #13856 is only the PR whose run head the red was OBSERVED on, and it landed
+    # a different root (the D14 embedded leg), so following it leads to a closed, unrelated fix.
     #
     # ⛔ `HOME` does NOT redirect it: `DEFAULT_DB_PATH` is computed at IMPORT
     # (`tortoise/config.py:31`), so the `setenv("HOME", …)` above is too late. The
