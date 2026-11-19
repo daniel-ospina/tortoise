@@ -16513,10 +16513,37 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "`04-plan.md`'s `declared_relation_predicates()` row must carry a `sdk.py:<line>` "
         f"cite; the row reads {plan_row[:200]!r}")
     expected_cite = f"sdk.py:{plan_number.group(1)}"
-    assert expected_cite in text, (
-        f"D5 must name `{expected_cite}`, the value `04-plan.md`'s own row carries at this "
-        "head (read off that row, not typed: the literal this check used to carry went "
-        "stale the moment the row was re-pointed). Re-derive the address; do not drop it")
+    # ⛔ BOUND TO THE AFFIRMATIVE CLAUSE, not just present somewhere in the row (#13746
+    # review round 5, P1 — measured). A bare `expected_cite in text` is a SUBSTRING test, and
+    # this row necessarily NEGATES the old address ("no longer reads `sdk.py:28607`"), so a
+    # row rewritten to say the OPPOSITE of the live cite still satisfied it: the reviewer
+    # replaced the affirmative clause with "does NOT carry `sdk.py:28682` — its row reads the
+    # old address" and the whole file went green. The cite is therefore read out of the
+    # clause that BINDS it — the number D5 says is "the value it carries at this head" — so
+    # a negation cannot satisfy the check, and neither can a stale derivation: mutating
+    # `04-plan.md` instead of D5 now REDs on the comparison below (measured).
+    # ⚠️ Residual, stated: this reads prose, so a reworded binding REDs (fail-closed — a
+    # reword must be re-derived), and a deliberate rewrite that keeps the binding phrase
+    # while asserting the opposite is a review question, not a pin's.
+    #
+    # The BINDING is the number the clause attributes to that claim: the LAST cite before
+    # `which is the value it carries at this head`. Taking the last one is what
+    # discriminates the affirmation from the negation above it — this row says "no longer
+    # reads `:28607` … re-points it to `:28682`, which is the value it carries at this
+    # head", and a plain leftmost regex would bind the NEGATED number.
+    bind_at = text.find("which is the value it carries at this head")
+    assert bind_at >= 0, (
+        "D5 must state AFFIRMATIVELY which cite `04-plan.md`'s row carries at this head "
+        "(the shape `<cite>` … `which is the value it carries at this head`) — it does "
+        f"not, so nothing in the row binds `{expected_cite}` to a live address")
+    bound = re.findall(r"`?(sdk\.py:\d+)`?", text[:bind_at])
+    assert bound, (
+        "the clause `which is the value it carries at this head` names no cite before it "
+        "— it must bind a `sdk.py:<line>` to that claim")
+    assert bound[-1] == expected_cite, (
+        f"D5 binds `{bound[-1]}` to `which is the value it carries at this head`, but "
+        f"`04-plan.md`'s row reads `{expected_cite}` — re-derive the address; the two "
+        "documents must not disagree")
 
     assert not failures, (
         "D5's present-tense anchors are not the lines they name "
