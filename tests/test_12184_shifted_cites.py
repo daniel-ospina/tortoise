@@ -298,9 +298,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # 2: `:6989` is BOTH the §1 label-scan table row's own key (already in this document) and the
     # §2.5 header enumeration's disclosure of THIS tree's Object declaration, added by `#13489` beside
     # its three siblings. Two sites, one spelling — a single pin resolves the line, and the count is
-    # what stops a third occurrence appearing unannounced. Measured at THIS head:
-    # `grep -o '\`:6938\`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 2, and
-    # `grep -o '\`:6939\`' …` -> 1, so `origin/main`'s 1 is the count BEFORE `#13489`'s second site.
+    # what stops a third occurrence appearing unannounced. Measured at THIS head, on the token
+    # this row was re-pointed TO: `grep -o '\`:6989\`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md
+    # | wc -l` -> 2, while `origin/main` carries 0 — so 2 is this branch's count, and `origin/main`'s
+    # OLD tokens are gone (`:6938` and `:6939` both -> 0 here, 2 and 2 there).
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6989`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
@@ -1113,7 +1114,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     disclosing this tree's figure appends a SECOND `:6989` occurrence, which
     `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` counts at 1. So a header that
     names both heads is a TWO-file edit, not a rewrite of this one: keep the declaration above
-    `` :6869`; ``, put the disclosure AFTER the semicolon, and move `_TOKEN_OCCURRENCES[':6938']` to 2
+    `` :6869`; ``, put the disclosure AFTER the semicolon, and move `_TOKEN_OCCURRENCES[':6989']` to 2
     in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
     deletes the only protection on the entry that actually suffered the false correction. The document's
     own shape puts the branch figure FIRST with the head in parens (`:33637` **on this branch**
@@ -1164,7 +1165,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "§2.5's row); putting it here re-points a history cite to a working-tree address, the "
         "`⚠️ CORRECTED` failure this file exists to stop. Restore `:6869` directly above a `;`. To ALSO "
         "disclose this tree's figure, keep the declaration where it is, append the disclosure AFTER the "
-        "semicolon, and bump `_TOKEN_OCCURRENCES[':6938']` to 2 in the same change — otherwise "
+        "semicolon, and bump `_TOKEN_OCCURRENCES[':6989']` to 2 in the same change — otherwise "
         "`test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` reds. Do not loosen either arm."
     )
 
