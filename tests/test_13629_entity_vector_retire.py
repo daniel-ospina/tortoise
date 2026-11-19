@@ -4499,6 +4499,52 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE KEY NEED NOT BE THE LITERAL AT ALL. The property can be COMPUTED from
+        # the pair (`{f"{k}": v …}`, `{str(k): v …}`, `{(k2 := k): v …}`, `{k + "": v …}`,
+        # `{v[0]: v[1] for v in [(…)]}`) and each of those placed the top-level vector while
+        # being CERTIFIED (measured, and runtime-checked). A key this check cannot read now
+        # fails CLOSED whenever the source is a pairs literal it CAN read — an over-refusal of
+        # a key that transforms the name away, which is cheap beside certifying a stop arm
+        # that stores.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {f"{k}": v for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {str(k): v for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v[0]: v[1] for v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        # ⛔ …AND THE UNPACK NEED NOT BE EXACTLY TWO: `{k: v for k, v, *rest in [(…)]}` reads the
+        # same pair as `(key, value, *rest)` and places the vector; a three-element source
+        # (`[("embedding", vec, 1)]`) is read the same way and is NOT a "pair" to the pairs
+        # rule, which mirrors what `dict([...])` accepts, so it has its own term.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: v for k, v, *rest in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: v for k, v, *rest in [("embedding", _encode(ev), 1)]}
+        return None
+    _write(props)
+""",
         # ⛔ …AND THE SAME COMPREHENSION BEHIND ONE `**` — `_dict_stores_the_vector`'s merge
         # arm accepted only an `ast.Dict` operand, so `{**<dictcomp>}` was CERTIFIED while the
         # literal behind the same `**` was refused (measured, and runtime-checked to place the

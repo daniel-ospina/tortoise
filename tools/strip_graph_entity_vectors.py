@@ -1707,10 +1707,13 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     ANY MORE (`#13788` F6, measured at `78cbe4da`): its operands are a KEY SEQUENCE and one
     value, both statically readable, so `_constructor_stores_the_vector` recognises it when
     the key sequence is a LITERAL (list, tuple or set) containing the EXACT property name. A
-    COMPUTED key sequence remains a residual — `props |= dict.fromkeys(_keys(ev), vec)` is
-    the fixture that pins BOTH terms of that boundary: dropping the literal-container test,
-    or the exact-name test, makes that honest-stop row (and the identity-triple row beside
-    it) refuse, so neither narrowing is dead weight.
+    COMPUTED key sequence remains a residual, and TWO fixtures pin the boundary — ONE TERM
+    EACH, measured by the review of this branch: `props |= dict.fromkeys(_keys(ev), vec)` is
+    the honest write-stop that the LITERAL-CONTAINER term keeps certified (dropping it
+    refuses that row), and `props |= dict.fromkeys(["embedding_model"], _m())` is the
+    identity-triple row that the EXACT-NAME term keeps certified (dropping it refuses that
+    row). Neither term reddens both rows, so neither is dead weight — and a claim that one
+    term pins both would be a false record.
 
     ⛔ AND IT IS NOT THE MAPPING RULE — `{"embedding": vec}` has no pair in it, so this
     helper answers False for the mapping spelling BY DESIGN. Every caller that can be handed
@@ -1758,19 +1761,37 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # constant, not a pair — and scanning only the generators certified it (measured at
         # `45b5f88a`, and runtime-checked to leave `{"embedding": VEC}` in `props`). Same
         # narrowing as everywhere else: EXACT name, NON-CONSTANT value.
-        if (isinstance(node.key, ast.Constant) and node.key.value == EMBEDDING_PROPERTY
-                and not isinstance(node.value, ast.Constant)):
-            return True
+        if isinstance(node.key, ast.Constant):
+            # ⛔ A CONSTANT KEY IS FULLY DECIDED HERE: the property (with a non-constant value,
+            # the same narrowing every other arm makes) or something else. Nothing below can
+            # apply, because the produced mapping's key is this constant.
+            return (node.key.value == EMBEDDING_PROPERTY
+                    and not isinstance(node.value, ast.Constant))
+        # ⛔ AND A KEY THIS CHECK CANNOT READ FAILS **CLOSED** (`#13788`, measured): the
+        # property need not be spelled as the literal — `{f"{k}": v for k, v in [(…)]}`,
+        # `{str(k): v …}`, `{(k2 := k): v …}` and `{k + "": v …}` all compute `"embedding"`
+        # at runtime and place it, and each was CERTIFIED while the literal spelling was
+        # refused. The SOURCE is a pairs literal this check can read, so the pair decides:
+        # mentioning it anywhere in the key means refusing. ⛔ The cost is an over-refusal of
+        # a key that transforms it AWAY (`{k.upper(): v …}`), which the doctrine permits and
+        # which is cheap beside certifying a stop arm that stores.
+        if not isinstance(node.key, ast.Name):
+            return any(_pairs_operand_stores_the_vector(generator.iter)
+                       for generator in node.generators)
         # ⛔ AND THE SOURCE IS A STORE ONLY WHEN THE PAIR IS **UNPACKED INTO THE KEY AND THE
-        # VALUE**. `{k: v for k, v in [("embedding", vec)]}` places the property; the same
-        # source read as a whole (`{x: 1 for x in [("embedding", vec)]}` keyed by the PAIR, or
-        # `{v: k for k, v in […]}`, which keys by the vector) places no `embedding` key at all,
-        # and refusing those refused honest writers (measured at this head — two of them, each
-        # runtime-checked). Hence the target test: the generator must unpack a two-element
-        # target and the produced KEY must be that target's FIRST name.
+        # VALUE**, because a pair used as a whole places nothing:
+        # `{x: 1 for x in [("embedding", vec)]}` keys the mapping by the PAIR and
+        # `{v: k for k, v in [(…)]}` by the vector (both runtime-checked, both refused by an
+        # unconditional source scan — an over-refusal, measured). Hence the target test: the
+        # clause must unpack and the produced KEY must be its FIRST name.
         return any(
             _generator_unpacks_the_pair_into_the_key(node.key, generator)
-            and _pairs_operand_stores_the_vector(generator.iter)
+            and (_pairs_operand_stores_the_vector(generator.iter)
+                 # ⛔ …AND A PAIR WITH EXTRAS IS STILL READ AS `(key, …)` BY AN UNPACKING
+                 # CLAUSE: `{k: v for k, v, *rest in [("embedding", vec, 1)]}` places the
+                 # vector, and the pairs rule rejects a three-element element by design (it
+                 # mirrors what `dict([...])` accepts). Measured CERTIFIED at this head.
+                 or _unpacked_element_stores_the_vector(generator.iter))
             for generator in node.generators)
     if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
         # `[x for x in [("embedding", vec)]]` — a comprehension over a pairs literal still
@@ -1900,17 +1921,44 @@ def _generator_unpacks_the_pair_into_the_key(key, generator) -> bool:
     `{k: v for k, v in [("embedding", vec)]}` reads the pair as `(key, value)` and places the
     property; `{x: 1 for x in […]}` keys the mapping by the PAIR ITSELF and `{v: k for k, v in
     […][…]}` by the vector, so neither places an `embedding` key — refusing those refused
-    honest writers (measured). Static, like every other reading here: the target must be a
-    two-element unpack and the key expression must be its FIRST name.
+    honest writers (measured). Static, like every other reading here: the target must UNPACK
+    and the key expression must be its FIRST name.
+
+    ⛔ TWO OR MORE ELEMENTS, NOT EXACTLY TWO (`#13788`, measured): `{k: v for k, v, *rest in
+    [(…)]}` unpacks the same pair and places the property, and an `== 2` test certified it.
     """
     import ast
 
     target = getattr(generator, "target", None)
-    if not isinstance(target, ast.Tuple | ast.List) or len(target.elts) != 2:
+    if not isinstance(target, ast.Tuple | ast.List) or len(target.elts) < 2:
         return False
     first = target.elts[0]
     return (isinstance(first, ast.Name) and isinstance(key, ast.Name)
             and key.id == first.id)
+
+
+def _unpacked_element_stores_the_vector(node) -> bool:
+    """Does this iterable literal hold an element whose FIRST TWO items are the store?
+
+    The pair-with-extras shape — `[("embedding", vec, 1)]`, read by
+    `{k: v for k, v, *rest in [...]}`. ⛔ NOT the pairs rule, deliberately: that one mirrors
+    what `dict([...])` accepts (exactly two), and the unpacking clause reads a longer element
+    as `(key, value, *rest)`. Stop arm only, like every caller of the rules above.
+    """
+    import ast
+
+    if not isinstance(node, ast.List | ast.Tuple):
+        return False
+    for element in node.elts:
+        if not isinstance(element, ast.Tuple | ast.List) or len(element.elts) < 2:
+            continue
+        first, second = element.elts[0], element.elts[1]
+        if (isinstance(first, ast.Constant) and first.value == EMBEDDING_PROPERTY
+                and not isinstance(second, ast.Constant)):
+            return True
+    return False
+
+
 def _is_full_slice(node) -> bool:
     """Does this subscript index select the WHOLE container — `[:]`, `[0:]`, `[::1]`?
 
@@ -2406,15 +2454,17 @@ def _mapping_argument_stores_the_vector(node) -> bool:
     if isinstance(node, ast.Dict):
         return _dict_stores_the_vector(node)
     # ⛔ A COMPREHENSION NEEDS NO ARM HERE, AND THE REASON IS NOT A TAIL OF THIS HELPER — it
-    # ends in `return False`, and it never asks the pairs rule or the mapping-literal rule.
-    # Every position that matters reaches the comprehension through a DIFFERENT caller:
-    # `_mapping_operand_stores_the_vector` (which asks `_mapping_literal_stores_the_vector`
-    # first) answers the `update(…)`/`|=` operands and the constructor's operands, and the
-    # assignment arm asks the mapping-literal rule directly. An explicit arm here was written,
-    # measured REDUNDANT — removing it changed no verdict on any fixture, and disabling the
-    # operand leg instead does miss the constructor case — and removed rather than kept
-    # looking load-bearing. ⛔ So a FUTURE caller of THIS helper alone does not get
-    # comprehensions; ask the operand rule.
+    # ends in `return False`, and it never asks the pairs rule nor the mapping-literal rule.
+    # Every position that matters reaches a comprehension through a DIFFERENT caller, and the
+    # route differs BY POSITION (measured by the review of this branch, each leg disabled in
+    # turn): the `|=` AugAssign arm asks `_pairs_operand_stores_the_vector(sub.value)`
+    # DIRECTLY; the ASSIGN arm asks `_mapping_literal_stores_the_vector`; and
+    # `_mapping_operand_stores_the_vector` (which asks the mapping-literal rule first) answers
+    # `update(…)`'s operands, the UNION-expression operand and the constructor's operands. An
+    # explicit arm here was written, measured REDUNDANT — removing it changed no verdict on any
+    # fixture, while disabling the constructor's operand leg does miss its case — and removed
+    # rather than kept looking load-bearing. ⛔ So a FUTURE caller of THIS helper alone does not
+    # get comprehensions; ask the operand rule (or the pairs rule for a bare `|=`).
     if isinstance(node, ast.Call) and _callee_name(node) == "dict":
         for keyword in node.keywords:
             if keyword.arg == EMBEDDING_PROPERTY and not isinstance(keyword.value, ast.Constant):
