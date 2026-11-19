@@ -3563,9 +3563,16 @@ _APPROVAL_RECORD_IN_A_TABLE_ROW = (
 # the pattern IS consulted on the CLOSING fence line and DOES split it (measured:
 # '``` x' / '``` **Owner approval …'), but the surviving paragraph still OPENS with that
 # fence, so the label is still unread. Either way the label needs an END boundary — which
-# is why the splitter is the remedy and the starts are not — and no stripper can reach
-# them either: there is no delimiter in front of the run to strip. `docs/ONTOLOGY-CHANGELOG.md`
-# writes neither shape.
+# is why the splitter is the remedy and the starts are not. ⛔ AND NOT "no stripper can
+# reach them either: there is no delimiter in front of the run to strip" (review P2,
+# measurably false for BOTH): the BREAK's paragraph reads `--- **Owner approval …**`,
+# delimiter and all, and teaching `_LEADING_LIST_MARKER_RE` the alternative `-{3,}\s+` —
+# the same move as the row's `|\s+` — turns it PASS → REFUSED (measured); the FENCE closes
+# the same way with a fence-AWARE strip, also measured REFUSED. What is true is that each
+# needs its OWN delimiter shape added to a pattern whose whole job is stripping one
+# leading marker, while ONE end-of-paragraph boundary closes both — which is why the
+# boundary is the remedy of choice, not because a stripper cannot reach them.
+# `docs/ONTOLOGY-CHANGELOG.md` writes neither shape.
 _APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK = (
     "> ---\n"
     "> **Owner approval of the exact changes** — given in-session, no comment cited.")
@@ -3836,14 +3843,24 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
           that consumes no space changes nothing either, and is not a row start. Measured
           PASS; the corpus writes no tables
           (``grep -c '^> *|' docs/ONTOLOGY-CHANGELOG.md`` = 0);
-        · the BREAK and the FENCE close through the SPLITTER only, and no stripper can reach
-          them — there is no delimiter in front of the run, the block IS the delimiter.
-          They need an END-of-paragraph boundary in ``_quoted_paragraphs`` (the
-          ``_HEADING_START_RE`` shape, a break being a whole block, CommonMark §4.1).
-          Measured, and it is why the guess costs a cycle: adding their STARTS to
-          ``_PARAGRAPH_START_RE`` alone leaves BOTH still PASS (that pattern is consulted on
-          the NEXT line, which is the label), while an end-boundary split turns both
-          PASS → REFUSED and moves the row not at all. The corpus writes neither shape
+        · the BREAK and the FENCE are closed by ONE end-of-paragraph boundary in
+          ``_quoted_paragraphs`` (the ``_HEADING_START_RE`` shape, a break being a whole
+          block, CommonMark §4.1). ⛔ NOT "through the SPLITTER only, and no stripper can
+          reach them — there is no delimiter in front of the run" (review P2, measurably
+          false for both): the BREAK's paragraph reads ``--- **Owner approval …**``,
+          delimiter and all, and ``_LEADING_LIST_MARKER_RE`` taught ``-{3,}\\s+`` — the
+          same move as the row's ``|\\s+`` — turns it PASS → REFUSED; the FENCE closes the
+          same way with a fence-AWARE strip. Each would need its OWN delimiter shape
+          added, though, while one end-of-paragraph boundary closes both — which is why
+          the boundary is the remedy of choice. Measured, and it is why the guess costs a
+          cycle: adding their STARTS to ``_PARAGRAPH_START_RE`` alone leaves BOTH still
+          PASS, and the reason differs per shape — a start taught for the BREAK sits on
+          the block's FIRST line, where ``current`` is still empty, so no boundary is
+          created (the paragraph is unchanged); for the FENCE the pattern IS consulted on
+          the CLOSING fence line and DOES split (``'``` x'`` / ``'``` **Owner approval …'``),
+          but the surviving paragraph still OPENS with that fence, so the label stays
+          unread. An end-boundary split turns both PASS → REFUSED and moves the row not at
+          all. The corpus writes neither shape
           (``grep -c '^> *\\(---\\|```\\)' docs/ONTOLOGY-CHANGELOG.md`` = 0);
         and all three are driven green — by ``_APPROVAL_RECORD_IN_A_TABLE_ROW``,
         ``_APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK`` and
@@ -4176,11 +4193,14 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     _refuse_an_approval_record_with_no_resolvable_home(_APPROVAL_RECORD_IN_A_TABLE_ROW)
     # ⛔ …AND ITS TWO SIBLING BLOCK KINDS, MEASURED (review P3: this file said the row was
     # "the one block kind" the paragraph model does not know, which was false, and it sent
-    # the next fix at the STRIPPER — the half that cannot reach either of these). Both are
-    # green here for the same reason: the block's own line fuses with the label's, so the
-    # paragraph does not open with the run. Pinned so the shapes are measured, not assumed,
-    # and so a lane that closes them (via an END-of-paragraph boundary in
-    # `_quoted_paragraphs`, NOT via `_PARAGRAPH_START_RE`'s starts, measured) has to
+    # the next fix at the STRIPPER alone). Both are green here for the same reason: the
+    # block's own line fuses with the label's, so the paragraph does not open with the run.
+    # ⛔ NOT "the half that cannot reach either of these" (review P2, measurably false): a
+    # stripper DOES reach both, with one shape-specific alternative each (measured:
+    # `-{3,}\s+` closes the break, a fence-aware strip closes the fence). What makes the
+    # END-of-paragraph boundary in `_quoted_paragraphs` the remedy of choice is that ONE
+    # rule closes both — and `_PARAGRAPH_START_RE`'s starts move nothing (measured). Pinned
+    # so the shapes are measured, not assumed, and so a lane that closes them has to
     # re-decide these two rows rather than discover them by accident.
     _refuse_an_approval_record_with_no_resolvable_home(
         _APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK)
