@@ -1193,10 +1193,14 @@ the translation fallback (`embeddings.py::_as_failure_kind`), i.e. the kind a RE
 nothing was recorded; likewise `no_embedder` / `load_in_flight` are LEG-TRACE words translated at that
 same seam, not failure kinds — publishing one of those here is the #5275/#13528 conflation. `oom` is
 not a member at all: a process killed for memory records nothing, so read the machine for that, not
-this field. `unavailable` with `failure_kind: null` means no attempt has run in THIS process yet (a
-fresh boot before the pre-warm landed) — not a failure.
+this field. `unavailable` with `failure_kind: null` is TWO states, and `load_in_progress` separates
+them — `load_in_progress: false` means no attempt has run in THIS process yet (a fresh boot before
+the pre-warm landed) and is not a failure, while `load_in_progress: true` means a first load is
+RUNNING at this very moment and `load_in_progress_s` is the number to read. A fresh deploy's first
+read lands in that second state (the pre-warm is a thread started at lifespan), so calling it "no
+attempt yet" sends an operator hunting a pre-warm that is 190 s into its own 300 s bound.
 - **`load_timeout_s` is the bound the PROCESS applies**, and it must read `300.0` on this image. A
-`90.0` here is a pre-#13674 binary still deployed, which is the whole outage.
+`90.0` here is a pre-#13692 binary still deployed, which is the whole outage.
 - **`threads` is the intra-op pin** (#10296), published for the same "why is this host slow" question;
 `null` before any load attempt.
 
