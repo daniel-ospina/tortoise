@@ -605,24 +605,132 @@ class TestRefusals:
         assert ei.value.exit_code == 2
 
     def test_seeded_guard_refuses_the_zero_zero_coverage_trap(self, tool_mod):
-        """`0 >= 0` is VERIFIED — so seeding is guarded, not inferred."""
+        """`0 >= 0` is VERIFIED — so seeding is guarded, not inferred.
+
+        ⛔ AND IT IS GUARDED FROM BOTH SIDES, BY TWO FUNCTIONS. One function that
+        asserted both counts was called inside the record block's `try/except`,
+        so a zero-vector GRAPH raised `graph_unseeded` there and blocked the
+        RECORD arm — a graph fact wearing a record cause, with the headline
+        `record_dense_vs_lexical` comparison going UNMEASURED (`#13745` review
+        round 2, finding 1). Each side now refuses where its fact lives.
+        """
         with pytest.raises(tool_mod.Refused) as ei:
-            tool_mod.require_seeded(0, 0)
-        assert ei.value.code == "graph_unseeded"
+            tool_mod.require_graph_population(0, 786)
+        assert ei.value.code == "graph_population_absent"
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_record_measured(0)
+        assert ei.value.code == "record_unseeded"
+
+    def test_the_record_guard_never_names_the_graph(self, tool_mod):
+        """⚠️ THE MESSAGE IS THE DIAGNOSIS: a record refusal must not blame the graph.
+
+        `require_seeded`'s graph clause said *"every arm would measure the lexical
+        leg"* — false for `record_dense`, which reads Postgres — and it raised
+        from inside the record block, so that sentence shipped as the record
+        arm's explanation.
+        """
+        source = TOOL.read_text()
+        tree = ast.parse(source)
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "require_record_measured"
+        )
+        # ⛔ THE CODE, NOT THE DOCSTRING: the docstring must be free to EXPLAIN the
+        # old coupling, and a pin that forbade the word there would forbid the
+        # explanation of the bug it guards.
+        code_nodes = (
+            fn.body[1:]
+            if (
+                fn.body
+                and isinstance(fn.body[0], ast.Expr)
+                and isinstance(fn.body[0].value, ast.Constant)
+                and isinstance(fn.body[0].value.value, str)
+            )
+            else fn.body
+        )
+        code = "\n".join(ast.unparse(n) for n in code_nodes)
+        assert "graph" not in code.lower(), (
+            "the record guard must never name the graph in CODE — that coupling is "
+            "what blocked the record arm on a graph fact"
+        )
+        # and the run must call the RECORD half here, not a both-sides guard
+        run = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        called = {
+            c.func.id
+            for c in ast.walk(run)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        }
+        assert "require_record_measured" in called, called
+        assert "require_seeded" not in called, (
+            "`require_seeded` asserts BOTH counts; called inside the record block it "
+            "re-introduces the graph-blocks-the-record-arm bug"
+        )
+
+    def test_no_GRAPH_fact_can_decide_the_RECORD_block(self):
+        """⛔ Structural, because the shipped bug was structural.
+
+        `require_seeded(graph_vectors, record_vectors)` raised `graph_unseeded`
+        from INSIDE the record block's `try/except`, which caught it as
+        `record_blocked`: a zero-vector graph then blocked the `record_dense` arm
+        under a message about "every arm", and the headline comparison went
+        UNMEASURED (`#13745` review round 2, finding 1). The pure-function pin
+        above cannot see that shape, so this one reads the RUN: inside the record
+        block, `graph_vectors` may be handed to `coverage(...)` as the DENOMINATOR
+        and nothing else, and no refusal there may be spelled `graph_*`.
+        """
+        tree = ast.parse(TOOL.read_text())
+        run = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        block = next(
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.If)
+            and isinstance(n.test, ast.Compare)
+            and "record_blocked" in ast.unparse(n.test)
+        )
+        # every COMPARISON touched inside the block is a decision; none may be about the graph
+        decisions = [
+            ast.unparse(node)
+            for node in ast.walk(block)
+            if isinstance(node, ast.Compare) and "graph" in ast.unparse(node).lower()
+        ]
+        assert not decisions, (
+            "a graph comparison decides the record block: "
+            f"{decisions} — that is the shape that let a graph fact block the record arm"
+        )
+        # and no `graph_*` refusal code may be raised there
+        codes = [
+            node.args[0].value
+            for node in ast.walk(block)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Refused"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ]
+        assert not [c for c in codes if isinstance(c, str) and c.startswith("graph")], codes
 
     def test_seeded_guard_refuses_an_empty_record(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
-            tool_mod.require_seeded(786, 0)
+            tool_mod.require_record_measured(0)
         assert ei.value.code == "record_unseeded"
         assert "13210" in ei.value.message  # the backfill is named, not implied
 
     def test_seeded_guard_refuses_an_unmeasurable_record(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
-            tool_mod.require_seeded(786, None)
+            tool_mod.require_record_measured(None)
         assert ei.value.code == "record_unmeasurable"
 
-    def test_seeded_guard_passes_a_seeded_pair(self, tool_mod):
-        tool_mod.require_seeded(786, 800)  # no raise
+    def test_seeded_guard_passes_a_seeded_record(self, tool_mod):
+        tool_mod.require_record_measured(800)  # no raise
 
     def test_a_required_embedder_that_cannot_load_is_a_NAMED_refusal(self, tool_mod, monkeypatch):
         """`EmbeddingModel.get()` RAISES when REQUIRED is armed — catch it by name.
@@ -1320,6 +1428,8 @@ class TestTheDocumentedRunPath:
     population build to the exit code is `run_measurement` as it ships.
     """
 
+    SCOPE = types.SimpleNamespace(org_id="org-1", graph_id="graph-1")
+
     BLOCK_MESSAGE = (
         "TORTOISE_RECORD_DSN is not set — the record's dense leg cannot be read, "
         "and the graph's leg under the record's name is not this measurement"
@@ -1334,6 +1444,7 @@ class TestTheDocumentedRunPath:
         out: str,
         preregistered_n: int,
         seeded: int | None = None,
+        record_ok: bool = False,
     ):
         corpus = tmp_path / "corpus"
         corpus.mkdir(exist_ok=True)
@@ -1349,6 +1460,24 @@ class TestTheDocumentedRunPath:
             raise tool_mod.Refused("no_record_dsn", self.BLOCK_MESSAGE)
 
         monkeypatch.setattr(tool_mod, "require_record", _no_record)
+        if record_ok:
+            # ⛔ A HEALTHY RECORD, so the property this change exists for — that a
+            # partial graph seed does NOT cost the headline
+            # `record_dense_vs_lexical` — is observable. Without it the run-path
+            # harness blocks `record_dense` for an unrelated reason and the claim
+            # is asserted nowhere (`#13745` review round 2, finding 2).
+            monkeypatch.setattr(tool_mod, "require_record", lambda _dsn: "postgresql://u@h/db")
+            # `run_measurement` imports `record_vector` INSIDE the function, so the
+            # seam is the module on `tortoise`, not an attribute of the tool.
+            monkeypatch.setattr("tortoise.record_vector._resolve_scope", lambda: self.SCOPE)
+            monkeypatch.setattr(
+                "tortoise.record_vector.coverage",
+                lambda *_a, **_k: types.SimpleNamespace(
+                    verified=True, reason="ok", record_vectors=3, graph_vectors=3
+                ),
+            )
+            monkeypatch.setattr("tortoise.record_vector.reset_coverage_cache", lambda: None)
+            monkeypatch.setattr(tool_mod, "record_population_vectors", lambda _ids, _scope, _dsn: 3)
         monkeypatch.setattr(tool_mod, "_git_head", lambda: "deadbeef")
         monkeypatch.setattr(tool_mod, "_seed_graph", lambda _proj, pop: len(pop))
         # ⛔ WHAT THE GRAPH "HOLDS" IS WHAT THIS RUN SEEDED — the `seeded` knob is
@@ -1432,39 +1561,77 @@ class TestTheDocumentedRunPath:
             "the guard refused on — not `graph_vectors` under a second name"
         )
 
-    def test_a_partly_seeded_graph_blocks_the_ARM_not_the_run(
-        self, tool_mod, monkeypatch, tmp_path
+    def test_a_partly_seeded_graph_costs_the_graph_arm_and_NOTHING_ELSE(
+        self, tool_mod, monkeypatch, tmp_path, capsys
     ):
-        """THE BEHAVIOUR, through the shipped guard: two arms still publish.
+        """THE BEHAVIOUR, through the shipped guard, with a HEALTHY record.
 
         ⛔ `#13745` review round 1, finding 1: stubbing `graph_population_vectors`
         in the run-path harness left the guard's enforcement unobservable — a run
-        that swallowed its refusal kept the suite green. This drives a PARTIAL
-        seed through the real `graph_population_vectors` + `require_graph_population`
-        and asserts what the run does with it.
+        that swallowed its refusal kept the suite green.
+        ⛔ AND ROUND 2, FINDING 2: the harness blocked `record_dense` too (a
+        deliberate `no_record_dsn`), so the property this whole change exists for
+        — that a partial graph seed does NOT cost the headline
+        `record_dense_vs_lexical` — was asserted nowhere, and a mutant that
+        suppressed the headline whenever the graph arm was blocked stayed green.
+        So `record_ok=True`: only the graph arm may be missing from the result.
         """
         target = tmp_path / "partial.json"
         rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            seeded=1,
+            record_ok=True,
+        )
+        artifact = json.loads(target.read_text())
+        # the graph arm is blocked BY NAME and carries no measurement
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_absent"
+        assert "summary" not in artifact["arms"]["graph_dense"]
+        assert artifact["population"]["graph_population_vectors"] == 1
+        # ⛔ THE OTHER TWO ARMS ARE REAL MEASUREMENTS — this is the discriminator
+        # against run-level scoping (which raises before the first arm, exits 2
+        # and publishes NO artifact) and against a graph block that leaks into the
+        # record arm (round 2, finding 1: `graph_unseeded` blocking `record_dense`).
+        assert "summary" in artifact["arms"]["lexical"], artifact["arms"]["lexical"]
+        assert "summary" in artifact["arms"]["record_dense"], artifact["arms"]["record_dense"]
+        # ⛔ AND THE HEADLINE SURVIVES. Only comparisons that involve the blocked
+        # arm are UNMEASURED; `record_dense_vs_lexical` is a real verdict.
+        assert artifact["comparisons"]["record_dense_vs_lexical"]["label"] != "UNMEASURED"
+        assert "primary" in artifact["comparisons"]["record_dense_vs_lexical"]
+        assert artifact["comparisons"]["graph_dense_vs_lexical"]["label"] == "UNMEASURED"
+        assert artifact["comparisons"]["record_dense_vs_graph_dense"]["label"] == "UNMEASURED"
+        # INCOMPLETE, named, exit 3 — and exactly ONE cause, since the record is healthy
+        assert rc == 3
+        notes = [n for n in artifact["not_measured"] if "BLOCKED[" in n]
+        assert len(notes) == 1, notes
+        assert "BLOCKED[graph_population_absent]" in notes[0], notes[0]
+        assert [line for line in capsys.readouterr().err.splitlines() if "REFUSED[" in line] == [
+            "REFUSED[graph_population_absent]: " + artifact["arms"]["graph_dense"]["message"]
+        ]
+
+    def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
+        """⛔ The single-`blocked` slot made the LAST cause win; this pins both.
+
+        A graph block and a record block are different facts about different
+        stores, and a report that names only one of them points the next lane at
+        the wrong repair. The mutant — reporting `blockages` as a one-element
+        slice — is green on every other test in this file.
+        """
+        target = tmp_path / "two.json"
+        rc = self._drive(
             tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N, seeded=1
         )
-        # ⛔ THE DISCRIMINATOR AGAINST RUN-LEVEL SCOPING: the artifact EXISTS and
-        # `lexical` is a REAL measurement. A run-level guard raises `Refused`
-        # before the first arm, so this path would exit 2 with NO artifact and
-        # nothing published — the failure the record gate was already moved out
-        # of. (In this harness `record_dense` is blocked for an unrelated reason,
-        # the deliberate `no_record_dsn` below, so the headline comparison is
-        # UNMEASURED here for THAT cause — the arm scoping is what keeps `lexical`
-        # on the page, which is the assertion that distinguishes the two designs.)
         artifact = json.loads(target.read_text())
-        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_absent"
-        assert artifact["population"]["graph_population_vectors"] == 1
-        assert "summary" in artifact["arms"]["lexical"], artifact["arms"]["lexical"]
-        assert artifact["comparisons"]["graph_dense_vs_lexical"]["label"] == "UNMEASURED"
-        # and the run is INCOMPLETE and NAMED, not silent
+        notes = [n for n in artifact["not_measured"] if "BLOCKED[" in n]
+        codes = sorted(n.split("BLOCKED[")[1].split("]")[0] for n in notes)
+        assert codes == ["graph_population_absent", "no_record_dsn"], codes
+        lines = [line for line in capsys.readouterr().err.splitlines() if "REFUSED[" in line]
+        assert len(lines) == 2, lines
+        assert {line.split("REFUSED[")[1].split("]")[0] for line in lines} == set(codes)
         assert rc == 3
-        assert any("BLOCKED[graph_population_absent]" in n for n in artifact["not_measured"]), (
-            artifact["not_measured"]
-        )
 
     def test_the_artifact_names_the_arms_OWN_reason_not_a_cohort_story(
         self, tool_mod, monkeypatch, tmp_path
@@ -1675,7 +1842,7 @@ class TestContradictionTest:
         assert "from tools.m3_fts_leg_recall import _binom_two_sided" in source
 
 
-# ── 5b. the GRAPH's membership of the population (id+text scoped, run-level) ──
+# ── 5b. the GRAPH's membership of the population (id+text scoped, arm-gated) ──
 
 
 class _GraphResult:
@@ -1704,7 +1871,7 @@ class _ProjStub:
 class TestGraphMembership:
     """The population's OWN ids must carry THIS run's vector in the GRAPH.
 
-    ⛔ The run-level gate beside the seed is PREFIX-wide:
+    ⛔ The gate beside the seed is PREFIX-wide:
     ``n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL``. That count is
     above zero while the population is only PARTLY seeded — the apply-fold leaves
     ``n.embedding`` unset for an operator point (every embed branch is gated on
@@ -1714,7 +1881,8 @@ class TestGraphMembership:
     Exception: pass``. And ``n.embedding IS NOT NULL`` alone cannot tell THIS
     run's vector from an EARLIER text's under the same deterministic id, which is
     what a reused ``--graph`` produces. These cases red the mutants that make the
-    graph guard prefix-wide, id-only, or arm-scoped.
+    graph guard prefix-wide, id-only, or blind to an earlier text under the same
+    id — and the wiring pin reds moving it off the ``graph_dense`` arm.
     """
 
     def _pop(self, n: int) -> list[dict]:

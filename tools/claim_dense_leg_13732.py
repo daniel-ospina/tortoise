@@ -66,9 +66,12 @@ payload was the production one, and it was right.
 ⚠️ ``record_vector.coverage`` compares
 ``record_vectors >= graph_vectors``, and **0 >= 0 is VERIFIED** — so an unseeded
 population does not fail the coverage gate, it *passes* it and then serves an
-empty record cohort as ``mechanism=pgvector, reason=ok``. That is why
-:func:`require_seeded` asserts a non-zero vector count on BOTH sides before any
-arm runs; a gate that can be satisfied by two zeros is not a gate.
+empty record cohort as ``mechanism=pgvector, reason=ok``. That is why the
+zero-zero state is refused from BOTH sides before an arm runs — by
+:func:`require_record_measured` for the record and by
+:func:`require_graph_population` for the graph. One function asserting both was
+what let a GRAPH fact refuse the RECORD arm; a gate that can be satisfied by two
+zeros is not a gate.
 
 ⛔ **AND THE COUNT IS NOT THE WHOLE GUARD — the IDS are.** ``coverage`` asks a
 LABEL-WIDE question by design (*"does the record hold as many vectors as the
@@ -789,22 +792,26 @@ def require_record(dsn: str | None):
     return dsn
 
 
-def require_seeded(graph_vectors: int, record_vectors: int | None) -> None:
-    """Both stores must hold vectors, or the coverage gate is satisfied by zeros.
+def require_record_measured(record_vectors: int | None) -> None:
+    """The RECORD's count must be a measurement, and a non-zero one.
 
     ⛔ ``record_vector.coverage`` compares ``record_vectors >= graph_vectors`` and
     **0 >= 0 is verified**. An unseeded population therefore PASSES the gate and
     then serves an empty cohort as ``mechanism=pgvector, reason=ok`` — the
     failure mode that would have made M2's population look like a dense leg with
     no recall rather than a population with no vectors.
+
+    ⛔ AND THIS IS THE RECORD HALF ONLY — the zero-zero trap is closed by TWO
+    guards now that each own their fact (#13745 review round 2). It used to be
+    one function asserting both sides, called inside the record block's
+    ``try/except``: a zero-vector GRAPH therefore raised ``graph_unseeded``
+    somewhere that caught it as a RECORD block, so the ``record_dense`` arm was
+    blocked by a graph fact — under a message ("every arm would measure the
+    lexical leg") that is false for an arm reading Postgres — and the headline
+    ``record_dense_vs_lexical`` comparison went ``UNMEASURED``. The graph fact
+    now refuses where it belongs, on the ``graph_dense`` arm, via
+    :func:`require_graph_population`; this function never names the graph.
     """
-    if graph_vectors <= 0:
-        raise Refused(
-            "graph_unseeded",
-            f"the graph holds {graph_vectors} vector-bearing claim(s) — the "
-            f"population was written without embeddings, so no dense leg can "
-            f"find anything and every arm would measure the lexical leg",
-        )
     if record_vectors is None:
         raise Refused(
             "record_unmeasurable",
@@ -823,8 +830,8 @@ def require_seeded(graph_vectors: int, record_vectors: int | None) -> None:
 def record_population_vectors(ids: list[str], scope, record_dsn: str | None) -> int | None:
     """How many of THIS population's ids does the record hold a VECTOR for?
 
-    The id-SCOPED half of the precondition :func:`require_seeded` can only state
-    as a label-wide count, and the one number that tells *"the record serves this
+    The id-SCOPED half of the precondition :func:`require_record_measured` can
+    only state as a label-wide count, and the one number that tells *"the record serves this
     cohort"* from *"the record serves some other cohort of the same label"*.
 
     ⛔ The predicates are :func:`tortoise.record_vector._record_vector_count`'s,
@@ -986,7 +993,7 @@ def require_graph_population(matched: int | None, population_n: int) -> None:
 def require_population_in_record(matched: int | None, population_n: int) -> None:
     """The record must hold a VECTOR for every id this run would score.
 
-    ⛔ ``coverage``/``require_seeded`` count the whole ``point`` label, so on any
+    ⛔ ``coverage``/``require_record_measured`` count the whole ``point`` label, so on any
     tenant holding enough embedded claims they answer VERIFIED for a population
     whose own ids are in NEITHER store. The ``record_dense`` arm would then rank
     none of them and publish ``recall@3 = 0.0`` — with a valid McNemar p-value —
@@ -1307,7 +1314,7 @@ def run_measurement(args: argparse.Namespace) -> int:
             coverage = require_coverage(
                 record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn)
             )
-            require_seeded(graph_vectors, coverage["record_vectors"])
+            require_record_measured(coverage["record_vectors"])
             # ⛔ DROP THE CACHE `coverage` JUST WROTE. The cached verdict is keyed
             # by LABEL and stored stickily, and this call supplied a POPULATION
             # count as the label's denominator — so the shipped read path, which

@@ -114,8 +114,11 @@ is never submitted (the declared `keyword_only`). Consequence 2, the quiet one: 
 `record_vectors >= graph_vectors`, and **`0 >= 0` is VERIFIED**. An unseeded population therefore
 *passes* the gate and then serves an empty cohort as `mechanism=pgvector, reason=ok` — which would
 have read as "the dense leg has no recall" instead of "the population has no vectors".
-`require_seeded` refuses two zeros for exactly this reason, and
-`test_seeded_guard_refuses_the_zero_zero_coverage_trap` pins it.
+The zero-zero state is refused from **both** sides — `require_record_measured` for the record,
+`require_graph_population` for the graph — and
+`test_seeded_guard_refuses_the_zero_zero_coverage_trap` pins it. One function asserting both counts
+was what let a GRAPH fact (a zero-vector graph) refuse the RECORD arm out of the record block's own
+`try/except`; each fact now refuses where it lives.
 
 That is **half** of this lane's code, and the other half is the correction `#13734`'s review forced.
 
@@ -136,7 +139,7 @@ unmeasured is never zero). `coverage` itself is unchanged: widening it would rev
 decision and change every other label's reader, and the id-set half belongs in the instrument, which
 is the only place the population is known.
 
-⛔ **THE GRAPH HALF NEEDS THE SAME QUESTION, ASKED OF THE ID *AND THE TEXT*, AND AT RUN LEVEL**
+⛔ **THE GRAPH HALF NEEDS THE SAME QUESTION, ASKED OF THE ID *AND THE TEXT*, ON THE `graph_dense` ARM**
 (`#13734` review, round 5). The gate beside the seed is **prefix-wide** —
 `MATCH (n:Point) WHERE n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL` — so it answers
 *"does this graph hold ANY embedded claim?"*, which stays above zero while the population is only
