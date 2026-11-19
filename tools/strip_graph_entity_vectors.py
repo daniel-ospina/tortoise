@@ -1714,9 +1714,17 @@ def _constructor_stores_the_vector(call, alias_keys: frozenset[str] = frozenset(
         if _callee_name(call) != "fromkeys" or not call.args:
             return False
         keys = call.args[0]
-        named = (isinstance(keys, ast.List | ast.Tuple | ast.Set)
-                 and any(_names_property_key(element, alias_keys)
-                         for element in keys.elts))
+        # ⛔ AND THE KEY SEQUENCE IS RESOLVED, NOT TYPE-TESTED (`#13788`, measured at `dde62cb2`).
+        # `isinstance(keys, ast.List | ast.Tuple | ast.Set)` is the SAME defect the zip COLUMNS
+        # carried one round earlier, one operand over: it answers the BARE literal and nothing a
+        # wrapper puts around it, so 168 matrix rows CERTIFIED — `list([...])`, `.copy()`,
+        # `copy.copy(…)`, `copy.deepcopy(…)`, `[:]`/`[0:]`/`[::1]`, `+ []`, `* 1`/`2 *`, `[*…]`,
+        # `[0]`/`[-1]`, `if…else`, `or`, `and`, the walrus and their nestings, with a literal AND
+        # an alias key, across all six declared positions — while `dict.fromkeys(["embedding"],
+        # vec)` was refused. `_sequence_options` is the ONE resolver, so this asks it per option.
+        named = any(_names_property_key(element, alias_keys)
+                    for option in (_sequence_options(keys) or ())
+                    for element in option)
         return (named and len(call.args) >= 2
                 and not isinstance(call.args[1], ast.Constant))
     return (_mapping_argument_stores_the_vector(call, alias_keys=alias_keys)

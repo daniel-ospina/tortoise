@@ -6631,6 +6631,48 @@ def _upsert_object(ev):
         return None
     props["embedding"] = _encode(ev)
 """,
+
+        # ⛔ AND THE `fromkeys` KEY SEQUENCE IS RESOLVED, NOT TYPE-TESTED (`#13788`, measured at
+        # `dde62cb2`): the same defect the zip COLUMNS carried one round earlier, one operand
+        # over. `isinstance(keys, ast.List | ast.Tuple | ast.Set)` answered only the BARE literal,
+        # so 168 matrix rows CERTIFIED across every declared position while
+        # `dict.fromkeys(["embedding"], vec)` was refused.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(list(["embedding"]), _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding"].copy(), _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding"] if _f() else ["x"], _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(list([key]), _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys([["embedding"]][0], _encode(ev))
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
