@@ -253,8 +253,9 @@ _PROVENANCE_RECORD = """\
 # handler's CODE OBJECT, written by a re-cut; a lane edit does not re-stamp it (see the end of this
 # block), and NOBODY hand-types one. Until #13626 this record sat as a per-row comment above the
 # `tortoise_query` row, which is the only form a re-cut DELETES: that PR's `cut` took 53 per-row
-# `  #` lines with it — including this file's only copy of the `OVERRIDES:` marker below — and
-# nothing reds on a comment, so the loss was silent (review ISSUE 3). It is in the header now so
+# `  #` lines with it — including the file's copy of the generated-artifact `OVERRIDES:` marker
+# below, one of the four the merge base carried (that cut left three) — and nothing reds on a
+# comment, so the loss was silent (review ISSUE 3). It is in the header now so
 # that the next cut re-emits it instead of charging the next lane to re-derive it.
 #
 # WHY A CELL CAN GO STALE. `#13075` (`a09a0b3840`, "the currency rule reads the position axis")
@@ -294,8 +295,11 @@ _PROVENANCE_RECORD = """\
 # `git rev-parse HEAD`, and `cmd_cut` carries no identity check — but it is gated on the owner's
 # approval DOCUMENT: `read_approval` reads `docs/product/canonical-mcp-tools.md` and `build_doc`
 # REFUSES when that file is missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or
-# carries no `approval_status`. The operative reason here is narrower: a re-cut would delete this
-# block to buy back a cell that is already correct on `main`.
+# carries no `approval_status`. The operative reason here is narrower: re-running `cut` from a docs
+# branch would re-derive every row's observed-usage columns from THIS machine's call log and rewrite
+# the served-file digests — a large, unreviewable diff to buy back a cell that is already correct on
+# `main`. ⛔ A re-cut no longer deletes this record (that is why it lives here), so "protect the
+# block" is not a reason to run one at all.
 #
 # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the
 # source and RE-RUN the generator (buf/protoc baselines and the mainstream codegen convention

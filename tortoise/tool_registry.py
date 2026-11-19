@@ -2970,9 +2970,13 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #
     # The seven below are the residue: `-> dict`, no `rest_spec`, no envelope
     # repair, and a destination arm that exists and delegates to the very method
-    # the door calls. The HELD names above plus these seven are 17 of the 17 live names
-    # off the 27-target — if you find a live name that is not on the target and not
-    # in that list, the list is incomplete and that name is NOT safe to retire.
+    # the door calls. ⛔ THEY ARE THE RETIRED SEVEN, NOT A SUM TO ADD TO THE HELD ONES: the
+    # `·` bullets above already enumerate every name that stays live, and a retired name is
+    # not one of them. The HELD names above are 17 of the 17 live names off the 27-target —
+    # if you find a live name that is not on the target and not in that list, the list is
+    # incomplete and that name is NOT safe to retire. (The earlier form of this sentence
+    # added the RETIRED seven to the held seventeen and printed that sum as the population;
+    # the summands totalled 24, a review of #13687 measured it, and the clause was dropped.)
     # (It was 25 before the #11609 P1, P2 and P6 waves left it there, with their arms:
     # `create_point`/`diary_write` in P1, `compute_confidence`/`recall` in P2, the
     # `rest_spec` pair and the DELETE pair in P6 — 25 -> 23 -> 21 -> 17. ⛔ THIS BLOCK
