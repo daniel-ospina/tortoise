@@ -1224,7 +1224,13 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                     # does not take a container of MAPPINGS, so borrowing that rule refused
                     # `props |= [{"embedding": vec}]` — a statement Python rejects outright —
                     # and turned a refusal the branch never had into a new one (measured).
-                    or (anywhere and _pairs_operand_stores_the_vector(sub.value))):
+                    or (anywhere and _pairs_operand_stores_the_vector(sub.value))
+                    # ⛔ AND THE PAIRS BUILT BY A `zip` OF TWO LITERAL COLUMNS (`#13788`):
+                    # `props |= zip(("embedding",), (vec,))` places the pair the literal
+                    # spelling places, and the residual that named `zip` was about a zip of
+                    # NAMES. Gated on `anywhere` for the same reason every other arm in this
+                    # block is: on the mirror arm a new recognition is a new ACCEPTANCE.
+                    or (anywhere and _zip_stores_the_vector(sub.value))):
                 # `props |= {"embedding": vec}` — a merge that places the vector. The same
                 # narrowing as everywhere else: EXACT property name, NON-CONSTANT value, so
                 # `props |= [("embedding", None)]` and `props |= [("embedding_model", _m())]`
@@ -1322,6 +1328,14 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # so a plain literal handed to a logger (`_audit({"embedding": props.get(…)})`)
             # is a mention and stays one.
             if anywhere and any(_rebuild_stores_the_vector(operand)
+                                for operand in _call_operands(sub)):
+                return True
+            # ⛔ AND A CALL HANDED A `zip` OF TWO LITERAL COLUMNS IS THE SAME STORE
+            # (`#13788`): `props.update(zip(("embedding",), (vec,)))` and
+            # `operator.ior(props, zip(…))` place the pair, and the `zip` residual named
+            # "a zip of names" — a literal pair of columns needs no data flow. Stop arm
+            # only, as every recognition in this family is.
+            if anywhere and any(_zip_stores_the_vector(operand)
                                 for operand in _call_operands(sub)):
                 return True
         elif isinstance(sub, ast.For | ast.AsyncFor) and anywhere:
@@ -1681,7 +1695,71 @@ def _constructor_stores_the_vector(call) -> bool:
                    # terminates; STOP ARM ONLY, as this whole helper is.
                    or (isinstance(argument, ast.Call)
                        and _constructor_stores_the_vector(argument))
+                   # ⛔ AND A `dict(zip(KEYS, VALUES))` OPERAND NEEDS NO ARM HERE, and that is
+                   # MEASURED rather than assumed (`#13788`): the literal-column `zip` is
+                   # answered by `_stores_embedding`'s operand scan, which reaches the SAME
+                   # nested `zip` call through `_own_walk` in every position (`|=`, `update`,
+                   # `**`, `*`, the writer being handed it, and this constructor). An arm here
+                   # was written, measured REDUNDANT — removing it changed no verdict on any
+                   # fixture, while disabling the operand scan reddens all seven zip rows —
+                   # and removed rather than kept looking load-bearing (the standard this
+                   # series applies to every arm it adds).
                    for argument in call.args))
+
+
+def _zip_stores_the_vector(call) -> bool:
+    """Is this `zip(KEYS, VALUES)` pairing a LITERAL property key with a live value?
+
+    ⛔ THE STATED RESIDUAL WAS HALF A RESIDUAL (`#13788`, measured on this branch).
+    `dict(zip(keys, values))` was disclosed as CERTIFIED because answering it needs the
+    call's RESULT — "a zip of names" — which is exactly right when the columns ARE names
+    (`dict(zip(_keys(ev), (vec,)))`, `dict(zip(K, V))`) and exactly wrong when both columns
+    are LITERALS: `zip` pairs them positionally, so `dict(zip(("embedding",), (_encode(ev),)))`
+    is the same mapping as `{"embedding": _encode(ev)}`, one call spelling over. Measured:
+    48 runtime-storing spellings of it were CERTIFIED across the wrapper/position matrix
+    (`.copy()`, `copy.copy(…)`, `if…else`, `{**…}`, unions, and every `|=` / `update(…)` /
+    `**` / `*` / helper operand position) while the literal twin was refused.
+
+    ⛔ NARROW BY CONSTRUCTION, and this is what keeps it a reading rather than data flow:
+    EXACTLY two positional arguments, each a List/Tuple LITERAL (so no name is followed),
+    paired BY INDEX as `zip` pairs them (a property key past the end of the values column
+    places nothing, so `dict(zip(("embedding",), ()))` stays certified), with the key the
+    EXACT property and the value beside it non-constant. A `strict=` keyword is tolerated
+    because it changes no pairing. ⛔ STILL THE RESIDUAL, and now named precisely: a zip whose
+    columns are NAMES or expressions (`dict(zip(K, V))`, `dict(zip(_keys(ev), (vec,)))`), and
+    a zip spliced through a `*` element or a list of calls (`props |= [*zip(a, b)]`) — both
+    are the data flow this module does not do.
+
+    ⛔ REFUSAL-ONLY BY REACH: both call sites are the stop arm — the `|=` arm and the operand
+    scan in `_stores_embedding`, each behind `anywhere`. It is deliberately NOT wired into
+    `_pairs_operand_stores_the_vector`, which the MIRROR arm also asks — recognizing a zip
+    there would turn a mirror-arm *mention* into an acceptance, and a fix may add refusals,
+    never acceptances.
+    """
+    import ast
+
+    # ⛔ IT IS ASKED OF ANY EXPRESSION, not only a call: the `|=` arm hands it the whole
+    # right-hand side (`props |= {"embedding": vec} | {}` reaches here as a `BinOp`), so a
+    # non-call must answer "no" rather than raise out of the destructive gate.
+    if not isinstance(call, ast.Call):
+        return False
+    if _callee_name(call) != "zip" or len(call.args) != 2:
+        return False
+    keys, values = call.args
+    if not (isinstance(keys, ast.List | ast.Tuple)
+            and isinstance(values, ast.List | ast.Tuple)):
+        return False
+    # ⛔ PAIRED BY INDEX, NOT BY THE TWO COLUMNS' LENGTHS: `zip` stops at the shorter column,
+    # so a property key whose index is PAST the end of the values literal has no pair and
+    # places nothing (`dict(zip(("embedding",), ()))` is `{}`), while a property key before
+    # it places whatever sits beside it. Requiring equal lengths was an easy way to answer
+    # both and it CERTIFIED the one that stores (`zip(("embedding", "x"), (_m(),))` pairs
+    # `embedding` with a live value). The value must be non-constant, as everywhere else.
+    return any(
+        index < len(values.elts)
+        and isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
+        and not isinstance(values.elts[index], ast.Constant)
+        for index, key in enumerate(keys.elts))
 
 
 def _pairs_operand_stores_the_vector(node) -> bool:
@@ -1697,13 +1775,18 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     ⛔ WHAT THIS DELIBERATELY DOES NOT DO — the two halves that are a DIFFERENT rule:
     a container of MAPPINGS (`[{…}]`) is NOT an iterable of pairs (`dict.__ior__` rejects it
     with a `ValueError`), so it is not recognized here; and a pairs iterable BUILT BY A CALL
-    (`zip(("embedding",), (vec,))`, `map(...)`, a generator expression) is the stated residual
-    — extracting a pair out of a call result is data flow this module does not do, and it is
+    (`zip(NAMES, VALUES)`, `map(...)`, a generator expression) is the stated residual —
+    extracting a pair out of a call result is data flow this module does not do, and it is
     disclosed here rather than left to be rediscovered. ⛔ THE SAME RESIDUAL COVERS A MAPPING
     BUILT BY A CALL THAT IS NOT A RECOGNISED BUILDER: `dict(zip(keys, values))` places the
     vector and is CERTIFIED (measured at `716991951e`), because answering it needs the call's
     RESULT — a zip of names — which is the data flow stated above, not a wrapper or an
-    operand. ⛔ `dict.fromkeys(["embedding"], vec)` USED TO BE IN THIS RESIDUAL AND IS NOT
+    operand. ⛔ AND THE `zip` HALF OF THAT RESIDUAL IS NOW NARROWED (`#13788`): when BOTH
+    COLUMNS ARE LITERALS the pairing is positional and static, so `zip(("embedding",), (vec,))`
+    is read as the pair it is — by `_zip_stores_the_vector`, at the stop-arm call sites only
+    (`dict`/`OrderedDict`/… operands, and a call's own operands) — while a zip of NAMES
+    stays certified. This rule is NOT widened to it, because the MIRROR arm asks this rule
+    too and a new recognition here would be a new ACCEPTANCE there. ⛔ `dict.fromkeys(["embedding"], vec)` USED TO BE IN THIS RESIDUAL AND IS NOT
     ANY MORE (`#13788` F6, measured at `78cbe4da`): its operands are a KEY SEQUENCE and one
     value, both statically readable, so `_constructor_stores_the_vector` recognises it when
     the key sequence is a LITERAL (list, tuple or set) containing the EXACT property name. A
@@ -1833,7 +1916,11 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # constructor in a constructor, through `|=`, `update(…)` and a rebuild). Removed
         # rather than kept looking load-bearing; `test_the_stop_arm_must_not_store_the_vector`
         # keeps the rows that pin the surviving route.
-        return False                  # `zip(…)`, `map(…)`, a builder: residual, stated above
+        # ⛔ …AND THE LITERAL-COLUMN `zip` IS NOT ANSWERED HERE EITHER (`#13788`): this rule
+        # is asked by the MIRROR arm as well, so recognizing a `zip` here would widen what
+        # the destructive gate ACCEPTS. `_zip_stores_the_vector` answers it at the stop-arm
+        # call sites instead, where a new recognition can only add a refusal.
+        return False                  # `zip(NAMES, …)`, `map(…)`, a builder: residual, above
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
         return _operand_stores_the_vector(node.value)
     # ⛔ A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE SAME OPERAND (`#13788` F4, measured

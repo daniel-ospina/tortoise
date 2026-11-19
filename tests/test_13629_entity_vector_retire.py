@@ -4343,6 +4343,69 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE `zip` HALF OF THE STATED RESIDUAL IS THE SAME STORE WHEN ITS COLUMNS ARE
+        # LITERALS (`#13788`). `dict(zip(keys, values))` was disclosed as CERTIFIED because
+        # "answering it needs the call's RESULT — a zip of names"; that is true of NAMES and
+        # false of two literal columns, which `zip` pairs positionally. `dict(zip(("embedding",),
+        # (_encode(ev),)))` is the literal mapping one call spelling over, and it CERTIFIED a
+        # stop arm that stores in every operand position while the literal twin was refused —
+        # 48 runtime-storing spellings measured across the wrapper/position matrix. The three
+        # routes below are the three call sites (`_zip_stores_the_vector`): the `|=` arm, the
+        # call's own operands, and the mapping-constructor operands — plus the indexed and the
+        # `strict=` spellings, which are one constant form over.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= zip(("embedding",), (_encode(ev),))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(zip(("embedding",), (_encode(ev),)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = dict(zip(["a", "embedding"], (1, _encode(ev))))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict(zip(("embedding",), (_encode(ev),)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **dict(zip(("embedding",), (_encode(ev),))))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(zip(("embedding",), (_encode(ev),), strict=True))
+        return None
+    _write(props)
+""",
+        # …and PAIRED BY INDEX, not by column length: `zip` stops at the shorter column, so a
+        # property key at an index the values column DOES reach is a store even when the two
+        # literals differ in length (`zip(("embedding", "x"), (_m(),))` pairs `embedding` with
+        # a live value). An equal-length requirement answered this with a CERTIFIED store.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(dict(zip(("embedding", "x"), (_m(),))))
+        return None
+    _write(props)
+""",
         # …and the REBUILD position of the `.copy()` wrapper the rows above cover as an
         # operand: `isinstance(value, ast.Dict)` saw only the bare literal there, so
         # `props = {"embedding": vec}` was refused beside its `.copy()` CERTIFIED.
@@ -5034,13 +5097,6 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.setdefault(*["embedding", _encode(ev)])
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        dict.setdefault(props, "embedding", _encode(ev))
         return None
     _write(props)
 """,
@@ -5839,6 +5895,41 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= dict.fromkeys(_keys(ev), _encode(ev))
+        return None
+    _write(props)
+""",
+        # ⛔ THE `zip` RESIDUAL THAT STAYS RESIDUAL (`#13788`): a zip whose COLUMNS ARE NAMES is
+        # data flow this module does not do, and the two narrowings of the literal form must
+        # each keep an honest writer certified — a keys literal naming ANOTHER property, a
+        # property key past the end of the values column (`zip` pairs nothing there, so
+        # `dict(zip(("embedding",), ()))` is `{}`), and a CONSTANT value (the pre-guard reset
+        # `embedding = None`, which places nothing). Without these the new arm costs an honest
+        # writer its gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(zip(_keys(ev), (_encode(ev),)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(zip(("embedding_model",), (_m(),)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(zip(("embedding",), ()))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(zip(("embedding",), (None,)))
         return None
     _write(props)
 """,
