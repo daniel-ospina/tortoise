@@ -765,7 +765,7 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(
     monkeypatch.setattr(record_vector, "mirror_verdict",
                         lambda entity_type, **_: (
                             False, "the count measured 3 vector(s) in the record for object "
-                                   f"against 3 in the graph"), raising=False)
+                                   "against 3 in the graph"), raising=False)
     # The recorded predicate says "not required" for every label; that is a READ fact and
     # the gate must still answer "emits" while a writer exists that nobody stopped.
     ungated = _fake_writer_module(tmp_path, monkeypatch, """
@@ -1666,7 +1666,7 @@ def test_the_gate_OPENS_when_every_declared_writer_asks(monkeypatch, tmp_path):
     monkeypatch.setattr(record_vector, "mirror_verdict",
                         lambda entity_type, **_: (
                             False, "the count measured 2 vector(s) in the record for object "
-                                   f"against 2 in the graph"), raising=False)
+                                   "against 2 in the graph"), raising=False)
     gated = _fake_writer_module(tmp_path, monkeypatch, """
 def _only_writer(ev):
     if not _derived_mirror_required("object"):

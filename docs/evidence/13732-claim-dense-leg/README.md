@@ -316,8 +316,9 @@ replay, so a repair command there could not work. If `record_declined` is non-ze
 a real journal.
 
 ⛔ **And `record_dsn_fingerprint` says WHICH store.** `--dsn "$TORTOISE_RECORD_DSN"` names the
-variable, not the value, so the artifact publishes the DSN's 8-hex fingerprint (`record_writer.dsn_fingerprint`,
-#2903/#2796 — a secret must never enter an artifact) beside the commands. Compare it against the
+variable, not the value, so the artifact publishes the DSN's 8-hex fingerprint
+(`record_writer.dsn_fingerprint`, #2903/#2796 — a secret must never enter an artifact) beside the
+commands. Compare it against the
 fingerprint of the DSN in your shell before pasting the fold: a shell that exports a *different*
 record folds this population into a store nobody measured, silently.
 
