@@ -172,6 +172,12 @@ _NEUTRAL_HEADROOM = {
     # `CI_RUNNER_OS_LABEL=on|auto` exported reded the label tests for a reason unrelated to the code
     # under test. The default arm is pinned here; each arm then sets what it means.
     "CI_RUNNER_OS_LABEL": "off",
+    # ⛔ AND THE MEMORY LEG, which is the ONE headroom gate that reads the live box rather than a
+    # knob: `MemAvailable` from `/proc/meminfo`. Left unpinned, every arm in this file was only green
+    # on a box with >= the needed memory — a loaded 8G cell would red arms about the drop-in for a
+    # reason unrelated to the drop-in, on the ARM64 fallback pool this repo documents as live
+    # (`ci_runner_gate.sh` re-attaches `ubuntu-latest` to it). The seam exists for exactly this.
+    "CI_RUNNER_MEM_AVAILABLE_GB": "1024",
 }
 
 
@@ -2814,8 +2820,8 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
     # ⛔ THE SYSTEMD REF IS NOT IN THE DICT ABOVE BECAUSE THE MAP DOES NOT WRITE IT AS
     # `label` `:NNN` — it writes `systemd install/start at `:NNN``, so the label-to-ref regex the
     # dict is matched with cannot be anchored on it. That is exactly why it drifted unchecked: the
-    # sentence cited `:1062-1064` (the download block) while the systemd install/start lives at
-    # `:1085-1088`, and `main` had it right at `:510-512` before this change — a regression that only
+    # sentence cited `:1078-1080` (the download block) while the systemd install/start lives at
+    # `:1101-1104`, and `main` had it right at `:526-528` before this change — a regression that only
     # the in-range arm could see. Pinned here by the phrase the sentence uses.
     systemd = re.search(r"systemd\s+install/start at `:(\d+)(?:-(\d+))?`", map_text)
     assert systemd is not None, (
@@ -2930,8 +2936,8 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     `install-ci-runner-x64.sh:NNN` and stops at the first blank line, so it pins ONE bullet of a
     section whose other bullets carry ~27 more bare `:NNN` refs — the same file, the same drift, and
     nothing watched them. Measured: the `--print-labels` bullet still said "the refusal itself dies
-    at `:534`" after two commits had inserted 33 lines above it (`:534` is the comment `# every
-    install.`, and the `die` is at `:567`) while the map bullet had been re-derived and stayed green.
+    at `:550`" after two commits had inserted 33 lines above it (`:550` is the comment `# every
+    install.`, and the `die` is at `:583`) while the map bullet had been re-derived and stayed green.
 
     So every citation in the installer section is pinned here against what its sentence claims that
     line holds. The table is deliberately two-way: a citation this pin does not know is a FAIL (add
@@ -2943,12 +2949,27 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     `MODE = …` block ref must land on that block's own `if [ "$MODE" = … ]` line, and "the refusal
     dies at `:NNN`" must land on a `die`, not on the comment that explains it.
 
-    Non-vacuity (measured, each mechanism in isolation): the pre-fix pair `:529`/`:534` reds on the
+    Non-vacuity (measured, each mechanism in isolation): the pre-fix pair `:545`/`:550` reds on the
     unknown-number check — "cites installer line(s) this pin does not know: [529, 534]". Supply table
     entries that ACCEPT those lines and the two sentence checks still catch it on their own: the
-    `MODE = install` claim reds on `:529` (the `--print-labels` prelude comment) and the refusal
-    claim reds on `:534` (`# every install.`). The same holds for a number this pin already knows:
-    `:562` swapped for `:535` (the `--print-labels` block) reds only the sentence check.
+    `MODE = install` claim reds on `:545` (the `--print-labels` prelude comment) and the refusal
+    claim reds on `:550` (`# every install.`). The same holds for a number this pin already knows:
+    `:578` swapped for `:551` (the `--print-labels` block) reds only the sentence check.
+
+    ⛔ THE RANGE HALF IS PINNED BY CONTENT TOO, AND BY A RELATION, BECAUSE A NUMBER KEY CANNOT BE
+    TRUSTED ALONE (review round 5). `range_ends` pins each span's TRAILING line(s) against a token
+    its sentence names; the algebra bullet is additionally checked against the carve-outs span the
+    next bullet calls "from that union" — the doc's own two numbers, one inside the other. That
+    relation is not redundant: at the pre-fix head BOTH numbers were re-derived together and both
+    were wrong (`:554-569` + a `range_ends` entry calibrated to `:569`), so every per-span check was
+    green and the span certified itself. Measured at this head, one arm at a time: (a) shorten the
+    doc to `:554-569` and leave the table — "cites installer RANGE(s) this pin does not know …
+    [(554, 569)]"; (b) shorten BOTH the doc and its table entry back to the shipped pair — "label
+    algebra span :554-569 does not CONTAIN the carve-outs span :578-594"; (c) leave both numbers
+    and change the installer's end token (`installer:593`, `grep -qiE` → `grep -Eiq`) — "RANGE whose
+    END is not the line that carries what the sentence names"; (d) put `:459` back in the WRITERS
+    sentence outside the map region — "cites :459 as `resolve_os_label` … but that line is `case
+    "$pages" in …`".
     """
     runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
     start = next(
@@ -2960,9 +2981,75 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     )
     installer = INSTALLER.read_text().splitlines()
 
-    # `install-ci-runner-x64.sh:740` AND the bare `:740` the section writes after the first one. The
+    # `install-ci-runner-x64.sh:740` AND the bare `:756` the section writes after the first one. The
     # lookbehind keeps `config.sh:76-81` (a DIFFERENT file, cited in the `--uninstall` paragraph) out.
+    # ⛔ THE END OF A RANGE IS CAPTURED AND CHECKED, not discarded. It used to be (`:448-\d+` matched,
+    # end ignored), and that is exactly how a re-measurement that bumped STARTS left six ends stale —
+    # three of them INVERTED (start > end) — while this pin stayed green and the sentences pointed at
+    # lines they never named. A range that does not run forwards is now red.
     ref = re.compile(r"(?:install-ci-runner-x64\.sh|(?<![A-Za-z0-9_.\-])):(\d+)(?:-\d+)?")
+    # ⛔ A RANGE'S END IS A SEPARATE CHECK, with its own two-group pattern — `ref` stays single-group
+    # because the sentences below index it as a string. The end used to be matched and DISCARDED here,
+    # which is how a re-measurement that bumped starts left six ends stale (three inverted) while this
+    # pin stayed green: a range that does not run forwards is now red.
+    range_ref = re.compile(r"(?:install-ci-runner-x64\.sh|(?<![A-Za-z0-9_.\-])):(\d+)-(\d+)")
+    for line in runbook[start:end]:
+        for rm in range_ref.finditer(line):
+            lo, hi = int(rm.group(1)), int(rm.group(2))
+            assert hi >= lo, (
+                f"the runbook cites the installer range {rm.group(0)}, whose end precedes its start — "
+                "re-derive BOTH numbers (ends drift when lines are inserted above them)"
+            )
+            assert hi <= len(installer), (
+                f"the runbook cites {rm.group(0)}, past the installer's EOF ({len(installer)} lines)"
+            )
+            # ⛔ THE END MUST BE THE CLOSER OF THE BLOCK THE START OPENS — not merely "a line in the
+            # file", and not merely "runs forwards". Measured: a re-measurement bumped six STARTS and
+            # left the ENDS stale; three of the ends were then INSIDE a different (nested) block and
+            # the rest were closing comments, while `start <= end` and `end <= EOF` both stayed true.
+            # The file's style is what makes this decidable: mode blocks and functions start and end
+            # at column 0, so the FIRST column-0 closer of the same kind at or after `lo` IS that
+            # construct's end. A stale end cannot satisfy it.
+            end_line = installer[hi - 1]
+            stripped_end = end_line.strip()
+            # ⛔ A NESTED-BRANCH TOKEN CANNOT END A RANGE, and an allow-list of closers cannot say so:
+            # `else`/`elif`/`then`/`do` all fell through as "not a closer, nothing to check", which is
+            # how FOUR wrong numbers stayed green (a range ending on `:489` = `else`, while the same
+            # sentence cited `resolve_labels` at `:499` with its `}` at `:536`). Comments and plain
+            # statements are legitimate ends for a comment/statement span, so this is a DENY-list of
+            # branch tokens, not a widened allow-list of closers.
+            assert not re.match(r"^(else|elif\b.*|then|do)$", stripped_end), (
+                f"the runbook cites {rm.group(0)}, but :{hi} is {stripped_end!r} — a NESTED BRANCH, "
+                "not the end of the construct the sentence names. Re-derive the END"
+            )
+            if stripped_end in ("}", "fi", "esac", "done"):
+                # (a) AN INDENTED CLOSER ENDS A NESTED BLOCK, so the range must START inside one. This
+                # is the shape that shipped: `:1492-1593` and `:1209-1390` both ended on an INDENTED
+                # `fi` belonging to a sub-branch, with a column-0 block header as the start — a range
+                # no reader can follow, and the first form of this assertion could not see it because
+                # both numbers were individually plausible lines.
+                if end_line != stripped_end:
+                    assert installer[lo - 1] != installer[lo - 1].lstrip(), (
+                        f"the runbook cites {rm.group(0)} as one block, but its end :{hi} is an "
+                        f"INDENTED {stripped_end!r} (a nested branch) while its start :{lo} is at "
+                        "column 0 — the end belongs to an inner construct, so re-derive it"
+                    )
+                else:
+                    # (b) A COLUMN-0 CLOSER MUST BE THE END OF A CONSTRUCT THAT STARTS AT/OR AFTER THE
+                    # RANGE'S START. `:386`-class drift — an end that closes a function 96 lines
+                    # BEFORE the construct the sentence names — is invisible to a number-keyed table.
+                    opener = {"}": r"^[A-Za-z_][A-Za-z0-9_]*\(\) \{",
+                              "fi": r"^if ",
+                              "esac": r"^case ",
+                              "done": r"^(for|while|until) "}[stripped_end]
+                    owner = next(
+                        (i + 1 for i in range(hi - 2, -1, -1) if re.search(opener, installer[i])), None
+                    )
+                    assert owner is not None and owner >= lo, (
+                        f"the runbook cites {rm.group(0)} as one block, but the {stripped_end!r} on "
+                        f":{hi} closes the construct that starts at :{owner} — before this range — "
+                        "so that end is not this block's"
+                    )
     cited = {int(m.group(1)) for line in runbook[start:end] for m in ref.finditer(line)}
     assert cited, (
         "the runbook's installer section cites no installer line — re-anchor this pin rather than "
@@ -2971,41 +3058,47 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
 
     # cited number -> a regex the line at that number must match, i.e. what the sentence names
     anchors: dict[int, str] = {
+        1689: r'^  if \[ ! -f "\$UNIT_DIR/\$\(unit_for "\$name"\)" \]; then',  # systemd block header
+        1667: r'^    say "downloading \$url"',  # "registration at" (the block's first line)
         111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
-        237: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
-        270: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        274: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        278: r"^fallback_engaged\(\) \{",
-        301: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
-        306: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
-        338: r"^resolve_labels\(\) \{",
-        377: r"label algebra: the UNION",  # "the union's label algebra at"
-        401: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        429: r"── status ──",  # the `--status` block
-        452: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        792: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        800: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        809: r"found NO runs-on label to check",  # zero labels -> exit 4
-        375: r"^\}$",  # "whose body ends at its `}` on"
-        1027: r"exit 5",  # the uncovered verdict
-        1049: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        1074: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1221: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1253: r'MODE" = labels',  # "`--print-labels`"
-        1280: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1285: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1288: r"FORK HEADROOM FIRST",  # "forks"
-        1308: r"DISK NEXT",  # "disk"
-        1315: r"CPU LAST",  # "cpu/memory"
-        1332: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1333: r'MODE" = uninstall',  # "`uninstall`"
-        1458: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1461: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1469: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1472: r"registration-token",  # "token"
-        1477: r"^    set -- --unattended",  # "one argv"
-        1479: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1489: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        256: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
+        447: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        451: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        455: r"^fallback_engaged\(\) \{",
+        478: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
+        483: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
+        515: r"^resolve_labels\(\) \{",
+        554: r"label algebra: the UNION",  # "the union's label algebra at"
+        578: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        606: r"── status ──",  # the `--status` block
+        629: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        969: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        977: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        986: r"found NO runs-on label to check",  # zero labels -> exit 4
+        # ⛔ A BARE `}` CANNOT ANCHOR A CLAIM ABOUT A SPECIFIC CONSTRUCT: it matches any of the file's
+        # function ends, which is how `:386` (the DROP-IN writer's brace) stayed green for one review
+        # round while the sentence promised `resolve_labels`. The number is kept here so the two-way
+        # table stays complete, and the claim is re-checked against the CONSTRUCT below.
+        552: r"^\}$",  # "whose body ends at its `}` on"
+        1204: r"exit 5",  # the uncovered verdict
+        1226: r'MODE" = repair',  # "--repair-labels UNIONS" / the repair block
+        1233: r'^  if \[ "\$FALLBACK" = off \]; then',  # "--fallback off is REFUSED"
+        1251: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1398: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1430: r'MODE" = labels',  # "`--print-labels`"
+        1457: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1462: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1465: r"FORK HEADROOM FIRST",  # "forks"
+        1485: r"DISK NEXT",  # "disk"
+        1492: r"CPU LAST",  # "cpu/memory"
+        1515: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1516: r'MODE" = uninstall',  # "`uninstall`"
+        1659: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1662: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1670: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1673: r"registration-token",  # "token"
+        1678: r"^    set -- --unattended",  # "one argv"
+        1680: r'\./config\.sh "\$@"',  # "`config.sh`"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -3028,6 +3121,84 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     assert not wrong, (
         "the runbook cites an installer line that is not what the sentence names — re-derive the "
         "number (and this pin's entry) from the installer: " + "; ".join(wrong)
+    )
+
+    # ⛔ THE SHAPE CHECK EARLIER IN THIS TEST CANNOT SEE EVERY WRONG END. An end that IS a column-0
+    # closer of a construct that genuinely starts inside the range satisfies it, even when the
+    # SENTENCE names a later one. Measured at this head, both of these passed every shape assertion
+    # above and were shipped:
+    #   `label resolution at :451-505` — `:505` is a column-0 `}` closing `resolve_os_label` (:483),
+    #     which really does start inside the range, while the same sentence names `resolve_labels`
+    #     (:515) three words later and pins ITS closer on `:552`;
+    #   `registration at :1665-1666` — `:1666` is not a closer at all, and the same sentence names
+    #     `:1668`, `:1673` and `:1675`, all of which fall OUTSIDE the range it writes.
+    # So every span's END is pinned by CONTENT here, two-way exactly like `anchors`: a cited span this
+    # table does not know is a FAIL (add it), and an entry the runbook stopped citing is a FAIL too
+    # (a pin over refs nobody writes is pinning nothing).
+    range_ends: dict[tuple[int, int], list[str]] = {
+        # exit codes, through "0 does not mean covered"
+        (111, 138): [r"erosion to zero"],
+        # label resolution: `fallback_engaged` + `resolve_os_label` + `resolve_labels` to ITS close
+        (451, 552): [r'^  LABELS="\$LABELS\$OS_LABELS"$', r"^\}$"],
+        # the OS-label flag, validated once — the `case` through its `esac`
+        (478, 481): [r'die "CI_RUNNER_OS_LABEL must be off', r"^esac$"],
+        # ⛔ THE UNION'S LABEL ALGEBRA IS ALL FOUR READERS, NOT THE FIRST ONE. This entry used to pin
+        # `is_host_label`'s `return 1`/`}` — i.e. it was calibrated to the doc's WRONG end `:569`, so
+        # the table CERTIFIED a span that stops two predicates short of what "the union's label
+        # algebra" is (review round 5, F2). `list_has` (:571), `is_foreign_arch_label` (:578-584) and
+        # `is_version_pinned_hosted_label` (:592-594) all follow, and the NEXT bullet cites `:578-594`
+        # as living inside this union — a span cannot contain its own sibling. The end is the version
+        # pin's `grep` and its brace.
+        (554, 594): [r"grep -qiE", r"^\}$"],
+        # the two carve-out predicates: foreign-arch, then the version pin's own `grep`
+        (578, 594): [r"grep -qiE", r"^\}$"],
+        # the `--status` block, through its `exit 0` and closing `fi`
+        (606, 1206): [r"^  exit 0$", r"^fi$"],
+        # the label-coverage block: its header `say` to the uncovered verdict
+        (629, 1204): [r"exit 5"],
+        # the repair block: its mode line through `exit "$rc"` and the closing `fi`
+        (1226, 1419): [r'exit "\$rc"', r"^fi$"],
+        # the `--fallback off` refusal itself: the `die`, then the `fi` that closes it
+        (1233, 1235): [r"only UNIONS", r"^  fi$"],
+        # the install guards, through the memory-headroom `say`
+        (1457, 1513): [r"headroom: cpu ok", r"^fi$"],
+        # `--uninstall` deletes only what it can PROVE
+        (1515, 1642): [r'^  exit "\$rc"$', r"^fi$"],
+        # registration: the sha256 pin through `config.sh`
+        (1667, 1680): [r'\./config\.sh "\$@"'],
+        # systemd install/start: `svc.sh install` through `svc.sh start`
+        (1689, 1699): [r"svc\.sh start"],
+    }
+
+    spans = {
+        (int(m.group(1)), int(m.group(2)))
+        for line in runbook[start:end]
+        for m in range_ref.finditer(line)
+    }
+    unknown_spans = sorted(spans - range_ends.keys())
+    assert not unknown_spans, (
+        "the runbook cites installer RANGE(s) this pin does not know — re-derive the end against "
+        f"the installer and add the span rather than leaving it unchecked: {unknown_spans}"
+    )
+    stale_spans = sorted(range_ends.keys() - spans)
+    assert not stale_spans, (
+        "this pin lists installer range(s) the runbook no longer cites — a pin over refs that were "
+        f"re-derived or removed is pinning nothing: {stale_spans}"
+    )
+
+    bad_spans: list[str] = []
+    for (lo, hi), expect in sorted(range_ends.items()):
+        assert 1 <= hi <= len(installer), (
+            f"the runbook cites :{lo}-{hi}, past EOF ({len(installer)} lines)"
+        )
+        window = installer[hi - len(expect) : hi]
+        if not all(re.search(e, line) for e, line in zip(expect, window, strict=True)):
+            bad_spans.append(
+                f":{lo}-{hi} ends at {[x.strip() for x in window]!r} (expected {expect!r})"
+            )
+    assert not bad_spans, (
+        "the runbook cites a RANGE whose END is not the line that carries what the sentence names — "
+        "re-derive both ends (and this pin's entry) from the installer: " + "; ".join(bad_spans)
     )
 
     # ⛔ THE TABLE ABOVE IS KEYED BY NUMBER, SO IT CANNOT SEE A SWAP BETWEEN TWO NUMBERS IT ALREADY
@@ -3053,7 +3224,7 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
         )
 
     # "the refusal itself dies at `:NNN`" must point at the `die` that refuses, not at a comment
-    # explaining it (the pre-fix `:534` was `# every install.`).
+    # explaining it (the pre-fix `:550` was `# every install.`).
     dies = list(re.finditer(r"dies at `:(\d+)`", region_text))
     assert dies, "the runbook no longer points at the arch refusal — re-anchor this pin"
     for m in dies:
@@ -3064,20 +3235,112 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
             f"{installer[n - 1].strip()!r} — a comment, not the refusal"
         )
 
+    # ⛔ "`resolve_labels` `:NNN`, whose body ends at its `}` on `:NNNNN`" — THE CLAIM A NUMBER-KEYED
+    # TABLE CANNOT CHECK. `:NNN` of a bare `}` matches ANY of this file's function ends, so the pin was
+    # green while the sentence promised `resolve_labels`'s brace and pointed at `write_unit_dropin`'s
+    # (96 lines before `resolve_labels` even begins — a body cannot end before its header). The claim
+    # is therefore re-checked against the CONSTRUCT it names: the cited end must be a `}` whose owning
+    # `name() {` header is the cited header.
+    m = re.search(r"`resolve_labels` `:(\d+)`, whose body ends at its `\}` on `:(\d+)`",
+                  " ".join(region_text.split()))
+    assert m is not None, (
+        "the runbook no longer states where `resolve_labels`'s body ends — re-anchor this pin rather "
+        "than deleting it (an unpinned end is how it drifted onto another function's brace)"
+    )
+    head, tail = int(m.group(1)), int(m.group(2))
+    assert re.search(r"^resolve_labels\(\) \{", installer[head - 1]), (
+        f"the runbook cites :{head} as the `resolve_labels` header, but that line is "
+        f"{installer[head - 1].strip()!r}"
+    )
+    assert installer[tail - 1] == "}", (
+        f"the runbook says `resolve_labels`'s body ends on :{tail}, but that line is "
+        f"{installer[tail - 1].strip()!r} — not a closing brace"
+    )
+    owner = next(
+        (i + 1 for i in range(tail - 1, -1, -1)
+         if re.search(r"^[A-Za-z_][A-Za-z0-9_]*\(\) \{", installer[i])),
+        None,
+    )
+    assert owner == head, (
+        f"the runbook says the body ending on :{tail} is `resolve_labels`'s, but that brace closes "
+        f"the function whose header is :{owner} — the end belongs to a DIFFERENT construct"
+    )
+
+    # ⛔ AND THE ALGEBRA SPAN MUST CONTAIN THE SPAN THE NEXT BULLET CITES (review round 5, F2). This
+    # is the runbook's OWN contradiction: "the union's label algebra at `:A-B`" is followed by "TWO
+    # NAMED CARVE-OUTS from that union (:C-D)". A span that stops at `is_host_label`'s brace cannot
+    # contain the carve-out predicates the next bullet says live INSIDE the union — and that is the
+    # state this head shipped, because the doc's end AND the end-content entry were re-derived
+    # together and were both wrong, so a per-span content check on the end alone still read green.
+    # The RELATION between the two spans is what fails here.
+    flat_region = " ".join(region_text.split())
+    algebra = re.search(r"the union's label algebra at `:(\d+)-(\d+)`", flat_region)
+    assert algebra is not None, (
+        "the runbook no longer cites the union's label algebra as a span — re-anchor this pin rather "
+        "than deleting it (an unpinned span is how it stopped two predicates short of its own name)"
+    )
+    carve_outs = re.search(r"TWO NAMED CARVE-OUTS[^`]*?\(`?:(\d+)-(\d+)`?\)", flat_region)
+    assert carve_outs is not None, (
+        "the runbook no longer cites the carve-outs span — re-anchor this pin rather than deleting it"
+    )
+    a_lo, a_hi = int(algebra.group(1)), int(algebra.group(2))
+    c_lo, c_hi = int(carve_outs.group(1)), int(carve_outs.group(2))
+    assert a_lo <= c_lo and c_hi <= a_hi, (
+        f"the runbook's label algebra span :{a_lo}-{a_hi} does not CONTAIN the carve-outs span "
+        f":{c_lo}-{c_hi} that the very next bullet calls 'from that union' — the algebra block runs "
+        "through its last predicate, so re-derive its end (checking the two numbers against the "
+        "installer ONE AT A TIME does not catch this: both were wrong together)"
+    )
+
+    # ⛔ ONE CITATION OUTSIDE THE MAP REGION IS KEYED TO A NUMBER TOO, so no table above reaches it:
+    # the `CI_RUNNER_OS_LABEL` section's WRITERS sentence. It cited `:459` on the pre-rebase head —
+    # a COMMENT inside the "validated ONCE" block — while `resolve_os_label` was at `:467`, and the
+    # same page cited `:467` for the same function twice, so the page contradicted itself and nothing
+    # read it (review round 5, F4). Pinned by the SENTENCE the operator follows.
+    flat = " ".join(line.strip() for line in runbook)
+    m = re.search(r"`resolve_os_label` in `tools/install-ci-runner-x64\.sh` \(`:(\d+)`\)", flat)
+    assert m is not None, (
+        "the runbook no longer cites `resolve_os_label`'s line in the WRITERS sentence — re-anchor "
+        "this pin rather than deleting it (an unpinned number is how it drifted onto a comment)"
+    )
+    n = int(m.group(1))
+    assert re.search(r"^resolve_os_label\(\) \{", installer[n - 1]), (
+        f"the runbook cites :{n} as `resolve_os_label` in its WRITERS sentence, but that line is "
+        f"{installer[n - 1].strip()!r} — re-derive the number from the installer"
+    )
+
 
 # ── 8b. the citations the runbook's map does NOT cover ──────────────────────────────────────
 def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_names():
     """⛔ THE MAP PIN ABOVE COVERS ONE BULLET; THE REST OF THE TREE CITES THE INSTALLER TOO.
 
-    `tools/runner_autoscale.py`, `tests/test_runner_autoscale.py` and `MEMORY.md` all point at
-    installer lines by NUMBER and name the symbol in the same sentence (`die()`, `resolve_labels`,
+    `tools/runner_autoscale.py`, `tests/test_runner_autoscale.py`,
+    `tests/test_runner_tool_contract.py` and `MEMORY.md` all point at installer lines by NUMBER and
+    name the symbol in the same sentence (`die()`, `resolve_labels`, the matrix-expression refusal,
     the repair's whole-set relabel). Two reviews found those wrong — `:153` was `-h|--help` and
     `:208` was `fallback_engaged()`, a DIFFERENT seam — while every pinned ref in the runbook still
     landed, so nothing went red. Every installer edit above them shifts them again; that is exactly
     the class this arm makes red instead of silent.
 
-    Non-vacuity: pointing either `die()` citation back at `:153` (the help flag) reds it, and so
-    does leaving the repair-range citation on the pre-PR `:241-256` (the tail of `resolve_labels`).
+    ⛔ `tests/test_runner_tool_contract.py` WAS THE ONE THIS ENUMERATION MISSED, and its docstring
+    claimed the opposite scope ("the rest of the tree cites the installer too"). It quoted the
+    installer's matrix-expression refusal and cited `:759-764` — correct on `origin/main`, where that
+    paragraph really is at `:759-765`. This PR inserts 177 lines above it (`main:761` → `head:938`),
+    so the citation silently became the label-coverage `awk` reader while every OTHER installer
+    citation in the tree was re-derived by the same commit. Nothing reddened, because the file was
+    not in the loop. `range_ends` below closes the second half of that gap: `land()` reads `:N`
+    only, so a `:N-M` citation is half-checked — its END can stop short of the construct the
+    sentence names and still pass.
+
+    Deliberately NOT pinned here: this file's OWN historical cites (`:2984`, `:3776`, `:5087`) — they
+    quote pre-PR heads as provenance ("the runbook grew by six lines, `:299` and …"), so they must
+    NOT move when the installer does; re-deriving them would falsify the record. The installer's
+    self-citations are pinned separately (8c).
+
+    Non-vacuity: pointing either `die()` citation back at `:153` (the help flag) reds it, leaving the
+    repair-range citation on the pre-PR `:241-256` (the tail of `resolve_labels`) reds it, and
+    reverting the tool-contract citation to `:759-764` reds BOTH the landing arm and "cites
+    installer RANGE(s) this pin does not know".
     """
     installer = INSTALLER.read_text().splitlines()
 
@@ -3089,14 +3352,42 @@ def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_nam
             "symbol the sentence names — re-derive the number"
         )
 
-    # The citations in the two files, and the symbol the sentence around them names. The `:NNN`
+    # The citations in the enumerated files, and the symbol the sentence around them names. The `:NNN`
     # sometimes sits on the NEXT line (`install-ci-runner-x64.sh::resolve_labels` then ``:232``), so
     # the window is two lines each side rather than the cited line alone.
-    known = {"die()": r"^die\(\)", "resolve_labels": r"^resolve_labels\(\)"}
-    for rel in ("tools/runner_autoscale.py", "tests/test_runner_autoscale.py"):
+    known = {
+        "die()": r"^die\(\)",
+        "resolve_labels": r"^resolve_labels\(\)",
+        # The matrix-expression refusal. Its paragraph OPENS on the cited range's first line, which
+        # is the line `land()` reads (`:N`, never the `-M` end — the END is `range_ends`'s job).
+        "REFUSES an expression rather than skipping it": r"THE EXTRACTION COULD NOT READ IS",
+    }
+    # ⛔ A RANGE CITATION'S START CAN LAND WHILE ITS END IS WRONG — the class that cost four rounds
+    # on the runbook map above (`range_ends` there). `land()` only ever sees `:N`, so a span cited as
+    # `:N-M` is half-checked: an end that stops short of the construct its sentence names, or one
+    # re-derived to a plausible closer, passes. Pinned by CONTENT at the END, two-way exactly like
+    # the runbook's table: a range this one does not know is a FAIL (add it), and an entry nothing
+    # cites any more is a FAIL too.
+    range_ends: dict[tuple[str, int, int], str] = {
+        # the matrix-expression refusal paragraph: its header through "the choice every other arm
+        # here already made", which is where the citing docstring's quotation continues into.
+        (
+            "tests/test_runner_tool_contract.py",
+            936,
+            941,
+        ): r"the choice every other arm here already made",
+    }
+    spans: set[tuple[str, int, int]] = set()
+    for rel in (
+        "tools/runner_autoscale.py",
+        "tests/test_runner_autoscale.py",
+        "tests/test_runner_tool_contract.py",
+    ):
         lines = (REPO_ROOT / rel).read_text().splitlines()
         cited = 0
         for i, line in enumerate(lines):
+            for r in re.finditer(r"install-ci-runner-x64\.sh:(\d+)-(\d+)", line):
+                spans.add((rel, int(r.group(1)), int(r.group(2))))
             for m in re.finditer(r"install-ci-runner-x64\.sh:(\d+)", line):
                 window = "\n".join(lines[max(0, i - 2): i + 3])
                 named = [rx for key, rx in known.items() if key in window]
@@ -3111,11 +3402,99 @@ def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_nam
                 cited += 1
         assert cited, f"{rel} no longer cites an installer line — re-anchor this pin"
 
+    unknown_spans = sorted(spans - range_ends.keys())
+    assert not unknown_spans, (
+        "a cross-file citation points at an installer RANGE this pin does not know — re-derive the "
+        "end against the installer and add the span rather than leaving it half-checked: "
+        f"{unknown_spans}"
+    )
+    stale_spans = sorted(range_ends.keys() - spans)
+    assert not stale_spans, (
+        "this pin lists installer range(s) no cross-file citation writes any more — a pin over refs "
+        f"nobody cites is pinning nothing: {stale_spans}"
+    )
+    bad_ends: list[str] = []
+    for (rel, lo, hi), expect in sorted(range_ends.items()):
+        assert 1 <= hi <= len(installer), (
+            f"{rel} cites :{lo}-{hi}, past EOF ({len(installer)} lines)"
+        )
+        if not re.search(expect, installer[hi - 1]):
+            bad_ends.append(
+                f"{rel} :{lo}-{hi} ends at {installer[hi - 1].strip()!r} (expected {expect!r})"
+            )
+    assert not bad_ends, (
+        "a cross-file citation points at a RANGE whose END is not the line that carries what its "
+        "sentence names — re-derive both ends from the installer: " + "; ".join(bad_ends)
+    )
+
     # `MEMORY.md` cites the REPAIR's range (the whole-set relabel that drops a version pin).
     memory = (REPO_ROOT / "MEMORY.md").read_text()
     repair = re.search(r"the repair \(`(?:tools/)?install-ci-runner-x64\.sh:(\d+)-\d+`\)", memory)
     assert repair, "MEMORY.md no longer cites the repair's line range — re-anchor this pin"
     land("MEMORY.md", int(repair.group(1)), r'^if \[ "\$MODE" = repair \]')
+
+
+# ── 8b-bis. the PLAN's positional refs ───────────────────────────────────────────────────────
+def test_the_plans_positional_refs_land_on_the_constructs_they_name():
+    """⛔ NOTHING PINNED `docs/plans/`, AND THIS FILE DROVE TWO ROUNDS OF DRIFT.
+
+    The plan header instructs a lane to EXECUTE it, and its step 11 is the load-bearing one: the
+    drop-in write must sit *"immediately after the `fi` at `:NNN`"*, outside the
+    `[ ! -f "$UNIT_DIR/$(unit_for "$name")" ]` guard. The plan's own `[R2-fix: P1]` records why:
+    inside the guard, the whole of an already-installed fleet is uncovered. Yet the number drifted
+    twice — once because it predated a re-measurement, and again when a LATER COMMIT IN THIS PR
+    inserted five lines above the guard and moved the `fi` from 1686 to 1691. Every installer pin
+    stayed green, because none of them reads the plan.
+
+    So this arm pins the two refs that carry a guarantee rather than a description of the code:
+    the `fi` the write follows, and the `--uninstall` span whose end must include the exit. It is
+    deliberately NOT a blanket pin of every `:NNN` in the plan — many of those cite OTHER files
+    (`config.sh`, `runner_autoscale.py`, this suite) and a two-way table over them would be mostly
+    noise. The symbol-keyed discipline of 8b still governs the files it enumerates.
+
+    Non-vacuity: pointing the `fi` claim back at 1686 (the pre-`c9e8b11e98` number) reds it — that
+    line is a comment, and the first code line below it is the `if`, not `write_unit_dropin`.
+    """
+    plan = (
+        REPO_ROOT / "docs" / "plans" / "2026-11-19-issue-13774-runner-unit-restart-and-memory-bound.md"
+    ).read_text()
+    installer = INSTALLER.read_text().splitlines()
+
+    fi_refs = set(re.findall(r"immediately after the `fi` at `:(\d+)`", plan))
+    assert fi_refs, "the plan no longer states where the drop-in write sits — re-anchor this pin"
+    problems = []
+    for n in sorted(int(x) for x in fi_refs):
+        assert 1 <= n <= len(installer), f"the plan cites :{n}, past EOF ({len(installer)} lines)"
+        if installer[n - 1].strip() != "fi":
+            problems.append(f":{n} is {installer[n - 1].strip()!r}, not the install guard's `fi`")
+            continue
+        # the write must be the FIRST code line after that `fi` — comments and blanks skipped
+        nxt = next(
+            (line for line in installer[n:] if line.strip() and not line.strip().startswith("#")),
+            "",
+        )
+        if 'write_unit_dropin "$name"' not in nxt:
+            problems.append(
+                f"the first code line after the `fi` at :{n} is {nxt.strip()!r}, not the drop-in write"
+            )
+    assert not problems, (
+        "the plan tells the next lane to place the drop-in write after a line that is not the guard's "
+        "`fi` — re-derive it (and the installer's line map) rather than shifting the number: "
+        + "; ".join(problems)
+    )
+
+    # the `--uninstall` span: its header through the `fi` that closes the block, so its END covers
+    # the exit rather than stopping at a comment inside the deleting branch.
+    span = re.search(r"uninstall loop \(`:(\d+)-(\d+)`\)", plan)
+    assert span, "the plan no longer cites the uninstall block's span — re-anchor this pin"
+    lo, hi = int(span.group(1)), int(span.group(2))
+    assert "── uninstall" in installer[lo - 1], (
+        f"the plan cites the uninstall block at :{lo}, which is {installer[lo - 1].strip()!r}"
+    )
+    assert installer[hi - 1].strip() == "fi" and installer[hi - 2].strip().startswith("exit "), (
+        f"the plan cites the uninstall block as ending at :{hi}, which is "
+        f"{installer[hi - 1].strip()!r} — it must be the `fi` after the `exit`"
+    )
 
 
 # ── 8c. the installer's OWN self-citations ──────────────────────────────────────────────────
@@ -5537,3 +5916,571 @@ def test_every_pool_only_pin_is_named_in_the_runbooks_departure_record():
         "carry the same line on the issue/decision comment the next lane reads — a pin with no "
         "record reads identically to an accident of history."
     )
+
+
+# ── 9. the unit's survival drop-in: a death is retried, and one unit's memory is bounded (#13774) ──
+def _dropin_env(tmp_path: Path, *, unit_present: bool, **extra: str) -> dict[str, str]:
+    """An INSTALL-mode env whose unit directory is hermetic and whose `sudo`/`systemctl` are stubs.
+
+    `sudo` LOGS its argv and then EXECs it, so a `sudo install -D` really creates the file — a no-op
+    stub would make every arm about "did the drop-in get written" vacuous. `systemctl` is stubbed on
+    PATH for the same reason: the sudo stub would otherwise exec the REAL `systemctl daemon-reload`
+    against this host's units.
+
+    `unit_present` CREATES the unit file (the already-installed branch every live box takes); without
+    it the installer takes its fresh-install path and runs `svc.sh install`. It used to be a dead
+    parameter — declared, passed by all nine call sites and never read — so the flag advertised a
+    distinction the fixture did not make and no mutant of it could red anything.
+
+    ⛔ THIS FIXTURE MUST NOT DEPEND ON THE HOST, and the file's header requires it. `_env` pins the
+    sizing knobs, `_NEUTRAL_HEADROOM` pins the three HEADROOM readings this fixture used to inherit
+    (arch via `uname -m`, the core count via `nproc`, and `MemAvailable`), so the eight install-mode
+    arms cannot red on an `aarch64` or <4-core host — which is what the ARM64 fallback pool is.
+
+    ⛔ `CI_RUNNER_MEM_PER_RUNNER_GB` IS PINNED TO A NON-ZERO VALUE HERE, and that is not cosmetic:
+    the file-wide `_NEUTRAL_HEADROOM` sets it to `0`, which the installer must read as "no memory
+    sizing" and therefore OMIT `MemoryMax=` (systemd 255 reads `0G` as UNSET, so an omission and a
+    written `0G` are the same runtime state — the omission just does not claim a bound). Leaving the
+    headroom value in place would make the
+    "six keys" assertions unpassable by construction, and the tempting repair — relaxing them to five
+    — would delete the only evidence that a bound is written at all. The sentinel has its own arm.
+    """
+    bin_dir = tmp_path / "bin"
+    _stub_tool(bin_dir, "sudo", f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\nexec "$@"')
+    _stub_tool(bin_dir, "systemctl", f'printf "%s\\n" "$*" >> {tmp_path / "systemctl.log"}\nexit 0')
+    _stub_tool(bin_dir, "gh", 'echo "tok"')
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir(exist_ok=True)
+    if unit_present:
+        (unit_dir / _unit_for()).write_text("[Unit]\nDescription=x\n")
+    base = tmp_path / "base"
+    base.mkdir(exist_ok=True)
+    (base / ".runner").write_text("{}\n")          # configured already: no download, no token
+    # the caller may OVERRIDE the sizing unit (the `0` sentinel arm does exactly that)
+    kwargs = {"CI_RUNNER_MEM_PER_RUNNER_GB": "2", **extra}
+    return _env(
+        base,
+        PATH=f"{bin_dir}:{os.environ['PATH']}",
+        CI_RUNNER_UNIT_DIR=str(unit_dir),
+        CI_RUNNER_ARCH="x86_64",
+        CI_RUNNER_NCPU="16",
+        **kwargs,
+    )
+
+
+def _svc_stub(runner_dir: Path, unit_dir: Path, unit: str, *, log: Path) -> None:
+    """A `svc.sh` that records its argv and, on `install`, writes the unit file like the real one."""
+    body = (
+        f'printf "svc.sh %s\\n" "$1" >> {log}\n'
+        'case "$1" in\n'
+        f'  install) mkdir -p {unit_dir} && printf "[Unit]\\nDescription=x\\n" > {unit_dir / unit} ;;\n'
+        'esac\n'
+        'exit 0'
+    )
+    _stub_tool(runner_dir, "svc.sh", body)
+
+
+def _unit_for(name: str = "pi-runner-x64-1") -> str:
+    return f"actions.runner.daniel-ospina-tortoise.{name}.service"
+
+
+def _section_of(text: str, key: str) -> str:
+    """The `[Section]` a key sits under — the only way to catch the `[Unit]`-vs-`[Service]` trap."""
+    section = ""
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            section = s
+        elif s.startswith(f"{key}="):
+            return section
+    raise AssertionError(f"{key}= is not in the drop-in at all:\n{text}")
+
+
+def test_install_writes_the_restart_and_memory_dropin_with_its_keys_in_the_right_sections(tmp_path: Path):
+    """`svc.sh install` writes a unit with NO `Restart=` (systemd default: `no`), so a runner that dies
+    for any reason but a clean 0 never comes back. The installer must add a drop-in carrying all six
+    keys — and the two START-LIMIT keys must sit under `[Unit]`, because under `[Service]` systemd
+    applies the burst and SILENTLY ignores the interval, leaving the 10 s default window: a guard that
+    reads as configured and is not (measured on this fleet's boxes).
+
+    Non-vacuity: with the drop-in writer deleted, the file does not exist and this test reds at the
+    existence assertion before reaching the keys.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 0, f"install must succeed, got {r.returncode}: {r.stderr}"
+
+    dropin = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"
+    assert dropin.is_file(), f"no drop-in written — the runner's death is unrecoverable: {r.stderr}"
+    text = dropin.read_text()
+
+    for key, value in (
+        ("Restart", "on-failure"),
+        ("RestartSec", "30s"),
+        ("OOMPolicy", "stop"),
+        ("MemoryMax", "8G"),
+        ("StartLimitIntervalSec", "1h"),
+        ("StartLimitBurst", "20"),
+    ):
+        assert f"{key}={value}" in text, f"{key}={value} missing from the drop-in:\n{text}"
+
+    # ⛔ POSITION, NOT PRESENCE. `StartLimitIntervalSec` under `[Service]` is silently ignored.
+    assert _section_of(text, "StartLimitIntervalSec") == "[Unit]", text
+    assert _section_of(text, "StartLimitBurst") == "[Unit]", text
+    for key in ("Restart", "RestartSec", "OOMPolicy", "MemoryMax"):
+        assert _section_of(text, key) == "[Service]", (key, text)
+
+    # and systemd must be told to read it
+    assert "daemon-reload" in (tmp_path / "systemctl.log").read_text(), "the drop-in is written but systemd never reloaded"
+
+
+def test_the_dropin_is_written_for_an_already_installed_unit_and_before_start(tmp_path: Path):
+    """THE BRANCH THIS FLEET ACTUALLY TAKES. Every box's units already exist, so
+    `if [ ! -f "$UNIT_DIR/$(unit_for …)" ]` is false and `svc.sh install` never runs. If the write sits
+    INSIDE that guard, the drop-in is never written on any existing box — and a negative-only assertion
+    ("nothing was restarted") would not notice.
+
+    Also pins the ORDER: the drop-in must exist before `svc.sh start`, so a fresh unit's first start
+    already carries the keys (no restart is performed to apply them).
+    """
+    env = _dropin_env(tmp_path, unit_present=True)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    # ⛔ THE UNIT FILE IS THE FIXTURE'S, NOT THIS TEST'S: `unit_present=True` creates it, so the flag is
+    # load-bearing here rather than a second copy of a line the caller writes. If that ever stops
+    # happening the installer takes its fresh path, `svc.sh install` appears in the log below, and this
+    # arm reds — which is the mutation row the parameter previously could not produce.
+    assert (unit_dir / unit).is_file(), "unit_present=True must have created the installed unit"
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 0, f"install must succeed, got {r.returncode}: {r.stderr}"
+    assert (unit_dir / f"{unit}.d" / "10-restart-and-memory.conf").is_file(), (
+        "the drop-in was NOT written for an already-installed unit — this is the branch every existing "
+        f"box takes, so the fix would be inert fleet-wide: {tmp_path / 'sudo.log'}"
+    )
+    log = (tmp_path / "sudo.log").read_text()
+    assert "svc.sh install" not in log, f"svc.sh install must be SKIPPED when the unit exists:\n{log}"
+    order = [ln for ln in log.splitlines() if "install -D" in ln or "svc.sh start" in ln]
+    assert len(order) >= 2, f"expected the drop-in write and the start in the log:\n{log}"
+    assert "install -D" in order[0], f"the drop-in must be written BEFORE svc.sh start:\n{log}"
+    # ⛔ NOT a bare substring check: the drop-in's own FILENAME carries `restart`, so "restart" appears
+    # in the install line by design. What must never appear is a restart/stop COMMAND.
+    assert not [ln for ln in log.splitlines() if re.search(r"(systemctl|svc\.sh)\s+(restart|stop)\b", ln)], (
+        f"installing must never restart or stop a serving runner:\n{log}"
+    )
+
+
+def test_the_dropin_write_is_idempotent_and_reloads_only_on_change(tmp_path: Path):
+    """A pass that rewrites and reloads on every run churns systemd on a live box. The second run must
+    find the file current (`cmp`) and skip both the install and the reload.
+
+    Non-vacuity: replace the `cmp -s` guard with an unconditional write and the reload count becomes 2.
+    """
+    env = _dropin_env(tmp_path, unit_present=True)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    for _ in range(2):
+        r = _run("--count", "1", "--fallback", "off", env=env)
+        assert r.returncode == 0, r.stderr
+    reloads = [ln for ln in (tmp_path / "systemctl.log").read_text().splitlines() if "daemon-reload" in ln]
+    assert len(reloads) == 1, f"expected exactly one daemon-reload over two identical runs, got {reloads}"
+    installs = [ln for ln in (tmp_path / "sudo.log").read_text().splitlines() if "install -D" in ln]
+    assert len(installs) == 1, f"the drop-in was re-installed although unchanged: {installs}"
+
+
+def test_a_failing_dropin_write_exits_3_and_leaves_the_install_and_registration_intact(tmp_path: Path):
+    """A half-applied change is worse than none: if the drop-in cannot be written the run must REPORT it
+    (rc=3, an OPERATION failure) and must not deregister or delete anything.
+    """
+    env = _dropin_env(tmp_path, unit_present=True)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    base = Path(env["CI_RUNNER_BASE"])
+    _svc_stub(base, unit_dir, unit, log=tmp_path / "sudo.log")
+    # make `install -D` fail the way a permission problem does
+    _stub_tool(
+        tmp_path / "bin",
+        "sudo",
+        f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\ncase "$*" in *"install -D"*) exit 1 ;; esac\nexec "$@"',
+    )
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 3, f"a failed drop-in write must be an OPERATION failure (rc=3), got {r.returncode}: {r.stderr}"
+    assert (base / ".runner").exists(), "the install (and its registration) must be left intact"
+    assert "drop-in" in r.stderr, f"the failure must name what failed: {r.stderr}"
+
+
+def test_a_zero_sizing_unit_omits_memorymax_instead_of_writing_zero(tmp_path: Path):
+    """⛔ `MEM_PER_RUNNER_GB=0` IS A REAL VALUE — the capacity gate reads it as "do not size from
+    memory", and this file's own headroom dict pins it. `0 × factor = 0` must NOT become
+    `MemoryMax=0G`, which LOOKS like a bound and is not: measured on systemd 255, `MemoryMax=0G` reads
+    as UNSET (`MemoryMax: infinity`, cgroup `memory.max` = `max`). The runtime state would be the same
+    either way; what differs is that a written `0G` tells every later reader (and every grep) that a
+    bound was set. The key is OMITTED instead, so the file states plainly that none is.
+    """
+    env = _dropin_env(tmp_path, unit_present=True, CI_RUNNER_MEM_PER_RUNNER_GB="0")
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 0, r.stderr
+    text = (unit_dir / f"{unit}.d" / "10-restart-and-memory.conf").read_text()
+    assert "MemoryMax=" not in text, f"MemoryMax must be OMITTED for a zero sizing unit, not written as 0G:\n{text}"
+    assert "Restart=on-failure" in text, "the restart keys are independent of the sizing unit"
+
+
+def test_the_unit_value_knobs_refuse_values_systemd_would_silently_drop(tmp_path: Path):
+    """An unvalidated bad value is the same class as a key in the wrong section: systemd DROPS a value it
+    cannot parse, so the guard visibly disappears. Both refusals are exit 1 (usage), never a silent pass.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    bad_interval = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_START_LIMIT_INTERVAL": "banana"})
+    assert bad_interval.returncode == 1, bad_interval.stderr
+    assert "START_LIMIT_INTERVAL" in bad_interval.stderr, bad_interval.stderr
+    bad_factor = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_MAX_FACTOR": "x"})
+    assert bad_factor.returncode == 1, bad_factor.stderr
+    assert "MEM_MAX_FACTOR" in bad_factor.stderr, bad_factor.stderr
+
+
+def test_uninstall_removes_only_our_dropin_and_never_another_operators(tmp_path: Path):
+    """The drop-in must go with the unit (a leftover silently governs a future unit of the same name),
+    but the `.d` directory is SHARED: pi-cell-4 carries a hand-written `restart.conf` in exactly that
+    directory which sorts AFTER `10-` and wins every shared key. So `rm -rf .d/` would delete another
+    operator's work — our file goes, foreign files stay.
+    """
+    env = _uninstall_env(tmp_path)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    _stub_tool(runner, "svc.sh", "exit 0")
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    foreign = unit_dir / f"{unit}.d" / "restart.conf"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("[Service]\nRestart=on-failure\n")
+    ours = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"
+    ours.write_text("[Service]\nRestart=on-failure\n")
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 0, f"a clean uninstall must exit 0, got {r.returncode}: {r.stderr}"
+    assert not ours.exists(), "our drop-in must be removed with the unit"
+    assert foreign.exists(), "another operator's drop-in must SURVIVE our uninstall"
+
+
+def test_uninstall_bails_out_without_svc_sh_and_leaves_the_live_dropin_alone(tmp_path: Path):
+    """⛔ THE BAIL-OUT ARM MUST NOT TOUCH THE DROP-IN. It fires when the runner dir has no `svc.sh` AND
+    the unit file is still installed, so it cannot deregister from here and exits 3 — and the unit is
+    still INSTALLED, which means our `Restart=`/`StartLimit*`/`MemoryMax=` keys are live on a serving
+    unit. Removing them here unbound that runner while printing only a warning. (Measured in an
+    attested round: the teardown was on this arm and missing from the arm that completes.)
+    """
+    env = _uninstall_env(tmp_path)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    (runner / "config.sh").write_text("#!/bin/sh\nexit 0\n")  # no svc.sh on purpose
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    ours = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("[Service]\nRestart=on-failure\n")
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 3, f"this arm cannot deregister, so it must report 3, got {r.returncode}"
+    assert ours.exists(), (
+        "our drop-in must SURVIVE here: the unit is still installed, so these keys are live on a "
+        "serving runner — removing them would unbound it silently"
+    )
+    assert runner.exists(), "the runner dir must survive: it holds the only state a retry can use"
+    out = r.stdout + r.stderr
+    assert "10-restart-and-memory.conf" in out, (
+        "the hand-removal hint must NAME our drop-in — the operator removes it, not this arm"
+    )
+
+
+def test_uninstall_that_completes_removes_the_dropin_of_the_unit_already_gone(tmp_path: Path):
+    """⛔ THE PATH THAT ACTUALLY FINISHES. No `svc.sh` and NO unit file on disk: nothing to uninstall, so
+    the run deregisters, deletes the runner dir and exits 0 — and it used to leave
+    `10-restart-and-memory.conf` behind to govern a future unit of the same name. The arm that cannot
+    finish was the one removing it; the arm that finishes was not, the inverse of `remove_unit_dropin`'s
+    own invariant.
+    """
+    env = _uninstall_env(tmp_path)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    (runner / "config.sh").write_text("#!/bin/sh\nexit 0\n")  # no svc.sh
+    ours = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"  # unit file absent on purpose
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("[Service]\nRestart=on-failure\n")
+    foreign = ours.parent / "restart.conf"
+    foreign.write_text("[Service]\nRestart=on-failure\n")
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 0, f"a completing uninstall must exit 0, got {r.returncode}: {r.stderr}"
+    assert not runner.exists(), "the runner dir must be deleted on the completing path"
+    assert not ours.exists(), (
+        "our drop-in must go with the runner: its unit is already gone, so a survivor would silently "
+        "govern a FUTURE unit of the same name"
+    )
+    assert foreign.exists(), "another operator's drop-in must still survive — the `.d` directory is shared"
+
+
+def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_path: Path):
+    """rc=0 on a target that never had a `.d` directory — and the teardown is not even INVOKED.
+
+    ⛔ THE rc=0 IS NOT THE GUARD'S DOING, and this arm used to assert NOTHING ELSE: `sudo rm -f` on an
+    absent path exits 0 and the `rmdir` ENOENT is swallowed by the `2>/dev/null || true` already on
+    that line, so deleting `[ -d "$UNIT_DIR/$unit.d" ] || return 0` left the old assertion GREEN — a
+    proven-green mutant. It pinned "uninstall exits 0", which was equally true before this PR, when
+    no drop-in code existed at all. What the guard actually buys is that a box with nothing of ours to
+    remove runs no `sudo` and no `rmdir`, so THAT is what is asserted here, and it is the thing that
+    reddens when the guard is deleted (mutant: drop the `[ -d ]` line ⇒ `sudo rm -f` and `sudo rmdir`
+    both run, `rmdir.log` appears, the arm reds while rc stays 0).
+    """
+    env = _uninstall_env(tmp_path)
+    # `rmdir` stub: logs its argv and exits 1, exactly as the REAL one does on a missing directory.
+    _stub_tool(
+        tmp_path / "bin", "rmdir", f'printf "%s\\n" "$*" >> {tmp_path / "rmdir.log"}\nexit 1'
+    )
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    _stub_tool(runner, "svc.sh", "exit 0")
+    (Path(env["CI_RUNNER_UNIT_DIR"]) / _unit_for()).write_text("[Unit]\nDescription=x\n")
+    assert not (Path(env["CI_RUNNER_UNIT_DIR"]) / f"{_unit_for()}.d").exists()
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 0, f"no `.d` dir is not a failure: rc={r.returncode}: {r.stderr}"
+    assert not (tmp_path / "rmdir.log").exists(), (
+        "the teardown ran `rmdir` on a target that never had a `.d` directory — the "
+        "`[ -d ] || return 0` guard is gone, and it is the guard (not the exit code) that this arm "
+        f"exists to pin: {(tmp_path / 'rmdir.log').read_text()}"
+    )
+    sudo_log = tmp_path / "sudo.log"
+    tried = [
+        line
+        for line in (sudo_log.read_text().splitlines() if sudo_log.exists() else [])
+        if "10-restart-and-memory.conf" in line
+    ]
+    assert not tried, (
+        f"the teardown tried to remove a drop-in that cannot exist on this target: {tried}"
+    )
+
+
+def test_the_timespan_validator_refuses_trailing_junk_after_a_valid_suffix(tmp_path: Path):
+    """⛔ A GLOB IS NOT A VALIDATION, and the first version of this validator proved it: `[0-9]*s` has an
+    unanchored `*`, so `30sm`, `30secs` and `30mss` were all ADMITTED. systemd then drops the value
+    ("Failed to parse sec value, ignoring: 30sm"), `RestartSec` falls back to its 100 ms default and
+    `StartLimitBurst=20` burns out in ~2 seconds — parking the unit `failed` for the rest of
+    `StartLimitIntervalSec`, which is the exact state the drop-in exists to prevent.
+
+    Non-vacuity: restore the `[0-9]*s`-style glob list and every arm below becomes green on the buggy
+    pattern while `systemd-analyze verify` still ignores the value.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    for bad in ("30sm", "30secs", "30mss", "30ss", "s30", "30"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": bad})
+        assert r.returncode == 1, f"{bad!r} must be refused (exit 1), got {r.returncode}: {r.stderr}"
+    for bad in ("30sm", "banana"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_START_LIMIT_INTERVAL": bad})
+        assert r.returncode == 1, f"interval {bad!r} must be refused, got {r.returncode}: {r.stderr}"
+    # and the real suffixes still pass
+    for good in ("30s", "1h", "5min", "500ms", "2d"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": good})
+        assert r.returncode == 0, f"{good!r} must be accepted, got {r.returncode}: {r.stderr}"
+
+
+def test_a_leading_zero_sizing_unit_still_derives_the_bound(tmp_path: Path):
+    """⛔ `$(( 08 * 4 ))` IS AN OCTAL ERROR in bash: the digits-only validator accepts a leading zero, so
+    the product silently came out EMPTY and the bound was dropped while the run reported success — a
+    guard that reads as present and is not, which is this change's whole subject. `10#` forces base 10;
+    this arm pins the arithmetic, not the string.
+
+    ⛔ AND IT PINS THAT THE HEADROOM GATE **RAN**. The first version of this arm asserted `rc == 0`
+    and nothing else, which distinguished nothing: on the PRE-FIX installer this run does not succeed
+    at all — `$(( 1 * 08 + 0 ))` errors, `mem_need_gb` is left UNSET, and the next line references it
+    under `set -u`, so the installer ABORTS with exit 1 (measured on bash 5.2.21; the sibling arm
+    below pins that abort). So the old arm was green for a reason it did not name — `10#` made the
+    arithmetic work — and could not tell "the arithmetic is right" from "the run got this far".
+    `headroom: cpu ok` is emitted only AFTER the memory gate has decided, so asserting it makes this
+    arm's `rc == 0` a statement about the ARITHMETIC rather than about how far the script got.
+    """
+    env = _dropin_env(tmp_path, unit_present=True, CI_RUNNER_MEM_PER_RUNNER_GB="08")
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 0, r.stderr
+    assert "headroom: cpu ok" in r.stderr, (
+        "the run exited 0 without reaching the end of the headroom block — a gate inside it was "
+        f"skipped, so this arm proves nothing about the `10#` arithmetic: {r.stderr}"
+    )
+    text = (unit_dir / f"{unit}.d" / "10-restart-and-memory.conf").read_text()
+    assert "MemoryMax=32G" in text, f"08 x 4 must derive 32G, not vanish:\n{text}"
+
+
+def test_a_leading_zero_sizing_unit_cannot_skip_the_memory_headroom_refusal(tmp_path: Path):
+    """⛔ THE ABORT THE `08` ARM NEVER NAMED. `$(( 1 * 08 + 0 ))` is an arithmetic ERROR, so
+    `mem_need_gb` is left UNSET and the next line's `"$mem_need_gb"` reference is a `set -u`
+    violation — fatal in a non-interactive script. MEASURED on bash 5.2.21 with this file's own
+    `set -uo pipefail`: the installer ABORTS with exit 1 and prints no `REFUSED:` line. So on a box
+    with too little memory the headroom refusal this code calls "deliberate fail-closed" was never
+    reached, and the caller was told **1** (usage) rather than 0 — a loud abort on the wrong code, not
+    a silent pass. (Three earlier rounds recorded this as "silently skipped, run exited 0"; that is
+    refuted, see the installer's validator comment.) Normalising every validated knob in base 10 in
+    ONE place, before any consumer, closes the class.
+
+    Non-vacuity (measured): against the pre-fix installer this exits 1 and the arm reds — it requires
+    the GUARD refusal, exit 2.
+    """
+    env = _dropin_env(
+        tmp_path,
+        unit_present=False,
+        CI_RUNNER_MEM_PER_RUNNER_GB="08",
+        CI_RUNNER_MEM_AVAILABLE_GB="4",
+    )
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 2, (
+        "a leading-zero sizing unit must not skip the memory refusal — 8G needed against 4G available "
+        f"is a GUARD refusal (exit 2), got {r.returncode}: {r.stderr}"
+    )
+    assert "memory headroom" in r.stderr, f"the refusal must name memory, not something else: {r.stderr}"
+
+
+def test_an_unreadable_memory_reading_is_refused_rather_than_sized_against(tmp_path: Path):
+    """⛔ THIS LEG'S REFUSAL HAD NO ARM AT ALL, while TWO artifacts said it did.
+
+    The installer's own comment says the `CI_RUNNER_MEM_AVAILABLE_GB` seam exists "for the same reason
+    `CI_RUNNER_NCPU` is one: a live reading cannot be exercised from a test without it, and a reading
+    that is not exercised is how this leg's refusal went untested while the other three each had an
+    arm" — and the plan said "two arms pin it". Measured at the head this arm was written for: the
+    seam was set to a NUMERIC value in every arm (`1024` file-wide, plus one leading-zero headroom
+    case), so deleting the `''|*[!0-9]*` arm below redded NOTHING. A guard this change adds, described
+    as the reason the seam exists, could be removed in silence — the "claim that reads as verified"
+    class this whole PR is about.
+
+    The refusal is a GUARD refusal (exit 2, `die`'s default), and it must name the reading rather than
+    the headroom, so a caller can tell "this box cannot be MEASURED" from "this box is too small".
+
+    ⛔ WHAT REMOVING IT ACTUALLY DOES — measured, after an earlier version of this docstring got it
+    wrong. Deleting the three `case … esac` lines does NOT fail open: `mem_free_gb` is never an
+    arithmetic operand, its only consumer is `[ "$mem_free_gb" -ge "$mem_need_gb" ]`, and bash
+    reports `line N: [: banana: integer expression expected` and returns FALSE for a non-integer — so
+    the `|| die` on the very next line still refuses, with exit 2:
+
+        REFUSED: memory headroom: bananaG available against 2G needed for 1 runners (+0G reserve)
+
+    So the guard's real value is the MESSAGE: without it the box still fails closed, but it reports a
+    headroom comparison that was never computable as though the measurement had succeeded, and the
+    string a fixer sees names the wrong fault. That is smaller than "a fail-open", and it is what this
+    arm pins: the arm REDS on the message assertion, not on a return code. Stated explicitly because
+    "`$(( ))` would coerce it to 0 and approve an unbounded install" was FALSE here, and a false
+    mechanism in a failure message is the same class as a false citation.
+    """
+    env = _dropin_env(tmp_path, unit_present=False, CI_RUNNER_MEM_AVAILABLE_GB="banana")
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 2, (
+        f"an unreadable memory reading must be refused (exit 2), got {r.returncode}: {r.stderr}"
+    )
+    assert "cannot read available memory" in r.stderr, (
+        "the refusal must name the UNREAD BOUND, not a headroom comparison that was never "
+        f"computable — that is the whole difference this arm pins: {r.stderr}"
+    )
+
+
+def test_an_overflowing_bound_is_refused_rather_than_silently_dropped(tmp_path: Path):
+    """A product that wraps negative would omit `MemoryMax=` and report success. The file's own rule is
+    that a bound nobody can read is REFUSED (exit 1), never coerced into a number.
+    """
+    env = _dropin_env(tmp_path, unit_present=True)
+    for bad in ("9223372036854775807", "18446744073709551617"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": bad})
+        assert r.returncode == 1, f"an overflowing bound must be refused, got {r.returncode}: {r.stderr}"
+        # either guard may refuse it (the operand length bound fires first now) — what must NOT happen
+        # is a silent success with a wrapped value
+        assert "MEM_PER_RUNNER_GB" in r.stderr or "MemoryMax" in r.stderr, r.stderr
+
+
+def test_the_count_is_rebuilt_in_base_10_too(tmp_path: Path):
+    """⛔ `COUNT` WAS THE LAST VALUE OUTSIDE THE `10#` REBUILD, and it feeds FOUR headroom gates.
+
+    The rebuild loop covered the sizing knobs and left the count out, so `--count 010` still
+    entered arithmetic as OCTAL: `$(( 010 * 2 + 2 ))` is 18, while `seq 1 010` iterates TEN and
+    the box needs 22 cores. Both readings are refused here (`16 < 18` and `16 < 22`), so the return
+    code cannot tell them apart — the ASSERTION IS ON THE NUMBER THE GATE SIZED FOR: `10x2` and
+    `= 22`, not `010x2` and `= 18`. Measured against the pre-fix installer: it prints `010x2` …
+    `= 18`, so this arm reds on the message and on the octal reading, and on the memory gate the
+    same defect lets a 24G need pass a 22G box while ten runners are installed (exit 0).
+    """
+    env = _dropin_env(tmp_path, unit_present=False, CI_RUNNER_FORKS_PER_RUNNER="0")
+    r = _run("--count", "010", "--fallback", "off", env=env)
+    assert r.returncode == 2, f"ten runners need 22 cores on a 16-core box: {r.returncode}: {r.stderr}"
+    assert "10x2 cores + 2 reserved for agent lanes = 22" in r.stderr, (
+        "the gate must size for TEN, not for octal EIGHT — the count has to be rebuilt in base 10 "
+        f"before any consumer reads it: {r.stderr}"
+    )
+
+
+def test_a_bound_beyond_systemds_parse_range_is_refused(tmp_path: Path):
+    """⛔ A PRODUCT THAT PARSES IN BASH CAN STILL BE ONE SYSTEMD DROPS.
+
+    `MemoryMax=` is a uint64 of BYTES: systemd 255.4 refuses `17179869184G` with "Numerical result
+    out of range" and IGNORES the key, which leaves the unit unbounded while the drop-in reads as a
+    bound — the same deception the `0G` sentinel arm refuses. The operand length bound does not
+    imply this ceiling: both operands may be nine digits, so the product reaches
+    999999999 x 999999999 = 999999998000000001G.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    r = _run(
+        "--count", "1", "--dry-run",
+        env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": "999999999", "CI_RUNNER_MEM_MAX_FACTOR": "999999999"},
+    )
+    assert r.returncode == 1, (
+        f"a MemoryMax systemd would ignore must be REFUSED (exit 1), got {r.returncode}: {r.stderr}"
+    )
+    assert "systemd" in r.stderr, f"the refusal must name systemd's parse limit: {r.stderr}"
+
+
+def test_a_timespan_magnitude_systemd_cannot_parse_is_refused(tmp_path: Path):
+    """⛔ THE SUFFIX WAS ONLY HALF THE PARSE. systemd accepts up to ~9.2e12 s (`9223372036855s` parses,
+    `9223372036854776s` is "Numerical result out of range") and DROPS anything past it — which lands on
+    `RestartSec`'s 100 ms default with `StartLimitBurst` burnt out, the same end state a bad suffix
+    produced. A suffix check alone therefore still admits a value systemd ignores.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    # ⛔ ONE CEILING PER SUFFIX, because systemd's limit is on the RESULT: `999999999d` is nine digits
+    # and is DROPPED, while `999999999h` parses. A flat digit bound let days, hours and minutes through.
+    for bad in (
+        "999999999999999999999s", "9223372036854776s", "12345678901234h",
+        "999999999d", "9999999999h", "999999999999min", "99999999999999999ms",
+    ):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": bad})
+        assert r.returncode == 1, f"{bad!r} is beyond what systemd can parse and must be refused, got {r.returncode}"
+    for good in ("9223372036855s", "99999999d", "999999999h", "99999999999min", "30s", "1h"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": good})
+        assert r.returncode == 0, f"{good!r} parses in systemd and must be accepted, got {r.returncode}: {r.stderr}"
+
+
+def test_a_sizing_unit_that_would_wrap_is_refused_before_the_product(tmp_path: Path):
+    """⛔ THE OVERFLOW GUARD ALONE WAS NOT ENOUGH: it refused only the wrap-to-NEGATIVE half, while a
+    magnitude ≥ 2^64 wraps to a SMALL POSITIVE or to 0 — `$(( 10#18446744073709551617 * 4 ))` is `4`
+    (a real, spurious 4 GB cap written onto a running job) and `$(( 10#36893488147419103232 * 4 ))` is
+    `0` (the bound silently gone, guard silent because it tested the already-wrapped value). The length
+    bound on the operands makes the wrap unreachable.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    for bad in ("18446744073709551617", "36893488147419103232", "9223372036854775807"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": bad})
+        assert r.returncode == 1, f"{bad!r} would wrap and must be refused, got {r.returncode}"
+    for good in ("0", "2", "8", "16"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": good})
+        assert r.returncode == 0, f"{good!r} must be accepted, got {r.returncode}: {r.stderr}"
