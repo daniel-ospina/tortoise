@@ -148,16 +148,28 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # database. (1) `delenv` at the door test: `run()` has four `return 3` arms, so
     # with an ambient URI the URI arm can answer for the door arm and the test
     # stays green over a deleted door guard (measured in its own docstring); the
-    # environment is therefore pinned EMPTY. (2)+(3) `setenv`: one `rediss://` URI
-    # to prove execution reaches `FalkorProjection.from_uri` at all (the assertion
-    # is the raised sentinel, not a message), and one `postgres://` URI for the
-    # inverse — an unsupported scheme must refuse WITH its reason, or
-    # `_uri_refusal` could return `None` unconditionally and stay decorative.
+    # environment is therefore pinned EMPTY. (2) `setenv rediss://`: proves
+    # execution reaches `FalkorProjection.from_uri` at all — the assertion is the
+    # raised sentinel, not a message. (3) `setenv postgres://`: pins the RUN()-LEVEL
+    # wiring, not the predicate. `_uri_refusal` is already pinned in both
+    # directions at the unit level (`test_the_uri_guard_accepts_every_scheme_the_
+    # product_itself_supports`), so deleting the PREDICATE would red those. What
+    # nothing else covers is `run()`'s half: it reads `_uri_refusal` and returns 3,
+    # and deleting THAT block leaves the unit pins green while every arm figure is
+    # written against a backend the product cannot use — measured: with the block
+    # deleted, `run()` reached `FalkorProjection.from_uri` and this row was the only
+    # red (`1 failed, 2 passed` over the uri-selected cases).
     # Every site uses `monkeypatch`, so no lane state leaks, and none of them
     # constructs anything: the ports are stubbed above the driver.
+    # ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored, like every row above: `_is_declared`
+    # matches each censused line on its own, so these three spellings are all the row
+    # authorizes and any FUTURE site in the same file reds until it is triaged (#11083 —
+    # a looser, unanchored arm would ride along silently, which is exactly the #942
+    # vacuity vector this census exists to catch).
     "test_capstone_12186_recall.py": [
-        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'^monkeypatch\.delenv\("TORTOISE_DB_URI", raising=False\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "rediss://:pw@falkordb\.example:6379/g"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "postgres://host/db"\)$',
     ],
     # ── DELIBERATE_EMBEDDED_LANE: SDK-level tests force the embedded lane so
     #    the constructions never ride the URI (the delenv IS the point) ──────
