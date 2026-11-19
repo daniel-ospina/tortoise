@@ -71,26 +71,66 @@ PRODUCTION_DIR = ROOT / "tortoise"
 #: `tests.<module>.<symbol>` or `tests/<module>[.py].<symbol>`, inside
 #: backticks. Deliberately narrow: a bare file pointer
 #: (`tests/test_x.py` — the `.py` lands in the symbol group, filtered by
-#: `_NOT_A_SYMBOL`), a data file (`tests/x.json`), an ellipsis
-#: (`tests/...boundary.py`) and a node id (`tests/test_x.py::node`) are out of
-#: scope, so this guard needs no per-token escape hatch.
+#: `_NOT_A_SYMBOL`), a data file **whose target is there** (`tests/x.json`), an
+#: ellipsis (`tests/...boundary.py`) and a node id (`tests/test_x.py::node`) are
+#: out of scope, so this guard needs no per-token escape hatch. ⚠️ Read that
+#: data-file clause with `_classify` in front of you: a data file is suppressed
+#: by the EVIDENCE conjunct (the file exists), not by an extension list, so the
+#: silence it promises holds only while the target is on disk — a pointer to a
+#: generated-or-absent fixture is asserted, and reds. That is an ADJACENT residual,
+#: opposite in direction: the `.py` shape fails SILENT (a pointer to a deleted
+#: `.py` test stays green — #13765), while this one fails LOUD. Neither is a
+#: reason to trust the other.
+#: ⛔ The dotted alternative allows INNER SEGMENTS (`tests.eval.harness.grading
+#: .SomeSymbol`): it did not, and an unmatched token is neither asserted nor
+#: listed — the same silent-loss shape as a fail-open branch, for a module the
+#: SLASH spelling of the same pointer would have guarded in full.
 _POINTER = re.compile(
-    r"`(?:tests\.(?P<dotted>[A-Za-z0-9_]+)\.(?P<dsym>[A-Za-z0-9_]+)"
+    r"`(?:tests\.(?P<dotted>[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\.(?P<dsym>[A-Za-z0-9_]+)"
     r"|tests/(?P<path>[A-Za-z0-9_/]+?)(?:\.py)?\.(?P<psym>[A-Za-z0-9_]+))`"
 )
 
-#: A trailing token that is a file EXTENSION, not a symbol — i.e. the pointer
-#: names a whole file, which is outside this guard's scope (a file pointer
-#: does not break on a rename unless the file itself moves).
-#: ⛔ A LIST IS NOT THE GUARANTEE — `_names_a_whole_file` is (below), because a
-#: static list only knows the extensions someone thought of here. This one knew
-#: seven and not `mjs`, so `tests/test_middleware_host_consolidation.mjs` (a real
-#: pointer in `tortoise/hosted_api.py`) was imported as a MODULE and reddened the
-#: required `test` job on a tree where nothing had moved.
-_NOT_A_SYMBOL = frozenset({
-    "py", "json", "yml", "yaml", "md", "txt", "toml",
-    "mjs", "js", "cjs", "mts", "ts", "jsx", "tsx", "sh", "sql", "css", "html",
-})
+#: A trailing token that is an EXTENSION, not a symbol. It covers ONLY the bare
+#: file pointer (`tests/test_x.py`, where `.py` lands in the symbol group), in
+#: BOTH spellings; every other pointer — either spelling — is recognised by
+#: EVIDENCE: `tests/<written>.<symbol>` naming a file that IS THERE
+#: (`tests/x.mjs`, `tests/x.jsonl`, `tests/x.c`, or an extension nobody has
+#: invented yet), never by an enumeration of extensions, which is only ever as
+#: complete as today's citations. Both spellings go through the ONE classifier
+#: (`_classify`); the dotted branch is not a second rule.
+#:
+#: ⛔ MEASURED (#13760 review): `tests/test_middleware_host_consolidation.mjs`,
+#: named by `tortoise/hosted_api.py`'s `#13636` note, was being IMPORTED as a
+#: Python module because the then-extension-list did not name `mjs` — and such a
+#: list is only ever as complete as today's citations (`tests/` also carries
+#: `.jsonl`, `.sh`, `.c`, `.html`). A JS harness is not a module in any Python
+#: sense, so that assertion had no ground. The token is now classified as a FILE
+#: pointer and is LISTED, not asserted — see `_classify`.
+#: ⛔ AND THE FIX MUST NOT FAIL OPEN. A first cut of this split classified a token
+#: as a FILE pointer whenever `tests/<written>.py` did NOT exist — which is
+#: exactly the population a RENAME produces, so the guard stopped catching the
+#: one failure it exists for (measured: a synthetic `tests/test_renamed_away
+#: .SomeSymbol` was listed, never imported, never reddened, where the pre-split
+#: code raised `ModuleNotFoundError`). The classification is therefore
+#: EVIDENCE-POSITIVE: a FILE pointer must name a file that IS THERE. Absence is
+#: not evidence of non-modulehood.
+#: ⚠️ RESIDUAL, stated rather than hidden — and MEASURED, because the first cut
+#: of this note named the WRONG case. A `.mjs` pointer whose file is renamed or
+#: deleted DOES red: it stops naming a file, so it reclassifies as a SYMBOL
+#: pointer and the import fails. The gap is the `.py`-TAILED bare file pointer,
+#: which `_NOT_A_SYMBOL` fixes to FILE unconditionally with NO existence check —
+#: so a pointer to a deleted `.py` test stays green. That is the reach question
+#: filed as #13765, whose title is about exactly this shape.
+#:
+#: Two `.py` pointers exist in production prose and are NOT citations, so neither
+#: population should carry them: `tortoise/referentiality.py` illustrates an
+#: identifier-only surface with `tests/x.py` (beside `#4118` and `feat/branch` —
+#: there is no `x` module and no rename for this guard to catch), and
+#: `tortoise/sdk.py` names `tests/test_backfill_sources.py` as a file #4282
+#: DELETED, a sentence that exists to record that it is gone. Both are already
+#: handled by `_NOT_A_SYMBOL` alone, so they need no separate escape hatch;
+#: #13765 owns removing the second name from that prose.
+_NOT_A_SYMBOL = frozenset({"py"})
 
 #: Names the #8920 move renamed away or never existed: the two pre-rename
 #: helpers, and the callee the moved docstring misspelled (`_purge_deleted_orgs`
@@ -158,43 +198,92 @@ CONSUMER_FIXTURES: dict[str, tuple[str, ...]] = {
 CONSUMERS = tuple(CONSUMER_FIXTURES)
 
 
-def _names_a_whole_file(
-    path_group: str, symbol: str, tests_dir: Path = TESTS_DIR
-) -> bool:
-    """True when `tests/<path_group>.<symbol>` IS a file — a pointer at a whole file.
+def _classify(
+    written: str, symbol: str, tests_dir: Path | None = None
+) -> tuple[str, str]:
+    """Classify a pointer token, EITHER spelling: ("symbol", module) or ("file", named path).
 
-    STRUCTURAL, not a vocabulary: any extension a file in `tests/` really carries
-    is out of scope, whether or not `_NOT_A_SYMBOL` happens to name it. A list of
-    extensions is a list of the ones someone remembered, and the one it forgot
-    (`mjs`) turned a prose pointer into an import of a module that never existed.
+    Shared by both spellings on purpose — `_production_pointers` calls it for the
+    slash form and for the dotted form, so there is ONE rule and no drift between
+    them. The body is form-neutral: a dotted module name carries no `/`, so the
+    `replace` is a no-op for it.
+
+    EVIDENCE-POSITIVE, and that is the whole point. A token is a FILE pointer
+    only when `tests/<written>.<symbol>` IS a file — any extension, so the rule
+    never needs extending — or when its tail is the bare-file extension
+    (`_NOT_A_SYMBOL`, the `tests/x.py` shape). Every other token is a SYMBOL
+    pointer and IS imported and looked up, INCLUDING a token whose module does
+    not exist: that is precisely the renamed-away shape this guard exists to
+    red, so its absence must not be what silences the check.
+
+    `tests_dir` is a parameter only so the rule can be pinned on a synthetic
+    tree; production callers take the default.
     """
-    return (tests_dir / f"{path_group}.{symbol}").is_file()
+    tests_dir = TESTS_DIR if tests_dir is None else tests_dir
+    named = f"tests/{written}.{symbol}"
+    if symbol in _NOT_A_SYMBOL or (tests_dir / f"{written}.{symbol}").is_file():
+        return "file", named
+    return "symbol", f"tests.{written.replace('/', '.')}"
 
 
 def _production_pointers(
-    production_dir: Path = PRODUCTION_DIR,
-    tests_dir: Path = TESTS_DIR,
-) -> list[tuple[Path, str, str, str]]:
-    """Every (file, token, module, symbol) dotted pointer in production source."""
-    found: list[tuple[Path, str, str, str]] = []
+    production_dir: Path | None = None, tests_dir: Path | None = None
+) -> tuple[list[tuple[Path, str, str, str]], list[tuple[Path, str, str]]]:
+    """(symbol pointers, file pointers) written into production source.
+
+    A SYMBOL pointer is (file, token, module, symbol) and is resolved by
+    importing the module and looking the symbol up. A FILE pointer is
+    (file, token, named path) and is OUT OF SCOPE for the import assertion — it
+    is returned so the caller can NAME it (and so the split is testable), not so
+    a claim can be made about it.
+
+    The slash form's split is `_classify`'s verdict, which is EVIDENCE-POSITIVE
+    on the target (`tests/<written>.<symbol>` exists ⇒ FILE), so a renamed
+    module stays a SYMBOL pointer and reds. **The dotted form goes through the
+    SAME `_classify`**, so the two spellings cannot drift: a dotted file pointer
+    (`tests.x.json`, `tests.x.py`) is LISTED, and a dotted module pointer is
+    imported and looked up — one rule, not two.
+    """
+    #: ⚠️ WHAT THE SYNTHETIC TREES ADD, MEASURED — stated this precisely because
+    #: two earlier cuts of this note claimed the opposite and were refuted by the
+    #: tree. Of the four real SYMBOL pointers, ONE is dotted
+    #: (`tests.fake_control_plane.FakeControlPlane`) and THREE are slash-form
+    #: (`tests/_embedded._projection_host`, two in `tests/_http_fixtures`), so the
+    #: real tree DOES exercise the slash SYMBOL rule. It also already reaches the
+    #: slash FILE-side conjunct four times (`tests/sample_transcript.txt`,
+    #: `tests/_assembly_census.json` twice, and
+    #: `tests/test_middleware_host_consolidation.mjs` — pinned by the mjs test
+    #: above). What NO real token reaches is the DOTTED spelling's FILE routing
+    #: (the tree carries zero dotted file pointers) and the multi-segment dotted
+    #: shape. Those are what the synthetic cases and `test_both_spellings_...` pin.
+    production_dir = PRODUCTION_DIR if production_dir is None else production_dir
+    tests_dir = TESTS_DIR if tests_dir is None else tests_dir
+    symbols: list[tuple[Path, str, str, str]] = []
+    files: list[tuple[Path, str, str]] = []
     for path in sorted(production_dir.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         for match in _POINTER.finditer(text):
             dotted = match.group("dotted")
-            module = dotted if dotted else match.group("path").replace("/", ".")
-            symbol = match.group("dsym") or match.group("psym")
-            if symbol in _NOT_A_SYMBOL:
+            if dotted:
+                dsym = match.group("dsym")
+                kind, target = _classify(dotted, dsym, tests_dir)
+                if kind == "file":
+                    files.append((path, match.group(0), target))
+                else:
+                    symbols.append((path, match.group(0), target, dsym))
                 continue
-            path_group = match.group("path")
-            if path_group is not None and _names_a_whole_file(
-                    path_group, symbol, tests_dir):
-                continue
-            found.append((path, match.group(0), f"tests.{module}", symbol))
-    return found
+            written = match.group("path")
+            symbol = match.group("psym")
+            kind, target = _classify(written, symbol, tests_dir)
+            if kind == "symbol":
+                symbols.append((path, match.group(0), target, symbol))
+            else:
+                files.append((path, match.group(0), target))
+    return symbols, files
 
 
 def test_production_pointers_into_the_test_tree_resolve():
-    pointers = _production_pointers()
+    pointers, file_pointers = _production_pointers()
     assert pointers, (
         "no `tests.<module>.<symbol>` pointer found under tortoise/ — the "
         "scan itself broke, so this guard would pass vacuously"
@@ -214,47 +303,126 @@ def test_production_pointers_into_the_test_tree_resolve():
     assert not broken, (
         "production source names test symbols that do not resolve:\n  "
         + "\n  ".join(broken)
+        + "\n⛔ file pointers are OUT OF SCOPE here and are listed for the next "
+        "reader rather than asserted: " + ", ".join(sorted(t for _, _, t in file_pointers))
     )
 
 
-def test_a_pointer_at_a_whole_FILE_is_not_scanned_as_a_symbol(tmp_path: Path) -> None:
-    """A file pointer whose extension the static list has not been taught yet.
+def test_the_file_pointer_split_is_what_makes_the_mjs_pointer_sane():
+    """The `.mjs` pointer that motivated the split is classified as a FILE, not a module.
 
-    NON-VACUITY: on the pre-fix guard `_NOT_A_SYMBOL` held seven extensions and no
-    `.mjs`, so `tests/test_middleware_host_consolidation.mjs` — a real pointer in
-    `tortoise/hosted_api.py`, unchanged from `main` — was returned as
-    `(…, 'tests.test_middleware_host_consolidation', 'mjs')` and the guard failed
-    trying to IMPORT it. The suite was red on a tree where nothing had moved, and
-    the fix is structural (the target IS a file), not a longer list: a list only
-    ever names the extensions someone remembered. `zzz` below is an extension no
-    list in this repo names, which is the point.
+    A class-complete check cannot be a list of extensions: such a set is only as
+    complete as today's citations (`tests/` carries `.jsonl`, `.sh`, `.c`,
+    `.html`). So this pins the DECISION for the pointer that broke first: it is
+    classified as a FILE pointer, and the import assertion therefore never sees
+    it. (Whether a file pointer's target exists is a different question, and is
+    NOT asserted here.)
     """
-    tests_dir = tmp_path / "tests"
-    tests_dir.mkdir()
-    (tests_dir / "test_widget.zzz").write_text("noop\n", encoding="utf-8")
-    (tests_dir / "test_widget.py").write_text("X = 1\n", encoding="utf-8")
-    production_dir = tmp_path / "tortoise"
-    production_dir.mkdir()
-    (production_dir / "mod.py").write_text(
-        "# behaviourally by `tests/test_widget.zzz`); what stays\n"
-        "# and the seam `tests/test_widget.py` — a whole file too\n",
-        encoding="utf-8",
+    _, file_pointers = _production_pointers()
+    targets = {target for _, _, target in file_pointers}
+    assert "tests/test_middleware_host_consolidation.mjs" in targets, (
+        "the `.mjs` harness pointer is no longer classified as a FILE pointer — "
+        f"file pointers now are {sorted(targets)}"
     )
 
-    assert _production_pointers(production_dir, tests_dir) == [], (
-        "a pointer naming a whole FILE was scanned as a symbol — the required "
-        "`test` job reds on prose that moved nothing"
+
+def test_the_split_is_evidence_positive_so_a_renamed_module_still_reds(tmp_path: Path):
+    """A pointer to a module that no longer exists is a SYMBOL pointer, not a silent FILE.
+
+    This is the regression the split's FIRST cut introduced: classifying by
+    "`tests/<written>.py` is absent ⇒ FILE pointer" sent exactly the renamed-away
+    population to the un-asserted side, so the guard stopped catching the one
+    shape it exists for. Evidence-positive means absence proves nothing.
+    """
+    assert _classify("test_renamed_away", "SomeSymbol", tests_dir=tmp_path) == (
+        "symbol",
+        "tests.test_renamed_away",
     )
 
-    # …and the scan still finds a REAL symbol pointer in the same tree, so the
-    # assertion above cannot pass by the walk breaking.
-    (production_dir / "mod.py").write_text(
-        "# `tests.test_widget.X` is the only symbol pointer here\n",
+
+def test_the_split_covers_both_branches_at_this_head(tmp_path: Path):
+    """Both branches of the PREDICATE, on a synthetic tree.
+
+    Measured split at this head: of the four real SYMBOL pointers, ONE is dotted
+    (`tests.fake_control_plane.FakeControlPlane`) and THREE are slash-form
+    (`tests/_embedded._projection_host`, and two in `tests/_http_fixtures`). So
+    the real tree does exercise the slash rule — but it never sends a FILE token
+    through the slash branch's POSITIVE side, which is what these cases pin.
+    """
+    (tmp_path / "test_present.py").write_text("X = 1\n", encoding="utf-8")
+    (tmp_path / "harness.mjs").write_text("// js\n", encoding="utf-8")
+    # module file exists ⇒ SYMBOL pointer (imported + looked up)
+    assert _classify("test_present", "X", tests_dir=tmp_path) == (
+        "symbol",
+        "tests.test_present",
+    )
+    # a file that IS there ⇒ FILE pointer, whatever its extension
+    assert _classify("harness", "mjs", tests_dir=tmp_path) == (
+        "file",
+        "tests/harness.mjs",
+    )
+    # the bare-file shape ⇒ FILE pointer, by `_NOT_A_SYMBOL` alone (which is why
+    # the `.py`-tailed non-citations need no separate escape hatch)
+    assert _classify("test_present", "py", tests_dir=tmp_path) == (
+        "file",
+        "tests/test_present.py",
+    )
+    assert _classify("x", "py", tests_dir=tmp_path) == ("file", "tests/x.py")
+
+
+def test_both_spellings_reach_the_same_classifier_on_a_real_scan(tmp_path: Path):
+    """The ROUTING, not just the predicate: `_production_pointers` on a synthetic tree.
+
+    `_classify` takes no spelling, so asserting on it twice pins nothing about
+    the dotted branch — that branch lives one level up, in
+    `_production_pointers`, and the real tree carries no dotted FILE pointer to
+    drive it. Measured, this is the only assertion shape that fails when the
+    dotted branch is reverted to `dsym in _NOT_A_SYMBOL`, or replaced with a
+    fail-open that lists every dotted token: a dotted FILE pointer must be
+    LISTED, and a renamed-away pointer must be ASSERTED in EITHER spelling.
+    """
+    prod = tmp_path / "prod"
+    tests = tmp_path / "tests"
+    prod.mkdir()
+    tests.mkdir()
+    (tests / "harness.mjs").write_text("// js\n", encoding="utf-8")
+    (tests / "test_present.py").write_text("X = 1\n", encoding="utf-8")
+    (prod / "probe.py").write_text(
+        "`tests.harness.mjs` `tests.test_present.py` `tests.test_present.X`\n"
+        "`tests.test_dotted_away.SomeSymbol`\n"
+        "`tests/test_slash_away.SomeSymbol`\n"
+        "`tests.sub.mod.SomeSymbol`\n",
         encoding="utf-8",
     )
-    assert _production_pointers(production_dir, tests_dir) == [
-        (production_dir / "mod.py", "`tests.test_widget.X`", "tests.test_widget", "X")
-    ]
+    syms, files = _production_pointers(production_dir=prod, tests_dir=tests)
+    file_targets = {target for _, _, target in files}
+    sym_modules = {modname for _, _, modname, _ in syms}
+
+    # dotted FILE pointers are LISTED, never imported
+    assert "tests/harness.mjs" in file_targets, (
+        f"a dotted file pointer was not listed as a file: files={sorted(file_targets)}"
+    )
+    assert "tests/test_present.py" in file_targets, (
+        f"the dotted bare-file pointer was not listed: files={sorted(file_targets)}"
+    )
+    # renamed-away pointers are ASSERTED in BOTH spellings — i.e. they reach the
+    # import, fail it, and red. A branch that lists them silently fails here.
+    assert "tests.test_dotted_away" in sym_modules, (
+        f"the DOTTED renamed-away pointer stopped being asserted: syms={sorted(sym_modules)}"
+    )
+    assert "tests.test_slash_away" in sym_modules, (
+        f"the SLASH renamed-away pointer stopped being asserted: syms={sorted(sym_modules)}"
+    )
+    # a dotted module pointer that DOES exist is asserted, not listed
+    assert "tests.test_present" in sym_modules, (
+        f"the dotted module pointer stopped being asserted: syms={sorted(sym_modules)}"
+    )
+    # a MULTI-SEGMENT dotted pointer is no longer silently unscanned: the shape
+    # must MATCH, so the module reaches the import assertion. There is no
+    # `tests/sub/mod.py` here, so it is a SYMBOL pointer — i.e. it would red.
+    assert "tests.sub.mod" in sym_modules, (
+        f"the multi-segment dotted pointer fell out of the scan: syms={sorted(sym_modules)}"
+    )
 
 
 def test_no_source_still_names_the_pre_move_symbols():
