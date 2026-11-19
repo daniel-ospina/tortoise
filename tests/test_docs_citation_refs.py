@@ -596,10 +596,9 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # against this head, because nothing here reads which head a bare `-- tortoise/` is
         # about. Such a claim has to carry its head in the full command form, which this rule
         # then skips — which is why the live document spells its own history that way.
-        # The separator `-- ` belongs to the command itself, so the test is whether a
-        # `git diff …` invocation runs RIGHT UP TO it with no backtick or newline between
-        # (a backtick ends the code span, and a newline ends the line — either one means
-        # this occurrence starts its own command). Measured both ways below.
+        # The executed test is stated with the code below (a `git diff` with NO backtick and
+        # no sentence break between it and this occurrence); it was tightened twice after
+        # being measured fail-open, and each tightening's measurement is recorded there.
         # ⛔ AND THE INVOCATION MUST NOT CROSS A SENTENCE BREAK (#13845 review, cycle 5,
         # MEASURED): the first cut of this skip was `git\s+diff\b[^`\n]*$`, which matched
         # ANY unbackticked `git diff` earlier on the same LINE, so
@@ -613,10 +612,27 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # invocation runs on: no sentence boundary (a `.` followed by whitespace) between
         # `git diff` and the occurrence. `origin/main...2a7f24e241` has dots, but none
         # followed by a space, which is exactly the discrimination wanted.
+        # ⛔ AND A BACKTICK BETWEEN THEM ENDS IT (#13845 review, cycle 6, MEASURED — this
+        # is the rule the first cut had and the sentence-break test replaced; BOTH are
+        # needed, and the measurements say why). The sentence-only test still skipped a
+        # claim that merely SHARED a sentence with another invocation:
+        #
+        #   "See `git diff origin/main...HEAD -- docs/` for the docs; `-- tortoise/` prints
+        #    the two COMMENT-ONLY modules at this head."            -> [] (skipped)  WRONG
+        #   "…`-- tortoise/` prints ONE path at this head" on the LIVE document (:134,
+        #    93 chars after a `-- docs/00_index.md` command, no `. ` between)  -> GREEN WRONG
+        #
+        # In both, a backtick sits between `git diff` and the occurrence: the first command's
+        # code span CLOSED, so this occurrence starts its own span and its own claim. Ten of
+        # the document's twenty-one `-- tortoise/` occurrences are that class. The true
+        # pathspec case (`(`git diff … -- tortoise/` names exactly …)`) has NO backtick
+        # between, because both sides are inside ONE span.
         _before = doc[max(0, match.start() - 200):match.start()]
         _invocation = re.search(r"git\s+diff\b", _before)
-        if _invocation and not re.search(r"\.\s", _before[_invocation.start():]):
-            continue
+        if _invocation:
+            _gap = _before[_invocation.start():]
+            if "`" not in _gap and not re.search(r"\.\s", _gap):
+                continue
         rest = doc[match.end():match.end() + 90]
         rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
         window = f"{match.group(1)} {rest}".strip()
@@ -1120,8 +1136,11 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # cannot read it as a live answer — a PAST-TENSE verb (`returned`, `named`, `printed`),
     # which is not in the verb list, or a restructure that puts the named head first and the
     # command after it (46f3e9ff5b, and the pathspec skip in the short-form arm). The COST is
-    # declared rather than hidden: a head-labelled PRESENT-tense emptiness claim is still
-    # refused, and the live document carries none.
+    # declared rather than hidden: a head-labelled PRESENT-tense claim is still refused in
+    # BOTH directions — an emptiness claim on a non-empty head AND a membership claim on
+    # an empty one (`at `2a7f24e241`, `-- tortoise/` names exactly those two modules` is
+    # true at that head and refused here, measured). The live document carries none: its
+    # history is past tense, or a kept pathspec of a longer invocation.
     for _claim, _claim_is_empty in (
             *((_c, True) for _c in (
                 f"neither is `{_tortoise_cmd}`",
