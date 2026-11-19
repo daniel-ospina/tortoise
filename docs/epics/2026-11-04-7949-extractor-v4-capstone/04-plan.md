@@ -354,7 +354,7 @@ map; it is pinned by `(org, graph, head)` and its `BLOCKED` reason names the hea
 
 ⛔⛔ **P0, found by the `duplication-architecture` review: the fixture lane's G1 REFUSES the committed record
 TODAY, and §4.2's earlier claim that "`corpus` stays ⇒ the six fixture rows are safe" is false.** The record's
-`corpus` block carries **no `sha256` and no `items`**, while `probes/capstone_run.py:1186` fail-closes with *"the
+`corpus` block carries **no `sha256` and no `items`**, while `probes/capstone_run.py:1194` fail-closes with *"the
 pre-registration freezes no corpus.sha256 — G1 would be a no-op"*; the checker's own note records the same
 (*"refuses at G1 (the registration freezes no corpus sha)"*). So **all six fixture rows** (E1, E1b, E2a, E2b, E4,
 E5) **cannot be produced at this record** — W2b was built on a pin that is already refusing.
@@ -367,7 +367,7 @@ a name collision in a pin is how the wrong digest gets compared.
 
 ⛔ **The first version also RETYPED `corpus` into `corpora`, which would have failed the
 majority of the epic.** `capstone_preregistration_check.py` reads `record["corpus"]` and cross-checks nine
-`CROSS_CHECKED_CORPUS_KEYS` against `pins.corpus`; and `capstone_run.py:1186` **fail-closes every run at G1** with
+`CROSS_CHECKED_CORPUS_KEYS` against `pins.corpus`; and `capstone_run.py:1194` **fail-closes every run at G1** with
 *"the pre-registration freezes no corpus.sha256"* — so removing `corpus` refuses all six fixture rows
 (E1, E1b, E2a, E2b, E4, E5). ⇒ **`corpus` STAYS**, `corpora` is **purely additive**, and **one CI pin asserts
 `corpora.fixture.{path,fixtures_hash} == corpus.{path,fixtures_hash}`** — otherwise the fixture is described twice
@@ -972,7 +972,7 @@ expansion the scope gate recorded; repo search carried every finding). Recorded 
 
 | # | finding | verdict | disposition — folded into |
 |---|---|---|---|
-| **F1** | ⛔ **P0 — the fixture lane's G1 REFUSES the committed record today** (`capstone_run.py`'s fail-closed `if not frozen.get("sha256")`, `:1186`, needs `corpus.sha256`; the record has none), so **all six fixture rows cannot be produced**; and the plan added two more pin kinds beside the one key the probe reads | `unify-contract-keep-drivers` | **§4.2**: G1 dispatches on `pinned_by`; the A-corpus key renamed **`posted_payload_sha256`** (the old spelling collides with `tortoise/export.py`'s envelope digest); owners C1 (record) / C2 (probe) |
+| **F1** | ⛔ **P0 — the fixture lane's G1 REFUSES the committed record today** (`capstone_run.py`'s fail-closed `if not frozen.get("sha256")`, `:1194`, needs `corpus.sha256`; the record has none), so **all six fixture rows cannot be produced**; and the plan added two more pin kinds beside the one key the probe reads | `unify-contract-keep-drivers` | **§4.2**: G1 dispatches on `pinned_by`; the A-corpus key renamed **`posted_payload_sha256`** (the old spelling collides with `tortoise/export.py`'s envelope digest); owners C1 (record) / C2 (probe) |
 | **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row**); and **three hardcoded literals silently drop the A-rows** (`probes/capstone_run.py:695`, `:758`, `probes/capstone_measure.py:244`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
 | **F3** | ⛔ **P1 — §5.4 INVERTED the door's retry contract**: "fresh `session_id`" double-mints, while the door's TRUE retry is a **same-session** re-POST with `capture_ok=false`, and `409` carries `Retry-After: 30` (not terminal); the citation `:17212-17217` claimed the 422 branch | `unify-contract-keep-drivers` | **§5.4**: the contract is the door's (`meta.mode`, `capture_ok`, `Retry-After`), cited at `hosted_api.py:1245-1254` (the `429` capacity refusal and the `409` in-flight refusal, both carrying `Retry-After: 30`), `retry_failed_capture` at `:18131`, its gate at `:18159`, and `"mode": "replayed"` at `:18717` |
 | **F4** | **P1 — a new `s3_attach` row would split a mechanism `failure_policy` already declares**, whose absence pin reds the day C4's create gate lands; `preconditions:` is ordering, not composition | `unify` | **§5.3 / I8**: **one row — `failure_policy`**; record the shipped half in `code:`/`tests:`/`symbols:`; name the reddening pin + the flip condition |
