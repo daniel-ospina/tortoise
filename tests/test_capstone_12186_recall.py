@@ -1333,10 +1333,44 @@ def _negates(text: str, phrase: str) -> bool:
     `not visible to a user` sits ~24 words before `too small to call a win`, and a
     loose `not .. phrase` match would red a correct sentence — a false red is as bad
     as a false pass (see `_clause`'s docstring).
+
+    ⛔ The PRIVATIVE set is wider than the first cut's four words, and that matters
+    most on the RERANK clause, which has no adjacency second net: its positive check
+    is `\b<phrase>\b` alone, so this helper is the ONLY thing between the record and
+    an inverted significance verdict. Measured GREEN through the four-word set:
+    `isn't too small to call a win` (the CONTRACTED spelling of the very privative
+    enumerated here — a contraction attaches to its host word, so `n't` cannot carry
+    a leading `\b`) and `far from too small to call a win`. Both are covered now at
+    window 0, so the tight window the false-red note protects is NOT widened.
     """
-    return re.search(
-        rf"\b(?:not|never|no\s+longer|no\s+more)\s+(?:\w+\s+){{0,3}}{phrase.replace(' ', r'\s+')}",
-        text) is not None
+    phrase_re = _phrase_re(phrase)
+    for privative in _PRIVATIVES:
+        if re.search(rf"{privative}\s+(?:\w+\s+){{0,3}}{phrase_re}", text):
+            return True
+    return False
+
+
+def _phrase_re(phrase: str) -> str:
+    """`phrase` as a WHITESPACE-TOLERANT regex — one normalised form, used everywhere.
+
+    ⛔ The first cut built the positive assertion from LITERAL SPACES while
+    `_negates` built its own from `\\s+`, and that asymmetry produced a FALSE RED on a
+    correct sentence (measured): `too small to  call a win` — one extra space,
+    identical rendering — redded as though the verdict had vanished, and so would a
+    README reflow that wrapped the phrase mid-line. A false red is as bad as a false
+    pass, so both sides are now derived from this one function.
+    """
+    return r"\s+".join(re.escape(word) for word in phrase.split())
+
+
+#: The privatives that INVERT a claim, as regexes. Split in two because a CONTRACTION
+#: (`isn't`, `don't`) attaches to its host word and therefore has no leading `\b` to
+#: anchor on — `\bn't` never matches, measured.
+_PRIVATIVES: tuple[str, ...] = (
+    r"\b(?:not|never|no\s+longer|no\s+more|far\s+from|nowhere\s+near"
+    r"|by\s+no\s+means|cannot)\b",
+    r"n't\b",
+)
 
 
 def _assert_mentions(text: str, tokens, where: str) -> None:
@@ -1765,7 +1799,7 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
     rerank_raw = _clause_raw(paragraph, "#12343").replace("*", "")
     rerank_phrase = (r"too small to call a win" if rerank["p"] >= 0.05
                      else r"a decisive win")
-    assert re.search(rf"\b{rerank_phrase}\b", rerank_raw), (
+    assert re.search(rf"\b{_phrase_re(rerank_phrase)}\b", rerank_raw), (
         f"the abstract's rerank clause no longer states the significance verdict the "
         f"artifact's p = {rerank['p']} implies ({rerank_phrase!r}): {rerank_raw!r}")
     assert not _negates(rerank_raw, rerank_phrase), (
@@ -1827,7 +1861,8 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
     #: may LEAD it (`no longer is visible on the write path` is valid English and
     #: would pass the adjacency check alone).
     write_path_raw = _clause_raw(paragraph, "#12304").replace("*", "")
-    assert re.search(r"\bis visible\s+on the write path\b", write_path_raw), (
+    assert re.search(rf"\b{_phrase_re(r'is visible on the write path')}\b",
+                     write_path_raw), (
         f"the abstract's `#12304` clause no longer states, ADJACENTLY, that the fold "
         f"is visible on the write path — a privative or qualifier inserted between "
         f"those words leaves the flattened token satisfied: {write_path_raw!r}")
