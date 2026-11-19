@@ -1196,8 +1196,9 @@ reading 10 s is abandoned while still reading *below* the published 300 s. The r
 itself when the thread exits (the guard clears, and the next `get()` retries once the cooldown has
 passed). ⛔ This block cannot tell PROGRESS from a WEDGE: the elapsed time is wall-clock since the
 attempt started, so a starved loader may legitimately run past its bound (`#13674`'s bound exists
-because the same cold import measured 156.5 s of imports ALONE on the production box; the 53 %
-headroom above it is what covers the contention the box shows while serving traffic). Before
+because the measured COLD cost is 195.8 s — 156.5 s of imports alone plus a 39.3 s construct — and
+300.0 = 195.8 x 1.53, so the 53 % headroom above it is what covers the contention the box shows
+while serving traffic). Before
 restarting a machine on this reading, get independent evidence that the import is not advancing — a
 stack from OUTSIDE the process, showing where the import sits. `py-spy` is the tool this runbook has
 used for that elsewhere, but ⛔ **the image does not ship it** (no dependency in `requirements.txt`,
@@ -1215,8 +1216,9 @@ ends the load and proves nothing. (2) **An in-process `sys._current_frames()` du
 interpreter** sees its OWN frames; `monitoring.py`'s capture samples the LOOP thread and only after
 `LOOP_BLOCK_SAMPLE_AFTER_S`, while the load runs on its own `tortoise-embedder-load` thread — so the
 loop keeps ticking, the sampler never fires, and it could not show the loader's frames anyway. It is
-the same trap the counter rule in §4.9 names: a fresh interpreter reads a fresh process (`0` there,
-its own frames here). (3) **Absence of further `embedder:` lines** — the
+the same trap the counter rule under *Arming the Postgres record — `TORTOISE_RECORD_DSN`* names: a
+fresh interpreter reads a fresh process (`0` there, its own frames here). (3) **Absence of further
+`embedder:` lines** — the
 LOADER logs nothing between the timeout line and the load finishing or its overrun ending. The one
 `embedder:` line an overrun CAN produce comes from the READ path, not the loader: `embedder: a
 previous load attempt is STILL RUNNING (<elapsed>) — refusing to start a second one`, at most once

@@ -1743,9 +1743,11 @@ class EmbeddingModel:
         ⛔ ``load_timeout_s`` is the bound this PROCESS applies
         (``_LOAD_TIMEOUT_S``), NOT necessarily the bound the attempt in flight
         runs under: ``get(load_timeout=…)`` may override the latter, and
-        ``load_in_progress_s`` is then a fraction of a different bound. Compare
-        it against ``load_in_progress_s`` only on the shipped path, where the
-        pre-warm takes the default (#13819 review F3).
+        ``load_in_progress_s`` is then a fraction of a different bound — so
+        compare the elapsed against the bound the attempt ACTUALLY ran under,
+        not against this process-wide default (see ``_describe_load_attempt``).
+        On the shipped path the two are the same, because the pre-warm takes the
+        default (#13819 review F3, #13841 review).
         """
         instance = cls._instance
         model = instance._model if instance is not None else None

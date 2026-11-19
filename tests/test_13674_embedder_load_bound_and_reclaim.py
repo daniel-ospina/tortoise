@@ -846,11 +846,15 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
         snapshot exists to make impossible, and the reading an operator uses to
         decide whether to restart a machine mid-import.
 
-        Pinned as an ORDER IN THE WRITER, the same way
+        The invariant is TWO-SIDED — the snapshot's own docstring says reordering
+        *either* side restores the tear — so BOTH sides are pinned here. Swapping
+        the reader's two reads left every row green (measured, #13841 review).
+
+        Pinned as an ORDER IN THE SOURCE, the same way
         `test_the_call_sits_before_the_topology_sentinel` pins `entrypoint.sh`: a
         class-attribute write cannot be intercepted by a descriptor (``type(self)
         ._load_started_at = …`` goes through the metaclass, not the class dict),
-        so the pin is the order of the two statements in `__init__`'s source.
+        so the pins are the order of the statements in each function's source.
         """
         source = inspect.getsource(EmbeddingModel.__init__)
         clock = source.index("_load_started_at = _attempt_started_at")
@@ -861,6 +865,18 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
             "FIRST, so it can pair a live thread with the PREVIOUS attempt's "
             "start time (a huge elapsed) or with None: `load_in_progress: "
             "true` beside `load_in_progress_s: null` (#13841 review)"
+        )
+
+        reader = inspect.getsource(EmbeddingModel.load_attempt_snapshot)
+        read_thread = reader.index("thread = cls._load_attempt_thread")
+        read_clock = reader.index("started = cls._load_started_at")
+        assert read_thread < read_clock, (
+            "`load_attempt_snapshot()` reads the CLOCK before the THREAD — the "
+            "writer publishes clock-then-thread, so a reader that reads in that "
+            "same order can pair the PREVIOUS attempt's start with the NEW "
+            "attempt's live thread: a `load_in_progress_s` far past the bound, "
+            "i.e. a false ABANDONED verdict on a load that just started "
+            "(#13841 review)"
         )
 
     def test_a_reset_drops_the_dead_attempts_bound_too(
