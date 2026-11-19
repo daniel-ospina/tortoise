@@ -2282,13 +2282,16 @@ def test_the_document_types_no_numstat_figure_for_the_index_residual():
     NON-VACUITY, MEASURED — and ⛔ the census is NOT typed per line here, because this
     comment is subject to the very rule it describes. An earlier cut of it said "FIVE
     times across FOUR clauses (:108, :134 … :114, :134 again, :143)" and NO revision in
-    this branch's range produces that census, and ⛔ **NO figure is typed here either**:
-    measured with the CURRENT pattern against `origin/main` (`28ca66878d`) it matches
-    **zero** lines, because `main`'s own `#13807` de-typed those clauses — the paragraph's
-    own thesis turned on its own docstring (round 10 review, P2: the cut that stood here
-    typed a six-match / five-line census "at `origin/main`", and re-measuring it is what
-    refutes it; a floating ref is not a head). Re-run the pattern at the head you
-    are reviewing and read the map from that, rather than trusting a figure written here
+    this branch's range produces that census, and ⛔ **the figure the earlier cut typed was HEAD-BOUND, not false**:
+    with this same pattern it reproduces SIX matches across FIVE lines at `6238dde72a`
+    (`:102`, `:108`, `:114`, `:134`, `:143`) and at every head before `8bdd34c631`, whose
+    own commit (`fix(13728)`, `#13728`/`#13845`) de-typed those clauses — and it measures
+    ZERO from there and at `origin/main` (`28ca66878d`). So a census is quoted WITH its head
+    or not at all: the cut that stood here typed it "at `origin/main`", a floating ref,
+    which is the rule this paragraph enforces everywhere else (round 10 review, P2 — and the
+    first correction of it blamed `#13807`, which landed on a file already at zero; both
+    halves measured here). Re-run the pattern at the head you are reviewing and read the map
+    from that, rather than trusting a figure written here
     — which is the arm's whole thesis applied to its own docstring.
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
