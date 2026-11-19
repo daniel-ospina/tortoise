@@ -737,7 +737,9 @@ def test_a_block_the_anchored_commit_does_not_hold_is_reported(tree: Path) -> No
     assert "does NOT hold" in problems[0]
 
 
-def test_an_unreadable_anchor_is_UNPROVEN_not_silently_green(tree: Path) -> None:
+def test_an_unreadable_anchor_is_UNPROVEN_not_silently_green(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A clone that cannot answer must say so — the strict verb's whole purpose."""
     entry = arch.archive_symbol(
         arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
@@ -750,10 +752,42 @@ def test_an_unreadable_anchor_is_UNPROVEN_not_silently_green(tree: Path) -> None
     # real archive must be quiet only where the commit is actually readable (finding from review
     # cycle 4: the unconditional form reds the required `test` job on a correct archive).
     real = arch.load_manifest(arch.ROOT / "archive" / "MANIFEST.json")["entries"]
-    if all(arch._git_has_commit(arch.ROOT, str(e.get("archived_at") or "")) for e in real):
+    assert real, "the real archive is empty — this arm would pass vacuously"
+    readable = all(
+        arch._git_has_commit(arch.ROOT, str(e.get("archived_at") or "")) for e in real
+    )
+    # ⛔ THE VERB HAS **TWO** PRECONDITIONS AND THIS ARM CHECKED ONE (#13760, measured on the
+    # required `test` shard). It demanded quiet as soon as every anchor was READABLE — but
+    # `anchor_unverified` also refuses to answer when the clone cannot name a
+    # default-branch ref, and a `fetch-depth: 1` checkout (`python-ci.yml`'s shards) names
+    # none. Readability does NOT detect that: this repo is a PARTIAL clone
+    # (`remote.origin.promisor=true`, `partialclonefilter=blob:none`), so on a runner with
+    # network every `git cat-file -e <old sha>` LAZY-FETCHES the anchor and answers True —
+    # measured, that is why the guard passed while the verb reported every entry
+    # "cannot name a default-branch ref in this clone". So the arm demanded quiet from a
+    # verb that was correctly failing CLOSED, and red-ed the required job on a correct
+    # archive. The local clone does the same lazy fetch but with no network, which is the
+    # other half of why this was "not reproducible locally" — do not re-derive it by hand
+    # again: assert BOTH preconditions, and require the opposite answer where they fail.
+    ref = arch.default_branch_ref(arch.ROOT)
+    if ref is not None and readable:
         assert arch.anchor_unverified(arch.ROOT) == [], (
-            "every anchor IS readable here, so the strict verb must be quiet"
+            "every anchor IS readable here AND this clone names a default-branch ref "
+            f"(`{ref}`), so the strict verb must be quiet"
         )
+    else:
+        assert arch.anchor_unverified(arch.ROOT), (
+            "this clone cannot answer — non-null ref: "
+            f"{ref!r}, every anchor readable: {readable} — so the strict verb MUST report "
+            "the entries rather than go quietly green"
+        )
+    # Non-vacuity of the branch above: with a default-branch ref the verb cannot name, it
+    # must still report — the arm that stops it going silently green where it cannot answer.
+    monkeypatch.setattr(arch, "default_branch_ref", lambda root=None: None)
+    assert arch.anchor_unverified(arch.ROOT), (
+        "with no default-branch ref the strict verb went QUIET — that is the silent green "
+        "this arm exists to refuse"
+    )
 
 
 def test_the_restore_anchor_is_a_commit_on_the_default_branch(tree: Path) -> None:
