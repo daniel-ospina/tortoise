@@ -1405,8 +1405,17 @@ class _FakeProj:
 
 
 class _FakeSDK:
+    # ⛔ THE PREFIX-WIDE COUNT IS ITS OWN KNOB, DELIBERATELY NOT `len(population)`.
+    # Fixed at the population's own 3 it made the artifact's two counts equal by
+    # construction, so emitting one count under BOTH names — the collapse the pair
+    # exists to prevent — stayed green across the suite (`#13745` review round 2,
+    # finding 1: `"graph_vectors": graph_population` survived 95 tests). The
+    # population is always 3 rows here; a test that sets this to anything else
+    # makes the two artifact fields DISAGREE.
+    prefix_rows: ClassVar[int] = 3
+
     def __init__(self, **_kw):
-        self._proj = _FakeProj(3)
+        self._proj = _FakeProj(self.prefix_rows)
 
     def _get_proj(self):
         return self._proj
@@ -1547,18 +1556,28 @@ class TestTheDocumentedRunPath:
         the prefix count under both names, left the suite green.
         """
         target = tmp_path / "a.json"
+        # ⛔ THE PREFIX COUNT IS DRIVEN TO A VALUE THE POPULATION IS NOT. With both
+        # fixed at 3 the fields agree by construction and the collapse mutant
+        # (`"graph_vectors": graph_population`) survives every assertion below.
+        # 5 vs 3 makes it visible (`#13745` review round 2, finding 1).
+        monkeypatch.setattr(_FakeSDK, "prefix_rows", 5)
         self._drive(tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N)
         artifact = json.loads(target.read_text())
         pop = artifact["population"]
-        assert pop["graph_vectors"] == 3, pop  # the PREFIX-wide count (_FakeGraph)
-        assert pop["graph_population_vectors"] == 3, pop  # the id-and-text count (stub)
-        # ⛔ and the second field must carry the GUARD's measurement, not a second
-        # spelling of the prefix count — `"graph_population_vectors": graph_vectors`
-        # satisfies every assertion above while telling the reader nothing.
+        assert pop["graph_vectors"] == 5, pop  # the PREFIX-wide count (_FakeGraph)
+        assert pop["graph_population_vectors"] == 3, pop  # the id-and-text count (guard)
+        # ⛔ and each field must carry ITS OWN measurement, not one count under two
+        # names — `"graph_population_vectors": graph_vectors` satisfies every
+        # assertion above while telling the reader nothing.
         src = TOOL.read_text()
         assert '"graph_population_vectors": graph_population' in src, (
             "the artifact's id-and-text count must be `graph_population`, the value "
             "the guard refused on — not `graph_vectors` under a second name"
+        )
+        assert '"graph_vectors": graph_vectors' in src, (
+            "the artifact's prefix-wide count must be `graph_vectors` — bound to "
+            "`graph_population` instead, the coverage denominator is not reported "
+            "and both fields say the same thing"
         )
 
     def test_a_partly_seeded_graph_costs_the_graph_arm_and_NOTHING_ELSE(

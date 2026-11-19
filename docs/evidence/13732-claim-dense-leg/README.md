@@ -158,8 +158,10 @@ because unmeasured is never zero). ⛔ **The text pairing is not decoration:** t
 the population's ids are deterministic (`f"{ID_PREFIX['point']}{index:06d}"`), so on a reused
 `--graph` every id collides — an id-only `IS NOT NULL` count passes over the OLD text's vector and
 `graph_dense` ranks by a vector this run did not write. Residual, stated rather than papered over:
-the same id holding the **same** text with a vector from a different embedder of the same width is
-still indistinguishable without a model identity on the node (`_record_embedding_identity`, `#5004`).
+the pairing compares TEXT only, so on a re-run whose population text is unchanged a preserved
+vector is indistinguishable **whatever its width or embedder** — the text test catches only a node
+whose text CHANGED, and this guard reads no vector. Closing it needs the vector's provenance on the
+node (`_record_embedding_identity`, `#5004`).
 
 The guard gates the **`graph_dense` arm, not the run** — the same scope, for the same reason, as the
 record gate above (`#13745` review round 1, finding 2). A partly seeded graph does **not** degrade
