@@ -803,11 +803,37 @@ _REMOTE_HAS_NO_SUCH_OBJECT = re.compile(
     r"not our ref|couldn't find remote ref", re.IGNORECASE)
 
 
+#: Our own sentinel for "git did not answer inside `_GIT_TIMEOUT_S`", and the bound itself.
+#: ⛔ A BOUNDED git call is what keeps this gate from HANGING a required check: every
+#: `_git` call here asks about ONE object, and on a `blob:none` promisor clone an absent
+#: object makes git ask the remote and then walk the local pack store — measured 2026-11-19
+#: on the `cmux` cell: `git cat-file -e deadbeef…` burned 115 s of CPU and still had not
+#: returned, because that checkout's object store had grown to 27,394 packfiles (a
+#: multi-pack-index does NOT help: the cost is the per-pack walk, not the lookup). With no
+#: bound, `surface-guard` blocks until pytest's own 300 s timeout — so the guard does not
+#: refuse, it never answers. A bound converts that into the verdict this function already
+#: has for "this clone cannot answer": UNPROVABLE, which is printed and is never a pass.
+_GIT_TIMEOUT_S = 30
+_GIT_TIMED_OUT_RC = 124
+
+
 def _git(*args: str) -> tuple[int, str, str]:
-    """(rc, stdout, stderr) for one `git` run rooted at ROOT; rc 127 when git is absent."""
+    """(rc, stdout, stderr) for one `git` run rooted at ROOT.
+
+    rc 127 when git is absent; `_GIT_TIMED_OUT_RC` when it did not answer inside
+    `_GIT_TIMEOUT_S` (see `cut_commit_verdict`'s arm for that sentinel — git itself never
+    returns 124, so the value cannot be mistaken for one of its own failures).
+    """
     try:
         proc = subprocess.run(
-            ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
+            ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False,
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return _GIT_TIMED_OUT_RC, "", (
+            f"git {' '.join(args)} did not answer within {_GIT_TIMEOUT_S}s and was abandoned — a "
+            "partial/promisor clone can block here while it asks the remote for an object it "
+            "does not have"
         )
     except OSError as exc:  # no git binary, or no repository to run it in
         return 127, "", str(exc)
@@ -856,6 +882,17 @@ def cut_commit_verdict(sha: str) -> tuple[str, str]:
         return CUT_RESOLVED, ""
     if rc == 127:
         return CUT_UNPROVABLE, f"git is not runnable here ({stderr.splitlines()[-1:] or ['']})"
+    # ⛔ ORDERED BEFORE the remote-disproof and non-shallow arms: a git call that was
+    # ABANDONED on the clock (`_git`'s own sentinel) answered nothing, so it can neither
+    # prove the object exists nor prove it does not. Reading it as `fabricated` would be a
+    # FALSE REFUSAL on a healthy tree whose lookups are merely slow; reading it as
+    # `resolved` would be a false pass. It is exactly `unprovable` — and never silent, since
+    # `cmd_check` prints the arm it took.
+    if rc == _GIT_TIMED_OUT_RC:
+        return CUT_UNPROVABLE, (
+            f"`git cat-file` did not answer within {_GIT_TIMEOUT_S}s, so this clone cannot say "
+            f"whether it holds that commit ({stderr.splitlines()[0] if stderr else '(no output)'})"
+        )
     if _REMOTE_HAS_NO_SUCH_OBJECT.search(stderr):
         return CUT_FABRICATED, (
             "`git cat-file` asked the remote for it and the remote answered that it has no "

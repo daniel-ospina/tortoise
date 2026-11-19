@@ -4489,6 +4489,57 @@ def test_a_shallow_clone_that_cannot_answer_is_UNPROVABLE_and_NEVER_SILENT(
     assert "NOT VERIFIED" in out and FABRICATED_SHA in out, out
 
 
+def test_a_git_call_that_never_answers_is_ABANDONED_on_the_clock(monkeypatch):
+    """The gate must never HANG a required check: a stuck `git` is bounded, not waited on.
+
+    Measured on the `cmux` cell 2026-11-19: this checkout's object store had grown to
+    27,394 packfiles, so `git cat-file -e <an absent sha>` walked every pack (115 s of CPU
+    and still running) AFTER the promisor remote refused it. `_git` had no bound, so
+    `surface-guard` did not refuse — it never answered, and only pytest's own 300 s
+    timeout ended the run. A bound turns "cannot answer" into the verdict this module
+    already has for it.
+    """
+    sm = _load_manifest_tool()
+    seen: list[float | None] = []
+
+    def fake_run(*_a, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(cmd="git cat-file -e", timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(sm.subprocess, "run", fake_run)
+    rc, out, err = sm._git("cat-file", "-e", f"{FABRICATED_SHA}^{{commit}}")
+    assert seen and seen[0] == sm._GIT_TIMEOUT_S, (
+        f"the git call was not bounded (timeout={seen}), so a wedged promisor lookup can block "
+        "the required `surface-guard` job with no upper limit")
+    assert rc == sm._GIT_TIMED_OUT_RC, (rc, out, err)
+    assert out == ""
+    assert "did not answer within" in err and str(sm._GIT_TIMEOUT_S) in err, err
+
+
+def test_an_ABANDONED_git_call_is_UNPROVABLE_and_never_a_fabrication(monkeypatch):
+    """A timed-out probe answered NOTHING, so it can neither prove nor disprove the object.
+
+    Non-vacuity: the stub sets `shallow="false"`, i.e. the arm that WOULD refuse
+    (`fabricated`) if the timeout were not handled first. Deleting the sentinel arm reds
+    this row with `fabricated`, which on a merely SLOW checkout is a false refusal of a
+    healthy record.
+    """
+    sm = _load_manifest_tool()
+    _stub_git(
+        monkeypatch, sm, rc=sm._GIT_TIMED_OUT_RC,
+        stderr="git cat-file -e … did not answer within 30s and was abandoned",
+        shallow="false")
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_UNPROVABLE, (
+        f"an abandoned probe read as {verdict!r} ({why}): a bounded call must not be graded as "
+        "a proven absence")
+    assert "did not answer within" in why, why
+    # The lint's three-valued probe reads the SAME verdict function, so it must be None
+    # (red an unresolvable record, stay silent where the clone cannot answer).
+    assert sm.cut_commit_resolves(FABRICATED_SHA) is None, (
+        "the lint probe did not follow the verdict for an abandoned call")
+
+
 def test_an_abbreviated_cut_at_commit_is_refused_without_asking_git(monkeypatch):
     """No abbreviation, no upper case, no `HEAD`-ish symbolic name: `cut` writes a sha."""
     sm = _load_manifest_tool()
