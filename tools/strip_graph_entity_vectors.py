@@ -1988,11 +1988,17 @@ def uri_fingerprint(uri: str) -> str:
     be found BEFORE the path is split. Partitioning on the first ``/`` first — the obvious
     reading — cuts a password that CONTAINS a ``/`` in half, so ``docker://:pa/ss@host:6379/g``
     yields authority ``:pa`` and path ``ss@host:6379/g``, there is no ``@`` left to strip,
-    and this function handed back the credential VERBATIM. That is not hypothetical here:
+    and this function handed back the credential VERBATIM. The shape is real —
     `tortoise/__main__.py` builds `legacy_uri = f"docker://:{password}@{host}:{port}/tortoise"`
-    from the RAW `FALKORDB_PASSWORD`, with no percent-encoding, so a password containing
-    ``/`` reaches this function in exactly that shape — and the plan, the ``--json`` output
-    and the ``REFUSE_TARGET_DRIFT`` message are all places an operator pastes.
+    from the RAW `FALKORDB_PASSWORD`, with no percent-encoding — and the plan, the
+    ``--json`` output and the ``REFUSE_TARGET_DRIFT`` message are all places an operator
+    pastes. ⚠️ BUT ITS REACHABILITY IS AT THE UNIT LEVEL ONLY, and that is measured rather
+    than assumed: a real `strip_graph_entity_vectors` run refuses BEFORE this function is
+    handed such a URI, because target resolution casts the authority as ``host:port``
+    through `urllib` and raises on the password's head. That refusal is the second reason
+    this tool must not relay a resolver message (it quotes the token — see
+    `_unexpected_failure`), and the first reason this contract still has to be right on
+    its own terms.
 
     ⛔ AND A FINGERPRINT IS A COMPARISON KEY, NOT A DISPLAY, so the fix for the leak must
     not buy safety with a FALSE EQUALITY. Cutting at the last ``@`` unconditionally DROPS
@@ -2047,6 +2053,27 @@ def uri_fingerprint(uri: str) -> str:
     authority, _, path = rest.partition("/")
     host = authority.rpartition("@")[2]      # drop `user:password@`
     return f"{scheme}://{host}/{path.lstrip('/')}" if path else f"{scheme}://{host}"
+
+
+def _unexpected_failure(exc: BaseException) -> str:
+    """The exception's TYPE, never its message — for the arms that report an UNEXPECTED one.
+
+    ⛔ AN UNEXPECTED FAILURE OUT OF TARGET RESOLUTION CAN ECHO A CREDENTIAL FRAGMENT, and
+    this tool's whole contract is that a credential does not reach an operator's terminal.
+    The canonical resolver casts the authority's port through `urllib`, whose `ValueError`
+    QUOTES the offending token: for `docker://:pa/ss@host:6379/g` — a password containing
+    `/` — the first `/` leaves `:pa` as the authority, `pa` is cast as a PORT, and the
+    message reads `Port could not be cast to integer value as 'pa'` (measured). Printing
+    that would put the head of the password on stderr and into CI logs.
+
+    So the TYPE is printed and the text is withheld, with the remedy stated instead. The
+    resolver's own message is the place to fix this properly (filed separately); a caller
+    cannot repair a message it did not build, but it can decline to relay it.
+    """
+    return (
+        f"{type(exc).__name__} — the message is WITHHELD because an unexpected failure "
+        "here can echo a credential fragment; percent-encode the password so the target "
+        "is parseable")
 
 
 def _live_entries(g: Any, labels: list[str]) -> list[tuple[str, str]]:
@@ -2469,10 +2496,10 @@ def main(argv: list[str] | None = None) -> int:
     except CensusError as exc:
         sys.stderr.write(f"strip_graph_entity_vectors: REFUSED — {exc}\n")
         return 3
-    except Exception as exc:
+    except Exception as exc:  # an unexpected target failure is a refusal, not a leak
         sys.stderr.write(
             f"strip_graph_entity_vectors: REFUSED — the target could not be resolved "
-            f"({type(exc).__name__}: {exc}). Nothing was removed.\n")
+            f"({_unexpected_failure(exc)}). Nothing was removed.\n")
         return 3
 
     if not args.execute:
@@ -2533,6 +2560,17 @@ def main(argv: list[str] | None = None) -> int:
         return refusal_exit_code(exc.token)
     except CensusError as exc:
         sys.stderr.write(f"strip_graph_entity_vectors: REFUSED — {exc}\n")
+        return 3
+    except Exception as exc:  # ⛔ an unreadable gate is a REFUSAL, never a traceback
+        # The execute path used to catch only `CensusError`, so a gate read that raised
+        # anything else (measured: an `ImportError` out of `parity.affected_entity_types`)
+        # escaped `main` and was read as exit 1 ("usage") over a traceback — nothing about
+        # the invocation was wrong, and the destructive path's own contract says a census
+        # that cannot be run is a refusal. This mirrors the preview arm above.
+        sys.stderr.write(
+            f"strip_graph_entity_vectors: REFUSED — the run could not complete "
+            f"({_unexpected_failure(exc)}). A gate that cannot be read is a refusal, not a "
+            "pass. Nothing was removed.\n")
         return 3
 
     print(json.dumps(result, indent=2))

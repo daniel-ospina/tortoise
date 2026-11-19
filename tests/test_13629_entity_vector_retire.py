@@ -534,8 +534,10 @@ def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monke
       that one label is blocked and the census completes) is therefore DEFENSIVE DEPTH —
       measured to fire for a raise `write_gate` does not currently produce.
 
-    ⚠️ Line numbers are deliberately not cited here: every one of them in this file has
-    rotted within the same PR that wrote it, twice.
+    ⚠️ Line numbers are deliberately not cited here. The justification is measured rather
+    than assumed: of the four citations this pair of tests ever carried, ONE pointed at a
+    line that moved and had to be re-derived twice in this PR, and the decision is to stop
+    writing claims that rot rather than to keep re-deriving them.
 
     A falsifier for those reads is a follow-up, not this test.
 
@@ -1536,6 +1538,84 @@ def _only_writer(ev):
     emits, reason = strip.write_gate("object")
     assert emits is True
     assert "_missing" in reason
+
+
+def test_the_preview_refuses_an_unparseable_target_without_echoing_it(tmp_path, capsys):
+    """⛔ THE REFUSAL MUST NOT RELAY THE RESOLVER'S MESSAGE, because that message QUOTES the
+    offending token.
+
+    `resolve_db_endpoint` casts the authority's port through `urllib`, and for a password
+    containing `/` the first `/` leaves the password's HEAD as the authority — so the
+    `ValueError` text is `Port could not be cast to integer value as 'pa'` (measured),
+    i.e. a fragment of the credential, on stderr and into CI logs. The fingerprint above
+    refuses this same shape one layer up; a refusal that prints the token hands the
+    secret back. The type is reported, the text is withheld.
+    """
+    code = strip.main([
+        "--uri", "docker://:pa/ss@falkordb.internal:6379/tortoise",
+        "--graph-name", "tortoise", "--org-id", "o", "--graph-id", "g",
+        "--record-dsn", "postgresql://x/y"])
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "REFUSED" in err
+    assert "Port could not be cast" not in err, err
+    assert "pa/ss" not in err and "'pa'" not in err, err
+    assert "WITHHELD" in err, err
+
+
+def test_the_execute_path_refuses_an_unreadable_gate_instead_of_tracebacking(
+        tmp_path, monkeypatch, capsys):
+    """⛔ THE EXECUTE ARM CAUGHT ONLY `CensusError`, so any other raise escaped as a
+    traceback and was read as exit 1 ("usage") — over a destructive path.
+
+    The tool's contract is "a census that cannot be run is a refusal, not a pass", and the
+    PREVIEW arm already caught everything; the arm that REMOVES nodes did not. Measured
+    pre-fix: a gate read raising `ImportError` inside `parity.census` propagated out of
+    `strip.main` instead of refusing, and nothing about the invocation was wrong.
+    """
+    plan = {
+        "tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION,
+        "graph": "g", "org_id": "o", "graph_id": "g",
+        "graph_uri": strip.uri_fingerprint("docker://:pw@h:6379/g"),
+        "batch": 7,
+        "labels": [{"label": "Object", "keys": ["obj-1"], "graph_vectors": 1,
+                    "record_vectors": 1, "missing": 0, "graph_only": 0,
+                    "unkeyed_nodes_blocking": 0, "strip_ready": True,
+                    "blocked_reason": None}],
+        "total_nodes": 1,
+    }
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+
+    import tortoise.projection as projection
+
+    class _Proj:
+        g = "GRAPH"
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        type("P", (), {"from_uri": staticmethod(lambda *a, **k: _Proj()),
+                                       "__init__": lambda self, *a, **k: None}))
+    monkeypatch.setattr(strip.census_mod, "resolve_graph_name", lambda *a, **k: "g")
+    monkeypatch.setattr(strip.census_mod, "_refuse_unless_graph_present",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(strip.census_mod, "empty_graph_target_flag", lambda *a, **k: None)
+
+    def _boom(**kwargs):
+        raise ImportError("import of tortoise.security halted")
+
+    monkeypatch.setattr(strip, "execute", _boom)
+
+    code = strip.main([
+        "--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+        "--org-id", "o", "--graph-id", "g", "--record-dsn", "postgresql://x/y",
+        "--execute", "--plan", str(plan_path),
+        "--confirm-plan-digest", plan["digest"]])
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "REFUSED" in err
+    assert "ImportError" in err
+    assert "tortoise.security" not in err, "the message must be withheld, not relayed"
 
 
 def test_a_plan_that_lists_a_label_twice_is_refused(tmp_path):
