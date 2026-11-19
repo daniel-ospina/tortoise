@@ -272,7 +272,7 @@ no-merge verdict — `dedup_reviewed='reject'` + `dedup_target_id` /
 `dedup_rejected_targets` — and it is **pair-scoped between two NODES**. A
 name-only mention has no node, so only the target-less form (`target_suppressed`)
 is evaluable here; the targeted form is honoured by the merge verb
-(`entity_resolver.apply_entity_merge`, called at `sdk.py:28431`). Line numbers here are a convenience and rot on every merge — the symbol is the citation. Stated rather than approximated.
+(`entity_resolver.apply_entity_merge`, called at `sdk.py:28506`; `:28431` was the address before this branch's base moved under it — re-derived here, since the pin in `tests/test_12184_shifted_cites.py` reads this sentence by content, not by number). Line numbers here are a convenience and rot on every merge — the symbol is the citation. Stated rather than approximated.
 
 **Phase 1 applies `target_retired` only.** It binds on an exactly-equal folded
 name+kind *or* on a spelling the survivor's `aliases[]` already records

@@ -205,7 +205,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # occurrence, which is what makes the fragment discriminating.
     (_INDEX, '`sdk.py:28142` at this head', _SDK, 28142, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, '(`sdk.py:28142`), so any non-NULL', _SDK, 28142, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
-    (_EVIDENCE, 'called at `sdk.py:28431`', _SDK, 28431, 'result = apply_entity_merge('),
+    (_EVIDENCE, 'called at `sdk.py:28506`', _SDK, 28506, 'result = apply_entity_merge('),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -332,7 +332,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3005` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28142` at this head'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28142`), so any non-NULL'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28431`'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28506`'): 1,
 }
 
 
