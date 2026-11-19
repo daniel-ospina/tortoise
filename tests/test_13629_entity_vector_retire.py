@@ -4207,6 +4207,14 @@ def _upsert_object(props, ev):
         # nothing, and the mapping operand need be neither first nor alone. Each of these was
         # CERTIFIED while the bare literal was refused (measured by the review of this branch,
         # which also runtime-checked that they merge).
+        # ⛔ …and the constructor spellings this branch's reviews measured: the operand may be
+        # neither a pairs sequence nor first nor alone (`defaultdict(list, pairs)`,
+        # `OrderedDict(pairs, extra=1)`), and the constructor family is not "suffix `Dict`" —
+        # `defaultdict` is a mapping whose name says nothing. Each was CERTIFIED at the tip
+        # its review measured, and each was runtime-checked to merge. Two rows that first
+        # landed in this block were DUPLICATES of rows already above it in this same tuple:
+        # removed, because a duplicate row adds no discriminating power while it makes the
+        # block's claim ("each was certified") untrue of the tree it lands on.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4221,9 +4229,6 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # (the `OrderedDict({…})` and `ChainMap({…})` rows this block used to repeat are the
-        # ones above it — the same spelling twice pinned nothing the first row did not, and a
-        # duplicate reads as a second distinct case. Dropped, not reordered.)
         # ⛔ …and a ``**`` MAPPING KEYWORD on a constructor, which merges exactly as
         # `dict(**{"embedding": vec})` does. This row is answered by the MUTATOR arm on the
         # nested `dict(...)` call, not by the constructor scan (whose keyword half was
@@ -4239,11 +4244,24 @@ def _upsert_object(props, ev):
         # ⛔ …and the DICT COMPREHENSION, which is a comprehension whose fields are
         # `key`/`value` rather than `elt` — omitting it left
         # `{k: v for k, v in [("embedding", vec)]}` CERTIFIED, and adding the type to the
-        # `elt`-shaped tuple instead of its own branch raises rather than refuses.
+        # `elt`-shaped tuple instead of its own branch raises rather than refuses. It is
+        # refused through the GENERATOR's `iter` — where the pairs literal actually is — and
+        # that term is pinned below by the `**` row, which only that term can answer.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: v for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        # ⛔ …AND THE SAME COMPREHENSION BEHIND ONE `**` — `_dict_stores_the_vector`'s merge
+        # arm accepted only an `ast.Dict` operand, so `{**<dictcomp>}` was CERTIFIED while the
+        # literal behind the same `**` was refused (measured, and runtime-checked to place the
+        # key). One wrapper, one hole.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {**{k: v for k, v in [("embedding", _encode(ev))]}}
         return None
     _write(props)
 """,
@@ -4804,6 +4822,26 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        # ⛔ THE CONTROLS FOR THE DICT-COMPREHENSION BRANCH: its `key`/`value` expressions are
+        # the produced mapping's KEY and VALUE, so a pairs literal there becomes a container
+        # key or a list-of-pairs value and NEVER a top-level `embedding` key. Scanning them
+        # refused both of these honest writers (measured with a runtime oracle: the merge
+        # places no top-level key), so only the generators are scanned and these rows keep the
+        # branch from widening back over them.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {x: [("embedding", _encode(ev))] for x in _keys()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {tuple([("embedding", _encode(ev))]): 1 for _x in _keys()}
         return None
     _write(props)
 """,

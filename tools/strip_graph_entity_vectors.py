@@ -1596,10 +1596,15 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # branch raised `AttributeError` instead of refusing (measured by the review of this
         # branch, which is also how the spelling `{k: v for k, v in [("embedding", vec)]}` was
         # found CERTIFIED).
-        return (_pairs_operand_stores_the_vector(node.key)
-                or _pairs_operand_stores_the_vector(node.value)
-                or any(_pairs_operand_stores_the_vector(generator.iter)
-                       for generator in node.generators))
+        # ⛔ ONLY THE `generators` ARE SCANNED — NOT `key`/`value`. Those are the produced
+        # mapping's KEY and VALUE expressions, so a pairs literal in either becomes a
+        # CONTAINER key or a list-of-pairs value and never a top-level `embedding` key:
+        # scanning them refused three honest writers (`{x: [("embedding", vec)] for x in keys}`
+        # and two more, each runtime-checked to place no top-level key) and deleting the two
+        # terms changed no verdict on any fixture — the branch's own row is answered by the
+        # generator's `iter`, which is where the pairs literal actually is.
+        return any(_pairs_operand_stores_the_vector(generator.iter)
+                   for generator in node.generators)
     if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
         # `[x for x in [("embedding", vec)]]` — a comprehension over a pairs literal still
         # yields the pair. Static here because the SOURCE is a literal this check can read;
@@ -2036,8 +2041,15 @@ def _dict_stores_the_vector(node, *, stop_arm: bool = False) -> bool:
         # ⛔ A `**` OPERAND'S KEY IS `None`, and its VALUE is another mapping:
         # `{**{"embedding": vec}}` sets the property through a merge the flat loop cannot see
         # (measured GATED at `8637df0fde`). Recursing keeps the two narrowings.
-        if stop_arm and key is None and isinstance(value, ast.Dict) \
-                and _dict_stores_the_vector(value, stop_arm=stop_arm):
+        # ⛔ AND THE OPERAND NEED NOT BE A LITERAL: `{**{k: v for k, v in [("embedding",
+        # vec)]}}` merges the very same mapping, and the `ast.Dict` narrowing certified it
+        # while the literal behind the same `**` was refused (measured, and runtime-checked
+        # to place the key). One wrapper, one hole — the shape this helper's `.copy()` /
+        # `list(…)` / `+ []` history is made of.
+        if stop_arm and key is None and isinstance(value, ast.Dict | ast.DictComp) \
+                and (_dict_stores_the_vector(value, stop_arm=stop_arm)
+                     if isinstance(value, ast.Dict)
+                     else _pairs_operand_stores_the_vector(value)):
             return True
         if (isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
                 and not isinstance(value, ast.Constant)):
