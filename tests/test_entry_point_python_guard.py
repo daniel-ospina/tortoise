@@ -1686,6 +1686,7 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/cypher_diff_harness.py": 2,
     "tools/cypher_inventory.py": 2,
     "tools/reap_empty_test_graphs.py": 2,
+    "tools/claim_dense_leg_13732.py": 4,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1760,6 +1761,15 @@ REFUSAL_WHY: dict[str, str] = {
         "cannot be built), reused on purpose. #13218 landed this guard below the "
         "import block — a census red on main — and the hoist is pinned here so a "
         "rewrite cannot drop it again (#11342)"
+    ),
+    "tools/claim_dense_leg_13732.py": (
+        "the set is CLOSED and stated in the tool's own exit table: 0 complete, "
+        "3 PUBLISHED-BUT-INCOMPLETE, 4 REFUSED, 2 argparse usage. 0 and 3 are "
+        "ANSWERS a reader branches on (3 means the run printed figures it could "
+        "not complete), so an environment refusal must not wear either; 1 is what "
+        "CPython gives an uncaught traceback, which is exactly what an old "
+        "interpreter must NOT look like. 4 is the tool's own 'could not run' — "
+        "the guard reuses it on purpose rather than inventing a code"
     ),
 }
 

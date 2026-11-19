@@ -41,7 +41,7 @@ The write operations appear once in this skill (by operation name). Invoke them 
 | Annotate operator | `tortoise_annotate_operator` | `sdk.annotate_operator(id, bias, precision, …)` |
 | Supersede point | `tortoise_supersede` | `sdk.supersede_point(old, new)` |
 | Invalidate point | `tortoise_invalidate` | `sdk.supersede(old, new, transfer_edges=False)` |
-| Delete point | `tortoise_delete_point` | `sdk.delete_point(id)` |
+| Delete point | `tortoise_delete(id, dry_run=True)` to preview, then `tortoise_delete(id, confirmation=<token>)` | `sdk.delete_point(id)` |
 | Update point | `tortoise_update_point` | `sdk.update_point(id, **props)` |
 | Compute confidence | `tortoise_compute_confidence` | `sdk.compute_confidence(anchors=…)` |
 | Check structure | `tortoise_check_structure` | `sdk.check_structure()` |

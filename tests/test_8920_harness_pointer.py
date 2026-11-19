@@ -81,8 +81,14 @@ _POINTER = re.compile(
 
 #: A trailing token that is a file EXTENSION, not a symbol — i.e. the pointer
 #: names a whole file, which is outside this guard's scope (a file pointer
-#: does not break on a rename unless the file itself moves).
-_NOT_A_SYMBOL = frozenset({"py", "json", "yml", "yaml", "md", "txt", "toml"})
+#: does not break on a rename unless the file itself moves). The JS family is in
+#: the SAME class: `tests/x.mjs` is a harness a Python `importlib` can never
+#: resolve, so without these three the scan asserts an import of a file that is
+#: not a module — measured on `tests/test_middleware_host_consolidation.mjs`,
+#: named by `tortoise/hosted_api.py`'s `#13636` note (#13750-wave).
+_NOT_A_SYMBOL = frozenset(
+    {"py", "mjs", "js", "ts", "json", "yml", "yaml", "md", "txt", "toml"}
+)
 
 #: Names the #8920 move renamed away or never existed: the two pre-rename
 #: helpers, and the callee the moved docstring misspelled (`_purge_deleted_orgs`
