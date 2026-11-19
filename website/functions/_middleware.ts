@@ -224,6 +224,30 @@ export const onRequest: PagesFunction = async (context) => {
     "/dpa", "/dpa.html",
   ]);
 
+  // The contact page is a COMPANY page living at the company ROOT, like the
+  // legal three above — but it is not a legal document, so it is NOT a member of
+  // LEGAL_AT_ROOT: their shared property is the ADDRESS, not the document class.
+  //
+  // ⛔ Why this set has to exist at all (#13636, measured live). `website/_redirects`
+  // carries `/contact/` and `/contact.html` → `/contact`, and those rules are
+  // HOST-AGNOSTIC: they collapse SPELLINGS of one page, they do not move a page
+  // between hosts. So with no branch here `/contact` fell through to
+  // `context.next()` and Pages served `website/contact.html` with a **200 on BOTH
+  // hosts** — the last marketing document left on two addresses after #11762,
+  // which is exactly the class that migration existed to remove. The sibling rows
+  // (`/privacy`, `/dpa`, `/tos`) fired because they are in LEGAL_AT_ROOT; this one
+  // had no row anywhere in this file, in any spelling, ever (git log -S).
+  //
+  // ⛔ EXACT PATHS ONLY — never a prefix. `/contact/submit` is a POST endpoint
+  // (`functions/contact/submit.ts`), so a prefix row would answer it with a 301,
+  // the browser would re-issue a GET, and the message body would be gone. That is
+  // the same reason `/blog/api/*` is excluded from the blog rule. The two members
+  // are the extensionless path and its raw `.html` asset; the trailing-slash form
+  // needs no member because `path` is slash-stripped above — which is also what
+  // keeps `/contact/` ONE hop instead of `_redirects`' same-host 301 onto
+  // `/contact` followed by this one.
+  const CONTACT_AT_ROOT = new Set(["/contact", "/contact.html"]);
+
   // `/signin` is a legacy ALIAS, not a page: `_redirects` maps it to `/auth`,
   // which lives on the APP origin (#4054). It is resolved to the app origin in
   // ONE hop on whichever host is asked — and it is deliberately NOT a member of
@@ -576,6 +600,10 @@ export const onRequest: PagesFunction = async (context) => {
     // Legal governs the business, so it lands at the company ROOT, not under
     // the product prefix.
     if (LEGAL_AT_ROOT.has(path)) return toCompany(path.replace(/\.html$/, ""));
+    // The contact page has ONE address on the ONE marketing host, and it is the
+    // company root — one hop, both spellings (see CONTACT_AT_ROOT above; the
+    // trailing-slash form is already collapsed by `path`).
+    if (CONTACT_AT_ROOT.has(path)) return toCompany("/contact");
     if (PRODUCT_PAGES.has(path)) return toCompany(PRODUCT_PREFIX + path.replace(/\.html$/, ""));
   }
 

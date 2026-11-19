@@ -386,6 +386,158 @@ export TORTOISE_EVENT_LOG_BASE_DIR="${TORTOISE_EVENT_LOG_BASE_DIR:-/data/events}
 export TORTOISE_VALUE_GATE="${TORTOISE_VALUE_GATE:-1}"
 export TORTOISE_EMBED_GATE="${TORTOISE_EMBED_GATE:-1}"
 
+# ── #13674: PAY THE EMBEDDER'S COLD COST BEFORE TRAFFIC ──────────────────────
+# The bug this closes is a documented promise that was never implemented: this
+# file used to say the embedder was "pre-warmed at container start
+# (entrypoint.sh)" — `tortoise/embeddings.py` still does — while the ONLY
+# warm-up ran INSIDE the serving process, in a background thread, competing with
+# live traffic and under the app's own load bound.
+#
+# MEASURED 2026-11-19 on the production box (cpu_kind=shared, 2 cpus, 4096 MB),
+# with the revision the image bakes:
+#     import torch .............................. 24.1 s
+#     from sentence_transformers import … ...... 132.4 s
+#     imports alone, before one weight is read .... 156.5 s
+#     full construct, WARM page cache ............. 39.3 s
+# The 156.5 s is filesystem + CPU work done ONCE PER PROCESS; nothing in the
+# app's budget can make it cheap, so the only lever is WHEN it is paid. Paying
+# it here — before `exec`, in a throwaway child — puts those pages in the
+# kernel's page cache, so the server's own in-process load is the 39.3 s warm
+# construct instead of a 196 s cold one.
+#
+# ⛔ WHAT THIS IS NOT: it cannot hand a loaded model to uvicorn (``exec``
+# replaces this process; memory is not inherited across it), and it is NOT a
+# substitute for the app's own load. It is a PAGE-CACHE warmer and nothing more.
+# Removing it is safe (the app still loads, cold); keeping it is what makes the
+# in-process load fit its bound.
+#
+# NON-FATAL BY CONTRACT. A pre-warm that fails, or overruns its bound, must never
+# stop the app: the app's own lazy path is the fallback, and it now has a bound
+# that exceeds the cold cost (#13674's `_LOAD_TIMEOUT_S` = 300 s). The old
+# fail-fast pre-warm (#160) crashed deploys on exactly this (issue #545) — do not
+# restore that shape.
+#
+# BOUND vs Fly's `grace_period`. The child is capped by
+# TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S (default 300 s, i.e. the same number
+# the load bound uses) and fly.toml's grace period is raised to 420 s so a boot
+# that pays the measured 195.8 s cold cost still has ~220 s of headroom before
+# the platform starts failing checks. A boot that exceeds its grace is a restart
+# loop — the same outage wearing a different hat.
+_prewarm_embedder() {
+    # The emergency switch (#7809 / #4097) is honoured HERE too. Production ran
+    # with TORTOISE_EMBEDDER_WARMUP=0 while the embedder could not load; paying
+    # 196 s of boot for a model the app will not load would be pure cost. One
+    # declaration, both consumers: this mirrors `env_flag(name, True)`'s falsy
+    # set {0,false,no,off}, case-insensitive, after trimming.
+    local _flag="${TORTOISE_EMBEDDER_WARMUP:-}"
+    _flag="${_flag#"${_flag%%[![:space:]]*}"}"
+    _flag="${_flag%"${_flag##*[![:space:]]}"}"
+    case "${_flag,,}" in
+        0|false|no|off)
+            echo "tortoise: embedder boot pre-warm SKIPPED (TORTOISE_EMBEDDER_WARMUP=${TORTOISE_EMBEDDER_WARMUP}) — the in-process load is disabled too, so there is nothing this would make cheap"
+            return 0
+            ;;
+    esac
+
+    local _bound="${TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S:-300}"
+    #: A bound this large cannot help: fly.toml's grace_period is 420 s, and a
+    #: bound approaching it leaves no time for the app to bind and pass a check
+    #: before the platform starts failing them. Chosen to keep >=60 s of the
+    #: grace period for the bind + the app's own startup.
+    local _ceiling=360
+    case "$_bound" in
+        ''|*[!0-9]*)
+            echo "tortoise: TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S='${_bound}' is not a whole number of seconds — using 300" >&2
+            _bound=300
+            ;;
+        0*)
+            # ⛔ #13674 review F6: `0` is a whole number, so it used to pass the
+            # check above and reach `timeout --kill-after=15 0 python …` — and
+            # GNU coreutils reads a duration of 0 as NO TIMEOUT (measured: `timeout
+            # 0 sleep 2` returns 0 after the full 2 s). The one value an operator
+            # naturally types to mean "no bound" would therefore REMOVE the bound
+            # entirely: an unbounded boot overruns grace_period and produces the
+            # restart loop this function's own comment forbids. `0*` catches 0,
+            # 00, 000 — every spelling timeout(1) reads as "no bound".
+            echo "tortoise: TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S='${_bound}' means NO TIMEOUT to timeout(1), not 'unbounded is safe' — using 300 (an unbounded boot overruns grace_period and restart-loops)" >&2
+            _bound=300
+            ;;
+        *)
+            # `0*` above intercepts every leading-zero spelling, so `$_bound` is
+            # a plain decimal here and `-gt` cannot read it as octal.
+            if [ "$_bound" -gt "$_ceiling" ]; then
+                echo "tortoise: TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S='${_bound}'s exceeds this image's ${_ceiling}s ceiling (fly.toml grace_period is 420s, so the platform would fail checks before the bound fired) — using 300" >&2
+                _bound=300
+            fi
+            ;;
+    esac
+
+    local _t0="$SECONDS" _rc=0
+    # `|| _rc=$?` is required, not style: this script runs `set -e`, so a bare
+    # `timeout …` that exits non-zero would kill the boot — the exact fail-fast
+    # regression #545 records.
+    if timeout --signal=TERM --kill-after=15 "$_bound" python - <<'PY'
+import json
+import time
+
+# The model identity is read from the SHIPPED constant, never restated here: a
+# second copy in the boot script is how a warmed cache and a loaded model drift
+# apart (#1349 T10).
+from tortoise.embeddings import (
+    EMBEDDING_MODEL,
+    EMBEDDING_MODEL_REVISION,
+    import_sentence_transformer,
+)
+
+_t = [time.monotonic()]
+import torch  # noqa: F401,E402 — imported for its cost, which is the point
+_t.append(time.monotonic())
+ST = import_sentence_transformer()
+_t.append(time.monotonic())
+model = ST(EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
+_t.append(time.monotonic())
+# ONE encode: constructing touches the weight files' METADATA; encoding forces
+# the actual tensor pages in, which is what the server's later load reads.
+model.encode(["tortoise boot warm-up"], batch_size=1, show_progress_bar=False)
+_t.append(time.monotonic())
+
+stages = {
+    "torch_import_s": round(_t[1] - _t[0], 1),
+    "st_import_s": round(_t[2] - _t[1], 1),
+    "construct_s": round(_t[3] - _t[2], 1),
+    "encode_s": round(_t[4] - _t[3], 1),
+}
+stages["total_s"] = round(_t[4] - _t[0], 1)
+print("PREWARM " + json.dumps({"model": EMBEDDING_MODEL, **stages}))
+PY
+    then
+        _rc=0
+    else
+        _rc=$?
+    fi
+
+    local _wall=$(( SECONDS - _t0 ))
+    case "$_rc" in
+        0)
+            # The child's own line already carries the staged breakdown; this
+            # one states what it BOUGHT, which is the only thing an operator
+            # reading a boot log can act on.
+            echo "tortoise: embedder boot pre-warm OK — cold import + weights paid in ${_wall}s of a ${_bound}s bound (before uvicorn, so the in-process load reads them warm)."
+            ;;
+        124|137)
+            echo "tortoise: WARNING — embedder boot pre-warm hit its ${_bound}s bound (${_wall}s wall) and was stopped; continuing WITHOUT it (non-fatal)." >&2
+            echo "tortoise: the app will load the embedder lazily under its own ${_bound}s bound, at COLD cost — if that also fails the dense leg stays off and reads declare keyword-only (#2952)." >&2
+            ;;
+        127)
+            echo "tortoise: WARNING — embedder boot pre-warm could not run (timeout/python not found, rc=127); continuing WITHOUT it (non-fatal)." >&2
+            ;;
+        *)
+            echo "tortoise: WARNING — embedder boot pre-warm FAILED (rc=${_rc}, ${_wall}s); continuing WITHOUT it (non-fatal). The app's lazy load is the fallback." >&2
+            ;;
+    esac
+    return 0
+}
+
 # Fast-fail if the pre-downloaded model cache is missing (code-review P3, #160)
 # — the build-time bake in Dockerfile.hosted is the ONLY source; a missing
 # cache means a broken image, not a retryable condition. #1349: the bake is
@@ -397,21 +549,19 @@ if [ ! -d "${HF_HOME}/models--BAAI--bge-small-en-v1.5" ]; then
     exit 1
 fi
 
-# Embedding model pre-warm moved into the app: the FastAPI lifespan
-# (tortoise/hosted_api.py _lifespan) spawns a daemon-thread pre-warm, so
-# uvicorn binds 0.0.0.0:8000 IMMEDIATELY and /health passes on cold start.
+# Embedding model pre-warm: THIS SCRIPT now pays it before `exec` (#13674).
+# The FastAPI lifespan still warms the model IN the serving process
+# (tortoise/hosted_api.py _lifespan, daemon thread) so uvicorn binds
+# 0.0.0.0:8000 without waiting — that is the load whose 39.3 s warm construct
+# the pre-warm above makes possible. Both are needed: the boot pre-warm pays the
+# 156.5 s cold IMPORT in a child, the lifespan load puts the model in the
+# server's own memory.
 #
-# Previous behavior (fail-fast blocking pre-warm, #160) crashed deploys:
-# EmbeddingModel._LOAD_TIMEOUT_S (30s) is shorter than a cold 2-core/2GB VM
-# needs to import torch + sentence-transformers + load the ~130MB model, so
-# get() returned None, the assert failed, the entrypoint exited 1, uvicorn
-# never started, and the Fly health check timed out (issue #545).
-#
-# Embeddings are OPTIONAL — FTS + structural RRF work without them
-# (embeddings.py docstring). The model cache existence check above still
-# catches a broken image (missing bake) cheaply; a present-but-corrupt bake
-# is surfaced by the post-pre-warm model-identity log in hosted_api.py
-# (#1349 T10, non-blocking).
+# History worth keeping: the fail-fast pre-warm of #160 crashed deploys because
+# `_LOAD_TIMEOUT_S` was 30 s against a cold 2-core/2GB VM, so `get()` returned
+# None, the assert failed, the entrypoint exited 1, and uvicorn never started
+# (#545). The pre-warm above is NON-FATAL and BOUNDED on purpose — do not
+# reintroduce an exit-on-failure shape.
 _IS_SERVER=0
 for _arg in "$@"; do
     if grep -q "uvicorn" <<<"$_arg"; then
@@ -449,9 +599,9 @@ if [ "$_IS_SERVER" = "1" ]; then
         exit 1
     fi
     rm -f "$TORTOISE_EVENT_LOG_BASE_DIR/.write-probe"
-    echo "tortoise: uvicorn server — embedding pre-warm runs in-app (non-blocking, degraded-but-alive)"
+    echo "tortoise: uvicorn server — embedder boot pre-warm runs before exec; the in-app load follows (non-blocking, degraded-but-alive)"
 else
-    echo "tortoise: skipping embedding pre-warm (non-server command: release check)"
+    echo "tortoise: skipping embedder boot pre-warm (non-server command: release check)"
 fi
 
 if [ -n "${TORTOISE_DB_URI:-}" ]; then
@@ -464,6 +614,20 @@ elif [ -n "${FLY_APP_NAME:-}" ]; then
     exit 1
 else
     echo "tortoise: using embedded redislite (local/dev mode)" >&2
+fi
+
+# ── #13674: the boot pre-warm, AFTER the fatal config checks and BEFORE exec ──
+# Ordered here deliberately:
+#   * after the DB fatal, so a machine with no FALKORDB_CLOUD_URI refuses in
+#     milliseconds instead of paying 196 s of boot first;
+#   * before the #1677 gate's block — two reasons. A refused topology should not
+#     pay a 196 s pre-warm either, and `tests/test_worker_topology.py` lifts and
+#     EXECUTES everything between the block sentinel below and `exec "$@"`, so a
+#     pre-warm call inside that slice would run a REAL embedder load in every
+#     gate test.
+#   * server boots only: a release/guard invocation has no embedder to warm.
+if [ "$_IS_SERVER" = "1" ]; then
+    _prewarm_embedder
 fi
 
 # ── #1677: multi-worker topology — MEASURE the count, then hand it to the app ──
