@@ -541,10 +541,16 @@ NEVER_DISPATCHED_MIN_AGE_SECONDS = 5400.0
 #: How long a persisted never-dispatched proof is honoured before it must be RE-OBSERVED.
 #:
 #: ⛔ THIS IS A PERSISTENCE BOUND, NOT A SAFETY BOUND, and an earlier revision of this
-#: design sold it as the latter. The only event that invalidates a wrong proof is a
-#: dispatch, which also prunes the entry — so a TTL can never shorten a wrong exclusion;
-#: it can only stop a proof being treated as permanent. The guard that keeps a wrong
-#: proof from being ACQUIRED is `NEVER_DISPATCHED_MIN_AGE_SECONDS`.
+#: design sold it as the latter. A TTL can never shorten a wrong exclusion; it can only
+#: stop a proof being treated as permanent. The guard that keeps a wrong proof from being
+#: ACQUIRED is `NEVER_DISPATCHED_MIN_AGE_SECONDS`.
+#: ⛔ AND A DISPATCH IS NOT ALWAYS OBSERVABLE (review P2): an earlier revision of THIS
+#: paragraph claimed dispatch "also prunes the entry", which the module's own falsifier
+#: refutes — job creation does NOT reliably move `updated_at` (three live runs at
+#: 74/96/159 s had `updated_at == created_at` with one job each), so a proved run that
+#: later acquires its first job while its stamp stays put is pruned only by this TTL and
+#: the re-eligibility check, never by the dispatch itself. The residual is bounded by the
+#: TTL and declared in the plan (§10.3); it is not zero.
 #:
 #: The value is derived from convergence, not taste: 128 proofs measured on this repo /
 #: `DEFAULT_MAX_QUEUE_PROBES` = 24 per pass × 10-minute cadence ≈ 54 min to walk the whole
@@ -2245,6 +2251,28 @@ def classify_queue(
     # shape: no live wait plus a proved residue is the residue's state, whether or not a
     # reporting workflow happens to be dominating at the same time.
     if not wait_runs and pr_never_dispatched:
+        # ⛔ A CUT FEED VOIDS A NEGATIVE CLAIM (review P1). "Every waiter was proved
+        # dead" is an ABSENCE, and an absence read off a leg that was CUT AT ITS PAGE
+        # CAP is exactly the claim `health()` refuses for `OK` two clauses below. That
+        # degradation is gated on `verdict == OK`, so this early return WALKED PAST IT
+        # and printed `PR-NEVER-DISPATCHED` over an unread population — measured: a
+        # clean shape and both cut shapes (`truncated=True`, `pending_truncated=True`)
+        # produced BYTE-IDENTICAL state lines, and the workflow's annotation arm then
+        # asserted "the live PR queue is empty" from a payload that does not carry it.
+        # The doctrine is the module's own: these feeds are NEWEST-FIRST, so a cut drops
+        # the OLDEST rows — the very run an absence is a claim about. So the cut is not
+        # mentioned beside the verdict here, it REPLACES it.
+        if truncated or pending_truncated:
+            reasons.append(
+                f"PR-UNWITNESSED: both wait legs are empty and {pr_never_dispatched} "
+                f"run(s) were PROVED never dispatched, but a feed was CUT at its page "
+                f"cap (queued_truncated={truncated}, "
+                f"pending_truncated={pending_truncated}) — and that feed is "
+                f"NEWEST-FIRST, so the dropped rows are the OLDEST, i.e. exactly the "
+                f"run an absence claim would be about. The PR work was not witnessed"
+            )
+            return health(PR_UNWITNESSED, pr_queued=len(pr_queued_runs),
+                          oldest_pr_queued_age_seconds=None, pr_wait_measured=False)
         reasons.append(
             f"PR-NEVER-DISPATCHED: every PR-event run in the wait legs was PROVED never "
             f"dispatched ({pr_never_dispatched} of them), so there is no live wait AND "

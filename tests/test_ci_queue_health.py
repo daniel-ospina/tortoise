@@ -5154,6 +5154,53 @@ def test_R17_an_all_never_dispatched_queue_is_not_OK_and_exits_0(capsys):
     assert health.congests_pr is None, "no repo-wide clearance from an exclusion"
 
 
+def test_R23_a_CUT_feed_cannot_print_PR_NEVER_DISPATCHED():
+    """P1 (code review): the residue verdict is a NEGATIVE claim, and a cut feed voids it.
+
+    `"every waiter was proved dead"` is an ABSENCE. `health()` refuses to certify an
+    absence over a leg cut at its page cap — both arms are gated on `verdict == OK`, so the
+    early return for this verdict WALKED PAST them. Measured before the fix: the clean
+    shape and BOTH cut shapes produced BYTE-IDENTICAL state lines, and the workflow's
+    annotation arm then asserted "the live PR queue is empty" from a payload that does not
+    carry it. Mutation: drop the `truncated or pending_truncated` branch — both rows below
+    go red (they return PR-NEVER-DISPATCHED, the unqualified claim).
+    """
+    residue = [nd_run(200 + i, never_dispatched=True) for i in range(3)]
+    clean = classify(residue)
+    assert clean.verdict == Q.PR_NEVER_DISPATCHED
+
+    for kwargs in ({"truncated": True}, {"pending_truncated": True}):
+        cut = classify(residue, **kwargs)
+        assert cut.verdict == Q.PR_UNWITNESSED, (
+            f"{kwargs}: a cut feed cannot certify that NO live wait exists — the dropped "
+            f"rows are the OLDEST, i.e. exactly the run the absence is about")
+        assert cut.verdict != clean.verdict
+        assert cut.state_line != clean.state_line, (
+            "the reading must be DISTINGUISHABLE from the uncut one, or the sampled "
+            "string asserts an absence nobody measured")
+        joined = "\n".join(cut.reasons)
+        assert "CUT at its page cap" in joined, joined
+        assert cut.congests_pr is None, "still no clearance from a cut read"
+
+
+def test_R23_a_NON_NUMERIC_proved_at_is_dropped_not_raised(tmp_path):
+    """P2 (code review): `_load_queue_proofs` is contractually "never raises".
+
+    A string `proved_at` reaches `now - proved_at` and raises `TypeError` — escaping as a
+    crash instead of a dropped record, in the one function the docstring promises cannot
+    raise. Mutation: drop the `proved_at` type check — this reds with the exception.
+    """
+    state = tmp_path / "proofs.json"
+    state.write_text(json.dumps({"version": 1, "repo": "o/r", "proofs": [
+        {"run_id": 1, "never_dispatched": True, "proved_at": "not-a-number",
+         "updated_at": "2026-10-01T00:00:00Z"},
+    ]}))
+    proofs, warning = Q._load_queue_proofs(
+        state, "o/r", NOW, Q.NEVER_DISPATCHED_REPROOF_SECONDS)
+    assert proofs == {}, "the record must be DROPPED, not honoured and not raised"
+    assert warning, "and the drop must be REPORTED, or a silent store is a silent bug"
+
+
 def test_R16_the_per_run_deadlock_breaker_still_answers_FALSE():
     """The #10641 exemption must survive the exclusion — otherwise `ci_check_repair`
     refuses the only repair that can clear a zero-job run and escalates to exit 1.
