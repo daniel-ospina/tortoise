@@ -1,5 +1,5 @@
 ---
-title: "Tortoise — Canonical Ontology v3.37"
+title: "Tortoise — Canonical Ontology v3.38"
 type: data
 domain: data
 status: live
@@ -11,7 +11,7 @@ aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.37
+# Tortoise — Canonical Ontology v3.38
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -102,7 +102,7 @@ Each layer answers a different question. All four are live mechanisms.
 | performs / produces / uses / authoredBy / ownedBy / memberOf / managedBy | **Structural** (plain) | None (factual) | (:Subject "Daniel")-[performs]->(:Event), (:Object "Customer Profile")-[ownedBy]->(:Subject "Daniel") |
 | Any of `:Point`/`:Subject`/`:Object`/`:Event` ↔ same (e.g. Event↔Point, Point↔Point) | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") · (Point:"argument for X")-[IMPL]->(Event:decision-on-X) — both propagate EP under #7813 (all four epistemic labels; the Point→Event direction is no longer write-only — §8 OVERRIDES) |
 
-**Principle:** Operators connect epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event` — see the §8 `OVERRIDES`); `:Subject`/`:Object` may **also** connect via plain structural edges. The `:Subject`/`:Object` operator endpoints are live (`#7902`); the write path admits all four. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
+**Principle:** Operators connect epistemic targets (any of `:Point`/`:Subject`/`:Object`/`:Event` — see the §8 `OVERRIDES`); `:Subject`/`:Object` may **also** connect via plain structural edges. The `:Subject`/`:Object` operator endpoints are live (`#7902`); the write path admits all four. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. **`confidence` is EP's OUTPUT, not an input** — EP seeds from its own priors (`ep_alpha`/`ep_beta`) and overwrites `n.confidence` on every run, while ranking reads the persisted value as `graph_boost`; a caller who writes `confidence` asserts nothing about belief, because the next propagation replaces it.
 
 ---
 

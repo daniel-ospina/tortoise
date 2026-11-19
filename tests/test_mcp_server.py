@@ -1226,15 +1226,22 @@ class TestStdioEntrypointToolRegistration:
             #                       retire into `create_entity`'s new `type="point"` /
             #                       `type="diary"` ARMS — no container row, since the
             #                       container was already advertised)
-            #   46 -  2 + 0 = 44   (THIS PR, #11609 P2's confidence arms: two doors
-            #                       retired into `tortoise_check_confidence`, which
-            #                       was already live and grew PARAMETERS, not a row)
-            # ⛔ Not the HTTP-filtered view: that one is 39 at this head
-            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 39
-            # and 36 respectively), and
+            #   46 -  2 + 0 = 44   (#11609 P2's confidence arms: two doors retired
+            #                       into `tortoise_check_confidence`, which was
+            #                       already live and grew PARAMETERS, not a row)
+            #   44 -  2 + 0 = 42   (#11609 P6's `rest_spec` pair — `issue_insight` /
+            #                       `session_context` retire into
+            #                       `search_knowledge(mode="issue_insight")` /
+            #                       `check_confidence(session=True)`)
+            #   42 -  2 + 0 = 40   (#11609 P6's DELETE pair — `delete_point` /
+            #                       `delete_entity` retire into the `tortoise_delete`
+            #                       entry the #9660 ruling KEEPS)
+            # ⛔ Not the HTTP-filtered view: that one is 35 at this head
+            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 35
+            # and 32 respectively), and
             # the two differ by the five `http_policy=False` rows. Writing one view's
             # base with the other's head lands on a number no population has.
-            assert len(names) >= 44, f"expected >=44 tools, got {len(names)}"
+            assert len(names) >= 40, f"expected >=40 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.

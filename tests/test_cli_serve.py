@@ -723,14 +723,26 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         body = _parse_sse_json(r)
         tools = body["result"]["tools"]
         names = {t["name"] for t in tools}
-        assert "tortoise_create_point" in names
+        # ⛔ A RETIRED NAME IS NOT ON THE SERVED SURFACE. `tortoise_create_point` was
+        # retired (`RETIRED_USE_INSTEAD` → `tortoise_create_entity(type="point", …)`)
+        # and `_RetiredToolTransform.list_tools` drops it here while `tools/call`
+        # still resolves it through the #3883 shim — so asserting the retired name
+        # is served tested the shim against the one list it is designed to leave,
+        # and left this roundtrip red on `main` for a wave it never covered. The
+        # live door is asserted, and the write below goes through THAT door, so the
+        # roundtrip exercises what a caller is actually granted.
+        assert "tortoise_create_entity" in names
+        assert "tortoise_create_point" not in names, (
+            "a retired name must not be advertised: a grant-based client builds "
+            "its tool grant from tools/list")
         assert len(tools) > 5
 
         # write → lands in org_{org_id}
         r = c.post("/mcp", json={
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": {"name": "tortoise_create_point",
-                       "arguments": {"kind": "observation", "content": "roundtrip"}},
+            "params": {"name": "tortoise_create_entity",
+                       "arguments": {"type": "point", "name": "roundtrip",
+                                     "props": {"pointKind": "observation"}}},
         }, headers=headers)
         body = _parse_sse_json(r)
         assert not body["result"]["isError"], body

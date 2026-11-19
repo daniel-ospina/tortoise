@@ -292,9 +292,19 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     # because `create_entity` absorbs them as ARMS on a tool already in this population —
     # and 46 -> 44 when #11609 P2 retired `compute_confidence`/`recall` into
     # `check_confidence` the same way (both `http_policy=True`, no container row).
-    assert len(advertising) >= 36, (
+    #
+    #   #11609 lane P6 retired FOUR more `http_policy=True` doors in two units, NEITHER
+    #   bringing a container row: the `rest_spec` pair (`issue_insight`, `session_context`
+    #   → `search_knowledge(mode="issue_insight")` / `check_confidence(session=True)`) and
+    #   the DELETE pair (`delete_point`, `delete_entity` → the `tortoise_delete` entry the
+    #   #9660 ruling KEEPS). The FILTERED view this assertion measures moves 39 - 4 =
+    #   **35** (measured from the registry at this head: 40 live, 35 with `http_policy`),
+    #   and the advertising floor with it: 35 - 3 = **32** — the three
+    #   `GRAPH_ARGUMENT_EXCLUDED` names in this view are unchanged by P6, so the exclusion
+    #   term does not move.
+    assert len(advertising) >= 32, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
-        "at least 36 (39 HTTP-filtered live tools minus the 3 excluded names in that "
+        "at least 32 (35 HTTP-filtered live tools minus the 3 excluded names in that "
         "view); a lower number means the registry lost entries, not that a pin moved")
     # …and the served view must BE that population, name for name, so a name that is
     # registered-but-unserved is caught too (the floor above cannot see a substitution).
@@ -308,10 +318,14 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     # doors into containers already in this population (50 − 7 = 43), then 43 − 2 = 41
     # when #11609 lane P1 retired the two POINT-shaped doors the same way, and 41 − 2 = 39
     # when #11609 P2's confidence arms retired `compute_confidence`/`recall` into
-    # `check_confidence` the same way. A floor, for the same reason as the one above: an
+    # `check_confidence` the same way, then 39 − 4 = **35** when #11609 P6 retired its four
+    # `http_policy=True` doors in two units (the `rest_spec` pair and the DELETE pair, both
+    # into containers already in this population — no container row in either, so nothing
+    # arrives and the view moves by exactly the four departures). A floor, for the same
+    # reason as the one above: an
     # equality would move with a collapsed
     # registry and pass over it.
-    assert len(http_population) >= 39, (
+    assert len(http_population) >= 35, (
         f"the registry's http_policy population collapsed to {len(http_population)}")
     for name in advertising:
         schema = advertised[name]
