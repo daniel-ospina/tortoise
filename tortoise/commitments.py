@@ -138,20 +138,35 @@ def build_cypher(*, narrow_kinds: bool) -> str:
     ``IN``), exactly as ``ended.build_cypher`` does for the same reason.
 
     The row carries the record, its KIND, its POSITION (the stage id, the slot,
-    the outcome and when it was entered) and the events linked to it — every
-    field a caller needs to say *what* is outstanding and *how far along* it is,
-    and no field that would be a second vocabulary for either.
+    the outcome and when it was entered) and its own last touch — every field a
+    caller needs to say *what* is outstanding and *how far along* it is, and no
+    field that would be a second vocabulary for either.
+
+    ⛔ **IT READS NO RELATIONSHIP EDGE, and that is a decision rather than an
+    omission** (`#13833` review P1). A first cut carried the Events attached to
+    each commitment (`OPTIONAL MATCH (e:Event)-[:aboutObject]->(n)`) to mirror
+    ``ended.build_cypher``'s ``linked_events``. In the ENDED read those links ARE
+    the answer — *how* a record ended is often only in the event — which is why
+    §13 of ``docs/architecture/STORAGE-ARCHITECTURE.md`` enumerates that reader as
+    a load-bearing read (``ended.py::build_cypher``, row 45). Here they are not:
+    "how far along" is the stage this row already carries, no test asserted the
+    field, and the edge made this module a NEW customer-callable reader of
+    ``aboutObject`` — which the §13 census requires to own a row, and which a row
+    cannot carry here without §13.8 and the census guard's reader keying (both key
+    a reader by its BASE symbol, and ``build_cypher`` would then name two rows)
+    being redesigned for a field nothing consumed. So the read is dropped instead:
+    this population is a NODE FILTER, not a link read, and dropping the
+    ``OPTIONAL MATCH`` also takes a per-row edge scan out of the read path.
+    ``tests/test_13557_13558_reachable_reads.py`` pins it.
     """
     where = _keep_expression("n")
     if narrow_kinds:
         where = f"({where} AND n.objectKind IN $kinds)"
     return (
         "MATCH (n:Object) WHERE " + where + " "
-        "OPTIONAL MATCH (e:Event)-[:aboutObject]->(n) "
-        "WITH n, collect(DISTINCT e.id) AS linked_events "
         "RETURN n.id, n.name, n.objectKind, n.status, n.goalState, "
         "n.pipelineStageId, n.pipelineSlot, n.pipelineOutcome, "
-        "n.pipelineStageSince, n.isClosed, n.updatedAt, linked_events "
+        "n.pipelineStageSince, n.isClosed, n.updatedAt "
         "ORDER BY coalesce(n.updatedAt, '') DESC, n.id "
         "LIMIT $limit"
     )
@@ -161,13 +176,20 @@ def _commitment_row(raw: tuple) -> dict:
     """One served row: the record, its kind, its position, and nothing derived.
 
     The keys mirror ``ended._ended_row`` wherever the two reads describe the same
-    thing (``id``/``name``/``status``/``stage``/``isClosed``/``linkedEvents``), so
-    a caller can hold both answers without learning two shapes — and there is no
+    thing (``id``/``name``/``status``/``stage``/``isClosed``), so a caller can
+    hold both answers without learning two shapes — and there is no
     ``isCommitment``/``live`` token here, because the population this read is
     drawn from IS the answer and a token would be a second name for it.
+
+    ⛔ ``ended._ended_row`` ALSO carries ``linkedEvents`` and this one does NOT —
+    see ``build_cypher``: the ended read's links are part of "how did it end",
+    this read's would be an ``aboutObject`` edge walk nothing consumed. A caller
+    that needs the links about a commitment asks the ended read or a traversal;
+    serving them here would put this module on §13's read-site census for no
+    answer it gives.
     """
     (node_id, name, kind, status, goal_state, stage_id, slot, outcome, since,
-     is_closed, updated_at, linked_events) = raw
+     is_closed, updated_at) = raw
     return {
         "id": node_id,
         "entity_type": "object",
@@ -182,8 +204,6 @@ def _commitment_row(raw: tuple) -> dict:
         ),
         "isClosed": is_closed,
         "updatedAt": updated_at,
-        "linkedEvents": sorted(
-            {i for i in (linked_events or []) if isinstance(i, str) and i}),
     }
 
 

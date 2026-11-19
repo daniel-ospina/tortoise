@@ -505,6 +505,55 @@ def test_an_empty_commitment_kind_set_is_refused_rather_than_answered_empty():
         "cannot make from an empty QUESTION")
 
 
+def test_the_commitment_read_reads_no_relationship_edge():
+    """The commitment population is a NODE FILTER, not a link read (§13).
+
+    ⛔ THIS IS THE §13 CENSUS DECIDING A DESIGN QUESTION, and it is pinned here so
+    the answer cannot be undone by a later "symmetry" edit. The first cut carried
+    the Events attached to each commitment —
+    ``OPTIONAL MATCH (e:Event)-[:aboutObject]->(n)`` — to mirror
+    ``ended.build_cypher``, whose ``linked_events`` IS part of its answer ("how did
+    it end" is often only in the event). In the commitment question it is not:
+    "how far along" is the stage the row already carries, no test asserted the
+    field, and the edge made this module a new customer-callable reader of
+    ``aboutObject`` — which the §13 census (`docs/architecture/`
+    `STORAGE-ARCHITECTURE.md`) requires to own a row, where a row cannot be keyed
+    without §13.8 and the census guard's reader keying being redesigned for a field
+    nothing consumed. So the read was removed rather than registered.
+
+    ⛔ Hermetic on purpose (no ``sdk`` fixture, no docker): this is a property of
+    the STATEMENT and the served row SHAPE, and both are pure functions. It reds
+    on the pre-fix code in two places — the ``OPTIONAL MATCH`` in the query, and
+    the ``linkedEvents`` key the row carried.
+    """
+    from tortoise.commitments import build_cypher
+
+    statement = build_cypher(narrow_kinds=True)
+    assert "aboutObject" not in statement, (
+        f"the commitment read is walking the aboutObject edge again:\n  {statement}\n"
+        "That makes this module a customer-callable READER of the edge, which §13 "
+        "must enumerate and which nothing in the commitment answer consumes — "
+        "register the row in §13 (and settle §13.8's base-name keying for a "
+        "second `build_cypher`) or drop the edge")
+    # the general shape, so a DIFFERENT edge is not a silent way around the pin
+    assert "OPTIONAL MATCH" not in statement and "MATCH (n:Object) WHERE" in statement, (
+        f"the commitment statement is no longer the single node filter it claims "
+        f"to be:\n  {statement}")
+
+    # …and the served row does not promise links either, which is the half a
+    # caller sees. `linkedEvents` in a commitment row is the field the census
+    # question was about.
+    from tortoise.commitments import _commitment_row
+
+    served = _commitment_row(
+        ("p1", "launch", "core:plan", "live", None, "scheduled", "entry",
+         "pending", "2026-01-01", False, "2026-01-02"))
+    assert "linkedEvents" not in served, (
+        f"a commitment row carries {sorted(served)} — `linkedEvents` is the ended "
+        "read's field (its links ARE how it ended) and here it would put the read "
+        "back on §13's census for an answer nobody asked for")
+
+
 @_docker_only
 def test_the_commitment_question_honours_the_callers_kind_filter(sdk):
     """A narrowing the caller asked for is honoured, not overridden."""
