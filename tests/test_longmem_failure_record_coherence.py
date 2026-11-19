@@ -131,6 +131,98 @@ def test_a_deterministic_bug_stays_excluded():
     assert _entry(SMOKE_EXC)["retryable"] is True
 
 
+#: Redis exceptions that are DETERMINISTIC, not infra: each one reproduces on
+#: every attempt because the REQUEST decides it (the wrong operation for the
+#: key, an ACL that will refuse the same way forever, a command the server does
+#: not have) or because it is raised by redis-py's ENCODER before a byte is
+#: sent (``DataError``). Every row still grades ``ingest:retries_exhausted``,
+#: because ``eval_failure_class`` widens every non-HTTP, non-transport
+#: exception at the ingest site — so the CLASS cannot separate them from the
+#: smoke's abort, and the ``infra_failure`` gate is the only thing that can.
+DETERMINISTIC_REDIS_REFUSALS = [
+    ("wrongtype", redis_exc.ResponseError(
+        "WRONGTYPE Operation against a key holding the wrong kind of value")),
+    ("noperm", redis_exc.ResponseError(
+        "NOPERM User tenant_acme has no permissions to run the "
+        "'GRAPH.QUERY' command")),
+    ("unknown-command", redis_exc.ResponseError(
+        "ERR unknown command 'GRAPH.FROB'")),
+    ("data-error", redis_exc.DataError(
+        "Invalid input of type: 'dict'. Convert to a bytes, string, int or "
+        "float first.")),
+]
+
+
+@pytest.mark.parametrize("label,exc", DETERMINISTIC_REDIS_REFUSALS,
+                         ids=[row[0] for row in DETERMINISTIC_REDIS_REFUSALS])
+def test_a_deterministic_redis_refusal_stays_excluded(label, exc):
+    """⛔ THE FALSIFIER for an ``isinstance(exc, RedisError)`` infra arm.
+
+    ``redis.exceptions.RedisError`` is the BASE class, so it covers the
+    deterministic refusals as well as the infra ones. Grading "infra" from
+    base-class membership re-admits all four rows below at 2 × ~25 min per
+    question, and — because the burn is bounded only by the attempt cap —
+    turns one ACL mistake into a multi-hour burn across the whole failure
+    list. Measured on that build, each row graded ``retryable: True`` and
+    ``_retry_failed_skip_reason`` returned ``None`` (admitted), on a record
+    that was ``retryable: False`` before this PR.
+
+    The three NAMED infra families (graph-abort, MISCONF/disk-full, the
+    write-slot refusal) are the contrast, pinned separately in
+    ``test_the_infra_redis_families_are_admitted`` — so this pair of tests
+    fails if the gate is widened back to the base class AND if it is narrowed
+    until the smoke's own failure stops being re-attemptable.
+    """
+    assert lme_errors.eval_failure_class(exc, site="ingest") == (
+        "ingest:retries_exhausted"), (
+        "precondition: the class cannot carry the distinction — if this row "
+        "ever grades non-recoverable, this pin is no longer proving anything"
+    )
+    assert lme_errors.infra_failure(exc) is False, (
+        f"{label}: a deterministic redis refusal is NOT infra — re-running "
+        f"the same question reproduces it exactly")
+
+    entry = _entry(exc)
+    assert entry["retryable"] is False, (
+        f"{label}: admitted as retryable — a --retry-failed resume would "
+        f"re-burn ~25 min per attempt on an error that cannot change")
+    assert runner._retry_failed_skip_reason(entry) is not None, (
+        f"{label}: the resume gate must EXCLUDE it visibly, not admit it")
+
+
+#: The redis families the gate DOES name as infra, with the text each
+#: predicate in ``tortoise/retry.py`` actually matched on (``_GRAPH_ABORT_RE``,
+#: ``_MISCONF_RE``, ``_WRITE_LOCK_RE``) — a paraphrase would make the pin vacuous.
+INFRA_REDIS_FAMILIES = [
+    ("graph-aborted", redis_exc.ResponseError(
+        "graph was deleted or replaced while the query was running, aborting")),
+    ("misconf", redis_exc.ResponseError(
+        "MISCONF Redis is configured to save RDB snapshots, but it's "
+        "currently unable to persist to disk")),
+    ("write-lock", redis_exc.ResponseError(
+        "another write is in progress, retry the query")),
+]
+
+
+@pytest.mark.parametrize("label,exc", INFRA_REDIS_FAMILIES,
+                         ids=[row[0] for row in INFRA_REDIS_FAMILIES])
+def test_the_infra_redis_families_are_admitted(label, exc):
+    """The other half of the round-2 pin: narrowing the arm must not cost the
+    smoke's own failure (or the two families the plan already treats as
+    re-attemptable) their admission. Without this contrast a future "fix" of
+    the form ``return False`` would leave the P1 test above green.
+    """
+    assert lme_errors.infra_failure(exc) is True, (
+        f"{label}: an infra redis family must stay re-attemptable — the "
+        f"failure that motivated #8486 is one of these, and excluding it "
+        f"is the original silent skip")
+    entry = _entry(exc)
+    assert entry["retryable"] is True
+    assert entry["error_class"] == "ingest:retries_exhausted"
+    assert runner._retry_failed_skip_reason(entry) is None, (
+        f"{label}: the resume gate must ADMIT it")
+
+
 def test_the_smoke_record_is_now_coherent():
     """The exact shape the smoke persisted, graded field by field."""
     entry = _entry(SMOKE_EXC)
