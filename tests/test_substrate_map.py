@@ -1420,11 +1420,17 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
     #: asserted here rather than merely collected: the name recorded for the
     #: foreign read must be the frame that MADE it, not the recorder's own.
     #: ⛔ IT PINS THE NAME CAPTURE, NOT THE ATTRIBUTION RULE: the name is
-    #: stored before that rule runs, so a path filter, a thread check or a
-    #: deleted rule leaves this assertion GREEN — the exclusion and drift arms
-    #: are what catch those. `_probe` is hoisted out of the thread closure so the
-    #: expected name comes from its own code object rather than a string literal,
-    #: which a rename or an inline would red with a message blaming the recorder.
+    #: stored before that rule runs, so ANY rewrite of that rule leaves this
+    #: assertion GREEN. What catches a rewrite is the exclusion and drift arms,
+    #: and they catch a REPLACEMENT only (measured): replacing the rule with a
+    #: path filter reds the drift arm alone; deleting it reds only the two
+    #: exclusion assertions. ⛔ AND A STRENGTHENING IS CAUGHT BY NOTHING —
+    #: `caller is _LABEL_HITS_CODE and threading.current_thread() is
+    #: threading.main_thread()` leaves this whole file green (measured), which is
+    #: the narrowing #13699 is about; that residual is OPEN and this arm does not
+    #: close it. `_probe` is hoisted out of the thread closure so the expected
+    #: name comes from its own code object rather than a string literal, which a
+    #: rename or an inline would red with a message blaming the recorder.
     assert ({name for p, name in everything if p == foreign}
             == {_probe.__code__.co_name}), (
         "the recorder attributed the other thread's read to "
@@ -1508,12 +1514,14 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     #: name recorded for this read must be the frame that made it, not
     #: `_label_hits`'s own. ⛔ IT PINS THE NAME CAPTURE, NOT THE ATTRIBUTION RULE,
     #: and the difference is measurable: the name is stored before the rule that
-    #: decides `scoped` runs, so replacing that rule with a path filter — or
-    #: deleting it — leaves this assertion GREEN, and the exclusion arms below are
-    #: what catch those (measured: `if caller is _LABEL_HITS_CODE and
-    #: self.is_relative_to(REPO):` reds only the drift arm; a deleted rule reds
-    #: only the two exclusion assertions). An earlier cut of this comment claimed
-    #: the name assertion covered that class, and it does not.
+    #: decides `scoped` runs, so replacing that rule — or deleting it — leaves
+    #: this assertion GREEN. Measured: `if caller is _LABEL_HITS_CODE and
+    #: self.is_relative_to(REPO):` reds ONLY the drift arm in the sibling test
+    #: (`test_a_same_thread_read_outside_the_index_is_still_drift`), NOT the two
+    #: exclusion assertions below; and `if caller is not None:` (rule deleted)
+    #: reds only those two exclusion assertions. An earlier cut of this comment
+    #: both claimed the name assertion covered that class AND named the wrong
+    #: catcher for the filter; both are corrected here.
     assert ({name for p, name in everything if p == ambient}
             == {_an_ambient_read.__code__.co_name}), (
         "the recorder attributed the same-thread read to "
