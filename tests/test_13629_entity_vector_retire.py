@@ -4125,6 +4125,41 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE WRAPPER FAMILY HAS A SECOND SPELLING (`#13788`, measured at
+        # `716991951e`). `copy.copy(x)` and `copy.deepcopy(x)` return the same new mapping as
+        # `x.copy()`, so naming the METHOD instead of the SHAPE left every position open: at
+        # that head all four rows below CERTIFIED while their `.copy()` twins were refused
+        # (each runtime-checked to place a top-level `embedding`). Attribution is one arm:
+        # `_transparent_copy_operand` is the single place that answers the family, and a
+        # mutant that drops its functional branch reddens exactly these four rows.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= copy.copy({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(copy.copy({"embedding": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**copy.deepcopy({"embedding": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = copy.deepcopy({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
         # ⛔ THE ``**`` KEYWORD OPERAND IS AN OPERAND (`#13788` F2, measured at `45b5f88a`).
         # Both ``**`` arms narrowed the operand to `isinstance(value, ast.Dict)`, so the one
         # transparent wrapper this branch's OWN pairs rule already follows re-opened the hole
@@ -4440,6 +4475,47 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE WRITER HANDED A REBUILT MAPPING IS THE SAME STORE (`#13788` F4, measured at
+        # `45b5f88a`). `_dict_stores_the_vector`'s `{**{…}}` recursion is gated on `stop_arm`,
+        # and `_rebuild_stores_the_vector` — the route that answers `_write({**props, …})` —
+        # asked it with the default OFF while being reached only under `anywhere`. The
+        # recursion was therefore INERT on this route: all five rows below CERTIFIED while
+        # `_write({**props, "embedding": vec})` directly above was refused.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**{"embedding": _encode(ev)}.copy()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, **{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = props | {**{"embedding": _encode(ev)}}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write(props | {**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
         # …the KEYWORD spelling of the same mutator
         """
 def _upsert_object(props, ev):
@@ -4730,6 +4806,65 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE HELPER'S `key`/`value` PAIR IS THE SAME PAIR THROUGH A WRAPPER (`#13788` F5,
+        # measured at `45b5f88a`). The `**` operand's VALUE scan read only a top-level
+        # `ast.Dict` literal, so the row above (refused) certified in every one-wrapper
+        # spelling of itself — the same wrapper vocabulary the store test already follows.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"key": "embedding", "value": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE WRAPPER'S FUNCTIONAL SPELLING IS THE SAME PAIR (`#13788`, measured at
+        # `716991951e`): `copy.copy(…)` / `copy.deepcopy(…)` return the same new mapping as
+        # `.copy()`, so the scan that named only the METHOD left them reading as an
+        # unreadable operand and both rows below CERTIFIED beside the refused `.copy()` row
+        # above. `_transparent_copy_operand` is the one arm that answers the family; the
+        # `_read(…)` control beside it keeps a wrapped READ refused-free.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **copy.copy({"key": "embedding", "value": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **copy.deepcopy({"key": "embedding", "value": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"key": "embedding", "value": _encode(ev)} if _flag(ev) else {})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{**{"key": "embedding", "value": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **dict(key="embedding", value=_encode(ev)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **({"key": "embedding", "value": _encode(ev)} | {}))
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4950,18 +5085,41 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ …AND A UNION AROUND THAT MERGE IS THE SAME STORE (`#13788` F4, measured at this
-        # head). `_rebuild_stores_the_vector` answered the `**` operand of a `{…}` display
-        # only in its DIRECT form, because the two `_dict_stores_the_vector` calls it makes
-        # omitted `stop_arm=True` — so its own `merges = any(key is None …)` test was
-        # satisfied by `{**{…}}` while the operand behind `**` was never read. One union
-        # (`| {}`) around the merge therefore CERTIFIED a stop arm that stores, and so did
-        # the same union with the merge `.copy()`-wrapped, with a comprehension behind the
-        # `**`, on the ASSIGN arm as well as `|=`, and inside `update(…)` — all six measured
-        # CERTIFIED before the fix and runtime-checked to leave `{"embedding": VEC}` in
-        # `props`. The union's operands are now answered by the OPERAND rule (literal with
-        # the stop-mode recursion, comprehension, both wrappers) rather than by two type
-        # tests, which is the one-rule shape the rest of this family uses.
+        # ⛔ …AND A UNION WHOSE MERGE OPERAND IS WRAPPED IS THE SAME STORE (`#13788` F4).
+        # The bare `_rebuild_stores_the_vector` display merge is now read in STOP mode (the
+        # `stop_arm=True` token, pinned by its own five rows above), and the union arm itself
+        # still asked two TYPE TESTS for its operands — so a `.copy()` or an `if…else` around
+        # the mapping inside a union CERTIFIED beside the bare operand refused:
+        #     props = ({"embedding": vec}.copy()) | {}          CERTIFIED
+        #     props = {} | ({"embedding": vec}.copy())          CERTIFIED
+        #     props = ({"embedding": vec} if f else {}) | {}     CERTIFIED
+        # Measured: each is CERTIFIED with the union arm left as two type tests and refused
+        # once its operands are answered by `_mapping_operand_stores_the_vector` — the operand
+        # rule, which carries the stop-mode Dict recursion, the comprehension, the container
+        # arms and BOTH wrappers. The union rows for the unwrapped `**` merge stay here too:
+        # they were the measured CERTIFIED spellings at the head this was found at, and they
+        # are refused by the same one-rule answer.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = ({"embedding": _encode(ev)}.copy()) | {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {} | ({"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = ({"embedding": _encode(ev)} if _flag(ev) else {}) | {}
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -5429,6 +5587,25 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE FUNCTIONAL-COPY ARM (`#13788`, measured at
+        # `716991951e`): the widened wrapper arm must keep the two narrowings, so the identity
+        # triple and the pre-guard reset behind `copy.copy(…)` stay CERTIFIED. Without these
+        # rows an over-broad `return True` in `_transparent_copy_operand`'s callers would cost
+        # an honest writer its gate — the exact failure the pairs rule's controls pin.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(copy.copy({"embedding_model": _m()}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**copy.deepcopy({"embedding": None}))
+        return None
+    _write(props)
+""",
         # ⛔ THE HONEST-STOP CONTROLS FOR THE ``**`` WRAPPER ARM (`#13788` F2): the new refusal
         # is still narrowed to an EXACT property name and a NON-CONSTANT value, so the
         # pre-guard reset (`None`) and the identity triple behind the same wrapper must stay
@@ -5445,6 +5622,53 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update(**{"embedding": None}.copy())
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE STOP-MODE REBUILD ROUTE (`#13788` F4): the
+        # strengthened recursion must not swallow a MENTION or an identity-triple rebuild —
+        # `_write({**props, **extra})` merges an unknown and names no key, and
+        # `_write({**props, "embedding_model": …})` merges only the identity triple.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, **extra})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, "embedding_model": _m()})
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE `**` VALUE WALK (`#13788` F5): a READ whose
+        # default is a literal must still CERTIFY, and the identity triple must stay certified
+        # behind the same wrapper — otherwise the walk costs an honest writer its gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _read(props, **{"key": "embedding", "default": None}.copy())
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE FUNCTIONAL SPELLING OF THAT SAME CONTROL (`#13788`, measured at
+        # `716991951e`): the widened walk now reaches inside `copy.copy(…)`, so the pair that
+        # must stay a READ — the property as a constant beside a LITERAL default — has to keep
+        # certifying behind the functional wrapper too. Without this row, widening the walk
+        # could silently cost an honest reader its gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _read(props, **copy.copy({"key": "embedding", "default": None}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"key": "embedding_model", "value": _m()}.copy())
         return None
     _write(props)
 """,
@@ -5555,6 +5779,23 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update(_merged[0])
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE CONTROLS FOR THE UNION ARM: the wrapper recognition must not swallow a
+        # union that places nothing — the identity triple behind `.copy()` in the same
+        # position still CERTIFIES, and so does a union of two empty displays.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = ({"embedding_model": _m()}.copy()) | {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {} | {}
         return None
     _write(props)
 """,
