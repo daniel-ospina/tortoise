@@ -3744,10 +3744,14 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         **PASSES** (fail-OPEN, out of scope): the row's opening run is not read because the
         table's leading ``|`` sits BEFORE it — the same reason a mid-sentence bold run
         passes — not because ``_PARAGRAPH_START_RE`` lacks a table kind. Measured, that
-        distinction is load-bearing: teaching the paragraph model a `|` row start (in both
-        ``_PARAGRAPH_START_RE`` and ``_LEADING_LIST_MARKER_RE``) still PASSES, because the
-        run is still behind the delimiter; only stripping the leading cell delimiter would
-        close it. Measured PASS where `main` refused; the corpus writes no tables
+        distinction is load-bearing in the OTHER direction from the obvious guess: teaching
+        ``_PARAGRAPH_START_RE`` a `|` row start changes nothing (0 of the fixtures move),
+        while the STRIPPER is where the fix lives — ``_LEADING_LIST_MARKER_RE`` taught
+        `|\s+` does consume the cell delimiter and closes the shape
+        (``_APPROVAL_RECORD_IN_A_TABLE_ROW`` PASS → REFUSED, measured), so the shape stays
+        green only while the delimiter sits in front of the run. The bare-`|` form that
+        consumes no space changes nothing either, and is not a row start. Measured PASS
+        where `main` refused; the corpus writes no tables
         (``grep -c '^> *|' docs/ONTOLOGY-CHANGELOG.md`` = 0), and the shape is driven green
         by ``_APPROVAL_RECORD_IN_A_TABLE_ROW`` so removing it or handling it is a visible
         decision rather than a silent one;
@@ -4057,7 +4061,7 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
         _refuse_an_approval_record_with_no_resolvable_home(
             _APPROVAL_RECORD_AFTER_AN_H4_HEADING_LINE)
     _assert_refused_by(after_an_h4, "_refuse_an_approval_record_with_no_resolvable_home")
-    # …and a `####−` line with NO space is not a heading, so it continues the paragraph and
+    # …and a `####` line with NO space is not a heading, so it continues the paragraph and
     # the label below it opens nothing — green, which is what keeps the `\s+` honest.
     _refuse_an_approval_record_with_no_resolvable_home(_NOT_A_HEADING_WITHOUT_A_SPACE)
     # …and prose below a heading still passes, so the fix is a boundary and not a refusal
