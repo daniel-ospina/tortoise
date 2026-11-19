@@ -3108,18 +3108,13 @@ async def _lifespan(app):
     # metadata` → `read_text` on the stack, i.e. Sentry's `init()` building its
     # whole installed-distribution index (because `auto_enabling_integrations`
     # defaults to True) while the event loop was held. A held loop cannot run a
-    # timer callback or send a byte, so anything already on the loop stalls —
-    # and IN SERVICE that is `HTTP 000`: no answer, and no legible refusal,
-    # because `WaitBoundMiddleware`'s deadline is itself a loop callback.
-    # ⛔ NOT in this window, though — uvicorn binds only after this half returns
-    # (the note on the pre-warm task below, #2953), so no request is read yet
-    # and this change does NOT move first-answer time. What it buys is that the
-    # loop is not held during boot and that the loop-block instrument stops
-    # recording a STARTUP episode. `init_off_loop` keeps the ordering guarantee
-    # (this is still AWAITED before the app serves, so captures are armed from
-    # the first request) and moves only the THREAD. See `tortoise/sentry.py` for
-    # the measured breakdown and for why the shared executor is acceptable here
-    # when #10602 refused it for the read path.
+    # timer callback or send a byte, so anything already on the loop stalls — in
+    # SERVICE that is `HTTP 000`: no answer, no legible refusal, because
+    # `WaitBoundMiddleware`'s deadline is itself a loop callback. ⛔ NOT in this
+    # window: uvicorn binds only after this half returns (#2953), so no request is
+    # read yet and this does NOT move first-answer time — it stops the loop being
+    # held during boot. `init_off_loop` keeps the ordering guarantee and moves only
+    # the THREAD; `tortoise/sentry.py` carries the measured breakdown and #10602.
     try:
         from tortoise.sentry import init_off_loop as _sentry_init
 
