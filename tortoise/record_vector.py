@@ -845,7 +845,9 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
             # served from `_cached_coverage` stickily for the life of the process
             # (`#13799`), and an UNVERIFIED one for `COVERAGE_TTL_SECONDS`. Every
             # consumer renders this string LATER — the TRIVIALLY trace line, the
-            # unverified DECLINE line and its `RecordVectorDeclined` text, and
+            # unverified DECLINE line and its `RecordVectorDeclined` text,
+            # `tools/claim_dense_leg_13732.py`'s `coverage_unverified` refusal (which
+            # lands in that run's artifact and on stderr), and
             # `Coverage.as_dict()`, which a caller may render — so a present-tense
             # "the record holds N, the graph serves M" is read as a
             # claim about NOW while the read answering with it may return rows the
