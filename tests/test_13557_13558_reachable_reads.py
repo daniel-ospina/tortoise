@@ -249,6 +249,18 @@ NOT_SELECTED = [
     "which commitments are in the contract",
     "how much have we committed to the SOC2 audit",
     "current commitments in EMEA",
+    # ── the APPENDED-CONSTRAINT class (P2-5 review, measured) ──────────────
+    # The same questions with the constraint set off by a COMMA. The first cut
+    # scanned only `text.split(",")[0]`, so these routed while their comma-less
+    # twins above kept the relevance read — the constraint the caller appended
+    # was silently dropped, which is the one thing the commitment shapes say
+    # must never happen. Both spellings are pinned so the split cannot return.
+    "current commitments, in EMEA",
+    "all the commitments, by owner",
+    # …and the recall the removal gives up, stated rather than discovered: only
+    # the WHOLE question can be the question, so a compound question keeps the
+    # relevance read even when its first clause is an ending.
+    "what ended, and what replaced it",
     # ── STATEMENTS, third-party actions, and boundaries stated in the module ─
     "did the customer cancel their order",
     "what has ended recently",
@@ -276,13 +288,40 @@ def test_none_is_a_full_scan_not_a_question():
 
 
 def test_an_ending_question_outranks_a_commitment_noun():
-    """'which commitments were withdrawn' is an ENDING question.
+    """A question BOTH tables match is answered by the ending.
 
     The reverse precedence would answer a withdrawal question with everything
     still standing — the exact failure #13558 was filed for.
+
+    ⛔ THE OVERLAP IS THE POINT, and the first version of this test did not have
+    one (P2-4 review): `which commitments were withdrawn` matches only
+    ``which_predicate``, so swapping the two loops in ``detect_state_question``
+    reddened NOTHING — the ordering was unobservable and the docstring's
+    justification for it was not what the test measured. The compound question
+    below is ``committed_to`` AND ``existence`` at once, which is what makes
+    this a falsifier: reverse the loops and it answers ``commitments`` (measured:
+    the mutant returns `StateQuestion('commitments', 'committed_to', …)`).
     """
     from tortoise.state_intent import ENDED, detect_state_question
 
+    overlapping = "what are we committed to and has anything been withdrawn"
+    # …both tables really do match it, or this row proves nothing about ordering.
+    from tortoise import state_intent
+
+    assert any(p.search(overlapping) for _, p in state_intent._COMMITMENT_SHAPES), (
+        f"{overlapping!r} is no longer matched by a COMMITMENT shape, so the "
+        f"precedence this test pins is unobservable again")
+    assert any(p.search(overlapping) for _, p in state_intent._ENDING_SHAPES), (
+        f"{overlapping!r} is no longer matched by an ENDING shape, so the "
+        f"precedence this test pins is unobservable again")
+
+    got = detect_state_question(overlapping)
+    assert got.population == ENDED, (
+        f"a question both cue tables match was answered by the {got.population!r} "
+        f"population (shape {got.shape!r}) — ENDED must win, or a withdrawal "
+        f"question is answered with everything still standing (#13558)")
+
+    # The single-table case still routes, for the reason it always did.
     assert detect_state_question("which commitments were withdrawn").population == ENDED
 
 
