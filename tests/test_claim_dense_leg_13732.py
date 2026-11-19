@@ -1396,6 +1396,12 @@ class _FakeGraph:
     # alone models only a failing id-scoped read, which is what the round-11 test
     # drove; a dead store also fails the PREFIX count, the coverage denominator.
     down: ClassVar[bool] = False
+    # Only the PREFIX scan fails (a label-wide scan can time out on a store that
+    # answers id lookups) — the shape the round-12 `graph_unreadable` guard
+    # exists for, and the one `unreadable`/`down` do not model
+    # (`#13745` review round 14, finding 1: repointing the down-graph test at the
+    # WRITE left that guard asserted nowhere, so deleting it stayed green).
+    prefix_unreadable: ClassVar[bool] = False
 
     def __init__(self, rows: int):
         self._rows = rows
@@ -1410,6 +1416,8 @@ class _FakeGraph:
                 result_set=[[i, self.contents.get(i)] for i in params["ids"]]
             )
         # The run's PREFIX-wide count: `graph_vectors`, the coverage DENOMINATOR.
+        if self.prefix_unreadable:
+            raise RuntimeError("prefix scan timed out")
         return types.SimpleNamespace(result_set=[[f"pt-12186{i:06d}"] for i in range(self._rows)])
 
 
@@ -1470,6 +1478,7 @@ class TestTheDocumentedRunPath:
         record_ok: bool = False,
         graph_unreadable: bool = False,
         graph_down: bool = False,
+        prefix_unreadable: bool = False,
     ):
         self.coverage_kwargs = {}
         corpus = tmp_path / "corpus"
@@ -1525,6 +1534,7 @@ class TestTheDocumentedRunPath:
         # None-vs-0 contract through the RUN instead of the pure function.
         _FakeGraph.unreadable = graph_unreadable
         _FakeGraph.down = graph_down
+        _FakeGraph.prefix_unreadable = prefix_unreadable
 
         def _seed(_proj, pop):
             if graph_down:
@@ -1616,6 +1626,10 @@ class TestTheDocumentedRunPath:
         # assertion above while telling the reader nothing.
         # ⛔ THE DENOMINATOR ITSELF, not just its presence: `graph_vectors=0`
         # makes `record_vectors >= graph_vectors` always true.
+        # ⛔ AND THE HEALTHY CASE MUST STILL READ AS VERIFIED. Without this, the
+        # `denominator_zero` branch firing ALWAYS stayed green while every artifact
+        # declared the gate unverifiable (`#13745` review round 14, finding 2).
+        assert artifact["coverage"]["verified"] is True, artifact["coverage"]
         assert self.coverage_kwargs.get("graph_vectors") == 5, (
             "the coverage gate must be asked with the PREFIX count as its "
             f"denominator, got {self.coverage_kwargs!r}"
@@ -1866,6 +1880,30 @@ class TestTheDocumentedRunPath:
         assert "summary" in artifact["arms"]["lexical"]
         assert artifact["comparisons"]["record_dense_vs_lexical"]["label"] != "UNMEASURED"
         assert rc == 3
+
+    def test_a_failing_PREFIX_SCAN_is_a_named_refusal_not_a_traceback(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ THE ROUND-12 GUARD, ASSERTED WHERE IT LIVES.
+
+        A store that answers id lookups but fails the LABEL-WIDE scan (a plausible
+        timeout — the seed's writes are point-level, that query is a scan) used to
+        give exit 1 + a traceback + no artifact. Repointing the down-graph test at
+        the seed WRITE left this handler asserted NOWHERE, so narrowing or
+        deleting it stayed green (`#13745` review round 14, finding 1).
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            self._drive(
+                tool_mod,
+                monkeypatch,
+                tmp_path,
+                out=str(tmp_path / "scan.json"),
+                preregistered_n=M2_N,
+                record_ok=True,
+                prefix_unreadable=True,
+            )
+        assert ei.value.code == "graph_unreadable"
+        assert not (tmp_path / "scan.json").exists(), "a refused run publishes nothing"
 
     def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
         """⛔ The single-`blocked` slot made the LAST cause win; this pins both.
