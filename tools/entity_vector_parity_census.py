@@ -40,6 +40,12 @@ having looked, and this epic has already paid for that class of report once
 Two further buckets are printed because they turn a non-zero `graph_only` into a
 diagnosis instead of a mystery:
 
+* `render_collision` — graph nodes whose identity RENDERING collides with another
+  node's (`id=123` and `id="123"`). The join is on `text` because the record's identity
+  column is TEXT, so a collision set collapses to one string and a set-difference against
+  ONE readable record row reads as parity. Counted into `graph_only` as well as named
+  separately, and `at_parity` also requires `graph_vectors <= record_vectors` — the
+  count-based spelling of the same invariant (`#13647` round-3 P1).
 * `unkeyed_graph_nodes` — graph nodes carrying a vector but no key property
   (`id` / `eventId` / `url`). They can never be matched to a record row, so they are
   **graph-only by construction** and are counted INTO `graph_only` as well as being
@@ -237,6 +243,14 @@ class LabelCensus:
     graph_only: int = 0
     graph_only_sample: list[str] = field(default_factory=list)
     unkeyed_graph_nodes: int = 0
+    #: Graph nodes whose identity RENDERING collides with another node's — `id=123` and
+    #: `id="123"` are two typed identities the record's TEXT column cannot tell apart.
+    #: Counted separately AND into `graph_only`, because the join below is on `text`:
+    #: a collision set collapses to one string, so a set-difference against one readable
+    #: record row reads as PARITY over vectors the record has ONE copy of (`#13647`'s
+    #: round-3 P1). The excess is unmatchable by construction, exactly like an unkeyed
+    #: node, and a strip must never be licensed on it.
+    render_collision: int = 0
     record_unreadable_vector: int = 0
     record_only: int = 0
     #: The TENANT-WIDE readable count for the label — the one number NOT narrowed to the
@@ -254,13 +268,28 @@ class LabelCensus:
 
     @property
     def at_parity(self) -> bool:
-        """Graph ⊆ record: every vector the graph holds is readable in the record."""
-        return self.graph_only == 0 and self.unkeyed_graph_nodes == 0
+        """Graph ⊆ record: every vector the graph holds is readable in the record.
+
+        ⛔ THREE CLAUSES, and the third is the one a set-difference cannot give you.
+        `graph_only` is computed as `set(graph_text) - set(record_readable)`, so it
+        answers *"is every DISTINCT rendering answered"* — not *"is every NODE
+        answered"*. With `:Object {id:123}` and `:Object {id:"123"}` the graph holds
+        TWO vectors that render to one string, while the record's text-keyed column can
+        hold ONE readable row for it; the set difference is empty and the population is
+        not covered. `graph_vectors <= record_vectors` is the count-based statement of
+        the same invariant, kept alongside the collision bucket so neither can be
+        deleted without the other one reddening a falsifier.
+        """
+        return (self.graph_only == 0 and self.unkeyed_graph_nodes == 0
+                and self.render_collision == 0
+                and self.graph_vectors <= self.record_vectors)
 
     @property
     def verdict(self) -> str:
         if self.at_parity:
             return "PARITY"
+        if self.render_collision:
+            return f"RENDER-COLLISION({self.render_collision})"
         return f"GRAPH-ONLY({self.graph_only})"
 
     def as_dict(self) -> dict:
@@ -273,6 +302,7 @@ class LabelCensus:
             "graph_only": self.graph_only,
             "graph_only_sample": list(self.graph_only_sample),
             "unkeyed_graph_nodes": self.unkeyed_graph_nodes,
+            "render_collision": self.render_collision,
             "record_unreadable_vector": self.record_unreadable_vector,
             "record_only": self.record_only,
             "record_readable_total": self.record_readable_total,
@@ -633,6 +663,10 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
         # builds its plan from, so it must be the form the removal can MATCH; `identity_sort_key`
         # keeps a mixed-type label from raising here.
         keys_by_label[label] = sorted(graph["keys"], key=identity_sort_key)
+        # ⛔ THE RENDER COLLISION IS COUNTED HERE, before the join, because the join
+        # cannot see it: `graph["text"]` is the record leg's only language (a TEXT
+        # column) and two typed identities that render alike become one set member.
+        collision = len(graph["text"]) - len(set(graph["text"]))
         record = read_record_vector_keys(record_dsn, org_id, graph_id, table,
                                          graph["text"])
         row = LabelCensus(
@@ -642,6 +676,7 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
             graph_vectors=graph["count"],
             record_vectors=len(record["readable"]),
             unkeyed_graph_nodes=graph["unkeyed"],
+            render_collision=collision,
             record_unreadable_vector=record["unreadable"],
             # The record being AHEAD is the direction the cutover wants, and it is
             # computed from one aggregate row rather than by fetching the extra rows.
@@ -652,9 +687,22 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
         # ⛔ THE RENDERED FORM HERE, because the other side is the record's `text` column:
         # comparing a typed value against it would report EVERY typed key as graph-only.
         keyed_graph_only = sorted(set(graph["text"]) - record["readable"])
-        row.graph_only = len(keyed_graph_only) + graph["unkeyed"]
+        # ⛔ THE COLLISION EXCESS IS GRAPH-ONLY, not merely a footnote. One of the two
+        # colliding nodes can be answered by the single readable row; the other cannot be
+        # answered by anything, because the record has no field that distinguishes them.
+        # Counting it here (rather than only in `at_parity`) keeps EVERY consumer that
+        # blocks on `graph_only` — including `execute`'s live parity re-check — refusing
+        # a collision population, instead of only the printed verdict.
+        row.graph_only = len(keyed_graph_only) + graph["unkeyed"] + collision
         row.graph_only_sample = keyed_graph_only[:5]
         blocks: list[str] = []
+        if collision:
+            blocks.append(
+                f"{collision} graph node(s) share their identity RENDERING with another "
+                "node (e.g. `id=123` and `id=\"123\"`) while the record's identity "
+                "column is TEXT — it cannot hold a distinct readable copy for each, so "
+                "a text-keyed join would certify a population it cannot represent. "
+                "Nothing may be stripped until those identities are disambiguated")
         # ⛔ EVERY BLOCK, NOT JUST THE FIRST: these two are independent, and a reason
         # that named only one would send the operator to fix the other's problem. The
         # graph-only block is listed FIRST because it is the non-negotiable one —
@@ -719,12 +767,14 @@ def render(report: dict, graph_name: str) -> str:
         f"entity-vector parity census — graph {graph_name!r} at {report['at']}",
         "",
         f"{'label':10} {'graph':>9} {'record':>9} {'graph_only':>11} "
-        f"{'unkeyed':>8} {'rec_unread':>11} {'rec_only':>9} {'rec_total':>9}  verdict",
+        f"{'unkeyed':>8} {'coll':>5} {'rec_unread':>11} {'rec_only':>9} "
+        f"{'rec_total':>9}  verdict",
     ]
     for row in report["labels"]:
         lines.append(
             f"{row['label']:10} {row['graph_vectors']:>9} {row['record_vectors']:>9} "
             f"{row['graph_only']:>11} {row['unkeyed_graph_nodes']:>8} "
+            f"{row['render_collision']:>5} "
             f"{row['record_unreadable_vector']:>11} {row['record_only']:>9} "
             f"{row['record_readable_total']:>9}  {row['verdict']}")
     lines.append("")

@@ -151,6 +151,24 @@ Exit status: ``0`` preview printed, or execution completed AND verified · ``1``
 execution ran but its RESULT is not trustworthy (residual vectors remain, or the
 post-removal count could not be taken) · ``6`` execution FAILED PART-WAY — part of the
 graph is already stripped, re-plan before anything else.
+
+COMPATIBILITY — what this build refuses that the previous one did not
+=====================================================================
+Stated here because a plan is an artefact that OUTLIVES the build that printed it, and
+an operator holding an older file deserves a diagnosis rather than a surprise:
+
+* **A plan minted by the previous build refuses with ``REFUSE_DIGEST_MISMATCH``.**
+  ``digest()`` is now length-framed and type-framed (`_digest_key`), so the recorded
+  digest cannot re-derive from the same key lists. RE-PLAN; the plan's population is
+  not wrong, its token is.
+* **A plan that names the same node twice refuses with ``REFUSE_PLAN_UNREADABLE``.**
+  The digest describes a SET, so duplication is invisible to it while `expected` counted
+  it — one more number that could exceed the set it claimed to describe.
+* **Exit ``6`` and ``--expect-narrowed`` are new.** ``6`` means "part of the graph is
+  already stripped", which ``2`` ("nothing was written") must never mean; a narrowed run
+  exits ``5`` unless ``--expect-narrowed`` says the partial sweep was intended.
+* **The record leg is two statements** (one aggregate, one narrowed to the graph's own
+  keys), not one full-table read.
 """
 
 from __future__ import annotations
@@ -389,10 +407,14 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
        accepted guard placed AFTER an unconditional store still clears the function. What
        narrows this in practice is that the guarded body must itself store, which a
        pointless late guard does not do.
-    3. **Dead code and nested scopes are pruned, not analysed** — a guard wrapped in
-       `if False:`/`while False:` or inside an inner `def`/`class`/lambda is not counted
-       (`_reachable_ifs`), but neither is a guard behind a runtime-false condition this
-       check cannot evaluate. The REACHABLE `else` of a constant-tested `if` is kept.
+    3. **Dead code, nested scopes and NESTED CONDITIONS are pruned, not analysed** — a
+       guard wrapped in `if False:`/`while False:` or inside an inner `def`/`class`/lambda
+       is not counted (`_reachable_ifs`); a guard behind a runtime-false condition this
+       check cannot evaluate is likewise not counted; and an arm's STORE/REMOVE/EXIT is
+       counted only where it is UNCONDITIONALLY reached (`_unconditional_walk`), so
+       `if not gate(l): if DEBUG: raise` is unproven rather than certified. The REACHABLE
+       `else` of a constant-tested `if` is kept. A condition this check cannot decide is
+       answered "unproven", which leaves the destructive strip refused.
     4. **Two shapes are refused rather than resolved, deliberately** — a store reached
        through a helper ARGUMENT (`_set(e, embedding)`, indistinguishable from
        `print(embedding)` at this level) and a store behind a LOCAL ALIAS
@@ -456,7 +478,7 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
 # A `return` carrying a CALL is judged as a write, by the polarity rule below.
         if polarity < 0 and any(_is_write_stop_exit(statement)
                                 for statement in sub.body
-                                for statement in _own_walk(statement)):
+                                for statement in _unconditional_walk(statement)):
             return True
         # ⛔ THE POLARITY DECIDES WHICH BODY IS A WRITE-STOP, and getting this wrong in
         # either direction is a defect that was measured:
@@ -519,6 +541,14 @@ def _own_walk(node):
     early-exit arm — while `_reachable_ifs` prunes exactly those scopes for the guard. Being
     stricter one level up and laxer one level down is how the same defect walks back in.
 
+    ⛔ NESTED SCOPES AND DEAD BRANCHES ARE NOT EVIDENCE. This is the walk the GUARD arm
+    uses (`_reachable_ifs` prunes nested scopes for the same reason), and the STORE and
+    EXIT arms judge with `_unconditional_walk`, which prunes one layer further: a store or
+    an exit behind a LIVE nested condition is unproven, not proven. `_own_walk` survives
+    only where finding ANY node is the fail-closed direction — see `_is_write_stop_exit`'s
+    "does this return's value call anything" question, where a call hidden behind a
+    short-circuit or a conditional expression still means the return carries a write.
+
     ⛔ AND THE SAME ARGUMENT APPLIES ONE ARM OVER, to a statically dead BRANCH. The GUARD
     walk already drops `if False:` / `while False:` (`_statically_falsy`), but the STORE and
     EXIT walks did not — so
@@ -545,6 +575,64 @@ def _own_walk(node):
         if isinstance(current, ast.If | ast.While) and _statically_falsy(current.test):
             stack.extend(current.orelse)      # the dead BODY is not evidence; `else` is live
             continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def _unconditional_walk(node):
+    """`_own_walk`, but a NESTED CONDITIONAL is not evidence — only what always runs is.
+
+    ⛔ THE THIRD LOOSENESS IN THE SAME PLACE, and the one the earlier fixes missed. Pruning
+    nested SCOPES (`_own_walk`) and statically DEAD branches (`_statically_falsy`) still
+    left a *live* nested condition certifying an arm:
+
+        if not _derived_mirror_required("object"):
+            if DEBUG:                    # live condition, not a constant
+                raise                    # ⇒ certified write-stopped
+        props["embedding"] = vec         # ⇒ runs whenever DEBUG is false
+
+    and its mirror on the store arm (`if gate(l): if flag: embedding = encode()`) — both
+    fail-OPEN, and the exit arm's answer is the sole fact that authorises deleting the only
+    readable copy of a fingerprint. `#13647`'s round-3 P1 is exactly this shape; the
+    docstring's declared residuals named nested scopes, dead code and ordering, NOT
+    conditional descent, so it was an undeclared hole rather than an accepted residual.
+
+    So this walk descends ONLY through nodes that always execute between it and the leaf:
+    a `with` body, and a `try`'s body/finally. It STOPS at every construct whose child may
+    not run — `If`/`While`/`For` (only the test/iterable is evaluated, so only that is
+    walked), `IfExp`, comprehensions, `match` cases, exception handlers, a `try`'s `orelse`
+    — and at every nested scope, as `_own_walk` does.
+
+    ⛔ NOT USING IT IS FAIL-OPEN, so this is not merely "stricter": with the arm's action
+    behind a condition we cannot decide, the honest answer is *unproven*, and an unproven
+    write-stop must leave the destructive strip refused. Missing a store that IS
+    unconditional would also refuse (the arm does not certify), which is the same safe
+    direction — this walk can only ever make the gate harder to open, never easier.
+    """
+    import ast
+
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+                      | ast.ClassDef):
+            continue
+        if isinstance(current, ast.If):
+            stack.append(current.test)        # the test runs; neither arm is guaranteed
+            continue
+        if isinstance(current, ast.While):
+            stack.append(current.test)
+            continue
+        if isinstance(current, ast.For | ast.AsyncFor):
+            stack.append(current.iter)        # the iterable runs; the body may not
+            continue
+        if isinstance(current, ast.IfExp | ast.ListComp | ast.SetComp | ast.DictComp
+                      | ast.GeneratorExp | ast.Match):
+            continue                          # conditional / repeated / pattern-selected
+        if isinstance(current, ast.Try | getattr(ast, "TryStar", ast.Try)):
+            stack.extend(current.body)        # unconditional up to a raise…
+            stack.extend(current.finalbody)   # …and `finally` always runs
+            continue                          # handlers and `orelse` may never run
         stack.extend(ast.iter_child_nodes(current))
 
 
@@ -764,7 +852,7 @@ def _stores_embedding(node) -> bool:
     """
     import ast
 
-    for sub in _own_walk(node):
+    for sub in _unconditional_walk(node):
         if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign):
             value = sub.value
             # A Cypher clause is a store whatever it is assigned to: the property is set
@@ -825,7 +913,7 @@ def _removes_embedding(node) -> bool:
     """
     import ast
 
-    for sub in _own_walk(node):
+    for sub in _unconditional_walk(node):
         if isinstance(sub, ast.Delete):
             # `del props["embedding"]` — an unambiguous, decided removal.
             if any(isinstance(target, ast.Subscript) and _names_embedding(target)
@@ -1111,14 +1199,22 @@ def digest(entries: list[tuple[str, Any]]) -> str:
       so a collision is a set the human did not approve being executed as if it were.
       Length framing makes an embedded separator unrepresentable rather than unlikely.
     """
+    # ⛔ DEDUPE ON THE FRAME, NOT ON PYTHON VALUE EQUALITY. `set(entries)` treated
+    # `(Object, 1)` and `(Object, 1.0)` as ONE row (`1 == 1.0`, same hash), so one of two
+    # genuinely different identity values was silently dropped — and WHICH survived
+    # depended on insertion order, so the same set could digest two ways and a stale-plan
+    # check could pass over drift. The frame is TYPE-TAGGED, so a typed key and its
+    # rendering, and an int and a float, are distinct rows. The SORT key stays the raw
+    # value, so an all-string population still orders exactly as before and every
+    # string-only plan re-derives byte-identically.
+    rows: dict[tuple[str, str], tuple[str, Any]] = {}
+    for label, key in entries:
+        rows.setdefault((label, _digest_key(key)), (label, key))
     body = "\n".join(
         f"{len(label)}:{label}{_digest_key(key)}"
-        # `identity_sort_key`, not the bare tuple: an integer key and a string key in one
-        # label cannot be compared, and the ORDER here is only canonicalisation — the
-        # frame is what makes a row unambiguous. String-only sets order exactly as before.
-        for label, key in sorted(set(entries),
-                                  key=lambda entry: (entry[0],
-                                                     parity.identity_sort_key(entry[1]))))
+        for label, key in sorted(rows.values(),
+                                 key=lambda entry: (entry[0],
+                                                    parity.identity_sort_key(entry[1]))))
     return "sha256:" + hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -1289,12 +1385,28 @@ def _load_plan(path: str, confirmed: str) -> dict:
     # `plan_entries` calls itself "the approved node set" and `execute` strips exactly
     # those lists. Re-deriving the digest FROM the lists is what makes that claim true.
     try:
-        recomputed = digest(plan_entries(plan))
+        entries = plan_entries(plan)
+        recomputed = digest(entries)
     except Exception as exc:
         raise Refusal(
             REFUSE_PLAN_UNREADABLE,
             f"the plan's per-label key lists could not be read as an entry set "
             f"({type(exc).__name__}: {exc}). Nothing was removed.") from exc
+    # ⛔ A DUPLICATE NODE ROW — the same label AND identity twice — is the duplicate-label
+    # defect one level down, and it is invisible to the digest for the same reason: the
+    # digest describes a distinct SET while `expected` counts ENTRIES, so a plan could
+    # claim more nodes than the set it was approved for, and the removal would strip the
+    # same key twice. Measured against the FRAME, not the raw value: `1` and `1.0` are
+    # equal under Python `==` but are two identities the removal matches separately.
+    framed = [(label, _digest_key(key)) for label, key in entries]
+    repeated = sorted({label for label, frame in framed if framed.count((label, frame)) > 1})
+    if repeated:
+        raise Refusal(
+            REFUSE_PLAN_UNREADABLE,
+            f"the plan names the same node more than once on {', '.join(repeated)}. A "
+            "digest describes a SET, so duplication cannot be seen in it — while the "
+            "expected count would exceed the set it describes. Re-plan. Nothing was "
+            "removed.")
     # ⛔ A DUPLICATE LABEL ROW is invisible to the digest (`sorted(set(entries))`) and makes
     # the removal strip the same label twice with a reset counter. Refused here because a
     # plan this tool did not print is not the approved artefact.
@@ -1437,6 +1549,13 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
 
     removed: dict[str, int] = {}
     shortfalls: dict[str, int] = {}
+    #: Removal statements ISSUED so far, across every label. ⛔ THIS, not
+    #: `sum(removed.values())`, decides exit 2 vs exit 6: the returned row counts answer
+    #: "how many rows the driver reported", and a batch that LANDED can return no row
+    #: (`result_set` empty) — so a count-based token could assert "NO node was stripped"
+    #: over a part-stripped graph. What is knowable without the store is whether any
+    #: EARLIER statement completed, and that is what the two tokens promise.
+    attempted = 0
     for row in plan["labels"]:
         label = row["label"]
         # ⛔ THE APPROVED KEYS, not a fresh read of the table. The digest above already
@@ -1465,33 +1584,35 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
                 # the shortfall is then reported as a concurrent writer.
                 f"WHERE n.embedding IS NOT NULL AND n.{quoted_key} IN $keys "
                 "REMOVE n.embedding RETURN count(n)")
+            attempted += 1
             try:
                 result = g.query(statement, params={"keys": chunk})
                 seen = int(result.result_set[0][0]) if result.result_set else 0
             except Exception as exc:  # report, never swallow
-                # ⛔ THE COUNT DECIDES THE TOKEN, and getting this wrong is worse than not
-                # having the distinction at all. A first-chunk failure — the state a store
-                # wedge, a timeout or a `--batch` too large for the driver actually
-                # produces — has removed NOTHING, so exit 2 is exactly true and a retry is
-                # safe. Only a failure AFTER at least one batch landed is part-stripped.
-                # Claiming "part-stripped" on the zero case teaches an operator to distrust
-                # exit 6 on the one occasion it matters.
-                stripped = sum(removed.values())
-                if stripped == 0:
+                # ⛔ THE ATTEMPTED COUNT DECIDES THE TOKEN, and getting this wrong is worse
+                # than not having the distinction at all. A FIRST-statement failure — the
+                # state a store wedge, a timeout or a `--batch` too large for the driver
+                # actually produces — has no earlier batch that could have stripped
+                # anything, so exit 2 is true BY CONSTRUCTION and a retry is safe. Only a
+                # failure after at least one statement COMPLETED is potentially
+                # part-stripped. Claiming "part-stripped" on the zero case teaches an
+                # operator to distrust exit 6 on the one occasion it matters.
+                if attempted <= 1:
                     raise Refusal(
                         REFUSE_WRITE_ERROR,
                         f"the removal statement FAILED on {label} at offset {start} "
-                        f"({type(exc).__name__}: {exc}) and NO node was stripped — no "
-                        "batch had stripped anything before this failure, so nothing was "
-                        "removed and re-running once the store error is understood is "
-                        "safe.") from exc
+                        f"({type(exc).__name__}: {exc}) and it was the FIRST removal "
+                        "statement of the run — no earlier batch was issued, so nothing "
+                        "was removed and re-running once the store error is understood "
+                        "is safe.") from exc
                 raise Refusal(
                     REFUSE_WRITE_FAILED,
                     f"the removal statement FAILED on {label} at offset {start} "
-                    f"({type(exc).__name__}: {exc}). {stripped} node(s) were ALREADY "
-                    "STRIPPED before the failure — the graph is part-stripped, which is "
-                    "why this is not a plain refusal. Nothing further was removed; "
-                    "re-plan to see the current set.") from exc
+                    f"({type(exc).__name__}: {exc}). {attempted - 1} removal "
+                    "statement(s) had ALREADY COMPLETED before this failure, so the "
+                    "graph may be part-stripped, which is why this is not a plain "
+                    "refusal. Nothing further was removed; re-plan to see the current "
+                    "set.") from exc
             removed[label] += seen
             # `REMOVE` of an absent property is a no-op, so a shortfall is benign — but
             # it is also the signal that the population moved under us, so it is
@@ -1514,7 +1635,13 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
     # so an edited plan could declare the narrow scope it wants and publish exit 0 while the
     # other labels still hold their vectors — the same "a count/field a hand can edit"
     # defect this tool refuses to trust `total_nodes` for. The live census is a measurement.
-    served = set(live.get("declared_population") or ()) or set(plan.get("declared_population") or ())
+    # ⛔ THE LIVE CENSUS, AND ONLY IT. A `or set(plan.get("declared_population"))` fallback
+    # was here and re-admitted the hand-editable field this very comment forbids: on a
+    # live-census shape without the key, an EDITED plan's declaration produced
+    # `unmeasured_by_label = []` and exit 0 for a narrowed sweep. The fallback is now the
+    # module's own `RETIRED` population — a constant that cannot be edited into a plan —
+    # so an absent key refuses to claim the sweep covered everything.
+    served = set(live.get("declared_population") or ()) or {r[1] for r in parity.RETIRED}
     unmeasured = sorted(served - {row["label"] for row in plan["labels"]})
     if unmeasured:
         sys.stderr.write(
