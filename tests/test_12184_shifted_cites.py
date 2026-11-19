@@ -121,8 +121,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is a docstring line at this
-    # head, at `f07b73b1de` and on `origin/main`, where the statement is `:57387` (the `#13550` /
-    # `#13584` integration inserted 186 lines above it, and later merges 111 more — 297 in all).
+    # head and on `origin/main`, where the statement is `:57387` (the `#13550` / `#13584`
+    # integration inserted 186 lines above it, and later merges 111 more — 297 in all). ⛔ AND EACH
+    # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
+    # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57387` is
+    # NOT that head's), and `57276 + 111 = 57387` is `origin/main`'s and this head's. Measured per
+    # head with `git show <rev>:tortoise/sdk.py | grep -n 'entity_type="event"'` — an earlier cut of
+    # this comment named `:57387` for BOTH heads and so contradicted its own 186 (#13750 review).
     # A cite re-derived before a merge is stale after it, which is D5's own rule; the pin is what
     # makes the next one red instead of silent.
     # ⚠️ This branch's own `#5425` seam wrap sits ABOVE this cite and is written LINE-COUNT NEUTRAL
