@@ -483,6 +483,35 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
     assertEq(status, 404, `${from} is a 404 on the product host, never a 301 onto a 404`);
     assertEq(location, null, `${from} on the product host emits no Location`);
   }
+  // ⛔ AND THE OTHER HOST'S HALF: the committed `website/_redirects` twins. The arms
+  // above walk the PRODUCT host, where `ROOT_PAGE` answers BEFORE the asset router
+  // ever reads `_redirects` — so none of them can see the two rows this page's
+  // spellings actually depend on. Measured on the head before this arm existed:
+  // retarget `/tortoise-for-product-teams.html` to `/nowhere-at-all` in `_redirects`
+  // and every arm above (and this whole suite) stayed GREEN, while the COMPANY host
+  // answered a browser-persistent 301 onto a 404. That is the mutant the review at
+  // `da1ab1c1` recorded as the evidence for this gap, and it survived the first fix
+  // because only the product-host walk was added; with this arm it reds.
+  //
+  // Derived from `ROOT_PAGE` + the committed file rather than listed here, for the same
+  // reason as the population arm above: a new member must bring its twins, and a twin
+  // must keep a row AND land on the canonical 200 in the same deploy.
+  const rootPageCanonical = [
+    ...new Set([...rootPageSet].map((m) => m.replace(/\.html$/, "").replace(/\/$/, ""))),
+  ];
+  for (const canonical of rootPageCanonical) {
+    for (const twin of [`${canonical}.html`, `${canonical}/`]) {
+      assert(
+        COMMITTED_REDIRECTS.has(twin),
+        `website/_redirects has no row for ${twin} — the canonical form is ` +
+          `${canonical}, so this spelling is a second indexable 200 on the company host ` +
+          `(the duplicate address #11762 removed for every other page)`,
+      );
+      await assertOneHop(`https://${COMPANY}${twin}`, {
+        expectLocation: `https://${COMPANY}${canonical}`,
+      });
+    }
+  }
 
   // ⛔ THE CRAWLER SURFACE IS NOT A PAGE (#11766). `robots.txt` and the sitemaps are root
   // ASSETS, so without an explicit branch the retired host falls through to the asset
