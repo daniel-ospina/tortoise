@@ -741,6 +741,27 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
         )
         assert EmbeddingModel.load_attempt_in_flight() is False
 
+    def test_a_reset_drops_the_dead_attempts_bound_too(
+            self, monkeypatch, clean_embedder):
+        """The attempt's own bound must not outlive the attempt (#13819 review).
+
+        `_reset()` clears the record of a DEAD attempt; the bound recorded with
+        that attempt is part of the record, or a later snapshot quotes a stale
+        override that no longer applies. Nothing pinned the line, so deleting it
+        left the whole file green — measured, not assumed.
+        """
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_thread", None)
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_timeout_s", 7.0)
+
+        EmbeddingModel._reset()
+
+        _in_flight, elapsed, bound = EmbeddingModel.load_attempt_snapshot()
+        assert (_in_flight, elapsed) == (False, None)
+        assert bound == EmbeddingModel._LOAD_TIMEOUT_S, (
+            f"a dead attempt's bound ({bound!r}s) outlived `_reset()` — the next "
+            f"diagnosis would quote it as the bound in force"
+        )
+
     def test_a_live_attempt_survives_a_reset(self):
         """The mirror of the assertion above: a live importer is not reset away.
 

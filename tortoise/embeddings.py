@@ -1104,13 +1104,12 @@ class EmbeddingModel:
         bound_s)`` (#13819 review F1).
 
         Every reader used to take its own reading of the thread. ``status()`` in
-        particular called :meth:`load_attempt_in_flight` and then
-        :meth:`load_attempt_elapsed_s` — which reads the thread a SECOND time —
-        so a loader that died between the two reads published
-        ``load_in_progress: true`` beside ``load_in_progress_s: null``: a pair no
-        state of the machine produces, on the very instrument #13674 exists to
-        make readable. Taking one snapshot makes the published fields one
-        reading, not two.
+        particular read it once for ``load_in_progress`` and then AGAIN (through
+        a helper) for ``load_in_progress_s``, so a loader that died between the
+        two reads published ``load_in_progress: true`` beside
+        ``load_in_progress_s: null``: a pair no state of the machine produces, on
+        the very instrument #13674 exists to make readable. This snapshot is the
+        ONLY reader, so the published fields are one reading, not two.
         """
         thread = cls._load_attempt_thread
         started = cls._load_started_at
@@ -1133,24 +1132,6 @@ class EmbeddingModel:
         keeps importing, so a retry saw "no instance" and allocated again.
         """
         return cls.load_attempt_snapshot()[0]
-
-    @classmethod
-    def load_attempt_elapsed_s(cls) -> float | None:
-        """Seconds the IN-FLIGHT load attempt has been running, else ``None``.
-
-        #13674's other half: ``load_in_progress`` says an attempt EXISTS, but a
-        bool cannot answer the question an operator actually has — *how far into
-        its bound is it?* An attempt at 4 s of 300 is early in a 156.5 s cold
-        import and worth waiting for; one at 290 s is about to be abandoned.
-        Without this the bound is only observable AFTER it fires, which is the
-        #1349 failure class.
-
-        ``_load_started_at`` is deliberately not read on its own: it survives the
-        attempt that wrote it, so a finished load would otherwise report a
-        growing "in-progress" time forever. The THREAD is the authority here,
-        exactly as it is for the reclaim guard (``load_attempt_in_flight``).
-        """
-        return cls.load_attempt_snapshot()[1]
 
     @classmethod
     def _describe_load_attempt(cls, snapshot: "tuple[bool, float | None, float] | None" = None) -> str:  # noqa: UP037
@@ -1821,12 +1802,22 @@ class EmbeddingModel:
         # `get()` (or the next reset+attempt in a fresh test) see "still
         # running" forever. Clear the whole attempt on a dead thread; keep it
         # while it is alive.
-        attempt = cls._load_attempt_thread
-        if attempt is None or not attempt.is_alive():
-            cls._load_attempt_thread = None
-            cls._load_attempt_abandoned = None
-            cls._load_started_at = None
-            cls._load_attempt_timeout_s = None
+        #
+        # ⛔ UNDER THE SAME LOCK the attempt is PUBLISHED under (`get()` holds
+        # it across the `cls(load_timeout=…)` call, i.e. across `__init__`'s
+        # write). Clearing outside it left a window in which a reset could read
+        # a thread published-but-not-yet-started (`is_alive()` False), drop the
+        # record, and leave a LIVE loader with no reference — the reclaim guard
+        # disarmed, and `load_attempt_snapshot()` publishing
+        # `load_in_progress: true` beside `load_in_progress_s: null`, the very
+        # torn pair it exists to prevent (#13819 review).
+        with cls._lock:
+            attempt = cls._load_attempt_thread
+            if attempt is None or not attempt.is_alive():
+                cls._load_attempt_thread = None
+                cls._load_attempt_abandoned = None
+                cls._load_started_at = None
+                cls._load_attempt_timeout_s = None
         cls._load_elapsed_s = None
         # #13224: re-arm the cold-write latch, so a test that resets the
         # embedder to observe a cold window gets its own line rather than
