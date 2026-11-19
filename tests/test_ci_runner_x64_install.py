@@ -6290,9 +6290,9 @@ def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_pat
     """rc=0 on a target that never had a `.d` directory — and the teardown is not even INVOKED.
 
     ⛔ THE rc=0 IS NOT THE GUARD'S DOING, and this arm used to assert NOTHING ELSE: `sudo rm -f` on an
-    absent path exits 0 and the `rmdir` ENOENT is swallowed by the `2>/dev/null || true` already on
-    that line, so deleting `[ -d "$UNIT_DIR/$unit.d" ] || return 0` left the old assertion GREEN — a
-    proven-green mutant. It pinned "uninstall exits 0", which was equally true before this PR, when
+    absent path exits 0, and nothing in the function lets `rmdir`'s ENOENT become the exit code — the
+    terminal `return 0` decides it (measured: delete the `|| true` as well and it still reports 0), so
+    deleting `[ -d "$UNIT_DIR/$unit.d" ] || return 0` left the old assertion GREEN — a proven-green mutant. It pinned "uninstall exits 0", which was equally true before this PR, when
     no drop-in code existed at all. What the guard actually buys is that a box with nothing of ours to
     remove runs no `sudo` and no `rmdir`, so THAT is what is asserted here, and it is the thing that
     reddens when the guard is deleted (mutant: drop the `[ -d ]` line ⇒ `sudo rm -f` and `sudo rmdir`
@@ -6324,6 +6324,76 @@ def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_pat
     assert not tried, (
         f"the teardown tried to remove a drop-in that cannot exist on this target: {tried}"
     )
+
+
+def test_the_missing_dot_d_mechanism_is_named_as_the_terminal_return_not_the_rmdir_flag():
+    """⛔ THE MECHANISM, NOT JUST THE OUTCOME — the false answer that survived four review cycles.
+
+    `remove_unit_dropin` reports 0 on a target with no `.d/` because its LAST statement is `return 0`
+    under `set -uo pipefail` (no `-e`): a failing `rmdir` does not terminate the function, and the
+    terminal `return 0` then decides the status. NOT because the status is normalised by the `|| true`
+    on the `rmdir` line — measured, deleting the `[ -d ]` guard AND the `|| true` still reports 0, so
+    the flag is not load-bearing and a reader taught that it is cannot tell a real change to the exit
+    code from a cosmetic one.
+
+    The arm above and this plan's step 13 both stated the FLAG as the mechanism while the installer
+    comment and the plan's next clause stated the terminal return — two artifacts, two answers, one
+    behaviour. Nothing pinned either, which is why the answer that refuted itself two lines above it
+    outlived four review cycles. This arm keeps it from coming back to either file.
+    """
+    src = (REPO_ROOT / "tools" / "install-ci-runner-x64.sh").read_text().splitlines()
+    start = next(
+        (i for i, line in enumerate(src) if line.startswith("remove_unit_dropin() {")), None
+    )
+    assert start is not None, (
+        "`remove_unit_dropin` is gone from the installer — re-anchor this pin rather than deleting it"
+    )
+    end = next(i for i in range(start, len(src)) if src[i] == "}")
+    body = [ln.strip() for ln in src[start:end] if ln.strip() and not ln.strip().startswith("#")]
+    # The prose's whole premise: the mechanism is the TERMINAL `return 0`, and the `|| true` rides the
+    # `rmdir` line it is measured against. If either moves, every artifact in this PR is stale.
+    assert body[-1] == "return 0", (
+        "the terminal `return 0` is the mechanism these artifacts name — if it moved, re-derive the "
+        f"prose rather than deleting this pin: {body[-3:]!r}"
+    )
+    assert any("rmdir" in line and line.endswith("|| true") for line in body), (
+        f"the `|| true` this prose measures no longer rides the `rmdir` line: {body!r}"
+    )
+
+    plan = (
+        REPO_ROOT
+        / "docs"
+        / "plans"
+        / "2026-11-19-issue-13774-runner-unit-restart-and-memory-bound.md"
+    ).read_text().splitlines()
+    step = next((i for i, line in enumerate(plan) if line.startswith("13. **Implement**")), None)
+    assert step is not None, (
+        "the plan no longer carries step 13 — re-anchor this pin rather than deleting it"
+    )
+    step_end = next(
+        (i for i in range(step + 1, len(plan)) if plan[i].startswith("14. **Implement**")), len(plan)
+    )
+    texts = {
+        "the no-`.d/` arm's docstring": (
+            test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure.__doc__ or ""
+        ).splitlines(),
+        "the plan's step 13": plan[step:step_end],
+    }
+    for where, lines in texts.items():
+        # ⛔ THE ATTRIBUTION, not the literal: step 13 legitimately prints the flag in its MEASUREMENT
+        # ("delete the guard AND the `2>/dev/null || true` and it STILL reports 0"). What is false is
+        # naming the flag as the thing that SWALLOWS the ENOENT / normalises the status.
+        offenders = [
+            ln.strip()
+            for ln in lines
+            if "`2>/dev/null || true`" in ln and "swallow" in ln.lower()
+        ]
+        assert not offenders, (
+            f"{where} names `2>/dev/null || true` as the mechanism that keeps the status at 0 — it "
+            "does not: the terminal `return 0` does (measured, delete the guard AND the `|| true` "
+            "and the uninstall STILL reports 0). Name the terminal `return 0`, and `rmdir`'s "
+            f"`|| true` separately, as the installer comment does: {offenders!r}"
+        )
 
 
 def test_a_dropin_that_cannot_be_removed_is_an_operation_failure_not_a_clean_uninstall(

@@ -103,7 +103,8 @@ aggregate. Stated here, in R4 and in the runbook step.
     case ends in `return 0`
     (measured — delete the guard and the uninstall still reports 0; delete the guard AND the
     `2>/dev/null || true` and it STILL reports 0), so the guard only saves a `sudo` on a target with
-    nothing of ours, while `2>/dev/null || true` swallows `rmdir`'s ENOENT for a `.d/` that is already gone; and the verify step is
+    nothing of ours, and on a `.d/` that is already gone `2>/dev/null` silences only `rmdir`'s ENOENT
+    MESSAGE — it is the terminal `return 0`, NOT the `|| true`, that keeps the status at 0; and the verify step is
     what stops the same flag from swallowing our own failed `rm`. The orphan-unit branch (`:1558-1561`) does the same
     and its printed remedy (`sudo rm -f $UNIT_DIR/$u`) is extended to name the drop-in
     **[cycle-3 fix: `ENOENT` is not ignored by that flag; and add the no-`.d/` case to step 7's arm]**.
