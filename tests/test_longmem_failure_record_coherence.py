@@ -136,9 +136,15 @@ def test_a_deterministic_bug_stays_excluded():
 #: key, an ACL that will refuse the same way forever, a command the server does
 #: not have) or because it is raised by redis-py's ENCODER before a byte is
 #: sent (``DataError``). Every row still grades ``ingest:retries_exhausted``,
-#: because ``eval_failure_class`` widens every non-HTTP, non-transport
-#: exception at the ingest site — so the CLASS cannot separate them from the
-#: smoke's abort, and the ``infra_failure`` gate is the only thing that can.
+#: because these four all reach ``classify_llm_error`` as ``unknown`` (they are
+#: redis exceptions, so none of them is HTTP/transport/URLError) and
+#: ``eval_failure_class`` converts ``unknown`` to ``retries_exhausted`` at any
+#: site — so the CLASS cannot separate them from the smoke's abort, and the
+#: ``infra_failure`` gate is the only thing that can. ⚠️ It is NOT a general
+#: rule that "everything non-HTTP, non-transport widens": ``classify_eval_error``
+#: takes a ``parse`` pre-branch for ``KeyError``/``ValueError``/``TypeError``,
+#: and ``parse`` does not convert — at ingest it becomes the bare ``ingest``
+#: veto, which is what ``test_a_permanent_class_is_never_retryable`` asserts.
 DETERMINISTIC_REDIS_REFUSALS = [
     ("wrongtype", redis_exc.ResponseError(
         "WRONGTYPE Operation against a key holding the wrong kind of value")),
