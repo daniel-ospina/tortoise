@@ -652,7 +652,7 @@ def record_population_vectors(ids: list[str], scope, record_dsn: str | None) -> 
     table, id_column = LABEL_SERVED["point"][:2]
     try:
         conn = open_record(record_dsn)
-    except Exception:  # noqa: BLE001 — unmeasurable, not zero
+    except Exception:  # unmeasurable, not zero
         return None
     try:
         cur = scope_connection(conn, scope.org_id)

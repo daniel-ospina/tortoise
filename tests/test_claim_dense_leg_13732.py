@@ -384,18 +384,17 @@ class TestRefusals:
         # function is `record_writer`'s, and asking `record_vector` (or an alias
         # of it) for it is the AttributeError. A text pin alone missed an alias.
         off_module = [
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.Attribute) and n.attr == "record_dsn"
+            n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "record_dsn"
         ]
         assert not off_module, [ast.dump(n)[:80] for n in off_module]
         assert "from tortoise.record_writer import" in source
         run = next(
-            n for n in ast.walk(tree)
+            n
+            for n in ast.walk(tree)
             if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
         )
         assert any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-            and n.func.id == "_resolve_dsn"
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_resolve_dsn"
             for n in ast.walk(run)
         ), "run_measurement must resolve the DSN through `_resolve_dsn`"
         monkeypatch.setenv("TORTOISE_RECORD_DSN", "")
@@ -537,9 +536,7 @@ class TestRecordMembership:
     def test_the_query_is_id_scoped_and_not_a_label_count(self, tool_mod, monkeypatch):
         cur = _FakeCursor((786,))
         monkeypatch.setattr("tortoise.record_serve.open_record", lambda *a, **k: _FakeConn(cur))
-        monkeypatch.setattr(
-            "tortoise.record_projection.scope_connection", lambda conn, org_id: cur
-        )
+        monkeypatch.setattr("tortoise.record_projection.scope_connection", lambda conn, org_id: cur)
         ids = self._ids(786)
         got = tool_mod.record_population_vectors(ids, self.SCOPE, "postgresql://u@h/db")
         assert got == 786
@@ -596,9 +593,7 @@ class TestRecordMembership:
         arms_loop = [
             n
             for n in ast.walk(run)
-            if isinstance(n, ast.For)
-            and isinstance(n.iter, ast.Name)
-            and n.iter.id == "ARMS"
+            if isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == "ARMS"
         ]
         assert arms_loop
         assert min(c.lineno for c in guard) < min(a.lineno for a in arms_loop)
