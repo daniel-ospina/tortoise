@@ -1959,6 +1959,38 @@ def _generator_unpacks_the_pair_into_the_key(key, generator) -> bool:
             and key.id == first.id)
 
 
+def _comprehension_bound_source_constants(source):
+    """The CONSTANT elements of a clause's source, behind the wrappers a refactor puts there.
+
+    The value-side rule needs the literal VALUES a clause iterates over, so it asks the same
+    wrapper vocabulary the pairs rule does rather than a second, weaker one (`#13788`,
+    measured by the review of this branch): a bare literal was answered while `[..., ][:]`
+    and `[*[...]]` were ACCEPTED — one transparent wrapper re-opening the hole the plain
+    spelling had just closed, the exact shape this branch's `.copy()` history records.
+
+    `_container_literal` supplies the `list(...)`/`tuple(...)`/full-slice arms; a SET literal
+    is added here (the pairs rule accepts one), and a `Starred` element splices another
+    sequence in (`[*["embedding"]]`), which is followed.
+
+    ⛔ A source that is not a literal this check can read returns () — the clause's source is
+    then unreadable and the caller's other arms, plus the disclosed residual, still apply.
+    """
+    import ast
+
+    literal = _container_literal(source)
+    if literal is None and isinstance(source, ast.Set):
+        literal = source
+    if literal is None:
+        return ()
+    found = []
+    for element in literal.elts:
+        if isinstance(element, ast.Starred):
+            found.extend(_comprehension_bound_source_constants(element.value))
+        elif isinstance(element, ast.Constant):
+            found.append(element)
+    return tuple(found)
+
+
 def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
     """Does this comprehension's produced KEY reference a name bound to the property?
 
@@ -1974,7 +2006,14 @@ def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
     (`for k, _i in [("embedding", 1)]`, `for _i, v in [(1, "embedding")]`). ⛔ IT MENTIONS AND
     IS NOT THE KEY, on purpose: `{f"{k}": _encode(ev) for k, _i in [("embedding", 1)]}`
     computes the same key and is the same store, and a `Name`-only version accepted it
-    (measured). The cost is the same over-refusal of a key that transforms the name AWAY
+    (measured). The source is resolved through `_comprehension_bound_source_constants`, which
+    is the same wrapper vocabulary the pairs rule uses — a bare literal answered while
+    `[..., ][:]` and `[*[...]]` were ACCEPTED (measured), one transparent wrapper re-opening
+    the hole the plain spelling had just closed. ⛔ THE STATED RESIDUAL IS A SOURCE THAT IS
+    ITSELF A COMPREHENSION — `{k: _encode(ev) for k in [x for x in ["embedding"]]}` is
+    ACCEPTED, because answering it means evaluating the inner clause, which is the same data
+    flow this module declines for a pairs sequence built by a call.
+    The cost is the same over-refusal of a key that transforms the name AWAY
     (`k.upper()`) that the unreadable-key term beside it already pays, and the doctrine permits
     it. A source this check cannot read answers False, and the caller's other arms still run.
     """
@@ -1984,25 +2023,33 @@ def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
     if not referenced:
         return False
     for generator in generators:
-        container = getattr(generator, "iter", None)
-        if not isinstance(container, ast.List | ast.Tuple | ast.Set):
-            continue
         target = getattr(generator, "target", None)
         if isinstance(target, ast.Name):
             if target.id in referenced and any(
                     isinstance(element, ast.Constant)
                     and element.value == EMBEDDING_PROPERTY
-                    for element in container.elts):
+                    for element in _comprehension_bound_source_constants(generator.iter)):
                 return True
             continue
         if not isinstance(target, ast.Tuple | ast.List):
             continue
+        literal = _container_literal(generator.iter)
+        if literal is None and isinstance(generator.iter, ast.Set):
+            literal = generator.iter
+        if literal is None:
+            continue
+        elements = []
+        for element in literal.elts:
+            if isinstance(element, ast.Tuple | ast.List):
+                elements.append(element)
+            elif isinstance(element, ast.Starred) and isinstance(
+                    element.value, ast.Tuple | ast.List):
+                elements.extend(element.value.elts)
         for index, bound in enumerate(target.elts):
             if not (isinstance(bound, ast.Name) and bound.id in referenced):
                 continue
-            for element in container.elts:
-                if (isinstance(element, ast.Tuple | ast.List)
-                        and index < len(element.elts)
+            for element in elements:
+                if (index < len(element.elts)
                         and isinstance(element.elts[index], ast.Constant)
                         and element.elts[index].value == EMBEDDING_PROPERTY):
                     return True

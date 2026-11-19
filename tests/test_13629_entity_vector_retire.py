@@ -5504,6 +5504,43 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE VALUE-SIDE TERM NEEDS THE WRAPPER VOCABULARY TOO (`#13788`, measured by the
+        # review of this branch). The bare literal was answered while one TRANSPARENT wrapper
+        # — the exact shape this branch's `.copy()` history records — re-opened the hole:
+        #
+        #     props |= {k: _encode(ev) for k in ["embedding"]}      <- refused
+        #     props |= {k: _encode(ev) for k in ["embedding"][:]}   <- ACCEPTED
+        #     props |= {k: _encode(ev) for k in [*["embedding"]]}   <- ACCEPTED
+        #
+        # A SET and a TUPLE source are refused too, so the row is not list-only.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ["embedding"][:]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in [*["embedding"]]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ("embedding",)}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {"embedding"}}
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
