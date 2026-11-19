@@ -283,12 +283,16 @@ _REAL_READ_TEXT = Path.read_text
 #:
 #: ⛔ ONE SUPERSET IS STILL GREEN, MEASURED, AND IS THE DECLARED RESIDUAL: `caller is
 #: _LABEL_HITS_CODE or self.suffix == ".py"` — a widening that re-admits every `.py`
-#: ambient read. Pinning it needs a fixture this file does not have: a `.py` file
-#: OUTSIDE the population, read by an ambient frame. Note the fixture difference, so a
-#: later reader does not reach for the wrong arm — the imposter above is a `.txt` and
-#: the staged stales are `.py`-free, so neither can pin this one, and the qualname arm
-#: that DOES reuse the imposter could not pin it either (`self` is the file read, not
-#: the caller). Named here so the next reader does not read this pin as total.
+#: ambient read (measured at this head: 48 passed, so no arm here can tell it from the
+#: shipped rule). ⛔ NOT because this file stages no `.py` outside the population: the
+#: drift arm's `inside_checkout` stale IS one (`tests/test_substrate_map.py`). That arm
+#: cannot pin the widening because BOTH its stales are read through `_label_hits`'s OWN
+#: frame, where `caller is _LABEL_HITS_CODE` already matches and a suffix disjunct adds
+#: nothing. The imposter arm's staged reads are both `.txt`, and reusing it would not
+#: help anyway: the rule tests `self`, the file READ, never the caller, so a
+#: frame-identity fixture cannot see a suffix disjunct. Pinning it needs a `.py` file
+#: OUTSIDE the population read by an AMBIENT frame — a fixture this file does not have
+#: yet. Named here so the next reader does not read this pin as total.
 _LABEL_HITS_CODE = _label_hits.__code__
 
 
