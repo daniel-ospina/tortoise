@@ -717,13 +717,6 @@ console.log("RESULT " + JSON.stringify(out));
 
 # ── the refusal PAGE contract (#10884 / #10865 arm B) ───────────────────────
 
-REFUSAL_REASONS = (
-    "consent_store_unavailable",
-    "session_store_unavailable",
-    "as_origin_misconfigured",
-    "flow_not_yours",
-)
-
 
 def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     """A hard failure of the carriage is a PAGE — with the status and the reason UNCHANGED.
@@ -1962,6 +1955,35 @@ def test_the_refusal_page_makes_NO_outbound_request_and_carries_no_referrer() ->
         assert (out.get("referrerPolicy") or "").lower() == "no-referrer", (opts, out.get("referrerPolicy"))
 
 
+def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
+    """The class, not the instances: a NEW refusal added as `json(...)` reds here.
+
+    The parametrised test enumerates the arms that exist TODAY. That is the right shape for
+    behaviour, and the wrong shape for the defect: the root of #10884/#10865 is "a hard failure of
+    this route was never given a face", so the next failure someone adds to `start.ts` would ship as
+    JSON again with every arm-specific test still green — nobody would have written an arm for it
+    yet. This guard counts the SHAPES instead, so the two numbers can only move together:
+
+      * every refusal returns `consentRefusalPage(...)` — five of them (four `503` reasons and the
+        `403`), and the count is asserted so deleting one is a failure rather than a quiet drop;
+      * `return json(` survives in exactly TWO places, and they are named: the `400` for an
+        unparseable authorize request (a caller error, not a carriage failure — it carries a
+        message the CLIENT shows) and the terminal `200` flow state, which is a decided outcome
+        rather than a refusal. The terminal arm still answers JSON to a browser and its comment
+        claims a page; that residual is recorded on the issues rather than changed here.
+    """
+    src = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
+    pages = re.findall(r"return consentRefusalPage\(", src)
+    jsons = re.findall(r"return json\(", src)
+    assert len(pages) == 5, (
+        f"`start.ts` renders {len(pages)} refusal page(s), not 5 — a refusal arm moved back to a "
+        "machine body, or a new one was added without a face (#10884/#10865)")
+    assert len(jsons) == 2, (
+        f"`start.ts` returns JSON from {len(jsons)} place(s), not the 2 accounted for — a hard "
+        "failure of the carriage is being answered with a JSON body again; render it with "
+        "`consentRefusalPage(...)` and keep the status (#10884/#10865)")
+
+
 def _key_from(location: str | None) -> str:
     """The attempt key the route handed back in its `/auth?next=` return target."""
     assert location, "the cold-browser leg must answer a redirect, not a body"
@@ -2338,11 +2360,19 @@ def test_start_validates_the_params_the_way_the_AS_will(broken: dict, needle: st
 def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> None:
     """#10790 review (P2): the residual's declared home must OUTLIVE the fold.
 
-    Both consent legs still answer a store fault with the raw
-    `503 consent_store_unavailable` JSON asserted above, on a blank page. That arm was
-    recorded on #10487 — which this fold CLOSES — so after landing the residual was
-    reachable only by someone who already knew to read a closed issue's comments.
-    Its open home is #10884, filed from that review.
+    Both consent legs still EMIT `consent_store_unavailable` when a store fault
+    raises. ⚠️ Read the biconditional for what it actually holds: it is the ARM
+    that is still emitted, not the raw body. Since #10884/#10865 arm B the
+    `start` leg renders that arm as a PAGE (`x-consent-refusal: …`, asserted by
+    `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`),
+    and the mint leg (`token.ts`) still answers JSON — deliberately, because the
+    AS page's `fetch()` is its reader and that page renders the human copy.
+    The CONDITION is what is unfixed: which store call raises is not
+    determinable from outside and needs `wrangler pages deployment tail`.
+
+    That arm was recorded on #10487 — which this fold CLOSES — so after landing
+    the residual was reachable only by someone who already knew to read a closed
+    issue's comments. Its open home is #10884, filed from that review.
 
     The assertion is a BICONDITIONAL so the guard cannot rot into a tautology either way:
 
@@ -2351,6 +2381,9 @@ def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> Non
     * the arm is FIXED and the docstring still declares it → RED (a stale claim pointing
       the next reader at a closed thread). Fixing the arm means updating the note here,
       and this test says so at the moment it happens.
+
+    ⛔ NOT a licence to re-point it: presenting the arm as a page does NOT fix the
+    fault, so this paragraph stays until the `503` condition itself does.
     """
     routes = CONSENT_DIR / "start.ts", CONSENT_DIR / "token.ts"
     arm_present = any(
