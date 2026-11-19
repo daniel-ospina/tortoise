@@ -3009,6 +3009,79 @@ def _reviewer_entry_point() -> str:
     return " ".join(block)
 
 
+def _reserved_members_paragraph() -> str:
+    """The manifest's `RESERVED for a decision...` paragraph (the members list), as one string.
+
+    Same reader shape as `_reviewer_entry_point` — from the paragraph's opening
+    until the next block separator (a bare `#`) — so it follows the file rather
+    than a line range that drifts under every edit above it.
+    """
+    lines = REAL_MANIFEST.read_text().splitlines()
+    heading = next(
+        (index for index, line in enumerate(lines) if "RESERVED for a decision" in line),
+        None,
+    )
+    if heading is None:
+        raise AssertionError(
+            "the manifest has no RESERVED-members paragraph — the probe is stale, and a "
+            "stale probe would pass vacuously"
+        )
+    block: list[str] = []
+    for line in [lines[heading], *lines[heading + 1:]]:
+        stripped = line.lstrip("#").strip()
+        if not stripped:
+            break
+        block.append(stripped)
+    return " ".join(block)
+
+
+def test_the_reserved_member_paragraph_names_every_fly_only_member():
+    """The OTHER paragraph that enumerates the `fly-only:` members (the uncovered twin).
+
+    The defect is read off the ARTIFACT, not off a review label: this manifest
+    declares a THIRD `fly-only:` member (`TORTOISE_EMBEDDER_WARMUP`, `#13674`)
+    while this paragraph still said the members are `#661` and `#13209`,
+    *"each with its own recorded ruling"* — false for a member whose ruling is
+    requested and not yet recorded, and contradicted by the `ENTRY-POINT FOR A
+    REVIEWER` paragraph a few lines below it, which names all three and says the
+    third is *not* pre-cleared. Two paragraphs about one set, disagreeing. The
+    same paragraph had already drifted once the same way (`#13209`'s commit
+    updated it when it added the second member), so prose is why it recurs: no
+    test read it, while the `ENTRY-POINT FOR A REVIEWER` paragraph beside it has
+    had a reader since `#13370`.
+
+    Both halves are derived FROM the manifest — never a list in the test: every
+    `fly-only:` member's issue REF must be named here (this paragraph names issues,
+    not variables), and the spelled-out count must equal the number of members. It
+    reds on the pre-fix paragraph in BOTH directions (the missing ref, and `TWO`
+    against three).
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    refs = sorted({source.split(":", 1)[1] for source in sources.values() if source.startswith("fly-only:")})
+    assert refs, "the shipped manifest declares no fly-only: name — the reader is wrong"
+
+    reserved = _reserved_members_paragraph()
+    missing = [ref for ref in refs if ref not in reserved]
+    assert not missing, (
+        "the manifest's RESERVED-members paragraph does not name every `fly-only:` "
+        "member's issue, so it states a membership set that is no longer true — and "
+        "its own sentence about the recorded rulings is then false for every member "
+        f"it omits: {missing}\n--- paragraph ---\n{reserved}"
+    )
+
+    number_words = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}
+    match = re.search(r"\b(ONE|TWO|THREE|FOUR|FIVE|SIX)\b\s+members?\b", reserved, re.IGNORECASE)
+    assert match, (
+        "the RESERVED-members paragraph no longer states how many members it is "
+        f"describing: {reserved!r}"
+    )
+    stated = number_words[match.group(1).upper()]
+    assert stated == len(refs), (
+        f"the RESERVED-members paragraph says {match.group(1).upper()} member(s), but the "
+        f"manifest declares {len(refs)} `fly-only:` issue ref(s): {refs}"
+    )
+
+
 def test_the_reviewer_entry_point_names_every_fly_only_member():
     """The entry point is the ONE place a reviewer learns which names are out of band.
 
