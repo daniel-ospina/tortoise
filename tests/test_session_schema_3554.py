@@ -3795,9 +3795,10 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     true prose, stated rather than glossed: the test reads the NEWEST block alone, which
     passes, and a lane sweeping the corpus should expect these two.
     ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT — the shapes MEASURED at this head, NOT an
-    enumeration of every way a label can render. Nine are fail-OPEN, which is the direction
-    that matters: an unread record, an unread HTML label, a label split across runs, a label
-    behind a table row, a label behind a thematic break, a label behind a fenced block, an
+    enumeration of every way a label can render. Eleven are fail-OPEN at this head, which is
+    the direction that matters: an unread record, an unread HTML label, a label split across
+    runs, a label behind a table row, a label behind a thematic break, a label behind a fenced
+    block, a label behind a setext heading, a label behind an indented code block, an
     entity-encoded space, a lead-in this arm's bounded rule does not spell and an id borrowed
     from a contrastive parenthetical all PASS, so this arm reduces the
     vacuity #13669 measured rather than ending it, and a reading this list does not name
@@ -3861,7 +3862,10 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         ``'**Owner approval …**'``) but NOT the INDENTED CODE BLOCK, whose delimiter is
         indentation and whose remedy is therefore UNMEASURED here. Neither has a fixture,
         which is why the class is stated as open: an unnamed kind is to be treated as
-        fail-OPEN.
+        fail-OPEN. ⛔ THE HEADER'S CENSUS CARRIES THIS NUMBER: adding a measured kind here
+        must move "Eleven" there too — this docstring has now grown a kind and left a count
+        behind THREE times ("the one block kind", then "the THREE BLOCK KINDS", then this),
+        so the two sentences are pinned to each other by this note and not by memory.
         The READING is what splits the PINNED shapes (⛔ NOT "all three give the label its
         own paragraph" — that reads as if every paragraph OPENS with the label, which is
         true only of the break and the fence): the BREAK and the FENCE make the label OPEN
