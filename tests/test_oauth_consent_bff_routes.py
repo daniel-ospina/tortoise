@@ -95,7 +95,8 @@ _RESOURCE = "cursor://tools.internal/v1"
 # parameter that can name one: `redirect_uri` accepts this exact shape — `consent-bridge.ts:64`
 # `NATIVE_REDIRECT_SCHEMES = ["cursor"]`, accepted at `:244-248` — because the beta's only native
 # harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED value
-# in `_CROSS_HALF_URIS` at `:1473`, the accepted row at `:1483`). `cursor://…` carries no
+# in `_CROSS_HALF_URIS`, at the `cursor://anysphere.cursor-mcp/oauth/callback` row). `cursor://…`
+# carries no
 # `http(s)://`, so it is invisible to the origin assertion AND absent from the scheme-less
 # `client.example/cb` tail row: a page that rendered it passed every assertion in
 # `_assert_refusal_page` GREEN (review of #13712, F1).
@@ -2149,76 +2150,43 @@ def test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left() -> None
 
 
 # ⛔ The DENIAL this PR exists to keep out of the contract artifacts: "every hard failure is a
-# page" — the claim `start.ts` falsifies with its two surviving `json(...)` returns. Matched as the
-# three words in order with ANY markup or whitespace between them, so the re-introduction cannot
-# evade the guard by wrapping the phrase, emphasising it, or hyphenating it.
+# page" — the claim `start.ts` falsifies with its two surviving `json(...)` returns.
+#
+# ⛔ THE PATTERN PINS THE PREDICATE, AND THAT IS THE WHOLE GUARD. Four revisions tried to match the
+# bare PHRASE and then EXEMPT the sentences where it is legitimate ("…answered raw JSON; two arms
+# still do"), and every one was defeated by ordinary English and each also false-blocked truthful
+# prose: a word list (`still`/`survives`/`remains`) exempted the absolute on "…is a page, and the
+# status is still unchanged"; requiring PAST framing plus a counted survivor exempted it again on
+# "…is a page; previously the two refusal arms returned JSON", while the same window cut at `e.g. `
+# and false-blocked 7 of 12 correct phrasings (review of #13712, F3/F4, and the independent pass on
+# `e13ae506`). A prose exemption is not a mechanical question, so THERE IS NONE HERE.
+#
+# What is matched instead is the absolute's own SPELLING: the phrase, then a present-tense copula
+# asserting a page. A denial has no copula-plus-page — "answered raw JSON", "still do" — so it
+# passes without any list of excuse-words, and an absolute fails however the author dresses it
+# (`**hard**`, a line break, a hyphen, "is presented as a page"). The cost is stated plainly rather
+# than hidden: the PAST-tense form ("every hard failure used to answer `json(...)`") does NOT match,
+# because it is not the retracted claim — and if it misleads anyone into converting the terminal
+# `200`, `test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left` reds on the ARM COUNT,
+# which no wording can defeat.
 #
 # `IGNORECASE` rather than a `.lower()` copy of the corpus: lowercasing is not length-preserving for
 # every character, and the assertion below QUOTES the span it matched out of the ORIGINAL text, so
 # an index taken from a lowered copy could quote a different span than the one that earned the red.
-_FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure", re.IGNORECASE)
-
-# ⛔ …but the PHRASE alone is not the defect, and matching it alone reddened the CORRECT form. The
-# sentence this change asks an author to write states the universal about the PAST and then names
-# what survives — "before #13671, every hard failure of this route answered raw JSON; two arms still
-# do" — and a phrase-only match failed it while reporting that the file "claims EVERY HARD FAILURE
-# is a page", the opposite of what that sentence says (review of #13712, F3).
-#
-# ⛔ AND THE EXEMPTION IS TWO CONDITIONS, NOT A WORD LIST. An earlier revision exempted any sentence
-# containing `still`, `survives` or `remains` — ordinary English, tied to nothing — so the absolute
-# went GREEN on sentences this repo actually writes: "every hard failure of this route is a page,
-# and the status is still unchanged", "…the no-store header survives", "…the CSP remains strict"
-# (review of #13712, F4; measured through these very patterns, not by inspection). A guard one
-# adverb defeats is not a guard. A sentence is exempt only when it BOTH states the universal in the
-# PAST — so it is a claim about what used to be true — AND names a COUNTED survivor, so the reader
-# is told what still answers JSON. Neither condition alone exempts anything.
-_SURVIVORS_NAMED_RE = re.compile(
-    r"\b(?:two|both|\d+)\b[^.\n]{0,40}\b(?:arms?|returns?|places?|browsers?)\b",
+_FALSE_ABSOLUTE_RE = re.compile(
+    r"every\W+hard\W+failure[^.\n;]{0,80}?\b(?:is|are|becomes?)\b[^.\n;]{0,30}?\bpages?\b",
     re.IGNORECASE)
-_PAST_UNIVERSAL_RE = re.compile(r"\b(?:used to|previously|before)\b", re.IGNORECASE)
-
-
-# A sentence ends at a `.` that whitespace follows (never at `start.ts` or `json({error, reason})`,
-# which carry no such pair), AND at a PARAGRAPH BREAK in either direction. The paragraph arm is not
-# decoration: a JSDoc blank line is ` *\n *\n`, never `\n\n`, so a `\n\n`-only head cut was dead in
-# every TS header it scans, and the tail had no paragraph arm at all — measured, a survivor named in
-# the NEXT PARAGRAPH of `consent-refusal.ts` exempted an absolute whose own sentence carried no
-# period (review of #13712, F3c). The head keeps its 240-character cap so a run-on paragraph cannot
-# hide the match behind a distant terminator; the tail gets the same cap rather than running on.
-_SENTENCE_BREAK_RE = re.compile(r"\.\s|\n\s*\n|\n[ \t]*\*[ \t]*\n")
-
-
-def _sentence_around(text: str, start: int, end: int) -> str:
-    """The sentence around `text[start:end]`, BOUNDED at both ends so a survivor named in a
-    different sentence — or a different PARAGRAPH — cannot exempt this one. Both directions use the
-    same breaks (`_SENTENCE_BREAK_RE`): a period that whitespace follows, a blank line, or a ` *`
-    line that is blank inside a JSDoc block. An unterminated span on either side stops at 240
-    characters rather than reaching across the document.
-    """
-    head = text[:start]
-    breaks = list(_SENTENCE_BREAK_RE.finditer(head))
-    begin = breaks[-1].end() if breaks else 0
-    stop = _SENTENCE_BREAK_RE.search(text, end)
-    finish = stop.end() if stop else min(len(text), end + 240)
-    return text[max(begin, start - 240):finish]
 
 
 def _false_absolute_in(text: str) -> str | None:
-    """The first false-absolute span in `text` that is NOT the correct form, or None.
+    """The first false-absolute span in `text`, or None.
 
-    A module-level helper so the exemption is exercised through THIS loop (finditer →
-    `_sentence_around` → both conditions) rather than through a retyped copy of it in the test that
-    pins the exemption's shape.
+    A module-level helper so the assertion and the committed table below exercise ONE definition
+    rather than a retyped copy of it. The span is quoted out of the ORIGINAL text (no lowered copy),
+    so the red names what the file actually says.
     """
-    for m in _FALSE_ABSOLUTE_RE.finditer(text):
-        sentence = _sentence_around(text, m.start(), m.end())
-        # BOTH, never either: without the past marker this is a present-tense absolute that merely
-        # mentions an adverb; without the counted survivor the reader is not told what still answers
-        # JSON (review of #13712, F4).
-        if _PAST_UNIVERSAL_RE.search(sentence) and _SURVIVORS_NAMED_RE.search(sentence):
-            continue
-        return text[m.start():m.end()]
-    return None
+    m = _FALSE_ABSOLUTE_RE.search(text)
+    return text[m.start():m.end()] if m is not None else None
 
 
 def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
@@ -2246,25 +2214,25 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     `"every hard failure"` passed all three, so a guard for a false absolute was defeatable by a
     line break (review of #13712, F3). `_FALSE_ABSOLUTE_RE` pins the PHRASE in any markup.
 
-    ⛔ AND THE PHRASE ALONE IS NOT THE DEFECT. It also appears in the sentence this change asks an
-    author to write — the universal stated about the PAST, with the survivors named ("before
-    #13671, every hard failure … answered raw JSON; two arms still do"). A phrase-only match failed
-    that sentence and reported that the file "claims EVERY HARD FAILURE is a page", the opposite of
-    what it says (review of #13712, F3). So a match is exempt only when its OWN sentence does BOTH
-    things — states the universal about the PAST and names a COUNTED survivor (`_PAST_UNIVERSAL_RE`
-    and `_SURVIVORS_NAMED_RE`, both required; review of #13712, F4 measured a one-word list being
-    the whole exemption and defeatable by "…is a page, and the status is still unchanged") — and the
-    message QUOTES the span it matched, so a red can no longer be read as a claim about a sentence
-    nobody wrote.
+    ⛔ AND IT PINS THE PREDICATE RATHER THAN EXEMPTING SENTENCES. Four revisions matched the bare
+    phrase and then excused the legitimate "…answered raw JSON; two arms still do" by inspecting the
+    same sentence; each excuse was a word list, each was defeated by ordinary English ("…is a page,
+    and the status is still unchanged"; "…is a page; previously the two refusal arms returned
+    JSON"), and each false-blocked truthful prose. There is NO exemption here: a denial carries no
+    present-tense copula asserting a page, so it passes structurally, and the absolute fails however
+    it is dressed. The measured boundary is that the PAST-tense retelling ("every hard failure used
+    to answer `json(...)`") is not matched — it is not the retracted claim, and the consequence it
+    could invite is caught mechanically by
+    `test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`, which counts ARMS.
 
-    Non-vacuous, and where the red actually lands: `origin/main`'s
-    `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
-    answer `json({error, reason})`" — the sentence this change rewrites — so reverting that hunk
-    REDS this guard. ⛔ It does NOT red on a `start.ts` header carrying the absolute: no header of
-    that file ever read `**Every hard failure is a PAGE, not a JSON blob**` (`git log -S 'Every
-    hard failure' -- …/api/consent/start.ts` is empty, and main's header already says "Every
-    REFUSAL is a PAGE"), so `consent-refusal.ts` is the real pre-fix red and the only provenance
-    this docstring may claim.
+    Non-vacuous, and where the red actually lands: every scanned file is CORRECT at this head
+    (`git grep -i 'every hard failure'` hits only this test module), so all three rows are
+    FORWARD-LOOKING — they hold the next author who writes the absolute. The red today is proved by
+    mutant, not by a live defect: injecting `Every hard failure of that route is a page.` into
+    `consent-refusal.ts` REDS here, and wrapping, emphasising or hyphenating it does not evade it.
+    ⛔ It does NOT red on a `start.ts` header: no header of that file ever read `**Every hard failure
+    is a PAGE, not a JSON blob**` (`git log -S 'Every hard failure' -- …/api/consent/start.ts` is
+    empty, and main's header already says "Every REFUSAL is a PAGE").
     """
     corpus = {
         "start.ts": (CONSENT_DIR / "start.ts").read_text(encoding="utf-8"),
@@ -2280,64 +2248,76 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
         if span is None:
             continue
         raise AssertionError(
-            f"`{name}` states the absolute: it says {span!r} and names nothing that still answers "
-            "JSON, while `start.ts` returns JSON from TWO places (the `400` caller error and the "
-            "terminal `200` flow state — see "
+            f"`{name}` states the absolute: it says {span!r}. `start.ts` returns JSON from TWO "
+            "places (the `400` caller error and the terminal `200` flow state — see "
             "`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`). Say every "
-            "REFUSAL, or state the universal about the PAST and count the survivors (\"before "
-            "#13671, every hard failure … answered raw JSON; two arms still do\"): the terminal "
-            "`200` is #10865's recorded decision, and a summary that denies it invites converting "
-            "it.")
+            "REFUSAL: the terminal `200` is #10865's recorded decision, and a summary that denies "
+            "it invites converting it.")
 
 
-def test_the_summary_guard_exempts_ONLY_a_past_universal_with_a_COUNTED_survivor() -> None:
+def test_the_summary_guard_pins_the_PRESENT_TENSE_absolute_and_needs_NO_word_list_exemption() -> None:
     """A guard that fails OPEN on one word is worse than no guard: it reads as coverage.
 
-    Measured at `bf5202ce79` (review of #13712, F4): the exemption was a WORD LIST, so any `still` /
-    `surviv…` / `remains?` anywhere in the match's own sentence exempted the exact denial the guard
-    exists to stop — “the consent cookie is still set before the flow starts” was enough. The
-    exemption is now two required conditions (a PAST-framed universal AND a counted, named survivor),
-    and this table runs through the guard's OWN loop — `_false_absolute_in` →
-    `_FALSE_ABSOLUTE_RE.finditer` + `_sentence_around` + both patterns — never a retyped copy of it.
+    Measured, three revisions running (review of #13712, F4, and the independent pass on
+    `e13ae506`): every attempt to EXEMPT the legitimate denial by inspecting the same sentence
+    failed open on ordinary English — a bare word list on "…is a page, and the status is still
+    unchanged", then PAST-framing plus a counted survivor on "…is a page; previously the two
+    refusal arms returned JSON" — while the same window false-blocked 7 of 12 truthful phrasings
+    (`e.g.`/`i.e.` cut the window; `until`, "the 400 and the terminal 200", and "two of them"
+    counted as nothing). The exemption is GONE: the pattern pins the absolute's own spelling (phrase
+    + present-tense copula asserting a page), so a denial passes structurally and no excuse-word can
+    be reached for.
 
-    ⛔ WHY A COMMITTED TABLE, when the exemption had already been measured by hand twice: a
-    measurement that lives only in a commit message is the “reads as coverage it does not have”
-    pattern this PR has corrected twice (review of #13712). The rows below ARE the measurement, and
-    they are executable.
+    ⛔ WHY A COMMITTED TABLE rather than a hand measurement: a count that lives only in a commit
+    message is the "reads as coverage it does not have" pattern this PR has corrected twice. The
+    rows below ARE the measurement, and they run through the guard's OWN `_false_absolute_in`.
 
-    Non-vacuity, both directions: every BYPASS row is EXEMPT at `bf5202ce79` and RED here (measured),
-    and every CORRECT row is exempt in both — it is the sentence F3 asked this guard to stop
-    reddening, so a red there would be a false block.
+    The rows are chosen to DISCRIMINATE, which the previous table did not: its window row passed
+    with the whole window bound deleted (review of #13712, P1). Each `bypass` row below reds because
+    of the thing it names, and each `correct` row is the phrasing this change asks an author to
+    write — a red there would be a false block.
     """
     bypass = [
-        # The denial itself: the claim `start.ts`'s two `json(...)` returns falsify.
+        # The denial itself, and the three shapes that defeated a phrase-only match.
         "Every hard failure is a page, not a JSON blob.",
-        # The three the review measured at `bf5202ce79` — ordinary English, tied to nothing.
+        "every hard\n   * failure is a page",
+        "every **hard** failure is a page",
+        "every hard-failure is a page",
+        # The two that defeated the WORD-LIST exemption at `bf5202ce79` and the PAST-framing one at
+        # `e13ae506`: an incidental adverb / past marker that used to exempt the absolute.
         "Every hard failure is a page; the consent cookie is still set before the flow starts.",
+        "Every hard failure of this route is a page; previously the two refusal arms returned JSON.",
         "Every hard failure of the route is a page, and the store remains the source of truth.",
-        "Every hard failure is a page, which still leaves the graph as the source of truth.",
-        # The sentence window is bounded, so a survivor in the NEXT sentence exempts nothing.
-        "Every hard failure is a page. Two arms still answer JSON.",
-        # Counted survivors alone are not enough: without PAST framing it is still the absolute.
+        # A copula asserting it, with the survivors named in the same breath — still the absolute.
         "Every hard failure is a page, because two arms still answer JSON.",
-        # …and PAST framing alone is not enough: nothing is counted and named as a survivor.
         "Before #13671, every hard failure is a page, and the store remains the source of truth.",
+        # The gaps are BOUNDED and stop at a clause break: these two pin that, one on each side.
+        # Inside the bound the predicate still counts; across a `;` it is a different clause.
+        "Every hard failure of the route is now presented as a page.",
     ]
     correct = [
-        # The sentence this change asks an author to write (F3).
+        # A `page` after a CLAUSE BREAK is a different clause, not the predicate of `every hard
+        # failure`. This row is the one that pins the `;` in both bounded gaps: drop either `;`
+        # from `_FALSE_ABSOLUTE_RE` and it turns RED (measured).
+        "Every hard failure is documented; a page is generated.",
+        # The phrasing this change asks for (F3), and the ones the old window false-blocked.
         "Before #13671, every hard failure of that route answered raw JSON; two arms still do.",
-        # `origin/main`'s header form, with the survivors counted rather than implied.
-        "Every hard failure of that route used to answer `json({error, reason})`; two arms still do.",
         "Previously every hard failure of that route answered raw JSON; both arms return one.",
+        "Until #13671, every hard failure of that route answered raw JSON; two arms still do.",
+        "…answered raw JSON; the 400 and the terminal 200 still do.",
+        "…answered raw JSON; two `json(...)` returns still do.",
+        "Previously, e.g. in the 503 arm, every hard failure answered raw JSON; two arms still do.",
+        "Every hard failure of that route used to answer `json({error, reason})`; two arms still do.",
+        # Not the retracted claim: the PAST-tense retelling is out of scope by design.
+        "Every hard failure of that route used to answer `json({error, reason})`.",
     ]
     for sentence in bypass:
-        # The span is quoted out of the ORIGINAL text, so compare case-insensitively.
-        assert (_false_absolute_in(sentence) or "").lower() == "every hard failure", (
-            f"the guard FAILS OPEN on {sentence!r}: it states the denial and the exemption let it "
-            "through")
+        assert _false_absolute_in(sentence) is not None, (
+            f"the guard FAILS OPEN on {sentence!r}: it states the absolute and nothing caught it")
     for sentence in correct:
         assert _false_absolute_in(sentence) is None, (
-            f"the guard reds the CORRECT form {sentence!r} — F3's finding, re-opened")
+            f"the guard reds the CORRECT form {sentence!r} — a false block, and the cheapest exit "
+            "is to reword for the regex")
 
 
 def _key_from(location: str | None) -> str:
