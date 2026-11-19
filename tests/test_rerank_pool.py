@@ -1544,6 +1544,15 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # this list can only say the file is ALLOWED to run the lever, so the
         # flags it actually passes are pinned against `_fts_rows`'s own.
         "tools/window_quality_m2.py": frozenset({"query"}),
+        # ⛔ A MIRROR of the shipped read, on the tool's OWN stated contract:
+        # "It calls the shipped read (``sdk.tortoise_fts_query``) exactly as M2
+        # did — same function, same ``limit``, same sanitiser — so the arms
+        # differ in the LEG, never in the query shape" (`claim_dense_leg_13732.py`
+        # docstring). Both sites are ``_query``: the dense/lexical arm and the
+        # designed-absence arm. Opting them out would make the paired recall
+        # figures describe a reader the shipped call does not run; that is the
+        # same grant `window_quality_m2.py` already holds for the same reason.
+        "tools/claim_dense_leg_13732.py": frozenset({"_query"}),
         # ⛔ A MIRROR of the MCP tool's own door, and it must pass NO
         # `_rerank_candidates` kwarg BECAUSE the tool passes none (the measured
         # arm is the user's door — `sdk.tortoise_fts_query(entity_type='object',
