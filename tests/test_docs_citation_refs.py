@@ -591,7 +591,26 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # table-cell spelling is the natural one for this bundle, whose own D5 row is a
             # table row. Widening the class is the difference between "every occurrence" and
             # "every occurrence with no punctuation after it", which is not a closure at all.
-            + r"[`_\s*|)]*(?:(?:still|now|actually|also)\s+)?"
+            # ⛔ AND NO ENUMERATION OF PUNCTUATION CAN CLOSE IT (#13900 review, cycle 9
+            # P1, MEASURED at `eec3593423`). Adding `|` and `)` moved the same hole to
+            # `—`, `–`, `;`, `,`, `/`, `(`, `…`, `[^1]`, a quote character and an inline tag:
+            # all returned `[]`, and an em-dash claim appended to the LIVE document left the
+            # file GREEN — this document uses `—` 402 times, so that spelling is natural here.
+            # A list of separators is the same mistake as a list of skips: closed only
+            # against what someone thought of. So the separator is NOT enumerated — it is any
+            # run of non-word, non-newline characters, plus the two FORMS through which a
+            # word character legitimately reaches a separator (an inline tag, a footnote
+            # marker). Words cannot cross it, so a sentence such as
+            # "`-- tortoise/` — see the row below — prints …" is deliberately NOT graded as
+            # an answer: admitting prose there is how a rule loses the ability to tell a
+            # claim from a sentence about one.
+            # `_` IS A WORD CHARACTER in Python's `\w`, so markdown emphasis spelled with
+            # underscores has to be named here or this rule loses the `_prints_` family the
+            # older, enumerated class used to admit (measured: `2 failed` when it was left
+            # out — a closure that drops a form the previous rule already had is a
+            # regression wearing a widening's clothes).
+            + r"(?:[^\w\n]|_|<[^>\n]{1,8}>|\[\^?\d{1,3}\]){0,4}"
+              r"(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
         # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
@@ -1493,6 +1512,20 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
             f"the arm SKIPPED {_refuted!r} — punctuation between the command and the verb "
             "is still the same claim (#13900 review, finding 2)")
+    # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
+    # these returned `[]` when the separator was an enumerated character class.
+    for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
+                     "`-- tortoise/` – prints ONE path at this head.",
+                     "`-- tortoise/`; prints ONE path at this head.",
+                     "`-- tortoise/`, prints ONE path at this head.",
+                     "`-- tortoise/` / prints ONE path at this head.",
+                     "`-- tortoise/` (prints ONE path at this head).",
+                     "`-- tortoise/`… prints ONE path at this head.",
+                     "`-- tortoise/`[^1] prints ONE path at this head.",
+                     "`-- tortoise/`\" prints ONE path at this head."):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — a separator is not a different claim, and this "
+            "one is spelled the way this bundle writes (#13900 review, cycle 9, P1)")
     # …and the control: a standalone short form is still read, so the live question cannot
     # go ungraded.
     assert _typed_answers_to_tortoise_cmd(
