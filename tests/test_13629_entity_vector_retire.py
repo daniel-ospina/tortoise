@@ -3730,6 +3730,25 @@ def test_the_stop_arm_must_not_store_the_vector(tmp_path, monkeypatch):
     only (`_rebuild_stores_the_vector`, `_property_alias_names`), and the mention-shaped
     controls at the end keep the rule from swallowing a read: a plain literal for reporting
     is not a merge, and a constant value places nothing.
+
+    ⛔ AND ONE WRAPPER *FAMILY* OVER (`#13788`, measured at `105b047b`). The rules answered an
+    `if`-expression but not the two other spellings of the SAME conditional selection: `x or y`
+    IS `x if x else y`, and `(p := x)` evaluates to `x` with no name to resolve. So
+    `props |= [] or [("embedding", vec)]`, `props.update([("x", 1)] and [("embedding", vec)])`,
+    `props |= {} or {"embedding": vec}`, `props.update(**({} or {"embedding": vec}))`,
+    `_set(props, **({} or {"key": "embedding", "value": vec}))` and
+    `props |= (p := [("embedding", vec)])` all CERTIFIED a stop arm that stores. `BoolOp` and
+    `NamedExpr` now answer in every rule that answers `IfExp` — the two operand rules, the
+    ``**`` value scan, and the container-candidate resolver — because a wrapper typed in one
+    rule and not its twin is this series' recurring defect. Mutation: delete either `ast.BoolOp`
+    arm and its rows red; delete either `ast.NamedExpr` arm and its rows red.
+
+    ⛔ AND THE *CONTAINER* OF A CONSTANT INDEX IS A CONDITIONAL TOO: `([{"embedding": vec}] if f
+    else [{}])[0]` CERTIFIED because the index arm demanded one bare literal while the
+    `if`-expression arm answered a bare operand — the two met only when the literal was bare.
+    `_const_index_candidates` answers EVERY branch (a store in any of them is a store), and the
+    controlling narrowings are pinned in the accepted tuple: a container whose branches place
+    nothing, an `or` whose operands place nothing, and a walrus over a non-store all certify.
     """
     refused = (
         # the arm places the vector, THEN leaves
@@ -5811,6 +5830,94 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE OTHER TWO SPELLINGS OF THE SAME CONDITIONAL WRAPPER (`#13788`, measured
+        # at `105b047b`). `x or y` is `x if x else y` — the wrapper the rules already follow —
+        # and `(p := x)` IS `x`. Both CERTIFIED on every operand form (pairs, mapping, the
+        # ``**`` keyword pair, the rebuild assignment) while the `if`-expression twin beside
+        # them was refused. `BoolOp` and `NamedExpr` are therefore answered in every rule that
+        # answers `IfExp`; these rows pin the pairs and mapping rules, the ``**`` value scan
+        # and the assignment arm.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [] or [("embedding", _encode(ev))]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([("x", 1)] and [("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {} or {"embedding": _encode(ev)}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {} or {"embedding": _encode(ev)}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**({} or {"embedding": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **({} or {"key": "embedding", "value": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (p := [("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (p := {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = (p := {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        # ⛔ …AND A CONSTANT INDEX INTO A *CONDITIONAL* CONTAINER (`#13788`, measured at
+        # `105b047b`): the const-index arm and the `if`-expression arm were both implemented and
+        # only met when the literal was BARE. Either branch may be the one selected, so a store
+        # in any of them refuses — and the `or` spelling of the same container follows.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([{"embedding": _encode(ev)}] if _f() else [{}])[0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([{"embedding": _encode(ev)}] or [])[0]
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -5858,6 +5965,40 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {"embedding": None for k in {"embedding": 1}}
+        return None
+    _write(props)
+""",
+        # ⛔ THE BOOLEAN AND WALRUS ARMS MUST NOT SWALLOW A NON-STORE (`#13788`, measured at
+        # `105b047b`): refusing every `or` would make the rule an over-block
+        # (`#13788`'s whole class, inverted). An `or` whose operands place nothing, a walrus
+        # over a non-store, and a conditional container with no storing branch are all honest
+        # write-stops and must stay CERTIFIED — without these rows, a `BoolOp` arm written as
+        # `return True` would pass the entire refused tuple above.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [] or []
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([] or [("embedding_model", _m())])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (p := [("embedding_model", _m())])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([{"embedding": None}] if _f() else [{}])[0]
         return None
     _write(props)
 """,
