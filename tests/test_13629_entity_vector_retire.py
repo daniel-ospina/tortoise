@@ -499,9 +499,15 @@ def test_a_comment_mentioning_the_gate_is_not_a_gate(tmp_path, monkeypatch):
     tree the folds do not consult the gate, so the answer must be "still emits" AND the
     reason must name `entities.py` — if the AST walk silently failed to find the fold, an
     "ABSENT" reason would pass a weaker assertion.
+
+    ⛔ AND IT MUST PASS THE LABEL'S `entity_types`. Without them `_writer_consults_gate`
+    computes `wanted = ()` and `wanted and _asks_the_gate(...)` short-circuits, so the
+    refusal comes from the empty-`wanted` arm and says nothing about the AST walk: a
+    `_asks_the_gate -> True` mutant leaves the assertion green (round 8's F2). With
+    `("event",)` the mutant reds this test.
     """
     gated, why = strip._writer_consults_gate(
-        "tortoise.projection.entities", "_upsert_event")
+        "tortoise.projection.entities", "_upsert_event", ("event",))
     assert gated is False
     assert "tortoise.projection.entities::_upsert_event" in why
     assert "without an `if`" in why
@@ -586,7 +592,7 @@ def _upsert_object(ev):
 
 WRITER_GATED = """
 def _upsert_object(ev):
-    if _derived_mirror_required("object"):
+    if not _derived_mirror_required("object"):
         return None
     return _write(ev)
 """
@@ -653,10 +659,10 @@ def _upsert_object(ev):
     return None
 """
 
-#: …while these DO decide, and refusing them would make the gate unsatisfiable. They are
-#: the shapes the REAL write-stop uses (`#13617`'s `if _derived_mirror_required(...)`
-#: around the encode), so the gate is not an inert enforcer that no correct implementation
-#: could satisfy.
+#: …while these DO decide, and refusing them would make the gate unsatisfiable. The first is
+#: the CORRECT polarity of `#13617`'s shape spelled the other way round (write on the mirror
+#: arm); the second is the negated early exit. Both must stay accepted, or the gate is an
+#: inert enforcer that no correct implementation could satisfy.
 WRITER_RETURNED_AND_DECIDING = (
     """
 def _upsert_object(ev):
@@ -666,8 +672,8 @@ def _upsert_object(ev):
 """,
     """
 def _upsert_object(ev):
-    if ev and mirror_required("object"):
-        return None
+    if not _derived_mirror_required("object"):
+        return
     return self._write(ev)
 """,
 )
@@ -708,6 +714,31 @@ def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
     module = _fake_writer_module(tmp_path, monkeypatch, WRITER_RETURNS_A_WRITE_WHEN_STOPPING)
     gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
     assert gated is False, "a `return <write>` under a NEGATED ask opened the gate"
+
+    # ⛔ AND AN EXIT IS NOT POLARITY-BLIND EITHER. Closing "a `return` that carries a write"
+    # left the BARE exit accepted on BOTH arms, so the review's leading example —
+    # `if mirror_required("object"): return None`, which exits on the runs the vector must
+    # be written and stores on every run a strip can happen — was still certified gated
+    # (`measured at df345c22: GATED`). A bare exit is a write-stop only on the negated arm.
+    for source in ("""
+def _upsert_object(ev):
+    if mirror_required("object"):
+        return None
+    return _write(ev)
+""", """
+def _upsert_object(ev):
+    if ev and mirror_required("object"):
+        return None
+    return _write(ev)
+""", """
+def _upsert_object(ev):
+    if mirror_required("object"):
+        raise RuntimeError("the graph must still store this")
+    return _write(ev)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"an INVERTED early exit opened the gate: {source!r}"
 
     for source in WRITER_RETURNED_AND_DECIDING:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -971,23 +1002,40 @@ def test_the_gate_check_is_fail_closed_on_an_unreadable_or_renamed_writer(
     assert gated is False
     assert "ABSENT" in why
 
-    # ⛔ A SHADOWED FIRST DEFINITION is a writer too. `ast` sees BOTH, and one ungated
-    # definition must not be hidden by a gated one below it — the original substring check
-    # kept only the first body (`setdefault`), which is the arm this pins.
+    # ⛔ A SHADOWED DEFINITION IS A WRITER TOO. `ast` sees BOTH, and `setdefault` kept only
+    # the FIRST — so a GATED first definition hid an UNGATED second one that still stores,
+    # which is the fail-open direction. Mutation: keep only the first body and this test
+    # reds on `gated is True`.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    if not mirror_required("object"):
+        return None
+    return _write(ev)
+
+
+def _upsert_object(ev):
+    return _write(ev)
+""")
+    gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+    assert gated is False
+    # The UNGATED definition is named by its own line, not hidden behind the gated one.
+    assert "line(s) 8" in why
+
+    # ⛔ …AND WHEN *BOTH* DEFINITIONS ARE UNGATED, BOTH LINES ARE NAMED. The assertion has to
+    # track the SET of definitions walked: `"line(s) 2"` is a substring of both the shipped
+    # `line(s) 2, 6` and a `setdefault` mutant's `line(s) 2`, so a prefix assertion proves
+    # nothing (round 8's F2).
     module = _fake_writer_module(tmp_path, monkeypatch, """
 def _upsert_object(ev):
     return _write(ev)
 
 
 def _upsert_object(ev):
-    if mirror_required("object"):
-        return None
     return _write(ev)
 """)
-    gated, why = strip._writer_consults_gate(module, "_upsert_object")
+    gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
     assert gated is False
-    # The UNGATED definition is named by its own line, not hidden behind the gated one.
-    assert "line(s) 2" in why
+    assert "line(s) 2, 6" in why, why
 
 
 def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
@@ -1029,7 +1077,7 @@ def test_the_gate_OPENS_when_every_declared_writer_asks(monkeypatch, tmp_path):
                         lambda entity_type: False, raising=False)
     gated = _fake_writer_module(tmp_path, monkeypatch, """
 def _only_writer(ev):
-    if _derived_mirror_required("object"):
+    if not _derived_mirror_required("object"):
         return None
     return _write(ev)
 """)
