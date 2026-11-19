@@ -1967,8 +1967,9 @@ def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
     JSON again with every arm-specific test still green — nobody would have written an arm for it
     yet. This guard counts the SHAPES instead, so the two numbers can only move together:
 
-      * every refusal returns `consentRefusalPage(...)` — five of them (four `503` reasons and the
-        `403`), and the count is asserted so deleting one is a failure rather than a quiet drop;
+      * every refusal returns `consentRefusalPage(...)` — five of them (four `503` arms over the
+        three `503` reasons, plus the `403`), and the count is asserted so deleting one is a
+        failure rather than a quiet drop;
       * `return json(` survives in exactly TWO places, and they are named: the `400` for an
         unparseable authorize request (a CALLER error — its message is worded for the caller that
         built the URL) and the terminal `200` flow state, which is a decided outcome rather than a

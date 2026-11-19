@@ -83,22 +83,22 @@ interface Copy {
  *    `as_origin_misconfigured`) are the same thing to a person: an infrastructure or deployment
  *    fault on our side, not their doing. Rendering them distinctly would leak our topology into
  *    copy that cannot help anyone act differently.
- *    ⛔ "retryable" was the word here and it is FALSE of one of the three:
- *    `as_origin_misconfigured` means the `CONSENT_AS_ORIGIN` binding itself does not parse
+ *    ⛔ "retryable" was the word here and NO arm earns it unconditionally: each of the three can
+ *    be permanent in a state a visitor actually reaches. A genuine DDL failure in the
+ *    `consent_store_unavailable` arm (`start.ts` records that no retry or restart fixes a failed
+ *    `ALTER TABLE`), an ABSENT `SESSIONS` binding for `session_store_unavailable`, and the
+ *    `CONSENT_AS_ORIGIN` binding itself not parsing for `as_origin_misconfigured`
  *    (`start.ts::parseAsOrigin` returns null only for a SET-but-unusable value — the default is
- *    valid), so no reload can clear it and only an operator can. A genuine DDL failure inside the
- *    `consent_store_unavailable` arm is a SECOND non-transient member — `start.ts` records that no
- *    retry or restart fixes a failed `ALTER TABLE` — so "retryable" is not merely imprecise here,
- *    it is wrong for two of the three. The copy below therefore does not
- *    PROMISE that a reload fixes it: the reload is offered as a try, and a fresh attempt from the
- *    client is the next step. That is the same care the `403` gets for the same reason — copy must
- *    not sell a retry that cannot work.
+ *    valid) are all states a reload cannot change. The copy below therefore never PROMISES that a
+ *    reload fixes it: the reload is offered as a try, and a fresh attempt from the client as the
+ *    next step. That is the same care the `403` gets for the same reason — copy must not sell a
+ *    retry that cannot work.
  *  - `403 flow_not_yours` is NOT retryable by reload: the row belongs to another attempt, so
  *    reloading the same URL is refused again (the bridge doc §"a DEAD row" states it). The only way
  *    forward is a new authorize request from the client, and saying "reload to retry" here would be
  *    a lie that costs the visitor another dead end.
  */
-const RETRYABLE: Copy = {
+const STORE_FAULT: Copy = {
   title: "Connection not completed — try again",
   heading: "We couldn't finish setting up your connection",
   what:
@@ -128,7 +128,7 @@ const FLOW_NOT_YOURS: Copy = {
  * refusal it is describing.
  */
 export function consentRefusalPage(reason: ConsentRefusalReason, status: number): Response {
-  const copy = reason === "flow_not_yours" ? FLOW_NOT_YOURS : RETRYABLE;
+  const copy = reason === "flow_not_yours" ? FLOW_NOT_YOURS : STORE_FAULT;
   // No template interpolation anywhere: every value is a constant from the table above.
   const html =
     "<!DOCTYPE html>\n" +
