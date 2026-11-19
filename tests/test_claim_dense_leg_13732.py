@@ -2063,6 +2063,13 @@ class TestGraphMembership:
         assert "EMBED gate" not in ei.value.message, ei.value.message
         assert "swallowed" not in ei.value.message, ei.value.message
         assert "never reached the row" not in ei.value.message, ei.value.message
+        # ⛔ THE CLAIM, NOT THE PHRASING. The negative assertions above match
+        # literals, so the same unreachable cause re-enters green as soon as it is
+        # spelled differently ("a population row the seed's write did not land on"
+        # → 96 passed; `#13745` review round 6, finding 1). The message names a row
+        # exactly ONCE — in "of the {population_n} population row(s)" — so ANY
+        # row-missing cause adds an occurrence and reds here.
+        assert ei.value.message.count("row") == 1, ei.value.message
         # ⛔ AND IT MUST NOT PROMISE MORE THAN THE GUARD CAN SEE. It once said the
         # text pairing refuses a node that kept "an EARLIER text's vector" — which
         # the pairing cannot detect, because this run's text is written

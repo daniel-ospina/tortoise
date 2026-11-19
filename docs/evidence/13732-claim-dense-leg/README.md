@@ -160,9 +160,10 @@ text at every deterministic id it scores.
 returning `(id, content)`, paired in Python against the text this run asked for — and
 `require_graph_population` refuses `graph_population_absent` (or `graph_population_unmeasurable`,
 because unmeasured is never zero). ⛔ **What the text half buys is narrow, and stated exactly:** it
-catches a row this run did NOT write — a node absent, or one still holding an earlier population's
-text at this id (the population's ids are deterministic, `f"{ID_PREFIX['point']}{index:06d}"`, so on
-a reused `--graph` every id collides). It does **not** catch a preserved VECTOR: the fold rewrites
+catches a row this run did NOT write — a node the seed never created, or one a LATER write moved (the
+population's ids are deterministic, `f"{ID_PREFIX['point']}{index:06d}"`, so on a reused `--graph`
+every id collides and the seed's own `MERGE` rewrites each one — which is why a reused graph alone
+does **not** put a row in this category). It does **not** catch a preserved VECTOR: the fold rewrites
 `n.content` unconditionally, so on a reused graph the node carries THIS run's text beside the OLD
 vector and the pair matches anyway — an id-only `IS NOT NULL` count would agree with it.
 Residual, stated rather than papered over: the pairing compares TEXT only, so on a re-run whose
