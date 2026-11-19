@@ -17,7 +17,7 @@
 queued runs on this repo (created 2026-11-05/11) hold ZERO job records** — GitHub accepted them and
 never dispatched them. Measured at the head this plan is written on:
 
-```
+```text
 CI: PR-BACKLOGGED(queued=165, pr_running=4, pr_queued=155, pr_pending=10, oldest=1215486s)
 congests_pr=True
 ```
@@ -292,6 +292,7 @@ probed-but-dispatched run counted as UNREAD.
 
 ⛔ **THREE MUTATIONS SURVIVED THE FIRST RUN AND EACH WAS A REAL DEFECT, NOT A TEST NUISANCE** (recorded
 because "the mutation passed" is the only evidence that an arm tests the guard it names):
+
 - **M3 survived** because the only "young" fixture was 74 s — below BOTH candidate floors, so the arm
   never discriminated 300 from 5 400. Fixed with fixtures at 1 000 s and 4 000 s (inside the measured
   p50 queue wait, outside the 300 s window).
@@ -301,7 +302,6 @@ because "the mutation passed" is the only evidence that an arm tests the guard i
   implies `apart is False`, so no refusal can be recorded on such a reading and the guard could never
   fire. It was **removed** rather than kept — dead weight masquerading as protection is the defect
   `_settled_still`'s own comment names.
-
 
 ## 9. Round-1 findings that were FALSIFIED (recorded so they are not re-applied)
 
@@ -347,6 +347,7 @@ queued run be "proved" dead. And the sibling instrument already owns this questi
 progressive-job-creation lag"). Two instruments must not answer the same question differently.
 
 **Eligibility (all four; anything else ⇒ `never_dispatched=None` ⇒ a WAITER):**
+
 1. `run.run_attempt == 1` **and the payload reported it** — from the RAW row, not the coerced projection
    (new `QueuedRun.attempt_reported: bool`, set in `_project` from `type(attempt) is int and attempt > 0`,
    closing the `int(True)==1` / `"2"` / absent-field coercion at `:1297`);
@@ -512,7 +513,7 @@ fail-closed direction (a lost proof counts a run as waiting, never the reverse).
 **What it does NOT deliver — indicator 2 of the issue, and why that is correct.** `oldest`
 stays at ~14 days after the exclusion, because the witness moved legs. Measured:
 
-```
+```text
 pending 42062387969  Python CI          is_pr=True   attempt=1   0 jobs  created 2026-11-05T16:14:34Z  updated 16:14:36Z
 pending 42066444542  ci-queue-health    is_pr=False  attempt=1   0 jobs
 pending 42065475308  Inbound relay      is_pr=False  attempt=1   0 jobs
@@ -531,7 +532,7 @@ So the fix does the two things it can prove (the count and the exclusion), and �
 demotion holds: `congests_pr` never goes `False` from an exclusion. The reading now *names*
 the witness leg so the residue cannot be mistaken for the unfixed defect:
 
-```
+```text
 · the witness is a 'pending' leg run (#42062387969) — a `pending`/`requested` run, on a leg
   where zero job records is not a proof (a concurrency hold has none either), so it is
   counted as WAITING
