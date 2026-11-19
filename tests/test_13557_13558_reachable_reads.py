@@ -824,6 +824,41 @@ def test_a_withdrawal_question_on_a_clean_graph_says_so_plainly(sdk):
     assert status.get("status") == "empty", status
 
 
+@_docker_only
+def test_a_policy_question_is_not_answered_with_the_ended_population(sdk):
+    """The blast radius of a present-habitual cue, measured on served rows.
+
+    ⛔ ROUND-5 REVIEW, P1, and the row demonstration the detector table cannot
+    give on its own. `do we archive customer emails` is the present-habitual
+    POLICY frame, and pre-fix it selected the ended population — this is the
+    measurement that turns the mechanism into a served answer: on a store holding
+    one live note and one retracted claim, the question came back as the WITHDRAWN
+    claim (the whole ended population, no query applied) with the caller's words
+    dropped, on the default SDK / MCP surface and on the hosted `/v1/search`.
+    Post-fix the route does not fire, so the relevance read answers and no ending
+    is asserted to the customer.
+    """
+    live = sdk.create_point(kind="statement",
+                            content="we archive customer emails on request")
+    dead = sdk.create_point(kind="statement",
+                            content="an old claim we withdrew")
+    sdk.retract_point(dead["id"])
+
+    rows = sdk.tortoise_fts_query("do we archive customer emails",
+                                  entity_type="point", limit=50)
+    served = _ids(rows)
+    assert dead["id"] not in served, (
+        "a present-habitual policy question was answered with the ended "
+        "population — the caller asked what we DO and was told what has ended, "
+        "which is #13558's defect class on a default surface")
+    # …and the READ kept is the relevance read the caller's words belong to, so
+    # this is not satisfied by an empty answer: pre-fix the note matching the
+    # question was NOT in the answer at all (`served == {dead}`).
+    assert live["id"] in served, (
+        "the policy question's own record was not served — the route either "
+        "fired anyway or the relevance read it keeps did not answer")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Both directions of the one determinant
 # ══════════════════════════════════════════════════════════════════════════════
