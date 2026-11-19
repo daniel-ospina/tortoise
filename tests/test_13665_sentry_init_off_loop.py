@@ -59,6 +59,7 @@ event loop may call it (#13665).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 
 import pytest
@@ -142,10 +143,8 @@ async def _loop_wake_ups_during(awaitable_factory) -> int:
         return ticks - before
     finally:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 def test_init_off_loop_keeps_the_event_loop_serving(slow_init: dict) -> None:
