@@ -6586,10 +6586,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # START is again confirmed by structure rather than by a bumped number:
         # ⛔ RE-DERIVED AGAIN at the forward merge of `origin/main` `0774035055` (this merge):
         # `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split) inserts 22 lines above
-        # `org_info`, so the span is `:15261-15338` at THIS head — the START is the `grep -n
+        # `org_info`, so the span is `:15262-15339` at THIS head — the START is the `grep -n
         # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line, and the END is
         # the blank line before `return OrgInfoResponse(` (`:15339`, measured at this head).
-        # The three offsets (+29 `nodes_used` -> `:15290`, +39 `max_nodes` -> `:15300`, +77 END)
+        # The three offsets (+29 `nodes_used` -> `:15291`, +39 `max_nodes` -> `:15301`, +77 END)
         # hold EXACTLY from that START, which is how the figures below were re-derived rather
         # than nudged. ⛔ An earlier cut of this comment carried the PRE-`#13589` pair
         # (`:15225`/`:15254`/`:15264`/`:15302`), which names different statements at this
@@ -6817,10 +6817,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15300` (both needles are the file's only occurrences —
-    # `:15290` and `:15300` — so a later end cannot change the sum). Ends below `:15300` fail
+    # true for any end at or beyond `:15301` (both needles are the file's only occurrences —
+    # `:15291` and `:15301` — so a later end cannot change the sum). Ends below `:15301` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15262`-`:15300` gives a non-empty window that lacks at least the second needle,
+    # end in `:15262`-`:15301` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15262` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
