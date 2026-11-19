@@ -1690,7 +1690,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     retirement prose in `tortoise/mcp_server.py:4430`, the seventh, whose point IS
     a retirement — and **#12915**'s (`#4282` Phase 2, lane B) `record_decision`
     docstring at `tortoise/sdk.py:37108` and `_file_human_approval`'s `:37150`
-    (the `:4382` / `:36676,36718` addresses these two copies carried are DELETED,
+    (the `:4382` address both copies carried is DELETED, as are `:36687,36718` in the document's copy and `:36676,36718` here,
     re-measured: `mcp_server.py:4382` is a BLANK line, the prose is at `:4430`;
     the two `:Document` docstring lines are `:37108` / `:37150`), the eighth, whose `Args:` block for
     `artifact_id` names the retired label to state the D10 rule — and **#13447**'s
