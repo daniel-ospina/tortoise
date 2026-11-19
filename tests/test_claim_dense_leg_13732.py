@@ -178,6 +178,32 @@ class TestPreregistration:
         )
         assert committed == tool_mod.preregistration(M2_N)
 
+    def test_the_readme_table_quotes_the_committed_thresholds(self, tool_mod):
+        """The README's §1 table is a SECOND copy, and a docs-only edit re-stales it.
+
+        ⛔ `config/ci-surfaces.yml` names the README as one of the guarded
+        artifacts, and until this pin existed nothing read it: the README copied
+        the four detectable-effect values into a markdown table, so a docs-only
+        edit could move them with every pin green — the "coverage claim with no
+        pin behind it" the sibling rows call out. Compared CELL BY CELL against
+        the same committed block the pin above checks.
+        """
+        readme = (
+            REPO_ROOT / "docs" / "evidence" / "13732-claim-dense-leg" / "README.md"
+        ).read_text()
+        committed = json.loads(
+            (
+                REPO_ROOT / "docs" / "evidence" / "13732-claim-dense-leg" / "preregistration.json"
+            ).read_text()
+        )
+        rows = re.findall(r"^\|\s*([0-9.]+)\s*\|\s*\*\*([0-9.]+) pp\*\*\s*\|\s*$", readme, re.M)
+        assert rows, "the README's detectable-effect table is gone or was reworded"
+        assert {d: float(v) for d, v in rows} == {
+            d: float(v) for d, v in committed["detectable_delta_pp"].items()
+        }, "the README table and preregistration.json disagree"
+        # …and the population the table's right-hand column names in prose.
+        assert f"at n = {committed['population_n']}" in readme
+
     def test_preregister_needs_no_store_no_embedder_no_corpus(self):
         """The one mode THIS box can run — so the thresholds precede the run.
 
@@ -310,6 +336,31 @@ class TestPaired:
         # …and with the move above the COMMITTED bar it resolves.
         cmp["delta_pp"] = 5.0
         assert tool_mod.classify(cmp) == "GAIN"
+
+    def test_a_run_below_the_preregistered_n_cannot_buy_an_easier_bar(self, tool_mod):
+        """⛔ ``detectable_effect_pp`` DECREASES in n, so the pre-registered bar is
+        the larger one only when the run built MORE claims than 786.
+
+        `--min-population` is 600, so `600 <= built_n < 786` is reachable from the
+        documented recipe — and there the pre-registered bar (4.47) is SMALLER
+        than the run's own resolution (4.74 at n = 700). Gating on the
+        pre-registered bar alone would publish a delta the run cannot resolve as
+        a `GAIN`: the exact inversion of the class this gate closes. The bar is
+        therefore max(pre-registered, observed).
+        """
+        observed = tool_mod.detectable_effect_pp(700, 0.20)
+        pre_registered = tool_mod.detectable_effect_pp(786, 0.20)
+        assert pre_registered < observed, "the fixture must undersize the run"
+        cmp = {
+            "delta_pp": round((pre_registered + observed) / 2, 2),  # between the two
+            "mcnemar_p_two_sided": 1e-6,
+            "detectable_pp": round(observed, 2),
+            "detectable_pp_preregistered": round(pre_registered, 2),
+            "found_deep_delta_pp": 1.0,
+        }
+        # the delta clears the pre-registered bar and NOT the run's own.
+        assert cmp["delta_pp"] > pre_registered and cmp["delta_pp"] < observed
+        assert tool_mod.classify(cmp) == "UNRESOLVED"
 
     def test_gain_and_loss(self, tool_mod):
         up = {
@@ -685,6 +736,32 @@ class TestRecordMembership:
         assert n_arg.args[0].id == "population_ids", (
             "the guard's population size must be len(population_ids) — the same "
             "list it asked the record about, never a constant"
+        )
+        # ⛔ AND ARG 1 MUST BE THE MEASUREMENT, NOT A LITERAL. Pinning only arg 2
+        # let `require_population_in_record(786, len(population_ids))` — a guard
+        # made into a no-op — satisfy every assertion above, and let
+        # `record_population_vectors(queries, …)` answer about a different set.
+        matched_arg = guard[0].args[0]
+        assert isinstance(matched_arg, ast.Name), ast.dump(matched_arg)[:120]
+        assert matched_arg.id == "population_vectors", (
+            "the guard must be handed the record's own count for this population, never a constant"
+        )
+        bound = [
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "population_vectors" for t in n.targets)
+        ]
+        assert bound, "population_vectors is never bound in run_measurement"
+        value = bound[0].value
+        assert isinstance(value, ast.Call) and isinstance(value.func, ast.Name), ast.dump(value)[
+            :120
+        ]
+        assert value.func.id == "record_population_vectors", ast.dump(value)[:120]
+        asked = value.args[0]
+        assert isinstance(asked, ast.Name) and asked.id == "population_ids", (
+            "the count must be asked about population_ids — the same list arg 2 "
+            "measures over, or the guard is answering about a different set"
         )
 
 

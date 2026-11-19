@@ -460,15 +460,29 @@ def classify(cmp: dict) -> str:
     """One word for a paired result — the label the PR body quotes.
 
     ``GAIN`` / ``LOSS`` need BOTH significance and resolution: a significant
-    delta below the pre-registered detectable effect is ``UNRESOLVED`` (the test
-    found an ordering, not a magnitude this population can price). ``TRADE`` is
-    a resolved recall@k move that costs ``found@deep`` — real, and not a win.
+    delta below the detectable effect is ``UNRESOLVED`` (the test found an
+    ordering, not a magnitude this population can price). ``TRADE`` is a
+    resolved recall@k move that costs ``found@deep`` — real, and not a win.
+
+    The resolution bar is ``max(pre-registered, observed)`` — see the comment
+    below on why "the pre-registered one" alone is not conservative.
     """
     p = cmp["mcnemar_p_two_sided"]
-    # ⛔ the PRE-REGISTERED bar decides; the observed one is disclosure (see
-    # `paired`). Falling back to the observed bar keeps a caller that built the
-    # comparison by hand working, and is what the tests drive.
-    bar = cmp.get("detectable_pp_preregistered") or cmp["detectable_pp"]
+    # ⛔ THE BAR IS THE STRICTER OF THE TWO, AND THAT IS NOT THE SAME AS "THE
+    # PRE-REGISTERED ONE". `detectable_effect_pp` DECREASES in n, so the
+    # pre-registered bar (n = 786) is the LARGER one only when the run built
+    # MORE claims than that. `--min-population` is 600, so 600..785 is
+    # reachable: at n = 700 the run's own resolution is 4.74 pp while the
+    # pre-registered bar is 4.47, and gating on the pre-registered bar alone
+    # would publish a delta the run cannot resolve as a `GAIN` — the inverse of
+    # the class this gate exists to close. `max()` requires resolution at BOTH
+    # n: the one the data has, and the one declared before the data.
+    bars = [
+        b
+        for b in (cmp.get("detectable_pp_preregistered"), cmp.get("detectable_pp"))
+        if b is not None
+    ]
+    bar = max(bars) if bars else None
     resolved = bar is not None and abs(cmp["delta_pp"]) >= bar
     if p >= ALPHA or not resolved:
         return "UNRESOLVED"
@@ -1108,9 +1122,15 @@ def run_measurement(args: argparse.Namespace) -> int:
         ]
         + (
             [
-                f"the `{ARM_RECORD_DENSE}` arm — BLOCKED[{blocked.code}]: its "
-                "dense leg would rank a cohort the record does not hold, and "
-                "its recall would then be a figure about the seed step"
+                f"the `{ARM_RECORD_DENSE}` arm — BLOCKED[{blocked.code}]: "
+                + (
+                    "how much of this population the record holds a vector for "
+                    "could not be MEASURED — unmeasured is not zero, and it is "
+                    "not a verdict"
+                    if blocked.code == "record_population_unmeasurable"
+                    else "the record does not hold this population's cohort, so "
+                    "the arm's recall would be a figure about the seed step"
+                )
             ]
             if blocked is not None
             else []
