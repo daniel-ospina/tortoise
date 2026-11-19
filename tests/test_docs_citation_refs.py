@@ -677,15 +677,22 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # a doubled form in a spelling the docstring declared closed.
             # ⛔ `is` IS STRIPPED AS A BARE PREFIX, DELIBERATELY WITHOUT A WORD BOUNDARY
             # (#13831 review, round 3, P2). The normalisation above deletes `` ` ``/`*`/`_`,
-            # so the document's glued spellings — ``is`two` paths`` and `is_empty` — arrive
-            # here as `istwo` / `isempty`, and the strip is what re-exposes `two` / `empty`
-            # there. The cost is measured and stated rather than implied: a token that merely
-            # STARTS with `is` loses those two characters, so `prints istwo paths` types as
-            # MEMBERSHIP and `prints isempty` as EMPTINESS (both were SKIPPED before this
-            # strip). Do NOT "tidy" a `\b` onto `is`: measured, adding one reds the PINNED
-            # glued row below and drops `is_empty` back to a skip — a single-line "cleanup"
-            # that would otherwise pass every check while re-opening the hole. The pinned row
-            # is what makes that cleanup fail loudly instead of silently.
+            # so a GLUED spelling — ``is`two` paths``, `is_empty` — arrives here as `istwo` /
+            # `isempty`, and the strip is what re-exposes `two` / `empty` in it. Those are
+            # MUTATIONS of the document's `… is <answer>` form, not quotations of it: measured,
+            # `05-verify.md` contains ZERO `` is` `` and ZERO `_empty` occurrences — its `is`
+            # is always followed by whitespace — so they are named as mutations, which is the
+            # convention the markup comment above already states for the same reason (a
+            # witness attributed to the tree goes stale the moment the tree stops writing it).
+            # The cost is measured too: a token that merely STARTS with `is` loses those two
+            # characters, so `prints istwo paths` types as MEMBERSHIP and `prints isempty` as
+            # EMPTINESS (both were SKIPPED before this strip).
+            # ⛔ AND BOTH SURVIVORS ARE PINNED, so a "cleanup" cannot drop one silently: the
+            # doubled MEMBERSHIP spelling is a row in the loop below, and the doubled EMPTINESS
+            # spelling (`prints is_empty`) is asserted with the other emptiness witnesses.
+            # MEASURED, adding a `\b` to the `is` alternative reds exactly the first of them
+            # and drops the second back to a skip — two rows, both loud, instead of a
+            # single-line tidy-up that passes every check while re-opening the hole.
             low = re.sub(r"^(?:->|→|=|:|is)\s*", "", low, count=1, flags=re.IGNORECASE)
         if re.match(r"(?:nothing\s+but\b|none\s+other\s+than\b)", low):
             # an emptiness WORD doing membership duty — `nothing but the two modules`
@@ -1308,6 +1315,15 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     ) == [], (
         "the shape detector types the UPPER BOUND `prints at most two paths` as membership; "
         "zero satisfies it, so it asserts neither direction and must skip (#13831 review, P2)")
+    # ⛔ AND ITS EMPTINESS SIBLING, which the `_doubled_form` loop above cannot hold (that
+    # loop asserts MEMBERSHIP). Same glued shape — the normalisation turns `is_empty` into
+    # `isempty` — so only a boundary-less `is` strip reaches the head; measured, a `\b` on
+    # that alternation drops this back to a skip (#13831 review, round 4, P2).
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints is_empty", _tortoise_cmd
+    ) == [("prints is_empty", True)], (
+        "the shape detector skips the GLUED emptiness spelling `prints is_empty` after "
+        "markup normalisation makes it `isempty` (#13831 review, round 4, P2)")
     assert _typed_answers_to_tortoise_cmd(
         f"`{_tortoise_cmd}` prints at most zero paths", _tortoise_cmd
     ) == [("prints at most zero paths", True)], (
