@@ -160,6 +160,28 @@ def test_the_jaccard_threshold_is_the_declared_one():
     assert cap.NEARDUP_RULE == "neardup-v1"
 
 
+def test_the_artifact_carries_the_near_duplicate_rule_it_was_measured_under(artifact):
+    """The record's OWN copy of the rule, which nothing read (round 24, F3).
+
+    ⛔ MEASURED: `grep -c neardup_rule tests/test_capstone_12186_recall.py` was **0**,
+    so `measurement.json → neardup_rule` — the version and threshold the published §3a
+    rates were computed under — could be changed to `0.5` or `neardup-v0` with the suite
+    GREEN at 54 passed, while README §3a states that rule is "pinned by
+    `tests/test_capstone_12186_recall.py`". A record that states a rule the tool and the
+    document contradict is the claim/evidence split this file exists to close.
+
+    Derived from the TOOL, never from the record: reading the record's own field back
+    would pass whatever it holds.
+    """
+    rule = artifact["neardup_rule"]
+    assert rule["version"] == cap.NEARDUP_RULE, (
+        f"the artifact records near-duplicate rule {rule['version']!r}, but the tool "
+        f"computed §3a under {cap.NEARDUP_RULE!r}")
+    assert rule["jaccard_threshold"] == cap.NEARDUP_JACCARD, (
+        f"the artifact records a Jaccard threshold of {rule['jaccard_threshold']!r}, "
+        f"but the tool computed §3a at {cap.NEARDUP_JACCARD!r}")
+
+
 def test_an_empty_name_is_never_a_duplicate_of_anything():
     assert not cap.is_near_duplicate("", "")
     assert not cap.is_near_duplicate("the ", "")
@@ -2194,7 +2216,15 @@ def test_the_readme_quotes_the_provenance_the_artifact_records(artifact):
     #: The label is part of the token because `sha256` itself ENDS in a digit, which
     #: would otherwise read as a glued digit run and make `_mentions` refuse a
     #: correct row (observed).
-    _assert_mentions(digest, (pin["digest"], pin["query_digest"],
+    #: ⛔ AND THE OTHER TWO LABELS ARE GLUED TOO (round 24, F2). Bare tokens only check
+    #: that a value occurs SOMEWHERE in the cell, so the two digests could be SWAPPED
+    #: between their labels — publishing `population \`5604d0ad…\`, queries
+    #: \`90122e99…\``, i.e. both figures wrong and each attributed to the other list —
+    #: with every pin green (measured at this head: 54 passed). This is the attribution
+    #: failure the sibling population row already closes by gluing `600definite`, and
+    #: these digests are what make the artifact reproducible at all.
+    _assert_mentions(digest, (f"population{pin['digest']}",
+                              f"queries{pin['query_digest']}",
                               f"sha256{pin['sha256'][:8]}…"), "§1 digest row")
 
     #: ⛔ THE MASTHEAD, which is a SECOND quotation of two artifact values (round 11,
@@ -2618,7 +2648,21 @@ def test_the_readme_refuses_the_cross_corpus_comparison_too(artifact):
     paragraph could lose its own copy while the check stayed green (measured).
     """
     block = _paragraph(README.read_text(), "refuses that comparison")
-    assert "0.7133" in block, f"the refusal paragraph no longer names 0.7133: {block!r}"
+    # ⛔ BOTH copies, pinned by CLAUSE (round 24, F1). The paragraph names the refused
+    # baseline TWICE — "not a comparison to the 0.7133 baseline in the epic body" and
+    # "0.7133 was measured on the `#12298`/`#12360` pin" — and the pin was a bare
+    # `"0.7133" in block`, satisfied by EITHER. Measured at this head: mutating the
+    # SECOND copy to `0.9999` stayed GREEN at 54 passed, so the paragraph could name two
+    # different figures for the one baseline it refuses. This is the same shape the §5
+    # DOOR paragraph was repaired with, and the reason `_phrase_mentions` (digit-bounded)
+    # alone does not close it: two legitimate copies mean a mutation of one is satisfied
+    # by the other.
+    assert _mentions(block, "0.7133baselineintheepicbody"), (
+        f"the refusal paragraph no longer names the 0.7133 baseline as the one it "
+        f"refuses: {block!r}")
+    assert _mentions(block, "0.7133wasmeasuredonthe"), (
+        f"the refusal paragraph's SECOND copy of the baseline (what it WAS measured "
+        f"on) was unpinned: {block!r}")
     assert ("refusesthatcomparison" in block
             or "notacomparisontothe0.7133" in block), block
 
