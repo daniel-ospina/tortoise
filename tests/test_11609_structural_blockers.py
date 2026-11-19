@@ -1953,7 +1953,7 @@ def test_the_adapter_reading_is_not_spelling_blind():
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "def build_pair():\n"
-        "    return object(), A\n"
+        "    return A, object()\n"
         "A, b = build_pair()\n"
         "A(x)\n"
     ), ("an UNREADABLE destructuring value dropped the alias — making no claim must leave the "
