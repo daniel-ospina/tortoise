@@ -250,29 +250,40 @@ def test_the_record_states_the_near_duplicate_rule_the_tool_ran(artifact):
     #: The names are therefore read from the RAW document, where backticks and
     #: whitespace give the token real edges.
     raw = README.read_text()
-    rule_shape = re.compile(
-        rf"(?<![0-9A-Za-z]){re.escape(cap.NEARDUP_RULE)}(?![0-9A-Za-z])")
-    #: …and EVERY spelling of the shape in the document is the rule, so a third copy
-    #: added elsewhere cannot carry a different version either.
-    #: ⛔ CASE-INSENSITIVELY (round 30, F3). `neardup-v[0-9A-Za-z]+` never saw an
-    #: uppercase spelling, so a third copy reading `Neardup-v9` carried a version the
-    #: tool does not have with the suite GREEN at 58 passed — the same "keyed to one
-    #: CASE" defect already repaired for the `git show` guard in this file. The scan is
-    #: folded and the folded set compared, so no spelling escapes it.
-    spelled = {tok.lower() for tok in
-               re.findall(r"(?<![0-9A-Za-z])neardup-v[0-9A-Za-z]+", raw,
-                          re.IGNORECASE)}
+    #: ⛔ THE TOKEN, NOT THE PREFIX (round 30 F1). The first form of this check compared
+    #: an ALNUM-BOUNDED `neardup-v1`, which a fresh reviewer falsified with a non-alnum
+    #: continuation: renaming BOTH §3a copies to `neardup-v1.1` (or `neardup-v1-rc1`,
+    #: `neardup-v1_2`) stayed GREEN at 58 passed, because the match stopped at the
+    #: separator and the next character was neither alnum. `neardup-v1.1` IS a different
+    #: version, and the guard's own message says a name the tool does not carry is a rule
+    #: nobody can re-derive §3a under. So the shape runs to the end of the VERSION TOKEN
+    #: (`.`/`-`/`_`/`/` are version-token characters here) and the comparison is on the
+    #: whole token, not on a boundary test.
+    #:
+    #: ⛔ AND CASE-INSENSITIVELY (round 30, F3, the peer lane's axis). `neardup-v[0-9A-Za-z]+`
+    #: never saw an uppercase spelling, so a third copy reading `Neardup-v9` carried a
+    #: version the tool does not have with the suite GREEN at 58 passed — the same
+    #: "keyed to one CASE" defect already repaired for the `git show` guard in this file.
+    #: The scan is folded and the folded set compared, so no spelling escapes it. The two
+    #: axes are orthogonal — case (`Neardup-v9`) and separator (`neardup-v1.1`) — and
+    #: either alone leaves the other open, so the token carries both.
+    version_tail = "0-9A-Za-z._/-"
+    rule_token = re.compile(rf"(?<![0-9A-Za-z])neardup-v[{version_tail}]+",
+                            re.IGNORECASE)
+    spelled = {m.group(0).lower() for m in rule_token.finditer(raw)}
     assert spelled == {cap.NEARDUP_RULE.lower()}, (
         f"the record spells the near-duplicate rule {sorted(spelled)}, but the tool's "
         f"rule is {cap.NEARDUP_RULE!r} — a name the tool does not carry is a rule "
         f"nobody can re-derive §3a under")
     headings = [ln for ln in raw.splitlines() if ln.startswith("### 3a.")]
     assert len(headings) == 1, headings
-    assert rule_shape.search(headings[0]), (
+    assert {m.group(0).lower() for m in rule_token.finditer(headings[0])} == {
+        cap.NEARDUP_RULE.lower()}, (
         f"§3a's heading no longer names {cap.NEARDUP_RULE!r}: {headings[0]!r}")
     blocks = [b for b in re.split(r"\n\s*\n", raw) if "frozen in the tool" in b]
     assert len(blocks) == 1, f"expected one §3a rule block, got {len(blocks)}"
-    assert rule_shape.search(blocks[0]), (
+    assert {m.group(0).lower() for m in rule_token.finditer(blocks[0])} == {
+        cap.NEARDUP_RULE.lower()}, (
         f"§3a's rule sentence no longer names {cap.NEARDUP_RULE!r}: {blocks[0]!r}")
 
     #: THE SENTENCE'S OTHER COMPONENTS (round 29). The separators are pinned above and
