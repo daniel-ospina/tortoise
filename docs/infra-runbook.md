@@ -1198,9 +1198,13 @@ passed). ⛔ This block cannot tell PROGRESS from a WEDGE: the elapsed time is w
 attempt started, so a starved loader may legitimately run past its bound (`#13674`'s bound exists
 because the same cold import measured 156.5 s of imports ALONE on the production box; the 53 %
 headroom above it is what covers the contention the box shows while serving traffic). Before
-restarting a machine on this reading, get independent evidence that the import is not advancing — a stack from OUTSIDE the process
-(`py-spy dump --pid <pid>`, which this runbook already uses elsewhere), showing where the import
-sits.
+restarting a machine on this reading, get independent evidence that the import is not advancing — a
+stack from OUTSIDE the process, showing where the import sits. `py-spy` is the tool this runbook has
+used for that elsewhere, but ⛔ **the image does not ship it** (no dependency in `requirements.txt`,
+`Dockerfile.hosted` or `entrypoint.sh`), so install it on the machine first:
+`fly ssh console -a tortoise-y4mjjq -C "pip install py-spy && py-spy dump --pid <uvicorn pid>"` —
+which needs runtime egress to PyPI (the same sandbox that could hang a runtime HF download,
+`Dockerfile.hosted`).
 
 ⛔ **Three routes that look like evidence and are not, on this image.** (1) **`faulthandler`** —
 nothing here enables it: no `faulthandler.enable()`, `PYTHONFAULTHANDLER` unset in
@@ -1210,29 +1214,20 @@ either — without `enable()` the default handler prints no Python traceback —
 ends the load and proves nothing. (2) **An in-process `sys._current_frames()` dump from a fresh
 interpreter** sees its OWN frames; `monitoring.py`'s capture samples the LOOP thread and only after
 `LOOP_BLOCK_SAMPLE_AFTER_S`, while the load runs on its own `tortoise-embedder-load` thread — so the
-loop keeps ticking, the sampler never fires, and it could not show the loader's frames anyway (the
-same fresh-interpreter trap warned about above). (3) **Absence of further `embedder:` lines** — the
-loader logs nothing between the timeout line and the load finishing or its overrun ending, so
-silence is the expected state for BOTH progress and a wedge.
+loop keeps ticking, the sampler never fires, and it could not show the loader's frames anyway. It is
+the same trap the counter rule in §4.9 names: a fresh interpreter reads a fresh process (`0` there,
+its own frames here). (3) **Absence of further `embedder:` lines** — the
+LOADER logs nothing between the timeout line and the load finishing or its overrun ending. The one
+`embedder:` line an overrun CAN produce comes from the READ path, not the loader: `embedder: a
+previous load attempt is STILL RUNNING (<elapsed>) — refusing to start a second one`, at most once
+per 60 s cooldown while traffic asks for an embedding. Its growing `elapsed` is the same wall-clock
+since the attempt started that `load_in_progress_s` publishes — the datum this section says cannot
+separate progress from a wedge — so seeing that line repeat is NOT progress, and its absence only
+means nothing on the read path asked for an embedding.
 
 A restart on this reading throws away an import that may be about to finish and re-pays the whole
 cold cost, so get the stack FIRST — the block alone cannot justify it.
 
-attempt started, so a starved loader may legitimately run past its bound (`#13674`'s bound exists
-because the same cold import measured 156.5 s of imports ALONE on the production box; the 53 %
-headroom above it is what covers the contention the box shows while serving traffic). Before restarting a machine on this reading,
-get independent evidence — a stack (`py-spy dump --pid`, faulthandler) showing where the import sits;
-an ABSENCE of further `embedder:` lines is NOT that evidence, because the loader logs nothing between
-the timeout line and the load finishing or its overrun ending. A restart throws away an import that
-may be about to finish and re-pays the whole cold cost.
-attempt started, so a starved loader may legitimately run past its bound (`#13674`'s bound exists
-because the same cold import measured 156.5 s of imports ALONE on the production box; the 53 %
-headroom above it is what covers the contention the box shows while serving traffic). Before
-restarting a machine on this reading,
-get independent evidence — a stack (`py-spy dump --pid`, faulthandler) showing where the import sits;
-an ABSENCE of further `embedder:` lines is NOT that evidence, because the loader logs nothing between
-the timeout line and the load finishing or its overrun ending. A restart throws away an import that
-may be about to finish and re-pays the whole cold cost.
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
 `failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
 `load_failed` (the common one: an import/construct failure in an installed dependency chain),
