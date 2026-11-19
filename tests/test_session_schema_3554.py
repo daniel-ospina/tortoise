@@ -3450,6 +3450,19 @@ _APPROVAL_RECORD_BEHIND_AN_H1_HEADING_AFTER_AN_ITEM = (
 _APPROVAL_RECORD_AFTER_A_HEADING_LINE = (
     "> ### v3.41 — a wording fix\n"
     "> **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ AND THE H4–H6 HALF OF THE CLASS, driven separately (review: narrowing the new pattern
+# to `#{1,3}` left the suite GREEN while restoring the very fail-OPEN above for a `####`
+# title — measured). This is the same defect the sibling regex's round-8 review caught, so
+# it is closed the same way: a fixture per half of the declared class.
+_APPROVAL_RECORD_AFTER_AN_H4_HEADING_LINE = (
+    "> #### v3.41 — a wording fix\n"
+    "> **Owner approval of the exact changes** — given in-session, no comment cited.")
+# …and the SPACE is part of the class: `#NotAHeading` is an ordinary paragraph line to
+# CommonMark, so it does not end anything and the next line continues it — the label does
+# not open a paragraph. Dropping `\s+` to `\s*` splits here and false-blocks the shape.
+_NOT_A_HEADING_WITHOUT_A_SPACE = (
+    "> ####v3.41 — a wording fix\n"
+    "> **Owner approval of the exact changes** — given in-session, no comment cited.")
 # …and the MIRROR, so closing the heading's paragraph is not satisfied by refusing every
 # line after a heading: prose below a heading records nothing and must stay green.
 _NO_APPROVAL_RECORD_AFTER_A_HEADING_LINE = (
@@ -3476,8 +3489,13 @@ _PARAGRAPH_START_RE = re.compile(
 # is the line it is written on), so the line after it opens a NEW paragraph — which by
 # this arm's own contract means its opening emphasis run is a label. Measured before this
 # cut: "### v3.41 — a wording fix" followed by the label on the next line PASSED, while
-# `main` refused it. The corpus writes no heading lines, which is exactly why it was
-# silent; `_APPROVAL_RECORD_AFTER_A_HEADING_LINE` pins the direction now.
+# `main` refused it. ⛔ WHY NOTHING RED, stated correctly: the corpus DOES write ATX
+# headings inside its blocks (measured: 11 lines match this pattern, 10 of them inside the
+# changelog blocks), and they are silent only because every one of them is followed by a
+# BLANK line (measured: an empty line in each of the 10 cases; `_quoted_paragraphs` treats
+# both `""` and `">"` as a break), so the fused shape never arises there. `_APPROVAL_RECORD_AFTER_A_HEADING_
+# LINE` pins the end-of-paragraph rule, `_APPROVAL_RECORD_AFTER_AN_H4_HEADING_LINE` drives
+# the H4-H6 half of the class, and `_NOT_A_HEADING_WITHOUT_A_SPACE` pins the required space.
 _HEADING_START_RE = re.compile(r"^#{1,6}\s+")
 
 
@@ -3645,12 +3663,12 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     true prose, stated rather than glossed: the test reads the NEWEST block alone, which
     passes, and a lane sweeping the corpus should expect these two.
     ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT — the shapes MEASURED at this head, NOT an
-    enumeration of every way a label can render. Six are fail-OPEN, which is the direction
-    that matters: an unread record, an unread HTML label, a label split across runs, an
-    entity-encoded space, a label whose rendered text carries a leading determiner and an
-    id borrowed from a contrastive parenthetical all PASS, so this arm reduces the vacuity
-    #13669 measured rather than ending it, and a reading this list does not name should be
-    treated as fail-OPEN until a fixture says otherwise:
+    enumeration of every way a label can render. Seven are fail-OPEN, which is the direction
+    that matters: an unread record, an unread HTML label, a label split across runs, a label
+    in a table row, an entity-encoded space, a label whose rendered text carries a leading
+    determiner and an id borrowed from a contrastive parenthetical all PASS, so this arm
+    reduces the vacuity #13669 measured rather than ending it, and a reading this list does
+    not name should be treated as fail-OPEN until a fixture says otherwise:
       - an UNBOLDED, or MID-PARAGRAPH, record is OUT OF SCOPE and therefore **PASSES**:
         ``Owner approval: comment `NNN`.`` in plain prose, and ``The change landed.
         **Owner approval …**``, are not read as records — emphasis is the corpus's only
@@ -3691,12 +3709,16 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         rendered text carries ``<b>``/``</b>`` or ``[...](url)`` and does not begin with
         the phrase. Closing either needs the MARKUP stripped first, not the run unsplit;
       - a label in a TABLE ROW (``| **Owner approval …** | given in-session |``) is
-        **PASSES** (fail-OPEN, out of scope): ``_PARAGRAPH_START_RE`` knows bullets,
-        ordered items, task boxes and headings, and a table row is none of them, so the
-        row's opening run is never read. Measured PASS where `main` refused; the corpus
-        writes no tables (``grep -c '^> *|' docs/ONTOLOGY-CHANGELOG.md`` = 0), and the
-        shape is driven green by ``_APPROVAL_RECORD_IN_A_TABLE_ROW`` so removing it or
-        handling it is a visible decision rather than a silent one;
+        **PASSES** (fail-OPEN, out of scope): the row's opening run is not read because the
+        table's leading ``|`` sits BEFORE it — the same reason a mid-sentence bold run
+        passes — not because ``_PARAGRAPH_START_RE`` lacks a table kind. Measured, that
+        distinction is load-bearing: teaching the paragraph model a `|` row start (in both
+        ``_PARAGRAPH_START_RE`` and ``_LEADING_LIST_MARKER_RE``) still PASSES, because the
+        run is still behind the delimiter; only stripping the leading cell delimiter would
+        close it. Measured PASS where `main` refused; the corpus writes no tables
+        (``grep -c '^> *|' docs/ONTOLOGY-CHANGELOG.md`` = 0), and the shape is driven green
+        by ``_APPROVAL_RECORD_IN_A_TABLE_ROW`` so removing it or handling it is a visible
+        decision rather than a silent one;
       - an ENTITY-ENCODED space (``**Owner&#32;approval …**``, ``**Owner&nbsp;approval
         …**``) renders as the label but ``_reader_text`` decodes no entities, so it
         **PASSES** (fail-OPEN); driven by ``_ENTITY_ENCODED_LABEL_IS_NOT_A_RECORD``;
@@ -3980,6 +4002,15 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
         _refuse_an_approval_record_with_no_resolvable_home(
             _APPROVAL_RECORD_AFTER_A_HEADING_LINE)
     _assert_refused_by(after_heading, "_refuse_an_approval_record_with_no_resolvable_home")
+    # ⛔ …AND FOR EVERY DECLARED HEADING LEVEL (review: only `###` was driven, so the
+    # H4–H6 half of the class could be narrowed away in silence).
+    with pytest.raises(AssertionError) as after_an_h4:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _APPROVAL_RECORD_AFTER_AN_H4_HEADING_LINE)
+    _assert_refused_by(after_an_h4, "_refuse_an_approval_record_with_no_resolvable_home")
+    # …and a `####−` line with NO space is not a heading, so it continues the paragraph and
+    # the label below it opens nothing — green, which is what keeps the `\s+` honest.
+    _refuse_an_approval_record_with_no_resolvable_home(_NOT_A_HEADING_WITHOUT_A_SPACE)
     # …and prose below a heading still passes, so the fix is a boundary and not a refusal
     # of everything that follows a heading.
     _refuse_an_approval_record_with_no_resolvable_home(
