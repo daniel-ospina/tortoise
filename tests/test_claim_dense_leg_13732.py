@@ -1992,6 +1992,20 @@ class TestGraphMembership:
         assert "EARLIER text" not in ei.value.message, ei.value.message
         assert "which the text pairing" not in ei.value.message, ei.value.message
 
+    def test_the_guard_does_not_CLAIM_vector_provenance(self, tool_mod):
+        """The SUMMARY line is the contract a reader quotes; it must not overclaim.
+
+        ⛔ `#13745` review round 4, finding 2: both docstrings opened with "THIS
+        run's vector" while their own bodies said the count does NOT prove the
+        stored vector is this run's (the fold preserves an old vector when the
+        payload's is refused). Only the body was corrected in round 3, so `help()`
+        and an IDE kept advertising the contract the guard does not enforce.
+        """
+        for fn in (tool_mod.graph_population_vectors, tool_mod.require_graph_population):
+            summary = (fn.__doc__ or "").strip().splitlines()[0].lower()
+            assert "this run's vector" not in summary, summary
+            assert "this run's text" in summary, summary
+
     def test_guard_refuses_an_unmeasurable_graph(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
             tool_mod.require_graph_population(None, 786)

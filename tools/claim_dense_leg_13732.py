@@ -878,7 +878,12 @@ def record_population_vectors(ids: list[str], scope, record_dsn: str | None) -> 
 
 
 def graph_population_vectors(proj, population: list[dict]) -> int | None:
-    """How many of THIS population's rows does the GRAPH hold THIS run's vector for?
+    """How many of THIS population's rows carry a vector AND THIS run's TEXT?
+
+    ⛔ THAT IS THE WHOLE CONTRACT — read the body before quoting it. It asserts
+    the write REACHED the row, not that the stored VECTOR is this run's: the fold
+    preserves an old vector when the payload's is refused, so a reused ``--graph``
+    can pass this count with a foreign vector (see the residual below).
 
     The graph half of the same question :func:`record_population_vectors` asks
     the record, and it exists because the run-level gate beside the seed asks a
@@ -953,7 +958,12 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
 
 
 def require_graph_population(matched: int | None, population_n: int) -> None:
-    """The GRAPH must hold THIS run's VECTOR for every id the arm would score.
+    """Every id the ``graph_dense`` arm would score must carry a vector AND this run's text.
+
+    ⛔ NOT "this run's VECTOR" — the summary said exactly that and claimed more
+    than :func:`graph_population_vectors` can see (`#13745` review round 4,
+    finding 2). A preserved vector under a refused write passes this guard; the
+    residual is named on that function.
 
     ⛔ IT GATES THE ``graph_dense`` ARM, NOT THE RUN — and the reason is the one
     the record gate beside it already states: a run-level refusal DISCARDS the
