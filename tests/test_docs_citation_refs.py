@@ -642,6 +642,15 @@ _TORTOISE_MEMBERSHIP_SPELLINGS = (
     f"{_TORTOISE_CENSUS_CMD}` prints the two COMMENT-ONLY modules",
     f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
     "the `tortoise/` set above is the two COMMENT-ONLY modules",
+    # ⛔ AND THE AFFIRMATIVE ROW IN THE ABBREVIATED SHAPE (#13807 review round 5, F2 —
+    # MEASURED). The ledger carried the abbreviated form in the EMPTINESS direction only
+    # (`-- tortoise/` returns NOTHING, below), so the mirror-image affirmative spelling was
+    # read by NEITHER arm: (c-i) had no such row, and (c-ii) requires the FULL command, which
+    # an abbreviation never matches. It was LIVE in `05-verify.md:134` and green — the same
+    # one-sided blindness `#13746` finding 7 recorded, in the abbreviated shape. The row is
+    # added together with the document edit that removes the string, because an
+    # unconditional ban row would otherwise red the document it polices.
+    "`-- tortoise/` returns ONE module",
 )
 #: Spellings that state the NEGATIVE direction — that the set is EMPTY. Mirror images of the
 #: list above, and every bit as carryable: the set is a property of the HEAD the command was
@@ -735,8 +744,10 @@ def _census_membership_verdicts(doc: str) -> list[str]:
     clause in the section does. Stated here rather than left to be discovered as a bug.
 
     ⛔ AND THE OPERATIVE BOUNDARY, STATED PLAINLY (#13807 review round 4, finding 1). The
-    answer-form matcher requires the FULL command string; this ledger now carries the
-    abbreviated forms that shipped (`-- tortoise/`, `that command`) as exact rows, but a
+    answer-form matcher requires the FULL command string; this ledger carries the
+    abbreviated forms that shipped (`-- tortoise/`, `that command`) as exact rows, in BOTH
+    directions — the emptiness row from round 4 and the affirmative row from round 5, the
+    latter being the half that was still live and still green when round 4 closed — but a
     FUTURE re-wording onto a NEW phrasing — an abbreviated command this ledger has not seen
     before — is not detected. The class is finite in both arms, and a guard may be narrow;
     what it may not do is describe itself as complete.
@@ -1144,7 +1155,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
        it was broken, which is why it took a fresh-context reviewer to find it. Each injected
        spelling below reds.
     2. **The CONTENT is pinned, not the size** (#13807 review, finding 5). Length assertions
-       left eight of eleven membership rows unpinned: appending one character to an unpinned
+       left eight of the membership rows unpinned: appending one character to an unpinned
        row kept every count, every membership test and the injection loop green — because the
        loop iterates the MUTATED list — while that retired phrasing could be re-inserted into
        `05-verify.md` uncaught. That is the realistic bypass: a fixer loop "fixing" a doc hit
@@ -1174,6 +1185,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         f"{_TORTOISE_CENSUS_CMD}` prints the two COMMENT-ONLY modules",
         f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
         "the `tortoise/` set above is the two COMMENT-ONLY modules",
+        "`-- tortoise/` returns ONE module",
     ) == _TORTOISE_MEMBERSHIP_SPELLINGS, (
         "the affirmative (MEMBERSHIP) ledger changed. These are the exact phrasings that were "
         "FALSE at a head and survived anyway, so a row that is edited, however slightly, is a "
@@ -1200,7 +1212,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     # loop iterates the tuples, so editing the constant re-renders ledger AND witnesses
     # together and reds NOTHING: measured, retyping it as `-- docz/` left `2 passed` while
     # `_census_membership_verdicts` went blind to the real command (`[]` for a document that
-    # spelled it). 3 of 3 emptiness rows and 5 of 11 membership rows went dead silently. The
+    # spelled it). 3 of 3 emptiness rows and 5 of the membership rows went dead silently. The
     # literal below is the INDEPENDENT copy that makes the drift red.
     assert _TORTOISE_CENSUS_CMD == "git diff --name-only origin/main...HEAD -- tortoise/", (
         "`_TORTOISE_CENSUS_CMD` no longer names the command the `#7949` bundle quotes, so the "
@@ -1217,7 +1229,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     # a substitution that does not also deliberately recompute it. A legitimate ledger change
     # therefore updates the ledger, its readable tuple AND this digest — which is the point.
     assert hashlib.sha256("\n".join(_TORTOISE_MEMBERSHIP_SPELLINGS).encode()).hexdigest() == (
-        "157672680550c5feed848cc4ade6ff96b27f762b4c91e0a08b5277aaae0280ec"), (
+        "cc115e0ff30fdec88b009b8752c752180c8716cc3ca3f51cb203c32b03ab0a1c"), (
         "the membership ledger's TEXT changed. If that was deliberate, recompute this digest "
         "and the tuple above; if it was a find-and-replace across the file, it just silently "
         "narrowed the ban (#13807 review round 5, F2)")
