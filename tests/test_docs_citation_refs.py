@@ -1053,6 +1053,15 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
                 f"neither is `{_tortoise_cmd}`",
                 f"{_tortoise_cmd}` -> empty",
                 f"{_tortoise_cmd}` prints NOTHING",
+                # ⛔ AND THE PARAPHRASE THAT NAMES NO VERB (#13845 review, P2) — measured:
+                # the three command-shaped spellings above were all the arm read, and the
+                # live document stated the same refuted direction as "the `tortoise/` set
+                # above is EMPTY", which no entry matches: the shape detector needs an
+                # answer form immediately after the command, so a sentence that refers to
+                # the set by NAME rather than re-running the command is invisible to it.
+                # Mutation-pinned: restoring that spelling in a doc whose set is non-empty
+                # reds HERE and nowhere else.
+                "the `tortoise/` set above is EMPTY",
             )),
             *((_c, False) for _c in (
                 f"{_tortoise_cmd}` is NOT empty",
