@@ -101,7 +101,9 @@ const RETRYABLE: Copy = {
 
 const FLOW_NOT_YOURS: Copy = {
   title: "Connection not completed — start again",
-  heading: "This connection attempt isn't yours to finish",
+  // ⛔ Not "this attempt isn't yours": the commonest real cause is the visitor's OWN earlier
+  // browser or a restarted client, and accusing them of something is both wrong and unhelpful.
+  heading: "We couldn't continue this connection attempt",
   what:
     "This approval link belongs to a different browser, or a newer attempt has replaced it. " +
     "Nothing was approved, and no access was granted.",
