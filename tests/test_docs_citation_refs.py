@@ -567,8 +567,9 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # `` `-- tortoise/` ``), NOT by this function — so this docstring states the boundary
     # rather than implying the class is closed over every way a document can point at the
     # command. The residual is a sentence that refers to the measurement without naming it
-    # at all, which is why the live document carries a HEAD LABEL on each such sentence and
-    # that is checked by reading, not by an assertion.
+    # at all; the live document states those as PAST TENSE with their head named, which is
+    # a convention kept by reading, not by an assertion (the label exemption that tried to
+    # enforce it mechanically was measured fail-open and false-blocking, and is deleted).
     for match in re.finditer(
             r"`?" + re.escape(cmd)
             + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
@@ -599,8 +600,22 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # `git diff …` invocation runs RIGHT UP TO it with no backtick or newline between
         # (a backtick ends the code span, and a newline ends the line — either one means
         # this occurrence starts its own command). Measured both ways below.
+        # ⛔ AND THE INVOCATION MUST NOT CROSS A SENTENCE BREAK (#13845 review, cycle 5,
+        # MEASURED): the first cut of this skip was `git\s+diff\b[^`\n]*$`, which matched
+        # ANY unbackticked `git diff` earlier on the same LINE, so
+        # `Some history here. We ran git diff earlier. `-- tortoise/` prints ONE path at this
+        # head.` returned `[]` and the arm went GREEN while the same claim with the prose
+        # changed returned an answer and RED — one dropped backtick defeated it.
+        # (Requiring the text to END with the `-- ` separator does not work: the separator is
+        # the START of this match, so it is never in `_before` — measured, the rule matched
+        # nothing and the true head-named history was refused again.)
+        # What separates a pathspec of a live invocation from a claim about one is that the
+        # invocation runs on: no sentence boundary (a `.` followed by whitespace) between
+        # `git diff` and the occurrence. `origin/main...2a7f24e241` has dots, but none
+        # followed by a space, which is exactly the discrimination wanted.
         _before = doc[max(0, match.start() - 200):match.start()]
-        if re.search(r"git\s+diff\b[^`\n]*$", _before):
+        _invocation = re.search(r"git\s+diff\b", _before)
+        if _invocation and not re.search(r"\.\s", _before[_invocation.start():]):
             continue
         rest = doc[match.end():match.end() + 90]
         rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
@@ -1143,8 +1158,13 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         # the case where they differ, written out rather than inlined, because the first cut
         # of this guard negated the whole disjunction and let an UNLABELLED emptiness claim
         # through (measured: the mutation below stayed green, which is a bypass, not a fix).
-        # AND a claim carrying a HEAD LABEL is not refuted by THIS head, which the sign-only
-        # test cannot see (#13845 review, P2).
+        # ⛔ AND THERE IS NO HEAD-LABEL EXEMPTION (see the convention stated above): a
+        # membership/emptiness claim in the refuted direction is refused whether or not a
+        # head is named, because the exemption that was supposed to tell "history about
+        # another head" from "a live claim" was measured fail-open (a plain number, or the
+        # word `defaced`, counted as a label) AND false-blocking. The document states history
+        # so this arm cannot read it as a live answer instead — past-tense verbs, or the
+        # named head first and the command after it.
         _consistent = _claim_is_empty != bool(_tortoise_set)
         assert _consistent or _claim not in doc, (
             f"05-verify.md asserts {_claim!r} — an answer to `{_tortoise_cmd}` in the "
