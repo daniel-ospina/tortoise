@@ -28,7 +28,7 @@ WHAT IS PINNED, AND WHAT IS DELIBERATELY NOT
     instantiates the only thing that would derive one (`FastAPIRouterAdapter`), and the
     served routes are hand-written decorators that call the SDK. `PROTECTED`'s `rest_spec`
     reason is therefore STALE, and THAT is what is pinned below;
-  · the nine `NO_CONTAINER_YET` destinations are still not MCP doors.
+  · the seven `NO_CONTAINER_YET` destinations are still not MCP doors.
 
 ⛔ NOT pinned here: the retired-forward population, the pointer one-hop rule, and the
 `PROTECTED`/`NO_CONTAINER_YET` table sizes — `tests/test_11609_door_retirement.py` owns
@@ -905,7 +905,7 @@ def _mounted_router_names(source: str) -> set[str]:
     return visitor.names
 
 
-#: All nine `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
+#: All seven `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
 NO_CONTAINER_DESTINATIONS = {
     # ⛔ `tortoise_delete_point` / `tortoise_delete_entity` left this map in #11609 lane P6:
     # the owner's #9660 ruling executes the `delete_knowledge` row by KEEPING
@@ -2508,7 +2508,7 @@ def test_the_search_door_is_held_by_the_envelope_not_the_route():
     assert inspect.signature(ms.tortoise_search, eval_str=True).return_annotation == list[dict]
 
 
-# ── the nine are still not doors ─────────────────────────────────────────────
+# ── the seven are still not doors ─────────────────────────────────────────────
 
 def _doors_missing_the_prefix(live) -> list[str]:
     """Live door names that do NOT carry the `tortoise_` prefix.
@@ -2528,7 +2528,7 @@ def test_every_live_door_carries_the_prefix_the_destination_pins_compare_against
     door carries the prefix: a door landed under the bare destination name
     (`delete_knowledge`) would be invisible to the comparison, which then stays green
     while `NO_CONTAINER_YET` keeps a door that became retirable — the container's landing
-    goes unnoticed, which is the drift the nine-door pin exists to catch. A review round
+    goes unnoticed, which is the drift the seven-door pin exists to catch. A review round
     measured exactly that mutant green, so the convention is part of the pin.
     """
     missing = _doors_missing_the_prefix(_live())

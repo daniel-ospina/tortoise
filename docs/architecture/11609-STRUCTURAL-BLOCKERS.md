@@ -188,14 +188,14 @@ warning shim with `None` schemas and are excluded because they are not advertise
 One annotation cannot honestly describe that. That heterogeneity is the real reason the
 annotation is `Any`, and it is what makes the re-wrap cost asymmetric.
 
-### 1.4 `NO_CONTAINER_YET` — the nine destinations, verified live-or-not
+### 1.4 `NO_CONTAINER_YET` — the seven destinations, verified live-or-not
 
 Checked against `TOOL_REGISTRY` **and** `TortoiseSDK` (the pointer must resolve to a live MCP
 door, per `TestEveryPointerResolvesInOneHop`):
 
 | door | destination | MCP door live? | SDK method exists? |
 |---|---|---|---|
-| `tortoise_delete`, `tortoise_delete_point`, `tortoise_delete_entity` | `delete_knowledge` | **no** | yes |
+| `tortoise_delete` | `delete_knowledge` | **no** | yes |
 | `tortoise_create_edge`, `tortoise_create_operator` | `link_entities` | **no** | yes |
 | `tortoise_events_poll` | `poll_events` | **no** | yes |
 | `tortoise_ingest` | `sdk:write_knowledge_batch` | **no** | **no — does not exist** |
@@ -203,8 +203,17 @@ door, per `TestEveryPointerResolvesInOneHop`):
 | `tortoise_list_graphs` | `tenancy:list_memory_graphs` | **no** | yes (`org_id`-scoped) |
 | `tortoise_org_create` / `list_graphs` note | `tenancy:` = hosted API router, not an MCP door | — | — |
 
-**Verdict: all nine reasons hold.** Not one destination is an MCP door today, so none is
-retirable and none of the nine is unblocked by this lane. (`delete_knowledge`/`link_entities`/
+⛔ **THIS TABLE HELD NINE DOORS WHEN IT WAS WRITTEN, AND TWO OF THEM LEFT IN #11609 LANE P6.**
+`tortoise_delete_point` / `tortoise_delete_entity` shared the `delete_knowledge` row here; the
+owner's **#9660** ruling executes that row by KEEPING `tortoise_delete` and WIDENING it
+(`TortoiseSDK.delete` dispatches by label), so their destination became a live door — the kept
+entry — and both retired FORWARD into it. `tortoise_delete` stays: it IS the kept entry. The
+population is now 7, pinned by `NO_CONTAINER_YET` in `tests/test_11609_door_retirement.py`
+(10 `PROTECTED` + 7 = the 17 live names off the 27-target) and by `NO_CONTAINER_DESTINATIONS`
+in `tests/test_11609_structural_blockers.py`.
+
+**Verdict: all seven reasons hold.** Not one destination is an MCP door today, so none is
+retirable and none of the seven is unblocked by this lane. (`delete_knowledge`/`link_entities`/
 `poll_events` existing as *SDK methods* does not help: a retirement pointer inside
 `TOOL_REGISTRY` must name a live **tool**, and `tools/bridge_table.py`'s `DESTINATION` map is
 what `_destination()` asserts against.)
