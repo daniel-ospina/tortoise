@@ -20,11 +20,15 @@ related:
 
 # Canonical SDK method surface — an inventory, not the target
 
-**Read this for coverage, not for names.** This document is two things: an **inventory of all 94
-methods that exist today**, placed in exactly one group, duplicates collapsed and gaps named; and,
-alongside that, an **earlier target sketch** (32 groups over the 124 members live when it
-was written; the live surface is 94 today — see *The count*). The 26 names that left
-the surface on 2026-10-27 are recorded in *Removed from the surface* below rather than in a group.
+**Read this for coverage, not for names.** This document is two things: an **inventory of the
+method surface as it was partitioned**, placed in exactly one group, duplicates collapsed and gaps
+named; and, alongside that, an **earlier target sketch** (32 groups over the 124 members live when
+it was written; the live surface is **39 today** — see *The count*, and the `#12901` FINAL batch
+section below). ⛔ **The groups answer a HISTORICAL question — they partition the surface as it
+stood before the retirement waves** — and every name that has left is accounted for in a
+*Removed from the surface* section below rather than in a group: the 26 names that left on
+2026-10-27, the sixteen control-plane members `#12901` wave 2 closed, and the 66 the FINAL batch
+privatised on 2026-11-18.
 
 > ⛔ **The SDK target is `docs/product/beta-sdk-surface.md` (40 methods), not this document.**
 > Where the two disagree, that doc governs. They really do disagree: this sketch says
@@ -44,8 +48,8 @@ owner-approved `docs/product/canonical-mcp-tools.md`.
 
 | | |
 |---|---|
-| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **105** |
-| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **105** |
+| Public methods on `TortoiseSDK` (parsed by `ast`, no leading underscore) | **39** |
+| Rows in `config/surface-manifest.yml` (`counts.sdk_public_methods`) | **39** |
 
 The two agree exactly. The count moved 150 → 149 in #4282 phase 2.3, then 149 → 147 on
 2026-10-25 (the plan-quota counter `graph_count` went internal as `_graph_count`; the
@@ -95,15 +99,28 @@ number:
   so the declaration stays at 40 — the count moves UP here for the first time in this list,
   because the move delivers approved surface instead of removing surplus.
 
+- **105 → 39 on 2026-11-18** — `#12901`'s FINAL batch privatised the whole remaining off-surface
+  set (66 methods, in ONE batch). 39 is the approved METHOD-ROW count, and the 40th approved row
+  is the `Tortoise(...)` entry point, which is a class and not a method — so the class now carries
+  exactly the approved method rows, 0 off-surface, and the declaration stays at 40. Every body is
+  kept: `def name` became `def _name` (two took `_name__svc` because the plain private spelling was
+  already taken: `audit`, `delete_entity`). The 29 departures are tabulated in *Removed from the
+  surface* below; the other 37 are renames recorded in `tortoise/sdk_retired.py` with their hint.
+  ⚠️ The GROUP tables above are deliberately left as the HISTORICAL partition this document
+  described (a group table is a map of a surface that no longer exists, and re-cutting it would
+  destroy the record the departure sections cite); `tools/sdk_rename_table.py` reads those groups
+  as its canonical partition and therefore reds on the dropped names until it is re-cut against
+  the 39-method surface — tracked separately, and it is not in the required CI gate.
+
 The overlap is chosen rather than assumed: wave 1 admitted a name only when NO `tool_registry` entry
 (live or retired) bound it, and the four doors that batch re-keyed were live MCP tools at that time,
 so the waves could not have consumed each other's candidates. Wave 2 rests on the same gate plus the
 partition: it is `N1`–`N6` minus the approved rows minus the one MCP-bound member, and the three
 waves are disjoint by construction (the wave-1 and wave-2 candidate lists share no name — wave 1's
 members were checked against every `tool_registry` entry, wave 2's are checked against the partition
-AND against wave 1's recorded set). **105 is the count today**, and it is derived, not typed: `ast`
+AND against wave 1's recorded set). **39 is the count today**, and it is derived, not typed: `ast`
 over `tortoise/sdk.py`, `tools/sdk_surface.py --check` and `counts.sdk_public_methods` in
-`config/surface-manifest.yml` all read 105. (Wave 2 was written against a main that predated
+`config/surface-manifest.yml` all read 39. (Wave 2 was written against a main that predated
 `#12951`'s READ/QUERY containers, so the derivation it recorded — 118 → 102 — is that branch's
 BEFORE/AFTER; on the tree this landed in, the same sixteen departures read 110 → 94.) *Removed from the surface* below is the per-method
 record.
