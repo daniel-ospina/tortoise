@@ -2100,6 +2100,25 @@ def test_the_readme_quotes_the_mint_rates_the_artifact_holds(artifact):
     document published two different mint rates for the shipped matcher.
     """
     mint = artifact["arms"]["mint_rate"]
+    # ⛔ THE LEDGER MUST ADD UP, and the window it was measured at must be the TOOL's
+    # (round 27, F2). This test read `pairs`, `retrieval_in_window`, `attached` and
+    # `rate` and stopped, so two fields the tool writes were read by NOTHING:
+    # `window_k` — the window the §3b rate was measured at, whose whole point is that
+    # the residual below is "the matcher failed" and not "retrieval failed" — and
+    # `in_window_not_attached`, the residual itself. Measured at this head, mutating
+    # `in_window_not_attached` 205 -> 206 (breaking `397 - 192 = 205`) and `window_k`
+    # 3 -> 5 both stayed GREEN at 54 passed, so the record could publish a mint ledger
+    # that does not add up. `PRIOR_WINDOW` was equally unread (3 -> 5 in the tool, green),
+    # which is how the window and the cells computed from it could drift apart.
+    assert mint["window_k"] == cap.PRIOR_WINDOW, (
+        f"the artifact measures the mint rate at k={mint['window_k']}, but the tool "
+        f"queries the capture prior at PRIOR_WINDOW={cap.PRIOR_WINDOW}")
+    assert mint["in_window_not_attached"] == (
+        mint["retrieval_in_window"] - mint["shipped"]["attached"]), (
+        f"the mint ledger does not add up: {mint['retrieval_in_window']} in window "
+        f"minus {mint['shipped']['attached']} attached is not "
+        f"{mint['in_window_not_attached']} — a residual that does not equal its own "
+        f"subtraction makes 'the matcher failed' and 'retrieval failed' one number")
     header, rows = _tables(README.read_text(), "canonical in window")
     assert [h.replace("*", "").strip() for h in header[1:]] == [
         "pairs", "canonical in window", "attached", "mint rate"], header
@@ -2132,6 +2151,15 @@ def test_the_readme_quotes_the_mint_rates_by_variant_class(artifact):
                           "mint rate"], header
     assert len(rows) == len(by_class), ([r[0] for r in rows], sorted(by_class))
     for cls, held in by_class.items():
+        #: ⛔ THE SAME IDENTITY PER CLASS ROW (round 27, F2): `in_window_not_attached`
+        #: is what names the remaining gap, so a row whose residual does not equal its
+        #: own two counts states a gap the class does not have.
+        assert held["in_window_not_attached"] == (
+            held["retrieval_in_window"] - held["shipped_attached"]), (
+            f"variant class {cls!r}'s ledger does not add up: "
+            f"{held['retrieval_in_window']} in window minus "
+            f"{held['shipped_attached']} attached is not "
+            f"{held['in_window_not_attached']}")
         matched = [r for r in rows if f"`{cls}`" in r[0]]
         assert len(matched) == 1, (
             f"expected exactly one README row for variant class {cls!r}, got "
