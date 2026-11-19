@@ -421,6 +421,69 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
     assertEq(preflight.location, null, `${from} preflight emits no Location`);
   }
 
+  // ⛔ `/tortoise-for-product-teams` IS THE SECOND ROOT-LEVEL COMPANY PAGE (#13645),
+  // and it is the row `ROOT_PAGE` in `_middleware.ts` exists for. It is NOT a
+  // `PRODUCT_PAGES` member (that set 301s its members UNDER the prefix, which would
+  // send the canonical URL to `/tortoise/tortoise-for-product-teams`, a 404) and NOT
+  // a `PRODUCT_ROOT` asset (that maps onto `/tortoise`). The shared Pages project
+  // serves every static asset on BOTH hosts, so without the row the retired product
+  // host answers a second 200 copy of this document — measured here: with the
+  // `ROOT_PAGE` branch deleted, `/tortoise-for-product-teams` on the product host
+  // falls to `next()` and the asset router answers **200**, which is why this block
+  // has to drive the row rather than assume it.
+  //
+  // ALL THREE SPELLINGS, one hop each. The trailing-slash arm is the interesting one:
+  // `website/_redirects` carries `/tortoise-for-product-teams/` →
+  // `/tortoise-for-product-teams` HOST-AGNOSTICALLY, so without the middleware's
+  // slash-stripped `path` that request would take the same-host 301 and THEN this
+  // cross-host hop — the two-hop chain `assertOneHop` exists to refuse.
+  const rootPageRows = [
+    "/tortoise-for-product-teams",
+    "/tortoise-for-product-teams.html",
+    "/tortoise-for-product-teams/",
+  ];
+  for (const from of rootPageRows) {
+    await assertOneHop(`https://${PRODUCT}${from}`, {
+      expectLocation: `https://${COMPANY}/tortoise-for-product-teams`,
+    });
+  }
+  // ⛔ AND THE SET CANNOT GROW SILENTLY — the same arm, for the same reason, as
+  // `CONTACT_AT_ROOT` above. These rows are hand-kept, so a member added to
+  // `ROOT_PAGE` without a row here would be a behaviour change with no assertion
+  // over it. Compared against the middleware's own literal rather than trusted.
+  const rootPageSet = new Set(
+    (
+      /const ROOT_PAGE = new Set\(\[(.*?)\]\)/s.exec(
+        readFileSync(join(WEBSITE, "functions", "_middleware.ts"), "utf8"),
+      )?.[1] ?? ""
+    )
+      .match(/"[^"]+"/g)
+      ?.map((s) => s.slice(1, -1)) ?? [],
+  );
+  assert(
+    rootPageSet.size > 0,
+    "ROOT_PAGE is no longer a `new Set([...])` literal this harness can read — " +
+      "re-derive the root-page rows by hand rather than letting this comparison pass empty",
+  );
+  for (const member of rootPageSet) {
+    assert(
+      rootPageRows.includes(member),
+      `${member} is in ROOT_PAGE but has no row above — add the row (this arm ` +
+        `exists so an edit to the set cannot change behaviour with no assertion over it)`,
+    );
+  }
+  // ⛔ AND IT IS EXACT-PATH KEYED, like `CONTACT_AT_ROOT` and for a related reason:
+  // `path.replace(/\.html$/, "")` on a PREFIX match would forward an arbitrary suffix
+  // to the company host — a 301 onto a 404, the class this file already refuses for
+  // `/tortoise/nope` below. So an unknown child path must stay a 404 on the product
+  // host. Swapping the membership test for `path.startsWith("/tortoise-for-product-teams")`
+  // reds THIS arm while every other row in the map stays green.
+  for (const from of ["/tortoise-for-product-teams/nope"]) {
+    const { status, location } = await hit(`https://${PRODUCT}${from}`);
+    assertEq(status, 404, `${from} is a 404 on the product host, never a 301 onto a 404`);
+    assertEq(location, null, `${from} on the product host emits no Location`);
+  }
+
   // ⛔ THE CRAWLER SURFACE IS NOT A PAGE (#11766). `robots.txt` and the sitemaps are root
   // ASSETS, so without an explicit branch the retired host falls through to the asset
   // router and answers 200 with a sitemap index whose <loc>s are all on the marketing
