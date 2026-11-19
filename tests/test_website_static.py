@@ -68,6 +68,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import os
 import re
 import struct
@@ -246,6 +247,94 @@ def _fmt_price(price, mode: str, discount_pct: int) -> tuple[str, str]:
     return f"${price}", "Billed monthly"
 
 
+# ── the SAME contract, executed from the JS both pages load ─────────────────
+
+#: `window.tortoiseFmtPrice = function (…) {` in the shared source.
+FMT_PRICE_HEAD_RE = re.compile(
+    r"window\.tortoiseFmtPrice\s*=\s*function\s*\([^)]*\)\s*\{")
+
+#: The three bindings the formatter's math is MADE OF.
+FMT_PRICE_BINDING_RE = {
+    name: re.compile(rf"\bvar\s+{name}\s*=\s*([^;]+);")
+    for name in ("disc", "perMonth", "total")
+}
+
+
+def _fmt_price_js_body() -> str:
+    """The body of the shared formatter — the code BOTH pages actually execute.
+
+    `_code_only`, so a COMMENT edit cannot red a row whose subject is the math.
+    """
+    code = _code_only(PRICING_SOURCE.read_text(encoding="utf-8"))
+    m = FMT_PRICE_HEAD_RE.search(code)
+    assert m, (
+        "the shared source no longer defines `window.tortoiseFmtPrice` — the "
+        "rounding contract has no home, so each page would re-implement it")
+    return _balanced_block(code, m.start())
+
+
+def _js_round(value: float) -> int:
+    """`Math.round`: JS sends halves UP, where Python's `round` is half-to-EVEN
+    (`round(20.5)` is 20 here and 21 in a browser)."""
+    return math.floor(value + 0.5)
+
+
+def _js_fmt_price(price: int, mode: str, discount_pct: int) -> tuple[str, str]:
+    """Run the SHARED formatter's arithmetic — the source both pages load — and
+    return the same `(big, total)` pair `_fmt_price` returns.
+
+    ⛔ A TRANSLATION of the three bindings the contract is made of, not a text
+    match and not a JS engine: the row that uses it therefore measures
+    AGREEMENT between the code the browser runs and the Python mirror, so a
+    rewritten formula reds even when a substring check would still find a
+    plausible-looking line. `Math.max` / `Math.round` are the only JS-isms in
+    those bindings; anything else is REFUSED rather than guessed at, so a
+    rewrite this cannot execute is a red that says so instead of a silent pass.
+
+    Measured at `59bc263091` (#13696 round 11, P2): `var disc = discountPct / 100;`
+    → `var disc = 0 / 100;` left all 158 rows GREEN while both pages rendered
+    annual $9/$25/$149 against the static cards' $7/$20/$119, and
+    `var total = perMonth * 12;` → `Math.round(price * 12 * (1 - disc))` printed
+    `$15/mo` beside `$182 billed annually`.
+    """
+    body = _fmt_price_js_body()
+    one_line = " ".join(body.split())
+    if mode != "annual":
+        assert ("return { big: '$' + price, total: 'Billed monthly' };"
+                in one_line), (
+            "the shared formatter no longer returns the monthly pair verbatim, "
+            f"so a monthly visitor's price is unread (#13645):\n{body}")
+        return f"${price}", "Billed monthly"
+    assert "if (price === 0) return { big: '$0', total: 'Free forever' };" in one_line, (
+        "the shared formatter no longer short-circuits the free tier before its "
+        f"math, so $0 would be quoted with a billed total (#13645):\n{body}")
+    if price == 0:
+        return "$0", "Free forever"
+
+    def evaluate(name: str, names: dict[str, object]) -> float:
+        m = FMT_PRICE_BINDING_RE[name].search(body)
+        assert m, (
+            f"the shared formatter no longer binds `var {name} = …`, so its "
+            f"math cannot be executed against the Python mirror (#13696 round "
+            f"11):\n{body}")
+        expr = m.group(1).strip()
+        js = expr.replace("===", "==").replace("!==", "!=")
+        js = js.replace("Math.max", "max").replace("Math.round", "_js_round")
+        for unsupported in ("?", "||", "&&", "=>", "function", "[", "{", "%"):
+            assert unsupported not in js, (
+                f"the shared formatter's `{name}` uses `{unsupported}`, which "
+                "this translation does not model — teach it here rather than "
+                f"letting the row pass blind: {expr!r}")
+        return eval(js, {"__builtins__": {}},
+                    {"max": max, "_js_round": _js_round, **names})
+
+    disc = evaluate("disc", {"discountPct": discount_pct})
+    per_month = evaluate("perMonth", {"price": price, "disc": disc})
+    total = evaluate("total", {"price": price, "disc": disc,
+                               "perMonth": per_month})
+    return f"${per_month}", f"${total} billed annually"
+
+
 def _render_pricing_fn(html: str) -> str:
     """Extract the renderPricing() function body from product.html."""
     m = re.search(r"function renderPricing\(\) \{.*?\n    \}", html, re.S)
@@ -262,8 +351,72 @@ def _function_refs(html: str, fn_name: str, page: str = "product.html") -> str:
     return m.group(0)
 
 
+def _balanced_block(text: str, start: int) -> str:
+    """`text[start:]` up to and including the `}` that closes its first `{`.
+
+    QUOTE-AWARE, because every body this is used on holds strings: a quoted `}`
+    (or `{`) must not move the depth. A `${…}` interpolation inside a template
+    literal is balanced by construction, so treating a backtick literal as an
+    opaque string is enough — none of these consumers needs a JS parser.
+    """
+    open_at = text.find("{", start)
+    assert open_at != -1, (
+        f"no `{{` at or after offset {start}: {text[start:start + 80]!r}")
+    depth = 0
+    quote = ""
+    i = open_at
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+        i += 1
+    raise AssertionError(
+        f"unbalanced `{{` at offset {open_at}: {text[open_at:open_at + 80]!r}")
+
+
+#: The block that CHOOSES the initial billing mode, at the page's top level.
+_PRICING_INIT_RE = re.compile(
+    r"^[ \t]*if[ \t]*\([ \t]*PRICING[ \t]*\)[ \t]*\{", re.M)
+
+#: A `function` head, whose body the stray-call scan must not read as top level.
+_FUNCTION_HEAD_RE = re.compile(r"\bfunction\b[^\n{]*\{")
+
+
+def _without_function_bodies(code: str) -> str:
+    """`code` with every `function …(…) { … }`, head included, removed.
+
+    What survives is the page's TOP-LEVEL code — the statements a browser runs
+    at parse time. A `function` whose signature spans lines is not matched, so
+    its body stays in the result: that direction is fail-CLOSED (a call inside
+    it would red the row below with a message naming the rule), never a silent
+    pass.
+    """
+    out: list[str] = []
+    i = 0
+    while True:
+        m = _FUNCTION_HEAD_RE.search(code, i)
+        if m is None:
+            out.append(code[i:])
+            return "".join(out)
+        out.append(code[i:m.start()])
+        block = _balanced_block(code, m.start())
+        i = m.start() + len(block)
+
+
 def _pricing_init_code(html: str, page: str = "product.html") -> str:
-    """The statement that decides which prices a visitor sees FIRST.
+    """The `if (PRICING) { … }` BLOCK that decides which prices a visitor sees FIRST.
 
     `setBilling` is itself compared by `test_the_two_pages_render_from_the_same_code`,
     but the call that CHOOSES its argument sits at the page's top level, outside
@@ -272,19 +425,56 @@ def _pricing_init_code(html: str, page: str = "product.html") -> str:
     (#13696 review 2, finding 4): flipping the campaign page's init to
     `setBilling('monthly')` left all 135 rows GREEN while that page opened on
     $19/$25/$149 against `/tortoise`'s $15/$20/$119 annual.
+
+    ⛔ Round 11 (#13696, P1): this used to return the ONE LINE carrying both
+    `PRICING.display.annual_default` and `setBilling` and compare that stripped
+    line. Keeping that line BYTE-IDENTICAL and appending
+    `if (PRICING) setBilling('monthly');` after the block left all **158 rows
+    GREEN** at `59bc263091` while the campaign page opened on $19/$25/$149
+    against `/tortoise`'s $15/$20/$119 — the same divergence, one statement
+    later. So the WHOLE block is compared, and a second top-level `setBilling(…)`
+    call is refused: the block is the only statement allowed to choose the
+    initial mode.
     """
-    hits = [ln.strip() for ln in html.splitlines()
-            if "PRICING.display.annual_default" in ln and "setBilling" in ln]
-    assert hits, (
+    blocks: list[str] = []
+    stray: list[str] = []
+    for script in _inline_scripts(html):
+        found = [_balanced_block(script, m.start())
+                 for m in _PRICING_INIT_RE.finditer(script)]
+        blocks.extend(found)
+        rest = script
+        for block in found:
+            rest = rest.replace(block, "", 1)
+        # `_code_only`, not the comment-stripped script: this consumer asks
+        # "is the call there at all", where a mention in prose or in a trailing
+        # comment is indistinguishable from the call (see `_code_only`).
+        stray.extend(ln.strip()
+                     for ln in _code_only(_without_function_bodies(rest)).splitlines()
+                     if re.search(r"\bsetBilling\s*\(", ln))
+    assert blocks, (
         f"{page} no longer wires its billing default from the shared table "
-        "(`if (PRICING.display.annual_default) setBilling(...)`). Without it the "
+        "(`if (PRICING) { … setBilling(…) … }`). Without it the "
         "page opens on whatever `setBilling` was left at, not the mode "
         "`pricing.json` names, so every price on it is quoted in the wrong "
         "billing period (#13645).")
-    assert len(hits) == 1, (
-        f"{page} wires the billing default {len(hits)} time(s): {hits!r}. Two "
-        "wiring statements can disagree, and only the last one runs.")
-    return hits[0]
+    assert len(blocks) == 1, (
+        f"{page} wires the billing default {len(blocks)} time(s): {blocks!r}. "
+        "Two wiring blocks can disagree, and only the last one runs.")
+    # Indentation is not code, so the comparison is over stripped lines.
+    block = "\n".join(ln.strip() for ln in blocks[0].splitlines() if ln.strip())
+    assert "PRICING.display.annual_default" in block and "setBilling(" in block, (
+        f"{page}'s `if (PRICING) {{ … }}` block no longer chooses the mode from "
+        "`PRICING.display.annual_default`, so the page opens on the wrong "
+        f"billing period with every row green (#13645):\n{block}")
+    assert not stray, (
+        f"{page} calls `setBilling(…)` at TOP LEVEL, outside the init block:\n  "
+        + "\n  ".join(stray)
+        + "\nThe init block is the only statement allowed to choose the "
+        "initial billing mode: a later top-level call WINS, so the page opens "
+        "on the other mode than `/tortoise` while the compared block is "
+        "byte-identical (#13696 round 11, measured green). Move the call inside "
+        "the block, or leave the mode to the monthly/annual buttons' `onclick`.")
+    return block
 
 
 def _code_only(code: str) -> str:
@@ -719,6 +909,72 @@ class TestFmtPriceMath:
         assert _fmt_price(1, "annual", 20)[0] == "$1"
         # Even a 99% discount floor keeps $1/mo (max(1, ...))
         assert max(1, round(1 * 12 * 0.01 / 12)) == 1
+
+
+class TestSharedFormatterMathIsExecuted:
+    """The JS the pages RUN is executed, not merely found.
+
+    ⛔ #13696 round 11, P2. `TestFmtPriceMath` above exercises `_fmt_price` —
+    the Python MIRROR — and the shared-source row asserted only that
+    `website/assets/tortoise-pricing.js` DEFINES `window.tortoiseFmtPrice`. So
+    nothing tied either to the arithmetic both pages actually execute, and the
+    PR makes that one file the place EVERY product page formats through: one
+    silent edit there quotes wrong money on both, which is the invariant this
+    PR declares. Measured mutants, both left all **158 rows GREEN** at
+    `59bc263091`:
+
+      * `var disc = discountPct / 100;` → `var disc = 0 / 100;` — both pages
+        then rendered annual $9/$25/$149 (totals $108/$300/$1788) beside the
+        static no-JS cards' $7/$20/$119;
+      * `var total = perMonth * 12;` → `Math.round(price * 12 * (1 - disc))` —
+        `$15/mo` printed beside `$182 billed annually`.
+
+    The rows below run the source's own bindings (`_js_fmt_price`) against the
+    mirror's cases and a range, so the two implementations are held to EACH
+    OTHER. A formula rewrite reds even where the text still looks right.
+    """
+
+    def test_the_shared_math_agrees_with_the_python_mirror(self):
+        disc = _mirror_data()[0]["display"]["annual_discount_pct"]
+        cases = {
+            0: ("$0", "Free forever"),
+            1: ("$1", "$12 billed annually"),      # the max(1, …) floor
+            9: ("$7", "$84 billed annually"),      # 7.2 → 7
+            25: ("$20", "$240 billed annually"),   # 25 × 0.8 exactly
+            149: ("$119", "$1428 billed annually"),  # 119.2 → 119
+        }
+        for price, expected in cases.items():
+            from_source = _js_fmt_price(price, "annual", disc)
+            from_mirror = _fmt_price(price, "annual", disc)
+            assert from_source == from_mirror == expected, (
+                f"the formatter both pages LOAD and the Python mirror that "
+                f"pins its cases disagree at ${price}: source={from_source!r} "
+                f"mirror={from_mirror!r} expected={expected!r}. One of them "
+                "now quotes a different number than the other, and the page "
+                "runs the first (#13645, #13696 round 11).")
+
+    def test_the_two_implementations_agree_across_the_price_range(self):
+        """The five pinned cases are also the five the mirror was written from.
+
+        A formula can agree on those and diverge elsewhere — so the agreement
+        is measured over a range, which is what makes the row a comparison of
+        two implementations rather than of two literals.
+        """
+        disc = _mirror_data()[0]["display"]["annual_discount_pct"]
+        offenders = [
+            (price, _js_fmt_price(price, "annual", disc),
+             _fmt_price(price, "annual", disc))
+            for price in range(0, 500)
+            if _js_fmt_price(price, "annual", disc)
+            != _fmt_price(price, "annual", disc)]
+        assert not offenders, (
+            "the shared formatter's math and the Python mirror disagree "
+            f"({len(offenders)} of 0..499): {offenders[:5]}")
+
+    def test_monthly_is_left_to_the_verbatim_branch(self):
+        for price in (0, 9, 25, 149):
+            assert _js_fmt_price(price, "monthly", 20) == \
+                _fmt_price(price, "monthly", 20)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7335,6 +7591,30 @@ def _pricing_source_includes(html: str) -> list[str]:
 #: digits must follow the tag run, so `$1</div>…428` still yields only `$1`.
 PRICE_FIGURE_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d")
 
+#: A DOLLAR FRAGMENT: a `$` that is neither a `${…}` template interpolation nor
+#: the head of a figure (a `$` followed by a digit is `PRICE_FIGURE_RE`'s job).
+#:
+#: ⛔ It is how JS ASSEMBLES a price — `'<div class="price">$' + t.price` — and
+#: the figure then lives in the TABLE, not in the page's source text, so no
+#: `$<digit>` detector can see it: the most common way to build a price in JS
+#: was in no channel at all. Measured at `59bc263091` (#13696 round 11, P2):
+#: appending that one line to the campaign page's inline script left all **158
+#: rows GREEN** while its grid showed Builder at $25/mo beside its own $20
+#: annual cards, and `/tortoise` showed $20/$15.
+#:
+#: Both product pages carry ZERO `$` outside a `${…}` in any channel today, so
+#: this is green as written — it refuses the next one. A price a script needs
+#: must still come from the shared table through `window.tortoiseFmtPrice`,
+#: whose own `'$' + perMonth` is legitimate because THAT file is the source (it
+#: is excluded from `_price_channels`, and its math is executed by
+#: `TestSharedFormatterMathIsExecuted`).
+PRICE_FRAGMENT_RE = re.compile(r"\$(?![{\d])")
+
+#: A figure carried in a DATA ATTRIBUTE (`data-price="20"`), which no `$`
+#: detector reads and which exists only to be turned into one by a script. Zero
+#: on both product pages today; refused rather than gated on a spelling.
+PRICE_DATA_ATTR_RE = re.compile(r"\bdata-price\s*=\s*[\"']?\d")
+
 #: A whole figure, for the row that asks whether the SHARED SOURCE can produce
 #: it. Same tag tolerance as the detector, so a figure cannot be read as
 #: present-but-different; `_figures` normalises the match back to `$89` before
@@ -8300,6 +8580,164 @@ class TestPricingSourceIsShared:
             assert not re.search(r"Math\.round\(\s*price\s*\*\s*12", html), (
                 f"{name} re-derives the annual per-month price instead of "
                 "delegating to `window.tortoiseFmtPrice`")
+
+    def test_a_price_is_not_assembled_from_a_dollar_fragment(self):
+        """A figure built by CONCATENATION is in no `$<digit>` channel.
+
+        ⛔ #13696 round 11, P2. `PRICE_FIGURE_RE` needs a digit right after the
+        `$`, which is the one shape a concatenated price never has: the figure
+        lives in the table and the source text carries only `'$' + t.price`.
+        Measured at `59bc263091`: appending
+        `document…insertAdjacentHTML('beforeend', '<div class="price">$' + t.price + '<span>/mo</span></div>')`
+        to the campaign page's inline script left all **158 rows GREEN** while
+        its grid showed Builder at $25/mo beside its own $20 annual cards and
+        `/tortoise` showed $20/$15. `String.fromCharCode(36)` reaches the same
+        markup, but it reaches NO detector either — that is a decision about
+        what a static gate can see, not a spelling to chase.
+
+        Read over EVERY channel `_price_channels` lists (inline script, `<style>`,
+        same-origin files, stylesheets), because a fragment is exactly as
+        invisible there as a figure. The shared source is excluded from that
+        list BY DESIGN — it is where a price is legitimately built.
+        """
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            markup = path.read_text(encoding="utf-8")
+            hits = [f"{where}: {line.strip()}"
+                    for where, body in _price_channels(name, markup)
+                    for line in body.splitlines()
+                    if PRICE_FRAGMENT_RE.search(line)]
+            assert not hits, (
+                f"{name} assembles a price from a bare `$` fragment:\n  "
+                + "\n  ".join(hits)
+                + "\nA figure concatenated onto `'$'` carries no digit in the "
+                "source, so no price row can read the number it renders and "
+                "this page can quote a price no other page does with every "
+                "suite green (#13645, #13696 round 11). Get the WHOLE figure "
+                "from `window.tortoiseFmtPrice(…)` — it returns `big` already "
+                "carrying the `$` — or from `PRICING`.")
+            attrs = [m.group(0) for m in PRICE_DATA_ATTR_RE.finditer(markup)]
+            assert not attrs, (
+                f"{name} carries a price in a DATA ATTRIBUTE ({attrs!r}). A "
+                "figure stored as `data-price` is turned into a visible price "
+                "by a script, so it is a second copy of the number that no "
+                "static row reads and that the shared table does not own "
+                "(#13645). Render it from `window.tortoiseFmtPrice` instead.")
+
+    def test_the_shared_table_is_FROZEN_against_a_reflective_write(self):
+        """…and the runtime half of the mutation gate.
+
+        ⛔ #13696 round 11, P2. `test_neither_page_mutates_the_shared_table`
+        refuses the STATIC spellings of a write (`x = …`, `delete x.y`,
+        `Object.assign`), and a list of spellings is what the reflective forms
+        defeat: `Object.defineProperty(window.TORTOISE_PRICING.tiers.pro,
+        'price', { value: 26 })` and `Reflect.set(…)` both left all **158 rows
+        GREEN** at `59bc263091`, re-pricing the tier for BOTH pages at runtime.
+        The fix is not more regex — it is that the table cannot be written at
+        all: the shared source deep-freezes it, so the write is REFUSED. What
+        that means in a page's classic (sloppy-mode) script, measured with node
+        against the frozen file: `Object.defineProperty(…)` and
+        `features.push(…)` throw, while `x.price = 26` and
+        `Reflect.set(…, 'price', 26)` are silently refused (`Reflect.set`
+        returns false) — the tier still prices at 25 and the formatter still
+        returns `$20` / `$240 billed annually`. The write does not take effect
+        either way, which is the invariant; a throw is not required.
+
+        The freeze IS the mechanism, so what this row can do is keep the freeze
+        in place and DEEP (`Object.keys(table.tiers).forEach`, so a new tier is
+        covered the day it lands, plus each tier's `features`/`excluded` arrays
+        and `display`).
+        """
+        code = _code_only(PRICING_SOURCE.read_text(encoding="utf-8"))
+        assert re.search(r"Object\.keys\(\s*table\.tiers\s*\)\.forEach\(", code), (
+            "the shared source no longer freezes every tier by ITERATION, so a "
+            "tier added to the table is writable while the ones named in a "
+            "list are not (#13696 round 11)")
+        for target in ("tier.features", "tier.excluded", "tier",
+                       "table.display", "table.tiers", "table"):
+            assert re.search(
+                rf"Object\.freeze\(\s*{re.escape(target)}\s*\)", code), (
+                f"the shared source no longer `Object.freeze({target})`, so "
+                "that part of the ONE table both pages render is writable at "
+                "runtime — `Object.defineProperty` / `Reflect.set` then change "
+                "the price `other` pages quote with nothing red (#13696 "
+                "round 11).")
+
+    #: What makes a served page a RENDERER of the shared table.
+    TABLE_RENDER_MARKERS = (
+        "TORTOISE_PRICING", "tortoise-pricing.js",
+        'id="pricing-grid"', 'class="price"',
+    )
+
+    def test_the_population_is_every_page_that_renders_the_table(self):
+        """The set is hand-maintained on purpose — and VERIFIED, not trusted.
+
+        ⛔ #13696 round 11, P3. `PRODUCT_PAGES_SHARING_PRICING` is a two-page
+        tuple, while `website/assets/tortoise-pricing.js` told an editor that "a
+        page that inlines its own tier table reds the shared-source test". It
+        did not: giving `website/index.html` its own
+        `window.TORTOISE_PRICING = {…}` left all **158 rows GREEN**, because
+        every row in this class iterates the tuple. The list stays explicit — a
+        page joins the shared table by DECISION — but the population is now
+        derived from the pages themselves, so a page that starts rendering the
+        table without joining reds here instead of shipping a second copy.
+
+        The marker list is deliberately about RENDERING the table, not about
+        mentioning a number: `license.html`/`faq.html` quote legitimate fees, and
+        a `$<digit>` marker would draft them into a set that requires loading
+        the shared source.
+        """
+        members = {(name, path.resolve()) for name, path in
+                   PRODUCT_PAGES_SHARING_PRICING}
+        population = TestSiteIconAndSocialPreviewContract.PAGES_AT_11762
+        for page in sorted((REPO_ROOT / "website").glob("*.html")):
+            text = page.read_text(encoding="utf-8")
+            if not any(marker in text for marker in self.TABLE_RENDER_MARKERS):
+                continue
+            rel = f"website/{page.name}"
+            assert (rel, page.resolve()) in members, (
+                f"{rel} renders the shared pricing table "
+                f"({[m for m in self.TABLE_RENDER_MARKERS if m in text]!r}) but is "
+                "not in `PRODUCT_PAGES_SHARING_PRICING`, so NONE of the rows "
+                "that hold a page to the ONE source and to the other pages' "
+                "render covers it — it can quote a different price with every "
+                "suite green (#13645, #13696 round 11). Either load "
+                "`/assets/tortoise-pricing.js` and join the tuple, or stop "
+                "rendering a price table on this page.")
+            assert page.name in population, (
+                f"{rel} renders the shared pricing table but is missing from "
+                "`PAGES_AT_11762` (the pinned served-page population), so the "
+                "head/card guards do not cover it either")
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            text = path.read_text(encoding="utf-8")
+            assert any(marker in text for marker in self.TABLE_RENDER_MARKERS), (
+                f"{name} is in `PRODUCT_PAGES_SHARING_PRICING` but renders none "
+                "of the table's markers — it no longer renders the shared "
+                "table, so the set is stale and the rows above pin a page "
+                "that has moved on")
+
+
+class TestPriceFragmentDetector:
+    """`PRICE_FRAGMENT_RE` pinned on its own, so the channel row cannot go blind.
+
+    The row above reads the LIVE pages, which carry no fragment today: nothing
+    inside it can tell a working detector from a dead one. These rows drive the
+    regex directly.
+    """
+
+    def test_a_concatenated_price_is_flagged(self):
+        assert PRICE_FRAGMENT_RE.search(
+            "d.innerHTML = '<div class=\"price\">$' + t.price + '</div>';")
+        assert PRICE_FRAGMENT_RE.search("document.title = 'from $' + t.price;")
+
+    def test_a_template_interpolation_is_not_a_fragment(self):
+        assert not PRICE_FRAGMENT_RE.search(
+            "`<div class=\"price\">${fmtPrice(t.price).big}</div>`")
+
+    def test_a_whole_figure_is_left_to_the_figure_detector(self):
+        # `$25` / `$0` / `$1,428` are `PRICE_FIGURE_RE`'s subject; this detector
+        # must not double-report them (or it reds correct markup on sight).
+        assert not PRICE_FRAGMENT_RE.search("'$25', '$0', '$1,428'")
+        assert not PRICE_FRAGMENT_RE.search("<div class=\"price\">$119<span>/mo</span></div>")
 
 
 class TestConsentSeam:

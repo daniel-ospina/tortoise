@@ -11,8 +11,14 @@
  * source by `TestStaticPricingFallback`).
  *
  * ⛔ DO NOT add a second copy of this object to a page. Both pages load
- * `/assets/tortoise-pricing.js`; a page that inlines its own tier table reds
- * the shared-source test, which exists for exactly that.
+ * `/assets/tortoise-pricing.js`, and the list of pages that render the table is
+ * `PRODUCT_PAGES_SHARING_PRICING` in `tests/test_website_static.py` — a row in
+ * that file (`test_the_population_is_every_page_that_renders_the_table`) walks
+ * every served page and REFUSES one that renders the table (`TORTOISE_PRICING`,
+ * `pricing-grid`, `class="price"`) without being in that list, so a page that
+ * inlines its own tier table reds rather than shipping a second copy. A new
+ * page that quotes prices joins the list deliberately; it does not inherit
+ * coverage by copy-pasting this file's shape.
  *
  * The table is a MIRROR of `product/pricing.json` (the first source), pinned
  * against it by `tests/test_website_static.py::TestMirrorNumericParity` and
@@ -37,6 +43,35 @@ window.TORTOISE_PRICING = {
     team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Unlimited integrations", "Usage-based overage", "Priority support"], excluded: [] }
   }
 };
+
+/* ⛔ FROZEN — the table is ONE object every page that quotes a price renders, so
+ * a page that WRITES to it changes the price every OTHER page shows.
+ * `tests/test_website_static.py::test_neither_page_mutates_the_shared_table`
+ * refuses the statically written forms (`x = …`, `delete x.y`, `Object.assign`),
+ * and a list of spellings is exactly what a reflective write defeats:
+ * `Object.defineProperty(…, 'price', {value: 26})` and `Reflect.set(…)` got past
+ * it and left every row green (#13696 round 11, measured). So the freeze is the
+ * gate. Measured with node against this file: `defineProperty` / `features.push`
+ * throw, and `x.price = 26` / `Reflect.set(…, 'price', 26)` are REFUSED
+ * (`Reflect.set` returns false) — the tier still prices at 25 and
+ * `tortoiseFmtPrice(25, 'annual', 20)` still returns `$20` / `$240 billed
+ * annually`, so no page can re-price the table for the other one. A classic
+ * (non-module) script is SLOPPY mode, which is why an assignment or a
+ * `Reflect.set` is silently ignored rather than thrown: the write does not take
+ * effect either way, which is the invariant. Deep — `Object.keys`, so a tier
+ * added above is covered the day it lands — and it is pinned by
+ * `test_the_shared_table_is_FROZEN_against_a_reflective_write`. */
+(function freezePricingTable(table) {
+  Object.keys(table.tiers).forEach(function (key) {
+    var tier = table.tiers[key];
+    Object.freeze(tier.features);
+    Object.freeze(tier.excluded);
+    Object.freeze(tier);
+  });
+  Object.freeze(table.display);
+  Object.freeze(table.tiers);
+  Object.freeze(table);
+}(window.TORTOISE_PRICING));
 
 /* The display contract: (price, mode, discountPct) → {big, total}.
  *
