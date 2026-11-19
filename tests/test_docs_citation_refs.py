@@ -1576,7 +1576,43 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
 #: an emptiness word. The HISTORICAL form ("printed no path at the head this was written
 #: for") is past tense and deliberately allowed — that is the same line the numstat arm
 #: draws between `printing `1 1` at a head of its own` and `both print `1 1``.
-_TORTOISE_SET_DIRECTION_CLAIM = re.compile(
+_TORTOISE_NAMED_HEAD = re.compile(r"(?:`[0-9a-f]{7,40}`|\b[0-9a-f]{7,40}\b|#\d{3,6})")
+
+
+class _HeadBoundBan:
+    """The direction ban, minus HISTORICAL mentions.
+
+    A sentence that NAMES the head it is about is not a head-bound claim about the head you
+    merge: the document is allowed to say "`#10215`'s `8bc2fbed1` touches no `tortoise/`
+    file", and the witness list pins the past-tense form as MUST-NOT-REFUSE. A regex
+    lookbehind cannot express that (variable width), so the allowance is a post-filter on
+    the match's preceding window (#13802 review, P2 — measured: three named-head emptiness
+    sentences were refused by the unanchored verb-before-path alternative, one of them
+    already shipped in `docs/evidence/7949-capstone/README.md`).
+    """
+
+    __slots__ = ("_rx",)
+
+    def __init__(self, rx):
+        self._rx = rx
+
+    def _claimed(self, m, text):
+        return not _TORTOISE_NAMED_HEAD.search(text[max(0, m.start() - 80):m.start()])
+
+    def search(self, text):
+        for m in self._rx.finditer(text):
+            if self._claimed(m, text):
+                return m
+        return None
+
+    def findall(self, text):
+        return [m.group(0) for m in self._rx.finditer(text) if self._claimed(m, text)]
+
+    def finditer(self, text):
+        return (m for m in self._rx.finditer(text) if self._claimed(m, text))
+
+
+_TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # ANCHOR — the command (long spelling or the `-- tortoise/` shorthand), the
     # `tortoise/` SET, or the DEICTIC reference that names no command at all.
     r"(?:(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
@@ -1617,7 +1653,8 @@ _TORTOISE_SET_DIRECTION_CLAIM = re.compile(
     # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
-    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two|exactly (?:one|two)"
+    r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entries|diffs?|hits?)"
+    r"|empty|EMPTY|exactly those two|exactly (?:one|two)"
     r"|ONE module|TWO modules|one module|two modules|both modules"
     r"|ONE path|TWO paths|one path|two paths|no module"
     r"|(?:the\s+)?(?:one|two|three|four|five)\s+[\w-]+\s+modules"
@@ -1666,7 +1703,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = re.compile(
     # about that command"; "untouched" IS that claim, so it belongs here rather than in a
     # footnote limiting the ban's scope.
     r"|`?tortoise/`?\s+(?:is|are|was|were|remains?|stays?)\s+(?:NOT\s+|not\s+)?"
-    r"(?:untouched|unchanged|unmodified|identical|byte-identical|the\s+same|no\s+code)")
+    r"(?:untouched|unchanged|unmodified|identical|byte-identical|the\s+same|no\s+code)"))
 
 
 def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_verb_class():
@@ -1741,6 +1778,10 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "the `-- tortoise/` form answers with `tortoise/x.py`",
         "the `tortoise/` set holds exactly four files",
         "at THIS head the `tortoise/` set above is this branch's own comment/docstring-only edits",
+        # ⛔ AND THE NOUN-SYNONYM HOLE (#13802 review, round 6, P2 — MEASURED: a one-word
+        # edit, `path`->`files`/`diff`, put the refuted claim back GREEN in BOTH arms)
+        "`-- tortoise/` prints no files at all",
+        "`-- tortoise/` prints no diff",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
@@ -1751,6 +1792,10 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         f"`{_cmd}` is the command that answers it at the head you merge",
         "at `2584a86ec1` the command printed no path at all",
         "read the set from `git diff --name-only origin/main...HEAD`",
+        # ⛔ AND THE HISTORICAL FORM MUST STILL BE ALLOWED (#13802 review, round 6, P2 —
+        # MEASURED: the unanchored verb-before-path alternative refused a named-head
+        # emptiness claim, and the bundle already ships one in README.md)
+        "`#10215`'s `8bc2fbed1` touches no `tortoise/` file at all",
     ):
         assert not _TORTOISE_SET_DIRECTION_CLAIM.search(_allowed), (
             f"the direction detector REFUSES {_allowed!r}, which states the command (or "
