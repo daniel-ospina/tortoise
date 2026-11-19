@@ -3267,9 +3267,10 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # 25 of them in comments), so a uniform drift landed it on a comment; the
     # per-label write it was actually found by occurs **once** and is what it now
     # stores. And `22593-22768` recorded `None` for its end — its START text
-    # `def update_knowledge(` is unique and did red, but an end that is never read
-    # let an insert INSIDE the function leave the cited end naming nothing while
-    # both guards stayed green.
+    # `def update_knowledge(` is unique, but an end recorded `None` is never read,
+    # so an edit to that END LINE left the cited range end naming nothing and
+    # NOTHING red: no other row addresses line 22768. (An insert INSIDE the
+    # function does red — via the five later `sdk.py` rows, not via this one.)
     # Both ADDRESSES were re-derived at `ef0abcb`; both LOCATORS were narrowed at
     # `c50a03a` (the commit carrying this note), by the texts pinned below.
     ("sdk.py", 55317, 55319): (
