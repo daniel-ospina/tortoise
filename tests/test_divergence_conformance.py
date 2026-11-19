@@ -619,12 +619,32 @@ def test_d13_wipe_server_refusal(leg, tmp_path):
 # ── D14: hosted_api embedded fallback (hosted_api.py L78-119) ─────────────
 
 
-def test_d14_hosted_make_sdk_fallback(leg, tmp_path):
+def test_d14_hosted_make_sdk_fallback(leg, tmp_path, monkeypatch):
     """D14 — _make_sdk: no URI → embedded fallback at TORTOISE_DB_PATH
     (the prod degraded path, keepalive-anchored); URI → TortoiseSDK(namespace=…)
     server mode. No divergence when the URI is set — each lane's SDK is
-    provably its intended backend."""
+    provably its intended backend.
+
+    ⛔ ISOLATION — the embedded leg must not take the PROD path (#main-red,
+    measured on `test (d)` at `09f5c99afd`). The ``leg`` fixture delenvs
+    ``TORTOISE_DB_URI``; it says nothing about ``TORTOISE_DB_PATH``, so
+    ``_resolve_embedded_db_path()`` fell through to its **``/data/tortoise.db``**
+    default on any host where ``/data`` is creatable. FalkorDBLite is
+    single-writer, so on a self-hosted runner where two jobs share the host the
+    second one died before any assertion:
+
+        EmbeddedStoreBusyError: Embedded store busy: '/data/tortoise.db' is held
+        by a live process (pid 731759).
+
+    The arm is about **URI ABSENCE**, not about which file the fallback lands in,
+    so the path is pinned here to this test's own ``tmp_path`` — and the pin below
+    asserts the SDK actually opened THAT file, so a later edit cannot quietly
+    drift the leg back onto the shared prod path (an unpinned assumption is how
+    this reddened)."""
     from tortoise.hosted_api import _FALLBACK_KEEPALIVE, _make_sdk
+
+    if leg == "embedded":
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "d14-fallback.db"))
 
     ns = f"test_d14_{os.urandom(4).hex()}"
     sdk = _make_sdk(namespace=ns)
@@ -634,6 +654,11 @@ def test_d14_hosted_make_sdk_fallback(leg, tmp_path):
         if leg == "embedded":
             assert proj._is_embedded is True, \
                 "no URI → hosted fallback must be embedded"
+            assert os.path.dirname(sdk._db_path or "") == str(tmp_path), (
+                "the embedded fallback must open a store inside THIS test's "
+                f"tmp_path, not a shared one — it opened {sdk._db_path!r} "
+                "(a fixed path is how the single-writer store collided with a "
+                "peer job on the runner)")
         else:
             assert proj._is_embedded is False, \
                 "URI → hosted SDK must be server-mode"

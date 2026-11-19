@@ -8376,6 +8376,65 @@ async def liveness(response: Response):
             else round((now - previous) * 1000.0, 1)}
 
 
+# ── #13674: the embedder's declared state, as `/health` reports it ───────────
+# `EmbeddingModel.status()` exists so the LOAD BOUND is observable — the three
+# fields #13674 added (`load_timeout_s`, `load_elapsed_s`, `load_in_progress`,
+# plus `load_in_progress_s`) are what let an operator see a load 290 s into a
+# 300 s bound BEFORE it becomes a timeout. Until this block existed, every
+# caller of that dict in `tortoise/` was a test comment, so on the product the
+# one instrument for "is hybrid retrieval on, and if not, why" had no reader —
+# which is exactly the clause
+# `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §6 states for the record
+# door: "a door must not make a counter its instrument unless the caller can
+# read it back."  #13674's own indicator (1) — a production boot showing
+# `embedder warm-up OK` rather than `load_timeout` — was therefore checkable
+# only from `fly logs`, and indicator (3) (RSS bounded across a retry) not at
+# all.
+#
+# ⛔ IT DOES NOT FOLD INTO `status`, the same rule as `change_feed`,
+# `wait_bound_breaches` and `capture`: an embedder that is loading or on
+# cooldown means KEYWORD-ONLY READS, and #2952 already requires each such read
+# to DECLARE itself (`declared_retrieval_kind`). Folding it in would pin a
+# deployment degraded for the life of the process the moment the model failed to
+# load once (#10185), and would land a restart-loop's worth of 503s on the deploy
+# gate for a condition the product is designed to survive. `state` is the
+# operator's cue; the per-read declaration is the contract.
+#
+# `threads` rides along because #10296 made the intra-op pin observable for the
+# same reason ("why is this host slow" is read here instead of rediscovered).
+# `model` is the pinned identity (#1349), so a reader can tell WHICH embedder
+# reported ready.
+_EMBEDDER_HEALTH_KEYS = (
+    "model", "available", "state", "last_error", "failure_kind",
+    "cooldown_remaining_s", "threads", "load_timeout_s", "load_elapsed_s",
+    "load_in_progress", "load_in_progress_s",
+)
+
+
+def _embedder_health() -> dict:
+    """#13674: the embedder's load state, on the surface an operator curls.
+
+    Publishes `EmbeddingModel.status()` — the DECLARED availability plus the
+    load bound and how far into it the in-flight attempt is — so "the dense leg
+    is off in production" has a datum that survives the process, instead of a
+    log line somebody has to already be watching for.
+
+    Never raises, collects no I/O (#2850): `status()` reads process memory only
+    — it takes no embedder lock, so a 156.5 s cold import cannot delay this
+    handler. The DEGRADED arm publishes the SAME key set as the healthy one
+    (PLUS `error` — an extra key cannot `KeyError` a consumer, a missing one
+    can) and the rule `capture` / `refusals` state holds: an ad-hoc short dict
+    is how a dashboard gets a `KeyError` in exactly the path it is reading.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+
+        status = EmbeddingModel.status()
+    except Exception as exc:  # a health path must always answer
+        return {**dict.fromkeys(_EMBEDDER_HEALTH_KEYS), "error": str(exc)[:200]}
+    return {key: status.get(key) for key in _EMBEDDER_HEALTH_KEYS}
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -8493,6 +8552,24 @@ async def health():
     a saturated capture gate refuses `POST /v1/sessions` while every other route
     — including this one — is healthy, and restarting the process would neither
     drain the extractions holding the slots nor clear a burst of arrivals.
+
+    Embedder check (#13674): ``embedder`` publishes ``EmbeddingModel.status()`` —
+    ``available``, ``state`` (``ready``/``cooldown``/``unavailable``),
+    ``failure_kind``, the intra-op ``threads`` pin, the load bound
+    ``load_timeout_s`` and, for the attempt in flight, ``load_in_progress`` plus
+    ``load_in_progress_s`` — plus ``model``, ``last_error``,
+    ``cooldown_remaining_s`` and ``load_elapsed_s``. The authoritative full set is
+    ``_EMBEDDER_HEALTH_KEYS``, which the DEGRADED arm publishes exactly. It exists
+    because the dense leg being OFF —
+    keyword-only reads for every query, with every published surface saying
+    ``ok`` — was invisible except in a ``fly logs`` line nobody watched. It does
+    NOT fold into ``status``: a loading or cooling-down embedder means
+    keyword-only reads, which #2952 requires each read to DECLARE; folding it in
+    would pin a deployment degraded forever after one failed load (#10185) and
+    put a restart loop's worth of 503s on the deploy gate. ⛔ Its DEGRADED arm
+    (``_embedder_health``'s never-raise branch) returns the SAME key set with
+    every value ``null`` plus ``error`` — ``available: null`` therefore means
+    "this block could not be read", NOT "the model is unavailable".
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -8629,7 +8706,14 @@ async def health():
             # (see the docstring). Resolved through the SAME module the verifier
             # uses, so the reading cannot describe a key this process does not
             # actually sign with.
-            "consent_token_key": _consent_token_key_health()}
+            "consent_token_key": _consent_token_key_health(),
+            # #13674: the embedder's declared state. The load bound this P1
+            # raised (90 s -> 300 s), how far into it the in-flight attempt is,
+            # and whether the dense leg is available AT ALL — without this the
+            # "hybrid retrieval is OFF in production" claim could only be
+            # re-measured by a human with a shell on the box. Reported, never
+            # folded into `status`: see `_embedder_health`'s docstring.
+            "embedder": _embedder_health()}
 
 
 @app.get("/health/ready")
@@ -50800,7 +50884,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 196 tracked files (736 distinct
+# ABSOLUTE line number from 197 tracked files (737 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

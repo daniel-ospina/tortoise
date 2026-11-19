@@ -5534,6 +5534,36 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     include_terminal=True for the complete supersede-structure view).
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
+    Two question shapes are answered from STATE instead of from the words, because
+    their answer is a population and not a match set (#13557/#13558):
+    a commitment question ("current commitments", "what are we committed to")
+    reads the live commitments by KIND + STAGE — so it returns a plan/goal/target
+    whose text never says "commitment" — and an ending question ("has anything
+    been withdrawn", "what ended") reads the ended records, each with how it
+    ended (its lifecycle word, the successor it names, or its terminal stage and
+    outcome). No new argument and no new tool is needed for the ending question:
+    the sentence reaches it. ⛔ THE COMMITMENT ONE HAS A FAMILY BOUNDARY, and it is
+    a real caller obligation: the commitment kinds are OBJECT kinds (ONTOLOGY §5),
+    so this call must pass `entity_type='object'` to receive them — with this
+    tool's default `entity_type='point'` a commitment question still returns
+    Points (the capstone's own Q1 point read, which already answered with the live
+    claims). A single call does not return both families. The route is also taken
+    only for a plain question: pass any retrieval knob (`threshold`,
+    `min_confidence`, `order_by`, …) and this stays the relevance read it always
+    was.
+
+    ⛔ AND THE BOUNDARY IS THE WHOLE QUESTION, inclusive of what it must give up:
+    the sentence is matched as a SHAPE, so an ending question with a trailing
+    adverb or an added constraint keeps the relevance read instead of routing —
+    `what has ended recently`, `have any claims been retracted in Q3` and
+    `which claims were retracted by legal` are all RELEVANCE reads. That is
+    deliberate, not an oversight: the population read cannot apply a narrowing,
+    so routing would serve the whole ended set as if the caller's `in Q3` had
+    been honoured. If you want the population, ask the question in its
+    unqualified form (`what ended`, `have any claims been retracted`); if you want
+    the narrowing applied, keep the qualified wording and this is the relevance
+    read you asked for.
+
     Point results annotated with EP breakdown. confidence_mean is THE point's
     confidence (belief mean α/(α+β): persisted posterior when EP has run,
     else persisted prior mean) — and ``null`` with ``ep.ep_state: "absent"``

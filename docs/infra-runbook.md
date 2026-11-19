@@ -1148,6 +1148,131 @@ On `serve_health`'s `/metrics` the series is
 `tortoise_wait_bound_starved_total{surface="mcp"|"rest"}`, both children declared
 at import for the same absent-vs-zero reason.
 
+### 4.1.1d The embedder's load state — `embedder` (#13674)
+
+**Symptom this exists for.** Hybrid (keyword + vector) retrieval is OFF in production and every
+published surface says `"status": "ok"`. The dense leg contributes nothing, reads silently fall back
+to keyword-only, and the only evidence was a `fly logs` line — `embedder warm-up FAILED
+(load_timeout)` — that nobody was watching for. Measured 2026-11-19: the boot load needs **156.5 s of
+imports alone** on the production box against a **90 s** bound, and each abandoned attempt was never
+reclaimed, which is what reached **3.66 GB** and got the process OOM-killed (the model is 432 MB —
+not the cause).
+
+The body carries
+
+```json
+"embedder": {"model": "BAAI/bge-small-en-v1.5", "available": true, "state": "ready",
+             "last_error": null, "failure_kind": null, "cooldown_remaining_s": 0.0,
+             "threads": {"threads": 1, "source": "default", "previous": null,
+                         "applied": true, "env_vars": ["OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                                                     "OPENBLAS_NUM_THREADS"]},
+             "load_timeout_s": 300.0, "load_elapsed_s": 39.3,
+             "load_in_progress": false, "load_in_progress_s": null}
+```
+
+⛔ **It is REPORTED, never folded into `status`** — the same rule as `wait_bound_breaches` and
+`capture`. An embedder that is loading or on cooldown means **keyword-only reads**, which is a state
+the product is designed to survive and which #2952 already requires each read to DECLARE
+(`declared_retrieval_kind`). Folding it in would pin a deployment degraded for the life of the
+process after one failed load (#10185) and put a restart loop's worth of `503`s on the deploy gate.
+
+Four properties, because each is a different misread:
+
+- **`load_in_progress_s` is the field to read DURING a slow start.** `load_in_progress` is a bool, so
+a 4 s attempt and a 290 s attempt of the same 300 s bound render identically — and they call for
+opposite decisions. `load_in_progress_s` is the in-flight attempt's elapsed seconds (`null` when none
+is running, `null` after a FINISHED load too — the start timestamp outlives its attempt, so the
+running thread is the authority). It is the in-flight attempt's OWN elapsed time; the bound to compare
+it against is `load_timeout_s`, which is the CLASS default — an attempt a caller started with
+`get(load_timeout=…)` runs under THAT bound instead (`embeddings.py::status`). True and harmless on
+the shipped path (the pre-warm takes the default), but the comparison is only exact there.
+- **`load_in_progress_s` PAST `load_timeout_s` means the attempt was ABANDONED** — the caller already
+returned `None` at the bound and the loader is still importing. The guard then refuses to start a
+second attempt for as long as that thread lives, and the leg stays keyword-only. The tuple to match
+is `failure_kind: "load_timeout"` + `load_in_progress: true` + `load_in_progress_s` past the bound —
+**whichever of the two `state` words accompanies it**: `cooldown` while the 60 s negative-cache
+window is live, and `unavailable` once it expires with no `get()` in between, which is the reading a
+quiet box shows because a `/health` poll never re-stamps it. ⛔ A `get()` **inside** the window is
+refused by the outer negative cache (`embeddings.py:1210-1215`) and does NOT touch the stamp, so
+traffic running inside the window does not hold it open: it is re-armed by the first `get()` AFTER
+expiry, i.e. the reclaim refusal (`:1245`) — which is what makes `cooldown` recur on a busy box.
+⛔ Do not read the in-flight bullet's
+“wait, it is RUNNING” mapping on this tuple: `load_in_progress_s` past the bound is the one case
+where the attempt is already dead to its caller. This resolves BY ITSELF when the thread exits (the
+guard clears, and the next `get()` retries once the cooldown has passed).
+
+A reading that stays past the bound for minutes is a WEDGED import, and that does not resolve without
+`fly machine restart` — read the boot log for the bound it hit, then check the image layer/page-cache
+path, not the app. ⛔ But establish that it is wedged from OUTSIDE this block first: the elapsed time
+is wall-clock since the attempt started, so `status()` cannot tell a slow-but-advancing import from a
+stuck one, and a starved loader may legitimately overrun (`#13674`'s bound exists because the measured
+COLD cost is 195.8 s — 156.5 s of imports alone plus a 39.3 s construct — and 300.0 ≈ 195.8 × 1.53).
+
+⛔ **Three routes that look like evidence here and are not.** (1) **An absence of further `embedder:`
+lines.** The LOADER logs nothing between the timeout line and the load finishing or its overrun
+ending — silence is the expected state either way. The one line an overrun produces WHILE IT IS STILL
+RUNNING comes from the READ path, not the loader (`a previous load attempt is STILL RUNNING
+(<elapsed>) — refusing to start a second one`, at most once per 60 s cooldown while traffic asks for
+an embedding), and its growing `elapsed` is the same wall-clock — so seeing it repeat is NOT progress.
+(2) **`faulthandler`.** Nothing here enables it: no `faulthandler.enable()`, `PYTHONFAULTHANDLER`
+unset in `fly.toml`/`Dockerfile.hosted`/`entrypoint.sh`, and the repo's only registrar
+(`tools/embedder_provision.py`) is a CI tool that is not in the image — so a fatal signal prints no
+Python traceback either, and `kill -ABRT` kills the PROCESS (a machine exit and a cold start), not
+just the load. (3) **An in-process `sys._current_frames()` dump from a fresh interpreter** sees its
+OWN frames; `monitoring.py`'s capture samples the LOOP thread and only after
+`LOOP_BLOCK_SAMPLE_AFTER_S`, while the load runs on its own `tortoise-embedder-load` thread.
+
+The route that works is a stack from OUTSIDE the process. `py-spy` is what this runbook has used
+elsewhere, but ⛔ **the image does not ship it** (no dependency in `requirements.txt`,
+`Dockerfile.hosted` or `entrypoint.sh`), so install it on the machine first —
+`fly ssh console -a tortoise-y4mjjq -C "pip install py-spy && py-spy dump --pid <uvicorn pid>"` — which
+needs runtime egress to PyPI (the same sandbox that could hang a runtime HF download,
+`Dockerfile.hosted`). A restart on this reading throws away an import that may be about to finish and
+re-pays the whole cold cost, so get the stack first.
+
+- **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
+`failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
+`load_failed` (the common one: an import/construct failure in an installed dependency chain),
+`load_timeout` or `not_installed` — or `null` before any attempt records a cause. Point at that
+declaration rather than re-typing a copy here: it is the ONE set the producer literals are pinned
+against. `model_unavailable` is a member of the vocabulary but NOT a value THIS field holds — it is
+the translation fallback (`embeddings.py::_as_failure_kind`), i.e. the kind a REFUSAL carries when
+nothing was recorded; likewise `no_embedder` / `load_in_flight` are LEG-TRACE words translated at that
+same seam, not failure kinds — publishing one of those here is the #5275/#13528 conflation. `oom` is
+not a member at all: a process killed for memory records nothing, so read the machine for that, not
+this field. `unavailable` with `failure_kind: null` is TWO states, and `load_in_progress` separates
+them — `load_in_progress: false` means no attempt has run in THIS process yet (a fresh boot before
+the pre-warm landed) and is not a failure, while `load_in_progress: true` means a first load is
+RUNNING at this very moment and `load_in_progress_s` is the number to read. A fresh deploy's first
+read lands in that second state (the pre-warm is a thread started at lifespan), so calling it "no
+attempt yet" sends an operator hunting a pre-warm that is 190 s into its own 300 s bound.
+- **`load_timeout_s` is the bound the PROCESS applies**, and it must read `300.0` on this image. A
+`90.0` here is a pre-#13692 binary still deployed, which is the whole outage.
+- **`threads` is the intra-op pin** (#10296), published for the same "why is this host slow" question;
+`null` before any load attempt.
+
+⛔ **`available: null` is NOT "the model is unavailable" — it is "this block could not be read".**
+If `status()` itself raises (an embeddings import half-written by a deploy, a partial wheel), the
+block still arrives — with the SAME key set, every value `null`, plus `error`
+(`hosted_api.py::_embedder_health`, its never-raise arm) — and `/health` is still a **200**. Read it
+as INCONCLUSIVE: `available: false` means the dense leg is down **and measured** (then read `state`
+and `failure_kind`), while `available: null` means the reading failed and this process knows
+nothing about the leg. Check `error` and the process's own logs; do NOT page on `available` alone,
+and do not read `null` as "no attempt yet" — that reading is `available: false` with
+`state: "unavailable"`, `failure_kind: null` and `load_in_progress: false`. All four terms are
+needed: drop `failure_kind` and the same tuple describes a load that FAILED and whose 60 s
+cooldown has since expired (#13819 review).
+
+```bash
+curl -sS https://api.premiselabs.co/health \
+  | jq '.embedder | {available, state, failure_kind, load_timeout_s, load_in_progress_s}'
+```
+
+The boot half of the same question is a log line, not this block: `entrypoint.sh`'s
+`_prewarm_embedder` prints `embedder boot pre-warm OK` with a staged breakdown (`torch_import_s` /
+`st_import_s` / `construct_s` / `encode_s`), or a WARNING naming the bound it hit. `fly logs` is the
+only reader for THAT — the block above is what answers "is the leg up NOW".
+
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
 **Symptom.** A customer pays for a higher tier and is enforced at a lower one.

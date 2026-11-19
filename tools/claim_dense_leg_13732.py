@@ -22,10 +22,12 @@ variance.
     (``sdk.tortoise_fts_query``) exactly as M2 did — same function, same
     ``limit``, same sanitiser — so the arms differ in the LEG, never in the
     query shape.
-  * It does not invent record rows. The record's population is a PRECONDITION
-    (``#13210`` is the backfill's tool); if the record does not hold the
-    tenant's claims, the instrument REFUSES rather than seeding a second writer
-    for the record's schema.
+  * It does not invent record rows. It SEEDS them (#13830) — through the ONE
+    journaled door (``live_write.write``: append → record projection → graph
+    fold), so the record receives exactly the records the journal holds. It does
+    not write the record a SECOND way, and if the record does not hold this
+    population's ids the ``record_dense`` arm is REFUSED by name rather than
+    measured over a cohort that is not there.
   * It does not arm anything new. ``TORTOISE_RECORD_VECTOR_LEG`` is already
     default-ON since ``#13610``; what this measures is whether serving the dense
     leg from the record MOVES claim recall, which is a question about the leg,
@@ -65,8 +67,10 @@ payload was the production one, and it was right.
 
 ⚠️ ``record_vector.coverage`` compares
 ``record_vectors >= graph_vectors``, and **0 >= 0 is VERIFIED** — so an unseeded
-population does not fail the coverage gate, it *passes* it and then serves an
-empty record cohort as ``mechanism=pgvector, reason=ok``. That is why the
+population does not fail the coverage gate, it *passes* it and is then served by a
+leg whose trace never names the two-zero state — ``empty_results`` from the record
+where the contract owns the label, ``no_embeddings``/``degraded=True`` from the graph
+everywhere else. That is why the
 zero-zero state is refused from BOTH sides before an arm runs — by
 :func:`require_record_measured` for the record and by
 :func:`require_graph_population` for the graph. One function asserting both was
@@ -152,7 +156,9 @@ USAGE
     # the pre-registration — no store, no embedder, no corpus required:
     uv run python tools/claim_dense_leg_13732.py --preregister --population 786
 
-    # the measurement (needs a corpus, an embedder, and a record at that tenant):
+    # the measurement (needs a corpus, an embedder, a journal, and a record at
+    # that tenant — the population is written THROUGH the journaled door, so the
+    # journal is where it enters the world):
     uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
     TORTOISE_RECORD_DSN=... TORTOISE_RECORD_SINGLE_TENANT=1 \\
     TORTOISE_RECORD_ORG_ID=<org> TORTOISE_RECORD_GRAPH_ID=<graph> \\
@@ -160,25 +166,87 @@ USAGE
     uv run python tools/claim_dense_leg_13732.py --points 900 --deep 50 \\
         --out /tmp/claim-dense-13732.json
 
+⛔ THE JOURNAL THIS RUN WRITES IS THE TENANT'S JOURNAL, AND THAT IS THE POINT.
+``--journal`` / ``TORTOISE_RECORD_JOURNAL`` names it (one of them is required —
+``no_journal``), every population row is APPENDED to it, and the same path is what
+``record_vector.journal_ready`` compares the tenant's projected positions against.
+So point it at a MEASUREMENT tenant: a run adds ``n`` journal records and ``n``
+record rows to whatever tenant the env pair names, and re-running adds them again
+(the ids collide, so the rows are upserts; the journal only grows).
+
 ⛔ ``TORTOISE_RECORD_ORG_ID``/``TORTOISE_RECORD_GRAPH_ID`` are NOT optional and
 not implied by ``TORTOISE_RECORD_SINGLE_TENANT``: :func:`tortoise.record_writer.record_tenant`
 returns the env PAIR and refuses a HALF-configured one, so exporting only the
 declaration yields ``no_tenant`` before any arm runs (measured: ``record_tenant()
 -> None`` with the declaration alone). The tenant is never guessed.
 
-⛔ THE ``record_dense`` ARM NEEDS A STEP THIS TREE DOES NOT HAVE YET. This
-instrument writes the population to the GRAPH only (:func:`_seed_graph` is a
-direct projection write that emits NO journal record), while the record is fed
-**exclusively** by a journal fold (``tortoise/record_vector.py:247``: *"the record
-is a journal fold with NO backfill"*), folded by ``tools/record_runner.py apply``.
-The population's ids are minted by the M2 harness (``pt-12186…``), so nothing else
-in the tree writes them. Consequently :func:`record_population_vectors` returns
-``0`` on **every** tenant today and the instrument REFUSES
-``record_population_absent`` — unless the population is first written through a
-**journaled** door and folded (``python -m tortoise record-reconcile`` /
-``tools/record_runner.py apply``) BEFORE this run. The guard is deliberately not
-relaxed: publishing a ``record_dense`` figure over ids the record does not hold is
-exactly the ``#5090`` Q2 false PASS the id-scoped half exists to stop.
+⛔ THE ``record_dense`` ARM IS FED BY THIS INSTRUMENT, THROUGH THE JOURNALED DOOR
+(#13830). :func:`_seed_population` writes every population row with ONE call of
+the ``#13345`` chokepoint (``tortoise/live_write.py::write``): append the journal
+record → project it into the record on that write's own transaction → fold the
+graph. So the graph the ``lexical``/``graph_dense`` arms read and the record the
+``record_dense`` arm reads hold the SAME population, written through ONE path —
+which is the only shape in which the three arms are comparable at all.
+
+⛔ AND IT IS NOT A SECOND WRITER. The alternative — a direct projection write for
+the graph plus a hand-rolled record seed — IS the dual-write defect ``#13345``
+built the chokepoint to remove: two paths that can disagree, measured and then
+published under the leg's name. Before #13830 this file was the GRAPH half of
+exactly that shape (``_upsert_point_props`` is the apply-fold and emits no journal
+record, so the record could never receive an id that never entered the journal);
+now it holds no record write at all (``TestContradictionTest`` pins that by AST)
+and no direct graph write either (the same pin, one store over).
+
+⛔ AND EVERY GUARD STAYS. :func:`record_population_vectors` still asks the record
+for the POPULATION's own ids, and :func:`require_population_in_record` still
+REFUSES the ``record_dense`` arm when they are not all there — a seeding step
+that was ATTEMPTED proves nothing about one that LANDED, and publishing a
+``record_dense`` figure over ids the record does not hold is exactly the ``#5090``
+Q2 false PASS the id-scoped half exists to stop. A shortfall is still a refusal
+by name (the arm is BLOCKED, the artifact is kept, the run exits 3) and the
+repair is still the record's own fold, never a relaxed guard:
+``tools/record_runner.py plan --from-checkpoint`` then ``… apply --acknowledge-plan
+<N>`` — the artifact emits BOTH, with this run's tenant filled in, as ``seed.fold``
+whenever a write came back unprojected. One command would not be runnable: `apply`
+requires ``--org-id``/``--graph-id`` on every verb and refuses a writing run without
+the count `plan` prints.
+
+⛔ AND THE DSN IS DECLARED TOO, BECAUSE ``--dsn`` ALONE DOES NOT ARM THE WRITE
+(#13839 review, finding 1). ``--dsn`` resolved the value every READ used, while
+``live_write.write`` asked ``record_writer.record_dsn()`` — the ENVIRONMENT — and
+answered "unarmed": nothing was written, no fold was emitted, the artifact
+published ``record_armed: false`` for a store the same run could query, and the
+refusal that blocked the arm named only FOLD causes. ``run_measurement`` therefore
+declares the resolved value into ``TORTOISE_RECORD_DSN`` for the length of the run
+(``main()`` restores the caller's, exactly as it does for the journal), and
+:func:`_arm_blockage` blocks the ``record_dense`` arm by name
+(``record_arm_undeclared``) if a run holding a DSN ever sees its seam answer
+unarmed again — so that mismatch can neither recur silently nor be mistaken for a
+fold. ⚠️ A caller that invokes :func:`_seed_population` directly must declare the
+same variable itself; the seam reads nothing else.
+
+⛔ AND A WRITE THE RECORD *DECLINED* IS THE FOURTH ANSWER, NOT A ZERO (#13839
+review, finding 1). ``live_write`` reports the seam's durable DECLINE
+(``no_durable_journal``) as ``applied=False, unprojected=0`` — the SAME shape an
+UNARMED deployment has — so a seed the record refused outright used to publish as
+clean: no count, no repair, nothing to see. It is now ``seed.record_declined``,
+published with a ``declined`` note and a stderr warning, and it deliberately gets
+NO ``fold``: a decline means there is no durable line for a fold to replay, so a
+repair command there could not work. The artifact also carries
+``seed.record_dsn_fingerprint`` — the STORE this run wrote, as the tree's own
+secret-hygiene handle (#2903/#2796) — because the emitted ``--dsn
+"$TORTOISE_RECORD_DSN"`` names the variable, and only the fingerprint tells an
+operator whether their shell's value is the record this run measured.
+
+⛔ THE JOURNAL IS A PRECONDITION, DECLARED, NOT DERIVED. The record is
+``replay(journal)``, so a seed that appends nowhere is not a seed; ``--journal``
+(or ``TORTOISE_RECORD_JOURNAL``, which also tells ``record_vector.journal_ready``
+which journal to compare the tenant's positions against) names the one journal
+this run writes, and a run with neither refuses ``no_journal``. Two DIFFERENT
+declarations are refused as ``journal_conflict`` rather than silently preferring
+one: the record arm's readiness gate compares the record against the DECLARED
+path, so seeding a different path would make the gate answer about a journal the
+population is not in.
 
 Exit codes: ``0`` ran · ``2`` precondition refused (named) · ``3`` an arm's trace
 contradicted its own declaration, **or an arm was BLOCKED by a precondition**
@@ -227,6 +295,7 @@ import contextlib
 import json
 import math
 import os
+import shlex
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -815,12 +884,72 @@ def require_record(dsn: str | None):
     return dsn
 
 
+def require_journal(explicit: str | None = None) -> Path:
+    """The journal this run APPENDS the population to — declared, never derived.
+
+    ⛔ THE RECORD IS ``replay(journal)``, so a seed with no journal is not a seed:
+    an id that never entered a journal cannot be folded into the record by any
+    backfill, which is the whole of #13830. The path is DECLARED because the other
+    half of that contract is a declaration too: ``record_vector.journal_ready``
+    compares the record's positions against ``TORTOISE_RECORD_JOURNAL``, so the
+    journal this run writes must be the journal the record's readiness gate
+    measures. A path derived from a pid or a temp dir would be a journal nothing
+    ever compares — the population would be in the record and the gate would be
+    answering about a different file.
+
+    ⛔ TWO DIFFERENT DECLARATIONS ARE REFUSED, NOT RESOLVED. ``--journal`` and the
+    environment naming two paths is an operator error with a silent-wrong-answer
+    shape: preferring either one seeds a journal the other half of the run does not
+    measure. ``journal_conflict`` names both, and the operator picks.
+
+    ``no_journal`` when neither is set — unnamed, not empty. A default (a temp
+    file, a pid-derived name) would make every run a run against a throwaway
+    journal that the record's readiness gate cannot see, which would be a "pass"
+    the operator could not reproduce.
+    """
+    from tortoise import record_vector
+
+    given = (explicit or "").strip()
+    declared = (os.environ.get(record_vector.RECORD_JOURNAL_ENV) or "").strip()
+    if (
+        given
+        and declared
+        and os.path.abspath(os.path.expanduser(given))
+        != os.path.abspath(os.path.expanduser(declared))
+    ):
+        raise Refused(
+            "journal_conflict",
+            f"--journal ({given}) and {record_vector.RECORD_JOURNAL_ENV} "
+            f"({declared}) name DIFFERENT journals — the record arm's readiness "
+            f"gate compares the tenant's positions against the DECLARED path, so "
+            f"seeding the other one would make the gate answer about a journal "
+            f"this population is not in. Name one path in both places",
+        )
+    chosen = given or declared
+    if not chosen:
+        raise Refused(
+            "no_journal",
+            f"no journal to write the population to — set --journal or "
+            f"{record_vector.RECORD_JOURNAL_ENV}. The population enters through "
+            f"the journaled door (#13345: append → record → fold), so the record "
+            f"is ``replay(journal)`` and a seed appended nowhere can never reach "
+            f"it (#13830)",
+        )
+    # ⛔ RESOLVED TO AN ABSOLUTE PATH BEFORE IT IS USED OR DECLARED. The same
+    # string goes to `EventLog`, to `record_vector.RECORD_JOURNAL_ENV` and into the
+    # `seed.fold` commands an operator pastes — three readers, so a relative
+    # path would make each of them depend on its own working directory.
+    return Path(os.path.abspath(os.path.expanduser(chosen)))
+
+
 def require_record_measured(record_vectors: int | None) -> None:
     """The RECORD's count must be a measurement, and a non-zero one.
 
     ⛔ ``record_vector.coverage`` compares ``record_vectors >= graph_vectors`` and
-    **0 >= 0 is verified**. An unseeded population therefore PASSES the gate and
-    then serves an empty cohort as ``mechanism=pgvector, reason=ok`` — the
+    **0 >= 0 is verified**. An unseeded population therefore PASSES the gate and is
+    then served with a trace that does not name the two zeroes (``empty_results``
+    from the record where the contract owns the label, ``no_embeddings`` /
+    ``degraded=True`` from the graph everywhere else) — the
     failure mode that would have made M2's population look like a dense leg with
     no recall rather than a population with no vectors.
 
@@ -915,8 +1044,9 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
     what this run wrote. Ways that count is above zero while the population is
     only partly seeded — and ⛔ ONLY THE TWO THIS WRITE PATH CAN REACH, because
     a message that names an unreachable cause sends the operator to a dead end
-    (``#13745`` review round 6, finding 3). ``_seed_graph`` calls
-    ``_upsert_point_props`` with ``{"id", "content", "embedding"}``, so
+    (``#13745`` review round 6, finding 3). :func:`_seed_population` puts
+    ``{"id", "content", "embedding"}`` under ``point`` on every journal record,
+    and the fold takes its ``owns_embedding`` branch from that payload, so
     ``owns_embedding`` is ALWAYS true and the fold never reaches its
     ``encode_for_row`` derive branch: an operator point, an EMBED-gate refusal
     (``#5008``) and a swallowed encode failure are all UNREACHABLE here (and a
@@ -931,7 +1061,7 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
       field with no usable value, so nothing is written.
 
     ⛔ AND NOTHING ELSE. A row this run's own write never created cannot be the
-    explanation here: ``_seed_graph`` upserts every population row before this
+    explanation here: the seed appends and folds every population row before this
     guard runs and a failure raises straight out of it, so ``matched < n`` means
     the VECTOR is missing, never the row. The text half of the pairing is still
     kept — it is what would catch a store that lost a row, or a guard reading a
@@ -958,8 +1088,9 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
     preserved vector is indistinguishable HERE, because this is a RE-READ. It is
     closable without touching the store: ``_upsert_point_props`` already returns
     whether the row's vector was written (``(embedding is not None, …)``,
-    ``projection/entities.py:3339``) and ``_seed_graph`` DISCARDS that value —
-    capturing it per row would make the count exact, where a re-read cannot. Until
+    ``projection/entities.py:3339``) and the fold path this seed now uses DISCARDS
+    that value — capturing it per row would make the count exact, where a re-read
+    cannot. Until
     then this guard is an assertion that the population WAS WRITTEN, not that
     every vector was REPLACED.
 
@@ -1019,7 +1150,7 @@ def require_graph_population(matched: int | None, population_n: int) -> None:
     record gate was moved out of, and the graph gate starts where it ended.
 
     Satisfiable, unlike the record's: this instrument SEEDS the graph itself, so
-    ``_seed_graph`` has already written the cohort by the time the arm consults
+    the fold has already written the cohort by the time the arm consults
     this. When the graph cannot hold the cohort, the arm is recorded
     ``BLOCKED[graph_population_absent]`` by name and the run exits ``3``.
     """
@@ -1062,10 +1193,21 @@ def require_population_in_record(matched: int | None, population_n: int) -> None
     *"this population is not in the record"*. A population id the record cannot
     rank makes every delta on that arm a statement about the seeding step.
 
-    This REFUSES rather than seeding: the record is a journal fold with no
-    backfill from this process (``#13210`` is the backfill's tool), and a second
-    writer for the record's population is the one thing this instrument promised
-    not to be.
+    ⛔ IT IS THE POST-CONDITION OF THE SEED, NOT A REFUSAL TO SEED (#13830). The
+    population IS written through the journaled door now
+    (:func:`_seed_population`), so this guard asks the store that received it
+    whether the write LANDED — a seeding step that was attempted proves nothing
+    about one that took. It is deliberately asked of the RECORD rather than read
+    off the seed's return value: the seed's own count is what the write path
+    claimed, and the whole point of this guard is that the claim is not the fact.
+
+    A shortfall is therefore an ORDERING/FOLD fact, not a design limit: the
+    journal holds the population and the record has not folded it (a projection
+    refusal, an unproven position, or a cut-over graph's enumerated-replay
+    refusal). The repair is the record's own fold — ``tools/record_runner.py
+    plan --from-checkpoint`` then ``… apply --acknowledge-plan <N>``, which the
+    artifact emits as ``seed.fold`` when the seed reported one — never a second
+    writer from here and never a relaxed guard.
     """
     if matched is None:
         raise Refused(
@@ -1081,9 +1223,31 @@ def require_population_in_record(matched: int | None, population_n: int) -> None
             f"population id(s) this run would score — the `record_dense` arm "
             f"could rank {matched} of them and would report 0.0 recall for the "
             f"rest, which is a figure about the seed step and not about the leg. "
-            f"The record's cohort is a PRECONDITION (#13210 is the backfill's "
-            f"tool); this instrument does not seed node rows and will not fake "
-            f"a cohort",
+            f"This population WAS written through the journaled door, so the "
+            f"reachable causes are the FOLD's, not the writer's — and only these "
+            f"(review: a proven-position failure is deliberately NOT among them, "
+            f"because that write still lands the row and only its "
+            f"`public.journal_event` row): an armed record that REFUSED the "
+            f"projection, a row filed under a DIFFERENT tenant than this read's "
+            f"scope, an enumerated replay refused on a cut-over graph (all three "
+            f"leave no row), or a row whose `embedding` produced no "
+            f"`embedding_vec` (row present, not rankable — a width the store's "
+            f"converter will not hold). ⛔ PLUS ONE WRITER-SIDE CAUSE THAT IS "
+            f"REACHABLE AND IS NOT A FOLD: a write the seam DECLINED — it "
+            f"answered, refused and never attempted the row, so there is no "
+            f"durable line for a fold to replay. Read the artifact's `seed` block "
+            f"to tell them apart: `record_declined > 0` (with its `declined` "
+            f"note) IS that arm and means the journal itself was not durable, "
+            f"while everything else here is a fold fact. `record_armed: false` on "
+            f"a run that resolved a DSN does not reach this message at all — the "
+            f"arm is blocked `record_arm_undeclared` instead, so a run whose write "
+            f"seam and reads DISAGREE is never reported as a fold shortfall. "
+            f"Run the record's own fold over "
+            f"the journal this run wrote (`tools/record_runner.py plan "
+            f"--from-checkpoint`, then `apply --acknowledge-plan <N>`, "
+            f"both carried in the artifact's `seed.fold` with this run's tenant "
+            f"filled in), then re-run. This instrument will not write the "
+            f"record a second way and will not fake a cohort",
         )
 
 
@@ -1213,46 +1377,353 @@ def _query(sdk, arm: str, text: str, deep: int, trace: list[dict]) -> list[dict]
         embeddings.EmbeddingModel.get = saved  # type: ignore[assignment]
 
 
-def _seed_graph(proj, population: list[dict], encode_many=None) -> int:
-    """Write the claim population to the GRAPH with an explicit vector.
+class SeedReport:
+    """What ONE seeding pass did, in the three steps the chokepoint fixes.
 
-    ⛔ THE VECTOR IS THE POINT OF THIS STEP, but NOT for the reason the first cut
-    of this file gave: ``_upsert_point_props`` DERIVES an embedding from
-    ``content`` on a box that has an embedder
-    (``projection/entities.py:2968-2976``), so M2's ``{"id", "content"}``
-    payload would have carried one there — it carried none because M2's box had
-    no embedder and the derive path's ``except Exception: pass`` ate the failure.
-    What this step buys is a vector written **unconditionally, by this
-    instrument, under this run's embedder** — not inherited from a best-effort
-    branch whose behaviour depends on the EMBED gate, the adapter, and whatever
-    the node held before. The write goes through the real projection door
-    (``_upsert_point_props``), so the property shape is the production one and
-    the full-text index the lexical arm reads is the production index.
+    ⛔ A PLAIN CLASS RATHER THAN ``@dataclass``, DELIBERATELY. This module is loaded
+    by harnesses that build it with ``importlib.util.module_from_spec`` and exec it
+    WITHOUT registering it in ``sys.modules`` (this file's own test fixture is one);
+    ``dataclasses`` resolves ``from __future__ import annotations`` strings through
+    ``sys.modules[cls.__module__]``, so a dataclass here raised ``AttributeError:
+    'NoneType' object has no attribute '__dict__'`` at CLASS-DEFINITION time — the
+    whole module unimportable for that harness. A tool that can only be imported by
+    a loader that registers it is a booby trap for the next loader, and the report
+    is small enough that the decorator buys nothing.
 
-    ⛔ THE COMPOSITION IS THE WRITE PATH'S, NOT THIS FILE'S (#13734 review,
-    finding 3). Every write-side embedder in this tree goes through
-    :func:`tortoise.embeddings.compute_embeddings`, which (a) TRUNCATES the text
-    to ``EMBED_WORD_BUDGET`` (512) words via ``_truncate_for_embedding`` before
-    encoding and (b) returns ``vec.tolist()`` — Python floats, which is the value
-    type production hands to Cypher. Seeding with a bare ``model.encode(content)``
-    wrote neither: an UNTRUNCATED text's vector (a composition production never
-    makes — and ``POINT_TEXT_LIMIT`` is 1200 chars, so 512 words is reachable on
-    real turn text) as ``list(numpy_row)``, i.e. a list of ``numpy.float32``
-    scalars. Both are fidelity gaps in the one step whose whole purpose is that
-    the seeded vector IS the production one, so this delegates to the shipped
-    composition instead of re-deriving it.
+    ⛔ THE COUNTS ARE THE POINT, because "the seed ran" and "the record took the
+    seed" are different facts and only the second one makes the `record_dense` arm
+    measurable (#13830). ``record_unprojected`` > 0 means the journal holds lines the
+    record did NOT take — the named disagreement ``live_write`` returns — and the
+    repair is the record's own fold, never a relaxed guard.
 
-    ``encode_many`` is the injection seam the tests patch; production never
-    passes it. A ``None`` vector (the composition's answer where the encode did
-    not happen) is a NAMED refusal, never a written row: seeding a hole would
-    make the arm's recall a figure about the hole.
+    ``first_seq``/``last_seq`` are the journal POSITIONS the appends proved, or
+    ``None`` when none was proven: a position the append could not prove is
+    ``positions_unproven``, and a record row written without one leaves no
+    ``public.journal_event`` row — which the readiness gate then reads as a tenant
+    that is behind (correctly).
 
-    ⚠️ A GRAPH WRITE ONLY. This is a direct projection write and emits NO journal
-    record, so it cannot put this population's ids in the record — see
-    :func:`record_population_vectors` and the README's runbook for the step that
-    must, and is absent.
+    ⛔ ``record_declined`` IS THE FOURTH STORE ANSWER, and it exists because
+    ``applied=False, unprojected=0`` IS TWO FACTS (#13839 review, finding 1).
+    ``live_write`` reports the seam's durable DECLINE — its own
+    ``no_durable_journal`` token, a scratch buffer that has no journal for a line
+    to be missing from — in exactly the shape an UNARMED deployment has. It used
+    to be invisible here, so a seed the record refused OUTRIGHT read as clean: 0
+    applied, 0 unprojected, no repair. A declined write IS a write the record did
+    not take, so it is counted and published — and it is deliberately NOT given a
+    ``fold``, because a decline means there is no durable line for a fold to
+    replay (:meth:`_fold_needed`).
+
+    ⛔ ``record_dsn_fingerprint`` IS THE STORE THIS RUN WROTE, in the only form of
+    a DSN that may be published (``record_writer.dsn_fingerprint``,
+    #2903/#2796). The emitted repair names the DSN as a SHELL VARIABLE, which is
+    only half of naming the store: the operator still has to know whether their
+    ``TORTOISE_RECORD_DSN`` is the record this run measured. The fingerprint is
+    that comparison handle — without it, a shell exporting a DIFFERENT record folds
+    the population into a store nobody measured (#13839 review, finding 1,
+    corollary).
     """
+
+    __slots__ = (
+        "first_seq",
+        "folded",
+        "graph_id",
+        "journal",
+        "last_seq",
+        "org_id",
+        "positions_unproven",
+        "record_applied",
+        "record_armed",
+        "record_declined",
+        "record_dsn_fingerprint",
+        "record_unprojected",
+        "written",
+    )
+
+    def __init__(
+        self,
+        *,
+        journal: str,
+        org_id: str | None,
+        graph_id: str | None,
+        written: int,
+        record_armed: bool | None,
+        record_applied: int,
+        record_unprojected: int,
+        positions_unproven: int,
+        folded: int,
+        first_seq: int | None,
+        last_seq: int | None,
+        record_declined: int = 0,
+        record_dsn_fingerprint: str | None = None,
+    ) -> None:
+        self.journal = journal
+        self.org_id = org_id
+        self.graph_id = graph_id
+        self.written = written
+        self.record_armed = record_armed
+        self.record_applied = record_applied
+        self.record_unprojected = record_unprojected
+        self.positions_unproven = positions_unproven
+        self.folded = folded
+        self.first_seq = first_seq
+        self.last_seq = last_seq
+        self.record_declined = record_declined
+        self.record_dsn_fingerprint = record_dsn_fingerprint
+
+    def _fold_needed(self) -> bool:
+        """Is there a record fold to run at all?
+
+        ⛔ NOT MERELY "something went wrong". An UNPROVEN POSITION on an UNARMED
+        deployment needs no fold — there is no record for a journal position to be
+        missing from — so emitting a repair there would send the operator to a fold
+        over a store this run never wrote. An unprojected write always needs one
+        (it exists only where the record was armed and refused).
+
+        ⛔ AND A DECLINED WRITE NEEDS NONE (#13839 review, finding 1). The seam's
+        ``no_durable_journal`` decline means there is NO durable line to replay — a
+        fold over a scratch buffer has nothing to fold — so pointing the operator at
+        one would be a repair command that cannot work. It is published as
+        ``record_declined``/``declined`` instead: a visible fact, not a silent zero.
+        """
+        if self.record_unprojected:
+            return True
+        return bool(self.positions_unproven) and self.record_armed is not False
+
+    def as_dict(self) -> dict:
+        payload = {
+            "journal": self.journal,
+            "org_id": self.org_id,
+            "graph_id": self.graph_id,
+            "written": self.written,
+            # ⛔ THE THREE-STATE ANSWER, KEPT THREE-STATE. `record_applied == 0` on
+            # an UNARMED deployment means "no record in this run", not "the record
+            # refused"; and a projection that RAISED leaves arming unmeasured
+            # (`None`) rather than false — `LiveWrite.armed`'s own contract, carried
+            # here so a reader cannot collapse two facts into one zero.
+            "record_armed": self.record_armed,
+            "record_applied": self.record_applied,
+            "record_unprojected": self.record_unprojected,
+            "record_declined": self.record_declined,
+            "positions_unproven": self.positions_unproven,
+            "folded": self.folded,
+            "first_seq": self.first_seq,
+            "last_seq": self.last_seq,
+            # ⛔ THE STORE THIS RUN WROTE, AS A COMPARISON HANDLE — never the value
+            # (#13839 review, finding 1, corollary). The fold commands name the DSN
+            # as a shell variable, so this is what tells the operator whether their
+            # `TORTOISE_RECORD_DSN` is the record this run measured; without it, a
+            # shell naming a DIFFERENT record folds the population into a store
+            # nobody measured, silently. `record_writer.dsn_fingerprint` is the
+            # tree's own secret-hygiene form (#2903/#2796).
+            "record_dsn_fingerprint": self.record_dsn_fingerprint,
+            "door": "tortoise.live_write.write (journal append → record projection → graph fold)",
+        }
+        # ⛔ THE REPAIR IS TWO COMMANDS, AND BOTH ARE RUNNABLE (review round 2,
+        # finding 1). The single `... apply --journal <path>` this emitted first was
+        # NOT: `record_runner` requires `--org-id`/`--graph-id` on every verb, and
+        # `apply` REFUSES a writing run without `--acknowledge-plan <N>` — a number
+        # only `plan` prints (#11469's report-before-drop guarantee, made
+        # mechanical). A "repair command" that argparse rejects is the same class of
+        # false promise this file keeps closing, so the artifact carries the pair,
+        # with the tenant this run already holds filled in.
+        #
+        # ⛔ AND THE TWO FACES ARE DIFFERENT GATES, so the note names both: an
+        # UNPROJECTED write leaves no row and the id-scoped guard catches it, while
+        # an UNPROVEN POSITION still lands the row and only its
+        # `public.journal_event` row is missing — the id count then PASSES and the
+        # arm is declined to the graph and refused by the mechanism check instead.
+        if self._fold_needed():
+            journal = shlex.quote(self.journal)
+            if self.org_id and self.graph_id:
+                ident = (
+                    f"--org-id {shlex.quote(self.org_id)} --graph-id {shlex.quote(self.graph_id)}"
+                )
+            else:
+                # ⛔ REACHABLE, AND THAT IS WHY IT IS A PLACEHOLDER RATHER THAN AN
+                # OMISSION (review round 3, non-blocking). An ARMED record with an
+                # UNRESOLVED tenant is a real state: the seam refuses the write
+                # `no_tenant`, that refusal sets `unprojected=1`, and this report
+                # then has no ids to fill in. Emitting `<org-id>`/`<graph-id>` says
+                # "you must supply this" (and the `record_dense` arm is separately
+                # blocked `no_tenant`, so no figure depends on it); dropping the
+                # flags would emit a command argparse rejects, and guessing an id
+                # would be the mis-scoped write `#9192` forbids.
+                ident = "--org-id <org-id> --graph-id <graph-id>"
+            payload["fold"] = {
+                "plan": (
+                    f"uv run python tools/record_runner.py plan --from-checkpoint "
+                    f"--journal {journal} {ident} --dsn \"$TORTOISE_RECORD_DSN\""
+                ),                "apply": (
+                    f"uv run python tools/record_runner.py apply --journal {journal} "
+                    f"{ident} --dsn \"$TORTOISE_RECORD_DSN\" "
+                    f"--acknowledge-plan <N: the count `plan` reports>"
+                ),
+                # The handle an operator compares their shell against, so "is my
+                # $TORTOISE_RECORD_DSN the store this run wrote?" is answerable
+                # without a secret in the artifact.
+                "dsn_fingerprint": self.record_dsn_fingerprint,
+                "why": (
+                    "`apply` writes NOTHING without --acknowledge-plan (a number only "
+                    "`plan` prints), and `--from-checkpoint` makes the plan report "
+                    "what REMAINS rather than the whole journal — the number `apply` "
+                    "then wants. Both verbs require --org-id/--graph-id, filled in "
+                    "above from this run's tenant. ⛔ `--dsn \"$TORTOISE_RECORD_DSN\"` "
+                    "names the store THIS RUN measured, as a shell VARIABLE so no "
+                    "secret enters this artifact: `record_runner` otherwise falls back "
+                    "to the same environment variable, and with it unset the paste is "
+                    "an obvious `no record DSN` refusal — but with it naming a "
+                    "DIFFERENT record the fold would write this population into a "
+                    "store nobody measured, silently. Export the DSN this run used "
+                    "(or pass it on `--dsn`) before pasting. ⚠️ A "
+                    "CUT-OVER graph (one holding a `record_cursor` row) refuses an "
+                    "ENUMERATED replay whatever the acknowledgement; there the repair "
+                    "is the allocator's operator path, not this fold"
+                ),
+            }
+            payload["note"] = (
+                f"{self.record_unprojected} write(s) came back unprojected and "
+                f"{self.positions_unproven} append(s) proved no position — the "
+                f"journal holds the population and the record does not (yet). An "
+                f"unprojected write is caught by the `record_dense` arm's id-scoped "
+                f"guard; an unproven position leaves the row but not its "
+                f"`public.journal_event` row, so `journal_ready` reads the tenant as "
+                f"behind and the arm is declined to the graph (refused by the "
+                f"mechanism check). Both are healed by `fold`'s two commands, "
+                f"reported here rather than run in-process because the fold is the "
+                f"record's own door, not a second writer (#13345)"
+            )
+        # ⛔ A DECLINED WRITE IS PUBLISHED, never left as a clean-looking zero
+        # (#13839 review, finding 1). `live_write.write` reports the seam's durable
+        # DECLINE as `applied=False, unprojected=0` — the SAME shape an UNARMED
+        # deployment has — so without this block a seed the record refused outright
+        # is indistinguishable from one it took. It gets NO `fold`: a decline means
+        # there is no durable line to replay, so a repair here could not work.
+        if self.record_declined:
+            payload["declined"] = {
+                "count": self.record_declined,
+                "why": (
+                    f"{self.record_declined} of {self.written} seeded write(s) were "
+                    f"DECLINED by the record seam: it answered, refused, and did not "
+                    f"attempt the row (`live_write`'s `no_durable_journal`, or another "
+                    f"armed DECLINE). The journal append committed, so the population "
+                    f"is in the journal and NOT in the record — and NO FOLD HEALS "
+                    f"this one, because a decline means there is no durable journal "
+                    f"line to replay. Point `--journal` at a real journal path and "
+                    f"check the seam's `durable` answer; the id-scoped guard still "
+                    f"blocks `record_dense` by name, so no figure depends on it"
+                ),
+            }
+        return payload
+
+
+def _arm_blockage(dsn: str | None, seed: SeedReport) -> Refused | None:
+    """Does the WRITE seam disagree with this run's own arming?
+
+    ⛔ THE MISMATCH THAT MADE THE SEED A SILENT NO-OP, AS A STANDING GUARD
+    (`#13839` review, finding 1). A run that holds a DSN has armed the record for
+    every READ it makes (`record_vector.coverage`, `record_population_vectors`)
+    and every repair it can emit — so a write seam answering *unarmed* is not a
+    deployment without a record, it is THIS RUN's two doors reading different
+    arming surfaces (`--dsn` resolved a value; `record_writer._live_write_verdict`
+    asks the environment). Left unreported, the artifact publishes
+    ``record_armed: false`` for a store the same run queries, no fold is emitted,
+    and the refusal that eventually blocks the arm names only FOLD causes.
+
+    ⛔ ``armed is None`` IS NOT THIS FAULT. Unmeasured (a projection that raised on
+    every row) is a different fact and one this function must not collapse into
+    False — it carries `positions_unproven`/`record_unprojected` and its own
+    repair. And a run holding NO DSN is legitimately unarmed: the arm is blocked
+    by `no_record_dsn` and the other two arms still publish.
+
+    ⛔ A BLOCKED ARM, NOT A REFUSED RUN. The record's preconditions belong to the
+    ``record_dense`` arm (see `run_measurement`'s note), so this becomes the arm's
+    named blockage and the lexical/graph arms still measure — while the cause the
+    operator reads is the real one, not the fold.
+    """
+    if dsn is not None and seed.record_armed is False:
+        return Refused(
+            "record_arm_undeclared",
+            f"this run holds a record DSN but the write seam answered UNARMED for "
+            f"all {seed.written} seeded row(s) — the token this run resolved and "
+            f"the token the seam reads are not the same one, so nothing reached "
+            f"the record and there is no fold to run. The seam asks the "
+            f"ENVIRONMENT (`record_writer.record_dsn()`), so a DSN supplied only "
+            f"by flag must be declared into `TORTOISE_RECORD_DSN` for the write "
+            f"path (`run_measurement` does this; a caller invoking the seed "
+            f"directly must too). ⛔ This is NOT the fold: re-running the fold "
+            f"cannot repair a store that was never written, which is why it is "
+            f"named here instead of in `require_population_in_record`'s causes",
+        )
+    return None
+
+
+def _seed_population(
+    proj,
+    population: list[dict],
+    *,
+    journal_path,
+    tenant=None,
+    encode_many=None,
+    record_dsn: str | None = None,
+) -> SeedReport:
+    """Write the claim population through the ONE journaled door (#13830).
+
+    ⛔ ONE CALL OF THE ``#13345`` CHOKEPOINT PER ROW, and that is the whole design.
+    ``live_write.write`` appends the journal record, projects it into the record on
+    that write's own transaction, and folds the graph — in that order, from ONE
+    function. So the population reaches the record the way every production write
+    does (``EventAPI._emit``, ``TortoiseSDK._emit_event``,
+    ``ConversationMiner._emit_event`` are the three existing doors), and the graph
+    the other two arms read is folded from the SAME journal record the record was
+    projected from. There is no second path here to disagree with the record.
+
+    ⛔ THE FAILURE THAT MOTIVATED THIS (#13830). The previous seed called
+    ``proj._upsert_point_props`` directly. That is the apply-FOLD: it writes the
+    graph and emits **NO journal record**, while the record is fed exclusively by a
+    journal fold — so the population's ids (minted here, ``pt-12186…``, written by
+    nothing else in the tree) could not reach the record by ANY backfill, and
+    ``record_dense`` refused ``record_population_absent`` on every tenant. The
+    tempting repair — keep the fold write and hand-insert record rows — is the
+    dual-write defect the chokepoint exists to remove, and it is banned structurally
+    by ``TestContradictionTest``.
+
+    ⛔ THE VECTOR IS THIS RUN'S, AND THE COMPOSITION IS THE WRITE PATH'S (#13734
+    review, finding 3). ``_upsert_point_props`` would DERIVE an embedding from
+    ``content`` on a box with an embedder (``projection/entities.py:2968-2976``,
+    inside an ``except Exception: pass``), so the vector here is deliberately the
+    PAYLOAD's: written unconditionally by this run, under this run's embedder, not
+    inherited from a best-effort branch whose behaviour depends on the EMBED gate,
+    the adapter and whatever the node held before. And the composition is
+    :func:`tortoise.embeddings.compute_embeddings` — TRUNCATING to
+    ``EMBED_WORD_BUDGET`` (512) words and returning ``vec.tolist()`` (Python
+    floats) — because a bare ``model.encode(content)`` produced an untruncated
+    text's vector as ``list(numpy_row)``, a value type no production write makes.
+    One encode per row: the payload OWNS the vector, so neither the record's
+    derivation nor the graph fold re-encodes it.
+
+    ``encode_many`` is the injection seam the tests patch; production never passes
+    it. A ``None`` vector (the composition's answer where the encode did not
+    happen) is a NAMED refusal, never a written row: seeding a hole would make the
+    arm's recall a figure about the hole.
+
+    ⛔ WHAT A REFUSED RECORD WRITE DOES NOT DO: STOP THE SEED. ``live_write.write``
+    never raises after its append (the append is the commit point, #7951), so a
+    failed projection leaves a NAMED ``unprojected`` write and the run continues —
+    the population is then in the journal and not in the record, which is the
+    direction a replay heals. The report counts them (:class:`SeedReport`), the
+    artifact publishes the counts, and :func:`require_population_in_record` still
+    refuses the arm by name if the record does not hold every id.
+
+    ⛔ ``record_dsn`` DOES NOT ARM ANYTHING — it is the report's, and only the
+    report's (#13839 review, finding 1). The door is armed by the run's
+    DECLARATION into ``TORTOISE_RECORD_DSN`` (see ``run_measurement``), because the
+    seam's predicate asks the environment and ``live_write.write`` has no ``dsn=``
+    parameter. What the value is used for here is publishing its FINGERPRINT, so
+    the emitted repair can be checked against the store this seed actually wrote.
+    """
+    from tortoise import live_write
     from tortoise.embeddings import compute_embeddings
+    from tortoise.log import EventLog
 
     encode_many = encode_many or compute_embeddings
     vectors = encode_many([row["content"] for row in population])
@@ -1274,11 +1745,80 @@ def _seed_graph(proj, population: list[dict], encode_many=None) -> int:
             f"`record_dense` arm's recall a figure about the hole",
             exit_code=2,
         )
+    log = EventLog(journal_path)
+    applied = unprojected = unproven = declined = folded = 0
+    armed_yes = armed_unmeasured = False
+    first_seq = last_seq = None
     for row, vec in zip(population, vectors, strict=True):
-        proj._upsert_point_props(
-            {"id": row["id"], "content": row["content"], "embedding": list(vec)}
+        # ⛔ THE EVENT SHAPE IS THE PRODUCTION ONE: `PointAdded` with the snapshot
+        # under `point`. The record's mutation reads `payload["point"]`
+        # (`NodeSnapshot(path="point", key_from="id")`) and the graph fold reads
+        # the same carrier (`_apply_one`: `p = ev.get("point")`) — one payload, two
+        # stores, so a shape only one of them understood would be a divergence this
+        # seed invented.
+        event = {
+            "type": "PointAdded",
+            "point": {
+                "id": row["id"],
+                "content": row["content"],
+                "embedding": list(vec),
+            },
+        }
+        outcome = live_write.write(
+            event,
+            log=log,
+            projection=proj,
+            tenant=tenant,
+            scope_label="claim_dense_leg_13732.seed",
         )
-    return len(population)
+        if outcome.seq is None:
+            unproven += 1
+        else:
+            first_seq = outcome.seq if first_seq is None else first_seq
+            last_seq = outcome.seq
+        if outcome.applied:
+            applied += 1
+        elif outcome.unprojected:
+            unprojected += 1
+        elif outcome.refusal:
+            # ⛔ THE FOURTH ANSWER, AND THE ONE THAT USED TO VANISH (#13839 review,
+            # finding 1). Every armed `applied=False` EXCEPT the durable DECLINE
+            # sets `unprojected=1` in `live_write.write`, so reaching here means the
+            # seam ANSWERED AND DECLINED — `no_durable_journal`, or another armed
+            # decline: the record did not take the row and there is no durable line
+            # for a fold to replay. Counting it as neither applied nor unprojected
+            # made a refused seed read as a clean one.
+            declined += 1
+        if outcome.armed is True:
+            armed_yes = True
+        elif outcome.armed is None:
+            armed_unmeasured = True
+        if outcome.folded:
+            folded += 1
+    # The STORE this run wrote, in the only publishable form of a DSN
+    # (`record_writer.dsn_fingerprint`, #2903/#2796) — and only when a DSN was
+    # resolved at all, so an unarmed run publishes `null` rather than a hash of the
+    # empty string.
+    dsn_fingerprint = None
+    if record_dsn:
+        from tortoise.record_writer import dsn_fingerprint as _fingerprint
+
+        dsn_fingerprint = _fingerprint(record_dsn)
+    return SeedReport(
+        journal=str(journal_path),
+        org_id=tenant[0] if tenant else None,
+        graph_id=tenant[1] if tenant else None,
+        written=len(population),
+        record_armed=True if armed_yes else (None if armed_unmeasured else False),
+        record_applied=applied,
+        record_unprojected=unprojected,
+        positions_unproven=unproven,
+        folded=folded,
+        first_seq=first_seq,
+        last_seq=last_seq,
+        record_declined=declined,
+        record_dsn_fingerprint=dsn_fingerprint,
+    )
 
 
 def run_measurement(args: argparse.Namespace) -> int:
@@ -1291,7 +1831,7 @@ def run_measurement(args: argparse.Namespace) -> int:
     files = require_corpus(sessions)
     # The named precondition (`no_embedder` / `embedder_required_unavailable`)
     # still belongs HERE, before the corpus is built; the vector itself is
-    # composed by the write path's own seam inside `_seed_graph`.
+    # composed by the write path's own seam inside `_seed_population`.
     require_embedder()
 
     # ⛔ THE RECORD'S PRECONDITIONS BELONG TO THE `record_dense` ARM, NOT TO THE
@@ -1308,6 +1848,23 @@ def run_measurement(args: argparse.Namespace) -> int:
     scope = None
     try:
         dsn = require_record(_resolve_dsn(args.dsn))
+        # ⛔ AND THE RESOLVED DSN IS DECLARED FOR THE RUN, because "--dsn arms the
+        # reads" is only HALF of arming (#13839 review, finding 1). The write
+        # seam's predicate asks the DSN question with NO ARGUMENT —
+        # `record_writer._live_write_verdict` reads `record_dsn()`, i.e. the
+        # ENVIRONMENT (tortoise/record_writer.py:2754-2759) — so a `--dsn`-only run
+        # armed every READ (`record_vector.coverage(record_dsn=dsn)`,
+        # `record_population_vectors(..., dsn)`) while `live_write.write` answered
+        # "unarmed": nothing written, no fold emitted, `record_armed: false` in the
+        # artifact for a store this same run can read, and every named cause in the
+        # refusal pointing at the FOLD. The seam cannot be handed a DSN — it asks
+        # the environment, by design — so the run declares it, exactly as it already
+        # declares the journal below for the same class of reason. The value is the
+        # one `--dsn`/`TORTOISE_RECORD_DSN` already resolved (flag wins), never a
+        # second reading of the flags; `main()` restores the caller's value.
+        from tortoise.record_writer import RECORD_DSN_ENV
+
+        os.environ[RECORD_DSN_ENV] = dsn
         scope = record_vector._resolve_scope()
         if scope is None:
             raise Refused(
@@ -1320,6 +1877,21 @@ def run_measurement(args: argparse.Namespace) -> int:
             )
     except Refused as exc:
         record_blocked = exc
+
+    # ⛔ THE JOURNAL IS A RUN-LEVEL PRECONDITION, NOT A RECORD-ARM ONE (#13830).
+    # Every arm is scored over a population this run WRITES, and the write goes
+    # through the journaled door (append → record → fold) — so with no journal
+    # there is no seed and therefore no arm, record or not. Resolved here, ahead of
+    # `_seed_population`, so a refused run leaves no half-seeded graph behind (the
+    # DSN/tenant gates above are ahead of it for the same reason).
+    journal_path = require_journal(args.journal)
+    # ⛔ AND THE DECLARATION IS MADE EXPLICIT FOR THE READ PATH. `--journal` is
+    # enough to WRITE; `record_vector.journal_ready` reads only the env name, so a
+    # `--journal`-only run would leave the record arm's per-tenant gate unenforced
+    # ("not enforced" + one warning) while this process knows exactly which journal
+    # it seeded. Declaring it is the act the arming procedure prescribes; `main()`
+    # restores the caller's value when the run returns.
+    os.environ[record_vector.RECORD_JOURNAL_ENV] = str(journal_path)
 
     # ⛔ THE PRE-REGISTERED n — the bar committed in `preregistration.json`
     # BEFORE any number existed. It is ONE of the two bars that decide; the bar
@@ -1374,23 +1946,83 @@ def run_measurement(args: argparse.Namespace) -> int:
             f"measured against, so this run publishes no artifact rather than a "
             f"result about a graph it never reached",
         ) from exc
-    # ⛔ AND THE WRITE IS A STORE OPERATION TOO (`#13745` review round 13). This
-    # one covers the NARROWER case the open probe cannot: a store that accepts
-    # the open and then refuses the write. `except Refused: raise` is what keeps a
-    # `Refused` raised INSIDE the seed (the embedder answered no vector) from
-    # being re-labelled as a store fault — see `#13745` review round 15.
+    # ⛔ AND THE SEED IS A STORE OPERATION TOO (`#13745` review round 13) — and, since
+    # #13830, a JOURNAL and a RECORD one as well, because it goes through the ONE
+    # door (`live_write.write`: append → record project → graph fold). The guard is
+    # therefore about the whole write path, not only the graph: a dead store, an
+    # unwritable journal, or an append that cannot be counted all present as one
+    # cause from here ("the population was not written"), and the exception text
+    # names which step. `except Refused: raise` is what keeps a `Refused` raised
+    # INSIDE the seed (the embedder answered no vector) from being re-labelled as a
+    # store fault — see `#13745` review round 15.
+    tenant = (scope.org_id, scope.graph_id) if scope is not None else None
     try:
-        written = _seed_graph(proj, population)
+        seed = _seed_population(
+            proj,
+            population,
+            journal_path=journal_path,
+            tenant=tenant,
+            # ⛔ THE REPORT'S OWN (never the door's — the declaration above is what
+            # arms it): the artifact has to publish the STORE this seed wrote, or
+            # the emitted repair cannot be checked against it (#13839 review,
+            # finding 1, corollary).
+            record_dsn=dsn,
+        )
     except Refused:
         raise
     except Exception as exc:
+        # ⛔ THE CODE TOKEN IS KEPT DELIBERATELY. `graph_unwritable` is an existing
+        # refusal a caller (and `tests/`) may key on, so the name does not move with
+        # the fix; the MESSAGE names the three steps, because the failure can now
+        # come from the journal append, the record projection or the graph fold.
         raise Refused(
             "graph_unwritable",
-            f"the population could not be written to the graph "
-            f"({exc.__class__.__name__}: {exc}) — no arm can be measured against a "
-            f"store that will not hold the cohort, so this run publishes no artifact "
-            f"rather than a result about a graph that was never seeded",
+            f"the population could not be written through the journaled door "
+            f"({exc.__class__.__name__}: {exc}) — the step that failed is the "
+            f"journal append, the record projection or the graph fold, and no arm "
+            f"can be measured against a population the write path would not hold, "
+            f"so this run publishes no artifact rather than a result about a "
+            f"graph that was never seeded",
         ) from exc
+    # ⛔ THE WRITE SEAM AND THIS RUN MUST AGREE ABOUT ARMING (#13839 review,
+    # finding 1). A run holding a DSN whose seam answered "unarmed" wrote NOTHING
+    # to the record, so the `record_dense` arm is blocked by name HERE — at the
+    # cause — rather than by `record_population_absent`, whose message would send
+    # the operator to a fold that cannot repair a store nobody wrote to. The FIRST
+    # blockage wins, so an already-named cause (`no_tenant`, an unreachable
+    # record) is not overwritten by this one.
+    if record_blocked is None:
+        record_blocked = _arm_blockage(dsn, seed)
+    if seed.record_unprojected or seed.positions_unproven:
+        # ⛔ NOT FATAL, AND NOT SILENT. `live_write.write` never raises after its
+        # append (the append is the commit point), so these are lines the RECORD did
+        # not take — the direction a replay heals. The run continues so the other
+        # arms still publish, the artifact carries the counts, and the id-scoped
+        # guard blocks `record_dense` by name if the record is short. The operator
+        # gets the exact repair on stderr as well, because an artifact nobody reads
+        # until later is not a report.
+        print(
+            f"WARNING: {seed.record_unprojected} of {seed.written} seeded write(s) "
+            f"came back UNPROJECTED and {seed.positions_unproven} proved no journal "
+            f"position — repair with `seed.fold.plan` then `seed.fold.apply` "
+            f"(the artifact carries both, with this run's tenant filled in)",
+            file=sys.stderr,
+        )
+    if seed.record_declined:
+        # ⛔ THE DECLINE IS REPORTED TOO, AND IT IS NOT THE FOLD'S (#13839 review,
+        # finding 1). It used to be invisible — `applied=False, unprojected=0` is the
+        # shape an UNARMED deployment has — so a seed the record refused outright
+        # read as clean. There is no repair command to name: a decline means the seam
+        # saw no durable journal line to take.
+        print(
+            f"WARNING: {seed.record_declined} of {seed.written} seeded write(s) were "
+            f"DECLINED by the record seam (it answered and refused, so the row was "
+            f"never attempted) — the population is in the journal and not in the "
+            f"record, and no fold heals a decline; see `seed.declined` in the "
+            f"artifact",
+            file=sys.stderr,
+        )
+    written = seed.written
 
     # ⛔ THE PREFIX COUNT IS A READ TOO, AND AN UNREADABLE GRAPH MUST BE A NAMED
     # REFUSAL, NOT A TRACEBACK (`#13745` review round 12). This count is the
@@ -1424,16 +2056,15 @@ def run_measurement(args: argparse.Namespace) -> int:
     # about the leg, when it is a finding about the seed step.
     #
     # ⛔ IT GATES THE `record_dense` ARM, NOT THE RUN — and `#13734`'s review
-    # round had to move it there. The population's ids are minted by THIS
-    # instrument and reach the GRAPH only: `_seed_graph` writes through
-    # `proj._upsert_point_props`, which is the apply-fold and emits NO journal
-    # record, while the record is a journal fold. So a run-level refusal here is
-    # UNSATISFIABLE for every measurement this tool can make, and it also blocked
-    # the `lexical` and `graph_dense` arms, which need no record cohort at all —
-    # a run that refuses before its first arm publishes nothing while looking
-    # like a strict gate. The other two arms still score, and the artifact
-    # carries the refusal BY NAME against the one arm it blocks (exit 3) rather
-    # than skipping it silently.
+    # round had to move it there. Since #13830 the population DOES reach the record
+    # (it is written through the journaled door above), so this is no longer an
+    # unsatisfiable gate: it is the post-condition of the seed, asked of the store
+    # that received it rather than of the seed's own return value. It still gates
+    # the ARM because a `record_dense` arm is the only thing that needs the cohort:
+    # `lexical` and `graph_dense` read the graph this run folded, and a run-level
+    # refusal here would throw them away while looking like a strict gate. The
+    # refusal is carried BY NAME against the one arm it blocks (exit 3) rather than
+    # skipped silently.
     population_ids = [row["id"] for row in population]
     # ⛔ THE GRAPH HALF IS GUARDED BY THE ID-AND-TEXT QUESTION, AND IT GATES THE
     # `graph_dense` ARM (not the run — see `require_graph_population`). The count
@@ -1467,6 +2098,14 @@ def run_measurement(args: argparse.Namespace) -> int:
             # asks the label-wide question, would receive this population-scoped
             # answer instead of measuring for itself.
             record_vector.reset_coverage_cache()
+            # ⛔ AND THE READINESS CACHE, FOR THE SAME CLASS OF REASON (#13830).
+            # `journal_ready` memoises per (tenant, journal) for 30 s, and a verdict
+            # taken BEFORE the seed would be reused for the arms — a NOT-READY
+            # answer from an unseeded record would keep the graph branch and turn
+            # `record_dense` into the graph arm (refused as `scan`/`index`), i.e. a
+            # refusal caused by this run's own earlier state. It is evicted here,
+            # AFTER the seed and BEFORE the first arm.
+            record_vector.reset_readiness_cache()
             population_vectors = record_population_vectors(population_ids, scope, dsn)
             coverage["population_n"] = len(population_ids)
             coverage["population_vectors"] = population_vectors
@@ -1558,11 +2197,14 @@ def run_measurement(args: argparse.Namespace) -> int:
         "head": _git_head(),
         "graph": graph_name,
         # ⛔ A RUN THAT REFUSES AFTER THE SEED LEAVES THE GRAPH BEHIND, AND NOTHING
-        # DROPS IT. The tenant/DSN gates now resolve BEFORE `_seed_graph`, so the
-        # most common refusal leaves nothing; the ones that need a seeded graph to
-        # be answerable (coverage, the id-scoped cohort) cannot, so the artifact
-        # declares the leftover rather than letting the next lane discover it —
-        # `window_quality_m2` commits the same field for the same reason.
+        # DROPS IT. The tenant/DSN/journal gates resolve BEFORE `_seed_population`,
+        # so the most common refusal leaves nothing; the ones that need a seeded
+        # graph to be answerable (coverage, the id-scoped cohort) cannot, so the
+        # artifact declares the leftover rather than letting the next lane discover
+        # it — `window_quality_m2` commits the same field for the same reason.
+        # ⚠️ The RECORD rows are the other leftover, and they are NOT dropped by
+        # anything: they are the tenant's now, which is what makes the arm
+        # measurable. A measurement tenant is the right target for that reason.
         "cleanup": {
             "graph": graph_name,
             "dropped_by_this_run": False,
@@ -1574,6 +2216,16 @@ def run_measurement(args: argparse.Namespace) -> int:
             ),
         },
         "corpus": {"files": len(files), "stats": corpus_stats, "point_build": funnel},
+        # ⛔ THE SEED'S OWN OUTCOME, BESIDE THE COUNTS, BECAUSE THEY ARE DIFFERENT
+        # FACTS (#13830). `population.graph_population_vectors` says what the GRAPH
+        # received and `coverage.population_vectors` says what the RECORD holds for
+        # these ids; this block says how the write path itself answered — whether
+        # each append's position was PROVEN, whether the record took the projection,
+        # and (only when something was left unprojected) the exact fold command that
+        # heals it. `record_unprojected > 0` beside `population_vectors == built` is
+        # a coherent pair (the fold already caught up); a shortfall with 0
+        # unprojected points at the fold, not at the write.
+        "seed": seed.as_dict(),
         "population": {
             "built": len(population),
             "written": written,
@@ -1711,6 +2363,13 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--ks", default=",".join(str(k) for k in KS))
     r.add_argument("--sessions-dir", default="~/.tortoise/session-events")
     r.add_argument("--dsn", default="", help="the record's DSN (default: TORTOISE_RECORD_DSN)")
+    r.add_argument(
+        "--journal",
+        default="",
+        help="the journal the population is APPENDED to (default: "
+        "TORTOISE_RECORD_JOURNAL; one of them is required — the population enters "
+        "through the journaled door, #13830)",
+    )
     r.add_argument("--namespace", default="claimdense_13732")
     r.add_argument("--graph", default="")
     r.add_argument("--out", default="")
@@ -1774,11 +2433,40 @@ def main(argv: list[str] | None = None) -> int:
     if args.preregister:
         print(json.dumps(preregistration(args.population), indent=2, sort_keys=True))
         return 0
+    # ⛔ THE JOURNAL DECLARATION IS THIS RUN'S, FOR THE LENGTH OF THIS RUN (#13830).
+    # `run_measurement` sets it (`--journal` is enough to write, but the record arm's
+    # readiness gate reads only the env name, so the two must agree); restoring the
+    # caller's value here keeps a `main()` CALLER from inheriting a path for a
+    # journal this process happened to seed. ⚠️ SCOPE, STATED EXACTLY (the previous
+    # sentence claimed `run_measurement` callers too, which is false — the restore
+    # lives HERE): a caller that invokes `run_measurement` DIRECTLY still inherits
+    # both declarations, which is why a test that drives it directly owns its own
+    # `monkeypatch`. The import is LOCAL so `--preregister` stays store-free.
+    from tortoise import record_vector
+    from tortoise.record_writer import RECORD_DSN_ENV
+
+    saved = os.environ.get(record_vector.RECORD_JOURNAL_ENV)
+    # ⛔ THE DSN DECLARATION IS RESTORED FOR THE SAME REASON, AND WITH THE SAME
+    # RULE (#13839 review, finding 1): `run_measurement` publishes the run's DSN to
+    # the write seam, and a caller that gets its environment back unchanged must
+    # not inherit a record this process happened to measure against. A prior
+    # declaration is put back VERBATIM — popped when there was none, restored when
+    # there was — so a library caller's own arming survives a run.
+    saved_dsn = os.environ.get(RECORD_DSN_ENV)
     try:
         return run_measurement(args)
     except Refused as exc:
         print(f"REFUSED[{exc.code}]: {exc.message}", file=sys.stderr)
         return exc.exit_code
+    finally:
+        if saved is None:
+            os.environ.pop(record_vector.RECORD_JOURNAL_ENV, None)
+        else:
+            os.environ[record_vector.RECORD_JOURNAL_ENV] = saved
+        if saved_dsn is None:
+            os.environ.pop(RECORD_DSN_ENV, None)
+        else:
+            os.environ[RECORD_DSN_ENV] = saved_dsn
 
 
 if __name__ == "__main__":

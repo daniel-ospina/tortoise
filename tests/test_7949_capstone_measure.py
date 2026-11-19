@@ -5737,8 +5737,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # accounting block moved the def from `:745` to `:751`, and its last commit
         # re-derived the DOCUMENT's cite while leaving this row on the old number —
         # so the pin reddened against a document that was already right (#11837).
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:751`) refuses a GREEN row whose", (
-            ("751", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:779`) refuses a GREEN row whose", (
+            ("779", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -6288,8 +6288,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # rot, while a typed pair here did: `:19481`/`:22036` named a COMMENT and a BLANK line
         # (#13489 review F2). (Prose here had `:18854`/`:21409`, `#12947`'s head.)
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("19541", ("exact", '@app.post("/v1/sessions")')),
-            ("22101", '@app.post("/v1/sessions/install-probe")'),
+            ("19607", ("exact", '@app.post("/v1/sessions")')),
+            ("22167", '@app.post("/v1/sessions/install-probe")'),
         ), "hosted_api"),
         # ⛔ The four repairs `#12587` round 2 made, each given the reader it lacked.
         # Every one was measured UNPINNED first (revert -> 776 passed), which is the
@@ -6299,7 +6299,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # LINE as the cite (`_pin_row_failures` scopes to one line, not a paragraph),
         # so it is the clause after the number, not the heading above it.
         ("00-plan.md", 'returns `"v2"` **unless**', (
-            ("19678", "def _capture_lane() -> str:"),
+            ("19744", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         ("00-plan.md", "**default-ON**: `TORTOISE_S4_DELTA`", (
             ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
@@ -6396,8 +6396,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
-            ("20245", "if count + est > max_points:"),
-            ("20270", "quota_refusal_payload(QuotaExceededError("),
+            ("20311", "if count + est > max_points:"),
+            ("20336", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
         # re-states `hosted_api.py:19589` (`19558` when this note was written, the same guard read at an older head), so it is
@@ -6407,7 +6407,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-head number is pinned: the `:18205` beside it is a STAMP read at
         # `a577d0e25c` and does NOT resolve here, so pinning it would red a true record.
         ("03-test-design.md", "`:82`'s `hosted_api.py:", (
-            ("20245", "if count + est > max_points:"),
+            ("20311", "if count + est > max_points:"),
         ), "hosted_api"),
         # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review). The row whose
         # SUBJECT is that line numbers rot carried NINE this-head cites and no reader at
@@ -6415,8 +6415,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # is unique in the file. The first cut pinned only three of the nine, and review measured the
         # residual by mutating the rest — the rest of the file GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `9d790287af`", (
-            ("20138", "``body.harness`` only ever introduces a harness on a session the server"),
-            ("20245", "if count + est > max_points:"),
+            ("20204", "``body.harness`` only ever introduces a harness on a session the server"),
+            ("20311", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("12141", "_registry_cache = PackRegistry(packs_dir)"),
@@ -6544,7 +6544,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ABOVE it, and a phrase that binds the wrong line is the failure `_pin_row_failures`
         # reports rather than hides).
         ("00-plan.md", "returns `\"v2\"`", (
-            ("19678", "def _capture_lane() -> str:"),
+            ("19744", "def _capture_lane() -> str:"),
         ), "hosted_api"),
         # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3, P2): re-pointed to
         # `:14465-14542` and unread, so both endpoints could move silently. Only the START
@@ -6584,14 +6584,26 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # than assumed from one bumped number — and ⛔ RE-DERIVED ONCE MORE at the rebase onto
         # `main` @ `b8f56fdec4`, where the three offsets STILL hold at the new START, so the
         # START is again confirmed by structure rather than by a bumped number:
-        # ⛔ RE-DERIVED AGAIN at the forward merge of `origin/main` `0774035055` (this merge):
-        # `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split) inserts 22 lines above
-        # `org_info`, so the span is `:15262-15339` at THIS head — the START is the `grep -n
-        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line, and the END is
-        # the blank line before `return OrgInfoResponse(` (`:15339`, measured at this head).
-        # The three offsets (+29 `nodes_used` -> `:15291`, +39 `max_nodes` -> `:15301`, +77 END)
+        # ⛔ RE-DERIVED ONCE MORE at the rebase onto `origin/main` `09f5c99afd` (`#13824`):
+        # `main`'s `c3309ec656` (`#13674`/`#13819`, the embedder's `/health` block) inserts 67 lines
+        # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
+        # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
+        # further down), so the span moves by a uniform +66 and is
+        # `:15328-15405` at THIS head — the START is the `grep -n 'point_count = await
+        # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15328`, measured), and the END is
+        # the blank line before `return OrgInfoResponse(` (`:15405`, with the call at `:15406`).
+        # The three offsets (+29 `nodes_used` -> `:15357`, +39 `max_nodes` -> `:15367`, +77 END)
         # hold EXACTLY from that START, which is how the figures below were re-derived rather
-        # than nudged. ⛔ An earlier cut of this comment carried the PRE-`#13589` pair
+        # than nudged — a uniform +66 on both ends, and the offsets re-measured rather than
+        # assumed. The span at the PREVIOUS head, `:15262-15339`, no longer contains the
+        # `nodes_used` read at all (`grep -c 'nodes_used = await asyncio.to_thread'` over those
+        # lines -> 0), which is why carrying it would have been a false pin.
+        # ⛔ AN EARLIER cut of this comment recorded the forward merge of `origin/main`
+        # `0774035055`, where `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split)
+        # inserted 22 lines above `org_info` and the span was `:15262-15339` at THAT head, with
+        # the offsets (+29 `nodes_used` -> `:15291`, +39 `max_nodes` -> `:15301`, +77 END)
+        # holding exactly from that START — kept as history WITH its head, never as this one's.
+        # ⛔ And an earlier cut of this comment carried the PRE-`#13589` pair
         # (`:15225`/`:15254`/`:15264`/`:15302`), which names different statements at this
         # head — every one of those four was re-measured against the tree, not inferred.
         #
@@ -6608,7 +6620,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
         # the blank line immediately before `return OrgInfoResponse(` at `:15258`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
-            ("15262", "point_count = await asyncio.to_thread("),
+            ("15328", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
         # ⛔ `:1186` IS NOT PINNED BY A ROW *ALONE*, and the reason is measured rather than
         # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
@@ -6826,35 +6838,35 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "satisfies a row scoped to the line, so this sentence is asserted whole.")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15262-15339`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15328-15405`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15301` (both needles are the file's only occurrences —
-    # `:15291` and `:15301` — so a later end cannot change the sum). Ends below `:15301` fail
+    # true for any end at or beyond `:15367` (both needles are the file's only occurrences —
+    # `:15357` and `:15367` — so a later end cannot change the sum). Ends below `:15367` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15262`-`:15301` gives a non-empty window that lacks at least the second needle,
-    # and an end below `:15262` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15328`-`:15367` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15328` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
-    assert _i7.count("`hosted_api.py:15262-15339`") == 1, (
+    assert _i7.count("`hosted_api.py:15328-15405`") == 1, (
         "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
         "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
     _org_info = _EPIC_CITE_SOURCES["hosted_api"].read_text(encoding="utf-8").splitlines()
-    _span = _org_info[15262 - 1:15339]
+    _span = _org_info[15328 - 1:15405]
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
         assert sum(_needle in _l for _l in _span) == 1, (
-            f"04-plan.md I7 says `:15262-15339` publishes `nodes_used` / `max_nodes`, but "
+            f"04-plan.md I7 says `:15328-15405` publishes `nodes_used` / `max_nodes`, but "
             f"{_what} occurs {sum(_needle in _l for _l in _span)} time(s) in that span — the "
             "range has moved, so re-derive it (start AND end) rather than bumping one end")
     # …and the END by structure, because membership inside a window cannot see it move.
-    _i7_end_ok = _org_info[15339 - 1].strip() == "" and bool(
-        _org_info[15339].lstrip().startswith("return OrgInfoResponse("))
+    _i7_end_ok = _org_info[15405 - 1].strip() == "" and bool(
+        _org_info[15405].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:15339`) is no longer the blank line before "
+        "04-plan.md I7's range end (`:15405`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 
@@ -16478,6 +16490,157 @@ def test_the_D5_row_is_still_one_table_row():
         "for the stray or missing delimiter. Delete or add it; do not re-word around it")
 
 
+#: Readings this row carried that a MEASUREMENT refuted, each kept beside the measurement
+#: that killed it (#13794). ⛔ An ABSENCE pin, deliberately: the three defects below are
+#: PROSE, so there is no tree line to bind them to, and the only rot-proof assertion is
+#: that the refuted reading is not stated again. ⛔ The rule is QUOTING, not the literal's
+#: shape: this document family marks a retraction by QUOTING the wording it deletes
+#: (`… the sentence an earlier cut carried here, "X", is DELETED …`), so every
+#: double-quoted span is stripped before the test and only an UNQUOTED occurrence counts
+#: as the claim coming BACK. That is deliberately symmetric across all three entries —
+#: binding one entry to an "asserting frame" while the others stay bare is what made two
+#: of them red on a correct, quoted retraction (#13809 review, P2; reproduced).
+#: ⛔ STATED LIMITS, four, each MEASURED at `3719864ec9` (#13809 review):
+#: (a) an assertion written INSIDE double quotation marks is not caught — that is what the
+#:     strip is FOR; and (b) the strip recognises DOUBLE quotes only, so a retraction marked
+#:     with single quotes or with typography that the word match still sees REDS this pin on a
+#:     CORRECT repair (measured: `'AND THE BOX IS NO LONGER SHALLOW' … DELETED` -> `1 failed`).
+#:     The convention is therefore stated rather than assumed: **mark a retraction by
+#:     double-quoting the wording you delete**, which is what this row's own repair does, and
+#:     the assertion text says so at the point of failure, where the author who hits it needs
+#:     it. An earlier cut of this comment called that trade "never redding a repair", and that
+#:     was FALSE — the single-quote spelling is a correct edit and it reds.
+#: (c) the pin fires on the WORDING and not on grammatical mood — a conditional "after the
+#:     unshallow, the box is no longer shallow" is refused, so say it about the CLONE (cycle
+#:     4); and (d) the two SUBJECT-BOUND entries pin a reading WITH its subject, so a
+#:     restatement that drops the number is a different claim and is out of scope (cycle 4).
+#: ⛔ And the row must be BALANCED: an odd number of `"` fails the pin rather than being
+#: mis-parsed, because the strip pairs quotes POSITIONALLY and one unpaired quote swallowed
+#: 3,943 characters of the row in a MEASURED false pass — the claim came back unquoted and
+#: the suite stayed green (cycle 4).
+#: ⛔ No literal `hosted_api.py:<n>` token is spelled here: the census greps every tracked
+#: file, so one would join the population it measures.
+_D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        # ⛔ An entry is a TUPLE of fragments and fires only when EVERY one is present, so
+        # a reading can be bound to its SUBJECT without binding it to a frame. This entry
+        # and the next need that: their predicate ("is a bare # comment marker", "a
+        # DIFFERENT call site") is true of OTHER lines too, so the predicate alone refused
+        # correct prose — measured: `:12221` is a DIFFERENT call site from the import at
+        # `:12168` is TRUE and was RED — the false red this entry took until cycle 4 bound
+        # it to its SUBJECT (#13809 review, cycle 4, P2). No glyph, case or spacing is
+        # part of a fragment: `_d5_words` reduces each side to a word sequence.
+        ("14471", "is a bare `#` comment marker"),
+        "measured at `origin/main`: `:14471` is a docstring line in "
+        "`tortoise/hosted_api.py` and a code line in `tortoise/sdk.py` — neither is a "
+        "comment marker (#13794 review, P2). Keep the half that IS true, and keep it "
+        "SCOPED: no cite TOKEN for that line **with the `hosted_api.py` prefix** exists on "
+        "`main` — while one WITHOUT that prefix does, in "
+        "`docs/scoping/3863-surface-enumeration.json` — so a prefix-scoped grep is not a "
+        "tree-wide count, which is the error the D5 row itself retracts (#13489 review, "
+        "P2). ⛔ The token is deliberately not spelled here: the census greps every "
+        "tracked file, so one would join the population it measures",
+    ),
+    (
+        # ⛔ No frame and no typography, but subject-BOUND (see entry 1): the CONNECTIVE
+        # is not part of the reading, which is the rule entry 3 applies below — measured
+        # in cycle 2, when ``, a `` welded to this literal meant the `is`, `—` and `,`
+        # spellings of the SAME refuted claim all read GREEN (#13809 review, P2) — while
+        # the NUMBER is part of it, because without the number the predicate reds a true
+        # sentence about another call site (cycle 4, P2 — MEASURED). Residual: a
+        # restatement that drops the number is out of scope, which is a different claim.
+        ("45728", "a DIFFERENT call site"),
+        "measured at this head: `:45728` is a NAME in an import list "
+        "(`subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,`), not a call. The "
+        "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
+        "prints (#13794 measurement, P2)",
+    ),
+    (
+        # ⛔ No frame and no case dependence: the READING is what is pinned, so the entry
+        # carries neither the refuted sentence's connective nor its capitalisation. The
+        # quote-strip below is what keeps a marked, QUOTED retraction from redding this
+        # pin, so no entry needs a frame — and giving only SOME entries one is precisely
+        # the asymmetry that broke it. ⛔ The connectives are NOT part of the reading, and
+        # keeping one was a FALSE PASS (#13809 review, P2 — MEASURED: with `, so` still
+        # on this literal, an unquoted `AND THE BOX IS NO LONGER SHALLOW.` and its
+        # lowercase form both read GREEN, i.e. the refuted claim could come back in prose
+        # and the pin would not fire). One fragment, because its subject IS the wording.
+        ("the box is no longer shallow",),
+        "measured on the clone this row was repaired on: "
+        "`git rev-parse --is-shallow-repository` -> `true` and "
+        "`git merge-base 2584a86ec1 origin/main` -> rc=1, so the unshallow is a REPAIR a "
+        "reader may perform, never a state this row may assert — shallowness is a "
+        "property of the clone (#13794 measurement, P2)",
+    ),
+)
+
+
+#: A double-quoted span, stripped before the absence test: in this document family that
+#: is how a RETRACTION marks the wording it deletes, so a quotation is never an assertion.
+#: ⛔ Typography is not part of a READING, so the match is on the WORD SEQUENCE and not on
+#: the glyphs — markdown emphasis, code formatting, hyphens and spacing are all typography.
+#: Each way of keeping them was a measured false pass, in successive cycles: a literal with
+#: the backticks kept missed `and :14471 is a bare # comment marker` (cycle 2), and one with
+#: the glyphs intact still missed `a DIFFERENT **call site**`, `the box is **no longer
+#: shallow**`, `a bare **#** comment marker`, `the box is — no longer shallow` and
+#: `a DIFFERENT call-site` (cycle 3) — every one of them the SAME words, which is the same
+#: claim, which is what this pin exists to catch (#13809 review, P2 — MEASURED). A guard
+#: that only catches the exact typography of one head is the false pass it exists to
+#: prevent.
+_D5_QUOTED_SPAN = re.compile(r'"[^"]*"')
+_D5_WORD = re.compile(r"[^\W_]+")
+
+
+def _d5_words(text: str) -> str:
+    """The text's lowercase word sequence, space-padded so `in` is word-bounded."""
+    return " " + " ".join(_D5_WORD.findall(text.casefold())) + " "
+
+
+def test_the_D5_row_does_not_restate_a_refuted_reading():
+    """Three prose claims on D5 were false at the head they were written for (#13794).
+
+    ⛔ MEASURED, which is why this is a pin and not a note: at `43438fbe31` the row said
+    `origin/main`'s `:14471` is a bare `#` comment marker (it is a docstring line in one
+    file and code in the other), called `:45728` a "call site" (it is a name in an import
+    list), and asserted "the box is no longer shallow" (that clone reports `true`, and
+    `git merge-base 2584a86ec1 origin/main` -> rc=1). No guard in the tree read any of
+    the three, which is how they survived nine heads while the suite was green.
+
+    A reword is free here, and so is a retraction marked by a DOUBLE-quoted span (the
+    convention this row uses for the wording it deletes); the assertion is that the
+    refuted READING is not stated again UNQUOTED. ⛔ A single- or curly-quoted retraction
+    is NOT exempt — mark it with `"` — and the pin refuses a row whose `"` do not pair,
+    rather than mis-parsing it (#13809 review, cycle 4, P2 — MEASURED). See the tuple's
+    STATED LIMITS block for what this pin cannot catch and what it refuses.
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    # ⛔ FAIL CLOSED on an unbalanced row (#13809 review, cycle 4, P2 — MEASURED: one
+    # extra `"` made 89, the positional pairing below then swallowed 3,943 characters
+    # from the rest of the line, and an unquoted restatement of all three readings
+    # stayed GREEN). A retraction-marker strip that pairs quotes POSITIONALLY cannot
+    # tell an unpaired quote from a long span, so the row is required to be balanced
+    # rather than silently mis-parsed.
+    assert d5[0].count('"') % 2 == 0, (
+        f"the D5 row carries an ODD number of dquotes ({d5[0].count(chr(34))}) — a "
+        "retraction is marked by a DOUBLE-quoted span and the strip below pairs quotes "
+        "positionally, so one unpaired quote would swallow the rest of the line and "
+        "silently disarm this pin. Balance the quotes (or mark the retraction with a "
+        "dquote-quoted span)."
+    )
+    asserted = _d5_words(_D5_QUOTED_SPAN.sub("", d5[0]))
+    restated = [f"  {parts!r} — {why}" for parts, why in _D5_REFUTED_READINGS
+                if all(_d5_words(part) in asserted for part in parts)]
+    assert not restated, (
+        "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated)
+        + "\n⛔ If you are DELETING this wording rather than asserting it, mark it with "
+        "DOUBLE quotes — a retraction written with single quotes reds this pin: that is "
+        "limit (b) of its stated false-red surfaces.")
+
 
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
@@ -16505,6 +16668,21 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         r"the file's ONLY `dedup_reviewed IS NULL`, at `:(?P<n>\d+)` at THIS head",
         "sdk",
         "n.dedup_reviewed IS NULL",
+    ),
+    # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
+    # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
+    # carries ~50 numbers — so `:20311` was "read" from an unrelated clause denotating a
+    # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
+    # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
+    # regex binds the number to the sentence that gives the number its meaning, so a future
+    # `+N` above `org_info` reds the CLAIM instead of pairing a fresh number with a rotted
+    # one. Anchors: `is <symbol>` then `at THIS head`, which is exactly how the row states a
+    # current-tense address.
+    (
+        "the quota guard `if count + est > max_points:`",
+        r"and `:(?P<n>\d+)` is `if count \+ est > max_points:` at THIS head",
+        "hosted_api",
+        "if count + est > max_points:",
     ),
 )
 
@@ -16585,16 +16763,19 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
 
     # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while that file is NOT in this diff at all
-    # (`git diff --name-only origin/main...HEAD -- …/04-plan.md` is EMPTY, measured at this
-    # head — and so is its `--numstat`, so NO pair here is this diff's) and the document's own row reads
-    # `sdk.py:28718`. A phrase-only assertion was green over that,
+    # re-point — `sdk.py:28559` → `:28592`", while at THAT head the file was not in the diff at
+    # all (`git diff --name-only origin/main...HEAD -- …/04-plan.md` was EMPTY there, and so was
+    # its `--numstat`) and the document's own row reads `sdk.py:28718`. ⛔ THAT MEMBERSHIP IS NOT
+    # TYPED AS CURRENT, on purpose: `main`'s `#13819` later moved `hosted_api.py` by +66 and this
+    # branch re-derived the I7 range, which puts the file IN the diff — `git diff --numstat
+    # origin/main...HEAD -- …/04-plan.md` at the head you merge is the command, never this line.
+    # A phrase-only assertion was green over the old claim,
     # re-landed, and was green again: that is the class this pin exists to close. No count
     # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
     # ⛔ NO COUNT IS ASSERTED, IN EITHER DIRECTION (#13750 review, cycle 3 — MEASURED).
     # This arm used to forbid the phrases "carries TWO numeric re-points" / "carries ONE
     # numeric re-point" while its own message asserted FOUR, and both were wrong at the
-    # next head: that file is not in the diff at all (`--numstat` EMPTY, measured), and of
+    # next head: that file was not in the diff THERE (`--numstat` EMPTY at that head), and of
     # the four pairs the message listed only one had ever been this diff's
     # (two already read that way on `origin/main`, one named `:28607` where the base reads
     # `:28682`, and the range's TARGET was typed as the base's own value). A count in
@@ -16607,10 +16788,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
             "figure and this arm has already been wrong in both directions; name the "
             "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
-            "`:15261-15338` -> `:15262-15339`), which the document CARRIES at this head — "
-            "and note the file itself is NOT in this diff (`--numstat` empty), so no pair "
-            "here is this diff's (#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    for _pair in ("`sdk.py:28682` → `:28718`", ":15261-15338` → `:15262-15339`"):
+            "`:15262-15339` -> `:15328-15405`), which the document CARRIES at this head — "
+            "and whether that file sits in the diff is `git diff --numstat"
+            " origin/main...HEAD` at the head you merge, never a claim typed here "
+            "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
+    for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15328-15405`"):
         assert _pair in text, (
             f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
             "this head. Both ends are pinned here because the range's TARGET was once "
