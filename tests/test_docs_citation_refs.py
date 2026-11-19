@@ -697,15 +697,20 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
     file-table section, so nothing read it.
 
-    NON-VACUITY, MEASURED: on the pre-fix document this arm reds on the first
-    attribution found (`and THAT shift is this repair's, not main's`), because the
-    measured cite sets are EQUAL — no cite moves, so no re-point can be this diff's.
+    NON-VACUITY, MEASURED: on the pre-fix document this arm reds on the FIRST entry
+    of `_attributions`, `re-pointing that row's `sdk.py` cite from` — present once in
+    `git show f6f202cf5c:…/05-verify.md`, and earlier in that text than the phrase an
+    earlier cut of this paragraph named. That named phrase (`and THAT shift is this
+    repair's, not main's`) does NOT reproduce: `origin/main` credits the move to
+    itself ("and THAT shift is `main`'s, not this repair's"), so it reads 0 there —
+    the arm was right and the paragraph was wrong (#13802 review, P2).
     The prohibition is applied only where the measurement supports it: on a head whose
     diff really does move a cite the attribution is legitimate and this leg stands
-    down, while the resolution leg — now ordered ABOVE this arm so that it runs in the
-    depth-1 checkout too (`#13802` review, finding 3) — still has to hold. Where neither
-    ref can be read at all, this leg reports UNPROVABLE (a `pytest.skip`) instead of
-    failing: a fail-closed read here redded the required `test` job in every PR.
+    down, while the resolution leg — ordered ABOVE this arm so that it runs in the
+    depth-1 checkout too (`#13802` review, finding 3) — still has to hold. Where the
+    base ref cannot be read at all, the leg takes the UNCONDITIONAL direction rather
+    than reporting UNPROVABLE: a `pytest.skip` there would silence the only detector of
+    this PR's own defect class in the only job that gates merges (#13802 review, P1).
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
@@ -777,42 +782,52 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     # `_base_ref_absent_detail` and the `#11739` precedent it names.
     # ─────────────────────────────────────────────────────────────────────────────
     _absent = _base_ref_absent_detail()
-    if _absent is not None:
-        pytest.skip(
-            f"the `docs/00_index.md` cite-set comparison is UNPROVABLE here — "
-            f"{_absent}, which `actions/checkout@v4`'s default `fetch-depth: 1` on a "
-            f"`pull_request` always produces (only the PR ref is fetched, so nothing "
-            f"maps `origin/main`). UNPROVABLE is never FALSE: this is not a defect in "
-            f"the document, and the arms that need no base ref have already run above. "
-            f"Re-derive the comparison in a full clone:\n"
-            f"  git fetch origin main && git show origin/main:docs/00_index.md "
-            f"| grep -o 'sdk[.]py:[0-9]*'\n"
-            f"  grep -o 'sdk[.]py:[0-9]*' docs/00_index.md\n"
-            f"(#13802 review, finding 3; the shape is `#11739` review F1's)")
-
-    probe = subprocess.run(
-        ["git", "show", "origin/main:docs/00_index.md"],
-        cwd=REPO, capture_output=True, text=True, check=False)
-    # `origin/main` RESOLVES here (the skip above is the only way past this point), so a
-    # failed read is no longer an environment fact — it is an artifact fault, and it
-    # still fails closed. Do not widen this to `pytest.skip`: an unresolvable PATH at a
-    # resolvable ref is a real defect and the reader must see it as one.
-    assert probe.returncode == 0, (
-        "`origin/main` resolves in this checkout, but `docs/00_index.md` cannot be read "
-        "at it — `git show origin/main:docs/00_index.md` exits "
-        f"{probe.returncode} ({probe.stderr.strip()!r}). That is an artifact fault, not "
-        "a shallow clone, so this arm fails closed (#13802 review, finding 3)")
-    _main = sorted(re.findall(r"sdk\.py:(\d+)", probe.stdout))
-    _head = sorted(re.findall(r"sdk\.py:(\d+)", index))
-    if _main == _head:
+    # ⛔ NOT A `pytest.skip` (#13802 review, P1 — THE INERT-ENFORCER SHAPE). Every job
+    # that runs a suite checks out at `actions/checkout@v4`'s DEFAULT `fetch-depth: 1`
+    # (`python-ci.yml:968` and `post-merge-validation.yml:96`/`:222` carry no `with:`),
+    # so `origin/main` never resolves on the rail and a skip here means this arm
+    # asserts NOTHING in the only place the rail reads it. MEASURED on a real depth-1
+    # clone of this branch with the document's attribution flipped back to "and THAT
+    # shift is this repair's, not `main`'s": `11 passed, 2 skipped` — green, defect
+    # swallowed. The fallback is the UNCONDITIONAL direction instead, which is what
+    # this file's own `config/ci-surfaces.yml` row already prescribes for the sibling
+    # `-- tortoise/` leg: with the base unreadable, NOTHING shows this diff moves a
+    # cite, so no attribution may be asserted. It keeps the file hermetic (its row
+    # promises "no network", so fetching a base ref inside the suite is not available
+    # to it) and the trade it buys is an OVER-BLOCK — a head whose diff really does
+    # move a cite would red in a depth-1 checkout — which outranks a false PASS.
+    if _absent is None:
+        probe = subprocess.run(
+            ["git", "show", "origin/main:docs/00_index.md"],
+            cwd=REPO, capture_output=True, text=True, check=False)
+        # `origin/main` RESOLVES here, so a failed read is no longer an environment
+        # fact — it is an artifact fault, and it still fails closed.
+        assert probe.returncode == 0, (
+            "`origin/main` resolves in this checkout, but `docs/00_index.md` cannot "
+            "be read at it — `git show origin/main:docs/00_index.md` exits "
+            f"{probe.returncode} ({probe.stderr.strip()!r}). That is an artifact "
+            "fault, not a shallow clone, so this arm fails closed "
+            "(#13802 review, finding 3)")
+        _main = sorted(re.findall(r"sdk\.py:(\d+)", probe.stdout))
+        _head = sorted(re.findall(r"sdk\.py:(\d+)", index))
+        _may_attribute = _main != _head
+        _basis = (
+            f"that file's cite set is IDENTICAL on `origin/main` and at this head "
+            f"({_head}) — no cite moves here, so no re-point is this diff's")
+    else:
+        _may_attribute = False
+        _basis = (
+            f"the base ref is UNPROVABLE in this checkout ({_absent}), so nothing "
+            "shows this diff moves a cite at all — the depth-1 `test` job is the "
+            "normal case, and an unmeasured premise may not carry an attribution")
+    if not _may_attribute:
         for phrase in _attributions:
             assert phrase not in doc, (
                 f"05-verify.md says this diff re-points a `docs/00_index.md` cite "
-                f"({phrase!r}), but that file's cite set is IDENTICAL on `origin/main` "
-                f"and at this head ({_head}) — no cite moves here, so no re-point is "
-                "this diff's. State the command (`git diff -U0 --word-diff=plain "
-                "origin/main...HEAD -- docs/00_index.md`) and let the reader re-derive "
-                "it (#13746 review, round 3, finding 4)")
+                f"({phrase!r}), but {_basis}. State the command (`git diff -U0 "
+                "--word-diff=plain origin/main...HEAD -- docs/00_index.md`) and let "
+                "the reader re-derive it (#13746 review, round 3, finding 4; the "
+                "depth-1 fallback is the unconditional direction, #13802 review P1)")
 
 
 #: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
@@ -822,7 +837,13 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
 #: so the pattern below is the armed detector for that defect class.
 _TYPED_INDEX_NUMSTAT = re.compile(
     r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
-    r"\s*(?:->|prints)\s*`\d+\s+\d+`")
+    r"\s*(?:->|prints)\s*`\d+\s+\d+`"
+    # ⛔ THE SHORT FORM TOO (#13802 review, P2). The document's most-used spelling of
+    # this clause is "…and its `--numstat` form both print NOTHING", typed FIVE times,
+    # and a regex that knows only the long form walks straight past the figure that
+    # replaces `NOTHING` there — measured on a depth-1 clone: `both print `1 1`` left
+    # both arms green. The same command's short name is the same head-bound figure.
+    r"|`--numstat`\s+form[^`]{0,60}?(?:->|prints?|both\s+print)\s*`\d+\s+\d+`")
 
 
 def test_the_document_types_no_numstat_figure_for_the_index_residual():
@@ -937,18 +958,25 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
     # ("the live three-dot diff adds no such token"). rc == 0 with NO added token is a
     # real measurement and still reds; only an UNREADABLE base skips, and it says so.
     if proc.returncode != 0:
-        pytest.skip(
-            f"the live three-dot diff of `docs/00_index.md` is UNPROVABLE here — "
-            f"`git diff -U0 --word-diff=plain origin/main...HEAD` exits "
-            f"{proc.returncode} ({proc.stderr.strip()!r}); "
-            f"{_base_ref_absent_detail() or 'the base ref does not resolve'}. An empty "
-            f"reading would be read as MEASURED and would red this row on a correct "
-            f"artifact, so it is reported as unchecked instead. Re-derive it in a full "
-            f"clone:\n"
-            f"  git fetch origin main && git diff -U0 --word-diff=plain "
-            f"origin/main...HEAD -- docs/00_index.md\n"
-            f"(#13802 review, finding 3)")
-    moved = _added_cite_tokens(proc.stdout)
+        # ⛔ THE UNCONDITIONAL DIRECTION, NOT A SKIP (#13802 review, P1 — the same
+        # defect as the sister arm's `pytest.skip`). This leg is the ONLY one that still
+        # reads the document on a head whose cite sets DIFFER, and every job that runs a
+        # suite checks out at `fetch-depth: 1`, so a skip here asserts nothing wherever
+        # the rail reads it. With the base unreadable, NOTHING shows the diff adds a
+        # `sdk.py:<n>` token — so an empty `moved` is not a measurement, and a claim may
+        # not be carried on it. The message names which case it is, so an UNPROVABLE
+        # reading is never passed off as a MEASURED one; the cost is an OVER-BLOCK on a
+        # head that really does move a cite, which outranks a false PASS.
+        moved = set()
+        _why = (f"the live three-dot diff is UNPROVABLE here — `git diff -U0 "
+                f"--word-diff=plain origin/main...HEAD` exits {proc.returncode} "
+                f"({proc.stderr.strip()!r}); "
+                f"{_base_ref_absent_detail() or 'the base ref does not resolve'}, so "
+                "nothing shows this diff adds a cite token at all")
+    else:
+        moved = _added_cite_tokens(proc.stdout)
+        _why = ("the live three-dot diff adds no such `sdk.py:<n>` token "
+                f"(added: {sorted(moved) or 'none'})")
 
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
@@ -959,12 +987,11 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
         named = set(re.findall(r"`?:(\d+)`?", window))
         assert named & moved, (
             f"05-verify.md claims this diff re-points a `docs/00_index.md` cite "
-            f"({claim!r}) and names {sorted(named)}, but the live three-dot diff adds "
-            f"no such `sdk.py:<n>` token (added: {sorted(moved) or 'none'}). The "
-            "claim is refuted by the command the document prints beside it: read the "
-            "set from `git diff -U0 --word-diff=plain origin/main...HEAD -- "
-            "docs/00_index.md` at the head being merged, and state the command rather "
-            "than a head-bound pair (#13746 review, round 3, finding 4)")
+            f"({claim!r}) and names {sorted(named)}, but {_why}. The claim is refuted "
+            "by the command the document prints beside it: read the set from "
+            "`git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` "
+            "at the head being merged, and state the command rather than a head-bound "
+            "pair (#13746 review, round 3, finding 4)")
 
 
 if __name__ == "__main__":  # pragma: no cover
