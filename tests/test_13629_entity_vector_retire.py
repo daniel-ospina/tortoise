@@ -471,13 +471,18 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
 
     monkeypatch.setattr(record_vector, "mirror_required",
                         lambda entity_type: False, raising=False)
-    # The real folds on this tree do NOT consult the gate, so the answer must still be
-    # "emits" — the record's coverage does not stop a write nobody gated.
+    # The recorded predicate says "not required" for every label; that is a READ fact and
+    # the gate must still answer "emits" while a writer exists that nobody stopped.
     emits, reason = strip.write_gate("object")
     assert emits is True
     assert "writes `embedding` without an `if`" in reason
-    # …and the reason NAMES the writers, so an operator can read which code to fix.
-    assert "_upsert_object" in reason
+    # ⛔ ASSERT ON THE WRITER THAT MUST STILL BE UNGATED, NOT ON THE FOLD.
+    # `_upsert_object`/`_upsert_subject` are exactly what `#13617` write-stops, so pinning
+    # the refusal to THEM makes this test red the moment #13617 lands — whichever PR merges
+    # second inherits a failure caused by the other. `sdk::_update_entity` stores the
+    # property through `SET n += $props` and is not part of #13617, so a set-based
+    # assertion stays true before AND after it.
+    assert "_update_entity" in reason
     # ⛔ AND IT NAMES THE WRITERS THE FOLD MAP ALONE MISSED. `tortoise.sdk::_update_entity`
     # re-adds a caller-supplied `embedding` on Subject/Object/Source/Event through
     # `SET n += $props`, so a gate that cleared the `entities.py` folds alone would license
@@ -533,9 +538,13 @@ def _upsert_object(ev):
 
 
 #: A dict writer's write-stop: remove the property from the props before `SET n += $props`.
+#: ⛔ AND IT MUST BE NEGATED. `mirror_required` asks "must the GRAPH still store?", so the
+#: removal runs when the answer is NO — `if not gate("object"): props.pop("embedding")`,
+#: which is the repo's own idiom. Popping on the POSITIVE answer deletes the property
+#: exactly when the graph is supposed to keep it: not a write-stop, so it is refused below.
 WRITER_POPS_THE_KEY = """
 def _upsert_object(props):
-    if _derived_mirror_required("object"):
+    if not _derived_mirror_required("object"):
         props.pop("embedding", None)
     return _write({"SET n += $props": props})
 """
@@ -545,6 +554,14 @@ def _upsert_object(props):
     if _derived_mirror_required("object"):
         props["embedding"] = _encode(props)
     return _write(props)
+"""
+
+#: …and the same removal under the POSITIVE ask is not a write-stop.
+WRITER_POPS_ON_THE_MIRROR_ARM = """
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        props.pop("embedding", None)
+    return _write({"SET n += $props": props})
 """
 
 WRITER_POPS_ANOTHER_KEY = """
@@ -626,6 +643,16 @@ def _upsert_object(ev):
 """,
 )
 
+#: ⛔ A `RETURN` THAT CARRIES A WRITE IS A WRITE, not an exit — `if not gate(l): return
+#: self._write(ev)` stores on exactly the arm the gate said stop. Judged by the same
+#: polarity rule as an assignment (this shape was ACCEPTED by an earlier revision).
+WRITER_RETURNS_A_WRITE_WHEN_STOPPING = """
+def _upsert_object(ev):
+    if not mirror_required("object"):
+        return self._write(ev)
+    return None
+"""
+
 #: …while these DO decide, and refusing them would make the gate unsatisfiable. They are
 #: the shapes the REAL write-stop uses (`#13617`'s `if _derived_mirror_required(...)`
 #: around the encode), so the gate is not an inert enforcer that no correct implementation
@@ -633,7 +660,7 @@ def _upsert_object(ev):
 WRITER_RETURNED_AND_DECIDING = (
     """
 def _upsert_object(ev):
-    if not mirror_required("object"):
+    if mirror_required("object"):
         return self._write(ev)
     return None
 """,
@@ -678,6 +705,10 @@ def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"a RETURNED-but-dying gate was accepted: {source!r}"
 
+    module = _fake_writer_module(tmp_path, monkeypatch, WRITER_RETURNS_A_WRITE_WHEN_STOPPING)
+    gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+    assert gated is False, "a `return <write>` under a NEGATED ask opened the gate"
+
     for source in WRITER_RETURNED_AND_DECIDING:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         assert strip._writer_consults_gate(
@@ -704,6 +735,73 @@ def _upsert_object(ev):
 """)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"a {mention!r} MENTION opened the gate"
+
+    # ⛔ MASKING THE ANSWER IS NOT ASKING IT. A two-token blacklist (`not`, `or`) left every
+    # other way of inverting or wrapping the call accepted — and `is False` is not exotic:
+    # this repo already spells it that way in its write paths. The gate call must BE the
+    # operand of the branch test.
+    for masked in ('_derived_mirror_required("object") is False',
+                   '_derived_mirror_required("object") == False',
+                   '_derived_mirror_required("object") != True',
+                   'bool(_derived_mirror_required("object")) is False',
+                   '{True: False, False: True}[_derived_mirror_required("object")]',
+                   'all((_derived_mirror_required("object"), True))'):
+        module = _fake_writer_module(tmp_path, monkeypatch, f"""
+def _upsert_object(ev):
+    if {masked}:
+        embedding = _encode(ev)
+    return _write(ev, embedding)
+""")
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a MASKED ask opened the gate: {masked}"
+
+    # …and the `and` chain stays accepted: every operand must hold, so a non-gate conjunct
+    # can only make the branch LESS likely, never take it against the gate.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    if ev and _derived_mirror_required("object"):
+        embedding = _encode(ev)
+    return _write(ev, embedding)
+""")
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is True, "an `and` chain was refused"
+
+    # ⛔ AND A STORE INSIDE A NESTED SCOPE IS NOT THIS FUNCTION'S STORE — `ast.walk`
+    # descends into it, so a helper that never runs used to "prove" the write-stop.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        def helper():
+            embedding = _encode(ev)
+        _ = helper
+    return _write(ev, _encode(ev))
+""")
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is False, "a nested-scope store opened the gate"
+
+    # ⛔ AND THE REMOVAL MUST NAME *THIS* PROPERTY. This repo pops the identity triple
+    # (`embedding_model`/`embedding_text_hash`) while KEEPING the vector, so a substring
+    # match would license the strip on a writer that still stores.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(props):
+    if not _derived_mirror_required("object"):
+        props.pop("embedding_model", None)
+    return _write({"SET n += $props": props})
+""")
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is False, "an `embedding_model` pop opened the gate"
+
+    # …and a `while True:` body is REACHABLE — only a falsy constant test is dead.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    while True:
+        if _derived_mirror_required("object"):
+            embedding = _encode(ev)
+        break
+    return _write(ev, embedding)
+""")
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is True, "`while True:` was pruned as dead"
 
     # ⛔ POLARITY: `mirror_required` reads "must the GRAPH still store this?", so a `not`
     # around it stores on exactly the runs where the gate said STOP — i.e. every run a
@@ -757,7 +855,8 @@ def _upsert_object(ev):
     # of some OTHER key does not.
     for source, wanted in ((WRITER_POPS_THE_KEY, True),
                            (WRITER_SUBSCRIPT_STORE, True),
-                           (WRITER_POPS_ANOTHER_KEY, False)):
+                           (WRITER_POPS_ANOTHER_KEY, False),
+                           (WRITER_POPS_ON_THE_MIRROR_ARM, False)):
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         assert strip._writer_consults_gate(
             module, "_upsert_object", ("object",))[0] is wanted, source
@@ -1720,6 +1819,72 @@ def test_a_narrowed_execution_records_the_labels_it_did_not_touch(stores, monkey
     result = _execute(graph, plan)
     assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
     assert result["removed"] == 1
+
+
+def test_a_narrowed_execution_is_not_exit_0(stores, monkeypatch):
+    """⛔ EXIT 0 IS THE CONTRACT "stripped AND verified" — for a narrowed plan that is a lie.
+
+    `residual_by_label` is over the plan's labels, so a `--label Object` run whose residuals
+    are all zero used to publish 0 while `Event`/`Source`/`Subject` still held their
+    vectors: a script gating on the exit code read a partial sweep as a completed
+    retirement. The stderr warning is for a human; the exit code is for the caller.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    # ⛔ TWO approvals for two executions: a plan is an EXACT key set, so re-running the
+    # same approval after it stripped (rightly) refuses on the population digest.
+    plan = _plan(graph, labels=["Object"])
+    deliberate = _plan(graph, labels=["Object"])
+    result = _execute(graph, plan)
+    assert result["removed"] == 1 and result["residual_by_label"] == {"Object": 0}
+    assert strip.result_exit_code(result) == 5, "a partial sweep published a clean exit"
+
+    # …and an operator who says so deliberately gets 0, on the record. A fresh node keeps
+    # this plan's key set exact (a plan names keys, not labels).
+    graph.add("Object", "obj-2")
+    record.holds("object", "obj-2")
+    plan = _plan(graph, labels=["Object"])
+    deliberate = _plan(graph, labels=["Object"])
+    acknowledged = _execute(graph, deliberate, expect_narrowed=True)
+    assert acknowledged["expect_narrowed"] is True and acknowledged["removed"] == 1
+    assert strip.result_exit_code(acknowledged) == 0
+
+    # A plan that covers EVERY declared label is unaffected: nothing was left unmeasured.
+    for label, key in (("Event", "ev-1"), ("Source", "src-1"), ("Subject", "subj-1")):
+        graph.add(label, key)
+        record.holds(label.lower(), key)
+    whole = _plan(graph)
+    assert sorted(whole["declared_population"]) == ["Event", "Object", "Source", "Subject"]
+    assert strip.result_exit_code(_execute(graph, whole)) == 0
+
+
+def test_a_plan_without_a_labels_key_refuses_instead_of_raising(stores, monkeypatch):
+    """A hand-edited plan must get a published token, not a `KeyError` traceback.
+
+    `_load_plan` tolerates a missing `labels` key (`plan_entries` uses `.get`), so `execute`
+    reading `plan["labels"]` crashed at the one moment an operator most needs a verdict —
+    and exit 1 is argparse's usage code, not any of the eleven refusal tokens.
+    """
+    _ready(monkeypatch)
+    graph, _record = stores
+    graph.add("Object", "obj-1")
+    plan = _plan(graph, labels=["Object"])
+    del plan["labels"]
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    # Whatever the refusal, it is a PUBLISHED one on the destructive path — never a
+    # `KeyError` traceback, which exits 1 ("usage") and names nothing.
+    try:
+        _execute(graph, plan)
+    except strip.Refusal as exc:
+        assert exc.token in strip.REFUSALS, exc.token
+        assert "KeyError" not in str(exc)
+    except strip.CensusError as exc:
+        assert "NO label" in str(exc)
+    else:                                    # pragma: no cover - must refuse
+        pytest.fail("a plan with no `labels` key executed")
+    assert graph.vector_keys("Object"), "the refusal must not have removed anything"
 
 
 def test_a_census_over_no_label_refuses_instead_of_certifying_nothing(stores):
