@@ -7673,12 +7673,16 @@ def _upsert_object(props, ev):
     _write(props)
 """,
         # ⛔ THE MIS-PAIR CONTROLS for the `Starred` pairing in `_property_alias_names`
-        # (`#13788`, delta review of `bcb710a547`): Python binds `x = 2` in the first and `x = 1`
-        # in the second, and puts the PROPERTY in the starred name — so both are honest writers,
-        # i.e. the direction that pairing exists to protect. The branch's earlier index pairing
-        # REFUSED exactly these, and no other rule did, so without them an over-refusal
-        # regression in that brand-new code ships green: with these two absent, re-adding the
-        # historical index pairing reddened 0 of 461 rows (measured by the delta review).
+        # (`#13788`, delta reviews of `bcb710a547` and `079a2e6919`): Python binds `x = 2` in the
+        # first and `x = 1` in the second, and puts the PROPERTY in the starred name — so both
+        # are honest writers, i.e. the direction that pairing exists to protect.
+        # `*_r, x = 1, key, 2` was refused by the branch's earlier index pairing and by no other
+        # rule; `x, *_r = 1, key` was refused by NOTHING (the index pairing binds `x = 1`
+        # correctly and CERTIFIED it). Both rows are kept because each pins the OVER-REFUSAL
+        # half of one LEG, which no `refused` row can: before they existed (459 rows) the
+        # historical index pairing reddened ONE row (`refused[323]`, a LOST refusal) and no
+        # accepted row at all; with them present that same mutant additionally reds
+        # `accepted[108]`, and an off-by-shift on the HEAD leg reds `accepted[109]`.
         """
 def _upsert_object(props, ev):
     key = "embedding"
