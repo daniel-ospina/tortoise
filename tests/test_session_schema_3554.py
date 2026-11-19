@@ -3612,11 +3612,12 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     true prose, stated rather than glossed: the test reads the NEWEST block alone, which
     passes, and a lane sweeping the corpus should expect these two.
     ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT — the shapes MEASURED at this head, NOT an
-    enumeration of every way a label can render. Five are fail-OPEN, which is the direction
+    enumeration of every way a label can render. Six are fail-OPEN, which is the direction
     that matters: an unread record, an unread HTML label, a label split across runs, an
-    entity-encoded space and an id borrowed from a contrastive parenthetical all PASS, so
-    this arm reduces the vacuity #13669 measured rather than ending it, and a reading this
-    list does not name should be treated as fail-OPEN until a fixture says otherwise:
+    entity-encoded space, a label whose rendered text carries a leading determiner and an
+    id borrowed from a contrastive parenthetical all PASS, so this arm reduces the vacuity
+    #13669 measured rather than ending it, and a reading this list does not name should be
+    treated as fail-OPEN until a fixture says otherwise:
       - an UNBOLDED, or MID-PARAGRAPH, record is OUT OF SCOPE and therefore **PASSES**:
         ``Owner approval: comment `NNN`.`` in plain prose, and ``The change landed.
         **Owner approval …**``, are not read as records — emphasis is the corpus's only
