@@ -856,13 +856,27 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           The shape class stays FINITE and the docstring above says so: a verb outside the
           list, or an answer carrying none of the listed words, is not detected.
     """
-    from tools.hosted_api_cite_census import _note_paths, _sweep, census
+    from tools.hosted_api_cite_census import _note_paths, _sweep, census, lifetime_query_sites
 
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
 
     # (a) AGREEMENT, measured in-process by the checker the document quotes.
-    verdict = _sweep(census(), refresh=False)
+    # ⛔ THE PIVOT IS RE-DERIVED, BECAUSE `--check` RE-DERIVES IT (#13807 review round 7,
+    # P1 — MEASURED). `census()`'s default is the FROZEN `DEFAULT_PIVOT`; the verb's
+    # `--check` path calls `census(sites[0])` with `sites = lifetime_query_sites()` and
+    # iterates to a fixpoint. Measuring `census()` here therefore asserted agreement on a
+    # path `--check` does not take: MEASURED at `c2e8b42336`, `_sweep(census())` -> `0` while
+    # `_sweep(census(lifetime_query_sites()[0]))` -> `1`, so this arm reported "agreement"
+    # over a tree the verb it names reported as STALE — precisely the false PASS the arm
+    # exists to refuse, reproduced inside the arm. The shape `--check` refuses (more than one
+    # site) is refused here too rather than silently graded on the wrong pivot.
+    _lifetime_sites = lifetime_query_sites()
+    assert len(_lifetime_sites) == 1, (
+        f"{len(_lifetime_sites)} `query(LIFETIME_MEMORY_QUERY)` sites in `tortoise/hosted_api.py` "
+        f"({_lifetime_sites}). `--check` refuses to run on that shape, so this arm cannot "
+        "claim the verdict that verb prints (#13807 review round 7, P1)")
+    verdict = _sweep(census(_lifetime_sites[0]), refresh=False)
     _green_claims = (
         "--check` exits 0",
         "--check` reports every stated figure `== measured`",
@@ -1335,7 +1349,11 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     # patch already covered it. The genuinely NEW coverage is `Popen`, `os.popen` and
     # `os.system` (each measured: passing pre-patch, raising post-patch); `check_call` and
     # `call` are built on `Popen`, so they are reached through it. The seam is "a child
-    # process", not one function, so every primitive that reaches one explodes.
+    # process", not one function, so every primitive IN THE LIST BELOW explodes. ⛔ "IN THE LIST
+    # BELOW" IS THE HONEST SCOPE (#13807 review round 7, F2 — MEASURED): an earlier cut said
+    # "every primitive that reaches one", which `os.fork` / `os.execv*` / `os.spawn*` refute,
+    # and this file's own rule is that a guard "may be narrow; what it may not do is describe
+    # itself as complete".
     for _seam in ("run", "check_output", "check_call", "Popen", "getoutput", "call"):
         monkeypatch.setattr(subprocess, _seam, _explode, raising=False)
     monkeypatch.setattr(os, "popen", _explode, raising=False)
@@ -1344,9 +1362,16 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     # MEASURED). The patches above set ATTRIBUTES, so a probe bound at import time
     # (`from subprocess import Popen as _P`, `_os_system = os.system`) reads the ORIGINAL
     # object and stays green — which is the very shape this pin's docstring names as the one
-    # it is defending against. The whitelist below is the closure: the arm's bytecode may
-    # reach ONE global name, the ledger it ban-matches, and nothing else, so no module, no
-    # function and no alias can be reached without appearing here.
+    # it is defending against. The whitelist below is the closure FOR GLOBAL NAME LOOKUPS: the
+    # arm's bytecode may reach ONE global name, the ledger it ban-matches, and nothing else.
+    # ⛔ TWO SCOPES ARE STATED RATHER THAN IMPLIED (#13807 review round 7, F2 — MEASURED):
+    # `co_names` is a lookup table, so it does NOT see a seam captured in a DEFAULT ARGUMENT
+    # or a closure cell — `def arm(doc, _run=subprocess.run)` satisfies `co_names` byte-for-byte
+    # while holding the PRE-patch `run` in `__defaults__` and never tripping the attribute
+    # patches above. Those two channels are closed by the assertion on `__defaults__` /
+    # `co_freevars` / nested code objects BELOW, so the pair — not `co_names` alone — is the
+    # closure; an earlier cut of this comment claimed `co_names` alone was it, which is the
+    # "describe itself as complete" this file forbids by name.
     assert _census_membership_verdicts.__code__.co_names == (
         "_TORTOISE_RETIRED_SPELLINGS",
     ), (
@@ -1354,6 +1379,19 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         "subprocess (or any other seam) behind an import-time alias — which the attribute "
         "patches above cannot see. Keep the arm a pure function of the document's TEXT "
         "(#13807 review round 6, F4)")
+    assert (
+        _census_membership_verdicts.__defaults__ is None,
+        not _census_membership_verdicts.__code__.co_freevars,
+        not [
+            _const for _const in _census_membership_verdicts.__code__.co_consts
+            if hasattr(_const, "co_names")
+        ],
+    ) == (True, True, True), (
+        "arm (c-i) captures a seam in a DEFAULT ARGUMENT, a closure cell or a nested code "
+        "object. `co_names` is a LOOKUP table and cannot see any of those, so the global-name "
+        "whitelist alone would report clean over an arm that holds the pre-patch "
+        "`subprocess.run` in `__defaults__` (#13807 review round 7, F2 — MEASURED) — the same "
+        "alias hole F4 closed, one channel over")
     _probe = f"… {_TORTOISE_EMPTY_SPELLINGS[-1]} …"
     assert _census_membership_verdicts(_probe) == [_TORTOISE_EMPTY_SPELLINGS[-1]], (
         "arm (c-i) stopped answering from the document's text when a child-process seam "
