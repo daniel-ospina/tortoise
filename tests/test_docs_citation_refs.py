@@ -1526,11 +1526,16 @@ _INDEX_REPOINT_CLAIMS = (
 def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff():
     """⛔ The doc said this diff's ONE `docs/00_index.md` line WAS a cite re-point.
 
-    It is not, and the command printed beside the claim refutes it: at this head
-    `git diff --numstat origin/main...HEAD -- docs/00_index.md` is `1 1`, while
-    `git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` moves no
+    It is not, and the command printed beside the claim refutes it: the arm MEASURES
+    `git diff --numstat origin/main...HEAD -- docs/00_index.md` and
+    `git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` at the head it
+    is run against instead of freezing a figure, and the WORD DIFF is what decides — it moves no
     `sdk.py:<n>` token in either direction (`grep -c 'sdk.py:21679' docs/00_index.md` ->
-    `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both). The line it rewrites
+    `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both). ⛔ **no numstat figure is
+    typed here (#13807 review, round 6)**: at the head the mistaken sentence was written
+    against it printed `1 1`, and at this head it prints NOTHING — `main`'s bundle merge
+    absorbed the two re-points this branch carried — which is this file's own thesis about
+    stored figures, applied to the paragraph that states it. The line it rewrites
     is the `#12296` entity-verdict row's DESCRIPTION of its own `:27861` clause.
 
     So "the `1 1` numstat IS this cite re-point" was the same defect class the last four
