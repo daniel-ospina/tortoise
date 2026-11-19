@@ -1690,6 +1690,18 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     assert strip.uri_fingerprint("docker://:s3cret@host:6379/tortoise") != \
         strip.uri_fingerprint("docker://:s3cret@other-host:6379/tortoise")
     assert "s3cret" not in strip.uri_fingerprint("docker://:s3cret@host:6379/g")
+    # ⛔ A PASSWORD CONTAINING `/` IS THE CASE THAT LEAKED. Partitioning on the first
+    # `/` before the userinfo→host boundary cut the password in half, left no `@` to
+    # strip, and returned the credential VERBATIM — and `tortoise/__main__.py` builds
+    # `docker://:{password}@host:port/tortoise` from the RAW password, so this shape is
+    # reachable from an ordinary `FALKORDB_PASSWORD`. Pinned on the LEAK, not on the
+    # rendering: the assertion is that no fragment of the credential survives.
+    leaked = strip.uri_fingerprint("docker://:pa/ss@falkordb.internal:6379/tortoise")
+    assert leaked == "docker://falkordb.internal:6379/tortoise", leaked
+    assert "pa/ss" not in leaked and "ss@" not in leaked and "pa" not in leaked.split("/")[-1]
+    # …and the target is still DISTINGUISHED, so the fix did not buy safety by
+    # collapsing every credentialed URI to a constant.
+    assert leaked != strip.uri_fingerprint("docker://:pa/ss@other-host:6379/tortoise")
     # A bare db-path carries no credential and is passed through unchanged, so the
     # embedded lane's fingerprint is its path and the plan stays readable.
     assert strip.uri_fingerprint("/tmp/x.db") == "/tmp/x.db"

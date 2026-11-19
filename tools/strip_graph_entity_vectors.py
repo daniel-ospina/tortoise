@@ -157,10 +157,15 @@ COMPATIBILITY — what this build refuses that the previous one did not
 Stated here because a plan is an artefact that OUTLIVES the build that printed it, and
 an operator holding an older file deserves a diagnosis rather than a surprise:
 
-* **A plan minted by the previous build refuses with ``REFUSE_DIGEST_MISMATCH``.**
-  ``digest()`` is now length-framed and type-framed (`_digest_key`), so the recorded
-  digest cannot re-derive from the same key lists. RE-PLAN; the plan's population is
-  not wrong, its token is.
+* **A plan minted under the TAB-JOINED framing refuses with
+  ``REFUSE_DIGEST_MISMATCH``.** That is every plan minted before this change:
+  ``digest()`` used to be ``label<TAB>key`` and is now ``len(label):label`` +
+  ``len(key):key`` (and type-framed for non-strings, `_digest_key`), so such a plan's
+  token cannot re-derive from its own key lists. RE-PLAN; the plan's population is not
+  wrong, its token is. ⛔ Only the TAB-JOINED framing is refused: a plan whose population
+  is ALL STRINGS and that was framed by the length-prefixed build still re-derives
+  byte-identically and stays executable (`_digest_key`) — that is deliberate, and it is
+  why this paragraph names the framing rather than "the previous build".
 * **A plan that names the same node twice refuses with ``REFUSE_PLAN_UNREADABLE``.**
   The digest describes a SET, so duplication is invisible to it while `expected` counted
   it — one more number that could exceed the set it claimed to describe.
@@ -1958,12 +1963,33 @@ def uri_fingerprint(uri: str) -> str:
     circulate a credential; and a clone of the same graph on another host has the same
     name, the same tenant and the same node set, so a name-only comparison would let a
     plan approved against production execute against staging.
+
+    ⛔ THE USERINFO→HOST BOUNDARY IS THE LAST ``@`` OF EVERYTHING AFTER THE SCHEME, and
+    the path split must come AFTER that boundary, never before it. Partitioning on the
+    first ``/`` first — the obvious reading — cuts a password that CONTAINS a ``/`` in
+    half, so ``docker://:pa/ss@host:6379/g`` yields authority ``:pa`` and path
+    ``ss@host:6379/g``, there is no ``@`` left to strip, and this function handed back the
+    credential VERBATIM. That is not hypothetical here: `tortoise/__main__.py` builds
+    `legacy_uri = f"docker://:{password}@{host}:{port}/tortoise"` from the RAW
+    `FALKORDB_PASSWORD`, with no percent-encoding, so a password containing ``/`` reaches
+    this function in exactly that shape — and the plan, the ``--json`` output and the
+    ``REFUSE_TARGET_DRIFT`` message are all places an operator pastes.
+
+    The same boundary rule is already recorded repo-wide (#720 P2 conf 68,
+    `tortoise/__main__.py::_mask_uri_userinfo`, which #2983 hardened further): a password
+    may carry ``/``, ``?``, ``#`` or ``@`` even though RFC-invalid, so bounding the region
+    on any of them re-emits credential material. Following that recorded rule means
+    over-reaching past a genuine query/fragment in a malformed URI, which is
+    diagnosability loss and never a leak.
     """
     scheme, sep, rest = uri.partition("://")
     if not sep:
         return uri
+    at = rest.rfind("@")
+    if at >= 0:
+        rest = rest[at + 1:]             # drop `user:password@` up to the LAST '@'
     authority, _, path = rest.partition("/")
-    host = authority.rpartition("@")[2]      # drop `user:password@`
+    host = authority
     return f"{scheme}://{host}/{path.lstrip('/')}" if path else f"{scheme}://{host}"
 
 
@@ -2132,18 +2158,31 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
                 # than not having the distinction at all. A FIRST-statement failure — the
                 # state a store wedge, a timeout or a `--batch` too large for the driver
                 # actually produces — has no earlier batch that could have stripped
-                # anything, so exit 2 is true BY CONSTRUCTION and a retry is safe. Only a
+                # anything, so exit 2 is the right token and a retry is safe. Only a
                 # failure after at least one statement COMPLETED is potentially
                 # part-stripped. Claiming "part-stripped" on the zero case teaches an
                 # operator to distrust exit 6 on the one occasion it matters.
+                #
+                # ⛔ AND THE CLAIM IS SCOPED TO WHAT IS MEASURED, because this is a count
+                # of statements ISSUED, not of writes LANDED — the same distinction that
+                # rejected `sum(removed.values())` on the other side of this token. A
+                # client-side read timeout, or a socket dropped AFTER the server applied
+                # the `REMOVE`, raises here with the batch already landed, so this message
+                # must not promise the store is untouched. It reports the one fact it
+                # has: no earlier statement completed, so nothing is KNOWN to have been
+                # stripped. The shape that would follow a false "all clear" is covered
+                # anyway — a retry after a part-landed batch refuses with
+                # `REFUSE_PLAN_STALE`, because the live set no longer matches the plan.
                 if attempted <= 1:
                     raise Refusal(
                         REFUSE_WRITE_ERROR,
                         f"the removal statement FAILED on {label} at offset {start} "
                         f"({type(exc).__name__}: {exc}) and it was the FIRST removal "
-                        "statement of the run — no earlier batch was issued, so nothing "
-                        "was removed and re-running once the store error is understood "
-                        "is safe.") from exc
+                        "statement of the run — no earlier statement had completed, so "
+                        "no node is KNOWN to have been stripped. If the failure happened "
+                        "after the server applied this batch its answer was lost, and a "
+                        "retry of the same plan will refuse as stale rather than strip "
+                        "twice.") from exc
                 raise Refusal(
                     REFUSE_WRITE_FAILED,
                     f"the removal statement FAILED on {label} at offset {start} "
