@@ -3044,6 +3044,57 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
     )
 
 
+#: The per-row PROVENANCE record, by the three facts a later lane cannot cheaply re-derive: that the
+#: block IS a record rather than a value, the measured `recorded/derived` pair behind the `#13075`
+#: staleness, and the `OVERRIDES:` departure from the generated-artifact practice. Pinned as
+#: fragments rather than as the whole block so rewrapping the prose is not a red, and so losing a
+#: FACT is one.
+_PROVENANCE_RECORD_MARKERS = (
+    "⛔ PROVENANCE OF THE PER-ROW CELLS",
+    "recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8",
+    "OVERRIDES: the generated-artifact practice",
+)
+
+
+def test_the_provenance_record_lives_in_the_header_a_cut_re_emits():
+    """A `cut` re-emits `MANIFEST_HEADER` alone, so the record must live there (#13626 ISSUE 3).
+
+    The block this pins was a per-row comment above the `tortoise_query` row. `yaml.safe_dump`
+    carries no comments and `cut` re-emits only the header, so #13626's re-cut deleted all 53 of
+    its lines — including the file's ONLY copy of the `OVERRIDES:` departure from the
+    generated-artifact practice — and NOTHING reded, because no gate parses a comment. The
+    header/committed equality test above cannot see that: it is green for any header, including a
+    header that has lost the record.
+
+    Mutation attribution (measured, #3442): deleting `_PROVENANCE_RECORD` from `MANIFEST_HEADER`
+    (and from the committed file) reds this test on the first marker; deleting only the
+    `OVERRIDES:` line of the record reds it on the third; restoring either is green. Editing the
+    generator's `served_from` and re-running `cut` keeps it green — the header is re-emitted, so
+    this arm is red for LOSS, never for a legitimate re-cut.
+    """
+    sm = _load_manifest_tool()
+    committed_doc = MANIFEST.read_text(encoding="utf-8")
+    committed_header = committed_doc.split("manifest_version:")[0]
+    for marker in _PROVENANCE_RECORD_MARKERS:
+        assert marker in sm._PROVENANCE_RECORD, (
+            f"`_PROVENANCE_RECORD` in tools/surface_manifest.py no longer carries {marker!r} — "
+            "the record a re-cut re-emits lost a fact only it holds")
+        assert marker in sm.MANIFEST_HEADER, (
+            f"`MANIFEST_HEADER` no longer carries {marker!r}, so the next `cut` deletes it from "
+            "the artifact — a comment nothing reads cannot be missed, which is how #13626 lost it")
+        assert marker in committed_header, (
+            f"config/surface-manifest.yml's header no longer carries {marker!r} — the artifact a "
+            "lane actually reads is missing a recorded fact (and the header equality test above "
+            "should already have reded: the two copies disagree)")
+    # …and it must not ALSO sit in a per-row block below the first key: a re-cut deletes that
+    # copy, so a second one would be the drift this guard exists to stop.
+    below_header = committed_doc.split("manifest_version:", 1)[1]
+    assert "PROVENANCE OF THE PER-ROW CELLS" not in below_header, (
+        "the provenance record is duplicated as a per-row comment below the header; a re-cut "
+        "deletes per-row comments, so the copy that survives is the header's and the other is "
+        "a drift waiting to happen")
+
+
 #: The fragment of the line that went stale under `#13052` (`4a5ffa0a14`, the seven-door
 #: retirement): on the tree it was written on it spanned two lines and continued
 #: `…, so this is a fingerprint refresh, not a surface change.`; the rejoined fragment below
