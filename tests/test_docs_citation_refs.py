@@ -531,8 +531,9 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     the answer — the head is advanced by stripping, UNTIL A WHOLE PASS CHANGES NOTHING,
     every leading negation (`not`/`never`/`n't`, each one inverting the direction), every
     leading FILLER (`the`, `only`, `still`, `just`, `at least`, …) and every listed answer
-    FORM (so a DOUBLED form `prints contains …` is stripped too) — and then the first token
-    that is none of those decides. Never any word that merely sits in the window (#13795
+    FORM — the WORD forms AND the punctuation ones (`is`, `->`, `→`, `=`, `:`), so a
+    DOUBLED form (`prints contains …`, `prints -> …`, `prints is …`) is stripped too — and
+    then the first token that is none of those decides. Never any word that merely sits in the window (#13795
     review, round 3, C1/C2). Scanning the
     whole window was wrong in BOTH directions, measured: `prints the two comment-only
     modules and nothing else` was read as EMPTINESS (the trailing `nothing` won) and a
@@ -640,6 +641,7 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # and read ONLY by the emptiness branch below, which is where the reasoning lives.
         _lower_bound = False
         _tautology = False
+        _at_most = False
         _before = None
         while _before != low:
             _before = low
@@ -656,6 +658,8 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                     _lower_bound = True
                 elif re.match(r"(?:at\s+least|no\s+fewer\s+than)\b", low):
                     _tautology = True
+                elif re.match(r"at\s+most\b", low):
+                    _at_most = True
                 low = _filler
             # ⛔ AND A DOUBLED FORM (`prints contains …`) — a listed verb can sit where
             # the answer should start, and the head token is what follows it (#13795
@@ -664,6 +668,15 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             low = re.sub(
                 r"^(?:prints|returns|yields|reports|gives|outputs|carries|lists|shows"
                 r"|names|includes|contains|has)\s+", "", low, count=1)
+            # ⛔ …AND THE SAME FOR THE NON-WORD FORMS (#13831 review, P2). The docstring
+            # declares the strip set to be "every listed answer FORM", and the form tuple
+            # is not only words: `is`, `->`, `→`, `=` and `:` are listed too, so
+            # `prints -> two paths`, `prints is two paths`, `prints : two paths` and
+            # `prints -> tortoise/x.py` were SKIPPED by a strip that only knew the verbs —
+            # a doubled form in a spelling the docstring declared closed. No member or
+            # emptiness token starts with any of these, so stripping them re-exposes the
+            # real head and can never invent one.
+            low = re.sub(r"^(?:->|→|=|:|is)\s*", "", low, count=1, flags=re.IGNORECASE)
         if re.match(r"(?:nothing\s+but\b|none\s+other\s+than\b)", low):
             # an emptiness WORD doing membership duty — `nothing but the two modules`
             claims_empty = False
@@ -757,6 +770,16 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 else:
                     claims_empty = True
             elif _member:
+                # ⛔ `at most <n>` IS AN UPPER BOUND, SO IT ASSERTS NEITHER DIRECTION
+                # (#13831 review, P2). `at most two paths` is satisfied by an EMPTY head,
+                # exactly like `at least zero` in the mirror — so typing it MEMBERSHIP
+                # REFUSES a true sentence at an empty head. It is the same tautology the
+                # file already skips for `at least zero` / `no fewer than zero` /
+                # `zero or more`, and this arm is where a positive numeral lands, since
+                # `_empty` above only catches a zero. `at most zero` really does mean
+                # emptiness and is caught there, so it keeps its direction.
+                if _at_most:
+                    continue
                 claims_empty = False
             else:
                 continue
@@ -1168,13 +1191,18 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "a refuted claim in that format passes green (#13795 review, round-5 P1; "
             "#13728 review, P1; #13831 review, P2)")
     # ⛔ AND A FILLER THE ROUND-5 LOOP COULD NOT EVEN SEE (#13728 review, round 2, P1):
-    # the negation and the form strip used to run ONCE, OUTSIDE the loop, so a filler that
-    # sat BEHIND a second listed form (`prints contains only two paths`) or IN FRONT of the
-    # negation (`is still not empty`) was never presented to the loop at all and the answer
-    # was SKIPPED. Both are listed vocabulary — a listed form, a listed filler, a listed
-    # head token — so both are in the class. Each row below is killed by putting one of
-    # those two strips back outside the loop; the control rows (`prints contains two
-    # paths`, `is not empty`) classified before this round and still do.
+    # the negation, the `nothing but …` read and the form strip all used to run ONCE, at a
+    # fixed point in an ORDERED pipeline around the filler loop, so a filler that sat BEHIND
+    # a second listed form (`prints contains only two paths`) or IN FRONT of the negation
+    # (`is still not empty`) was never presented to the loop at all and the answer was
+    # SKIPPED. Both are listed vocabulary — a listed form, a listed filler, a listed head
+    # token — so both are in the class. The controls (`prints contains two paths`,
+    # `is not empty`) classified before this round and still do.
+    # ⛔ ATTRIBUTION IS NOT UNIFORM, so it is stated per row rather than in one sentence: the
+    # FIRST EIGHT rows die when the negation strip or the form strip is put back outside the
+    # loop, and the NINTH (`prints contains nothing but the two modules`) dies from NEITHER —
+    # it needs the `nothing but …` read moved back BEFORE the loop, which is what used to
+    # make `contains` hide that guard and get the sentence typed as EMPTINESS.
     for _behind_a_form in (
             "prints contains only two paths",
             "prints has only two paths",
@@ -1192,7 +1220,42 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "answer with a filler behind a second listed form, or in front of the head "
             "negation, so a refuted claim in that format passes green, and "
             "`… contains nothing but the two modules` is read as EMPTINESS (#13728 "
-            "review, round-2 P1)")    # ⛔ AND THE QUALIFIED NEGATION (#13795 review, finding 3): `non-empty` CONTAINS the
+            "review, round-2 P1)")
+    # ⛔ AND THE SAME STRIP FOR THE NON-WORD FORMS (#13831 review, P2): `is`, `->`, `→`, `=`
+    # and `:` are listed answer FORMS, so a doubled form on one of them is the same class as
+    # a doubled verb — and the docstring now says so. Each row below was SKIPPED before that
+    # strip existed; deleting it reds exactly these rows.
+    for _doubled_form in (
+            "prints is two paths",
+            "prints -> two paths",
+            "prints → two paths",
+            "prints : two paths",
+            "prints = two paths",
+            # a path keeps its `.py`, which the window cuts at -- so the reported tuple is
+            # the pre-dot prefix. Asserted with the cut, not the full path, so the row pins
+            # the DIRECTION rather than re-stating a truncation this file already documents.
+            "prints -> tortoise/x"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_doubled_form}", _tortoise_cmd
+        ) == [(_doubled_form, False)], (
+            f"the shape detector skips {_doubled_form!r} — a MEMBERSHIP answer behind a "
+            "second listed form that is not a word, so a refuted claim in that spelling "
+            "passes green (#13831 review, P2)")
+    # ⛔ AND `at most <n>` ASSERTS NEITHER DIRECTION (#13831 review, P2, pre-existing): an
+    # upper bound of a POSITIVE count is satisfied by an empty head, so typing it MEMBERSHIP
+    # refused a true sentence — the mirror of the `at least zero` tautology the file already
+    # skips. `at most zero` really does mean emptiness, so it keeps its direction.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints at most two paths", _tortoise_cmd
+    ) == [], (
+        "the shape detector types the UPPER BOUND `prints at most two paths` as membership; "
+        "zero satisfies it, so it asserts neither direction and must skip (#13831 review, P2)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints at most zero paths", _tortoise_cmd
+    ) == [("prints at most zero paths", True)], (
+        "`at most zero` is genuinely emptiness, and the `at most` skip must not swallow it "
+        "(#13831 review, P2)")
+    # ⛔ AND THE QUALIFIED NEGATION (#13795 review, finding 3): `non-empty` CONTAINS the
     # word `empty`, and reading it as an emptiness claim inverts the direction — it passes
     # a false membership claim at THIS (empty) head and would refuse the true sentence at a
     # non-empty one. The negation test has to see the qualifier, not just a bare `not`.
