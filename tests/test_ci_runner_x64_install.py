@@ -3012,7 +3012,17 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
             # construct's end. A stale end cannot satisfy it.
             end_line = installer[hi - 1]
             stripped_end = end_line.strip()
-            if stripped_end in ("}", "fi", "esac"):
+            # ⛔ A NESTED-BRANCH TOKEN CANNOT END A RANGE, and an allow-list of closers cannot say so:
+            # `else`/`elif`/`then`/`do` all fell through as "not a closer, nothing to check", which is
+            # how FOUR wrong numbers stayed green (a range ending on `:489` = `else`, while the same
+            # sentence cited `resolve_labels` at `:499` with its `}` at `:536`). Comments and plain
+            # statements are legitimate ends for a comment/statement span, so this is a DENY-list of
+            # branch tokens, not a widened allow-list of closers.
+            assert not re.match(r"^(else|elif\b.*|then|do)$", stripped_end), (
+                f"the runbook cites {rm.group(0)}, but :{hi} is {stripped_end!r} — a NESTED BRANCH, "
+                "not the end of the construct the sentence names. Re-derive the END"
+            )
+            if stripped_end in ("}", "fi", "esac", "done"):
                 # (a) AN INDENTED CLOSER ENDS A NESTED BLOCK, so the range must START inside one. This
                 # is the shape that shipped: `:1492-1593` and `:1209-1390` both ended on an INDENTED
                 # `fi` belonging to a sub-branch, with a column-0 block header as the start — a range
@@ -3030,7 +3040,8 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
                     # BEFORE the construct the sentence names — is invisible to a number-keyed table.
                     opener = {"}": r"^[A-Za-z_][A-Za-z0-9_]*\(\) \{",
                               "fi": r"^if ",
-                              "esac": r"^case "}[stripped_end]
+                              "esac": r"^case ",
+                              "done": r"^(for|while|until) "}[stripped_end]
                     owner = next(
                         (i + 1 for i in range(hi - 2, -1, -1) if re.search(opener, installer[i])), None
                     )
