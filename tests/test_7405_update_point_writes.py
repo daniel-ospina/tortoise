@@ -5291,11 +5291,17 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
         encoding="utf-8")
     record = (_REPO / "tortoise" / "record_projection.py").read_text(
         encoding="utf-8")
+    entities = (_REPO / "tortoise" / "projection" / "entities.py").read_text(
+        encoding="utf-8")
     for symbol, owner, source in (
         ("plan_point_restamp_folds", "projection/__init__.py", proj),
         ("FalkorProjection", "projection/__init__.py", proj),
         ("_anchor_on_create", "projection/edges.py", edges),
         ("_relation_upsert_statement", "record_projection.py", record),
+        # The one line in this file that cited a `projection/entities.py` LINE
+        # now names the module and lets this symbol carry the reference, so the
+        # symbol's DEFINITION is pinned here with the others.
+        ("_upsert_point_props", "projection/entities.py", entities),
     ):
         assert symbol in sdk, (
             f"`{symbol}` is no longer named in `tortoise/sdk.py` — the comment "
@@ -5305,6 +5311,19 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
             f"`tortoise/sdk.py` attributes a claim to `{symbol}` in `{owner}`, but "
             f"`{owner}` no longer defines it — re-derive the symbol the mechanic "
             "moved to")
+
+    # ⛔ The arm above is FILE-wide, so it is satisfied by the symbol appearing
+    # anywhere in a 60k-line module — it says nothing about the sentence this
+    # change made symbol-carried. Measured: deleting `_upsert_point_props` from
+    # `create_point`'s note left the four-symbol arm GREEN. The cite must have
+    # its symbol IN FRONT of it, or the reference is a module holding hundreds
+    # of functions — the same unattributable claim the numeric ban replaces.
+    assert re.search(
+        r"`_upsert_point_props` MERGE \(`projection/entities\.py`\)",
+        _decommented(sdk_path)), (
+        "`create_point`'s note no longer names `_upsert_point_props` beside its "
+        "`projection/entities.py` cite — re-derive the symbol, do not drop it: a "
+        "bare module cite cannot red when the mechanic is renamed")
 
     # The CLAIM the presence-fold comment makes still holds: the projection folds
     # a merged-away id to NOT-present (a pending delete), the same verdict this
