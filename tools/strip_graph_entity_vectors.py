@@ -226,6 +226,7 @@ import argparse
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -295,6 +296,13 @@ class Refusal(Exception):
 #: the refusal message and the lookup cannot disagree about where the answer lives.
 WRITE_GATE_MODULE = "tortoise.record_vector"
 WRITE_GATE_SYMBOL = "mirror_required"
+
+#: The MEASURED form of the same predicate: ``(mirror_required, reason)``, one decision
+#: with its account attached (`#13796`). Read by NAME for the same reason
+#: :data:`WRITE_GATE_SYMBOL` is — it is looked up rather than imported so a tree holding
+#: only the boolean form still imports this module and says so in a refusal instead of
+#: dying in an `ImportError`.
+WRITE_VERDICT_SYMBOL = "mirror_verdict"
 
 #: The fold that derives and writes each label's vector, in `tortoise/projection/entities.py`.
 #:
@@ -2011,6 +2019,44 @@ def _writers_for(label: str) -> tuple[tuple[str, ...], str | None]:
     return tuple(sorted(writers)), None
 
 
+def graph_vector_population(proj: Any) -> Callable[[str], int | None] | None:
+    """The graph's OWN vector count, as `record_vector.coverage`'s supplier.
+
+    ⛔ THIS IS THE HALF OF THE GATE THE STRIPPER NEVER SUPPLIED (`#13796`).
+    `mirror_required` answers from a COVERAGE verdict, and that verdict is
+    ``record_vectors >= graph_vectors`` where the graph side is *"how many nodes of this
+    label carry an `embedding` ON THIS GRAPH"*. Only a caller holding a graph handle can
+    count it (`#13610`), so `record_vector.coverage` takes it as a SUPPLIER — a callable
+    asked on a cache MISS only — and the routine that consults the gate from inside a
+    write fold passes none, which is right there (a full-label aggregate behind every
+    write) and wrong here: this tool holds the very handle it plans to strip, and it runs
+    ONCE. Without a supplier the verdict cannot be taken at all in a fresh process, the
+    cache is empty, and every label answers *unproved* — a gate unsatisfiable from the
+    only tool that runs it.
+
+    ⛔ IT IS A MEASUREMENT, NEVER AN ASSERTION. The supplier returns a COUNT; the
+    comparison against the record's count is `record_vector.coverage`'s, unchanged. An
+    operator flag ("yes, I backfilled") would reintroduce exactly the asserted gate
+    `#13647` corrected.
+
+    ⛔ ``None`` WHEN THE PROJECTION CANNOT ANSWER, and ``None`` is UNVERIFIED rather than
+    zero. The guard is a PAIR, and it lives in `record_vector`, not here:
+    `coverage` never calls the supplier when it is absent (the count stays ``None`` and the
+    verdict is unverified), and `record_vector._safe_population` answers ``None`` for a
+    raise, a ``None`` value and a non-integer alike. An absence read as ``0`` would verify
+    coverage on a failed measurement and retire the graph for a store that needs it, which
+    is why `test_an_uncountable_projection_yields_NO_supplier_rather_than_a_zero` pins the
+    half this module owns.
+
+    The method is looked up rather than assumed because it is the projection's own
+    private count (`tortoise.projection._label_vector_count`, added by `#13610`) and
+    `sdk._record_vector_searcher` binds it the same way. Two spellings of one aggregate
+    query is how the two sides start counting different populations.
+    """
+    supplier = getattr(proj, "_label_vector_count", None)
+    return supplier if callable(supplier) else None
+
+
 def _fold_consults_gate(label: str) -> tuple[bool, str]:
     """``(every_writer_gated, reason)`` for ``label`` over EVERY writer that stores it."""
     writers, refusal = _writers_for(label)
@@ -2055,7 +2101,10 @@ def _fold_consults_gate(label: str) -> tuple[bool, str]:
     return True, f"every :{label} writer ({len(writers)}) calls the gate"
 
 
-def write_gate(entity_type: str) -> tuple[bool, str]:
+def write_gate(entity_type: str, *,
+               graph_population: Callable[[str], int | None] | None = None,
+               org_id: str | None = None, graph_id: str | None = None,
+               record_dsn: str | None = None) -> tuple[bool, str]:
     """``(still_emits, reason)`` for one caller-facing ``entity_type``.
 
     ⛔ **FAIL-CLOSED IN EVERY UNKNOWN OF THE GATE READ**, which is the opposite of the
@@ -2063,6 +2112,20 @@ def write_gate(entity_type: str) -> tuple[bool, str]:
     it) on an unknown because writing costs bytes while skipping costs the row — correct
     for a WRITE. This function answers ``True`` (still emits) on an unknown because *"I
     could not read the gate"* must never be able to licence a delete.
+
+    ⛔ AND IT ASKS THE GATE THE WAY THE GATE CAN ANSWER FROM HERE (`#13796`). The three
+    keyword arguments are this tool's OWN measurement context — its graph handle's count,
+    its declared tenant, its record leg — and passing them is what makes the answer
+    MEASURED in a fresh process instead of "this process has served no dense read". See
+    `graph_vector_population` for why only a caller holding a handle can supply the
+    denominator, and `record_vector.mirror_verdict` for why a non-request caller must
+    declare its tenant rather than hope one is ambient. Omit all three and the read degrades
+    to the pre-`#13796` one: a CACHE-ONLY verdict that takes no count. ⛔ It is not
+    ACCOUNT-LESS — `mirror_verdict` still names the arm that answered ("no tenant is
+    installed on this process …", "the record has not proved it holds this label's vectors
+    in this process"), which is a different state from the version-skew fallback below,
+    where the tree has no measured form at all and the reason says so. A cache-only verdict
+    is what a write fold wants and what this tool must not settle for.
 
     ⚠️ The qualifier is load-bearing: the reads BELOW the gate read — this module's
     `from tortoise.security import ENTITY_TYPE_LABELS` and `parity.affected_entity_types`
@@ -2101,17 +2164,56 @@ def write_gate(entity_type: str) -> tuple[bool, str]:
             "writer of the label (see `_writers_for`), which `#13617` alone does not "
             "satisfy: it gates the object/subject FOLDS. Stripping now would be undone by "
             "the next write of the same node")
-    try:
-        needed = bool(gate(entity_type))
-    except Exception as exc:  # a raising gate is not a permission
-        return True, (
-            f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) raised "
-            f"{type(exc).__name__}: {exc} — an unreadable answer is not a permission")
+    # ⛔ THE MEASURED FORM IS PREFERRED WHEN THE TREE HAS IT (`#13796`). `mirror_verdict`
+    # returns the boolean AND its account, so a refusal can name the two counts instead of
+    # reporting that nothing was proved. The fallback is not decoration: a tree carrying
+    # `mirror_required` without `mirror_verdict` is one this change has not reached, and a
+    # bare `getattr` miss there must still answer fail-closed rather than raise.
+    verdict = getattr(record_vector, WRITE_VERDICT_SYMBOL, None)
+    if callable(verdict):
+        try:
+            needed, account = verdict(
+                entity_type,
+                # ⛔ A HALF DECLARATION IS PASSED THROUGH, NEVER DOWNGRADED (`#13796`).
+                # `(org_id, graph_id) if (org_id and graph_id) else None` looked like the
+                # same guard and is not: it turns `("org-A", "")` into `None`, which
+                # `_declared_scope` reads as "nobody declared one" and answers with the
+                # AMBIENT tenant — so a mis-declared run measured a DIFFERENT tenant's
+                # record and could certify a strip from it (measured with an ambient
+                # `("org-B", "graph-B")` installed: the gate answered False).
+                # `_declared_scope` is the ONE resolver both doors use and it REFUSES a
+                # half tuple, which is the answer this arm wants.
+                # ⛔ AND THE TEST IS `is not None`, NOT TRUTHINESS (review round 6):
+                # `(org_id or graph_id)` re-opens the same fail-open for `(None, "")` and
+                # `("", None)` — measured, the gate answered False under an ambient
+                # tenant for both. Only BOTH-absent means "nobody declared one", and that
+                # is the one shape which still resolves the ambient tenant.
+                scope=(
+                    (org_id, graph_id)
+                    if (org_id is not None or graph_id is not None) else None),
+                record_dsn=record_dsn,
+                graph_population=graph_population)
+        except Exception as exc:  # a raising gate is not a permission
+            return True, (
+                f"{WRITE_GATE_MODULE}.{WRITE_VERDICT_SYMBOL}({entity_type!r}) raised "
+                f"{type(exc).__name__}: {exc} — an unreadable answer is not a permission")
+    else:
+        try:
+            needed = bool(gate(entity_type))
+        except Exception as exc:  # a raising gate is not a permission
+            return True, (
+                f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) raised "
+                f"{type(exc).__name__}: {exc} — an unreadable answer is not a permission")
+        account = (
+            "the gate answered True and this tree carries no measured form, so no counts "
+            "were taken"
+            if needed else "the gate answered False and this tree carries no measured "
+                          "form, so coverage is the predicate's own claim")
     if needed:
         return True, (
             f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) answers True: "
-            "the record has not proved it holds this label's vectors, so the graph "
-            "copy is still the answering leg and the fold keeps writing it")
+            f"{account}, so the graph copy is still the answering leg and the fold keeps "
+            "writing it")
     # ⛔ THE COVERAGE ANSWER IS NECESSARY AND NOT SUFFICIENT. It is a READ predicate: it
     # says what the record holds, never what the fold will do. `COVERAGE_GATED_LABELS` is
     # every served label while only two folds consult the gate, so trusting it alone
@@ -2128,18 +2230,27 @@ def write_gate(entity_type: str) -> tuple[bool, str]:
     if not gated:
         return True, (
             f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) answers False "
-            f"(the record reports coverage), but {why}")
+            f"({account}), but {why}")
     return False, (
         f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL}({entity_type!r}) answers False and "
-        f"{why} — the graph copy is no longer written for this label")
+        f"{why} — {account}, so the graph copy is no longer written for this label")
 
 
-def label_write_gate(label: str) -> tuple[bool, str]:
+def label_write_gate(label: str, *,
+                     graph_population: Callable[[str], int | None] | None = None,
+                     org_id: str | None = None, graph_id: str | None = None,
+                     record_dsn: str | None = None) -> tuple[bool, str]:
     """``(still_emits, reason)`` for a LABEL, over every `entity_type` that addresses it.
 
     `:Source` serves both `source` and `document` (`tortoise.security.ENTITY_TYPE_LABELS`),
     so a label is write-stopped only when EVERY type addressing it is. Checking one and
     assuming the other is how a strip half-lands on the document half of `:Source`.
+
+    ⛔ AND THE CERTIFIED REASON CARRIES THE COVERAGE COUNTS (`#13796`). A ``False`` here is
+    what a plan's ``strip_ready: True`` rests on, so the sentence behind it must be the
+    measurement ("the record holds N vector(s) …, the graph serves M") and not a bare
+    "write-stopped" a reader cannot check. The blocked side keeps every refusing type's
+    own account, joined, because a label blocked on two writers must name both.
     """
     types = parity.affected_entity_types(label)
     if not types:
@@ -2147,22 +2258,52 @@ def label_write_gate(label: str) -> tuple[bool, str]:
         # declared write-stopped on zero evidence — the vacuous gate, in the one function
         # that decides whether a destructive tool may run.
         return True, f"no entity_type addresses :{label} — refusing on zero evidence"
-    reasons: list[str] = []
-    still = False
+    blocked: list[str] = []
+    cleared: list[str] = []
     for entity_type in types:
-        emits, reason = write_gate(entity_type)
-        if emits:
-            still = True
-            reasons.append(f"{entity_type}: {reason}")
-    if still:
-        return True, "; ".join(reasons)
-    return False, f"write-stopped for {', '.join(types)}"
+        emits, reason = write_gate(
+            entity_type, graph_population=graph_population, org_id=org_id,
+            graph_id=graph_id, record_dsn=record_dsn)
+        (blocked if emits else cleared).append(f"{entity_type}: {reason}")
+    if blocked:
+        return True, "; ".join(blocked)
+    return False, f"write-stopped for {', '.join(types)} — " + "; ".join(cleared)
+
+
+def readiness_probe(*,
+                    graph_population: Callable[[str], int | None] | None = None,
+                    org_id: str | None = None, graph_id: str | None = None,
+                    record_dsn: str | None = None) -> Callable[[str], tuple[bool, str]]:
+    """A ``label -> (ready, reason)`` probe that CARRIES its measurement context.
+
+    The census's contract is one argument (`strip_readiness`), and the measurement context
+    is per-RUN data, not a per-label fact — so the context is closed over here instead of
+    widening that contract. Both CLIs build one of these from the projection they already
+    hold (`main` in this module and in `entity_vector_parity_census`), which is what keeps
+    the two tools' answers identical rather than merely similar.
+    """
+    def probe(label: str) -> tuple[bool, str]:
+        emits, reason = label_write_gate(
+            label, graph_population=graph_population, org_id=org_id,
+            graph_id=graph_id, record_dsn=record_dsn)
+        return (not emits), reason
+
+    return probe
 
 
 def strip_readiness(label: str) -> tuple[bool, str]:
-    """The single answer both the census report and the plan carry."""
-    emits, reason = label_write_gate(label)
-    return (not emits), reason
+    """The UNMEASURED arity-1 form of the gate — a version-skew fallback, never the answer.
+
+    ⛔ A CALLER THAT WANTS THE GATE'S REAL ANSWER PASSES `readiness_probe(...)` WITH ITS OWN
+    MEASUREMENT CONTEXT. This form has none, so in a fresh process it can only report *"not
+    proved"* for every label — which is exactly the unsatisfiable state `#13796` fixed. It
+    exists because `entity_vector_parity_census._write_gate()` falls back to this NAME when
+    the stripper module predates `readiness_probe`, and a caller with no measurement context
+    must get a fail-closed answer rather than an `ImportError`. Both CLIs pass
+    `readiness_probe(...)` (see `main` here and in the census tool), so this is not the
+    shipping path.
+    """
+    return readiness_probe()(label)
 
 
 # ── the plan ────────────────────────────────────────────────────────────────
@@ -2226,11 +2367,34 @@ def digest(entries: list[tuple[str, Any]]) -> str:
 
 def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
                graph_name: str, graph_uri: str,
-               labels: list[str] | None, batch: int) -> dict:
-    """Read both stores, and produce the approvable artefact. Writes NOTHING."""
+               labels: list[str] | None, batch: int,
+               graph_population: Callable[[str], int | None] | None = None) -> dict:
+    """Read both stores, and produce the approvable artefact. Writes NOTHING.
+
+    ``graph_population`` is THIS run's denominator for the coverage verdict — the count
+    of the target graph's vector-bearing nodes, which only a holder of the handle can
+    take (`graph_vector_population(proj)`; see `write_gate`). It is threaded into the
+    readiness probe rather than measured here so the probe a caller passes and the probe
+    built here are one implementation.
+    """
+    # ⛔ ONE PREDICATE, ONE CALL PER LABEL. The probe is built once and wrapped so this
+    # function can keep the REASON it answered — the census keeps a reason only for a
+    # BLOCKED label, and `#13796`'s acceptance needs the measured one on the READY side too
+    # ("with the reason string naming both counts"). Re-invoking the probe afterwards would
+    # be a second call that could see a different population.
+    probe_measurements: dict[str, str] = {}
+    probe = readiness_probe(
+        graph_population=graph_population, org_id=org_id, graph_id=graph_id,
+        record_dsn=record_dsn)
+
+    def _recording_probe(label: str) -> tuple[bool, str]:
+        ready, reason = probe(label)
+        probe_measurements[label] = reason
+        return ready, reason
+
     report = parity.census(
         g=g, record_dsn=record_dsn, org_id=org_id, graph_id=graph_id,
-        labels=labels, strip_readiness=strip_readiness)
+        labels=labels, strip_readiness=_recording_probe)
     entries: list[tuple[str, str]] = []
     per_label: list[dict] = []
     for row in report["labels"]:
@@ -2256,6 +2420,7 @@ def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
                 "unkeyed_nodes_blocking": row["unkeyed_graph_nodes"],
                 "strip_ready": False,
                 "blocked_reason": row["blocked_reason"],
+                "readiness_reason": probe_measurements.get(row["label"]),
             })
             continue
         entries.extend((row["label"], key) for key in keys)
@@ -2266,6 +2431,12 @@ def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
             "unkeyed_nodes_blocking": 0,
             "strip_ready": row["blocked_reason"] is None,
             "blocked_reason": row["blocked_reason"],
+            #: ⛔ THE GATE'S OWN ACCOUNT, carried on BOTH arms (`#13796`). A ready row used
+            #: to say only `strip_ready: True`, which is an assertion a human cannot check;
+            #: the reason is the MEASUREMENT ("the record holds N vector(s) …, the graph
+            #: serves M"), so the approver can see what was compared. Additive and
+            #: optional — a plan written before this field re-reads and executes unchanged.
+            "readiness_reason": probe_measurements.get(row["label"]),
         })
     return {
         "tool": PLAN_TOOL,
@@ -2325,7 +2496,15 @@ def render_plan(plan: dict) -> str:
         f"{'label':10} {'nodes':>8} {'strip_ready':>12}  note",
     ]
     for row in plan["labels"]:
-        note = "ready" if row["strip_ready"] else (row["blocked_reason"] or "blocked")
+        if row["strip_ready"]:
+            # ⛔ NOT THE BARE WORD "ready" (`#13796`). `strip_ready: True` is what an
+            # operator approves, so the note beside it is the GATE'S OWN ACCOUNT — the
+            # measurement ("the record holds N vector(s) …, the graph serves M") and the
+            # writers it proved stopped. A ready row that says only "ready" is an
+            # assertion the approver has no way to check.
+            note = row.get("readiness_reason") or "ready"
+        else:
+            note = row["blocked_reason"] or "blocked"
         lines.append(
             f"{row['label']:10} {row['nodes']:>8} "
             f"{row['strip_ready']!s:>12}  {note}")
@@ -2847,7 +3026,8 @@ def _unmeasured_labels(live: dict, plan_labels: list[str]) -> list[str]:
 
 def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
             graph_name: str, graph_uri: str, confirmed: str, batch: int,
-            expect_empty: bool, expect_narrowed: bool = False) -> dict:
+            expect_empty: bool, expect_narrowed: bool = False,
+            graph_population: Callable[[str], int | None] | None = None) -> dict:
     """Every precondition, then the batched removal. Refuses BEFORE the first write."""
     # ⛔ THE WHOLE TARGET TRIPLE. The graph NAME alone is not the target: the tenant
     # flags default from `TORTOISE_RECORD_ORG_ID`/`TORTOISE_RECORD_GRAPH_ID`, and the
@@ -2878,7 +3058,9 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
     # ── the parity re-check, LIVE, immediately before the first write ────────
     live = parity.census(
         g=g, record_dsn=record_dsn, org_id=org_id, graph_id=graph_id, labels=labels,
-        strip_readiness=strip_readiness)
+        strip_readiness=readiness_probe(
+            graph_population=graph_population, org_id=org_id, graph_id=graph_id,
+            record_dsn=record_dsn))
     blocked = [row for row in live["labels"] if row["graph_only"]]
     if blocked:
         detail = "; ".join(
@@ -3244,13 +3426,22 @@ def main(argv: list[str] | None = None) -> int:
             f"({_unexpected_failure(exc)}). Nothing was removed.\n")
         return 3
 
+    # ⛔ THE GATE'S DENOMINATOR COMES FROM THE HANDLE THIS RUN ALREADY HOLDS (#13796).
+    # Without it `coverage` cannot be taken in this fresh process at all (its cache starts
+    # empty and only a supplier can fill it), so every label answered *unproved* and the
+    # plan could never become ready — the gate was unsatisfiable from the only tool that
+    # runs it. `None` when the projection cannot count, which stays UNVERIFIED rather than
+    # zero (`graph_vector_population`).
+    population = graph_vector_population(proj)
+
     if not args.execute:
         try:
             plan = build_plan(
                 g=proj.g, record_dsn=record_dsn, org_id=args.org_id,
                 graph_id=args.graph_id, graph_name=graph_name,
                 graph_uri=args.uri or args.db_path or "", labels=args.label,
-                batch=args.batch or DEFAULT_BATCH)
+                batch=args.batch or DEFAULT_BATCH,
+                graph_population=population)
         except CensusError as exc:
             sys.stderr.write(
                 f"strip_graph_entity_vectors: REFUSED — {exc}. A census that cannot be "
@@ -3292,7 +3483,8 @@ def main(argv: list[str] | None = None) -> int:
             # of refusing it. Both are the same bug seen from two sides.
             graph_uri=uri_fingerprint(args.uri or args.db_path or ""),
             confirmed=args.confirm_plan_digest, batch=args.batch or plan_batch,
-            expect_empty=args.expect_empty, expect_narrowed=args.expect_narrowed)
+            expect_empty=args.expect_empty, expect_narrowed=args.expect_narrowed,
+            graph_population=population)
     except Refusal as exc:
         sys.stderr.write(
             f"strip_graph_entity_vectors: {exc.token} — {exc}\n")

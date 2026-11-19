@@ -1182,55 +1182,53 @@ Four properties, because each is a different misread:
 a 4 s attempt and a 290 s attempt of the same 300 s bound render identically — and they call for
 opposite decisions. `load_in_progress_s` is the in-flight attempt's elapsed seconds (`null` when none
 is running, `null` after a FINISHED load too — the start timestamp outlives its attempt, so the
-running thread is the authority).
+running thread is the authority). It is the in-flight attempt's OWN elapsed time; the bound to compare
+it against is `load_timeout_s`, which is the CLASS default — an attempt a caller started with
+`get(load_timeout=…)` runs under THAT bound instead (`embeddings.py::status`). True and harmless on
+the shipped path (the pre-warm takes the default), but the comparison is only exact there.
 - **`load_in_progress_s` PAST `load_timeout_s` means the attempt was ABANDONED** — the caller already
-returned `None` at the bound and the loader is still importing. The guard then refuses every retry
-while that thread lives, so the leg stays keyword-only. ⛔ **Do not key this off `state`:** `state`
-reads `cooldown` only for the 60 s after the last refusal and `unavailable` thereafter (nothing
-refreshes `_last_failed_at` on an idle process, and `get()` is the only refresher) — which is also the
-shape of a live FIRST attempt, i.e. the opposite diagnosis. The discriminator is `load_in_progress_s`
-EXCEEDING the bound — on the SHIPPED path, where the attempt runs under the process default the block
-publishes. An attempt a caller started with `get(load_timeout=…)` runs under ITS OWN bound (see
-`status()`'s note), so compare it against that, not against `load_timeout_s`: a 5 s-bounded attempt
-reading 10 s is abandoned while still reading *below* the published 300 s. The reading resolves by
-itself when the thread exits (the guard clears, and the next `get()` retries once the cooldown has
-passed). ⛔ This block cannot tell PROGRESS from a WEDGE: the elapsed time is wall-clock since the
-attempt started, so a starved loader may legitimately run past its bound (`#13674`'s bound exists
-because the measured COLD cost is 195.8 s — 156.5 s of imports alone plus a 39.3 s construct — and
-300.0 = 195.8 x 1.53, so the 53 % headroom above it is what covers the contention the box shows
-while serving traffic). Before
-restarting a machine on this reading, get independent evidence that the import is not advancing — a
-stack from OUTSIDE the process, showing where the import sits. `py-spy` is the tool this runbook has
-used for that elsewhere, but ⛔ **the image does not ship it** (no dependency in `requirements.txt`,
-`Dockerfile.hosted` or `entrypoint.sh`), so install it on the machine first:
-`fly ssh console -a tortoise-y4mjjq -C "pip install py-spy && py-spy dump --pid <uvicorn pid>"` —
-which needs runtime egress to PyPI (the same sandbox that could hang a runtime HF download,
-`Dockerfile.hosted`).
+returned `None` at the bound and the loader is still importing. The guard then refuses to start a
+second attempt for as long as that thread lives, and the leg stays keyword-only. The tuple to match
+is `failure_kind: "load_timeout"` + `load_in_progress: true` + `load_in_progress_s` past the bound —
+**whichever of the two `state` words accompanies it**: `cooldown` while the 60 s negative-cache
+window is live, and `unavailable` once it expires with no `get()` in between, which is the reading a
+quiet box shows because a `/health` poll never re-stamps it. ⛔ A `get()` **inside** the window is
+refused by the outer negative cache (`embeddings.py:1210-1215`) and does NOT touch the stamp, so
+traffic running inside the window does not hold it open: it is re-armed by the first `get()` AFTER
+expiry, i.e. the reclaim refusal (`:1245`) — which is what makes `cooldown` recur on a busy box.
+⛔ Do not read the in-flight bullet's
+“wait, it is RUNNING” mapping on this tuple: `load_in_progress_s` past the bound is the one case
+where the attempt is already dead to its caller. This resolves BY ITSELF when the thread exits (the
+guard clears, and the next `get()` retries once the cooldown has passed).
 
-⛔ **Three routes that look like evidence and are not, on this image.** (1) **`faulthandler`** —
-nothing here enables it: no `faulthandler.enable()`, `PYTHONFAULTHANDLER` unset in
-`fly.toml`/`Dockerfile.hosted`/`entrypoint.sh`, and the repo's only registrar
-(`tools/embedder_provision.py`) is a CI tool that is not in the image. A fatal signal dumps nothing
-either — without `enable()` the default handler prints no Python traceback — so `kill -ABRT` kills
-the PROCESS (on Fly: a machine exit and a fresh cold start), not just the load, and still proves
-nothing. It is the restart the passage above tells you not to take. (2) **An in-process `sys._current_frames()` dump from a fresh
-interpreter** sees its OWN frames; `monitoring.py`'s capture samples the LOOP thread and only after
-`LOOP_BLOCK_SAMPLE_AFTER_S`, while the load runs on its own `tortoise-embedder-load` thread — so the
-loop keeps ticking, the sampler never fires, and it could not show the loader's frames anyway. It is
-the same trap the counter rule under *Arming the Postgres record — `TORTOISE_RECORD_DSN`* (#9548)
-names: a fresh interpreter reads a fresh process (`0` there, its own frames here). (3) **Absence of
-further `embedder:` lines** — the
-LOADER logs nothing between the timeout line and the load finishing or its overrun ending. The one
-`embedder:` line an overrun produces WHILE IT IS STILL RUNNING comes from the READ path, not the
-loader: `embedder: a
-previous load attempt is STILL RUNNING (<elapsed>) — refusing to start a second one`, at most once
-per 60 s cooldown while traffic asks for an embedding. Its growing `elapsed` is the same wall-clock
-since the attempt started that `load_in_progress_s` publishes — the datum this section says cannot
-separate progress from a wedge — so seeing that line repeat is NOT progress, and its absence only
-means nothing on the read path asked for an embedding.
+A reading that stays past the bound for minutes is a WEDGED import, and that does not resolve without
+`fly machine restart` — read the boot log for the bound it hit, then check the image layer/page-cache
+path, not the app. ⛔ But establish that it is wedged from OUTSIDE this block first: the elapsed time
+is wall-clock since the attempt started, so `status()` cannot tell a slow-but-advancing import from a
+stuck one, and a starved loader may legitimately overrun (`#13674`'s bound exists because the measured
+COLD cost is 195.8 s — 156.5 s of imports alone plus a 39.3 s construct — and 300.0 = 195.8 × 1.53).
 
-A restart on this reading throws away an import that may be about to finish and re-pays the whole
-cold cost, so get the stack FIRST — the block alone cannot justify it.
+⛔ **Three routes that look like evidence here and are not.** (1) **An absence of further `embedder:`
+lines.** The LOADER logs nothing between the timeout line and the load finishing or its overrun
+ending — silence is the expected state either way. The one line an overrun produces WHILE IT IS STILL
+RUNNING comes from the READ path, not the loader (`a previous load attempt is STILL RUNNING
+(<elapsed>) — refusing to start a second one`, at most once per 60 s cooldown while traffic asks for
+an embedding), and its growing `elapsed` is the same wall-clock — so seeing it repeat is NOT progress.
+(2) **`faulthandler`.** Nothing here enables it: no `faulthandler.enable()`, `PYTHONFAULTHANDLER`
+unset in `fly.toml`/`Dockerfile.hosted`/`entrypoint.sh`, and the repo's only registrar
+(`tools/embedder_provision.py`) is a CI tool that is not in the image — so a fatal signal prints no
+Python traceback either, and `kill -ABRT` kills the PROCESS (a machine exit and a cold start), not
+just the load. (3) **An in-process `sys._current_frames()` dump from a fresh interpreter** sees its
+OWN frames; `monitoring.py`'s capture samples the LOOP thread and only after
+`LOOP_BLOCK_SAMPLE_AFTER_S`, while the load runs on its own `tortoise-embedder-load` thread.
+
+The route that works is a stack from OUTSIDE the process. `py-spy` is what this runbook has used
+elsewhere, but ⛔ **the image does not ship it** (no dependency in `requirements.txt`,
+`Dockerfile.hosted` or `entrypoint.sh`), so install it on the machine first —
+`fly ssh console -a tortoise-y4mjjq -C "pip install py-spy && py-spy dump --pid <uvicorn pid>"` — which
+needs runtime egress to PyPI (the same sandbox that could hang a runtime HF download,
+`Dockerfile.hosted`). A restart on this reading throws away an import that may be about to finish and
+re-pays the whole cold cost, so get the stack first.
 
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
 `failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
