@@ -6722,6 +6722,50 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE `.items()` RECEIVER'S OWN WRAPPERS ARE THE SAME VIEW (`#13788` review
+        # round 6, P1 — a measured in-surface false PASS). The arm read a BARE mapping
+        # literal, so each ONE-WRAPPER spelling of the row above CERTIFIED while the bare
+        # twin was refused, and the vector is placed by the comprehension's own value
+        # expression, so no other rule reads it:
+        #
+        #     {k: _encode(ev) for k, _v in {'embedding': 1}.copy().items()}          CERTIFIED
+        #     … in ({'embedding': 1} if _f() else {}).items()                        CERTIFIED
+        #     … in {**{'embedding': 1}}.items()                                      CERTIFIED
+        #
+        # `_mapping_items_pairs` is the one resolver for that receiver; the wrappers here are
+        # the ones `_transparent_copy_operand`, `_conditional_branches` and the `**` merge
+        # already own. The controls for it are in the `accepted` tuple below (a non-property
+        # key and a constant value must still certify), which is what keeps the arm from
+        # becoming an inert enforcer in the other direction.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {"embedding": 1}.copy().items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        import copy
+        props |= {k: _encode(ev) for k, _v in copy.copy({"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in ({"embedding": 1} if _f() else {}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {**({"embedding": 1})}.items()}
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -7900,6 +7944,26 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update({k: v for k, v in {"embedding_model": _m()}.items()})
+        return None
+    _write(props)
+""",
+        # ⛔ THE TWO NARROWINGS OF THE `.items()` RECEIVER'S WRAPPERS, or the round-6 fix
+        # becomes an over-refusal (`#13788`). They are the SAME spellings as the four `refused`
+        # rows and must still CERTIFY, because neither places the property as a key: one keys
+        # the produced mapping by a name that is not the property, the other produces a
+        # CONSTANT value, which is not the vector. Without these rows a resolver that answered
+        # "yes" to every wrapped mapping would pass every refused row above.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {"embedding_model": 1}.copy().items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: 1 for k, _v in ({"embedding": 1} if _f() else {}).items()}
         return None
     _write(props)
 """,

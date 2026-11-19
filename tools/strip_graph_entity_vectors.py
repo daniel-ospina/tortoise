@@ -2220,8 +2220,28 @@ def _source_holds_the_store_anywhere(node) -> bool:
             return _source_holds_the_store_anywhere(node.func.value)
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "items"
                 and not node.args and not node.keywords):
-            # ⛔ A MAPPING'S `.items()` VIEW *IS* A PAIRS SEQUENCE.
-            return _mapping_literal_stores_the_vector(node.func.value)
+            # ⛔ A MAPPING'S `.items()` VIEW *IS* A PAIRS SEQUENCE — so the question is the pair
+            #    one (is the KEY the property?), not "does the mapping's VALUE hold the
+            #    vector" (`#13788` review round 6, P1). The value question was the ONLY one
+            #    asked here, so for the legitimate shape of this idiom — the mapping holds a
+            #    placeholder and the COMPREHENSION's value expression is the store — this arm
+            #    answered `False` for every spelling it was the sole leg for, i.e. it was dead
+            #    weight inside a live rule. `_comprehension_source_pairs_the_property_with_a_
+            #    value` asks the key question and reaches the ONE source resolver, whose
+            #    `.items()` arm now follows the receiver's wrappers too; the value question is
+            #    kept BESIDE it, because a mapping that really does place the vector is still a
+            #    store. Both directions only ever REFUSE, so neither can widen acceptance.
+            #    ⚠️ AND REVERTING THIS LEG ALONE MOVES **0** OF THE 491 FIXTURE ROWS — measured,
+            #    not assumed, and recorded so the next lane does not re-litigate it: for every
+            #    spelling in this family the key question is ALSO answered upstream (by the
+            #    comprehension terms, or by `_comprehension_key_mentions_the_bound_property` on
+            #    the non-`Name`-key path this leg sits in). It is kept rather than deleted
+            #    because deleting a leg is the ONE direction that can widen acceptance, and the
+            #    narrow fix it was given here is the one the review asked for: ask the KEY
+            #    question, not the value question. An arm that is inert is not the same as an
+            #    arm that is wrong — it is disclosed here instead of looking load-bearing.
+            return (_comprehension_source_pairs_the_property_with_a_value(node)
+                    or _mapping_literal_stores_the_vector(node.func.value))
         return False              # `zip(…)`, `map(…)`: the stated residual
     if isinstance(node, ast.Subscript) and _is_full_slice(node.slice):
         return _source_holds_the_store_anywhere(node.value)
@@ -2273,6 +2293,60 @@ def _comprehension_yielded_item(node):
     if isinstance(node, ast.Tuple | ast.List):
         return tuple(node.elts)
     return (node,)
+
+
+def _mapping_items_pairs(mapping, _depth: int = 0):
+    """The `(key, value)` pairs a mapping's `.items()` view yields — through its WRAPPERS.
+
+    ⛔ ONE RESOLVER FOR THE RECEIVER, for the reason `_conditional_branches` gives: the
+    `.items()` arm of `_comprehension_source_yields` read a bare `ast.Dict`, so the three
+    one-wrapper spellings of that same view CERTIFIED while the bare twin was refused
+    (`#13788` review round 6, P1, measured through the tool's own `_writer_consults_gate`):
+
+        props |= {k: _encode(ev) for k, _v in {'embedding': 1}.copy().items()}
+        props |= {k: _encode(ev) for k, _v in ({'embedding': 1} if _f() else {}).items()}
+        props |= {k: _encode(ev) for k, _v in {**{'embedding': 1}}.items()}
+
+    The wrappers are the ones this module already answers at every other seam —
+    `_transparent_copy_operand` for the copy family, `_conditional_branches` for the
+    `if…else`/`or`/walrus family, and the `**` merge for a `Dict` whose key is `None` — asked
+    here rather than re-spelled, because a vocabulary typed per-resolver is this branch's
+    recurring defect.
+
+    `None` means "not a mapping this check can read", and every caller's other arms plus the
+    disclosed residual still apply. Both callers REFUSE on what this returns, so a wider walk
+    can only add refusals — it cannot widen acceptance, which is the one direction the
+    doctrine forbids.
+    """
+    import ast
+
+    if _depth > 8:                      # a wrapper stack is finite in real code; bound it
+        return None
+    copied = _transparent_copy_operand(mapping)
+    if copied is not None:
+        return _mapping_items_pairs(copied, _depth + 1)
+    branches = _conditional_branches(mapping)
+    if len(branches) > 1:
+        # ANY branch can be the selected mapping, and a store in any of them is a store — the
+        # same fail-closed policy `_comprehension_source_yields` applies to `if…else`. An
+        # unreadable branch contributes nothing.
+        resolved = [_mapping_items_pairs(branch, _depth + 1) for branch in branches]
+        readable = [item for item in resolved if item is not None]
+        if not readable:
+            return None
+        return [item for chunk in readable for item in chunk]
+    if isinstance(mapping, ast.Dict):
+        pairs: list = []
+        for key, value in zip(mapping.keys, mapping.values, strict=False):
+            if key is None:
+                merged = _mapping_items_pairs(value, _depth + 1)
+                if merged is None:
+                    return None
+                pairs.extend(merged)
+            else:
+                pairs.append((key, value))
+        return pairs
+    return None
 
 
 def _comprehension_source_yields(source, _depth: int = 0):
@@ -2485,10 +2559,23 @@ def _comprehension_source_yields(source, _depth: int = 0):
             if source.func.attr == "keys":
                 return _comprehension_source_yields(source.func.value, _depth + 1)
             if source.func.attr == "items":
-                mapping = source.func.value
-                if (isinstance(mapping, ast.Dict)
-                        and not any(key is None for key in mapping.keys)):
-                    return list(zip(mapping.keys, mapping.values, strict=True))
+                # ⛔ THE RECEIVER IS A SOURCE TOO, AND IT GOES THROUGH THE SAME WRAPPERS
+                # (`#13788` review round 6, P1 — a measured in-surface false PASS). This arm
+                # read a BARE `ast.Dict` only, so every wrapper the module already resolves
+                # everywhere else re-opened the hole on this one seam, and the comprehension's
+                # OWN value expression is what places the vector in this idiom:
+                #
+                #     props |= {k: _encode(ev) for k, _v in {'embedding': 1}.items()}            refused
+                #     props |= {k: _encode(ev) for k, _v in {'embedding': 1}.copy().items()}     CERTIFIED
+                #     props |= {k: _encode(ev) for k, _v in ({'embedding': 1} if _f() else {}).items()}  CERTIFIED
+                #     props |= {k: _encode(ev) for k, _v in {**{'embedding': 1}}.items()}      CERTIFIED
+                #
+                # The three CERTIFIED rows are the safe-direction ONE-WRAPPER spellings of the
+                # row above them, which is the same asymmetry this branch has closed at five
+                # seams. `_mapping_items_pairs` is the one resolver for the receiver's pairs,
+                # so a wrapper added to `_conditional_branches` tomorrow reaches this arm
+                # without a sixth copy of the vocabulary.
+                return _mapping_items_pairs(source.func.value, _depth + 1)
         return None                     # a builder, `zip(…)`, `map(…)`: stated residual
     if isinstance(source, ast.GeneratorExp | ast.ListComp | ast.SetComp):
         # ⛔ THE IDENTITY COMPREHENSION IS A TRANSPARENT WRAPPER (`[x for x in L]` is L's
