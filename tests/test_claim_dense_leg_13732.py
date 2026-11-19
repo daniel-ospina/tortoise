@@ -272,6 +272,41 @@ class TestPaired:
         }
         assert tool_mod.classify(cmp) == "TRADE"
 
+    def test_a_double_negative_is_a_loss_not_a_trade(self, tool_mod):
+        """⛔ ``TRADE`` is a GAIN that costs coverage — never a move that loses BOTH.
+
+        The committed ``trade_rule`` says *"a GAIN at k=3 that lowers
+        found@deep"*. Gating ``TRADE`` on ``found_deep_delta_pp < 0`` alone
+        labelled a plain regression as a trade, which is the softer word for it.
+        """
+        cmp = {
+            "delta_pp": -8.0,
+            "mcnemar_p_two_sided": 1e-5,
+            "detectable_pp": 4.47,
+            "found_deep_delta_pp": -2.5,
+        }
+        assert tool_mod.classify(cmp) == "LOSS"
+
+    def test_the_preregistered_bar_decides_not_the_run_n(self, tool_mod):
+        """⛔ A corpus that builds MORE claims must not tighten its own bar.
+
+        The observed bar falls as n grows, so gating on it would let a run with
+        a bigger population call the same absolute move a ``GAIN`` under a
+        threshold the pre-registration never declared. The committed bar
+        decides; the observed one is disclosure.
+        """
+        cmp = {
+            "delta_pp": 4.0,
+            "mcnemar_p_two_sided": 1e-5,
+            "detectable_pp": 3.23,  # observed at a larger n
+            "detectable_pp_preregistered": 4.47,  # committed at n = 786
+            "found_deep_delta_pp": 0.0,
+        }
+        assert tool_mod.classify(cmp) == "UNRESOLVED"
+        # …and with the move above the COMMITTED bar it resolves.
+        cmp["delta_pp"] = 5.0
+        assert tool_mod.classify(cmp) == "GAIN"
+
     def test_gain_and_loss(self, tool_mod):
         up = {
             "delta_pp": 8.0,
@@ -557,12 +592,17 @@ class TestRecordMembership:
     def test_no_ids_is_not_a_verdict(self, tool_mod):
         assert tool_mod.record_population_vectors([], self.SCOPE, "dsn") is None
 
-    def test_the_run_asks_the_id_scoped_question_before_any_arm(self):
-        """The guard is WIRED, over the population's own ids, before the arms.
+    def test_the_run_asks_the_id_scoped_question_inside_the_arm_loop(self):
+        """The guard is WIRED over the population's own ids, and gates ONE arm.
 
         ⛔ A guard nothing calls is the shape this finding started as: the
         label-wide gate verified, and no assertion anywhere asked the second
-        question.
+        question. ⛔ AND A GUARD THAT GATES THE RUN IS THE OPPOSITE FAILURE
+        (`#13734` review round 2): the population's ids reach the GRAPH only
+        (`_seed_graph` -> the apply-fold, no journal record), so a run-level
+        refusal is unsatisfiable and blocks the two arms that need no record
+        cohort. It must sit INSIDE the arms loop, where only `record_dense`
+        consults it.
         """
         tree = ast.parse(TOOL.read_text())
         run = next(
@@ -588,16 +628,37 @@ class TestRecordMembership:
         assert isinstance(first, ast.ListComp), ast.dump(first)[:120]
         assert isinstance(first.generators[0].iter, ast.Name)
         assert first.generators[0].iter.id == "population"
-        guard = [c for c in named if c.func.id == "require_population_in_record"]
-        assert guard, "the id-scoped measurement is never REFUSED on"
-        # …and it must precede the arm loop, or a bad cohort is scored anyway.
         arms_loop = [
             n
             for n in ast.walk(run)
             if isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == "ARMS"
         ]
         assert arms_loop
-        assert min(c.lineno for c in guard) < min(a.lineno for a in arms_loop)
+        # …it must be INSIDE the arm loop (gating `record_dense`), not before it.
+        guard = [
+            c
+            for c in ast.walk(arms_loop[0])
+            if isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Name)
+            and c.func.id == "require_population_in_record"
+        ]
+        assert guard, (
+            "the id-scoped guard must gate the record_dense arm INSIDE the arms "
+            "loop — before the loop it blocks the lexical and graph arms too, "
+            "and the population's ids never reach the record, so it can never pass"
+        )
+        # ⛔ AND ITS SECOND ARGUMENT MUST BE THE POPULATION'S OWN LENGTH. A pin
+        # that only asserts the call EXISTS is satisfied by
+        # `require_population_in_record(population_vectors, 0)`, which makes the
+        # guard a no-op — the exact fail-open class this file exists to close.
+        n_arg = guard[0].args[1]
+        assert isinstance(n_arg, ast.Call), ast.dump(n_arg)[:120]
+        assert isinstance(n_arg.func, ast.Name) and n_arg.func.id == "len", ast.dump(n_arg)[:120]
+        assert isinstance(n_arg.args[0], ast.Name), ast.dump(n_arg)[:120]
+        assert n_arg.args[0].id == "population_ids", (
+            "the guard's population size must be len(population_ids) — the same "
+            "list it asked the record about, never a constant"
+        )
 
 
 # ── 6. the contradiction test, structurally ───────────────────────────────

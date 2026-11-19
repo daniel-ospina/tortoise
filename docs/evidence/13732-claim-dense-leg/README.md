@@ -83,8 +83,9 @@ published as one number (M2's Finding 2 is the same distinction).
 
 **M2's claim population could not have exercised a dense leg even on a box that had an embedder,
 and the reason is in the instrument, not in the leg.**
-`window_quality_m2.build_point_population` writes each claim through
-`proj._upsert_point_props({"id", "content"})` — **no `embedding` key** — so neither store holds a
+`window_quality_m2.write` writes each claim through
+`proj._upsert_point_props({"id", "content"})` (`window_quality_m2.py:850` — `build_point_population`
+only *builds* the dicts and writes nothing) — **no `embedding` key** — so neither store holds a
 vector for those nodes. Consequence 1: with no embedder there is no `query_vec`, so the vector
 strategy is never submitted (the declared `keyword_only`). Consequence 2, the quiet one: with an
 embedder, the dense leg still finds nothing, because no node carries an `embedding` to be near.
@@ -117,9 +118,18 @@ is the only place the population is known.
 So the truth about this instrument, stated plainly: **it embeds and writes the population to the
 GRAPH, and it REQUIRES — never writes — the record's matching cohort.** `#13210` is the backfill's
 tool, and the record is a journal fold with no side door; a second writer for its population is the
-one thing this file promised not to be. The consequence is a real residual: on a tenant whose record
-does not hold this population's ids the run now REFUSES by name instead of publishing a 0.0 — the
-honest outcome, and the reason no claim-recall figure appears in this bundle on any reading.
+one thing this file promised not to be.
+
+⛔ **And this population's ids cannot reach the record by any backfill.** `_seed_graph` writes
+through `proj._upsert_point_props`, which is the apply-FOLD — it emits no journal record — while the
+record is a journal fold (`record_runner`). So `#13210` folding a journal cannot deliver a cohort
+that never entered the journal. The guard therefore gates the **`record_dense` arm**, not the run:
+the `lexical` and `graph_dense` arms need no record cohort and still publish, the `record_dense` arm
+is recorded as `BLOCKED[record_population_absent]` by name, and the run exits **3** so the artifact
+cannot be mistaken for the paired answer. A run that refused before its first arm published nothing
+while looking like a strict gate — that was this file's first cut of the guard, and it is the reason
+the scoping exists. Getting a `record_dense` number requires a population that IS in the record: one
+created through the journaled SDK door and folded with `record_runner`.
 
 ## 4. Falsifiers, and where each one stands
 
@@ -145,6 +155,9 @@ python -m tortoise record-reconcile --journal "$TORTOISE_RECORD_JOURNAL"   # exi
 uv run python tools/claim_dense_leg_13732.py --preregister --population 786
 
 # 3. the paired run:
+#    `record_dense` refuses by name unless the record holds THIS population's ids; the
+#    `lexical`/`graph_dense` arms publish regardless, and the run exits 3, so the artifact
+#    is never mistaken for the paired answer the pre-registration prices.
 uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
 uv run python tools/claim_dense_leg_13732.py --points 900 --deep 50 \
     --out /tmp/claim-dense-13732.json

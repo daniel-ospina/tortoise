@@ -34,9 +34,11 @@ variance.
 WHY THE M2 INSTRUMENT COULD NOT HAVE SEEN THE DENSE LEG
 -------------------------------------------------------
 This is the finding that motivates the file, and it is checkable from the code,
-not inferred: ``window_quality_m2.build_point_population`` writes its population
-through ``proj._upsert_point_props({"id", "content"})`` — **no embedding key** —
-so neither store holds a vector for those nodes. Two consequences, both silent:
+not inferred: ``window_quality_m2.write`` writes its population through
+``proj._upsert_point_props({"id", "content"})`` (``window_quality_m2.py:850``;
+``build_point_population`` only BUILDS the dicts, it writes nothing) — **no
+embedding key** — so neither store holds a vector for those nodes. Two
+consequences, both silent:
 
 1. no ``query_vec`` (no embedder on that box) means the vector strategy is never
    submitted, which the artifact declares as ``keyword_only``; and
@@ -333,7 +335,12 @@ def summarise(ranks: dict[str, int | None], k: int) -> dict:
     }
 
 
-def paired(a: dict[str, int | None], b: dict[str, int | None], k: int) -> dict:
+def paired(
+    a: dict[str, int | None],
+    b: dict[str, int | None],
+    k: int,
+    preregistered_n: int | None = None,
+) -> dict:
     """Paired comparison of two arms over the SAME queries (b against a).
 
     ``only_b`` are the queries b retrieves at k that a did not (the gain,
@@ -343,6 +350,15 @@ def paired(a: dict[str, int | None], b: dict[str, int | None], k: int) -> dict:
 
     ``found_at_deep`` is compared on the SAME pairing, so a delta that only
     re-orders the same candidate set is tellable from one that shrinks coverage.
+
+    ⛔ TWO THRESHOLDS, AND THE PRE-REGISTERED ONE IS THE GATE. ``detectable_pp``
+    is the bar for the n THIS run built; ``detectable_pp_preregistered`` is the
+    bar committed in ``preregistration.json`` before any number existed. A run
+    that builds MORE claims gets a SMALLER observed bar, so gating on the
+    observed one would let a corpus change tighten the evidence needed and still
+    call the same absolute move a ``GAIN`` — the pre-registration would bind
+    nothing. The committed bar therefore decides (the conservative direction:
+    it is the harder bar at a larger n), and the observed one is DISCLOSURE.
     """
     if set(a) != set(b):
         raise ValueError("paired comparison over different id sets")
@@ -377,6 +393,12 @@ def paired(a: dict[str, int | None], b: dict[str, int | None], k: int) -> dict:
         "detectable_pp": round(detectable_effect_pp(len(ids), n_disc / len(ids)), 2)
         if n_disc
         else None,
+        "detectable_pp_preregistered": (
+            round(detectable_effect_pp(preregistered_n, n_disc / len(ids)), 2)
+            if n_disc and preregistered_n
+            else None
+        ),
+        "preregistered_n": preregistered_n,
     }
 
 
@@ -401,10 +423,18 @@ def classify(cmp: dict) -> str:
     a resolved recall@k move that costs ``found@deep`` — real, and not a win.
     """
     p = cmp["mcnemar_p_two_sided"]
-    resolved = cmp["detectable_pp"] is not None and abs(cmp["delta_pp"]) >= cmp["detectable_pp"]
+    # ⛔ the PRE-REGISTERED bar decides; the observed one is disclosure (see
+    # `paired`). Falling back to the observed bar keeps a caller that built the
+    # comparison by hand working, and is what the tests drive.
+    bar = cmp.get("detectable_pp_preregistered") or cmp["detectable_pp"]
+    resolved = bar is not None and abs(cmp["delta_pp"]) >= bar
     if p >= ALPHA or not resolved:
         return "UNRESOLVED"
-    if cmp["found_deep_delta_pp"] < 0:
+    # ⛔ ``TRADE`` IS A GAIN THAT COSTS COVERAGE — never a move that loses BOTH.
+    # Requiring only ``found_deep < 0`` labelled a double-negative a ``TRADE``,
+    # which is the softer word for a plain regression and contradicts the
+    # committed ``trade_rule`` ("a GAIN at k=3 that lowers found@deep").
+    if cmp["delta_pp"] > 0 and cmp["found_deep_delta_pp"] < 0:
         return "TRADE"
     return "GAIN" if cmp["delta_pp"] > 0 else "LOSS"
 
@@ -833,6 +863,11 @@ def run_measurement(args: argparse.Namespace) -> int:
     model = require_embedder()
     dsn = require_record(_resolve_dsn(args.dsn))
 
+    # ⛔ THE PRE-REGISTERED n — the bar committed in `preregistration.json`
+    # BEFORE any number existed. It decides the verdict; the run's own n is
+    # recorded beside it as disclosure (see `paired`).
+    preregistered_n = args.population
+
     sys.path.insert(0, str(REPO_ROOT))
     from tools.window_quality_m2 import (
         ID_PREFIX,
@@ -885,21 +920,47 @@ def run_measurement(args: argparse.Namespace) -> int:
         record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn)
     )
     require_seeded(graph_vectors, coverage["record_vectors"])
+    # ⛔ DROP THE CACHE `coverage` JUST WROTE. The cached verdict is keyed by
+    # LABEL and stored stickily, and this call supplied a POPULATION count as
+    # the label's denominator — so the shipped read path, which asks the
+    # label-wide question, would receive this population-scoped answer instead
+    # of measuring for itself. On a fresh graph the two denominators coincide;
+    # with `--graph` pointed at a real tenant they do not.
+    record_vector.reset_coverage_cache()
 
     # ⛔ THE ID-SCOPED HALF (see the docstring): `coverage` is a LABEL-WIDE count
     # by design, so it verifies a tenant whose record holds SOME embedded points
     # while this population's own ids are in neither store. Asking only the
     # label-wide question publishes a 0.0 `record_dense` recall as a finding
     # about the leg, when it is a finding about the seed step.
+    #
+    # ⛔ IT GATES THE `record_dense` ARM, NOT THE RUN — and `#13734`'s review
+    # round had to move it there. The population's ids are minted by THIS
+    # instrument and reach the GRAPH only: `_seed_graph` writes through
+    # `proj._upsert_point_props`, which is the apply-fold and emits NO journal
+    # record, while the record is a journal fold. So a run-level refusal here is
+    # UNSATISFIABLE for every measurement this tool can make, and it also blocked
+    # the `lexical` and `graph_dense` arms, which need no record cohort at all —
+    # a run that refuses before its first arm publishes nothing while looking
+    # like a strict gate. The other two arms still score, and the artifact
+    # carries the refusal BY NAME against the one arm it blocks (exit 3) rather
+    # than skipping it silently.
     population_ids = [row["id"] for row in population]
     population_vectors = record_population_vectors(population_ids, scope, dsn)
-    require_population_in_record(population_vectors, len(population_ids))
     coverage["population_n"] = len(population_ids)
     coverage["population_vectors"] = population_vectors
 
     queries = [(row["id"], row["query"]) for row in population]
     arms: dict[str, dict] = {}
+    blocked: Refused | None = None
     for arm in ARMS:
+        if arm == ARM_RECORD_DENSE:
+            try:
+                require_population_in_record(population_vectors, len(population_ids))
+            except Refused as exc:
+                blocked = exc
+                arms[arm] = {"arm": arm, "blocked": exc.code, "message": exc.message}
+                continue
         ranks, _traces, verdict = _read_arm(sdk, arm, queries, args.deep, _sanitise_query_text)
         arms[arm] = {
             "summary": summarise(ranks, K_PRIMARY),
@@ -915,14 +976,22 @@ def run_measurement(args: argparse.Namespace) -> int:
         (ARM_GRAPH_DENSE, ARM_RECORD_DENSE),
     ):
         key = f"{cand}_vs_{base}"
-        per_k = {f"k{k}": paired(arms[base]["_ranks"], arms[cand]["_ranks"], k) for k in KS}
+        if ARM_RECORD_DENSE in (base, cand) and blocked is not None:
+            # A comparison against an arm that was blocked by name is
+            # UNMEASURED — never an empty delta a reader could mistake for 0.0.
+            comparisons[key] = {"label": "UNMEASURED", "blocked": blocked.code}
+            continue
+        per_k = {
+            f"k{k}": paired(arms[base]["_ranks"], arms[cand]["_ranks"], k, preregistered_n)
+            for k in KS
+        }
         cmp = per_k[f"k{K_PRIMARY}"]
         comparisons[key] = {
             "per_k": per_k,
             "primary": cmp,
             "label": classify(cmp),
             "detectable_pp_pre_registered": round(
-                detectable_effect_pp(cmp["n"], DISCORDANCES[2]), 2
+                detectable_effect_pp(preregistered_n, DISCORDANCES[2]), 2
             ),
         }
 
@@ -941,7 +1010,21 @@ def run_measurement(args: argparse.Namespace) -> int:
         "corpus": {"files": len(files), "stats": corpus_stats, "point_build": funnel},
         "population": {"built": len(population), "written": written},
         "coverage": coverage,
-        "preregistered": preregistration(len(population)),
+        "preregistered": preregistration(preregistered_n),
+        "population_mismatch": (
+            None
+            if len(population) == preregistered_n
+            else {
+                "preregistered_n": preregistered_n,
+                "built_n": len(population),
+                "note": (
+                    "the run built a different n than the pre-registration "
+                    "declares; the PRE-REGISTERED bar still decides (it is the "
+                    "harder bar at the larger n) and the observed bar is "
+                    "disclosure only"
+                ),
+            }
+        ),
         "deep_limit": args.deep,
         "arms": arms,
         "comparisons": comparisons,
@@ -949,7 +1032,16 @@ def run_measurement(args: argparse.Namespace) -> int:
             "the `:Object` population (#11901's capture prior) — unchanged here",
             "any end-to-end answer quality: the queries are verbatim spans of "
             "the claim's own text (#12186's declared self-retrieval bound)",
-        ],
+        ]
+        + (
+            [
+                f"the `{ARM_RECORD_DENSE}` arm — BLOCKED[{blocked.code}]: its "
+                "dense leg would rank a cohort the record does not hold, and "
+                "its recall would then be a figure about the seed step"
+            ]
+            if blocked is not None
+            else []
+        ),
     }
     out = Path(args.out) if args.out else None
     text = json.dumps(artifact, indent=2, sort_keys=True)
@@ -958,6 +1050,13 @@ def run_measurement(args: argparse.Namespace) -> int:
         print(f"wrote {out}", file=sys.stderr)
     else:
         print(text)
+    if blocked is not None:
+        # ⛔ THE ARTIFACT IS WRITTEN FIRST, THEN THE REFUSAL IS NAMED. The two
+        # arms that need no record cohort are real measurements and are kept;
+        # exit 3 says the run is INCOMPLETE, so no caller can mistake it for the
+        # paired answer the pre-registration exists to price.
+        print(f"REFUSED[{blocked.code}]: {blocked.message}", file=sys.stderr)
+        return 3
     return 0
 
 
