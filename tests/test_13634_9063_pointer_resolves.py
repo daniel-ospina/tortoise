@@ -23,7 +23,7 @@ replaced it. That asymmetry is the point: if someone later FILES an issue for de
 it in the changelog entry, that is a *correct* future state and this file must stay green. Pinning the
 replacement text would convert this guard into a false block on the repair it exists to protect.
 
-⛔ Three measurement decisions, each of which a plausible cheaper version got wrong:
+⛔ Four measurement decisions, each of which a plausible cheaper version got wrong:
 
 * The changelog check collapses the entry's line-wrapping before searching: the entry is hard-wrapped at
   ~100 columns, so a per-line search is evaded by an ordinary re-wrap of the very claim it forbids
@@ -67,15 +67,35 @@ ROOT = Path(__file__).resolve().parents[1]
 #: cover the repo's correction convention (`⚠️ CORRECTION APPENDED … It carried *"…"*`), or a real
 #: correction turns into a false BLOCK. Both directions are pinned by the two tests at the end.
 #: Every glyph family the repo writes a correction in: `"…"`, `“…”`, `‘…’`, `«…»`, `` `…` ``.
+#: MARKER VOCABULARY — report VERBS, withdrawals, and `as merged` / `used to read` / `carried`. A
+#: present-tense assertion verb (`asserts`, `claims`, `says`) is NOT a record marker: `The v3.38 entry
+#: asserts "remains open (#9063)"` is the claim with a narrator in front of it (measured GREEN when it
+#: was a marker). Nor are NOUNS/ADVERBS (`wording`, `correction`, `formerly`, `previously`): they do not
+#: TAKE the quotation as their object, so `the entry's wording is "…"` was stripped and stayed GREEN
+#: (measured). `read`/`reads` stay because they name the artifact's own text, not the author's position.
+#: The tuple IS the vocabulary — the regex is built from it, and one pin per entry (the last test) means
+#: an alternative can neither be dropped nor narrowed without reddening a row.
+_RECORD_MARKERS = (
+    "read",
+    "reads",
+    "reading",
+    "used to read",
+    "as merged",
+    "withdrawn",
+    "withdraws",
+    "retired",
+    "asserted",
+    "claimed",
+    "said",
+    "stated",
+    "wrote",
+    "written",
+    "carried",
+)
 _QUOTED_IN_CORRECTION = re.compile(
-    # MARKER VOCABULARY — records/withdrawals and PAST-tense reports only. A present-tense
-    # assertion verb (`asserts`, `claims`, `says`) is NOT a record marker: `The v3.38 entry asserts
-    # "remains open (#9063)"` is the claim with a narrator in front of it, and it stayed GREEN when
-    # those same words were markers (measured). `read`/`reads` are kept because they name the
-    # artifact's own text (`the passage reads "…"`), not the author's position.
-    r"\b(?:read|reads|reading|used\s+to\s+read|wording|as\s+merged|correction|corrected|"
-    r"corrects|withdrawn|withdraws|retired|asserted|claimed|said|stated|wrote|written|"
-    r"carried|formerly|previously)\b[^\"\n]{0,14}?"
+    r"\b(?:"
+    + "|".join(marker.replace(" ", r"\s+") for marker in _RECORD_MARKERS)
+    + r")\b[^\"\n]{0,14}?"
     r'(?:"[^"\n]*"|\u201c[^\u201d\n]*\u201d|\u2018[^\u2019\n]*\u2019|\u00ab[^\u00bb\n]*\u00bb|`[^`\n]*`)',
     re.I,
 )
@@ -255,6 +275,10 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
         'The code reads the predicate; whether declared priors should exist "remains open (#9063)".',
         'The v3.38 entry asserts "remains open (#9063)".',
         'The v3.38 entry claims "remains open (#9063)".',
+        # nouns/adverbs are NOT record markers — they do not take the quote as an object (measured GREEN
+        # while `wording`/`formerly` were in the vocabulary).
+        'Whether entity declared priors should exist at all: the entry\'s wording is "remains open (#9063)"',
+        'The entry, formerly corrected, now states "remains open (#9063)"',
     ],
 )
 def test_an_ASSERTION_of_the_claim_is_caught_in_every_phrasing(passage):
@@ -262,4 +286,54 @@ def test_an_ASSERTION_of_the_claim_is_caught_in_every_phrasing(passage):
     unquoted = _QUOTED_IN_CORRECTION.sub(" ", passage)
     assert _claimed_open(9063).search(unquoted), (
         "an assertion of the #9063 claim escaped the guard: " + passage
+    )
+
+
+_RECORD_MARKER_PASSAGES = {
+    "read": 'The v3.38 entry read "remains open (#9063)" before the correction.',
+    "reads": 'The v3.38 entry reads "remains open (#9063)"; that was false.',
+    "reading": 'The entry was written reading "remains open (#9063)".',
+    "used to read": 'It used to read "remains open (#9063)" before the correction.',
+    "as merged": 'As merged, "remains open (#9063)" was the wording recorded there.',
+    "withdrawn": 'The withdrawn claim "remains open (#9063)" is retired.',
+    "withdraws": 'This correction withdraws "remains open (#9063)".',
+    "retired": 'The retired wording "remains open (#9063)" no longer applies.',
+    "asserted": 'The v3.36 entry asserted "remains open (#9063)".',
+    "claimed": 'The earlier text claimed "remains open (#9063)".',
+    "said": 'The paragraph said "remains open (#9063)" and that was wrong.',
+    "stated": 'The v3.38 entry stated "remains open (#9063)" at merge time.',
+    "wrote": 'The author wrote "remains open (#9063)" in error.',
+    "written": 'The entry was written "remains open (#9063)" in error.',
+    "carried": 'It carried *"whether declared priors remain open (#9063)"*, now retired.',
+}
+
+
+@pytest.mark.parametrize("marker", sorted(_RECORD_MARKER_PASSAGES))
+def test_every_record_marker_introduces_a_skipped_span(marker):
+    """Each vocabulary entry, with its LITERAL passage, must introduce a skipped span.
+
+    The row also asserts the entry is still in `_RECORD_MARKERS` (which the regex is built from), so
+    dropping it from the tuple reds this row instead of deleting it — the first version of this test
+    parametrized over the tuple itself and silently deleted its own pin (measured: `withdraws` and
+    `written` vanished with the suite GREEN).
+    """
+    assert marker in _RECORD_MARKERS, (
+        f"{marker!r} has a pin but is not in _RECORD_MARKERS — the guard lost a record marker, so a "
+        f"real correction written that way is a false BLOCK"
+    )
+    passage = _RECORD_MARKER_PASSAGES[marker]
+    unquoted = _QUOTED_IN_CORRECTION.sub(" ", passage)
+    assert not _claimed_open(9063).search(unquoted), (
+        f"the record marker {marker!r} no longer introduces a skipped span, so a legitimate "
+        f"correction would become a false BLOCK: {passage}"
+    )
+
+
+def test_the_marker_vocabulary_and_its_pins_cannot_drift():
+    """Every marker the regex accepts is pinned, and every pin names a marker the regex accepts."""
+    assert set(_RECORD_MARKERS) == set(_RECORD_MARKER_PASSAGES), (
+        "the vocabulary and its literal pins have diverged — an entry was added without a pin, or "
+        "removed while its pin (and the correction it protects) stayed: "
+        f"vocabulary-only={sorted(set(_RECORD_MARKERS) - set(_RECORD_MARKER_PASSAGES))} "
+        f"pins-only={sorted(set(_RECORD_MARKER_PASSAGES) - set(_RECORD_MARKERS))}"
     )
