@@ -644,9 +644,12 @@ def test_the_published_denominator_is_the_count_of_this_file() -> None:
     NON-VACUOUS, measured on the pre-fix document (`git show 2b8df75c0e^:<the file>`, the edition whose
     header publishes `326 → 214 → 112`): this shipped scheme measures `326` spellings / `215` pairs /
     `111` collisions there, so `214`/`112` disagrees in both figures and this test reds on the tree it was
-    written for. Re-derived at `90ec782d31` (`#13599` review, finding 1: the two figures reported here were
-    `216`/`110`, which the shipped scheme does not reproduce at any head) — measured with `_resolved_pairs`
-    over the committed blob, not carried forward from the edition it names.
+    written for. The `216`/`110` pair is a DIFFERENT edition's measurement, not a refuted one: this scheme
+    returns `326`/`216`/`110` at `549bad0c77` and `b64290529b` (both publishing `326 → 214 → 112`), while
+    the edition named above returns `326`/`215`/`111`. Each figure is measured with `_resolved_pairs` over
+    the committed blob, not carried forward from the edition it names. The revision this replaces denied
+    `216`/`110` as unreproducible "at any head" — two heads refute that (`#13653`), so the numbers stay and
+    only the universal goes.
     `test_a_carried_forward_figure_is_reported` is the negative control for the comparator itself.
     """
     problems = _figure_problems((REPO / _AUDIT).read_text(encoding="utf-8"))
