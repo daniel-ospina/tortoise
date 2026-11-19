@@ -378,22 +378,31 @@ record. Measured at this head, one mutant per arm, over
   row stays GREEN, because MISCONF also routes through
   `retryable_aborted_write`; naming it here would be the over-claim this
   paragraph exists to prevent.
-- neutralise `graph_abort_family` -> `[graph-aborted]`, plus the smoke,
-  deterministic-bug and R2 coherence pins (4).
-- neutralise `retryable_aborted_write` -> `[write-lock]` ALONE (1), which is
-  what makes the third arm load-bearing rather than decorative.
-- make `infra_failure` return `False` -> all three `INFRA_REDIS_FAMILIES` rows,
-  `[loading]`, the smoke record, the deterministic-bug, recovery-tier and R2
-  coherence pins, AND `test_a_redactor_failure_does_not_mask_the_failure` (9)
-  — the last one builds its entry from the same smoke exception, so it lives
-  downstream of `failure_is_recoverable` too and was not counted in the first
-  draft of this line. The coherence pins red here (and under the two
-  single-arm mutants above) because they assert the flag on entries whose
-  failures ARE infra: that is the same property from the other end, not a
-  second claim.
+- neutralise `graph_abort_family` -> `[graph-aborted]`, plus
+  `test_the_smoke_record_is_now_coherent`, `test_a_deterministic_bug_stays_excluded`,
+  `test_r2_counts_a_second_pipeline_attempt` and
+  `test_a_redactor_failure_does_not_mask_the_failure`.
+- neutralise `retryable_aborted_write` -> `[write-lock]` ALONE, which is what
+  makes the third arm load-bearing rather than decorative (the `misconf` row
+  stays green here too, for the reason above).
+- make `infra_failure` return `False` -> every row named in the two single-arm
+  bullets above, together: the three `INFRA_REDIS_FAMILIES` rows, `[loading]`,
+  and the four coherence pins. ⛔ That union does NOT grow the way the arm
+  bullets do — `test_a_redactor_failure_does_not_mask_the_failure` builds its
+  entry from the same smoke exception, so it reds under the
+  `graph_abort_family` mutant and is easy to leave out of that bullet's count
+  (it was, twice). The coherence pins red under several mutants because they
+  assert the flag on entries whose failures ARE infra: that is the same
+  property from the other end, not a second claim.
 - restore the `isinstance(exc, RedisError)` base-class arm -> all four
   `DETERMINISTIC_REDIS_REFUSALS` rows and the three excluded
-  `TRANSIENT_VALUE_REDIS_FAMILIES` rows (7).
+  `TRANSIENT_VALUE_REDIS_FAMILIES` rows.
+
+⛔ The bullets name ROWS, not counts. Three successive drafts of this paragraph
+carried a number per bullet and every one of them was wrong at least once, in
+the under-stated direction, because a new row silently joins a mutant's red set.
+A reader who needs the count can run the mutant; a reader who needs to know
+which arm is load-bearing reads the rows.
 
 The THREE-arm shape is pinned by the
 write-slot literal, whose only
