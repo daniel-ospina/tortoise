@@ -1364,13 +1364,39 @@ def test_the_durations_map_carries_one_row_per_file():
     pin that reads one line of a file that carries two cannot claim the file is
     clean (the manifest's own 51st pin names this class).
     """
-    manifest = (_REPO / "config" / "ci-surfaces.yml").read_text()
-    rows = [line for line in manifest.splitlines()
-            if line.strip().startswith("test_7949_capstone_measure.py:")]
-    assert len(rows) == 1, (
-        f"the durations map carries {len(rows)} rows for this file — a duplicate "
-        "key is a claim YAML keeps only the last of:" + "".join(
-            f"\n  {row[:90]}" for row in rows))
+    # ⛔ SCOPED TO THE WHOLE MANIFEST, NOT TO THIS FILE (#13802 review, round 11, P2).
+    # The guard used to count this ONE filename, and the class recurred FIVE times inside
+    # the PR that added it — every recurrence in `test_docs_citation_refs.py`, a file this
+    # guard never looked at, so `merge=union` re-added the twin on each rebase and the
+    # suite stayed green over a manifest whose duplicate key silently discards a row. A
+    # guard scoped to the one file that has never been the offender is the inert-enforcer
+    # shape this PR keeps naming, so the reader is now the loader that actually merges:
+    # a duplicate key is detected wherever it sits.
+    import yaml
+
+    _dupes: list[tuple[str, int]] = []
+
+    class _DupKeyLoader(yaml.SafeLoader):
+        pass
+
+    def _mapping(loader: yaml.SafeLoader, node, deep: bool = False):
+        _seen: set[str] = set()
+        for _k, _v in node.value:
+            _key = loader.construct_object(_k, deep=deep)
+            if _key in _seen:
+                _dupes.append((_key, _k.start_mark.line + 1))
+            _seen.add(_key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+    _DupKeyLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
+    yaml.load((_REPO / "config" / "ci-surfaces.yml").read_text(),
+              Loader=_DupKeyLoader)
+    assert not _dupes, (
+        "the manifest carries a DUPLICATE mapping key — YAML keeps only the LAST value, so "
+        "one row (usually a stale `merge=union` twin) is silently discarded, and the two "
+        "readers of this file disagree: " + "".join(
+            f"\n  {key!r} repeated at line {line}" for key, line in _dupes))
 
 
 def _build_gate_repo() -> Path:
@@ -6592,7 +6618,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
-        # The three offsets (+29 `nodes_used` -> `:15357`, +39 `max_nodes` -> `:15367`, +77 END)
+        # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
         # hold EXACTLY from that START, which is how the figures below were re-derived rather
         # than nudged — a uniform +66 on both ends, and the offsets re-measured rather than
         # assumed. The span at the PREVIOUS head, `:15262-15339`, no longer contains the
@@ -6843,10 +6869,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15367` (both needles are the file's only occurrences —
-    # `:15357` and `:15367` — so a later end cannot change the sum). Ends below `:15367` fail
+    # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
+    # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15346`-`:15385` gives a non-empty window that lacks at least the second needle,
+    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.

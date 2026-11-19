@@ -953,12 +953,15 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # ⛔ THOSE TWO COUNTS ARE HISTORY, NOT THIS HEAD'S (round 6 review, P3 — MEASURED): the
     # regex has since been widened to the detector's whole VERB class, so `reports exactly
     # two paths`, `lists one path`, `shows`/`names`/`includes`/`contains`/`has`/`=`/`:` and
-    # `outputs`/`→` all match it here. Its ANSWER class is a strict SUBSET of the
-    # detector's — measured, `returns none` is read by the detector and not by this regex,
-    # which is exactly what the `config/ci-surfaces.yml` row for this file states — so the
-    # detector is still asked separately for its direction LOGIC and its wider answer list
-    # (#13802 review, P2: this comment claimed EQUALITY of both classes, which the config
-    # row in the same diff contradicted).
+    # `outputs`/`→` all match it here. Its ANSWER class now covers every emptiness and count
+    # answer the detector reads — the `config/ci-surfaces.yml` row for this file states the
+    # measured split (ZERO detector-only forms; `no files` and `no diff` are BAN-only) — so
+    # the detector is still asked separately for its direction LOGIC, never for an answer
+    # this ban misses. ⛔ THIS SENTENCE HAS NOW BEEN WRONG TWICE, in opposite directions
+    # (#13802 review, P2): it first claimed EQUALITY of the two classes, which the config
+    # row in the same diff contradicted, and the correction then claimed a strict SUBSET on
+    # the strength of `returns none` — an example this regex's own `none` alternative
+    # refutes (grep -n 'none|None|zero|ZERO' → the answer class on the ban below).
     # the sibling arm SKIPS once the base is unreadable (which is every job that gates a
     # merge), and this regex did not match the verb. Measured on the depth-1 topology with
     # `` `…-- tortoise/` reports exactly two paths `` injected: GREEN over a refuted
@@ -2001,9 +2004,10 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # each measured GREEN here while the detector read it; for the DEICTIC and `set` anchors
     # this ban is the ONLY layer, because the detector anchors on a command token)
     r"|(?:an?\s+)?(?:empty|blank|EMPTY)\s+(?:list|set|array|result|output)"
-    r"|single|SINGLE|\b\d+\b"
+    r"|(?:an?\s+)?single|SINGLE|\b\d+\b"
     r"|(?:exactly\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|a|an|the)\s+"
-    r"(?:[\w-]+\s+)?(?:files?|paths?|modules?|edits?|entries|diffs?|hits?)"
+    r"(?:[\w-]+\s+)?(?:files?|paths?|modules?|edits?|entry|entries|diffs?|hits?|"
+    r"records?|items?|rows?|lines?|changes?)"
     r"|(?:[a-z''-]+\s+){0,4}comment[^.]{0,40}?(?:only|text|edits?)"
     # ⛔ AND THE VERB-BEFORE-PATH PARAPHRASES that carry the answer as a NOUN PHRASE
     # (`paths only as comment/docstring text`) — no verb after the anchor at all.
@@ -2145,6 +2149,13 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` prints ten entries",
         "`-- tortoise/` prints seven diffs",
         "`-- tortoise/` prints blank",
+        # ⛔ AND `a single <noun>` — `single` behind an ARTICLE, plus the singular nouns the
+        # `entries` list did not carry (#13802 review, round 11, P1 — all measured GREEN, and
+        # on the SET anchor the detector returns NOTHING because it needs a command token)
+        "the `tortoise/` set prints a single entry",
+        "the `tortoise/` set holds a single record",
+        "the `tortoise/` set prints a single item",
+        "the `tortoise/` set prints a single row",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
@@ -2239,11 +2250,17 @@ def test_the_document_types_no_numstat_figure_for_the_index_residual():
     NON-VACUITY, MEASURED — and ⛔ the census is NOT typed per line here, because this
     comment is subject to the very rule it describes. An earlier cut of it said "FIVE
     times across FOUR clauses (:108, :134 … :114, :134 again, :143)" and NO revision in
-    this branch's range produces that census (re-measured with the CURRENT pattern at
-    `origin/main`: **SIX matches across FIVE lines**, three of them the `--numstat` form
-    and three the ``docs/00_index.md`` + pair form). Re-run the pattern at the head you
-    are reviewing and read the map from that, rather than trusting a figure written here
-    — which is the arm's whole thesis applied to its own docstring.
+    this branch's range produces that census — re-measured with the CURRENT pattern at
+    **`6238dde72a`**, the head that cut was true at: **SIX matches across FIVE lines**
+    (`:102`, `:108` twice, `:114`, `:134`, `:143`; three the `--numstat` form and three the
+    ``docs/00_index.md`` + pair form). ⛔ THAT FIGURE IS BOUND TO `6238dde72a` AND TO NO
+    FLOATING REF: an earlier cut typed it against `origin/main`, which is not a head —
+    re-measured with this same pattern, `main`'s `#13807` has since de-typed those clauses
+    and it matches **ZERO** lines on `origin/main` (`28ca66878d`) and at this head, so the
+    figure is history at a named sha, not a claim about the tree you are reading. Re-run
+    the pattern at the head you are reviewing and read the map from that, rather than
+    trusting a figure written here — which is the arm's whole thesis applied to its own
+    docstring.
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
