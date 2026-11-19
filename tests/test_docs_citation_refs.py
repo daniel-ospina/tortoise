@@ -528,14 +528,26 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     may be narrow, but may not describe itself as complete.
 
     `claims_empty` says which DIRECTION the answer asserts, and it is read from the HEAD of
-    the answer — an optional leading negation, then the FIRST answer token — never from any
-    word that happens to sit in the window (#13795 review, round 3, C1/C2). Scanning the
+    the answer — the head is advanced by stripping, UNTIL A WHOLE PASS CHANGES NOTHING,
+    every leading negation (`not`/`never`/`n't`, each one inverting the direction), every
+    leading FILLER (`the`, `only`, `still`, `just`, `at least`, …) and every listed answer
+    FORM (so a DOUBLED form `prints contains …` is stripped too) — and then the first token
+    that is none of those decides. Never any word that merely sits in the window (#13795
+    review, round 3, C1/C2). Scanning the
     whole window was wrong in BOTH directions, measured: `prints the two comment-only
     modules and nothing else` was read as EMPTINESS (the trailing `nothing` won) and a
     refuted membership claim stayed green; `prints NOTHING at this head, though it was not
     empty at `2a7f24e241`` was read as MEMBERSHIP (the contrast clause's `not` won) and a
     TRUE emptiness claim was refused. Both are one defect: a qualifying word that binds a
     different predicate, or a different head, was deciding the answer's direction.
+
+    ⛔ THE THREE STRIPS ARE ONE FIXPOINT, NOT AN ORDERED PIPELINE (#13728 review, round 2,
+    P1, measured). Run once and in a fixed order, they skip any answer whose filler sits
+    behind a second listed form (`prints contains only two paths`) or in front of the head
+    negation (`is still not empty`), and they read `prints contains nothing but the two
+    modules` as EMPTINESS — every one of those is listed vocabulary, i.e. inside the class
+    below. Because the strips are one loop, the order cannot matter and neither can a
+    filler hidden behind another strip.
 
     So a head negation (`is NOT empty`, `never empty`, `isn't empty`) INVERTS the head
     token's direction; `nothing but …` / `none other than …` are MEMBERSHIP in their own
@@ -586,11 +598,60 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # as MEMBERSHIP (the contrast clause's `not` won) so a TRUE emptiness claim was
         # REFUSED. Both are one defect: a qualifying word that binds a different predicate,
         # or a different head, was deciding the answer's direction. Read the head instead.
+        # ⛔ ONE LOOP, EVERY HEAD-STAGE STRIPPER — NEGATION, FILLERS AND **REPEATED**
+        # FORMS (#13728 review, round 2, P1). The round-5 fixpoint covered the FILLERS
+        # only, so every other head-stage cut still ran ONCE, in a fixed order: the
+        # negation before the loop (it used to sit here) and the form strip after it.
+        # A filler that sat BEHIND a second listed form, or in FRONT of the negation, was
+        # therefore never presented to the loop, and the answer fell out of the
+        # `continue` below — SKIPPED, so a refuted membership claim stayed green.
+        # Measured at the head before this loop, with this function:
+        # `prints contains only two paths`, `prints has only two paths`,
+        # `prints lists at least two paths` and
+        # `prints contains just the two comment-only modules` were all skipped, while the
+        # control `prints contains two paths` classified; and the adverb+negation
+        # spellings `is still not empty`, `is now NOT empty`, `is also not empty` and
+        # `is only not empty` were all skipped, while `is not empty` classified. Both are
+        # listed vocabulary — a listed form (`contains`, `is`), a listed filler (`only`,
+        # `just`, `still`, `at least`, `also`) and a listed head token — so they are inside
+        # the class this guard declares, not in its "a verb outside the list" residual.
+        # ⛔ AND THE DIRECTION CAN INVERT, not merely go missing: the
+        # `nothing but …` / `none other than …` cut was ALSO head-anchored and outside the
+        # loop, so `prints contains nothing but the two modules` was read as EMPTINESS
+        # (the `nothing` won) — the mirror of the defect above, and the dangerous one.
+        # One fixpoint fixes both: strip from the head until a whole pass changes nothing,
+        # then read what is left.
         negated = False
-        _head_negation = re.match(r"(?:not|never|n['’]t)\b[\s,]*", low)
-        if _head_negation:
-            negated = True
-            low = low[_head_negation.end():]
+        # ⛔ ONE FILLER REVERSES THE SENSE OF A ZERO (#13831 review, P2): every other
+        # alternation in the filler step preserves it (`at least zero`, `no fewer than
+        # zero` and `exactly zero` are all emptiness), but `more than zero` is a LOWER
+        # BOUND of one. Stripping it and reading the bare `zero` that follows turns the
+        # claim INSIDE OUT, so a refuted membership claim would be read as emptiness and
+        # pass green at an empty head — the exact false pass this file exists to refuse.
+        # The flag records that the filler was removed, and the emptiness branch honours it.
+        _lower_bound = False
+        _before = None
+        while _before != low:
+            _before = low
+            _neg = re.match(r"(?:not|never|n['’]t)\b[\s,]*", low)
+            if _neg:
+                negated = not negated
+                low = low[_neg.end():]
+            _filler = re.sub(
+                r"^(?:the|a|an|its|this|that|those|these"
+                r"|just|only|still|now|actually|also|at\s+least|at\s+most"
+                r"|more\s+than|no\s+fewer\s+than|exactly)\s+", "", low, count=1)
+            if _filler != low:
+                if re.match(r"more\s+than\b", low):
+                    _lower_bound = True
+                low = _filler
+            # ⛔ AND A DOUBLED FORM (`prints contains …`) — a listed verb can sit where
+            # the answer should start, and the head token is what follows it (#13795
+            # review, round 4). Only the form words are stripped, so a pointer sentence
+            # (`is the command that answers it`) still starts at `command` and is skipped.
+            low = re.sub(
+                r"^(?:prints|returns|yields|reports|gives|outputs|carries|lists|shows"
+                r"|names|includes|contains|has)\s+", "", low, count=1)
         if re.match(r"(?:nothing\s+but\b|none\s+other\s+than\b)", low):
             # an emptiness WORD doing membership duty — `nothing but the two modules`
             claims_empty = False
@@ -601,47 +662,16 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # — was skipped and a refuted membership answer stayed green; and a quantifier
             # before the numeral (`just one`, `only one`, `at least one`, `no fewer than
             # two`) skipped it the same way.
-            # ⛔ FILLERS ARE STRIPPED UNTIL NONE REMAINS — QUANTIFIERS **AND** ARTICLES
-            # (#13795 review, round 5; #13728 review, P1). One quantifier pass left
-            # `prints now only one path` skipped, because both `now` and `only` sit in
-            # front of the numeral. The determiner strip then still ran ONCE, BEFORE this
-            # loop, so a quantifier removed inside the loop re-exposed a determiner that
-            # nothing removed and the answer fell out of the `continue` below — measured,
+            # ⛔ WHY THE FILLERS ARE IN THE LOOP ABOVE AT ALL (#13795 review, round 5):
+            # one quantifier pass left `prints now only one path` skipped, because both
+            # `now` and `only` sit in front of the numeral; a determiner strip that ran
+            # ONCE before the loop then re-exposed a determiner nothing removed, so
             # `prints only the two COMMENT-ONLY modules`, `prints only a single path`,
             # `prints just the two comment-only modules`, `prints at least the two
             # comment-only modules` and `prints exactly the two comment-only modules` were
             # all SKIPPED, while the control `prints the two COMMENT-ONLY modules` (one
-            # determiner fewer) classified correctly. That is in-class vocabulary — a
-            # listed form, a listed quantifier and the document's own `the two COMMENT-ONLY
-            # modules` head — so a refuted membership claim walked through green. The
-            # determiner alternation is therefore INSIDE the loop: stripping stops only
-            # when a whole pass changes nothing, whichever filler it removed.
-            # ⛔ ONE FILLER REVERSES THE SENSE OF A ZERO (#13831 review, P2): every other
-            # alternation here preserves it (`at least zero`, `no fewer than zero` and
-            # `exactly zero` are all emptiness), but `more than zero` is a LOWER BOUND of
-            # one. Stripping it and reading the bare `zero` that follows turned the claim
-            # INSIDE OUT, so a refuted membership claim was read as emptiness and passed
-            # green at an empty head — the exact false pass this file exists to refuse.
-            # The flag records that the filler was removed, and the emptiness branch below
-            # honours it.
-            _before = None
-            _lower_bound = False
-            while _before != low:
-                _before = low
-                _cut = re.match(
-                    r"(?:the|a|an|its|this|that|those|these"
-                    r"|just|only|still|now|actually|also|at\s+least|at\s+most"
-                    r"|more\s+than|no\s+fewer\s+than|exactly)\s+", low)
-                if _cut is None:
-                    # nothing left to strip — a whole pass changed nothing, so stop.
-                    break
-                if re.match(r"more\s+than\b", _cut.group(0)):
-                    _lower_bound = True
-                low = low[_cut.end():]
-            low = re.sub(
-                r"^(?:prints|returns|yields|reports|gives|outputs|carries|lists|shows"
-                r"|names|includes|contains|has)\s+", "", low, count=1)
-            # (no leading `` `? ``: :573 already stripped every backtick from `low`, so that
+            # determiner fewer) classified correctly.
+            # (no leading `` `? ``: `low` had every backtick stripped above, so that
             # branch could never match — dropped rather than left as an inert alternative.)
             _member = re.match(
                 r"(?:tortoise/|comment-only\b|non[- ]?empty\b"
@@ -672,8 +702,11 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 claims_empty = False
             else:
                 continue
-            if negated:
-                claims_empty = not claims_empty
+        # ⛔ ANY HEAD NEGATION INVERTS THE HEAD TOKEN'S DIRECTION — including a negation
+        # the loop reached BEHIND a filler or a doubled form (`is still not empty`), and
+        # including `nothing but …` (`prints not nothing but the two modules`).
+        if negated:
+            claims_empty = not claims_empty
         answers.append((window, claims_empty))
     return answers
 
@@ -986,7 +1019,8 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the shape detector skips or mis-reads {_member_spelling!r} — a MEMBERSHIP "
             "answer spelled the way this document writes it, so the refuted claim passes "
             "green (#13795 review, round-4 P1)")
-    for _zero_spelling in ("prints 0 paths", "prints exactly zero paths", "prints 0 files"):
+    for _zero_spelling in ("prints 0 paths", "prints exactly zero paths", "prints 0 files",
+                           "is still empty"):
         assert _typed_answers_to_tortoise_cmd(
             f"`{_tortoise_cmd}` {_zero_spelling}", _tortoise_cmd
         ) == [(_zero_spelling, True)], (
@@ -1041,6 +1075,32 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "second quantifier or a determiner between the quantifier and the numeral, so "
             "a refuted claim in that format passes green (#13795 review, round-5 P1; "
             "#13728 review, P1)")
+    # ⛔ AND A FILLER THE ROUND-5 LOOP COULD NOT EVEN SEE (#13728 review, round 2, P1):
+    # the negation and the form strip used to run ONCE, OUTSIDE the loop, so a filler that
+    # sat BEHIND a second listed form (`prints contains only two paths`) or IN FRONT of the
+    # negation (`is still not empty`) was never presented to the loop at all and the answer
+    # was SKIPPED. Both are listed vocabulary — a listed form, a listed filler, a listed
+    # head token — so both are in the class. Each row below is killed by putting one of
+    # those two strips back outside the loop; the control rows (`prints contains two
+    # paths`, `is not empty`) classified before this round and still do.
+    for _behind_a_form in (
+            "prints contains only two paths",
+            "prints has only two paths",
+            "prints lists at least two paths",
+            "prints contains just the two comment-only modules",
+            "is still not empty",
+            "is now NOT empty",
+            "is also not empty",
+            "is only not empty",
+            "prints contains nothing but the two modules"):
+        _seen = _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_behind_a_form}", _tortoise_cmd)
+        assert _seen and _seen[0][1] is False, (
+            f"the shape detector skips or mis-reads {_behind_a_form!r} — a MEMBERSHIP "
+            "answer with a filler behind a second listed form, or in front of the head "
+            "negation, so a refuted claim in that format passes green, and "
+            "`… contains nothing but the two modules` is read as EMPTINESS (#13728 "
+            "review, round-2 P1)")
     # ⛔ AND THE QUALIFIED NEGATION (#13795 review, finding 3): `non-empty` CONTAINS the
     # word `empty`, and reading it as an emptiness claim inverts the direction — it passes
     # a false membership claim at THIS (empty) head and would refuse the true sentence at a
