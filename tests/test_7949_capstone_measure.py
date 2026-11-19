@@ -6509,7 +6509,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
                        "def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:")),
         ), "sdk"),
         # ⛔ THE CONTENT-REVIEW FILTER AND THE `_list_dedup_candidates` SIGNATURE — D5 states both in
-        # present tense on ONE markdown line, and neither had a reader: the filter is the file's ONLY
+        # present tense on ONE markdown line. ⛔ NOT "neither had a reader" (#13589 review, P3-1):
+        # the FILTER's number ALREADY had one, and an earlier cut of this comment claimed otherwise.
+        # `_D5_CURRENT_CLAIMS` — inherited from `main`, not added here — carries
+        # `the file's ONLY `dedup_reviewed IS NULL`, at `:(?P<n>\d+)` at THIS head` bound to the
+        # `n.dedup_reviewed IS NULL` needle, so moving that number already reds
+        # `test_the_D5_current_head_anchors_are_the_lines_they_name`. What is NEW here is (a) the
+        # SIGNATURE PAIR, neither half of which had any reader, and (b) a WHOLE-SENTENCE binding of
+        # the filter clause (the `assert _d5.count(_dedup_clause) == 1` arm below), which
+        # `_D5_CURRENT_CLAIMS` does not give: D5 is one markdown
+        # line and a `_pin_row_failures` row scoped to it is satisfied by ANY `:N` on that line, so
+        # it cannot tell the clause's own number from a sibling's. The filter is the file's ONLY
         # `dedup_reviewed IS NULL`, which is what makes the anchor discriminating, and the signature
         # pair is held at BOTH halves because the paragraph's whole point is that the comment line
         # above it is NOT the signature. Re-derived by content at the head this row lands on
