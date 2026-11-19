@@ -383,8 +383,11 @@ record. Measured at this head, one mutant per arm, over
 - neutralise `retryable_aborted_write` -> `[write-lock]` ALONE (1), which is
   what makes the third arm load-bearing rather than decorative.
 - make `infra_failure` return `False` -> all three `INFRA_REDIS_FAMILIES` rows,
-  `[loading]`, the smoke record and the deterministic-bug, recovery-tier and R2
-  coherence pins (8). The three coherence pins red here (and under the two
+  `[loading]`, the smoke record, the deterministic-bug, recovery-tier and R2
+  coherence pins, AND `test_a_redactor_failure_does_not_mask_the_failure` (9)
+  — the last one builds its entry from the same smoke exception, so it lives
+  downstream of `failure_is_recoverable` too and was not counted in the first
+  draft of this line. The coherence pins red here (and under the two
   single-arm mutants above) because they assert the flag on entries whose
   failures ARE infra: that is the same property from the other end, not a
   second claim.

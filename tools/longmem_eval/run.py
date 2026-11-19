@@ -1363,10 +1363,18 @@ def _retry_failed_skip_reason(entry: dict, *,
                 f"ingest:retries_exhausted entries are re-attempted "
                 f"(reader:/judge: entries stay permanently skipped)")
     if entry.get("retryable") is False:
+        # ⛔ NOT an enumeration of the excluded families. ``retryable: false``
+        # is also reached by families nobody would call deterministic — a
+        # provider ``requests.exceptions.HTTPError('503 …')`` at ingest grades
+        # ``ingest:retries_exhausted`` but ``retryable_transient`` refuses an
+        # ``HTTPError`` before any arm runs — so naming "deterministic bugs
+        # AND the transient-value redis refusals" told an operator triaging a
+        # provider 5xx that the cause was a bug in our code. Say what the flag
+        # means and point at the predicate; do not list what it excludes.
         return ("retryable=false (not an infra failure — never re-attempted; "
-                "the families this covers are deterministic bugs AND the "
-                "transient-value redis refusals #8486 excludes, see "
-                "errors.py::infra_failure)")
+                "covers a deterministic bug in our own code and every family "
+                "errors.py::infra_failure does not name, which includes the "
+                "transient-value redis refusals)")
     if entry.get("retryable") is None and not _legacy_repr_match(
             str(entry.get("error") or "")):
         # Legacy entry without a 'retryable' field: the repr-string check is
