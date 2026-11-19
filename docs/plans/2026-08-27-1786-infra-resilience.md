@@ -368,9 +368,22 @@ unknown command`, and redis-py's client-side `DataError`), which a coarser
 `isinstance(exc, RedisError)` reading would have re-admitted. P2-2 (provider
 transients at the ingest site ARE in scope) and P1-7 (MISCONF stays
 re-attemptable) both still hold. What is PINNED, precisely, so a successor can
-tell an arm from a claim: `retryable_transient` and `graph_abort_family` are
-each covered by a row that reds when the arm is neutralised (measured: 18 and 3
-failures). The THREE-arm shape is pinned by the write-slot literal, whose only
+tell an arm from a claim — by ROW, not by a failure count, because the counts
+move every time a row is added and a stale count is its own kind of false
+record. Measured at this head, one mutant per arm: neutralise
+`retryable_transient` and `TRANSIENT_VALUE_REDIS_FAMILIES[loading]` plus
+`test_the_recovery_tier_preservation_stays_coherent` red (the `misconf` row
+stays GREEN, because MISCONF also routes through `retryable_aborted_write` —
+that over-claim is why this is stated per row); neutralise `graph_abort_family`
+and `INFRA_REDIS_FAMILIES[graph-aborted]` plus the smoke, deterministic-bug and
+R2 pins red; neutralise `retryable_aborted_write` and
+`INFRA_REDIS_FAMILIES[write-lock]` reds alone; make `infra_failure` return
+`False` outright and all three `INFRA_REDIS_FAMILIES` rows,
+`TRANSIENT_VALUE_REDIS_FAMILIES[loading]` and the smoke record red; restore the
+`isinstance(exc, RedisError)` base-class arm and all four
+`DETERMINISTIC_REDIS_REFUSALS` rows plus the three excluded
+`TRANSIENT_VALUE_REDIS_FAMILIES` rows red. The THREE-arm shape is pinned by the
+write-slot literal, whose only
 route to `true` is `retryable_aborted_write` — MISCONF reaches `true` through
 `retryable_transient` as well, so a MISCONF row alone would stay green with
 that arm deleted. Every arm names `tortoise/retry.py`'s own regexes; none is a
