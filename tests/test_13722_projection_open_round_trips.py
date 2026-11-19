@@ -35,11 +35,16 @@ THE THREE THINGS THIS FILE PINS, each a way the fix could be defeated:
 HOW DISCRIMINATING A REVERT IS (measured, so a later reader inherits the real
 number): reverting the probe to `count(n)` reddens **3 of these 8 arms** on a
 lane with a store — "one query, no aggregate", the open's wire-count filter,
-and the scaling/control arm — and **1 of 7** where those two live arms skip
+and the scaling/control arm — and **1 of 6** where those two live arms skip
 (the cite pin is not one of them).
-(Measured at this head: `3 failed, 5 passed` with the probe reverted, and
-`1 failed, 7 passed` with the aggregate filter narrowed back to
-`GRAPH.QUERY`; the file as it stands, `8 passed`.)
+(Measured at this head. STORE lane — all eight arms run: `3 failed, 5 passed`
+with the probe reverted, `1 failed, 7 passed` with the aggregate filter
+narrowed back to `GRAPH.QUERY`, and `8 passed` as it stands. NO-STORE lane —
+six arms run, the two live ones skip: `1 failed, 5 passed, 2 skipped` with the
+probe reverted and `6 passed, 2 skipped` as it stands. Each figure names the
+lane it was taken on: a reader who re-runs the documented command without a
+store must get the SECOND pair, and treating the store lane's `8 passed` as
+this file's no-store result is how "1 of 7" outlived the arm it counted.)
 
 A FOURTH, CHEAPER PIN rides along because this branch's own insert is what moved it: the
 fix adds 30 lines at ``tortoise/projection/__init__.py:12099``, so EVERY ``file.py:NNNN``
