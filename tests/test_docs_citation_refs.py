@@ -652,9 +652,20 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           send the reader to the command, never away from it) and names every path
           `_note_paths` returns — the two `tortoise/` notes the verb grades and the test
           and tool rows it also lists — which is WHICH files the verdict is about;
-      (c) TYPED ANSWERS — a typed answer to the `-- tortoise/` command is refused in the
-          direction the MEASUREMENT refutes at this head: membership phrasings are refused
-          when the command prints nothing, emptiness phrasings when it prints a path.
+      (c) TYPED ANSWERS — a typed answer to the `-- tortoise/` command, refused by TWO
+          layers, and the difference is which checkout each holds in:
+
+          (c1) INLINE, base-free, ALWAYS LIVE: any present-tense typed answer to that command
+               — emptiness OR membership, through BOTH detectors below — is refused
+               unconditionally, because such an answer is head-bound by construction. This
+               is the layer that runs in the depth-1 `test` job.
+
+          (c2) MEASURED, in `test_the_bundles_tortoise_set_answers_are_not_typed_against_the
+               _tree`: it reads the set from `git diff origin/main...HEAD` and refuses only
+               the direction the measurement REFUTES, so a TRUE answer is allowed there. Its
+               direction comes from a subprocess a depth-1 checkout cannot answer (rc=128,
+               empty stdout), so it SKIPS there — measured in a real `--depth 1` clone as
+               `15 passed, 1 skipped`, which is exactly why (c1) exists.
           The spellings measured FALSE are refused by name AND by SHAPE (the command
           followed by one of the LISTED answer forms, then an answer), so neither a frozen
           sign nor a re-wording of the ANSWER — a different listed verb, or a different
@@ -773,12 +784,14 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "arm exists for, and it is refused in EVERY checkout because the ban is on the "
         "TEXT, not on a reading this clone may be unable to take (#13802 review, round 4, "
         "P2). State the command and let the reader run it at the head they merge")
-    # (c) TYPED ANSWERS live in `test_the_bundles_tortoise_set_answers_are_not_typed_against
-    # _the_tree`, deliberately NOT here. Their direction is read from `git diff
-    # origin/main...HEAD`, which a depth-1 `test` job cannot answer at all (rc=128, empty
-    # stdout) — and a `pytest.skip` raised from HERE would also silence (a) AGREEMENT and
-    # (b) POINTERS in every job that cannot measure, i.e. in the only job that gates the
-    # merge. Split out for that reason alone (#13795 review, finding 1).
+    # (c1) above is the always-live refusal and it lives HERE, base-free. The MEASURED
+    # classifier (c2) still lives in
+    # `test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree`, deliberately
+    # NOT here: its direction is read from `git diff origin/main...HEAD`, which a depth-1
+    # `test` job cannot answer at all (rc=128, empty stdout) — and a `pytest.skip` raised
+    # from HERE would also silence (a) AGREEMENT and (b) POINTERS in every job that cannot
+    # measure, i.e. in the only job that gates the merge. That skip is why (c1) has to
+    # carry the coverage on the rail (#13795 review, finding 1; #13802 merge round P2).
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
@@ -798,7 +811,15 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
 
 
 class _Unmeasurable(RuntimeError):
-    """The `-- tortoise/` set could not be MEASURED here, so its direction is UNKNOWN."""
+    """A `git diff origin/main...HEAD` reading could not be TAKEN here, so its value is UNKNOWN.
+
+    ⛔ IT HAS TWO SUBJECTS, AND NAMING ONE IS HOW THIS DOCSTRING WENT WRONG (#13802 merge
+    round P2): `_measured_tortoise_set` (the `-- tortoise/` set) and
+    `_measured_index_word_diff` (the `sdk.py:<n>` tokens this diff adds to
+    `docs/00_index.md`) both raise it. The rule they share is the only thing that matters
+    here: a FAILED read is UNKNOWN and must never be rendered as the empty value a
+    successful read of nothing produces.
+    """
 
 
 def _measured_tortoise_set(proc: subprocess.CompletedProcess | None = None) -> list[str]:
@@ -1311,6 +1332,13 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # only the long form walks straight past the figure that replaces `NOTHING` there —
     # measured: `both print `1 1`` left both arms green.
     r"|`--numstat`\s+form\s*(?:both\s+print|->|prints?)\s*`\d+\s+\d+`"
+    # ⛔ AND A BARE PRESENT-TENSE VERB ON THE `numstat` NOUN (#13802 merge round P2).
+    # `the numstat prints `3 3` here` is the same head-bound class and no alternative above
+    # saw it — measured: injected into the head document it left this arm GREEN, while the
+    # long form, the `--numstat` form and `both print` each red. The participle ("printing
+    # `1 1` at a head of its own") is HISTORY and stays allowed, which is why the verb here
+    # is present-tense only.
+    r"|numstat[^`]{0,160}?\b(?:prints?|returns?|reports?)\s*`\d+\s+\d+`"
     # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
     # document's `both print NOTHING` clauses state the CURRENT reading without repeating
     # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
@@ -1412,12 +1440,19 @@ def _measured_index_word_diff(
 #: `test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points`, whose first
 #: leg was `assert m` on `re-pointing that row's `sdk.py` cite from **`:OLD`** … to
 #: **`:NEW`**` — i.e. it REQUIRED the false attribution to exist in the document, so the
-#: sentence this PR deletes could not be deleted while that arm lived. Its resolution
-#: invariant (`_index` carries the NEW cite, not the OLD one) is kept and strengthened by
-#: the current-value leg inside
+#: sentence this PR deletes could not be deleted while that arm lived. It is replaced by a
+#: SCOPED current-value leg inside
 #: `test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed`, which
-#: checks the cite that IS in the file wherever the file carries one, instead of
-#: mandating a phrasing that attributes `main`'s move to this diff. Recorded here rather
+#: checks the CONTENT a cite resolves to wherever the file carries that cite, instead of
+#: mandating a phrasing that attributes `main`'s move to this diff.
+#:
+#: ⛔ AND THAT IS NARROWER THAN WHAT IT REPLACES — stated, not papered over (#13802 merge
+#: round P2). The deleted arm also asserted the OLD cite was ABSENT; nothing enforces that
+#: now, measured: injecting `sdk.py:21604` into `docs/00_index.md` ALONGSIDE the surviving
+#: `sdk.py:21715` leaves the suite green. It is not re-added here because "is it absent" is
+#: a property of `docs/00_index.md`'s own content rather than a claim about this diff, and
+#: because `main` re-deriving that row again is the normal case this PR exists to stop
+#: reding on. Recorded here rather
 #: than in a comment beside a deleted function, because a reader must be able to see WHY
 #: `main`'s arm is gone without diffing two heads.
 _ATTRIBUTION_PHRASES = (
