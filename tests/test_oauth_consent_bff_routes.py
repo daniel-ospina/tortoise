@@ -2172,10 +2172,41 @@ _FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure", re.IGNORECASE)
 # adverb defeats is not a guard. A sentence is exempt only when it BOTH states the universal in the
 # PAST — so it is a claim about what used to be true — AND names a COUNTED survivor, so the reader
 # is told what still answers JSON. Neither condition alone exempts anything.
+#
+# ⛔ AND THE PAST HALF MUST BE ATTACHED TO THE UNIVERSAL, NOT MERELY PRESENT IN ITS SENTENCE. The
+# first two-condition version searched the whole sentence for `before|previously|used to`, so ONE
+# unrelated clause later in the same sentence switched the guard off (review of #13712, F5).
+# Measured at `4ab3033e32`, through these very patterns and this very loop — both GREEN, i.e. the
+# absolute shipped as a PASS:
+#
+#   "Every hard failure is a page, as noted before, and two arms still return JSON."
+#   "Every hard failure is a page, and the two arms still return JSON, as we said before."
+#
+# The retro framing is therefore read from the SENTENCE HEAD — where it can scope the universal that
+# follows it (`_RETRO_*` below, applied to `text[begin:start]`) — or from an explicit `used to` in
+# the tail. `before` / `until` are also plain conjunctions, and "until the cookie is set" is PRESENT
+# tense, so they must carry a RETRO ANCHOR, which is what keeps the absolute red.
+#
+# Past-tense verb FORMS (`answered`, `returned`, `served`) are deliberately NOT a marker on their
+# own: "every hard failure IS ANSWERED with a page" is present tense spelled with a past participle,
+# and accepting the form exempted it. Documented residual — this is a prose lint, not a parser: a
+# sentence that manufactures an anchored retro clause about an UNRELATED subject before the
+# universal can still exempt it, and that shape cannot be told from the legitimate one without
+# resolving what the clause refers to.
 _SURVIVORS_NAMED_RE = re.compile(
     r"\b(?:two|both|\d+)\b[^.\n]{0,40}\b(?:arms?|returns?|places?|browsers?)\b",
     re.IGNORECASE)
-_PAST_UNIVERSAL_RE = re.compile(r"\b(?:used to|previously|before)\b", re.IGNORECASE)
+# Retro adverbs are unambiguous: none of them can head a present-tense conditional.
+_RETRO_ADVERB_RE = re.compile(r"\b(?:previously|formerly|originally|no\s+longer)\b", re.IGNORECASE)
+# `before` / `until` are also conjunctions, so they only scope the PAST when they name the thing the
+# universal used to be true of — an issue, a dated/refactoring cutover, or a year.
+_RETRO_ANCHORED_RE = re.compile(
+    r"\b(?:before|until)\s+(?:#\d+|(?:this|the)\s+"
+    r"(?:change|fix|fold|cutover|migration|refactor|pr|diff|commit|release)s?\b|\d{4})",
+    re.IGNORECASE)
+_USED_TO_AFTER_RE = re.compile(r"\bused\s+to\b", re.IGNORECASE)
+# How far after the phrase the universal's own verb may sit to read as a past statement.
+_PAST_VERB_SPAN = 80
 
 
 # A sentence ends at a `.` that whitespace follows (never at `start.ts` or `json({error, reason})`,
@@ -2188,37 +2219,72 @@ _PAST_UNIVERSAL_RE = re.compile(r"\b(?:used to|previously|before)\b", re.IGNOREC
 _SENTENCE_BREAK_RE = re.compile(r"\.\s|\n\s*\n|\n[ \t]*\*[ \t]*\n")
 
 
-def _sentence_around(text: str, start: int, end: int) -> str:
-    """The sentence around `text[start:end]`, BOUNDED at both ends so a survivor named in a
-    different sentence — or a different PARAGRAPH — cannot exempt this one. Both directions use the
-    same breaks (`_SENTENCE_BREAK_RE`): a period that whitespace follows, a blank line, or a ` *`
-    line that is blank inside a JSDoc block. An unterminated span on either side stops at 240
-    characters rather than reaching across the document.
+def _sentence_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """`(begin, finish)` of the sentence around `text[start:end]`, BOUNDED at both ends so a
+    survivor named in a different sentence — or a different PARAGRAPH — cannot exempt this one.
+    Both directions use the same breaks (`_SENTENCE_BREAK_RE`): a period that whitespace follows, a
+    blank line, or a ` *` line that is blank inside a JSDoc block. An unterminated span on either
+    side stops at 240 characters rather than reaching across the document.
     """
     head = text[:start]
     breaks = list(_SENTENCE_BREAK_RE.finditer(head))
     begin = breaks[-1].end() if breaks else 0
     stop = _SENTENCE_BREAK_RE.search(text, end)
     finish = stop.end() if stop else min(len(text), end + 240)
-    return text[max(begin, start - 240):finish]
+    return max(begin, start - 240), finish
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence around `text[start:end]` — see `_sentence_bounds` for the window."""
+    begin, finish = _sentence_bounds(text, start, end)
+    return text[begin:finish]
+
+
+def _names_the_survivors(text: str, start: int, end: int) -> bool:
+    """The SURVIVOR half, in one place: a COUNTED survivor is named, attached to its arm/return."""
+    return bool(_SURVIVORS_NAMED_RE.search(_sentence_around(text, start, end)))
+
+
+def _retro_framed(text: str, start: int, end: int) -> bool:
+    """The PAST half, ATTACHED to the universal — not merely somewhere in its sentence.
+
+    Retro framing in the sentence HEAD scopes the universal that follows it; `used to` in the tail
+    is the universal's own verb. A retro word in a LATER clause is about some other subject, and it
+    must not exempt the absolute (measured fail-open at `4ab3033e32`, review of #13712, F5).
+    """
+    begin, finish = _sentence_bounds(text, start, end)
+    head_window = text[begin:start]
+    tail_window = text[end:min(end + _PAST_VERB_SPAN, finish)]
+    return bool(
+        _RETRO_ADVERB_RE.search(head_window)
+        or _RETRO_ANCHORED_RE.search(head_window)
+        or _USED_TO_AFTER_RE.search(tail_window))
+
+
+def _absolute_violations(text: str) -> list[tuple[str, str]]:
+    """Every `(matched span, its sentence window)` for which `text` states the false absolute.
+
+    The DECISION lives here, in one place: the corpus check and the exemption's table both drive
+    THIS function, so a widening of any pattern cannot pass by leaving a second, re-typed copy of
+    the loop behind (review of #13712, F7).
+    """
+    violations: list[tuple[str, str]] = []
+    for m in _FALSE_ABSOLUTE_RE.finditer(text):
+        if _retro_framed(text, m.start(), m.end()) and _names_the_survivors(
+                text, m.start(), m.end()):
+            continue
+        violations.append((text[m.start():m.end()], _sentence_around(text, m.start(), m.end())))
+    return violations
 
 
 def _false_absolute_in(text: str) -> str | None:
     """The first false-absolute span in `text` that is NOT the correct form, or None.
 
-    A module-level helper so the exemption is exercised through THIS loop (finditer →
-    `_sentence_around` → both conditions) rather than through a retyped copy of it in the test that
-    pins the exemption's shape.
+    A thin accessor over `_absolute_violations`, so the exemption is exercised through the shipped
+    decision rather than through a retyped copy of its loop in the test that pins its shape.
     """
-    for m in _FALSE_ABSOLUTE_RE.finditer(text):
-        sentence = _sentence_around(text, m.start(), m.end())
-        # BOTH, never either: without the past marker this is a present-tense absolute that merely
-        # mentions an adverb; without the counted survivor the reader is not told what still answers
-        # JSON (review of #13712, F4).
-        if _PAST_UNIVERSAL_RE.search(sentence) and _SURVIVORS_NAMED_RE.search(sentence):
-            continue
-        return text[m.start():m.end()]
-    return None
+    violations = _absolute_violations(text)
+    return violations[0][0] if violations else None
 
 
 def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
@@ -2250,12 +2316,18 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     author to write — the universal stated about the PAST, with the survivors named ("before
     #13671, every hard failure … answered raw JSON; two arms still do"). A phrase-only match failed
     that sentence and reported that the file "claims EVERY HARD FAILURE is a page", the opposite of
-    what it says (review of #13712, F3). So a match is exempt only when its OWN sentence does BOTH
-    things — states the universal about the PAST and names a COUNTED survivor (`_PAST_UNIVERSAL_RE`
-    and `_SURVIVORS_NAMED_RE`, both required; review of #13712, F4 measured a one-word list being
-    the whole exemption and defeatable by "…is a page, and the status is still unchanged") — and the
-    message QUOTES the span it matched, so a red can no longer be read as a claim about a sentence
-    nobody wrote.
+    what it says (review of #13712, F3). So a match is exempt only when it states the universal
+    about the PAST **attached to it** and names a COUNTED survivor (`_retro_framed` and
+    `_names_the_survivors`, both required; F4 measured a one-word list being the whole exemption and
+    defeatable by "…is a page, and the status is still unchanged", and F5 measured a retro word in a
+    LATER clause doing it) — and the message QUOTES the span it matched, so a red can no longer be
+    read as a claim about a sentence nobody wrote.
+
+    ⛔ THE EXEMPTION IS PINNED BY ITS OWN TABLE, not only by this corpus. Both halves are
+    UNREACHABLE here at head — `git grep -i 'every hard failure'` over the three files below returns
+    0 hits — so without `test_the_summary_guard_exempts_ONLY_a_past_universal_with_a_COUNTED_survivor`
+    a later widening of any pattern would ship with nothing red claiming to cover it. That table
+    drives `_false_absolute_in` → `_absolute_violations`, the same decision this loop calls.
 
     Non-vacuous, and where the red actually lands: `origin/main`'s
     `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
@@ -2308,6 +2380,15 @@ def test_the_summary_guard_exempts_ONLY_a_past_universal_with_a_COUNTED_survivor
     Non-vacuity, both directions: every BYPASS row is EXEMPT at `bf5202ce79` and RED here (measured),
     and every CORRECT row is exempt in both — it is the sentence F3 asked this guard to stop
     reddening, so a red there would be a false block.
+
+    ⛔ AND THE PAST HALF IS ATTACHED, NOT MERELY PRESENT (review of #13712, F5). The first
+    two-condition version searched the whole sentence for `before|previously|used to`, so ONE
+    unrelated clause later in the same sentence switched the guard off. Measured at `4ab3033e32`
+    through these very patterns: the two `LATER CLAUSE` rows below were both GREEN, i.e. the
+    absolute shipped as a PASS. `_retro_framed` reads the frame from the SENTENCE HEAD or from an
+    explicit `used to` in the tail; `before`/`until` additionally need a retro anchor, so a
+    present-tense `until the cookie is set` does not qualify. Past PARTICIPLES are not markers (`is
+    answered` is present tense).
     """
     bypass = [
         # The denial itself: the claim `start.ts`'s two `json(...)` returns falsify.
@@ -2322,6 +2403,15 @@ def test_the_summary_guard_exempts_ONLY_a_past_universal_with_a_COUNTED_survivor
         "Every hard failure is a page, because two arms still answer JSON.",
         # …and PAST framing alone is not enough: nothing is counted and named as a survivor.
         "Before #13671, every hard failure is a page, and the store remains the source of truth.",
+        # ⛔ LATER CLAUSE (F5): the retro word is about another subject and comes AFTER the
+        # universal, which is present tense. Both were GREEN at `4ab3033e32`.
+        "Every hard failure is a page, as noted before, and two arms still return JSON.",
+        "Every hard failure is a page, and the two arms still return JSON, as we said before.",
+        # ⛔ `before` / `until` as present-tense conjunctions: an anchor is required.
+        "Until the cookie is set, every hard failure is a page; two arms still return JSON.",
+        "Before the cookie is set, every hard failure is a page; two arms still return JSON.",
+        # ⛔ A past PARTICIPLE is not a past tense: "is answered" is present.
+        "Every hard failure is answered with a page; two arms still return JSON.",
     ]
     correct = [
         # The sentence this change asks an author to write (F3).
@@ -2329,6 +2419,9 @@ def test_the_summary_guard_exempts_ONLY_a_past_universal_with_a_COUNTED_survivor
         # `origin/main`'s header form, with the survivors counted rather than implied.
         "Every hard failure of that route used to answer `json({error, reason})`; two arms still do.",
         "Previously every hard failure of that route answered raw JSON; both arms return one.",
+        # The retro frame may also be the universal's own verb rather than a clause before it.
+        "Every hard failure used to answer raw JSON; two arms still do.",
+        "Before this change, every hard failure returned raw JSON; both returns remain.",
     ]
     for sentence in bypass:
         # The span is quoted out of the ORIGINAL text, so compare case-insensitively.
