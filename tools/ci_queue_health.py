@@ -150,10 +150,14 @@ SEVEN STATES, DELIBERATELY NOT INTERCHANGEABLE
               side (``/cancel`` answers "Cannot run a workflow run that is
               completed" about a run that reads ``queued`` — tortoise#12906). It is
               NOT ``PR-UNWITNESSED`` either: nothing was missed, a population was
-              measured. ``congests_pr`` is ``None`` whenever an exclusion is in
-              play, so no destructive caller is ever authorised by it, and a CUT
-              feed refuses the state outright (an absence cannot be read off a leg
-              whose OLDEST rows were dropped). Exit 0, warned.
+              measured. ``congests_pr`` is ``None`` IN THIS STATE, so no destructive
+              caller is authorised by it — that is a property of the VERDICT, not of
+              the exclusion (a ``PR-STARVED``/``FLOOD``/``PR-BACKLOGGED`` reading can
+              carry an exclusion AND authorise a cancel, measured: one proved run
+              beside one live 7 000 s waiter reads ``PR-STARVED`` with
+              ``congests_pr=True``) — and a CUT feed refuses the state outright (an
+              absence cannot be read off a leg whose OLDEST rows were dropped).
+              Exit 0, warned.
 
 The truncation note, MEASURED rather than assumed (it is what makes
 PR-UNWITNESSED necessary):
@@ -1011,10 +1015,14 @@ class QueueHealth:
     def _never_dispatched_token(self) -> str:
         """Name the exclusion on the ONE string the fleet samples.
 
-        ⛔ ONLY WHEN POSITIVE, so every pre-#13825 reading renders byte-identically — and
-        the unproven complement is emitted beside it whenever a probe pass ran, because a
-        count with no denominator would let "budget-starved" read exactly like "measured
-        clear", which is the asymmetry this module refuses for `pr_running_unmeasured`.
+        ⛔ WHEN POSITIVE, OR WHEN A PROBE PASS RAN AND PROVED NOTHING (#13825 review
+        round 4 — this summary used to say "ONLY WHEN POSITIVE" while the body
+        deliberately emits a STANDALONE `never_dispatched_unproven=` token for the
+        all-abstained pass, which has no `never_dispatched=` count to sit beside). Every
+        pre-#13825 reading renders byte-identically, because the complements are `None`
+        unless a probe pass RAN — and the unproven complement is otherwise emitted
+        because a count with no denominator would let "budget-starved" read exactly like
+        "measured clear", the asymmetry this module refuses for `pr_running_unmeasured`.
         """
         if not self.pr_never_dispatched:
             # ⛔ AN ABSTENTION WITH NOTHING PROVED IS STILL AN ABSTENTION (#13825 review

@@ -2970,7 +2970,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # SHIPPED LEAD-IN, and this leg's RESIDUAL is stated rather than chased (review round
         # 22, the same lesson round 4 learned for `retracted`): ANY contiguous span can be
         # embedded by a correct rewrite, so (i) the bare clause reds a correct re-typing of the
-        # BUDGET-surplus scoping at `tools/ci_queue_health.py:1675` (measured; the coordinate
+        # BUDGET-surplus scoping at `tools/ci_queue_health.py:2003` (measured; the coordinate
         # moves with this file's own line count — it reds nothing if it drifts, so it is
         # cheapest to re-check when the module above it changes), and (ii) a
         # comment that quotes the retracted sentence IN ORDER TO REJECT IT also reds, because
