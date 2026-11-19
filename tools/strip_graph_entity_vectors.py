@@ -1570,6 +1570,12 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     if isinstance(node, ast.List | ast.Tuple):
         return (_pairs_store_the_vector(node)
                 or any(_mapping_operand_stores_the_vector(element) for element in node.elts))
+    # ⛔ A MAPPING-BUILDING CALL NEEDS NO ARM HERE, and that is MEASURED rather than assumed
+    # (`#13788` F6): `props.update(dict.fromkeys(["embedding"], vec))` and its siblings are
+    # answered by `_rebuild_stores_the_vector`, which `_stores_embedding` asks for every
+    # operand of every call — a route added here changed no verdict on any fixture, so it is
+    # not kept looking load-bearing (the same standard as the constructor arm removed from
+    # `_pairs_operand_stores_the_vector`).
     # ⛔ AND THE PAIRS LITERAL ONE WRAPPER IN IS THE SAME OPERAND. This helper is what
     # `update(...)` asks; `_pairs_operand_stores_the_vector` is what the `|=` arm asks — and
     # keeping the two apart meant `props.update([("embedding", vec)])` was refused while
@@ -1592,7 +1598,12 @@ def _mapping_operand_stores_the_vector(node) -> bool:
 #: would re-open the hole at the next spelling nobody thought of. The `endswith("Dict")`
 #: suffix still carries the CamelCase `collections` family (`OrderedDict`, `UserDict`, and a
 #: project's own `*Dict` subclass) — the lowercase/other-named ones have to be named here.
-_MAPPING_CONSTRUCTORS = ("dict", "defaultdict", "Counter", "ChainMap")
+#: ⛔ `MappingProxyType` IS THE SPELLING THE LIST MISSED (`#13788` F6, measured at
+#: `78cbe4da`): it is a mapping-like merge source (`|=` / `update()` both merge it), and a
+#: proxy around a literal this check CAN read — `props |= types.MappingProxyType({"embedding":
+#: vec})` CERTIFIED a stop arm that stores while the bare literal was refused. `fromkeys`
+#: needs its own arm below (its operands are a KEY SEQUENCE and one value, not a mapping).
+_MAPPING_CONSTRUCTORS = ("dict", "defaultdict", "Counter", "ChainMap", "MappingProxyType")
 
 
 def _is_mapping_constructor(name: str) -> bool:
@@ -1625,7 +1636,24 @@ def _constructor_stores_the_vector(call) -> bool:
 """
     import ast
     if not _is_mapping_constructor(_callee_name(call)):
-        return False
+        # ⛔ `dict.fromkeys(["embedding"], vec)` IS A MAPPING THE SAME MERGES TAKE (`#13788` F6,
+        # measured at `78cbe4da`): `dict.fromkeys` returns a real dict, so `props |=` /
+        # `update()` / a rebuild all place the vector — and it is CERTIFIED because its
+        # operands are a KEY SEQUENCE and ONE value, not a mapping the loops below can read.
+        # Recognised narrowly, like every other arm here: the callee must be `fromkeys`, the
+        # first positional must be a list/tuple literal containing the EXACT property name,
+        # and the value (the second positional, or the implied `None`) must be non-constant.
+        # A computed key sequence is the stated residual (the same data-flow limit the
+        # mutator docstring names), and `fromkeys(["embedding"])` alone places `None`.
+        if _callee_name(call) != "fromkeys" or not call.args:
+            return False
+        keys = call.args[0]
+        named = (isinstance(keys, ast.List | ast.Tuple)
+                 and any(isinstance(element, ast.Constant)
+                         and element.value == EMBEDDING_PROPERTY
+                         for element in keys.elts))
+        return (named and len(call.args) >= 2
+                and not isinstance(call.args[1], ast.Constant))
     return (_mapping_argument_stores_the_vector(call)
             # …and EACH OPERAND BY THE *OPERAND* RULE, not the ARGUMENT rule (`#13788` F1,
             # measured at `10184e6d`). The argument rule's dict-literal arm calls
@@ -2203,7 +2231,8 @@ def _rebuild_stores_the_vector(node) -> bool:
             if any(_mapping_operand_stores_the_vector(side)
                    for side in (leaf.left, leaf.right)):
                 return True
-        elif isinstance(leaf, ast.Call) and _is_mapping_constructor(_callee_name(leaf)):
+        elif isinstance(leaf, ast.Call) and (_is_mapping_constructor(_callee_name(leaf))
+                                            or _callee_name(leaf) == "fromkeys"):
             # ONE recognition, not two: the CONSTRUCTOR spelling is answered by
             # `_constructor_stores_the_vector` (both operand forms, both call sites), and a
             # second implementation of the same rule is how two answers to one question drift

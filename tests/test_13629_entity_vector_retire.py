@@ -4040,6 +4040,47 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE MERGE-SOURCE INCLUDE LIST MISSED TWO STDLIB SPELLINGS (`#13788` F6, measured at
+        # `78cbe4da`). `types.MappingProxyType` is a mapping-like merge source (PEP 584's
+        # "mapping-like objects") around a literal this check CAN read, and `dict.fromkeys`
+        # returns a real dict — both merged the vector on a stop arm while being CERTIFIED,
+        # beside the bare literal refused. `MappingProxyType` joins `_MAPPING_CONSTRUCTORS`;
+        # `fromkeys` gets its own arm because its operands are a KEY SEQUENCE and one value.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= types.MappingProxyType({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**types.MappingProxyType({"embedding": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = types.MappingProxyType({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding"], _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = dict.fromkeys(["embedding"], _encode(ev))
+        return None
+    _write(props)
+""",
         # ⛔ …AND THE SAME CONSTRUCTOR ONE SPELLING OVER IS THE SAME STORE: REBUILT rather
         # than merged. `_rebuild_stores_the_vector` named `dict` and only `dict`, so
         # `props = OrderedDict({"embedding": vec})` was CERTIFIED while
@@ -5557,6 +5598,31 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= _collections.Counter({"embedding_model": _m()})
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE NEW MERGE SOURCES (`#13788` F6): a proxy around the
+        # pre-guard reset places nothing, `fromkeys` with no value fills `None`, and the
+        # identity triple is exactly what this repo writes while KEEPING the vector — all three
+        # must stay CERTIFIED or the widened include list costs an honest writer its gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= types.MappingProxyType({"embedding": None})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding"], None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding_model"], _m())
         return None
     _write(props)
 """,
