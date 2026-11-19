@@ -24,12 +24,10 @@ REPORTED rather than silent.
 """
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import sys
 import tempfile
-import types
 
 import pytest
 
@@ -589,3 +587,116 @@ def test_restore_graph_with_no_tenant_keeps_every_vector(proj, monkeypatch):
                  "embedding") is not None, (
         "a tenant-less restore dropped a vector, so a DR artifact came back short")
     assert "retired_vectors" not in result
+
+
+def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypatch):
+    """A co-labelled node has ONE vector, so the drop is `all`, not `any` (#13854 review, F4).
+
+    `:Source` is the shape this rule was written for (its vector serves `document` AND
+    `source`) and it already asked both. A `:Subject` that also carries `:Object` is the
+    same node with the same property — `sdk.py` models it (`_sibling`) and `_update_entity`
+    drops per label on a per-label copy for exactly this reason. The four pops used to be
+    four INDEPENDENT `if`s, i.e. OR across the labels: an `object` STOP with a `subject`
+    KEEP stripped the vector off a node the subject read still needs, which is the
+    "vector in neither store" state the gate's own conservatism forbids.
+
+    Mutation (arm 1): turn the guard into `any(...)`/restore the independent pops → the
+    vector is gone and this reds. Mutation (arm 3): report every label on the node instead
+    of the ones that answered stop → the label list reds.
+    """
+    dump = _dump({"dump_id": 1, "labels": ["Object", "Subject"],
+                  "props": {"id": "obj-13826-co", "name": "co-13826",
+                            "embedding": list(VEC)}})
+
+    # ── arm 1: object STOP, subject KEEP → the vector SURVIVES ──────────────
+    _gate_map(monkeypatch, keep={"subject"})
+    result = restore_graph(proj.g, dump)
+    assert _prop(proj.g, "(n:Object {id:'obj-13826-co'})", "embedding") is not None, (
+        "the restore dropped a co-labelled node's vector because ONE of its labels said "
+        "stop — the other label's read now has no graph vector and the record may not "
+        "hold one (the #11395 outcome)")
+    assert "retired_vectors" not in result, (
+        f"a half-stopped node was reported as retired: {result}")
+
+    # ── arm 2: BOTH stop → dropped, and only the STOPPING label is reported ──
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    _gate_map(monkeypatch, keep={""})
+    result = restore_graph(proj.g, dump)
+    assert _prop(proj.g, "(n:Object {id:'obj-13826-co'})", "embedding") is None, (
+        "both gated labels said stop and the restore kept the vector")
+    assert result["retired_vectors"] == 1, result
+    assert _prop(proj.g, "(n:Object {id:'obj-13826-co'})", "name") == "co-13826", (
+        "the ROW was not restored — a retirement drops the vector, never the node")
+    assert result["retired_vector_labels"] == ["Object", "Subject"], (
+        f"the reported labels must be the gated ones the node carries: {result}")
+
+    # ── arm 3: a NON-gated label is never reported as retired ────────────────
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    mixed = _dump({"dump_id": 1, "labels": ["Object", "Point"],
+                   "props": {"id": "obj-13826-mixed", "content": "x",
+                             "embedding": list(VEC)}})
+    result = restore_graph(proj.g, mixed)
+    assert _prop(proj.g, "(n:Object {id:'obj-13826-mixed'})", "embedding") is None
+    assert result["retired_vector_labels"] == ["Object"], (
+        "a label no gate covers was reported as retired (#13854 review, P3): the list is "
+        f"operator-facing, so it must name what answered stop — {result}")
+
+
+def test_the_completeness_clause_asks_the_gate(sdk, monkeypatch, tmp_path):
+    """A gated deployment's session unit is COMPLETE — never a permanent repair candidate.
+
+    `embedding_incomplete` is the clause that routes a session unit onto the REPAIR path on
+    every sweep (`sdk.py`, `#13626`). It is load-bearing in the other direction too: while
+    the record serves `event`, a missing graph vector is the TARGET design, so leaving the
+    clause ungated makes every session file re-enter the repair path for ever — the
+    "skipped/embedding-unavailable, retryable=True for ever" shape the repair's own gate
+    exists to prevent.
+
+    ⛔ THE DISCRIMINATOR IS THE REPAIR PATH ITSELF, not the reported status (#13854 review,
+    F6): with the repair correctly a write-stop, the ungated clause ends in the same
+    `skipped/unchanged` verdict, so a status-only assertion is satisfied by the mutant. The
+    spy counts ENTRIES into the repair path — the gated unit must never take one.
+    """
+    _stub_session_metadata(monkeypatch)
+    monkeypatch.setattr(TortoiseSDK, "_session_embedding",
+                        lambda self, *a, **k: list(VEC), raising=True)
+    attempts: list[str] = []
+    _real = TortoiseSDK._embedding_repair_attempt
+
+    def _counting(self, event_id, *a, **k):
+        attempts.append(event_id)
+        return _real(self, event_id, *a, **k)
+
+    monkeypatch.setattr(TortoiseSDK, "_embedding_repair_attempt", _counting,
+                        raising=True)
+
+    corpus = tmp_path / "corpus-13826-complete"
+    corpus.mkdir()
+    (corpus / "sess.md").write_text(
+        "---\nsessionId: sess-13826-complete\ntitle: A Session\n---\nuser: hi\n",
+        encoding="utf-8")
+    g = sdk._get_proj().g
+
+    _gate(monkeypatch, True)
+    r1 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True,
+                                          llm_model=None)
+    assert r1["indexed"] == 1, r1
+    assert g.query("MATCH (e:Event) WHERE e.embedding IS NOT NULL RETURN count(e)"
+                   ).result_set[0][0] == 1
+
+    # the strip this PR makes possible: the row keeps its Event, the graph keeps no vector
+    g.query("MATCH (e:Event) SET e.embedding = NULL")
+    attempts.clear()
+    _gate(monkeypatch, False)
+    r2 = sdk.index_sources_from_directory(str(corpus), extract_metadata=True,
+                                         llm_model=None)
+    assert attempts == [], (
+        "a gated deployment entered the EMBEDDING REPAIR path for a session unit whose "
+        "vector the record serves — the completeness clause still treats a retired "
+        f"mirror as an outage, so every sweep retries it for ever: {attempts}")
+    assert r2["skipped"] == 1 and r2["updated"] == 0, r2
+    assert not [e for e in r2.get("errors", []) if e.get("retryable")], (
+        f"the gated unit was reported as a retryable failure: {r2}")
+    assert g.query("MATCH (e:Event) WHERE e.embeddingRepairFailedAt IS NOT NULL "
+                   "RETURN count(e)").result_set[0][0] == 0, (
+        "a repair marker was written for a unit that must never be repaired")
