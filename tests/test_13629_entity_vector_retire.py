@@ -28,6 +28,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_execute_refuses_an_empty_plan_unless_expect_empty` | "nothing to strip" is a refusal | an empty plan reports a finished retirement |
 | `test_execute_refuses_target_drift` | a plan is an authority over ONE graph | it is applied to a different graph of the same shape |
 | `test_the_refusal_set_is_closed` | the token set is closed and published | a refusal is raised with an unpublished token |
+| `test_a_swallowed_exit_does_not_certify_the_arm` | an exit is a write-stop only if it actually LEAVES | a `raise` a `try` handler or a context manager can swallow certifies the writer as write-stopped |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -2720,6 +2721,126 @@ def _upsert_object(ev):
         assert strip._writer_consults_gate(
             module, "_upsert_object", ("object",))[0] is True, (
             f"an UNCONDITIONAL arm was refused: {source!r}")
+
+
+#: ⛔ A SWALLOWED `raise` IS NOT AN EXIT (`#13647` round-9 F1, `_unconditional_exits`).
+#: `_is_write_stop_exit` answers True for any `ast.Raise`, so the walk — not the predicate
+#: — has to withhold the raises it cannot prove leave the function. Both shapes below were
+#: certified GATED at `1cc61230` while the store on the next line ran unconditionally, i.e.
+#: `REFUSE_WRITE_STILL_EMITS` was lifted for a writer that still emits.
+WRITER_SWALLOWED_EXIT = """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        try:
+            raise _Skip()
+        except Exception:
+            pass
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+"""
+
+WRITER_SWALLOWED_EXIT_IN_A_WITH = """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        with suppress(Exception):
+            raise _Skip()
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+"""
+
+
+def test_a_swallowed_exit_does_not_certify_the_arm(tmp_path, monkeypatch):
+    """⛔ `raise` IS ONLY A WRITE-STOP IF NOTHING CATCHES IT (`#13647` round-9 F1).
+
+    `_unconditional_walk` descends into a `try` BODY because the body always runs up to a
+    raise — which is right for a STORE and wrong for an EXIT, since a raise there is caught
+    by that same `try`'s handlers (`try: raise` / `except Exception: pass` falls straight
+    through to the store below). The mirror shape is a context manager: `__exit__` may
+    return True and swallow the raise (`with suppress(Exception): raise`). Both were
+    reported GATED at `1cc61230` — a false PASS on the boolean that authorises deleting the
+    only readable copy of a fingerprint.
+
+    Mutation: put the exit arm back on `_unconditional_walk` (i.e. delete the swallowable
+    filter) and the first two cases below go `True`, reddening this test; the accepted
+    cases at the end are what keeps the fix from being an inert enforcer.
+    """
+    refused = (
+        WRITER_SWALLOWED_EXIT,
+        WRITER_SWALLOWED_EXIT_IN_A_WITH,
+        # the same root through `except*`, which parses as `TryStar` and must set the
+        # same flag — the `Try` arm's `getattr(ast, "TryStar", ast.Try)` sibling
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        try:
+            raise _Skip()
+        except* Exception:
+            pass
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+""",
+        # …and a manager nested inside a `try/finally`: the flag is inherited, not reset by
+        # the arm that CANNOT catch
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        try:
+            with suppress(Exception):
+                raise _Skip()
+        finally:
+            _note(ev)
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+""",
+    )
+    for source in refused:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a SWALLOWED exit certified the arm: {source!r} ({why})"
+
+    # ⛔ AND A `return` IS NEVER SWALLOWED, nor is a raise nothing can catch: `try/finally`
+    # has no handlers, and its `finally` cannot cancel the propagation. Those must still
+    # certify, or the gate would be permanently shut.
+    accepted = (
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        try:
+            raise _Skip()
+        finally:
+            _note(ev)
+    return _write(ev)
+""",
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        with TRACE:
+            return None
+    return _write(ev)
+""",
+    )
+    for source in accepted:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        assert strip._writer_consults_gate(
+            module, "_upsert_object", ("object",))[0] is True, (
+            f"an exit nothing can swallow was refused: {source!r}")
+
+    # ⛔ AND THE FLAG IS AN *EXIT* FLAG ONLY. A store inside a `try` body that DOES declare a
+    # handler still places the vector before any raise can be caught, so it still certifies —
+    # widening the pruning to stores would refuse the honest shape.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    embedding = None
+    if _derived_mirror_required("object"):
+        try:
+            embedding = _encode(ev)
+        except Exception:
+            pass
+    return _write(ev, embedding)
+""")
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is True, (
+        "a store inside a `try` body was refused as a swallowed exit")
 
 
 def test_the_digest_does_not_dedupe_two_typed_identities_by_VALUE():

@@ -407,14 +407,17 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
        accepted guard placed AFTER an unconditional store still clears the function. What
        narrows this in practice is that the guarded body must itself store, which a
        pointless late guard does not do.
-    3. **Dead code, nested scopes and NESTED CONDITIONS are pruned, not analysed** — a
-       guard wrapped in `if False:`/`while False:` or inside an inner `def`/`class`/lambda
-       is not counted (`_reachable_ifs`); a guard behind a runtime-false condition this
-       check cannot evaluate is likewise not counted; and an arm's STORE/REMOVE/EXIT is
-       counted only where it is UNCONDITIONALLY reached (`_unconditional_walk`), so
-       `if not gate(l): if DEBUG: raise` is unproven rather than certified. The REACHABLE
-       `else` of a constant-tested `if` is kept. A condition this check cannot decide is
-       answered "unproven", which leaves the destructive strip refused.
+    3. **Dead code, nested scopes, NESTED CONDITIONS and SWALLOWED EXITS are pruned, not
+       analysed** — a guard wrapped in `if False:`/`while False:` or inside an inner
+       `def`/`class`/`lambda` is not counted (`_reachable_ifs`); a guard behind a
+       runtime-false condition this check cannot evaluate is likewise not counted; an
+       arm's STORE/REMOVE is counted only where it is UNCONDITIONALLY reached
+       (`_unconditional_walk`); and an EXIT is counted only where it is unconditionally
+       reached AND can actually leave the function (`_unconditional_exits`), so
+       `if not gate(l): if DEBUG: raise` and a `raise` a `try` handler or a context
+       manager can swallow are unproven rather than certified. The REACHABLE `else` of a
+       constant-tested `if` is kept. A condition this check cannot decide is answered
+       "unproven", which leaves the destructive strip refused.
     4. **Two shapes are refused rather than resolved, deliberately** — a store reached
        through a helper ARGUMENT (`_set(e, embedding)`, indistinguishable from
        `print(embedding)` at this level) and a store behind a LOCAL ALIAS
@@ -476,9 +479,13 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
 # write is the one that leaves; and a bare exit under a positive ask cleared the
 # gate on a body that wrote on the stop arm anyway. It is refused (fail-closed).
 # A `return` carrying a CALL is judged as a write, by the polarity rule below.
+        # ⛔ AND THE EXIT MUST ACTUALLY LEAVE. `_unconditional_exits` withholds a `raise`
+        # that a `try` handler or a context manager can swallow — a swallowed raise is
+        # not a write-stop, and counting it lifted `REFUSE_WRITE_STILL_EMITS` for a writer
+        # that stored unconditionally (round-9 F1, measured at `1cc61230`: GATED).
         if polarity < 0 and any(_is_write_stop_exit(statement)
                                 for statement in sub.body
-                                for statement in _unconditional_walk(statement)):
+                                for statement in _unconditional_exits(statement)):
             return True
         # ⛔ THE POLARITY DECIDES WHICH BODY IS A WRITE-STOP, and getting this wrong in
         # either direction is a defect that was measured:
@@ -579,7 +586,61 @@ def _own_walk(node):
 
 
 def _unconditional_walk(node):
+    """Every node reached unconditionally — the shared walk behind all three arms.
+
+    A thin view over `_unconditional_nodes`, which also reports whether a `raise` at a
+    node could be SWALLOWED. Stores and removals do not care (a store that runs before a
+    caught raise still ran); the EXIT arm does, and reads `_unconditional_exits` instead.
+    """
+    for sub, _swallowable in _unconditional_nodes(node):
+        yield sub
+
+
+def _unconditional_exits(node):
+    """`_unconditional_walk`, minus the `raise`s that are only *maybe* an exit.
+
+    ⛔ A `raise` IS NOT AN EXIT IF SOMETHING CATCHES IT, and `_is_write_stop_exit` answers
+    True for any `ast.Raise` — so the walk has to withhold the ones it cannot prove. A
+    raise can be swallowed twice over, and both were fail-OPEN at `1cc61230` (measured:
+    both shapes below reported GATED, lifting `REFUSE_WRITE_STILL_EMITS` for a writer that
+    stores the vector unconditionally):
+
+        if not _derived_mirror_required("object"):
+            try:
+                raise _Skip()            # caught by the handler below → does NOT exit
+            except Exception:
+                pass
+        props["embedding"] = _encode(ev) # runs unconditionally
+
+        if not _derived_mirror_required("object"):
+            with suppress(Exception):
+                raise _Skip()            # `__exit__` may return True → does NOT exit
+        props["embedding"] = _encode(ev)
+
+    So a `raise` inside a `try` BODY whose own `try` declares handlers, and a `raise`
+    inside a `with`/`async with` body, are *unproven* and dropped — the same answer the
+    walk already gives a store behind a live condition. `return` is NOT affected: neither
+    an `except` clause nor a context manager's `__exit__` can cancel a return, so the
+    accepted `with TRACE: return None` arm still certifies; and a `raise` in a
+    `try`/`finally` (no handlers) or in the `finally` body still propagates, so it still
+    certifies. Both directions are pinned by
+    `test_a_swallowed_exit_does_not_certify_the_arm`.
+    """
+    import ast
+
+    for sub, swallowable in _unconditional_nodes(node):
+        if swallowable and isinstance(sub, ast.Raise):
+            continue
+        yield sub
+
+
+def _unconditional_nodes(node):
     """`_own_walk`, but a NESTED CONDITIONAL is not evidence — only what always runs is.
+
+    Yields ``(node, swallowable)``: ``swallowable`` is True where an exception raised at
+    this node could be caught before it leaves the function — inside a `try` body that
+    declares handlers, or inside a `with` body (a context manager's ``__exit__`` may
+    return True). It says nothing about a `return`.
 
     ⛔ THE THIRD LOOSENESS IN THE SAME PLACE, and the one the earlier fixes missed. Pruning
     nested SCOPES (`_own_walk`) and statically DEAD branches (`_statically_falsy`) still
@@ -602,6 +663,15 @@ def _unconditional_walk(node):
     walked), `IfExp`, comprehensions, `match` cases, exception handlers, a `try`'s `orelse`
     — and at every nested scope, as `_own_walk` does.
 
+    ⛔ "ALWAYS EXECUTES" IS NOT THE SAME AS "ALWAYS LEAVES" — that is the second flag this
+    walk carries, and the `Try`/`With` arms set it. A `try` BODY always runs up to a raise,
+    but a raise there is caught by that same `try`'s handlers; a `with` body always runs,
+    but its manager's ``__exit__`` may swallow a raise. So the descendants of a
+    `try`-with-handlers body and of a `with` body are yielded with ``swallowable=True``,
+    and `_unconditional_exits` drops their `raise`s. Everything else — a `try/finally`
+    with no handlers, a `finally` body, the `with` item expressions (which run before the
+    manager exists) — keeps the enclosing flag.
+
     ⛔ NOT USING IT IS FAIL-OPEN, so this is not merely "stricter": with the arm's action
     behind a condition we cannot decide, the honest answer is *unproven*, and an unproven
     write-stop must leave the destructive strip refused. Missing a store that IS
@@ -610,30 +680,42 @@ def _unconditional_walk(node):
     """
     import ast
 
-    stack = [node]
+    stack: list[tuple] = [(node, False)]
     while stack:
-        current = stack.pop()
-        yield current
+        current, swallowable = stack.pop()
+        yield current, swallowable
         if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
                       | ast.ClassDef):
             continue
         if isinstance(current, ast.If):
-            stack.append(current.test)        # the test runs; neither arm is guaranteed
+            stack.append((current.test, swallowable))   # the test runs; neither arm is guaranteed
             continue
         if isinstance(current, ast.While):
-            stack.append(current.test)
+            stack.append((current.test, swallowable))
             continue
         if isinstance(current, ast.For | ast.AsyncFor):
-            stack.append(current.iter)        # the iterable runs; the body may not
+            stack.append((current.iter, swallowable))   # the iterable runs; the body may not
             continue
         if isinstance(current, ast.IfExp | ast.ListComp | ast.SetComp | ast.DictComp
                       | ast.GeneratorExp | ast.Match):
             continue                          # conditional / repeated / pattern-selected
         if isinstance(current, ast.Try | getattr(ast, "TryStar", ast.Try)):
-            stack.extend(current.body)        # unconditional up to a raise…
-            stack.extend(current.finalbody)   # …and `finally` always runs
-            continue                          # handlers and `orelse` may never run
-        stack.extend(ast.iter_child_nodes(current))
+            # ⛔ ONLY THE BODY BECOMES SWALLOWABLE, and only when there are HANDLERS: a
+            # `try/finally` cannot catch, and a raise in `finally` propagates past the
+            # `try` that owns it. `orelse` may never run; `handlers` is not this arm's code.
+            caught = swallowable or bool(current.handlers)
+            stack.extend((statement, caught) for statement in current.body)
+            stack.extend((statement, swallowable) for statement in current.finalbody)
+            continue
+        if isinstance(current, ast.With | ast.AsyncWith):
+            # ⛔ THE MANAGER MAY SWALLOW A RAISE FROM ITS BODY (`suppress`, or any
+            # `__exit__` returning True), so the body is unproven as an EXIT while still
+            # being evidence as a STORE. Its ITEMS run first, before the manager exists,
+            # so a raise there keeps the enclosing flag.
+            stack.extend((item, swallowable) for item in current.items)
+            stack.extend((statement, True) for statement in current.body)
+            continue
+        stack.extend((child, swallowable) for child in ast.iter_child_nodes(current))
 
 
 def _gate_conjuncts(test) -> list:
