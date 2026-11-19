@@ -1422,12 +1422,13 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     happens on the thread the recorder was scoped to — a synchronous reaper path,
     a fixture, a `gc`-driven finalizer — thread scoping excludes nothing, the
     path is recorded as `_label_hits`'s own, and the required `test` job reds with
-    no defect behind it. This file is registered in `tier1` and on the `core`
-    surface (`config/ci-surfaces.yml:8810`, `:10968`), and is in NEITHER
-    `slow_files` nor `carve_out`, so it runs in every fast `test (x)` shard — not
-    the `slow`/`carve-out` legs. The red reaches `python-ci-gate`, which gates
-    every PR, so one occurrence is a repo-wide merge blocker rather than a
-    one-shard nuisance.
+    no defect behind it. The file is registered in `tier1` and on the `core`
+    surface (`config/ci-surfaces.yml:8810`, `:10968`) and is in NEITHER
+    `slow_files` nor `carve_out`, so it belongs to the FAST pool: it is packed
+    into ONE of the `test (x)` shards (11 bins, `config/ci-surfaces.yml:63`) —
+    `test (e)` in the run above — never the `slow`/`carve-out` legs. That red
+    reaches `python-ci-gate`, which gates every PR, so one occurrence is a
+    repo-wide merge blocker rather than a one-shard nuisance.
 
     The read is STAGED through `during` rather than raced, so the reproduction is
     deterministic: pre-fix the staged path is recorded and this reds, post-fix it
