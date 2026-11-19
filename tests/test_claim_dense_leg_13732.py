@@ -1410,6 +1410,7 @@ class TestTheSeedReport:
         base = dict(
             journal="/tmp/j.jsonl",
             written=2,
+            record_armed=True,
             record_applied=2,
             record_unprojected=0,
             positions_unproven=0,
@@ -1440,6 +1441,26 @@ class TestTheSeedReport:
         payload = self._report(tool_mod, positions_unproven=2, first_seq=None, last_seq=None).as_dict()
         assert "fold_command" in payload, payload
         assert payload["positions_unproven"] == 2, payload
+
+    def test_an_UNARMED_record_is_not_read_as_a_refusal(self, tool_mod):
+        """⛔ `record_applied == 0` MEANS TWO THINGS, AND THE REPORT KEEPS THEM APART.
+
+        A deployment with no record has nothing to apply to (0 applied, and that
+        is not a fault); an ARMED record that refused the projection has 0 applied
+        and IS one. Collapsing them into one zero is how "no record in this run"
+        gets read as "the record refused the population" — the same class of
+        misreading `LiveWrite.armed`'s third state exists to prevent.
+        """
+        unarmed = self._report(tool_mod, record_armed=False, record_applied=0).as_dict()
+        assert unarmed["record_armed"] is False and unarmed["record_applied"] == 0
+        assert "fold_command" not in unarmed, (
+            "an unarmed record is not an unprojected one — nothing was attempted, "
+            "so there is no fold to run"
+        )
+        measured = self._report(tool_mod, record_armed=None, record_applied=0).as_dict()
+        assert measured["record_armed"] is None, (
+            "a projection that RAISED leaves arming UNMEASURED, never False"
+        )
 
     def test_the_report_states_the_door_it_used(self, tool_mod):
         payload = self._report(tool_mod).as_dict()
@@ -1900,6 +1921,7 @@ class TestTheDocumentedRunPath:
             return tool_mod.SeedReport(
                 journal=str(journal_path),
                 written=len(pop),
+                record_armed=True,
                 record_applied=len(pop) - seed_unprojected,
                 record_unprojected=seed_unprojected,
                 positions_unproven=0,

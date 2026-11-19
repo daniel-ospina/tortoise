@@ -263,6 +263,7 @@ import contextlib
 import json
 import math
 import os
+import shlex
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -902,7 +903,11 @@ def require_journal(explicit: str | None = None) -> Path:
             f"is ``replay(journal)`` and a seed appended nowhere can never reach "
             f"it (#13830)",
         )
-    return Path(os.path.expanduser(chosen))
+    # ⛔ RESOLVED TO AN ABSOLUTE PATH BEFORE IT IS USED OR DECLARED. The same
+    # string goes to `EventLog`, to `record_vector.RECORD_JOURNAL_ENV` and into the
+    # `seed.fold_command` an operator pastes — three readers, so a relative path
+    # would make each of them depend on its own working directory.
+    return Path(os.path.abspath(os.path.expanduser(chosen)))
 
 
 def require_record_measured(record_vectors: int | None) -> None:
@@ -1184,12 +1189,16 @@ def require_population_in_record(matched: int | None, population_n: int) -> None
             f"population id(s) this run would score — the `record_dense` arm "
             f"could rank {matched} of them and would report 0.0 recall for the "
             f"rest, which is a figure about the seed step and not about the leg. "
-            f"This population WAS written through the journaled door (a seed that "
-            f"was attempted, so the reachable causes are the fold's, not the "
-            f"writer's: an armed record that REFUSED the projection, an append "
-            f"whose position could not be proven — no `public.journal_event` row, "
-            f"so the readiness gate reads the tenant as behind — or an enumerated "
-            f"replay refused on a cut-over graph). Run the record's own fold over "
+            f"This population WAS written through the journaled door, so the "
+            f"reachable causes are the FOLD's, not the writer's — and only these "
+            f"(review: a proven-position failure is deliberately NOT among them, "
+            f"because that write still lands the row and only its "
+            f"`public.journal_event` row): an armed record that REFUSED the "
+            f"projection, a row filed under a DIFFERENT tenant than this read's "
+            f"scope, an enumerated replay refused on a cut-over graph (all three "
+            f"leave no row), or a row whose `embedding` produced no "
+            f"`embedding_vec` (row present, not rankable — a width the store's "
+            f"converter will not hold). Run the record's own fold over "
             f"the journal this run wrote (`tools/record_runner.py apply --journal "
             f"<path>`; the artifact's `seed.fold_command` names it when the seed "
             f"reported one), then re-run. This instrument will not write the "
@@ -1356,6 +1365,7 @@ class SeedReport:
         "last_seq",
         "positions_unproven",
         "record_applied",
+        "record_armed",
         "record_unprojected",
         "written",
     )
@@ -1365,6 +1375,7 @@ class SeedReport:
         *,
         journal: str,
         written: int,
+        record_armed: bool | None,
         record_applied: int,
         record_unprojected: int,
         positions_unproven: int,
@@ -1374,6 +1385,7 @@ class SeedReport:
     ) -> None:
         self.journal = journal
         self.written = written
+        self.record_armed = record_armed
         self.record_applied = record_applied
         self.record_unprojected = record_unprojected
         self.positions_unproven = positions_unproven
@@ -1385,6 +1397,12 @@ class SeedReport:
         payload = {
             "journal": self.journal,
             "written": self.written,
+            # ⛔ THE THREE-STATE ANSWER, KEPT THREE-STATE. `record_applied == 0` on
+            # an UNARMED deployment means "no record in this run", not "the record
+            # refused"; and a projection that RAISED leaves arming unmeasured
+            # (`None`) rather than false — `LiveWrite.armed`'s own contract, carried
+            # here so a reader cannot collapse two facts into one zero.
+            "record_armed": self.record_armed,
             "record_applied": self.record_applied,
             "record_unprojected": self.record_unprojected,
             "positions_unproven": self.positions_unproven,
@@ -1395,20 +1413,32 @@ class SeedReport:
         }
         if self.record_unprojected or self.positions_unproven:
             # ⛔ THE REPAIR, NAMED EXACTLY AND ONLY WHEN IT IS NEEDED. A run that
-            # emits this had lines the record did not take; the arm will then be
-            # refused by the id-scoped guard, and the operator needs the command
-            # that heals it rather than the name of the guard that caught it.
+            # emits this had lines the record did not take (or could not prove a
+            # position for), and the operator needs the command that heals it
+            # rather than the name of the guard that caught it.
+            #
+            # ⛔ AND THE TWO FACES ARE DIFFERENT GATES, so the note names both
+            # (reviewer, 2026-11-19): an UNPROJECTED write leaves no row and the
+            # id-scoped guard catches it, while an UNPROVEN POSITION still lands
+            # the row and only its `public.journal_event` row is missing — the id
+            # count then PASSES and the arm is declined to the graph and refused by
+            # the mechanism check instead. Naming one gate for both sent the reader
+            # to the wrong refusal.
             payload["fold_command"] = (
-                f"uv run python tools/record_runner.py apply --journal {self.journal}"
+                f"uv run python tools/record_runner.py apply --journal "
+                f"{shlex.quote(self.journal)}"
             )
             payload["note"] = (
                 f"{self.record_unprojected} write(s) came back unprojected and "
                 f"{self.positions_unproven} append(s) proved no position — the "
-                f"journal holds the population and the record does not (yet). The "
-                f"`record_dense` arm will be BLOCKED by its id-scoped guard until "
-                f"`fold_command` has been run; this is the direction a replay "
-                f"heals, and it is reported rather than retried here because the "
-                f"fold is the record's own door, not a second writer (#13345)"
+                f"journal holds the population and the record does not (yet). An "
+                f"unprojected write is caught by the `record_dense` arm's id-scoped "
+                f"guard; an unproven position leaves the row but not its "
+                f"`public.journal_event` row, so `journal_ready` reads the tenant as "
+                f"behind and the arm is declined to the graph (refused by the "
+                f"mechanism check). Both are healed by `fold_command`, which is "
+                f"emitted here rather than retried because the fold is the "
+                f"record's own door, not a second writer (#13345)"
             )
         return payload
 
@@ -1490,6 +1520,7 @@ def _seed_population(
         )
     log = EventLog(journal_path)
     applied = unprojected = unproven = folded = 0
+    armed_yes = armed_unmeasured = False
     first_seq = last_seq = None
     for row, vec in zip(population, vectors, strict=True):
         # ⛔ THE EVENT SHAPE IS THE PRODUCTION ONE: `PointAdded` with the snapshot
@@ -1522,11 +1553,16 @@ def _seed_population(
             applied += 1
         elif outcome.unprojected:
             unprojected += 1
+        if outcome.armed is True:
+            armed_yes = True
+        elif outcome.armed is None:
+            armed_unmeasured = True
         if outcome.folded:
             folded += 1
     return SeedReport(
         journal=str(journal_path),
         written=len(population),
+        record_armed=True if armed_yes else (None if armed_unmeasured else False),
         record_applied=applied,
         record_unprojected=unprojected,
         positions_unproven=unproven,
@@ -1659,6 +1695,10 @@ def run_measurement(args: argparse.Namespace) -> int:
     except Refused:
         raise
     except Exception as exc:
+        # ⛔ THE CODE TOKEN IS KEPT DELIBERATELY. `graph_unwritable` is an existing
+        # refusal a caller (and `tests/`) may key on, so the name does not move with
+        # the fix; the MESSAGE names the three steps, because the failure can now
+        # come from the journal append, the record projection or the graph fold.
         raise Refused(
             "graph_unwritable",
             f"the population could not be written through the journaled door "
