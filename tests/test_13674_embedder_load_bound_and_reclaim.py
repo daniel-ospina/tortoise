@@ -963,9 +963,6 @@ class TestTheBoundIsReadableFromTheProduct:
         assert block["available"] is True
         assert block["state"] == "ready"
         assert block["model"] == embeddings_mod.EMBEDDING_MODEL
-        # Reported, NEVER folded into `status` — a keyword-only deployment is a
-        # declared degraded READ (#2952), not a dying process.
-        assert body["status"] in {"ok", "degraded"}
 
     def test_an_unavailable_embedder_is_reported_and_does_not_5xx_health(
             self, monkeypatch, clean_embedder):
@@ -986,6 +983,21 @@ class TestTheBoundIsReadableFromTheProduct:
         assert block["failure_kind"] == "load_timeout"
         assert block["cooldown_remaining_s"] > 0.0
         assert block["load_timeout_s"] == EmbeddingModel._LOAD_TIMEOUT_S
+        # ── THE `status` ROW, ON THE STATE THAT CAN DISCRIMINATE IT (#13674
+        # review F2). "Reported, NEVER folded into `status`" is only pinned by
+        # a row where the two verdicts DIFFER: every other term is `ok` here
+        # (the DB snapshot and the watcher are stubbed, the record is unarmed
+        # — its documented, `ok` default), so the fold-into-`status` mutation
+        # turns this into "degraded" and reds the line. Asserted next to the
+        # degraded block rather than in the ready row, where both values would
+        # have been "ok" and the assertion could never fail (#10185/#10620 is
+        # the rule: one failed load must not pin the deployment degraded).
+        assert body["status"] == "ok", (
+            "an embedder on cooldown folded into `/health`'s `status` — a "
+            "keyword-only deployment is a DECLARED degraded read (#2952), not "
+            "a dying process, and one failed load must not pin it degraded "
+            "for the life of the process (#10185/#10620)"
+        )
 
     def test_the_degraded_arm_publishes_the_same_keys(self, monkeypatch):
         """An unreadable `status()` must not shorten the block (#12992/#12482).
