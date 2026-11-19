@@ -321,9 +321,11 @@ the tokens a running deployment already holds keep verifying.
 
 **The rotation window is publish-new, accept-both, retire-old** — and each step is one variable:
 
-1. **Publish.** Add the new kid beside the old in `CONSENT_TOKEN_KEYS` on **both** halves, and point
+1. **Publish.** Add the new kid beside the old in `CONSENT_TOKEN_KEYS` on both halves, and point
    `CONSENT_TOKEN_CURRENT_KID` at it. From then on the new key mints and the **old one still verifies** —
-   nothing in flight is killed.
+   nothing in flight is killed. ⚠️ "Both halves" is the END state, not one edit: `kid` is load-bearing,
+   so a set must reach them in the order in the box below (Fly first, with `consent-1` named), and only
+   once every half is on a set may `consent-1` be retired.
 2. **Wait out the longest in-flight lifetime:** **≤120 s** for a consent assertion (`exp`) and
    **≤15 min** for an attempt key (`CONSENT_ATTEMPT_TTL_S`). ⚠️ The attempt key is the NEW half of this
    window (#10794): the AS signs the flow reference and the app half verifies its MAC, so a rotation

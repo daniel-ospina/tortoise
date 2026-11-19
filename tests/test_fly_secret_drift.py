@@ -1984,7 +1984,9 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         "deploy-hosted.yml never references the key set's GitHub secret, so the set can "
         "only reach the AS by hand — i.e. §2.3 step 1 still has no operable route "
         "(#13721 review, Issue 1)")
-    assert _ct._CURRENT_KID_ENV in workflow_refs or _ct._CURRENT_KID_ENV in env_keys
+    assert _ct._CURRENT_KID_ENV not in workflow_refs, (
+        f"{_ct._CURRENT_KID_ENV} is a kid NAME, not secret material — staging it as a Fly "
+        "secret would shadow the versioned `[env]` value and freeze the rotation")
     # The kid NAME is a `[A-Za-z0-9_-]{1,64}` name, not secret material, so it takes
     # the versioned `[env]` route — which is also what makes a Fly SECRET of that
     # name fail as a shadow. The KEY MATERIAL takes the opposite route: a set written
