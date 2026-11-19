@@ -63,15 +63,10 @@ branch, and therefore not dependent on the EMBED gate, on the adapters, or on
 the graph's prior state. It is not a repair of a payload M2 wrote "wrong": M2's
 payload was the production one, and it was right.
 
-Two consequences of that box, both silent:
-
-1. no ``query_vec`` (no embedder) means the vector strategy is never submitted,
-   which the artifact declares as ``keyword_only``; and
-2. no node carries an ``embedding`` to be near, because the derive path failed
-   silently — which is a fact about the BOX, not about the harness. ⚠️ ``record_vector.coverage`` compares
+⚠️ ``record_vector.coverage`` compares
 ``record_vectors >= graph_vectors``, and **0 >= 0 is VERIFIED** — so an unseeded
 population does not fail the coverage gate, it *passes* it and then serves an
-empty record cohort as ``mechanism=pgvector, reason=ok``. That is why step
+empty record cohort as ``mechanism=pgvector, reason=ok``. That is why
 :func:`require_seeded` asserts a non-zero vector count on BOTH sides before any
 arm runs; a gate that can be satisfied by two zeros is not a gate.
 

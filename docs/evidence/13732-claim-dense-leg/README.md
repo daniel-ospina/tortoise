@@ -18,11 +18,11 @@ scorer and closed it. `#13345` and `#13210` have since landed, so the record can
 leg. The question this lane was dispatched with is *"does serving that leg from the record lift
 claim recall?"* — and it is **unanswered here**, because this box cannot run the instrument:
 
-| ingredient | state on this box (`cmux`, 2026-11-19) |
+| ingredient | state on this box (`cmux`, measured 2026-11-19; command given) |
 |---|---|
-| capture corpus (`~/.tortoise/session-events/*.jsonl`) | **absent under the lane's `HOME=/tmp/cell-home`** — 0 files. ⚠️ NOT absent on the box itself: under `HOME=/home/cmux` the same path holds **25** dated `*.jsonl` captures (measured 2026-11-19). The row is a statement about the lane's home, not about `cmux`, and the run on the real home gets PAST `require_corpus` and refuses `no_embedder` instead |
-| embedder (`fastembed`) | **absent**; `https://huggingface.co` → `000`, so it cannot be installed (`pyproject` extras are `embeddings`) |
-| record driver (`psycopg2`) | **absent**; `https://pypi.org` is unreachable, so it cannot be installed — every record read in this tree goes through it |
+| capture corpus (`~/.tortoise/session-events/*.jsonl`) | **absent under the lane's `HOME=/tmp/cell-home`** — `ls … \| wc -l` → 0. ⚠️ NOT absent on the box itself: under `HOME=/home/cmux` the same path holds dated `*.jsonl` captures (`ls ~/.tortoise/session-events/*.jsonl \| wc -l` → 24 at 2026-11-19, a rolling daily series, so any fixed integer here stales within a day). The row is a statement about the lane's home, not about `cmux`; a run on the real home gets PAST `require_corpus` |
+| embedder (`fastembed`) | **absent** — `importlib.util.find_spec("fastembed")` → `None`. ⚠️ **NOT because the network is down**: `curl -m 10 -o /dev/null -w '%{http_code}' https://huggingface.co` → **200** and `https://pypi.org` → **200** (measured 2026-11-19). The earlier `000` reading in this row was a **transient DNS failure** — in the same session `uv run` aborted with `failed to lookup address information: Temporary failure in name resolution` and then succeeded later — so network state is INTERMITTENT here and a single probe is not a durable claim. The blocker is that the extras were never installed, not that they cannot be |
+| record driver (`psycopg2`) | **absent** — `find_spec("psycopg2")` → `None`; every record read in this tree goes through it. Same network note as the row above: absence of the PACKAGE, not of the index |
 | pgvector image | **present** (`pgvector/pgvector:pg16`), so the *store* is not the blocker |
 | FalkorDB | **present** (lane containers) |
 
