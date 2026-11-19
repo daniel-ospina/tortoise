@@ -315,18 +315,15 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4993`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3138-3153'): 1,
     # ⛔ `origin/main`'s two `sdk.py:28019` rows are DROPPED at this merge, not carried: `28019` is
-    # `main`'s value for the content-review filter, and this branch re-derived that cite to `:28142`
+    # `main`'s value for the content-review filter, and this branch re-derived that cite to `:28067`
     # in BOTH documents. Measured at this head: `grep -rn 'sdk.py:28019' docs/00_index.md
     # docs/architecture/ENTITY-VERDICT-BANDS.md` -> no match (the token survives only in
     # `05-verify.md`'s sentence stating the re-point), so a row asserting 1 occurrence would be a
     # false pin over a token the documents no longer carry.
-    # ⛔ `:28142` was itself re-derived to `:28178` on the #13724 re-cut, and the reason is the rule
-    # this file enforces: #13724's own `tortoise/sdk.py` insertion (the attachment-site collapse)
-    # ADDS lines above this statement, so the filter moves. Re-derived by CONTENT, not by a delta:
-    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28178:` (at origin/main `945817d22a`
-    # the same command -> `28142:`). Both documents and both pin rows move together, which is the
-    # only edit that keeps the D-1 promise true; the arm reads the address out of the documents, so
-    # it would have reddened on the address that no longer opens.
+    # ⚠️ THAT WAS HOP ONE, and these two rows below are HOP TWO (`#13746`): `28067` itself rotted, and
+    # the same re-point moved both documents to `28178` — which is also where `#13724`'s own
+    # `tortoise/sdk.py` insertion independently landed it (`_PINS` above follows it). So `28019` and
+    # `28067` are BOTH tokens the documents no longer carry, and a row for either is a false pin.
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21867'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21909'): 2,
