@@ -849,18 +849,18 @@ Measured (private lane, idle box, CPU embedder = the pinned bge-small):
 | 10×20 | 200 | 100 | 300 | 0.04 s | 63.74 s | 0.213 |
 | 25×20 | 500 | 250 | 750 | 0.04 s | 158.55 s | 0.211 |
 
-- **It is per-question work, not a fixed setup cost.** The fixed per-question
++ **It is per-question work, not a fixed setup cost.** The fixed per-question
   setup (SDK construct + fresh graph + first touch) is **0.04–0.11 s**, i.e.
   ~0.03 % of the question's ingest; the marginal cost is a flat **0.211 s per
   point** at every size, so the cost is proportional to (turns + chunks).
-- **The dominant term is the write-time embed: 141.7 s of a 182.8 s run
++ **The dominant term is the write-time embed: 141.7 s of a 182.8 s run
   (77.5 %)**, from **776 single-text `encode_for_store` calls** (one per point,
   plus events) in `cProfile` (`tools/longmem_eval/ingest_profile.py`). The
   second term is the Cypher fan-out: **12,333 queries for 750 points = 16.4
   round trips per point** (34.9 s, 19 %), of which the `cypher_guard`
   numeric-literal scan alone is **19.5 s (10.7 %)** — 61,665 calls to
   `_numeric_literal_reason` over the same query text.
-- **Projection to the real split:** 742 points × 0.211 s = **~157 s/question
++ **Projection to the real split:** 742 points × 0.211 s = **~157 s/question
   ⇒ ~22 h for 500 questions** on an idle box; at the smoke's contended rate
   (870 s) it is **~5 days**. The shape is the same — the smoke's number is
   this cost inflated by host load (~5.4×), not a different code path.

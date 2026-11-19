@@ -27,8 +27,8 @@ Run::
 """
 from __future__ import annotations
 
-import redis.exceptions as redis_exc
 import pytest
+import redis.exceptions as redis_exc
 import requests
 
 from tools.longmem_eval import errors as lme_errors
@@ -236,7 +236,7 @@ def test_an_empty_message_omits_the_key_entirely():
 
 def test_a_broken_str_does_not_mask_the_failure():
     class Hostile(Exception):
-        def __str__(self):  # noqa: D105
+        def __str__(self):
             raise RuntimeError("no str for you")
 
     entry = _entry(Hostile())
