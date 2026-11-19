@@ -34,7 +34,7 @@ cgroup (confirmed on this box: `memory.max=2147483648` on the docker scope, `Cgr
 box-level arbiter still chooses between co-tenants. The bound narrows the victim set; it does not close the
 aggregate. Stated here, in R4 and in the runbook step.
 
-### Integration Surface Map
+## Integration Surface Map
 
 | Surface | What it is | Test layer | Why this layer |
 |---|---|---|---|
@@ -48,7 +48,7 @@ aggregate. Stated here, in R4 and in the runbook step.
 
 **Tech Stack:** bash (installer), pytest (tests), systemd 255 (cgroup v2).
 
-### Failure Modes
+## Failure Modes
 
 - `StartLimitIntervalSec` under `[Service]` → interval ignored, 10 s window, 20 restarts/10 s → positional assertion.
 - Non-idempotent write → rewrite + reload every pass → two-run arm (one reload, unchanged content).
@@ -113,6 +113,7 @@ aggregate. Stated here, in R4 and in the runbook step.
 **Class:** ops-infra
 
 **Risk surface** — what this change can break, each with the check that would catch it:
+
 - R1 a key in the wrong SECTION → systemd ignores it silently → positional assertion (step 2).
 - R2 non-idempotent write → rewrite + reload every pass → step 4.
 - R3 installing over a serving runner restarts it → step 5 (no `restart`/`stop` anywhere in the argv log).
