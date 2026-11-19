@@ -2964,9 +2964,11 @@ def test_this_table_names_exactly_the_no_container_yet_population():
     # and "seventeen destinations" is exactly the transcription slip a count re-stamp lane
     # makes when the population it just read is 17. Same class for "six"/"sixteen" and
     # "one"/"none" — a substring arm would pass over the very error it exists to red.
-    assert re.search(rf"\b{_NUMBER_WORDS[len(population)]}\b", heading), (
+    assert re.search(
+        rf"\b{_NUMBER_WORDS.get(len(population), str(len(population)))}\b", heading), (
         f"§1.4's heading reads {heading!r}, which does not state the population's size "
-        f"as the WORD {_NUMBER_WORDS[len(population)]!r}; a heading count outlives the "
+        f"as the WORD {_NUMBER_WORDS.get(len(population), len(population))!r}; "
+        "a heading count outlives the "
         "rows it counts. Substring matching is not enough — 'seven' is inside 'seventeen'")
 
     # …and the reader is table-scoped, so it cannot pass by grepping the section: §1.4

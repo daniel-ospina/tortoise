@@ -106,8 +106,11 @@
 # `create_edge`/`create_operator`, `events_poll`, `org_create`, `ingest`, `list_graphs`.
 # ⛔ `issue_insight`/`session_context`, `create_point`/`diary_write` and
 # `compute_confidence`/`recall` are NOT held names any more: #11609 lanes P6, P1 and P2 retired
-# each pair FORWARD in the batch that made its stated reason FALSE, so a lane that restores one
-# reverses a recorded decision and reds the door-retirement file it is editing.
+# each pair FORWARD in the batch that made its stated reason UNTRUE — for the P1/P2 pairs that
+# batch BUILT the missing arm; for the P6 `rest_spec` pair lane P4 MEASURED the coupling false
+# and P6 ACTED on the measurement, which the door-retirement file and the lane-E block state
+# in those words. So a lane that restores one reverses a recorded decision and reds the
+# door-retirement file it is editing.
 # Lowering the pin 55 → 48 AT THAT CUT is what keeps it a growth pin: 48 was the live count
 # then, so at 55 the seven slots that wave vacated would have read green if re-filled.
 #

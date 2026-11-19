@@ -4540,6 +4540,49 @@ def test_an_ABANDONED_git_call_is_UNPROVABLE_and_never_a_fabrication(monkeypatch
         "the lint probe did not follow the verdict for an abandoned call")
 
 
+def test_a_TIMED_OUT_shallow_probe_is_UNPROVABLE_and_never_a_proven_absence(monkeypatch):
+    """The SECOND `_git` probe is bounded too, and its timeout is not an answer either.
+
+    `cut_commit_verdict` bounds two calls: `cat-file -e` (does this clone hold the object)
+    and `rev-parse --is-shallow-repository` (may a missing object be merely unfetched).
+    Handling the sentinel on the FIRST only leaves the mixed case — object absent, shallow
+    probe abandoned — falling through to `fabricated`: a PROVEN ABSENCE from a probe that
+    never ran, i.e. a false refusal of a healthy record on a merely slow checkout.
+
+    Non-vacuity: with the arm removed (or `_GIT_TIMED_OUT_RC` re-keyed) the same stub yields
+    `fabricated`; measured by monkeypatching the sentinel away below.
+    """
+    sm = _load_manifest_tool()
+    # Captured ONCE: the mutant below re-keys `_GIT_TIMED_OUT_RC`, and a stub that read it
+    # lazily would move with the mutant and prove nothing.
+    sentinel = sm._GIT_TIMED_OUT_RC
+
+    def fake_git(*args, **_kwargs):
+        if args[:2] == ("cat-file", "-e"):
+            return 128, "", "fatal: Not a valid object name"
+        if args[:2] == ("rev-parse", "--is-shallow-repository"):
+            return (
+                sentinel,
+                "",
+                f"git rev-parse --is-shallow-repository did not answer within "
+                f"{sm._GIT_TIMEOUT_S}s and was abandoned",
+            )
+        return 0, "", ""
+
+    monkeypatch.setattr(sm, "_git", fake_git)
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_UNPROVABLE, (
+        f"an abandoned SHALLOW probe read as {verdict!r} ({why}) — the object probe answered "
+        "nothing, so this clone cannot say whether the object is merely unfetched")
+    assert "did not answer within" in why, why
+
+    # …and the arm is what makes it so: re-key the sentinel and the same stub is a refusal.
+    monkeypatch.setattr(sm, "_GIT_TIMED_OUT_RC", -1)
+    without_arm, _ = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert without_arm == sm.CUT_FABRICATED, (
+        "removing the sentinel arm did not change the verdict, so this test does not pin it")
+
+
 def test_an_abbreviated_cut_at_commit_is_refused_without_asking_git(monkeypatch):
     """No abbreviation, no upper case, no `HEAD`-ish symbolic name: `cut` writes a sha."""
     sm = _load_manifest_tool()

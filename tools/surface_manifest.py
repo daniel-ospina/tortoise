@@ -428,8 +428,11 @@ MANIFEST_HEADER = (
     "# `create_edge`/`create_operator`, `events_poll`, `org_create`, `ingest`, `list_graphs`.\n"
     "# ⛔ `issue_insight`/`session_context`, `create_point`/`diary_write` and\n"
     "# `compute_confidence`/`recall` are NOT held names any more: #11609 lanes P6, P1 and P2 retired\n"
-    "# each pair FORWARD in the batch that made its stated reason FALSE, so a lane that restores one\n"
-    "# reverses a recorded decision and reds the door-retirement file it is editing.\n"
+    "# each pair FORWARD in the batch that made its stated reason UNTRUE — for the P1/P2 pairs that\n"
+    "# batch BUILT the missing arm; for the P6 `rest_spec` pair lane P4 MEASURED the coupling false\n"
+    "# and P6 ACTED on the measurement, which the door-retirement file and the lane-E block state\n"
+    "# in those words. So a lane that restores one reverses a recorded decision and reds the\n"
+    "# door-retirement file it is editing.\n"
     "# Lowering the pin 55 → 48 AT THAT CUT is what keeps it a growth pin: 48 was the live count\n"
     "# then, so at 55 the seven slots that wave vacated would have read green if re-filled.\n"
     "#\n"
@@ -900,6 +903,15 @@ def cut_commit_verdict(sha: str) -> tuple[str, str]:
             f"such object — git said: {stderr.splitlines()[0] if stderr else '(no output)'}"
         )
     rc_shallow, shallow, _ = _git("rev-parse", "--is-shallow-repository")
+    # ⛔ THE SAME ARM ON THE SECOND PROBE. `_git` bounds both calls, so a `rev-parse` that was
+    # ABANDONED on the clock (rc 124) answers nothing about shallowness — and falling through to
+    # the arms below would report `fabricated`, i.e. a PROVEN ABSENCE from a probe that never
+    # ran, which the block above says must never happen. A shallow probe timing out is as
+    # unprovable as the object probe timing out.
+    if rc_shallow == _GIT_TIMED_OUT_RC:
+        return CUT_UNPROVABLE, (
+            f"`git rev-parse --is-shallow-repository` did not answer within {_GIT_TIMEOUT_S}s, "
+            "so this clone cannot say whether the object is merely unfetched")
     if rc_shallow == 0 and shallow == "true":
         return CUT_UNPROVABLE, (
             "this clone is SHALLOW, so the object may simply not have been fetched (git "

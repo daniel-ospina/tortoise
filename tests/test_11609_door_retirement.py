@@ -62,7 +62,8 @@ THAT UNBLOCKS IT, not silently:
     MEASURED the coupling FALSE, for `search` as much as for the pairs (no product module
     derives a route from a registry row; the route is a hand-written decorator in
     `hosted_api.py`, and `docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §1.5 records the
-    `rest_spec` cell as aspirational, not real). ⛔ So what ACTUALLY holds `search` is the
+    COUPLING as "aspirational, not real" — the CELL is a recorded fact about a route that
+    exists independently). ⛔ So what ACTUALLY holds `search` is the
     `list[dict]` envelope, not the route — do not restore "retiring the entry deletes a REST
     route" as a live reason. `issue_insight` and `session_context` carried a `rest_spec` too
     and left in lane P6, the batch that acted on that measurement;

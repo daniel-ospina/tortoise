@@ -188,7 +188,7 @@ warning shim with `None` schemas and are excluded because they are not advertise
 One annotation cannot honestly describe that. That heterogeneity is the real reason the
 annotation is `Any`, and it is what makes the re-wrap cost asymmetric.
 
-### 1.4 `NO_CONTAINER_YET` — the seven destinations, verified live-or-not
+### 1.4 `NO_CONTAINER_YET` — the seven doors, verified live-or-not
 
 Checked against `TOOL_REGISTRY` **and** `TortoiseSDK` (the pointer must resolve to a live MCP
 door, per `TestEveryPointerResolvesInOneHop`):
