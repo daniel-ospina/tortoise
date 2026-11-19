@@ -1299,6 +1299,71 @@ def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
     assert "do not ask the gate" in why
 
 
+def test_the_record_still_requiring_the_copy_keeps_the_gate_SHUT(monkeypatch, tmp_path):
+    """⛔ THE OTHER HALF OF THE POLARITY, and it was the one with no falsifier at all.
+
+    `mirror_required(entity_type) is True` means the record has NOT proved it holds this
+    label's vectors, so the graph copy is still the answering leg and the fold keeps writing
+    it. Every other test in this file drives that predicate to `False` (or makes it
+    missing/raising), so rewriting `if needed: return True` to `if False:` left the suite
+    **green — measured, 88 passed** — and the strip would then be licensed (ready) while the
+    record predicate said the copy is still required: a retirement silently undone by the
+    next gated write and reported as complete.
+
+    The writer population here ASKS the gate (the shape `_fold_consults_gate` accepts), so a
+    refusal cannot come from the un-gated-writer arm: the predicate's `True` is the only
+    remaining reason, which is exactly what is being pinned.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required",
+                        lambda entity_type: True, raising=False)
+    gated = _fake_writer_module(tmp_path, monkeypatch, """
+def _only_writer(ev):
+    if not _derived_mirror_required("object"):
+        return None
+    return _write(ev)
+""")
+    monkeypatch.setattr(strip, "_writers_for", lambda label: (
+        (f"{gated}::_only_writer",), None))
+
+    emits, reason = strip.write_gate("object")
+    assert emits is True, (
+        "a writer population that asks the gate is NECESSARY and not sufficient: "
+        f"the record predicate still says the copy is required, and the gate opened ({reason})")
+    assert "answers True" in reason
+    assert "record has not proved" in reason
+
+
+def test_a_writer_whose_labels_are_only_known_at_runtime_stays_in_the_population(monkeypatch):
+    """`LABELS_AT_RUNTIME` is precisely a writer the gate cannot prove stopped.
+
+    `_register_writers` therefore keeps it in the population unconditionally — and that arm
+    had no falsifier: dropping `or record.stores == register.LABELS_AT_RUNTIME` left the suite
+    **green (measured, 88 passed)**, because no live declaration carries that disposition any
+    more (`#11641` bounded the last two). A future declaration that reverts to the
+    runtime-labels shape would then leave the population SILENTLY, and `_fold_consults_gate`
+    could clear a label whose writer still stores the vector — the exact fail-open the
+    comment beside the arm says must never happen.
+    """
+    from tortoise import embed_writer_register as register
+
+    monkeypatch.setattr(register, "EMBED_WRITER_CLASSES", {
+        "tortoise.sdk::_runtime_only": register.WriterClass(
+            cls="runtime", reason="a synthetic declaration for this pin",
+            owner_issue="#13647", stores=register.LABELS_AT_RUNTIME),
+        "tortoise.sdk::_tuple_declared": register.WriterClass(
+            cls="tuple", reason="a synthetic declaration for this pin",
+            owner_issue="#13647", stores=("Object",)),
+    })
+
+    writers = strip._register_writers("Object")
+    assert "tortoise.sdk::_runtime_only" in writers, (
+        "a runtime-labels writer left the population, so the gate could clear a label whose "
+        "writer still stores the vector")
+    assert "tortoise.sdk::_tuple_declared" in writers
+
+
 def test_the_gate_OPENS_when_every_declared_writer_asks(monkeypatch, tmp_path):
     """⛔ THE ANTI-INERT-ENFORCER TEST, and it needed a real verdict to be possible.
 
