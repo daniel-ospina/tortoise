@@ -1893,8 +1893,16 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
     COLUMNS ARE LITERALS the pairing is positional and static, so `zip(("embedding",), (vec,))`
     is read as the pair it is — by `_zip_stores_the_vector`, at the stop-arm call sites only
     (`dict`/`OrderedDict`/… operands, and a call's own operands) — while a zip of NAMES
-    stays certified. This rule is NOT widened to it, because the MIRROR arm asks this rule
-    too and a new recognition here would be a new ACCEPTANCE there. ⛔ `dict.fromkeys(["embedding"], vec)` USED TO BE IN THIS RESIDUAL AND IS NOT
+    stays certified. ⛔ THE RECOGNITION LIVES THERE AND NOT HERE FOR THE POSITION SET, NOT FOR
+    A MIRROR-ARM HAZARD: this paragraph used to say "This rule is NOT widened to it, because
+    the MIRROR arm asks this rule too and a new recognition here would be a new ACCEPTANCE
+    there" — which is FALSE. Instrumenting every call site over the whole suite at
+    `9b19001eb` measured ZERO reaches of this rule with `anywhere=False` (each of
+    `_stores_embedding`, `_mapping_literal_stores_the_vector`,
+    `_mapping_operand_stores_the_vector` and `_operand_stores_the_vector` is `anywhere`-gated
+    or internal). The reason is the POSITION SET: the zip rule answers `|=`/`update`/`**` and
+    a writer-handed operand list, this rule answers the operand, and a second copy of the zip
+    vocabulary here would be a fifth copy of one rule — the defect this series removes. ⛔ `dict.fromkeys(["embedding"], vec)` USED TO BE IN THIS RESIDUAL AND IS NOT
     ANY MORE (`#13788` F6, measured at `78cbe4da`): its operands are a KEY SEQUENCE and one
     value, both statically readable, so `_constructor_stores_the_vector` recognises it when
     the key sequence is a LITERAL (list, tuple or set) containing the EXACT property name. A
@@ -2781,7 +2789,8 @@ def _sequence_options(node, _depth: int = 0):
     ⛔ THE ONE RESOLVER FOR THE SEQUENCE/CONTAINER FAMILY (`#13788`, measured at `6504b28f`).
     This vocabulary had been written FOUR times — `_container_literal` (now deleted),
     `_const_index_candidates`,
-    `_spliced_sequence_elements` and `_zip_stores_the_vector`'s type test — and each copy knew a
+    `_spliced_sequence_elements` (now deleted — see below) and `_zip_stores_the_vector`'s type
+    test — and each copy knew a
     different subset, so a 1853-row matrix with a runtime oracle measured **451 stop-arm false
     PASSes (27.2 %)** while the honest-writer axis measured **0** wrong refusals:
 
@@ -2975,26 +2984,6 @@ def _two_argument_store(arguments, alias_keys: frozenset[str] = frozenset()) -> 
             and not isinstance(arguments[1], ast.Constant))
 
 
-def _spliced_sequence_elements(node) -> list:
-    """The elements a `*`-splice contributes — the union of every `_sequence_options` option.
-
-    ⛔ ONE FLATTENER, AND IT IS THE RESOLVER (`#13788`, measured at `6504b28f`). This function
-    was a FOURTH copy of the sequence vocabulary: it knew `Starred`, `list`/`tuple`/`set`,
-    copy, `+`/`*`, a full slice and conditionals, but not a CONSTANT INDEX — so
-    `props._set(x, *[["embedding", vec]][0])` CERTIFIED while `*["embedding", vec]` was
-    refused, one spelling over from a fix that had just landed. It is now a projection of
-    `_sequence_options`, so there is no vocabulary left for it to miss.
-
-    ⛔ IT NEVER RETURNS AN EMPTY LIST FOR "UNREADABLE": an expression the resolver cannot read
-    is returned AS ITSELF, so the caller's raw-form test still sees an opaque argument and the
-    verdict can only move toward refusal.
-    """
-    options = _sequence_options(node)
-    if options is None:
-        return [node]
-    return [element for option in options for element in option]
-
-
 def _three_argument_store(arguments, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Is this `(…, EXACT property, non-constant value)`? THE positional three-argument store.
 
@@ -3014,7 +3003,8 @@ def _argument_expansions(arguments) -> list[list]:
 
     ⛔ POSITION IS THE WHOLE POINT (`#13788`, measured at `fbcbf152`). A `Starred` argument is
     spliced, and a `Starred` over a CONDITIONAL has one expansion per branch. Unioning those
-    branches into one list (which `_spliced_sequence_elements` does, correctly, for the
+    branches into one list (which the DELETED `_spliced_sequence_elements` used to do, correctly,
+    for the
     question "is there a store in here") destroys the ARGUMENT POSITION the three-argument
     test reads: `props._set(props, *({"x": 1} and (["embedding", vec])))` really is
     `_set(props, "embedding", vec)`, but a union puts the `{"x": 1}` branch first and
@@ -3067,7 +3057,13 @@ def _third_argument_stores_the_vector(call, alias_keys: frozenset[str] = frozens
     # branch first, so `"embedding"` landed at index 2 and the three-argument test, which reads
     # `arguments[1]`, CERTIFIED it. Same for a store branch that is not the FIRST branch of an
     # `or`/`and`/`if…else`. A position-preserving expansion can only add refusals: every
-    # candidate below is a shape the call really can take.
+    # candidate below is a shape the call really can take. ⛔ THAT IS TRUE ONLY IF EVERY
+    # EXPANSION IS ASKED (`#13788` F14, measured at `9b19001eb`): the positional-keyword leg
+    # read `expansions[0]`, so `_set(props, *([] if _f() else ["embedding"]), value=vec)` —
+    # whose false branch leaves the exact argument list `_set(props, "embedding", value=vec)`
+    # — CERTIFIED (a stop arm that stores) while the same call with the branches SWAPPED was
+    # refused. Refusal depended on BRANCH ORDER, which is the same defect the paragraph above
+    # describes one level up, left standing in the leg below. `expansions` is never empty.
     raw = list(arguments)
     expansions = _argument_expansions(raw)
     if _two_argument_store(raw, alias_keys=alias_keys):
@@ -3080,7 +3076,6 @@ def _third_argument_stores_the_vector(call, alias_keys: frozenset[str] = frozens
            or _three_argument_store(candidate, alias_keys=alias_keys)
            for candidate in expansions):
         return True
-    arguments = expansions[0] if expansions else raw
     # ⛔ A ``**`` OPERAND IS THE SAME FACTS ONE LEVEL IN. `keyword.arg` is `None` for it, so the
     # two rules below cannot see a `key`/`value` pair it carries — and
     # `_set(props, **{"key": "embedding", "value": vec})` certified the stop arm while its
@@ -3109,9 +3104,14 @@ def _third_argument_stores_the_vector(call, alias_keys: frozenset[str] = frozens
     # `record.set("embedding", value=vec)` / `_set(props, "embedding", value=vec)` — the
     # property as a POSITIONAL constant anywhere before the value, which then arrives as a
     # keyword (so the three-positional-argument test above never sees it).
+    # ⛔ EVERY EXPANSION, NOT THE FIRST (`#13788` F14). Asking only `expansions[0]` made the
+    # verdict depend on which branch the spliced expression listed first; each expansion is an
+    # argument list the call really can take, so asking all of them is refusal-only. On the
+    # MIRROR arm `alias_keys` is empty and this leg therefore still matches only the literal.
     named_positionally = any(
         _names_property_key(argument, alias_keys)
-        for argument in arguments)
+        for candidate in expansions
+        for argument in candidate)
     if named_positionally and live_keyword:
         return True
     # `_set(props, embedding=vec)` — the property's own name as the keyword.

@@ -4387,6 +4387,7 @@ def _upsert_object(ev):
     return _write(ev)
 """,
     )
+    assert refused, "the refused fixture tuple is EMPTY — the loop below asserts nothing"
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
@@ -4413,6 +4414,7 @@ def _upsert_object(ev):
     return _write(ev, embedding)
 """,
     )
+    assert accepted, "the accepted fixture tuple is EMPTY — the loop below asserts nothing"
     for source in accepted:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         assert strip._writer_consults_gate(
@@ -4567,6 +4569,7 @@ def _upsert_object(ev):
     return _write(ev)
 """,
     )
+    assert accepted, "the accepted fixture tuple is EMPTY — the loop below asserts nothing"
     for source in accepted:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         assert strip._writer_consults_gate(
@@ -6561,28 +6564,6 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ A SET IS AN ITERABLE OF PAIRS TOO (`#13788`, measured by the review of this
-        # branch). `dict.__ior__`/`dict.update` accept any iterable of pairs, and a set
-        # literal is one — so this is a store whenever the vector is HASHABLE (`(0.1, 0.2)`)
-        # and a `TypeError` when it is not (`[0.1, 0.2]`). The verdict turned on a type no
-        # static check can see, and the list spelling beside it was refused the whole time:
-        #
-        #     props |= [("embedding", _encode(ev))]            <- refused
-        #     props |= {("embedding", _encode(ev))}            <- CERTIFIED
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {("embedding", _encode(ev))}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props.update({("embedding", _encode(ev))})
-        return None
-    _write(props)
-""",
         # ⛔ THE VALUE-SIDE TERM NEEDS THE WRAPPER VOCABULARY TOO (`#13788`, measured by the
         # review of this branch). The bare literal was answered while one TRANSPARENT wrapper
         # — the exact shape this branch's `.copy()` history records — re-opened the hole:
@@ -6617,45 +6598,6 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k in {"embedding"}}
-        return None
-    _write(props)
-""",
-        # ⛔ AND THE WHOLE FAMILY OF SOURCE WRAPPERS, not just the two the first cut answered
-        # (`#13788`, measured on the MERGED head `a9de750238` by the lane that wrote this
-        # block). Answering a BARE literal while one transparent wrapper re-opens the hole is
-        # the shape this branch's `.copy()` history already recorded, so every row below was
-        # run through `_writer_consults_gate` BEFORE it was fixed and each answered GATED:
-        #
-        #     {k: _encode(ev) for k in ["embedding"][:]}                  <- CERTIFIED
-        #     {k: _encode(ev) for k in [*["embedding"]]}                 <- CERTIFIED
-        #     {k: _encode(ev) for k in list(["embedding"])}              <- CERTIFIED
-        #     {k: _encode(ev) for k in tuple(["embedding"])}             <- CERTIFIED
-        #     {k: _encode(ev) for k in ["embedding"] + []}               <- CERTIFIED
-        #     {k: _encode(ev) for k in ["embedding"] * 1}                <- CERTIFIED
-        #     {k: _encode(ev) for k in set(["embedding"])}               <- CERTIFIED
-        #     {k: _encode(ev) for k in {"embedding": 1}}                 <- CERTIFIED
-        #     {k: _encode(ev) for k in {"embedding": 1}.keys()}          <- CERTIFIED
-        #     {k: _encode(ev) for k in dict.fromkeys(["embedding"])}     <- CERTIFIED
-        #     {k: _encode(ev) for k, _i in {"embedding": 1}.items()}    <- CERTIFIED
-        #     {k: _encode(ev) for k in [x for x in ["embedding"]]}       <- CERTIFIED
-        #
-        # A MAPPING is in the list because ITERATING ONE YIELDS ITS KEYS, and `.items()`
-        # yields the pairs — the same store reached through a view, which the operand rule
-        # already answers (`.items()`, `#13788` F1). The last row is the IDENTITY
-        # comprehension, which is transparent: it yields exactly its source's elements. A
-        # TRANSFORMING one (`[x.upper() for x in …]`) is the resolver's stated residual and is
-        # an ACCEPTED control below, so the difference is pinned rather than asserted in prose.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in ["embedding"][:]}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in [*["embedding"]]}
         return None
     _write(props)
 """,
@@ -7106,8 +7048,8 @@ def _upsert_object(props, ev):
         # a bare literal and then the conditional spellings, while every OTHER wrapper the pairs
         # rule already resolves still CERTIFIED beside its refused bare twin — `list()`/`tuple()`,
         # `.copy()`, `+`, a full slice, a `Starred` element, and the conditional of a `Starred`.
-        # One flattener (`_spliced_sequence_elements`) now asks that same vocabulary, so a splice
-        # and the operand rule cannot answer one spelling differently.
+        # The resolver (`_sequence_options`) is what the splice path (`_argument_expansions`) asks,
+        # so a splice and the operand rule cannot answer one spelling differently.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -7190,8 +7132,10 @@ def _upsert_object(props, ev):
         # ⛔ AND THE VOCABULARY WAS STILL FOUR COPIES, MEASURED AS A MATRIX (`#13788`, measured at
         # `6504b28f`). A 1853-legal-row sweep with a RUNTIME ORACLE found 451 stop-arm false
         # PASSes (27.2 %) and 0 wrong refusals, all of it one root: `_container_literal`,
-        # `_const_index_candidates`, `_spliced_sequence_elements` and the zip arm's type test each
-        # knew a different subset. They are one resolver now (`_sequence_options`), and these rows
+        # `_const_index_candidates` and the zip arm's type test each
+        # knew a different subset (and the splice flattener, `_spliced_sequence_elements`, was a
+        # further copy — since DELETED, because `_argument_expansions` spliced without it). They
+        # are one resolver now (`_sequence_options`), and these rows
         # are the five classes that sweep named — every one refused beside its honest control.
         #
         # F1: the zip arm TYPE-TESTED each column instead of resolving it (320 of the 451).
@@ -7380,10 +7324,12 @@ def _upsert_object(props, ev):
         # ALREADY PINNED, and this comment used to say otherwise: deleting `_sequence_options`'
         # `ast.Mult` arm reddens the PRE-EXISTING row `props |= (2 * [{"embedding": …}])[0]`
         # (measured by the review of `86d6c74a5`), so "reached by no row / the suite stayed
-        # green" was false. What these two rows add is the SPLICE path: `_spliced_sequence_elements`
-        # projects `_sequence_options`, and a `Starred` around a repetition reaches the arm
-        # through that projection rather than through the const-index route the pre-existing row
-        # uses. ⛔ AND THE ROW MUST BE THE **SPLIT** FORM (`*["embedding", v]` splices to TWO
+        # green" was false. What these two rows add is the SPLICE path: the splice flattener
+        # (`_argument_expansions`) asks `_sequence_options`, and a `Starred` around a repetition
+        # reaches the arm through that projection rather than through the const-index route the
+        # pre-existing row uses. ⚠️ That flattener is `_argument_expansions`, NOT the deleted
+        # `_spliced_sequence_elements` this comment named before — measured by the review of
+        # `9b19001eb`: emptying that helper's body flips 0 of 351 refused rows. ⛔ AND THE ROW MUST BE THE **SPLIT** FORM (`*["embedding", v]` splices to TWO
         # arguments): the pair-tuple form `*[("embedding", v)]` is refused by the pairs rule
         # whether the splice flattens it or not (measured), so it would pin nothing here.
         """
@@ -7397,6 +7343,35 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props._set(x, *(1 * ["embedding", _encode(ev)]))
+        return None
+    _write(props)
+""",
+        # ⛔ EVERY EXPANSION, NOT THE FIRST ONE (`#13788` F14, measured at `9b19001eb`).
+        # `_third_argument_stores_the_vector` narrowed the argument list to `expansions[0]`
+        # before its positional-keyword leg, so the verdict turned on BRANCH ORDER: with the
+        # STORING branch second, the leg read `[]` and the `value=` keyword carried the vector
+        # into a call that was CERTIFIED (runtime-checked: `_f()` falsy leaves exactly
+        # `_set(props, "embedding", value=VEC)`). The row below is that spelling; its twin one
+        # branch over was already refused, which is what made the hole invisible.
+        # ⇒ the mutant it kills: `named_positionally = any(… for argument in expansions[0])`.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, *([] if _f() else ["embedding"]), value=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(props, *([] if _f() else ["embedding"]), value=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.setdefault(*([] if _f() else ["embedding"]), default=_encode(ev))
         return None
     _write(props)
 """,
@@ -7600,7 +7575,7 @@ def _upsert_object(props, ev):
         # be a row only the stop arm refuses, which is what made the widening invisible.
 
         # ⛔ AND THE SPLICE MUST KEEP THE ARGUMENT POSITION (`#13788`, measured at `fbcbf152`).
-        # `_spliced_sequence_elements` unions every option, which is right for "is there a store
+        # `_spliced_sequence_elements` (since DELETED) unioned every option, which is right for "is there a store
         # in here" and WRONG for the position-sensitive three-argument test: the union put the
         # non-storing branch first, so `"embedding"` landed at index 2 and the store CERTIFIED
         # while the bare twin was refused. Each expansion is now tested on its own.
@@ -8923,6 +8898,7 @@ def _upsert_object(props, ev):
     _write(props)
 """,
     )
+    assert over_refused, "the over_refused fixture tuple is EMPTY — the loop below asserts nothing"
     for source in over_refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
@@ -9021,6 +8997,7 @@ def _upsert_object(props, ev):
     _write(props)
 """,
     )
+    assert refused, "the refused fixture tuple is EMPTY — the loop below asserts nothing"
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
@@ -9058,6 +9035,7 @@ def _upsert_object(props, ev):
     _write(props)
 """,
     )
+    assert accepted, "the accepted fixture tuple is EMPTY — the loop below asserts nothing"
     for source in accepted:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
