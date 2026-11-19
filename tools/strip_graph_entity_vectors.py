@@ -1560,6 +1560,13 @@ def _mapping_literal_stores_the_vector(node) -> bool:
     # on a stop arm and still lifted `REFUSE_WRITE_STILL_EMITS`.
     # REFUSAL-ONLY: either operand may be the one SELECTED, so a store in ANY of them is a
     # store. A `BoolOp` whose operands place nothing still answers False, exactly as before.
+    # ⛔ STATED OVER-REFUSAL (`#13788`, measured at `6a164ac9`): `and` returns its LEFT operand
+    # when that operand is FALSY, so a statically-TRUTHY left operand makes the right one the
+    # result — `props |= [("embedding", vec)] and []` is `[]` and places nothing, yet it is
+    # refused. Deciding that needs truthiness of an arbitrary literal, and the series' doctrine
+    # permits an over-refusal where a false PASS is the alternative, so the imprecision is
+    # DISCLOSED here rather than left to be rediscovered (the same imprecision already exists
+    # for `if`-expressions, whose branches are both answered too).
     if isinstance(node, ast.BoolOp):
         return any(_mapping_literal_stores_the_vector(value) for value in node.values)
     if isinstance(node, ast.NamedExpr):
@@ -1763,6 +1770,15 @@ def _zip_stores_the_vector(call) -> bool:
     # ⛔ IT IS ASKED OF ANY EXPRESSION, not only a call: the `|=` arm hands it the whole
     # right-hand side (`props |= {"embedding": vec} | {}` reaches here as a `BinOp`), so a
     # non-call must answer "no" rather than raise out of the destructive gate.
+    # ⛔ AND A CONDITIONAL IS EVERY BRANCH (`#13788`, measured at `6a164ac9`): the caller hands
+    # over the whole right-hand side, so `props |= (zip(("embedding",), (vec,)) if f else
+    # zip((), ()))` and `props |= (None or zip(("embedding",), (vec,)))` arrived here as an
+    # `IfExp`/`BoolOp` and answered False on the `isinstance(call, ast.Call)` guard — the
+    # columns were literal, only the CALL was wrapped, and each CERTIFIED. Resolving the
+    # wrapper here is refusal-only: any branch that is a storing zip still refuses.
+    branches = _conditional_branches(call)
+    if len(branches) > 1 or branches[0] is not call:
+        return any(_zip_stores_the_vector(branch) for branch in branches)
     if not isinstance(call, ast.Call):
         return False
     if _callee_name(call) != "zip" or len(call.args) != 2:
@@ -2204,6 +2220,21 @@ def _comprehension_source_yields(source, _depth: int = 0):
 
     if _depth > 8:                      # a wrapper stack is finite in real code; bound it
         return None
+    # ⛔ THE TWO SPELLINGS THE RESOLVER'S OWN `if…else` ARM DOES NOT COVER (`#13788`, measured at
+    # `6a164ac9`, reconciled at `a06d6730`). That arm answers `x if c else y`; the OTHER two
+    # spellings of the same conditional selection — `a or b` / `a and b` and the walrus — were
+    # still unanswered, so `{k: vec for k in ([] or ["embedding"])}` and
+    # `{k: vec for k in (p := ["embedding"])}` CERTIFIED while the `if…else` twin was refused.
+    # Answering them through `_conditional_branches` (which is the ONE definition of the family)
+    # keeps the `if…else` arm where it is rather than growing a second vocabulary beside it —
+    # and the arm below keeps its own stated semantics, including "an unreadable branch
+    # contributes nothing", which is why this block covers ONLY the two spellings it omits.
+    if isinstance(source, ast.BoolOp | ast.NamedExpr):
+        branches = _conditional_branches(source)
+        resolved = [_comprehension_source_yields(branch, _depth + 1) for branch in branches]
+        if any(item is None for item in resolved):
+            return None
+        return [item for chunk in resolved for item in chunk]
     if isinstance(source, ast.Starred):
         return _comprehension_source_yields(source.value, _depth + 1)
     # ⛔ THE TRANSPARENT COPY OF THE SOURCE IS THE SAME SOURCE (`#13788`, measured by the fix
@@ -2513,6 +2544,38 @@ def _container_literal(node):
     return None
 
 
+def _conditional_branches(node) -> list:
+    """Every expression this TRANSPARENT CONDITIONAL wrapper can evaluate to.
+
+    ⛔ ONE DEFINITION FOR EVERY RESOLVER (`#13788`, measured at `6a164ac9`). `x if c else y` is
+    one of its two branches, `a or b` / `a and b` is one of its operands, and `(p := x)` IS `x`
+    — so a rule that looks THROUGH the wrapper must answer with every branch, because any of
+    them can be the one selected and a store in any of them is a store (refusal-only).
+
+    ⛔ IT EXISTS BECAUSE THE VOCABULARY WAS WRITTEN PER-RESOLVER AND EACH COPY MISSED A
+    DIFFERENT WRAPPER: after the operand rules learned `BoolOp`/`NamedExpr`, the container
+    resolver answered a conditional only OUTSIDE a slice (`([{…}] if f else [{}])[0]` refused)
+    and not inside one (`([{…}] if f else [{}])[0:][0]` CERTIFIED), the comprehension-source
+    resolver answered neither (`{k: vec for k in (["embedding"] if f else ["x"])}` CERTIFIED),
+    and the zip/`Starred` arms answered a bare call or literal only (`props |= (zip(("embedding",),
+    (vec,)) if f else zip((), ()))` CERTIFIED). Three copies, three holes. This function is the
+    one place the wrapper family is written, so the next resolver cannot miss it.
+
+    A non-wrapper answers `[node]`, so a caller that splices over the result keeps the plain
+    spelling exactly as before.
+    """
+    import ast
+
+    if isinstance(node, ast.IfExp):
+        return _conditional_branches(node.body) + _conditional_branches(node.orelse)
+    if isinstance(node, ast.BoolOp):
+        return [branch for value in node.values
+                for branch in _conditional_branches(value)]
+    if isinstance(node, ast.NamedExpr):
+        return _conditional_branches(node.value)
+    return [node]
+
+
 def _const_index_candidates(node) -> list:
     """Every List/Tuple literal this CONTAINER expression can be, through wrappers.
 
@@ -2523,26 +2586,41 @@ def _const_index_candidates(node) -> list:
     `if`-expression arm. The two only met when the literal was bare, which is this series'
     recurring shape: a spelling one wrapper out from a covered one.
 
-    ⛔ SO THE SAME WRAPPER FAMILY IS UNWRAPPED HERE — the `if`-expression, plus `or`/`and`
-    and the walrus, which are the same conditional SELECTION (`x or y` is `x if x else y`;
-    `(p := x)` evaluates to `x`). Either branch may be the one selected, so a store reached
-    through ANY of them is a store: that is what keeps this refusal-only. A branch that is
-    not a literal contributes no candidate — and an expression with NO candidate yields an
-    empty list, which answers False exactly as the `container is None` early return it
-    replaced did, so the stated name-bound container residual (`pairs[0]`) is unchanged.
+    ⛔ AND THE COMPOSITION IS NOT ONE-DIRECTIONAL (`#13788`, measured at `6a164ac9`): this
+    function originally delegated its terminal arm to `_container_literal`, so a conditional
+    INSIDE a wrapper was answered while a wrapper INSIDE the conditional was not —
+    `([{…}] if f else [{}])[0:][0]`, `list([{…}] if f else [{}])[0]` and the doubly-indexed
+    `([([{…}] if f else [{}])] if g else [[]])[0][0]` all CERTIFIED. So EVERY wrapper is
+    resolved HERE — the conditional branches via `_conditional_branches`, then the full slice,
+    the one-arg `list(…)`/`tuple(…)` and a CONSTANT index — in any nesting order, which is
+    what makes the order of the wrappers stop mattering.
+
+    A branch that is not a literal contributes no candidate — and an expression with NO
+    candidate yields an empty list, which answers False exactly as the `container is None`
+    early return it replaced did, so the stated name-bound container residual (`pairs[0]`) is
+    unchanged.
     """
     import ast
 
-    if isinstance(node, ast.IfExp):
-        return (_const_index_candidates(node.body)
-                + _const_index_candidates(node.orelse))
-    if isinstance(node, ast.BoolOp):
-        return [literal for value in node.values
-                for literal in _const_index_candidates(value)]
-    if isinstance(node, ast.NamedExpr):
-        return _const_index_candidates(node.value)
-    literal = _container_literal(node)
-    return [literal] if literal is not None else []
+    out: list = []
+    for branch in _conditional_branches(node):
+        if isinstance(branch, ast.List | ast.Tuple):
+            out.append(branch)
+            continue
+        if isinstance(branch, ast.Subscript) and _is_full_slice(branch.slice):
+            out.extend(_const_index_candidates(branch.value))
+            continue
+        if (isinstance(branch, ast.Call) and not branch.keywords
+                and len(branch.args) == 1 and _callee_name(branch) in ("list", "tuple")):
+            out.extend(_const_index_candidates(branch.args[0]))
+            continue
+        # A CONST-INDEXED container of containers (`[[…]][0]`) is the inner container, so the
+        # candidates are ITS candidates — the same question one index in, answered by recursion.
+        if isinstance(branch, ast.Subscript) and (index := _constant_index(branch.slice)) is not None:
+            for literal in _const_index_candidates(branch.value):
+                if -len(literal.elts) <= index < len(literal.elts):
+                    out.extend(_const_index_candidates(literal.elts[index]))
+    return out
 
 
 def _pairs_store_the_vector(node) -> bool:
@@ -2607,9 +2685,19 @@ def _third_argument_stores_the_vector(call) -> bool:
     raw = list(arguments)
     spliced: list = []
     for argument in raw:
-        if isinstance(argument, ast.Starred) \
-                and isinstance(argument.value, ast.List | ast.Tuple):
-            spliced.extend(argument.value.elts)
+        # ⛔ A CONDITIONAL SPLICE IS EVERY BRANCH (`#13788`, measured at `6a164ac9`):
+        # `props._set(x, *(["embedding", vec] if f else []))` is the same splice as the bare
+        # literal one wrapper in, and the `isinstance(argument.value, ast.List | ast.Tuple)`
+        # test below answered only the bare spelling. A branch that is not a literal keeps the
+        # `Starred` node, so the raw-form test below still sees it.
+        if isinstance(argument, ast.Starred):
+            branch_elements = []
+            for branch in _conditional_branches(argument.value):
+                if isinstance(branch, ast.List | ast.Tuple):
+                    branch_elements.extend(branch.elts)
+                else:
+                    branch_elements.append(argument)
+            spliced.extend(branch_elements)
         else:
             spliced.append(argument)
     arguments = spliced

@@ -6012,6 +6012,81 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE WRAPPER *ORDER* CANNOT MATTER (`#13788`, measured at `6a164ac9`). The
+        # container resolver delegated its terminal arm to `_container_literal`, so a
+        # conditional OUTSIDE a slice was answered while a wrapper INSIDE the conditional was
+        # not — the same fix, one nesting level over, and the doubly-indexed row is the same
+        # gap twice. Every wrapper is now resolved in one place (`_conditional_branches`), so
+        # the nesting order stops mattering; each row below placed a real top-level vector.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([{"embedding": _encode(ev)}] if _f() else [{}])[0:][0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= list([{"embedding": _encode(ev)}] if _f() else [{}])[0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(([{"embedding": _encode(ev)}] if _f() else [{}])[0:][0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([([{"embedding": _encode(ev)}] if _f() else [{}])] if _g() else [[]])[0][0]
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE SAME WRAPPER IN THE THREE OTHER RESOLVERS (`#13788`, measured at
+        # `6a164ac9`). Each carried its own copy of the vocabulary — the comprehension-source
+        # resolver (`{k: vec for k in …}`), the zip arm and the `Starred` splice — and each had
+        # answered only its BARE spelling, so one conditional around it CERTIFIED while the bare
+        # twin was refused. `_conditional_branches` is now the one definition all of them ask,
+        # which is why these rows exist beside the container ones: three copies had three holes.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in (["embedding"] if _f() else ["x"])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ([] or ["embedding"])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (zip(("embedding",), (_encode(ev),)) if _f() else zip((), ()))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (None or zip(("embedding",), (_encode(ev),)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *(["embedding", _encode(ev)] if _f() else []))
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -6026,6 +6101,31 @@ def _upsert_object(props, ev):
     # ⛔ AND THE HONEST STOP ARMS MUST STILL CERTIFY, or the rule is an inert enforcer: a
     # removal, a bare exit, and a non-store statement before the exit are all write-stops.
     accepted = (
+        # ⛔ THE CONDITIONAL RESOLVERS MUST NOT SWALLOW A NON-STORE (`#13788`, measured at
+        # `6a164ac9`): a branch that yields nothing, and a wrapper around a NON-STORING
+        # spelling, are honest write-stops. Without these rows a resolver that answered "any
+        # conditional is a store" would pass every refused row above.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([{}] if _f() else [{}])[0:][0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in (["embedding_model"] if _f() else [])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (zip(("embedding",), ()) if _f() else zip((), ()))
+        return None
+    _write(props)
+""",
         # ⛔ THE NARROWINGS OF THE SOURCE RESOLVER, one row per narrowing, or closing the
         # wrapper family above becomes an over-refusal (`#13788`, each measured CERTIFIED on
         # the merged head AND on this head). `[...] * 0` iterates NOTHING, so it places no key;
