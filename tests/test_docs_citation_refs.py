@@ -584,7 +584,14 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # enforce it mechanically was measured fail-open and false-blocking, and is deleted).
     for match in re.finditer(
             r"`?" + re.escape(cmd)
-            + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
+            # ⛔ THE SEPARATOR CLASS ADMITS A TABLE CELL AND A PARENTHETICAL (#13900
+            # review, finding 2, MEASURED): with `` [`_\s*]* `` alone,
+            # `| `-- tortoise/` | prints ONE path at this head |` and
+            # `(`-- tortoise/`) prints ONE path at this head.` both returned `[]` — and the
+            # table-cell spelling is the natural one for this bundle, whose own D5 row is a
+            # table row. Widening the class is the difference between "every occurrence" and
+            # "every occurrence with no punctuation after it", which is not a closure at all.
+            + r"[`_\s*|)]*(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
         # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
@@ -598,19 +605,19 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # there. Both passed only while this head happened to be non-empty, and both would
         # have been REFUSED on a docs-only head — a false block on the guard whose job is to
         # protect history, the one direction this file's docstring forbids.
-        # ⛔ NO SKIP — EVERY OCCURRENCE IS GRADED. Six review cycles measured the skip that
-        # stood here as FAIL-OPEN in nine spellings, and the last one is why it is gone
-        # rather than tightened a fifth time: appending
-        #
-        #   "See `git diff --name-only origin/main...HEAD -- docs/` for the docs rows, and
-        #    then `-- tortoise/` prints ONE path at this head."
-        #
-        # to the LIVE document left the whole file GREEN, because a bare `git diff` earlier
-        # on the line made the claim look like somebody else's pathspec. The spellings that
-        # defeated it, in order: a dropped backtick; an `—` separator; a `? ` (not a
-        # sentence break); markdown emphasis around the command; a fenced transcript; two
-        # invocations in one sentence; no backticks at all; and a command split across two
-        # code spans.
+        # ⛔ NO SKIP — EVERY OCCURRENCE IS GRADED. Four attempts to tighten a pathspec skip
+        # each closed the reported spelling and left another open, so it is gone. NINE
+        # spellings defeated it; SIX of them were measured returning `[]` against a rule that
+        # actually skipped them, and the other three are kept in the witness list below as
+        # the shapes the LAST rule let through. (A review of #13900 measured three of the
+        # nine against `origin/main`'s arm and found they were GRADED there, so the honest
+        # record is six-plus-three, not nine — the justification does not need the other
+        # three, and stating them as skipped would be a claim this file cannot support.)
+        # The six, in the order each was found: a dropped backtick; an `—` separator; a `? `
+        # (not a sentence break); markdown emphasis around the command; a fenced transcript;
+        # and two invocations in one sentence. The three that survived the last rule: no
+        # backticks at all; a command split across two code spans; and a bare `git diff`
+        # earlier on the SAME line.
         #
         # Prose and a command line are not distinguishable by punctuation, so the arm does
         # not try. The property the skip reached for is kept by the DOCUMENT instead: a claim
@@ -723,9 +730,11 @@ _TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
 #: full command, so a membership verdict stated on the abbreviation was unread by ANY arm:
 #: `_TORTOISE_MEMBERSHIP_SPELLINGS` covers the spellings that were LIVE, one row per incident
 #: (`returns ONE module`, round 5), which is a list that grows after each miss. The matcher
-#: already reads this subject correctly; only the call was missing — so it is called, and
-#: the pathspec SKIP inside the matcher keeps a `git diff … -- tortoise/` invocation (and the
-#: rev-pinned history sentences) out of it, exactly as it does for the full command.
+#: already reads this subject correctly; only the call was missing — so it is called.
+#: ⛔ THERE IS NO PATHSpec SKIP ANY MORE (#13900 review, finding 3): every occurrence is
+#: graded, and the reason is recorded at the matcher. A claim about another head is written
+#: so it is not an answer to the command (past tense, or the named head first) — that is the
+#: convention the document keeps, and it is the half this arm relies on now.
 _TORTOISE_CENSUS_CMD_ABBREV = "-- tortoise/"
 
 #: Every SUBJECT arm `(c-ii)` grades. A tuple, not two calls at the assertion, so that a row
@@ -1363,12 +1372,16 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "the abbreviated subject does not read an EMPTINESS verdict as emptiness, so the "
         "fragment pass is inert in the direction the retired rows cover "
         "(#13807 review round 16)")
-    # …and the two FALSE-RED directions the pathspec skip and the pointer rule exist for.
+    # …and the two FALSE-RED directions the POINTER RULE still exists for. (The pathspec
+    # skip that used to be named here is deleted — #13900 review, finding 3 — so a pointer is
+    # the only false-red shape left to pin. Its witness at `:1370` names the deletion in its
+    # own failure message, which is why it can stay as it is.)
     assert _typed_answers_to_the_census_command(
         "See `git diff origin/main...HEAD -- tortoise/` for it.") == [], (
         "the abbreviated subject read the TAIL OF A LONGER INVOCATION as a typed answer, so "
-        "the document's own pointer to the command would be refused "
-        "(#13845 review, cycle 3 — the skip must survive the second subject)")
+        "the document's own pointer to the command would be refused — an answer-FREE "
+        "pointer is not a claim, and the rule that reads pointers must not be confused with "
+        "the deleted skip (#13900 review, finding 3)")
     assert _typed_answers_to_the_census_command(
         "`-- tortoise/` is the command that answers it") == [], (
         "the abbreviated subject treats the document's POINTER as a typed answer, the "
@@ -1427,19 +1440,23 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "restored for, so the regression this arm was repaired for would go unreported "
         "(#13807 review round 16, F1)")
 
-    # ⛔ AND THIS PASS BRINGS A SKIP THAT MUST BE WITNESSED (#13807 review round 16, F2 —
-    # MEASURED). `"-- tortoise/"` is a SUFFIX of every longer `git diff … -- tortoise/`
-    # invocation, so the matcher skips an occurrence that is the pathspec of a longer
-    # invocation: the writer named the revs, which is the head-pinned spelling this document
-    # asks for, and this arm cannot fetch that head. Both halves are pinned, because the two
-    # ways this rule fails are opposite and both silent — a skip that WIDENS to every
-    # occurrence looks green while grading nothing, and a skip that no witness reaches is dead
-    # code nothing reads (measured: with the skip disabled, `main`'s arm test reds and this
-    # file's arm test was GREEN before this block existed).
-    # ⛔ THE OPPOSITE CONTRACT, PINNED IN EIGHT SPELLINGS (#13845 review, cycles 3-7). There
+    # ⛔ THIS PASS USED TO BRING A SKIP, AND NOW BRINGS ITS ABSENCE (#13807 review round 16,
+    # F2; #13900 review, findings 1 and 3). `"-- tortoise/"` is a SUFFIX of every longer
+    # `git diff … -- tortoise/` invocation, so an occurrence that is a pathspec was skipped
+    # here: the writer named the revs, which is the head-pinned spelling this document asks
+    # for, and this arm cannot fetch that head. Four attempts to keep that skip honest each
+    # closed the reported spelling and left another open — the last exempted any claim that
+    # merely SHARED A LINE with an unbackticked `git diff` — so it is DELETED, and the
+    # blocking direction it protected is now carried by the CONVENTION (a claim about another
+    # head is written as one: past tense, or the named head first). Both halves of that are
+    # pinned below, because the two ways this rule fails are opposite and both silent: a skip
+    # that widens to every occurrence looks green while grading nothing, and a skip no
+    # witness reaches is dead code nothing reads.
+    # ⛔ THE OPPOSITE CONTRACT, PINNED IN NINE SPELLINGS (#13845 review, cycles 3-7). There
     # is no skip: a claim that is an answer to this command is graded wherever it sits on the
-    # line and whatever surrounds it. Each spelling below was MEASURED skipped by one of the
-    # five rules that were tried, and the first was measured GREEN on the live document.
+    # line and whatever surrounds it. SIX of the nine were measured returning `[]` against
+    # the rule that was live at the time; the remaining three are the shapes that survived
+    # the LAST rule and are kept as regressions, not as history.
     for _refuted in (
             "Some history here. We ran git diff earlier. `-- tortoise/` prints ONE path at this head.",
             "See `git diff origin/main...HEAD -- docs/` for the docs; `-- tortoise/` prints the two COMMENT-ONLY modules at this head.",
@@ -1455,6 +1472,14 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the arm SKIPPED {_refuted!r} — it is an answer to the command in a form the arm "
             "must grade. A pathspec skip was measured fail-open in nine spellings and is "
             "DELETED; if this reds, one was reintroduced (#13845 review, cycles 3-7)")
+    # ⛔ AND THE SEPARATOR CASE, which is a hole a review of #13900 MEASURED and this
+    # witness now holds shut: a table cell and a parenthetical both came back `[]`.
+    for _refuted in ("| `-- tortoise/` | prints ONE path at this head |",
+                     "(`-- tortoise/`) prints ONE path at this head.",
+                     "`-- tortoise/` | prints ONE path at this head"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — punctuation between the command and the verb "
+            "is still the same claim (#13900 review, finding 2)")
     # …and the control: a standalone short form is still read, so the live question cannot
     # go ungraded.
     assert _typed_answers_to_tortoise_cmd(
