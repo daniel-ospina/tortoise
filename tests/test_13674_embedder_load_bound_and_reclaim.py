@@ -379,6 +379,50 @@ class TestTheBoundAndElapsedAreObservable:
         assert EmbeddingModel.get(load_timeout=0.05) is None
         assert EmbeddingModel.status()["load_in_progress"] is True
 
+    def test_a_first_load_reads_unavailable_while_it_is_still_in_flight(
+            self, monkeypatch, clean_embedder):
+        """THE OPERATOR CONTRACT THIS PIN EXISTS FOR (#13674 review round 4, F1).
+
+        `state` has three values and is derived from `_instance`/`_model` alone,
+        and `_instance` is assigned only AFTER the constructor returns — so the
+        FIRST attempt of a process, which is the production cold-boot load this
+        issue is about, reads `unavailable` with `failure_kind: null` while it
+        is loading. That tuple does NOT mean "no attempt has run": the
+        discriminator is `load_in_progress`. The runbook's table says exactly
+        that, and this row is what makes it un-revertable — the in-flight row
+        above samples the ABANDONED state, where `state` is already `cooldown`,
+        so nothing pinned the live first-attempt window before this.
+        """
+        frame = _Frame()
+        _patch_loader(monkeypatch, frame, mb=0, hold_s=1.5)
+
+        # A caller that is still WAITING for the load: generous bound, own
+        # thread, so the attempt is in flight while this test samples `status()`
+        # (a short bound would abandon it and land in `cooldown` instead).
+        waiter = threading.Thread(
+            target=lambda: EmbeddingModel.get(load_timeout=30.0), daemon=True)
+        waiter.start()
+        try:
+            deadline = time.monotonic() + 15.0
+            while frame.calls < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert frame.calls == 1, "the fake loader never started"
+
+            status = EmbeddingModel.status()
+            assert status["load_in_progress"] is True
+            assert status["available"] is False
+            assert status["failure_kind"] is None
+            assert status["state"] == "unavailable", (
+                f"a load IN FLIGHT reads state={status['state']!r}; the runbook "
+                "tells the operator to read `unavailable` + `load_in_progress: "
+                "true` as IN FLIGHT, and a fourth state would contradict it"
+            )
+            assert status["load_in_progress_s"] is not None
+        finally:
+            waiter.join(timeout=60)
+        assert not waiter.is_alive(), "the stubbed load never finished"
+        assert EmbeddingModel.status()["state"] == "ready"
+
     def test_the_timeout_log_names_the_bound_that_fired(self, monkeypatch,
                                                        clean_embedder, caplog):
         """The log used to name the CLASS default whatever the join used.
