@@ -7857,6 +7857,70 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ (#13788 review round 9, P1/P2) AND THE PAIRS ELEMENT IS A SEQUENCE, THE MIXED
+        # CONSTRUCTOR READS ITS KEYWORD, AND A COMPREHENSION'S KEY MAY BE BOUND BY ITS OWN CLAUSE.
+        # Each CERTIFIED at the parent while its sibling seam refused the same object: an element
+        # wrapper `_sequence_options` already resolves one level up (const index, full slice,
+        # `.copy()`, `Starred`); a mixed `dict(d, embedding=1)` discarded the literal keyword
+        # because a DIFFERENT operand was unreadable; and `{kk: 1 for kk in ["embedding"]}` emitted
+        # a key expression the key question can only read as a constant. The single-element row
+        # pins the pair ARITY: a 1-tuple reached the keys twin's unpack and raised ValueError.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict([[("embedding", 1)][0]]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict([[*("embedding", 1)]]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict([[("embedding", 1)][0]])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict([["embedding"]])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(d, embedding=1).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict(d, **{"embedding": 1})}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {kk: 1 for kk in ["embedding"]}.items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {kk: 1 for kk in ["embedding"]}}
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9082,6 +9146,20 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k, _v in ({"embedding_model": 1} | d).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(d).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {kk: 1 for kk in ["embedding_model"]}.items()}
         return None
     _write(props)
 """,

@@ -2445,6 +2445,17 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
             return None
         return [*(left or ()), *(right or ())]
     if isinstance(mapping, ast.DictComp):
+        # ⛔ A DICT COMPREHENSION'S KEY MAY BE A NAME ITS OWN CLAUSE BINDS (`#13788` review
+        # round 9, P1, measured): `{kk: 1 for kk in ["embedding"]}.items()` CERTIFIED while the
+        # constant-key twin one row away was refused. The key question downstream can only
+        # answer a CONSTANT (or a writer-scope alias), so the binding the comprehension makes
+        # itself has to be resolved HERE — and `_comprehension_key_mentions_the_bound_property`
+        # is the one resolver that answers it (the keys seam has used it since `#13788`).
+        # Refusal-only: it emits the property as the key, which can only cause a refusal, and a
+        # FOLDING key expression (`{f"{kk}": …}`) has no `Name` in `referenced`, so the stated
+        # residual is untouched.
+        if _comprehension_key_mentions_the_bound_property(mapping.key, mapping.generators):
+            return [(ast.Constant(value=EMBEDDING_PROPERTY), mapping.value)]
         return [(mapping.key, mapping.value)]
     if isinstance(mapping, ast.Call):
         name = _callee_name(mapping)
@@ -2463,26 +2474,50 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
                 if inner is not None:
                     pairs.extend(inner)
                 else:
+                    # ⛔ AN UNREADABLE POSITIONAL CONTRIBUTES NOTHING AND MUST NOT ABORT THE
+                    #    COLLECTION (`#13788` review round 9, P1, measured): `dict(d,
+                    #    embedding=1)` CERTIFIED on both seams because this branch returned
+                    #    `None` before the KEYWORD loop ran, discarding a fully literal
+                    #    `embedding=` operand because a DIFFERENT operand was unreadable — while
+                    #    `dict(embedding=1, **d)` was correctly refused. It is the rule the merge
+                    #    keyword three lines below already applies, one operand over. With no
+                    #    readable operand at all, `pairs or None` still abstains, so `dict(d)`
+                    #    behaves exactly as before.
                     options = _sequence_options(mapping.args[0], _depth + 1)
-                    if options is None:
-                        return None
-                    for option in options:
+                    for option in (options or ()):
                         for element in option:
                             # ⛔ AN ELEMENT THAT IS ITSELF A MAPPING IS THE MAPPING (`#13788`
                             #    review round 8, P1, measured): `dict(({'embedding': 1},)[0])`
                             #    and `dict(*[{'embedding': 1}])` are `dict(mapping)` through a
                             #    const index / a `Starred`, and wrapping the mapping as a
                             #    one-element "pair" made its key a `Dict`, so the key question
-                            #    could never name the property. The branch resolves every other
-                            #    wrapper to an element list, so the element is asked as a
-                            #    mapping first and only then read as a pair.
+                            #    could never name the property.
                             nested = _mapping_items_pairs(element, _depth + 1)
                             if nested is not None:
                                 pairs.extend(nested)
-                            elif isinstance(element, ast.Tuple | ast.List):
-                                pairs.append(tuple(element.elts))
-                            else:
-                                pairs.append((element,))
+                                continue
+                            # ⛔ AND A PAIR ELEMENT IS A SEQUENCE, SO IT GOES THROUGH THE ONE
+                            #    SEQUENCE RESOLVER (`#13788` review round 9, P1, measured):
+                            #    `dict([[("embedding", 1)][0]])` CERTIFIED for ELEVEN element
+                            #    wrappers (const index, `[-1]`, a full slice, `.copy()`,
+                            #    `copy.copy`, `Starred`, `list(…)`, `if…else`, `+ []`) because
+                            #    this loop read the element LITERALLY — `isinstance(el, Tuple |
+                            #    List)` — while `_sequence_options` resolved every one of those
+                            #    wrappers one level up. Reading the literal here was the same
+                            #    per-resolver vocabulary this branch exists to delete.
+                            rows = _sequence_options(element, _depth + 1)
+                            if rows is None:
+                                # An element nothing can read: keep the pair ARITY, because
+                                # every consumer unpacks two values (`#13788` review round 9,
+                                # P2: a 1-tuple reached the twin's `for key, _value in pairs`
+                                # and raised `ValueError` out of the gate).
+                                pairs.append((element, ast.Constant(value=None)))
+                                continue
+                            for row in rows:
+                                if len(row) >= 2:
+                                    pairs.append((row[0], row[1]))
+                                elif row:
+                                    pairs.append((row[0], ast.Constant(value=None)))
             elif mapping.args:
                 return None
             for keyword in mapping.keywords:
