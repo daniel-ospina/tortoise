@@ -1835,6 +1835,9 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     r"comes? back|resolves? to|answers? with|"
     r"includes?|contains?|outputs?|has|holds?|answers?|resolves?|reveals?|reads?|touches?|"
     r"is|[=:])\s*`?"
+    # ⛔ AND A PREPOSITION BETWEEN THE VERB AND THE ANSWER (`comes back WITH an empty
+    # list`, `resolves to ZERO`), measured GREEN before this line (#13802 review, round 7)
+    r"(?:(?:with|to|as|into|out|of)\s+)?"
     r"(?:(?:NOT|not)\s+)?"
     # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
@@ -1851,6 +1854,11 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # after an unlisted verb (`answers with `tortoise/x.py``), and the diff-side paraphrase
     # of the comment-only claim (`is this diff's own comment-only edits`).
     r"|`?\[\]`?|none|None|zero|ZERO"
+    # ⛔ AND THE `an empty list` / `single` / BARE-DIGIT tails (#13802 review, round 7, P1 —
+    # each measured GREEN here while the detector read it; for the DEICTIC and `set` anchors
+    # this ban is the ONLY layer, because the detector anchors on a command token)
+    r"|(?:an?\s+)?(?:empty|blank|EMPTY)\s+(?:list|set|array|result|output)"
+    r"|single|SINGLE|\b\d+\b"
     r"|(?:exactly\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|a|an|the)\s+"
     r"(?:[\w-]+\s+)?(?:files?|paths?|modules?|edits?)"
     r"|(?:[a-z''-]+\s+){0,4}comment[^.]{0,40}?(?:only|text|edits?)"
@@ -1968,6 +1976,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # edit, `path`->`files`/`diff`, put the refuted claim back GREEN in BOTH arms)
         "`-- tortoise/` prints no files at all",
         "`-- tortoise/` prints no diff",
+        # ⛔ AND THE `an empty list` / `single` / BARE-DIGIT tails (#13802 review, round 7,
+        # P1 — each measured GREEN while the detector read it; for the DEICTIC and `set`
+        # anchors this ban is the ONLY layer, the detector anchoring on a command token)
+        "the command this clause prescribes returns an empty list",
+        "the `tortoise/` set above is an empty list",
+        "`-- tortoise/` comes back with an empty list",
+        "`-- tortoise/` prints single path",
+        "`-- tortoise/` reports 0 paths",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
