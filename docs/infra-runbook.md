@@ -4309,10 +4309,12 @@ for a REAL out-of-band secret, so its removal is a visible revert rather than a 
 ⚠️ **The `fly-only:` ruling is still owed.** `#13674` records the lever's emergency nature but does not
 carry the `OVERRIDES:` marker the token's contract requires (`.github/scripts/fly-managed-secrets.txt:51-60`,
 `:78-90`), so the ref is checkable by **shape only** until that ruling lands on the issue. Measured
-**2026-11-19** at the head that added the declaration: `grep -ci 'overrides:'` on the issue body → **0**,
-and the only `OVERRIDES:` string on the issue is a self-described **proposal**. ⛔ Re-measure before
-quoting this — it is a volatile GitHub fact, not a property of the tree, and it goes stale the moment
-the owner rules.
+**2026-11-19** at the head that added the declaration: `grep -ci 'overrides:'` on the issue **body** → **0**,
+and over body **plus comments** → **6** — of which exactly **one** is in marker form (`**OVERRIDES:**`),
+living in a self-described **proposal** that says writing it here would be forging the ruling. Quote the
+**marker form**, not the string: "the string appears nowhere" is false and a re-measurement will show it.
+⛔ Re-measure before quoting this — it is a volatile GitHub fact, not a property of the tree, and it goes
+stale the moment the owner rules.
 
 ### Arming the READ path — `TORTOISE_RECORD_SERVE` (epic #7879, #12941)
 
