@@ -38,6 +38,7 @@ here, each on the artefact rather than on a string this file also writes:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -2408,3 +2409,58 @@ def test_the_state_requirement_is_MARKED_as_a_departure_where_a_reader_adopts():
         "`validate_authorize_params` no longer carries the `require_state` arm, so "
         "the page accepts a state-less request it cannot complete; the doc still "
         "claims it is refused")
+
+
+def test_the_unprovisioned_bounce_WARNS_ONCE_instead_of_once_per_request(
+        monkeypatch, caplog) -> None:
+    """The fallback mint's WARNING is bounded, because the endpoint is PUBLIC (#13721 review P2).
+
+    `_mint_consent_attempt_key` is reached from `consent_bounce_url` on EVERY unauthenticated
+    `GET /oauth/authorize` that carries no `attempt_key`, and the state it reports — no usable
+    consent key — is a SUPPORTED, non-fatal deployment state (an unauthenticated visitor must still
+    be handed to the app's sign-in leg). Logging it once per call therefore let any anonymous
+    caller append WARNING lines to the sink without bound, for the least actionable state there
+    is: the repeats carry no information the first occurrence did not.
+
+    The latch is keyed on the fault STRING rather than on "we warned already", so the second half
+    of this test matters as much as the first: a DIFFERENT fault is genuinely new evidence and must
+    still reach WARNING, otherwise a future second provisioning fault would be swallowed silently
+    by the first one's latch.
+    """
+    from tortoise import oauth as oauth_mod
+
+    # A fresh latch: the warning is per-PROCESS by design, so a sibling test that already hit the
+    # unprovisioned path would otherwise make the first call here read as a repeat.
+    monkeypatch.setattr(oauth_mod, "_unprovisioned_faults_warned", set())
+    monkeypatch.delenv("CONSENT_TOKEN_SECRET", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+
+    with caplog.at_level(logging.DEBUG, logger="tortoise.oauth"):
+        emitted = [oauth_mod._mint_consent_attempt_key() for _ in range(3)]
+
+    records = [r for r in caplog.records if r.name == "tortoise.oauth"]
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, (
+        "the unprovisioned fallback warned once per CALL, not once per process — this runs on an "
+        "UNAUTHENTICATED endpoint, so an anonymous caller could grow the log sink without bound: "
+        f"{[(r.levelname, r.getMessage()[:60]) for r in records]}")
+    assert len(records) == 3, (
+        "the repeat calls went silent entirely instead of degrading to DEBUG — the operator should "
+        "still be able to see, in a debug session, that every bounce is falling back: "
+        f"{[r.levelname for r in records]}")
+    assert all(len(value) >= 32 for value in emitted), (
+        f"the fallback stopped emitting a key-shaped value: {emitted}")
+
+    # …and a DIFFERENT fault is NOT folded into the latch above.
+    def _a_different_fault() -> str:
+        raise ValueError("a DIFFERENT provisioning fault")
+
+    caplog.clear()
+    monkeypatch.setattr("tortoise.consent_token.mint_attempt_key", _a_different_fault)
+    with caplog.at_level(logging.DEBUG, logger="tortoise.oauth"):
+        oauth_mod._mint_consent_attempt_key()
+    levels = [r.levelno for r in caplog.records if r.name == "tortoise.oauth"]
+    assert levels == [logging.WARNING], (
+        "a SECOND, different fault was suppressed by the first one's latch — the warning is keyed "
+        "on the fault STRING so that genuinely new evidence still reaches WARNING: "
+        f"{levels}")

@@ -2673,6 +2673,19 @@ CONSENT_PREVIEW_PATH = "/oauth/consent/preview"
 CONSENT_TOKEN_HEADER = "X-Consent-Token"
 
 
+# ⛔ ONE WARNING PER DISTINCT unprovisioned FAULT, PER PROCESS (#13721 review P2).
+# `consent_bounce_url` calls `_mint_consent_attempt_key` on EVERY unauthenticated `GET
+# /oauth/authorize` that carries no `attempt_key`, and the state it reports — no usable consent
+# key — is SUPPORTED and non-fatal (see that function's docstring): it repeats byte-identically
+# per request forever, so a WARNING per call is an unbounded, attacker-drivable write to the log
+# sink that carries no more information than its first occurrence. The latch is keyed on the fault
+# STRING, not on "have we warned at all", so a genuinely different fault is still new evidence and
+# still warns. (Today `mint_attempt_key` collapses every provisioning fault — unset, malformed set,
+# padded, reused — into one message, so this is one warning per process; the keying is what keeps a
+# future second fault from being folded silently into the first.)
+_unprovisioned_faults_warned: set[str] = set()
+
+
 def _mint_consent_attempt_key() -> str:
     """A SIGNED attempt key for this hop (§9 step 4, #10794) — or an unsigned fallback.
 
@@ -2687,12 +2700,23 @@ def _mint_consent_attempt_key() -> str:
     bounce. An unsigned value verifies NOWHERE, so the adopter treats it as absent and mints its
     own: the flow completes within that request and only the cross-leg adoption degrades — which is
     exactly the state the deployment is in, since it cannot verify anything either.
+
+    ⛔ THE LOG WRITE IS BOUNDED, because this runs on a PUBLIC endpoint. This function is reached
+    from `consent_bounce_url` on every bounce that carries no `attempt_key`, so logging the
+    unprovisioned state once per call would let any anonymous caller append unlimited lines to the
+    sink — for the least actionable state there is. The first occurrence of each distinct fault is
+    a WARNING; repeats degrade to DEBUG (`_unprovisioned_faults_warned`), so the operator keeps the
+    signal and the sink stops growing.
     """
     from tortoise.consent_token import mint_attempt_key
     try:
         return mint_attempt_key()
     except ValueError as exc:
-        logger.warning(
+        fault = str(exc)
+        first_of_its_kind = fault not in _unprovisioned_faults_warned
+        _unprovisioned_faults_warned.add(fault)
+        log = logger.warning if first_of_its_kind else logger.debug
+        log(
             "the bounce cannot SIGN its attempt key (%s) — emitting an unsigned value, which the "
             "app half will treat as absent and replace; the consent arm is unprovisioned", exc)
         return secrets.token_urlsafe(32)

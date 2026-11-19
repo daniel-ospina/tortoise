@@ -2555,9 +2555,6 @@ def test_the_whitespace_attempt_key_residual_is_CLOSED_and_says_so(monkeypatch) 
     assert not adopts_verbatim, (
         "start.ts still adopts a presented attempt key WITHOUT verifying it — that is the #10794 "
         "defect (a caller choosing a flow's key), and no docstring can close it")
-    assert gated_by_a_mac, (
-        "start.ts has no MAC gate between the presented key and the attempt key: the entry leg is "
-        "adopting on shape again")
 
     source = (REPO / "tortoise" / "oauth.py").read_text(encoding="utf-8")
     start = source.index("def presented_consent_attempt_key")
@@ -2565,12 +2562,18 @@ def test_the_whitespace_attempt_key_residual_is_CLOSED_and_says_so(monkeypatch) 
     docstring = source[start:end if end != -1 else len(source)]
     declares_it_closed = "THE WHITESPACE ARM IS CLOSED by #10794" in docstring
 
+    # ⛔ ONE assertion, so both directions of the claim are REACHABLE (#13721 review, rule 3).
+    # A separate unconditional `assert gated_by_a_mac` above this line made the "gate removed ⇒ the
+    # sentence must go" direction unreachable — it fired first, and what survived was equivalent to
+    # `assert declares_it_closed`. The gate's EXISTENCE is not lost by folding: it is measured
+    # behaviourally a few lines down (a well-formed CHOSEN key must not become the row's key), which
+    # is the only form of that claim a source-shape check could not substitute for anyway.
     assert gated_by_a_mac == declares_it_closed, (
         "the whitespace-arm record and the code disagree: "
         f"start_ts_gates_adoption_by_a_mac={gated_by_a_mac}, "
-        f"docstring_declares_the_arm_closed={declares_it_closed}. While the gate exists the "
-        "docstring must say the arm is closed; if the gate is removed, the sentence must go rather "
-        "than stand as a false claim."
+        f"docstring_declares_the_arm_closed={declares_it_closed}. Both directions are the claim: "
+        "while the gate exists the docstring must say the arm is closed; if the gate is removed the "
+        "sentence must go rather than stand as a false claim."
     )
 
     # …and the behaviour, not just the source shape: a well-formed CHOSEN key — 43 chars, exactly
