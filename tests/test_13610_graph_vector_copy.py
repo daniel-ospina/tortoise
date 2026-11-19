@@ -116,6 +116,16 @@ class _Cursor:
     def execute(self, sql, params=None):
         self.statements.append((sql, tuple(params or ())))
 
+    def serve(self, rows: list[tuple]) -> None:
+        """Change what the kNN arm answers — for the read AFTER a cached verdict.
+
+        Deliberately NOT a second `_stub_record` call, which resets the coverage
+        cache: the case this exists for needs the SAME cached trivial verdict while
+        the record's ANSWER changes, which is the ordinary fresh-tenant lifecycle
+        (measure 0/0, then write, then read a non-empty cohort).
+        """
+        self._rows = rows
+
     def fetchall(self):
         return self._rows
 
@@ -894,6 +904,71 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
         f"a catch-up: {caplog.text!r}")
     assert "BOTH SIDES ARE EMPTY" in caplog.text, (
         f"the trace names the state but not its evidence: {caplog.text!r}")
+
+
+def test_a_CACHED_trivial_verdict_does_not_claim_this_read_is_empty(
+        monkeypatch, caplog):
+    """⛔ THE LINE MUST STATE A MEASUREMENT, NOT THIS READ (#13799 review, open P2).
+
+    `trivial` is a MEASUREMENT-TIME fact and a VERIFIED verdict is sticky for the
+    life of the process (`_cached_coverage`: the only expiry is
+    `and not verdict.verified`). A trivial verdict is verified, so the ordinary
+    fresh-tenant lifecycle reaches a state the earlier wording claimed was
+    impossible: the first gated read measures `0/0` -> `trivial=True` is cached ->
+    the tenant WRITES (the mirror stays off, `mirror_required` is already False) ->
+    a later read is served the cached verdict and **returns rows**.
+
+    A present-tense line — *"this read is empty because the POPULATION is empty"* —
+    is then FALSE on every one of those reads. That is the trace-that-lies class
+    this repo treats as a defect, and it is self-defeating for the line's own
+    purpose: it exists so a trace can tell a vacuous pass from a catch-up, and the
+    wording would relabel the catch-up.
+
+    ⛔ THIS CASE REDS ON THE PRE-FIX WORDING. Nothing else in the tree emits
+    "TRIVIALLY", so the capture below cannot be satisfied by a pre-existing line;
+    the assertion that bites is the measurement-time one, which the reverted message
+    fails while every other assertion here stays green (measured).
+    """
+    import logging
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    # `cursor` and not a second `_stub_record`: the cache must SURVIVE into the
+    # second read, and `_stub_record` resets it as part of its setup.
+    cursor = _stub_record(monkeypatch, count=0, rows=[])
+
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows, _graph, _trace = _run(_searcher(0), entity_type="object")
+    assert rows == [], rows
+    assert "TRIVIALLY" in caplog.text, caplog.text
+
+    # ── the tenant writes; the SAME cached trivial verdict gates the next read ──
+    caplog.clear()
+    cursor.serve([("obj-written-later", 0.10, None)])
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows2, _graph2, trace2 = _run(_searcher(0), entity_type="object")
+
+    assert [row[0] for row in rows2] == ["obj-written-later"], (
+        "the write that landed after the trivial verdict was not served — the "
+        f"cached verdict decides the GATE, never the rows: {rows2}")
+    # The record answered, healthily: this is the caught-up case, not a decline.
+    assert trace2[-1]["reason"] == "ok", trace2
+    assert trace2[-1]["degraded"] is False, trace2
+
+    # ⛔ The verdict is STILL reported (provenance is the line's job) ...
+    assert "TRIVIALLY" in caplog.text, (
+        "a CACHED trivial verdict served a cohort with no provenance in the trace — "
+        "the one state an operator cannot reconstruct from the rows: "
+        f"{caplog.text!r}")
+    # ... and it says the fact is a MEASUREMENT, and therefore does NOT claim a
+    # present-tense property of a read that just returned rows.
+    assert "MEASUREMENT" in caplog.text, (
+        "the line does not say the verdict was a MEASUREMENT-time fact, so it reads "
+        f"as a claim about this read: {caplog.text!r}")
+    assert "this read is empty" not in caplog.text, (
+        "⛔ THE TRACE LIES: the verdict was taken when both stores were empty, but "
+        "this read returned rows, so a present-tense 'this read is empty' is false "
+        "and it mislabels the caught-up case the line exists to distinguish: "
+        f"{caplog.text!r}")
 
 
 # ── 4b. the cost model: the counts are taken on a MISS, and only then ─────
