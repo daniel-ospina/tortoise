@@ -337,7 +337,7 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     position whose value DECIDES the WRITE: an ``if`` (the only form walked — `while` and
     conditional expressions are not accepted, and this docstring says so rather than
     promising arms the code does not implement) whose test asks the gate about THIS label
-    and whose BODY contains the embedding store. That is exactly the shape `#13617`
+    and whose BODY STORES the embedding. That is exactly the shape `#13617`
     implements — ``embedding = None; if _derived_mirror_required("subject"):
     … embedding = derived_embedding.encode(...)``, an ENCODE GUARD with no ``return`` and
     no ``raise``. Requiring an early exit, as an earlier version did, refused the only
@@ -356,8 +356,11 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     ⛔ AND THE TESTED BRANCH MUST CONTAIN THE STORE. `if mirror_required("object"):
     _bump_counter()` calls the gate and the write then runs anyway; `if g(...) or True:` is
     a constant branch. The accepted form is an ``if`` whose test asks the gate about this
-    label and whose body touches ``embedding`` (or returns/raises) — so the guard sits on
-    the write itself, which is what `#13617` does.
+    label and whose body STORES ``embedding`` (or returns/raises) — so the guard sits on
+    the write itself, which is what `#13617` does. "Stores" means an embedding-named
+    ASSIGNMENT of a non-constant value, or a Cypher clause that sets the property: a mention
+    (`print(embedding)`, a log line naming it) and a placeholder (`embedding = None`) are
+    both refused, because a `False` verdict must actually stop the vector being written.
 
     ⛔ STATED RESIDUALS, all three, because a completeness claim narrower than the code is
     how the next lane re-derives false confidence:
@@ -371,8 +374,15 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
        narrows this in practice is that the guarded body must itself store, which a
        pointless late guard does not do.
     3. **Dead code and nested scopes are pruned, not analysed** — a guard wrapped in
-       `if False:` or inside an inner `def`/lambda is not counted (`_reachable_ifs`), but
-       neither is a guard behind a runtime-false condition this check cannot evaluate.
+       `if False:`/`while False:` or inside an inner `def`/`class`/lambda is not counted
+       (`_reachable_ifs`), but neither is a guard behind a runtime-false condition this
+       check cannot evaluate. The REACHABLE `else` of a constant-tested `if` is kept.
+    4. **Two shapes are refused rather than resolved, deliberately** — a store reached
+       through a helper ARGUMENT (`_set(e, embedding)`, indistinguishable from
+       `print(embedding)` at this level) and a store behind a LOCAL ALIAS
+       (`gate = mirror_required; if gate(...)`). Both fail closed: refusing them costs a
+       refactor (`embedding = …`, or call the gate directly), and failing open costs the
+       data.
 
     ⛔ A RETURNED VALUE IS NOT ACCEPTED, even when it is the gate's own answer.
     ``self._write(ev); return mirror_required("object")``, ``return (self._write(ev),
@@ -409,19 +419,50 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # encode-guard form `#13617` uses (`embedding = derived_embedding.encode(...)`).
         if any(isinstance(child, ast.Return | ast.Raise)
                for statement in sub.body for child in ast.walk(statement)):
-            return True
-        if any(_stores_embedding(statement) for statement in sub.body):
+            return True                      # early exit: `not` is the CORRECT polarity
+        # ⛔ THE STORE ARM NEEDS A *POSITIVE* ASK. `mirror_required` reads "Must the GRAPH
+        # still store this?" — so `if not mirror_required("object"): embedding = …` stores
+        # on exactly the runs where the gate said STOP, i.e. on every run a strip can
+        # happen. A `not` around the gate is refused here (and only here: for the
+        # Return/Raise arm, `if not gate(...): return` is the shape we WANT).
+        if _asks_positively(sub.test, wanted) \
+                and any(_stores_embedding(statement) for statement in sub.body):
             return True
     return False
 
 
-def _reachable_ifs(node):
-    """Every `if` in the function's OWN body — not inside a nested def, not in dead code.
+def _asks_positively(test, wanted: set[str]) -> bool:
+    """Is the gate's answer used WITHOUT negation in this branch test?
 
-    ⛔ A guard wrapped in `if False:` or sitting in an uncalled inner `def` is not a
-    write-stop for this function, and an `ast.walk` sees both. This walk prunes a
-    constant-tested branch and any nested function scope, so what it yields is code that
-    can actually run here.
+    ⛔ `or` ANYTHING DOES NOT COUNT. `if gate("object") or self.force_vectors:` takes the
+    branch when the gate said stop — a force/backfill flag is a plausible thing for a real
+    writer to grow, and it would store the vector on a "write-stopped" verdict. `And` is
+    fine: every operand must hold, so the gate still has to have said mirror.
+    """
+    import ast
+
+    if not _asks_about(test, wanted):
+        return False
+    for sub in ast.walk(test):
+        if isinstance(sub, ast.UnaryOp) and isinstance(sub.op, ast.Not):
+            return False
+        # An `and` chain is fine: every operand must hold, so a non-gate operand can only
+        # make the branch LESS likely — never take it against the gate.
+        if isinstance(sub, ast.BoolOp) and isinstance(sub.op, ast.Or):
+            return False
+    return True
+
+
+def _reachable_ifs(node):
+    """Every `if` in the function's OWN body — not in a nested scope, not in dead code.
+
+    ⛔ A guard wrapped in `if False:`, `while False:` or sitting in an inner `def`/`class`
+    is not a write-stop for this function, and an `ast.walk` sees all three. This walk
+    prunes a constant-tested branch and any nested scope, so what it yields is code that can
+    actually run here.
+
+    ⚠️ THE `else` OF A CONSTANT-TESTED `if` IS REACHABLE. `if False: … else: if gate(...):
+    embedding = …` is a live guard, so only the dead ARM is dropped, never the sibling.
     """
     import ast
 
@@ -430,14 +471,25 @@ def _reachable_ifs(node):
         current = stack.pop()
         if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
             continue                      # a nested scope is not this function's guard
+        if isinstance(current, ast.ClassDef):
+            continue                      # likewise: a class body does not run here
         if isinstance(current, ast.If):
             yield current
-            if not isinstance(current.test, ast.Constant):
+            if isinstance(current.test, ast.Constant):
+                # Only the taken branch can run; `if 0:` still runs `orelse`.
+                stack.extend(current.orelse if not current.test.value else current.body)
+            else:
                 stack.extend(current.body)
                 stack.extend(current.orelse)
-            continue                      # a constant test: neither branch can run
-        if isinstance(current, ast.While | ast.For | ast.AsyncFor | ast.With
-                      | ast.AsyncWith | ast.Try):
+            continue
+        if isinstance(current, ast.While | ast.For | ast.AsyncFor):
+            if isinstance(current.test if isinstance(current, ast.While)
+                          else current.iter, ast.Constant):
+                continue                  # `while False:` / `for x in []` never runs
+            for field in ("body", "orelse"):
+                stack.extend(getattr(current, field, []) or [])
+            continue
+        if isinstance(current, ast.With | ast.AsyncWith | ast.Try):
             for field in ("body", "orelse", "finalbody"):
                 stack.extend(getattr(current, field, []) or [])
             for handler in getattr(current, "handlers", []) or []:
@@ -485,50 +537,90 @@ def _asks_about(test, wanted: set[str]) -> bool:
 
 
 def _stores_embedding(node) -> bool:
-    """Does this statement ASSIGN the stored vector, or set it from Cypher?
+    """Does this statement STORE the vector — a real assignment, or a Cypher clause set?
 
-    ⛔ DELIBERATELY NARROW. An earlier version also accepted any CALL that passed an
-    embedding-named argument, which made `print(embedding)` inside the guarded branch read
-    as "the store sits under the guard" — a mention, not a write, opening a delete-
-    authorising gate. So the accepted shapes are the two that actually store: an
-    assignment to an embedding-named target (`embedding = derived_embedding.encode(...)`,
-    the `#13617` form) and a Cypher fragment that sets the property
-    (`set_embedding_clause(...)`, `SET n.embedding = …`). A helper that stores the vector
-    through an argument must be refactored to assign it — which costs a line and never the
-    race.
+    ⛔ DELIBERATELY NARROW, TWICE OVER. Two earlier versions were wrong in opposite
+    directions, both silently:
+
+    * accepting any CALL with an embedding-named argument made `print(embedding)` look like
+      a store (a mention, not a write);
+    * accepting any embedding-named ASSIGNMENT made `embedding = None` look like one —
+      which is the placeholder the real write-stop itself uses as its pre-guard reset, and
+      is also what `if gate(...): embedding = None` / `else: embedding = _encode(...)`
+      leaves in the guarded branch while the vector IS stored on the branch the gate said
+      stop.
+
+    So the value must be non-constant. The accepted shapes are: `embedding =
+    derived_embedding.encode(...)` (the `#13617` form), and a Cypher clause that sets or
+    clears the property, either as a self-naming call (`set_embedding_clause`) or as an
+    assigned string (`q = "SET n.embedding = $e"`). `clear_embedding` is NOT accepted:
+    clearing is the thing the strip does, not evidence that a writer stopped storing.
     """
     import ast
 
     for sub in ast.walk(node):
         if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign):
+            value = sub.value
+            # A Cypher clause is a store whatever it is assigned to: the property is set
+            # by the statement that runs, and `.embedding =` is not something a log line
+            # says.
+            if _sets_embedding_clause(value):
+                return True               # `q = "SET n.embedding = $e"`
             targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
-            for target in targets:
-                if _names_embedding(target):
-                    return True
+            if not all(_names_embedding(target) for target in targets):
+                continue
+            if value is None or isinstance(value, ast.Constant):
+                continue                  # `embedding = None` places nothing
+            return True
         elif isinstance(sub, ast.Call):
-            # The repo's Cypher vector writers name themselves (`set_embedding_clause`,
-            # `clear_embedding`), so a CALL to one is a store — unlike a bare read.
+            # The repo's Cypher vector writers name themselves — but only the SETTING
+            # ones. `clear_embedding` is the strip's own operation, not a write-stop.
             callee = sub.func
             name = getattr(callee, "id", None) or getattr(callee, "attr", None) or ""
-            if "set_embedding" in name or "clear_embedding" in name:
+            if "set_embedding" in name:
+                return True
+            # ⛔ A DICT WRITER'S WRITE-STOP *REMOVES THE KEY*: `props.pop("embedding")`
+            # before `SET n += $props` (`sdk::_update_entity`'s shape). Counting only
+            # assignments would refuse the one form that writer can possibly take, making
+            # the gate unopenable there — an enforcer that can never fire. Narrow on
+            # purpose: `pop`/`popitem` on a dict, with the property named as a constant.
+            if name in ("pop", "popitem") and any(
+                    isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                    and "embedding" in argument.value
+                    for argument in sub.args):
                 return True
     return False
 
 
 def _names_embedding(node) -> bool:
-    """Only a STORE/ARGUMENT-shaped reference counts — never a bare read or a log string."""
+    """Is this expression an embedding-named reference (used for assignment TARGETS)?
+
+    ⛔ NO STRING MATCHING HERE. This is called with assignment targets, and a string
+    literal can never be one — an earlier version carried a `ast.Constant` arm for it, so
+    the "Cypher `SET`" acceptance its docstring advertised did not exist. The clause case
+    is checked on the assigned VALUE in `_stores_embedding`, where a string can sit.
+    """
     import ast
 
     if isinstance(node, ast.Name):
         return "embedding" in node.id
     if isinstance(node, ast.Attribute):
         return "embedding" in node.attr
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        # A Cypher fragment that ASSIGNS the property (`SET n.embedding = …`,
-        # `set_embedding_clause(...)`), not a log line that happens to name it.
-        text = node.value
-        return ".embedding =" in text or "set_embedding" in text
+    if isinstance(node, ast.Subscript):
+        # `props["embedding"] = vec` — a dict-shaped writer's store.
+        key = node.slice
+        return (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                and "embedding" in key.value)
     return False
+
+
+def _sets_embedding_clause(node) -> bool:
+    """Is this expression a Cypher fragment that assigns the property?"""
+    import ast
+
+    return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and ".embedding =" in node.value)
 
 
 def _writer_consults_gate(module_name: str, symbol: str,

@@ -531,6 +531,30 @@ def _upsert_object(ev):
     return _write(ev)
 """
 
+
+#: A dict writer's write-stop: remove the property from the props before `SET n += $props`.
+WRITER_POPS_THE_KEY = """
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        props.pop("embedding", None)
+    return _write({"SET n += $props": props})
+"""
+
+WRITER_SUBSCRIPT_STORE = """
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        props["embedding"] = _encode(props)
+    return _write(props)
+"""
+
+WRITER_POPS_ANOTHER_KEY = """
+def _upsert_object(props):
+    embedding = _encode(props)
+    if _derived_mirror_required("object"):
+        props.pop("other", None)
+    return _write(props, embedding)
+"""
+
 #: ⛔ THE SHAPE `#13617` ACTUALLY IMPLEMENTS — an ENCODE GUARD with no `return`. The
 #: accepted form is "an `if` that asks about THIS label and whose body touches the store",
 #: and requiring an early exit instead (an earlier version did) refused the only write-stop
@@ -681,23 +705,142 @@ def _upsert_object(ev):
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"a {mention!r} MENTION opened the gate"
 
+    # ⛔ POLARITY: `mirror_required` reads "must the GRAPH still store this?", so a `not`
+    # around it stores on exactly the runs where the gate said STOP — i.e. every run a
+    # strip can happen on. It is refused for the STORE arm, and only there: for an early
+    # exit, `if not gate(...): return` is the shape we want.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        embedding = _encode(ev)
+    return _write(ev, embedding)
+""")
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is False, "a POLARITY-INVERTED guard opened the gate"
+
+    # ⛔ AND THE STORE MUST PLACE SOMETHING. `embedding = None` is the placeholder the real
+    # write-stop uses as its pre-guard reset; hoisted inside the guard it proves nothing,
+    # and `if gate(...): embedding = None` / `else: embedding = _encode(...)` stores on the
+    # branch the gate said stop.
+    for source in ("""
+def _upsert_object(ev):
+    embedding = _encode(ev)
+    if _derived_mirror_required("object"):
+        embedding = None
+    return _write(ev, embedding)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        embedding = None
+    else:
+        embedding = _encode(ev)
+    return _write(ev, embedding)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object") or self.force_vectors:
+        embedding = _encode(ev)
+    return _write(ev, embedding)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        touched = True
+    return _write(ev, embedding)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a VACUOUS store opened the gate: {source!r}"
+
+    # ⛔ A FIVE-LABEL WRITER STORES THROUGH A DICT (`SET n += $props`), so its write-stop
+    # REMOVES THE KEY rather than skipping an encode — `props.pop("embedding")`. Counting
+    # only assignments would refuse the one form that writer can take, i.e. leave the gate
+    # permanently shut on `sdk::_update_entity`. A dict-subscript store counts too; a `pop`
+    # of some OTHER key does not.
+    for source, wanted in ((WRITER_POPS_THE_KEY, True),
+                           (WRITER_SUBSCRIPT_STORE, True),
+                           (WRITER_POPS_ANOTHER_KEY, False)):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        assert strip._writer_consults_gate(
+            module, "_upsert_object", ("object",))[0] is wanted, source
+
+    # ⛔ `clear_embedding` is what the STRIP does, not evidence that a writer stopped
+    # storing; and a store arm that accepted ANY assignment would be satisfied by
+    # `touched = something()`, which places no vector. Both refused.
+    for source in ("""
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        clear_embedding(graph, "n", "n", {}, vec)
+    return _write(ev, embedding)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        touched = _encode(ev)
+    return _write(ev, embedding)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a non-store opened the gate: {source!r}"
+
+    # …and the accepted non-early-exit forms that really do store, so the narrowing above
+    # is not just "refuse everything": the encode guard, a Cypher clause, and a
+    # self-naming vector writer.
+    for source in (WRITER_ENCODE_GUARD, """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        clause = "SET n.embedding = $vec"
+    return _write(ev, clause)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        clause = set_embedding_clause("ev")
+    return _write(ev, clause)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        assert strip._writer_consults_gate(
+            module, "_upsert_object", ("object",))[0] is True, f"a real store was refused: {source!r}"
+
     # …and a guard in dead code, or in a nested scope, is not THIS function's guard.
     for source in ("""
 def _upsert_object(ev):
     if False:
         if mirror_required("object"):
-            embedding = 1
+            embedding = _encode(ev)
     return _write(ev)
 """, """
 def _upsert_object(ev):
     def inner():
         if mirror_required("object"):
-            embedding = 1
+            embedding = _encode(ev)
+    return _write(ev)
+""", """
+def _upsert_object(ev):
+    while False:
+        if mirror_required("object"):
+            embedding = _encode(ev)
+    return _write(ev)
+""", """
+def _upsert_object(ev):
+    class C:
+        if mirror_required("object"):
+            embedding = _encode(ev)
     return _write(ev)
 """):
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"a guard in dead/nested code opened the gate: {source!r}"
+
+    # ⚠️ THE `else` OF A CONSTANT-TESTED `if` IS REACHABLE, so pruning the dead arm must not
+    # drop the live sibling — a pruner that pushes only `body` for a constant test loses it.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    if False:
+        pass
+    else:
+        if mirror_required("object"):
+            embedding = _encode(ev)
+    return _write(ev, embedding)
+""")
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is True, "the reachable `else` was pruned"
 
     module = _fake_writer_module(tmp_path, monkeypatch, WRITER_GATED)
     assert strip._writer_consults_gate(module, "_upsert_object", ("object",))[0] is True
