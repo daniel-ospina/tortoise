@@ -2674,6 +2674,63 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     return _degraded_read_marker(reason, entries)
 
 
+#: ── #13674: the POSITIVE half of #2952's declaration vocabulary ─────────────
+#: #2952 answered "a keyword-only read must never be PRESENTED as hybrid". This
+#: is its mirror, and it is what the fix's last indicator measures: with the
+#: embedder loaded, a query must DECLARE the leg it actually used. Without it a
+#: healthy read is silent and "hybrid" is an inference from absence — exactly
+#: the shape #2952 forbids in the other direction.
+RETRIEVAL_HYBRID = "hybrid"
+RETRIEVAL_KEYWORD_ONLY = "keyword_only"
+#: No text leg was asked at all (a ``query=None`` full scan / a structural-only
+#: trace). NOT a degrade and NOT hybrid — there is no dense leg for this read to
+#: have used.
+RETRIEVAL_NOT_APPLICABLE = "not_applicable"
+#: No trace was supplied, so the read declares nothing. Distinct from
+#: ``not_applicable`` on purpose: "nobody asked" is not "nothing was asked for".
+RETRIEVAL_UNDECLARED = "undeclared"
+
+
+def declared_retrieval_kind(leg_trace: list[dict] | None) -> str:
+    """What legs a read ACTUALLY used — the non-raising mirror of #2952.
+
+    ``require_hybrid_read`` answers the same question but REFUSES (raises) on
+    anything short of a healthy in-scope vector leg, which is right for a
+    capability gate and wrong for a caller that must still serve the rows it
+    got. This returns the same verdict as a WORD, so a product read can declare
+    its leg without changing what it returns:
+
+    * ``hybrid`` — at least one IN-SCOPE vector entry ran and was not degraded
+      (:func:`_vector_leg_healthy`), or every vector arm measured an empty scope
+      (#2952's empty-scope rule).
+    * ``keyword_only`` — a text leg was asked and the vector leg did not
+      contribute (declared degraded, or absent from the trace).
+    * ``not_applicable`` — no text leg was asked (structural-only / query=None).
+    * ``undeclared`` — no trace, so there is nothing to declare.
+
+    The predicates are the SAME ones ``require_hybrid_read`` uses, called in the
+    same order, so the two cannot disagree about a given trace — a second
+    hand-written classifier is how #4199's laundering would come back through a
+    new door.
+    """
+    if leg_trace is None:
+        return RETRIEVAL_UNDECLARED
+    entries = [e for e in leg_trace if isinstance(e, dict)]
+    legs = [e for e in entries if e.get("leg") not in _NON_LEG_TRACE_ENTRIES]
+    # Structural-only is single-leg BY DESIGN (the same escape hatch both other
+    # predicates honour): there is no dense leg this read could have used.
+    if legs and all(e.get("leg") == "structural" for e in legs):
+        return RETRIEVAL_NOT_APPLICABLE
+    if declared_degraded_read(entries) is not None:
+        return RETRIEVAL_KEYWORD_ONLY
+    if _vector_leg_healthy(entries):
+        return RETRIEVAL_HYBRID
+    if _all_vector_arms_measured_empty_scope(entries):
+        return RETRIEVAL_HYBRID
+    # A trace with no vector entry at all cannot declare a dense leg.
+    return RETRIEVAL_KEYWORD_ONLY
+
+
 def require_hybrid_read(leg_trace: list[dict] | None,
                         *, lane: str | None = None) -> dict:
     """(C2) #2952 — fail-loud gate: refuse to label a single-leg read hybrid.
