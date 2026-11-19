@@ -402,25 +402,56 @@ def test_the_mint_arm_is_measured_inside_the_environment_guard():
         "the mint arm must record the `env` it ran under, like every other arm, and "
         "not only through the ARMS loop's write: without it a reader cannot tell which "
         "retrieval path §3b came from")
-    # ⛔ AND THE SHIPPED STATE IS SET EXPLICITLY, NOT INHERITED FROM THE LOOP (round 21).
+    # ⛔ AND THE SHIPPED STATE IS SET EXPLICITLY, NOT INHERITED FROM THE LOOP (rounds 21-22).
     # "inside the `try`" is not the fix on its own: the loop's LAST arm leaves its own
-    # `env` overrides in place, so a mint arm measured immediately after it would carry
-    # them. The pops enumerated here are the TRY BODY's only — a `max()` over the whole
-    # `guards[0]` subtree picks up the `finally`'s restores, which run AFTER the call and
-    # made the first cut of this assertion red on correct code.
-    pops = [n.lineno for stmt in guards[0].body for n in ast.walk(stmt)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "pop" and isinstance(n.func.value, ast.Attribute)
-            and n.func.value.attr == "environ"]
-    arm_loops = [n for n in guards[0].body if isinstance(n, ast.For)]
-    assert arm_loops, "the ARMS loop is no longer a `for` in the env guard's `try` body"
-    after_loop = [n for n in pops if n > arm_loops[0].end_lineno]
-    assert after_loop and max(after_loop) < calls[0], (
-        "`run()` must pop the ambient `TORTOISE_UNDERSCORE_TERMS`/`TORTOISE_FUSED_RERANK` "
-        "AFTER the ARMS loop and BEFORE measuring the mint arm (the SHIPPED matcher), "
-        "rather than inheriting whatever the loop's last iteration left set — the "
-        "loop's own pop does not satisfy this, which is what made the first cut of "
-        "this assertion green on a mint arm measured under the last arm's overrides")
+    # `env` overrides in place (`user_search_rerank` sets `TORTOISE_FUSED_RERANK=1`), so a
+    # mint arm measured straight after it carries them while recording `env: {}`.
+    #
+    # ⛔ THIS BINDS THE LOOP BY IDENTITY, NOT BY POSITION (round 22, measured). The first
+    # cut took `[n for n in guards[0].body if isinstance(n, ast.For)][0]` — the FIRST `for`
+    # in the `try` body, which need not be the ARMS loop at all. Moving the explicit pop
+    # block ABOVE `for arm, door, env in ARMS` (the defect) then made that loop the
+    # first-for, whose own body supplies a later pop, and the pin stayed GREEN on the very
+    # failure its message forbids; so did deleting the block and inserting any unrelated
+    # `for xx in (): pass` before the ARMS loop.
+    # ⛔ AND THE POP MUST COVER **BOTH** VARIABLES (round 22, measured). The first cut
+    # recorded line numbers only, so replacing the two-key `for key in saved: pop(key)`
+    # with a single `pop("TORTOISE_UNDERSCORE_TERMS")` left `TORTOISE_FUSED_RERANK=1`
+    # standing into `mint_rate(...)` — the shipped matcher measured rerank-armed — with
+    # the pin GREEN. It now requires a loop over `saved`, which is the only shape that
+    # covers every key the guard saved, and asserts `saved` is built from both names.
+    env_names = {"TORTOISE_UNDERSCORE_TERMS", "TORTOISE_FUSED_RERANK"}
+    present = {n.value for n in ast.walk(fn)
+               if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert env_names <= present, (
+        f"`run()` no longer names both env switches it must neutralise for the shipped "
+        f"arm — missing {sorted(env_names - present)}")
+    arm_loops = [n for n in guards[0].body
+                 if isinstance(n, ast.For) and isinstance(n.iter, ast.Name)
+                 and n.iter.id == "ARMS"]
+    assert len(arm_loops) == 1, (
+        f"expected exactly one `for ... in ARMS` loop in the env guard's `try` body, "
+        f"found {len(arm_loops)} — the mint-arm assertions below are scoped to it")
+    loop = arm_loops[0]
+    pops_all = [n for stmt in guards[0].body for n in ast.walk(stmt)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "pop" and isinstance(n.func.value, ast.Attribute)
+                and n.func.value.attr == "environ"]
+    assert any(n.lineno > loop.end_lineno and n.lineno < calls[0] for n in pops_all), (
+        "`run()` must pop the ambient switches AFTER the ARMS loop and BEFORE measuring "
+        "the mint arm (the SHIPPED matcher), rather than inheriting whatever the loop's "
+        "last iteration left set — the loop's own per-arm pop does not satisfy this")
+    shipping_resets = [s for s in guards[0].body
+                       if isinstance(s, ast.For) and isinstance(s.iter, ast.Name)
+                       and s.iter.id == "saved"
+                       and s.lineno > loop.end_lineno and s.end_lineno < calls[0]
+                       and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                               and n.func.attr == "pop" for n in ast.walk(s))]
+    assert len(shipping_resets) == 1, (
+        f"expected exactly one `for key in saved: os.environ.pop(key, None)` between the "
+        f"ARMS loop and the `mint_rate` call, found {len(shipping_resets)} — that loop is "
+        f"the only shape that neutralises EVERY saved switch, so a single-variable pop "
+        f"leaves the last arm's `TORTOISE_FUSED_RERANK=1` standing into the mint arm")
 
 
 def test_recall_is_monotone_in_k_on_every_arm(artifact):
@@ -942,7 +973,7 @@ def test_the_uri_guard_accepts_every_scheme_the_product_itself_supports():
     """
     from tortoise.config import SUPPORTED_URI_SCHEMES
 
-    assert cap.URI_PREFIXES == tuple(f"{s}://" for s in SUPPORTED_URI_SCHEMES), (
+    assert tuple(f"{s}://" for s in SUPPORTED_URI_SCHEMES) == cap.URI_PREFIXES, (
         f"the guard accepts {cap.URI_PREFIXES!r}; the product declares "
         f"{SUPPORTED_URI_SCHEMES!r} (tortoise/config.py). A scheme the product "
         f"connects to but this instrument refuses is a refusal that states "
