@@ -210,10 +210,13 @@ reader of the security rule:
   decision already made, never a softening of it.
 - **the machine reason survives in `x-consent-refusal`** (`flow_not_yours`,
   `consent_store_unavailable`, `session_store_unavailable`, `as_origin_misconfigured`) and appears
-  NOWHERE in the copy. Two bodies exist, not four: the `503`s are one state — a fault on our side,
-  which the visitor should try again past (and `as_origin_misconfigured` is the one of the three a
-  reload can NEVER clear, so the copy offers the reload as a try rather than promising it) — and the
-  `403` says plainly that reloading will not help (the paragraph above is why).
+  NOWHERE in the copy. Two bodies exist, not four: the `503`s are one state — a fault on our side
+  that the visitor should try again past — and the `403` says plainly that reloading will not help
+  (the paragraph above is why). What the shared `503` copy must NOT do is PROMISE that a reload
+  fixes it, because not all three reasons are transient: `as_origin_misconfigured` is a deployment
+  binding only an operator can fix, and the consent-store arm also propagates a genuine DDL failure
+  (`start.ts` records that no retry or restart fixes a failed `ALTER TABLE`). The reload is offered
+  as a try, and a fresh attempt from the client as the next step.
 - **the page decides nothing and fetches nothing** — no script, no link, no external asset, nothing
   echoed from the query string, `default-src 'none'`, `no-referrer`, `no-store`. Its URL carries
   `attempt_key` and `state` on the legs that reach it.

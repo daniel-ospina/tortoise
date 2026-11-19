@@ -86,7 +86,10 @@ interface Copy {
  *    ⛔ "retryable" was the word here and it is FALSE of one of the three:
  *    `as_origin_misconfigured` means the `CONSENT_AS_ORIGIN` binding itself does not parse
  *    (`start.ts::parseAsOrigin` returns null only for a SET-but-unusable value — the default is
- *    valid), so no reload can clear it and only an operator can. The copy below therefore does not
+ *    valid), so no reload can clear it and only an operator can. A genuine DDL failure inside the
+ *    `consent_store_unavailable` arm is a SECOND non-transient member — `start.ts` records that no
+ *    retry or restart fixes a failed `ALTER TABLE` — so "retryable" is not merely imprecise here,
+ *    it is wrong for two of the three. The copy below therefore does not
  *    PROMISE that a reload fixes it: the reload is offered as a try, and a fresh attempt from the
  *    client is the next step. That is the same care the `403` gets for the same reason — copy must
  *    not sell a retry that cannot work.
