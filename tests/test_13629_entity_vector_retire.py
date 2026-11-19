@@ -1983,6 +1983,28 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     with pytest.raises(strip.Refusal):
         strip.uri_fingerprint("docker::pw@host:6379/g")
     assert strip.uri_fingerprint("/tmp/a@b.db") == "/tmp/a@b.db"
+    # ⛔ THE NO-SCHEME REFUSAL MUST NOT ECHO THE TOKEN IT DETECTED. Its first cut
+    # interpolated everything before the `@` — i.e. the userinfo it had just fired on — so
+    # the password came back VERBATIM in the reason (measured).
+    with pytest.raises(strip.Refusal) as no_scheme:
+        strip.uri_fingerprint("docker::hunter2TOPSECRET@host:6379/g")
+    assert "hunter2TOPSECRET" not in str(no_scheme.value)
+    # …and a COLON IN A LOCAL PATH is not userinfo: the heuristic applies only when the
+    # text before the `:` is scheme-shaped (no `/`).
+    assert strip.uri_fingerprint("/tmp/a:b@c.db") == "/tmp/a:b@c.db"
+    # ⛔ #2987'S SHAPE: a CREDENTIAL WITH NO `@` (a copy-paste that dropped the `@host`
+    # tail). The canonical masker answers `<uri-redacted-unrecognised-shape>` for these; a
+    # COMPARISON KEY may not do less. Measured pre-fix: each came back VERBATIM as the
+    # host, and an empty authority folded every such target onto `docker://`.
+    for credential_shaped in ("docker://:hunter2", "docker://user:hunter2",
+                              "docker://:hunter2:6379", "docker://", "docker://?x"):
+        with pytest.raises(strip.Refusal) as shaped:
+            strip.uri_fingerprint(credential_shaped)
+        assert shaped.value.token == strip.REFUSE_TARGET_UNPARSEABLE
+        assert "hunter2" not in str(shaped.value)
+    # the recognised shapes still fingerprint, so the arm is not a blanket refusal
+    assert strip.uri_fingerprint("docker://h:6379") == "docker://h:6379"
+    assert strip.uri_fingerprint("docker://localhost") == "docker://localhost"
     assert strip.uri_fingerprint("docker://:pa%2Fss@prod:6379/tortoise") != \
         strip.uri_fingerprint("docker://:pa%2Fss@staging:6379/tortoise")
     # A bare db-path carries no credential and is passed through unchanged, so the

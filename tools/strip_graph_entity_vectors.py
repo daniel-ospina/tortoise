@@ -101,7 +101,7 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     ambiguous URI: cutting at the last ``@`` keeps the password out of the plan but can
     DROP the host, and dropping the host makes two different targets compare EQUAL, which
     is a fail-open on the very check that stops a plan approved against production from
-    executing against staging. THREE SHAPES reach it, with two different remedies:
+    executing against staging. FOUR SHAPES reach it, with two different remedies:
 
     * an ``@`` after the first ``/`` (a password containing ``/``, or an ``@`` inside the
       graph name) — percent-encode the credential (``/`` → ``%2F``), or pass the NAME out
@@ -111,7 +111,11 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
       cannot be separated from the credential; percent-encode ``?`` → ``%3F``, ``#`` →
       ``%23``;
     * userinfo on a target written without a scheme separator (``docker::pw@host:6379/g``),
-      which would otherwise be passed through verbatim as a db path.
+      which would otherwise be passed through verbatim as a db path;
+    * a CREDENTIAL WITH NO ``@`` at all (``docker://:pw``, ``docker://user:pw``,
+      ``docker://:pw:6379``) and an empty authority (``docker://``) — the shapes a
+      copy-paste that drops the ``@host`` tail produces, which the canonical masker
+      redacts as unrecognised and which used to be returned VERBATIM as the host.
 ``REFUSE_WRITE_FAILED``
     A removal statement raised AFTER at least one batch had already been stripped. Exit is
     ``6``, not ``2``: the graph is PART-STRIPPED, and the only correct next action is to
@@ -2139,6 +2143,14 @@ def uri_fingerprint(uri: str) -> str:
        pastes.
     4. Scheme and host are lowercased (RFC 3986 §6.2.2.1: both are case-insensitive), so a
        re-run spelled in another case is the SAME target rather than a refused drift.
+    5. #2987'S SHAPE — A CREDENTIAL WITH NO ``@`` AT ALL. `docker://:hunter2` (a copy-paste
+       that dropped the `@host` tail), `docker://user:hunter2`, `docker://:hunter2:6379`,
+       an empty authority (`docker://`) and `docker://?x` all returned VERBATIM as the host
+       (measured), and the empty ones folded every such target onto `docker://`. The
+       canonical masker answers ``<uri-redacted-unrecognised-shape>`` for exactly these, and
+       a value that is COMPARED may not do less than one that is only DISPLAYED — so an
+       authority that is not a recognised ``host[:port]`` refuses, naming the scheme and
+       never the token.
 
     The boundary rule itself is already recorded repo-wide (#720 P2 conf 68,
     `tortoise/__main__.py::_mask_uri_userinfo`, hardened by #2983/#2987): a password may
@@ -2152,12 +2164,18 @@ def uri_fingerprint(uri: str) -> str:
         # back VERBATIM, password included, because the pass-through branch never looked.
         # A `:` before an `@` is userinfo, so that shape is refused rather than copied into
         # the plan a human pastes.
+        # ⛔ AND THE MESSAGE MUST NOT ECHO THE TOKEN IT JUST DETECTED. The first cut of this
+        # guard interpolated `uri.split('@')[0]`, which IS the userinfo it fired on —
+        # measured, `docker::hunter2TOPSECRET@host:6379/g` refused with the password
+        # verbatim in the reason, on stderr and in CI logs. Only the scheme-shaped head is
+        # named now.
         at = uri.rfind("@")
-        if at >= 0 and ":" in uri[:at]:
+        colon = uri.find(":")
+        if at >= 0 and colon > 0 and "/" not in uri[:colon] and uri[:colon].isalnum():
             raise Refusal(
                 REFUSE_TARGET_UNPARSEABLE,
-                f"the graph target {uri.split('@')[0]}://… came without a scheme separator "
-                "but carries userinfo, so no credential-free fingerprint of it exists. "
+                f"the graph target {uri[:colon]}://… came without a scheme separator but "
+                "carries userinfo, so no credential-free fingerprint of it exists. "
                 "Percent-encode the credential, or pass the graph name out of band with "
                 "`--graph-name`.")
         return uri
@@ -2222,6 +2240,24 @@ def uri_fingerprint(uri: str) -> str:
                 "separated from a credential without either printing it or dropping the "
                 "host. Percent-encode the credential ('/' → '%2F', '?' → '%3F', "
                 "'#' → '%23') or pass the graph name out of band with `--graph-name`.")
+    # ⛔ 2b. #2987'S SHAPE — A CREDENTIAL WITH NO `@` — MUST REFUSE TOO, and the docstring
+    #    above cites that arm, so it has to exist here. `docker://:hunter2` (a copy-paste
+    #    that dropped the `@host` tail), `docker://user:hunter2` and
+    #    `docker://:hunter2:6379` all passed through VERBATIM as the host — measured — and
+    #    an empty authority folded every such target onto `docker://`. The canonical masker
+    #    answers `<uri-redacted-unrecognised-shape>` for exactly these; that is the recorded
+    #    decision this implements (a comparison key may not do less than a display masker).
+    if "@" not in authority and (
+            not host or (":" in authority and _host_port(host) is None)):
+        raise Refusal(
+            REFUSE_TARGET_UNPARSEABLE,
+            f"the graph target {scheme.lower()}://… has no usable host: the authority "
+            "is either empty or shaped like a credential (a colon and no '@'), which "
+            "is the shape a copy-paste that drops the '@host' tail produces. Refusing "
+            "rather than fingerprinting it, because the value is COMPARED: returning it "
+            "would put a credential in the plan and let the same shape name two "
+            "different targets. Pass the host explicitly, or percent-encode the "
+            "credential.")
     # 3. The path carries the graph name; a query/fragment there is neither identity nor
     #    safe (`?api_key=…`), so it is cut after the host is known.
     cut = min(
@@ -2240,9 +2276,10 @@ def _host_port(segment: str) -> tuple[str, str] | None:
 
     This is the discriminator between "a genuine query starts here" and "the `?`/`#` is
     part of a password": only a real ``host[:port]`` before the marker makes the query
-    genuine. Deliberately strict — a false ``None`` sends the reading to the refusal
-    branch, which is the safe direction for a value that decides whether two deployments
-    are the same target.
+    genuine. Deliberately strict: a false ``None`` sends the reading to the password
+    branch, and an authority that is not a recognised ``host[:port]`` is then REFUSED (see
+    the #2987 arm below) rather than returned — the safe direction for a value that decides
+    whether two deployments are the same target.
     """
     if not segment or any(ch in segment for ch in "@/?#"):
         return None
