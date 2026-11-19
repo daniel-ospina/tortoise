@@ -26,8 +26,15 @@ closes both:
    `~2.3 %` is now PINNED (see below), so the remaining unpinned set is
    `+1.7 and +6.7 points`, `0 gains, 0 losses across 272`, `282/300`, `34 of 300` —
    plus §5's declared LIMITS (items 1-4: not-a-census, phase 2 unmeasured, the
-   load confound, the dense-leg note) and §6's run metadata. ⛔ §5's DOOR paragraph is
-   NOT in that exclusion: it is asserted at `test_the_user_door_note_states_the_
+   load confound, the dense-leg note), item 5's EXTERNAL production share (no
+   artifact holds it), and §6's run metadata. ⛔ §5's items 5-7 are NOT in that
+   exclusion: their figures (the `30 % / 10 %` oversampling, `n = 300`, the
+   `±0.33 pts` quantum, `35 of 300` excluded) are derived from the record by
+   `test_section_fives_numbered_limits_five_to_seven_state_the_figures_the_artifact_
+   holds`, and the previous boundary said only "items 1-4", which a reader correctly
+   read as "5-7 are covered" while no assertion reached them (measured: all three
+   stayed green through a mutation). ⛔ §5's DOOR paragraph is
+   NOT in that exclusion either: it is asserted at `test_the_user_door_note_states_the_
    arguments_the_doors_do_not_default_to`. A reader who needs a figure guarded must
    check it is in a pinned table; do NOT read this module as "the document is
    enforced".
@@ -616,6 +623,21 @@ def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifa
     assert "--unshallow" in note, (
         "the note must tell a shallow-clone reader how to obtain history "
         "(`git fetch --unshallow`) — otherwise the instruction silently fails for them")
+    # ⛔ THE REBASE IS STATED AS A RULE, NOT AS A COMPLETED EVENT (round-14 P2,
+    # measured). The note is written AT the run head, where a rebase has not happened
+    # yet — the head IS the branch tip and is an ancestor of itself — so a note that
+    # says the rebase "REWROTE" the sha records an event its own writer cannot observe.
+    # (For THIS record the rebase has since happened, which is exactly why the wording
+    # must not depend on that: the builder is what a FUTURE run emits, and it emits the
+    # note before any rebase.) Assert the RULE form, and assert the past-tense claim is
+    # gone (mutation: restore it -> red).
+    assert "a rebase rewrites" in note, (
+        "`code_head_note` must state the RULE (`a rebase rewrites <label>`), which is "
+        "true at write time and after — not an `if` that implies it has not happened, "
+        "and not a past tense that implies the writer watched it happen")
+    assert "REWROTE" not in note and "predates this branch's rebase" not in note, (
+        "`code_head_note` asserted the rebase in the past tense, as though it had "
+        "already rewritten the run head — at write time the run head is the branch tip")
 
     readme = README.read_text()
     flat = " ".join(readme.split())
@@ -693,6 +715,17 @@ def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifa
         f"must name `git show {equivalent}:` too, so the record and its summary cannot "
         f"state the `cleanup` provenance against two different shas. It reads: "
         f"{declared_why[:200]!r}")
+
+    # ⛔ AND THE EQUIVALENT IS BRANCH-LOCAL TOO, WHICH THE RECORD MUST SAY (F3, verified):
+    # `git merge-base --is-ancestor 318950c6e0 origin/main` -> exit 1, i.e. the sha the
+    # masthead calls "reachable" is one of THIS branch's commits. A rebase rewrites it
+    # exactly as it rewrote `code_head`, so the equivalent is a convenience for a reader
+    # who already holds the pre-rebase object, never a durable anchor. Pinning the
+    # hand-out while calling it "reachable" without this sentence is how a record
+    # certifies a label it cannot make resolve.
+    assert "branch-local" in clause, (
+        "§6's `cleanup` clause must say the equivalent sha is BRANCH-LOCAL (a rebase "
+        "strands it like the run head), so no reader treats it as a durable anchor")
 
     # The note is a DECLARED edit, not free text the ledger cannot see (round-3 P1).
     declared = {e["field"] for e in artifact["post_run_edits"]}
@@ -1119,6 +1152,78 @@ def test_the_two_restated_prose_figures_are_pinned_and_not_only_the_tables(artif
     assert f"the rate is **{k10}**" in flat, (
         f"README §3a must also quote the user door's own shipped width (k=10, "
         f"{k10!r}) so the two windows cannot be confused")
+
+
+def test_section_fives_numbered_limits_five_to_seven_state_the_figures_the_artifact_holds(
+        artifact):
+    """§5 items 5–7 were DECLARED covered by exclusion, and asserted nowhere.
+
+    ⛔ MEASURED DEFECT this pins (the round-14 handover's F4). The pinned/not-pinned
+    boundary in this module's docstring excluded "§5's declared LIMITS (items 1-4)",
+    which tells a reader that items 5–7 ARE enforced. Nothing enforced them: mutating
+    them stayed green, so the document could publish an oversampling share, a
+    per-query quantum and an exclusion count that the record contradicts, under a
+    declaration saying it could not.
+
+    ⚠️ F4 AS HANDED OVER WAS ITSELF PARTLY WRONG, and a false correction here would
+    have made the record WORSE. It proposed `+7.13 pts, 9 gained / 0 lost` for §2a and
+    `≈5 %` / `±0.55 pts` for §5. The artifact holds `delta_pts_clean: 1.13`,
+    `gains: 3`, `losses: 0` for `user_search -> user_search_rerank` (so §2a's
+    `+1.13 pts, 3 gained / 0 lost` is CORRECT), and with `n = 300` one query is
+    1/300 = 0.33 pts, not 0.55; the strings `7.13`, `9 gained` and `0.55` occur
+    nowhere in `measurement.json`. Only F4's SECOND half — the boundary claiming
+    coverage it did not have — was real, and this test is what closes it.
+
+    Every figure is DERIVED from the record, never hard-coded, so the prose cannot
+    drift from the artifact.
+    """
+    plain = " ".join(README.read_text().split())
+
+    # §5.5 — the oversampling shares, from the pin's own class counts.
+    art_pin = artifact["pin"]
+    ident_pct = art_pin["shares"]["ident"] / art_pin["queries"] * 100
+    path_pct = art_pin["shares"]["path"] / art_pin["queries"] * 100
+    shares = f"{ident_pct:.0f} % / {path_pct:.0f} %"
+    assert f"({shares} against" in plain, (
+        f"README §5.5 must state the oversampling as `{shares}` — derived from the "
+        f"artifact pin's `shares` ({art_pin['shares']}) over `queries` ({art_pin['queries']})")
+    # …and the EXTERNAL production share it is compared against is named as such: no
+    # artifact holds it, which is why it stays in the unpinned set below rather than
+    # being silently counted as covered.
+    assert "measured production share of" in plain, (
+        "README §5.5 must keep naming the ≈2 % production share as a MEASURED "
+        "external figure — it is the one clause of §5.5 the record cannot hold")
+
+    # §5.6 — the query count and the per-query quantum it implies.
+    n = artifact["arms"]["user_search"]["n"]
+    quantum = 100 / n
+    assert f"n = {n} queries" in plain, (
+        f"README §5.6 must state the run's window count as `n = {n} queries` "
+        f"(artifact `arms.user_search.n`)")
+    assert f"±{quantum:.2f} pts" in plain, (
+        f"README §5.6 must state one query's weight as ±{quantum:.2f} pts with "
+        f"n = {n} — a different quantum beside the same n is a contradiction")
+
+    # §5.7 — the exclusion count, and the denominator it is out of.
+    excluded = artifact["paired"]["user_search_pre_lever -> user_search"]["paired"][
+        "excluded_degraded_on_either_side"]
+    assert f"{excluded} of {n} user-door queries were excluded" in plain, (
+        f"README §5.7 must state `{excluded} of {n} user-door queries were excluded` "
+        f"(artifact paired['user_search_pre_lever -> user_search']."
+        f"excluded_degraded_on_either_side = {excluded})")
+
+    # ⛔ THE DECLARATION must not read as covering more than this file enforces. With
+    # 5–7 pinned above, the ONLY part of §5 still outside the claim is item 5's
+    # external production share; the docstring must say exactly that, so the next reader
+    # cannot conclude that an unpinned §5 clause (or a pinned one) is the reverse.
+    doc = __doc__ or ""
+    assert "item 5's EXTERNAL" in doc, (
+        "the pinned/not-pinned boundary in this module's docstring must name item 5's "
+        "EXTERNAL production share as the only §5 clause outside the claim — items "
+        "5–7 are pinned by "
+        "`test_section_fives_numbered_limits_five_to_seven_state_the_figures_the_"
+        "artifact_holds`, so a boundary that lumps items 1–7 together understates "
+        "the coverage and invites the next lane to drop these pins")
 
 
 def test_every_declared_post_run_edit_is_named_in_the_readme(artifact):

@@ -14,7 +14,7 @@ aboutObjects: "#12186, #11901, #12368, #12304, #12343, #12297, #12348, #12349, S
 **Instrument:** `tools/capstone_12186_recall.py` · **Fixed query set:**
 [`queries.json`](./queries.json) (sha256 `2486a359…`, pinned in the artifact) · **Artifact:**
 [`measurement.json`](./measurement.json) · **Code head:** `31bce52ddb` (run head; see §6 — a
-reachable equivalent is `318950c6e0`) · **Measured:** 2026-11-19.
+LABEL, not a runnable anchor; a reachable equivalent is `318950c6e0`) · **Measured:** 2026-11-19.
 
 **Plain language:** one of the merged levers is visible to a user, one is not, and one is only
 visible on the write path. The `_`-preserving OR terms (`#12368`) move the user's own search from
@@ -259,7 +259,9 @@ them in `post_run_edits`:
    prints **`0`** at the reachable equivalent named in the masthead. ⛔ The SAME command run against
    `HEAD` prints **`1`**, and that `1` is the whole point rather than a contradiction: the builder
    arrived AFTER the run, so `HEAD` carries it and the run head does not. `post_run_edits[0].why`
-   states the identical pair.
+   states the identical pair. ⚠️ `318950c6e0` is a **branch-local** commit like the run head, so the
+   next rebase strands it the same way — the equivalent is a convenience for a reader who holds the
+   pre-rebase object today, and `HEAD` remains the anchor that resolves in every checkout.
 2. **`arms`** — the three `user_search*` arms' `door_note` **prose** was restated. The note as run
    read *"at the MCP tool `tortoise_search`'s own defaults"*, which is false about two default
    values: the doors default to `entity_type='point'` / `limit=10`, while the arms call
@@ -279,10 +281,11 @@ the run head yields the same numbers, with the `cleanup` block absent, the false
 three arms, the `paired` cap unmarked, and no `code_head_note`. Any later run writes all four itself
 and records `post_run_edits: []`.
 
-⛔ **`code_head` `31bce52ddb` is the RUN head and is a LABEL, not a runnable anchor.** It predates
-the rebase onto `origin/main`, which REWROTE it: it is an ancestor of no published ref, so any
-`git show` written against that sha fails with `fatal: invalid object name` for anyone without the
-pre-rebase object. **Reproduce at the branch's own head instead** — `git show HEAD:tools/capstone_12186_recall.py`
+⛔ **`code_head` `31bce52ddb` is the RUN head and is a LABEL, not a runnable anchor.** This
+branch is rebased onto `origin/main` before it lands, and a rebase rewrites `31bce52ddb`,
+leaving it an ancestor of no published ref — a `git show` against it then fails with
+`fatal: invalid object name` for anyone without the pre-rebase object. **Reproduce at the
+branch's own head instead** — `git show HEAD:tools/capstone_12186_recall.py`
 resolves everywhere, and the two INPUTS a reproduction needs are `queries.json` (whose sha256 the
 `pin` block pins) and the tool's query/recall code, which the run head and `HEAD` share: the tool's
 later changes are comments and new builder functions, never the recall computation. **In a shallow

@@ -806,13 +806,24 @@ def _git_head() -> str | None:
 def _code_head_note(run_head: str | None) -> str:
     """The record's statement that ``code_head`` is a LABEL, not a runnable anchor.
 
-    ⛔ A REBASE REWRITES THE RUN HEAD. This measurement runs on a branch, and the
-    branch is rebased onto ``main`` before it lands — so the sha the run recorded is
-    an ancestor of no published ref afterwards, and every ``git show <code_head>:``
-    command in the record fails with ``fatal: invalid object name`` for a reader who
-    does not happen to hold the pre-rebase object. That is a real property of the
-    record, not a defect to paper over: ``code_head`` answers *which run this is*,
-    which is what it was named for.
+    ⛔ A REBASE WOULD REWRITE THE RUN HEAD, AND THIS NOTE MUST NOT ASSERT THAT ONE
+    ALREADY DID IT TO THE HEAD IT IS DESCRIBING (round-14 P2, measured). This
+    measurement runs on a branch that is rebased onto ``main`` before it lands, so the
+    sha a run records stops being reachable once that happens — but the note is BUILT AT
+    WRITE TIME, when the head it names is still the branch tip, resolvable, and an
+    ancestor of itself. The previous wording stated flatly that the branch's rebase
+    "REWROTE" the sha and that it was "an ancestor of no published ref": a prediction
+    dressed as a record, and false for every run whose note is written before the rebase
+    (i.e. all of them, since the note is written by the run). The claim is therefore
+    stated as the RULE — a rebase rewrites the label, and a rewritten label resolves
+    nowhere — which is true whether or not the rebase has happened yet, rather than as a
+    past event the writer cannot observe.
+
+    ⛔ AND IT NAMES NO SHA-ANCHORED COMMAND. Spelling ``git show <label>:`` here, even
+    as a warning, is how the record hands a reader a command that cannot resolve: the
+    guard in ``tests/test_capstone_12186_recall.py`` pins every ``git show <hex>:``
+    target in the document, and prose is not exempt.
+    ``code_head`` answers *which run this is*, which is what it was named for.
 
     It is BUILT here rather than hand-written, for the reason the ``post_run_edits``
     mechanism itself exists: an edit nobody's builder emits is an edit the ledger
@@ -823,9 +834,10 @@ def _code_head_note(run_head: str | None) -> str:
     label = (run_head or "<unknown>")[:12]
     return (
         f"`code_head` {label} is the RUN head and is a LABEL, not a reproduction "
-        f"anchor. It predates this branch's rebase onto `origin/main`, which REWROTE "
-        f"it, so it is an ancestor of no published ref and `git show {label}:...` "
-        f"fails for a reader without the pre-rebase object. The CONTENT is verifiable "
+        f"anchor. This branch is rebased onto `origin/main` before it lands, and a "
+        f"rebase rewrites {label}, leaving it an ancestor of no published ref — a "
+        f"`git show` against it then fails with `fatal: invalid object name` for a "
+        f"reader without the pre-rebase object. The CONTENT is verifiable "
         f"even where the sha is not: reproduce at the branch's own head — the two "
         f"INPUTS this record names (`tools/capstone_12186_recall.py`'s query/recall "
         f"code and `docs/evidence/12186-capstone/queries.json`, whose sha256 the `pin` "
@@ -842,6 +854,12 @@ def run(args: argparse.Namespace) -> int:
     from tortoise.extractor_v2 import _fts_rows
     from tortoise.projection import FalkorProjection
     from tortoise.sdk import TortoiseSDK
+
+    # ⛔ THE RUN HEAD IS SAMPLED ONCE (round-14 P2). `code_head` and `code_head_note`
+    # are both derived from it, ~21 minutes apart in a real run; two `_git_head()`
+    # calls let a commit landing between them write a note that describes a head the
+    # record does not name.
+    head = _git_head()
 
     pin_path = Path(args.pin)
     pin, pin_sha = load_pin(pin_path)
@@ -1001,11 +1019,15 @@ def run(args: argparse.Namespace) -> int:
             "issue": "12186",
             "capstone": True,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "code_head": _git_head(),
+            "code_head": head,
             #: The record's own statement that `code_head` is a LABEL (a rebase rewrites
             #: it) and where a reproduction should actually run. BUILT, not typed — see
             #: `_code_head_note`.
-            "code_head_note": _code_head_note(_git_head()),
+            #: ⛔ ONE SAMPLE, TWO FIELDS (round-14 P2). These were two separate
+            #: `_git_head()` calls ~21 minutes into the run, so a commit landing between
+            #: them wrote a `code_head` its own `code_head_note` did not describe — and
+            #: the artifact's own equality pin reds on the artifact the tool just wrote.
+            "code_head_note": _code_head_note(head),
             #: The edits made to THIS record AFTER the run — `[]` when the record
             #: is exactly what the run wrote. It exists because `code_head` is the
             #: record's reproduction anchor: a block inserted by hand (`§4`'s
