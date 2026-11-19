@@ -283,9 +283,9 @@ def test_the_census_prints_the_unmatched_count_including_zero(stores):
     # …and the human render says so on the row rather than omitting it.
     text = parity.render({"labels": [row], "at": "now", "ready": True}, "g")
     assert "graph_only" in text
-    # every column, zeros included: graph, record, graph_only, unkeyed, rec_unread,
+    # every column, zeros included: graph, record, graph_only, unkeyed, coll, rec_unread,
     # rec_only, rec_total, verdict
-    assert re.search(r"Object\s+1\s+1\s+0\s+0\s+0\s+0\s+1\s+PARITY", text)
+    assert re.search(r"Object\s+1\s+1\s+0\s+0\s+0\s+0\s+0\s+1\s+PARITY", text)
 
 
 def test_a_graph_only_vector_blocks_the_label_and_names_it(stores):
@@ -2353,17 +2353,21 @@ def test_the_removal_never_re_reads_a_key_set_it_is_about_to_strip(stores, monke
 
 def test_a_removal_that_raises_splits_on_whether_anything_was_stripped(stores,
                                                                      monkeypatch):
-    """⛔ THE COUNT DECIDES THE TOKEN, and the wrong reading is worse than none.
+    """⛔ THE *ATTEMPTED* COUNT DECIDES THE TOKEN, never the returned row counts.
 
     Exit 2 promises "refused, nothing written, safe to retry"; exit 6 promises "part of the
-    graph is already stripped, re-plan". A first-batch failure — what a store wedge, a
-    timeout or an oversized `--batch` actually produces — has removed NOTHING, so it must
-    be exit 2. Reporting "part-stripped" there teaches an operator to distrust exit 6 on
-    the one occasion it matters.
+    graph is already stripped, re-plan". A FIRST-statement failure — what a store wedge, a
+    timeout or an oversized `--batch` actually produces — has no earlier batch that could
+    have stripped anything, so it must be exit 2. Reporting "part-stripped" there teaches
+    an operator to distrust exit 6 on the one occasion it matters.
 
-    Both arms are driven, because a test that only covers the part-stripped case pins a
-    message the zero case then contradicts (the previous version of this test did exactly
-    that).
+    ⛔ AND `sum(removed.values())` CANNOT ANSWER IT (`#13647` round-3 finding 6). `removed`
+    accumulates `result.result_set[0][0]`, which is 0 when a batch lands but the driver
+    returns no row — so a count-based token asserted "NO node was stripped" over a
+    part-stripped graph. ARM 3 drives exactly that shape.
+
+    Three arms are driven, because a test that only covers one of them pins a message the
+    others contradict.
     """
     _ready(monkeypatch)
     graph, record = stores
@@ -2372,12 +2376,12 @@ def test_a_removal_that_raises_splits_on_whether_anything_was_stripped(stores,
         record.holds("object", key)
     plan = _plan(graph, labels=["Object"], batch=1)
 
-    # ── ARM 1: the FIRST batch fails ⇒ nothing was removed ⇒ exit 2 ──────────
+    # ── ARM 1: the FIRST batch fails ⇒ nothing could have been removed ⇒ exit 2 ────
     graph.fail_removal = True
     with pytest.raises(strip.Refusal) as first:
         _execute(graph, plan, batch=1)
     assert first.value.token == strip.REFUSE_WRITE_ERROR
-    assert "NO node was stripped" in str(first.value)
+    assert "FIRST removal statement" in str(first.value)
     assert graph.vector_keys("Object") == {"obj-1", "obj-2", "obj-3"}
     assert strip.refusal_exit_code(strip.REFUSE_WRITE_ERROR) == 2
 
@@ -2397,10 +2401,41 @@ def test_a_removal_that_raises_splits_on_whether_anything_was_stripped(stores,
     with pytest.raises(strip.Refusal) as second:
         _execute(graph, plan, batch=1)
     assert second.value.token == strip.REFUSE_WRITE_FAILED
-    assert "ALREADY STRIPPED" in str(second.value)
+    assert "ALREADY COMPLETED" in str(second.value)
     # One node really is gone — that is what makes exit 6 honest here.
     assert graph.vector_keys("Object") == {"obj-2", "obj-3"}
     assert strip.refusal_exit_code(strip.REFUSE_WRITE_FAILED) == 6
+
+    # ── ARM 3: a batch LANDS but the driver reports NO ROW ⇒ still exit 6 ─────
+    # The pre-fix rule summed `removed`, saw 0, and told the operator "no node was
+    # stripped" over a graph it had just half-stripped.
+    reset, _record = FakeGraph(), Record()
+    for key in ("obj-1", "obj-2", "obj-3"):
+        reset.add("Object", key)
+        _record.holds("object", key)
+    plan3 = strip.build_plan(
+        g=reset, record_dsn="postgresql://x", org_id="org", graph_id="graph",
+        graph_name="g", graph_uri="docker://x/g", labels=["Object"], batch=1)
+    stats = {"n": 0}
+    original3 = reset._answer
+
+    def _strip_then_report_nothing(cypher, params, *, write):
+        if write and "REMOVE n.embedding" in cypher:
+            stats["n"] += 1
+            if stats["n"] == 1:
+                original3(cypher, params, write=write)   # the batch really lands…
+                return []                                # …and reports no row
+            raise RuntimeError("simulated store failure on batch 2")
+        return original3(cypher, params, write=write)
+
+    reset._answer = _strip_then_report_nothing    # type: ignore[method-assign]
+    with pytest.raises(strip.Refusal) as third:
+        _execute(reset, plan3, batch=1)
+    assert third.value.token == strip.REFUSE_WRITE_FAILED, (
+        f"a LANDED batch that reported no row was read as 'nothing was stripped': {third.value}")
+    assert "part-stripped" in str(third.value)
+    # …and the graph proves the batch landed, so exit 2's promise would have been false.
+    assert reset.vector_keys("Object") == {"obj-2", "obj-3"}
 
     # The rest of the mapping is unchanged: everything else is a pre-write refusal.
     assert strip.refusal_exit_code(strip.REFUSE_GRAPH_ONLY) == 2
@@ -2540,3 +2575,236 @@ def test_the_interpreter_guard_ships_in_both_entry_points():
             if later in source:
                 assert guard < source.index(later), (
                     f"{name}: the interpreter guard sits BELOW `{later}`")
+
+
+# ── #13647 round-3 P1 roots: a rendering is not an identity, and a condition is not a proof ──
+
+
+def test_a_render_collision_is_not_parity(stores, monkeypatch):
+    """⛔ TWO TYPED IDENTITIES THAT RENDER ALIKE ARE NOT ONE NODE (`#13647` round-3 P1).
+
+    The record leg's only language is `text` (its identity column is TEXT), so
+    `:Object {id:123}` and `:Object {id:"123"}` both arrive as `"123"`. A `set(text)` walk
+    collapses them, and a set-difference against ONE readable record row is empty — so the
+    census used to print PARITY over two graph vectors the record holds one copy of, and
+    `at_parity`/`parity`/`ready` all read True.
+
+    Falsified three ways: the bucket, the verdict, and the destructive consumer.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", 123)          # typed identity, legal (sdk `SET n += $props`, dumps)
+    graph.add("Object", "123")        # …and its rendering: a DIFFERENT node
+    record.holds("object", "123")     # ONE readable row, which both would join to
+    row = _row(_census(graph, labels=["Object"]), "Object")
+    assert row["graph_vectors"] == 2
+    assert row["record_vectors"] == 1
+    assert row["render_collision"] == 1
+    assert row["graph_only"] == 1, "the collision excess is unmatchable, so it is graph-only"
+    assert row["at_parity"] is False
+    assert row["verdict"] == "RENDER-COLLISION(1)"
+    assert "TEXT" in (row["blocked_reason"] or ""), row["blocked_reason"]
+
+    # …and the strip is refused by the LIVE parity re-check, not merely in the printout.
+    plan = _plan(graph, labels=["Object"])
+    assert plan["ready"] is False
+    with pytest.raises(strip.Refusal) as excinfo:
+        _execute(graph, plan)
+    assert excinfo.value.token == strip.REFUSE_GRAPH_ONLY
+    assert graph.vector_keys("Object") == {123, "123"}, "a collided vector was deleted"
+
+
+def test_parity_requires_a_READABLE_ROW_PER_GRAPH_VECTOR():
+    """The COUNT clause of `at_parity`, asserted directly so it cannot be deleted quietly.
+
+    A set-difference answers "is every distinct RENDERING answered". `graph_vectors <=
+    record_vectors` is the statement that every NODE is. Both are kept: the collision
+    bucket names the cause, this clause is the invariant.
+    """
+    row = parity.LabelCensus(label="Object", table="object", entity_types=["object"],
+                             graph_vectors=2, record_vectors=1)
+    assert row.graph_only == 0 and row.render_collision == 0
+    assert row.at_parity is False
+    row.record_vectors = 2
+    assert row.at_parity is True
+
+
+def test_a_store_or_exit_behind_a_LIVE_condition_does_not_certify_the_arm(tmp_path,
+                                                                       monkeypatch):
+    """⛔ A CONDITIONAL STOP IS NOT A STOP (`#13647` round-3 P1, and its 2b spellings).
+
+    `_own_walk` prunes nested SCOPES and statically dead branches, so a stop under a LIVE
+    nested condition (`if DEBUG: raise`) still certified the writer as write-stopped while
+    the store below ran unconditionally — and the exit arm's answer is the sole fact that
+    authorises deleting the only readable copy of a fingerprint. The store/remove arms had
+    the mirror looseness.
+
+    The `with`/`try` controls at the end are the other half: an arm's action that IS
+    unconditionally reached must still certify, or the fix would be an inert enforcer.
+    """
+    refused = (
+        # the exit, behind a live condition
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        if DEBUG:
+            raise
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+""",
+        # the same root spelled for the STORE arm (positive ask)
+        """
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        if flag:
+            props["embedding"] = _encode(props)
+    return _write({"SET n += $props": props})
+""",
+        # …and for the REMOVAL arm (negated ask)
+        """
+def _upsert_object(props):
+    if not _derived_mirror_required("object"):
+        if flag:
+            props.pop("embedding", None)
+    return _write({"SET n += $props": props})
+""",
+        # 2b: a TRUTHY constant walks both arms, so the store in the never-run `else`
+        # certified the guard while the vector was written unconditionally below
+        """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        if True:
+            pass
+        else:
+            props["embedding"] = _encode(ev)
+    return _write(ev)
+""",
+        # 2b: `if []:` is dead but is not an `ast.Constant`, so the pruner kept its body
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        if []:
+            raise
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+""",
+    )
+    for source in refused:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a CONDITIONAL stop certified the arm: {source!r}"
+
+    accepted = (
+        # an exit inside a `with` body IS unconditionally reached
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        with TRACE:
+            return None
+    return _write(ev)
+""",
+        # …and so is a store inside a `try` body
+        """
+def _upsert_object(ev):
+    embedding = None
+    if _derived_mirror_required("object"):
+        try:
+            embedding = _encode(ev)
+        finally:
+            _note(ev)
+    return _write(ev, embedding)
+""",
+    )
+    for source in accepted:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        assert strip._writer_consults_gate(
+            module, "_upsert_object", ("object",))[0] is True, (
+            f"an UNCONDITIONAL arm was refused: {source!r}")
+
+
+def test_the_digest_does_not_dedupe_two_typed_identities_by_VALUE():
+    """⛔ `set(entries)` COMPARED `(Object, 1)` AND `(Object, 1.0)` EQUAL (`#13647` 3).
+
+    `1 == 1.0` and they hash alike, so one of two genuinely different identities was
+    silently dropped from the digest — and WHICH survived depended on insertion order, so
+    the same set could digest two ways and a stale-plan check could pass over drift. The
+    dedupe is now on the TYPE-TAGGED frame.
+    """
+    one = strip.digest([("Object", 1)])
+    both = strip.digest([("Object", 1), ("Object", 1.0)])
+    assert one != both, "an int and a float identity collided into one digest row"
+    assert both == strip.digest([("Object", 1.0), ("Object", 1)]), (
+        "the digest depends on insertion order for typed keys")
+
+
+def test_an_all_string_plan_still_re_derives_to_the_same_bytes():
+    """The typed-key frame is ADDITIVE: a string-only set must order and frame as before.
+
+    The sort key is still the raw value (`identity_sort_key`), not the frame — sorting by
+    `"2:aa" < "1:b"` would re-digest every plan minted against an all-string population,
+    which is the compatibility promise `_digest_key` makes.
+    """
+    body = "\n".join(["6:Object2:aa", "6:Object1:b"])
+    expected = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+    assert strip.digest([("Object", "b"), ("Object", "aa")]) == expected
+
+
+def test_a_plan_that_names_the_same_node_twice_is_refused(tmp_path):
+    """⛔ THE DUPLICATE-LABEL DEFECT ONE LEVEL DOWN (`#13647` 4).
+
+    The digest describes a distinct SET while `expected` counts ENTRIES, so a plan listing
+    the same identity twice verified and then claimed more nodes than the set it was
+    approved for — and the removal would strip the same key twice.
+    """
+    plan = {
+        "tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION,
+        "labels": [{"label": "Object", "keys": ["obj-1", "obj-1"]}],
+        "total_nodes": 2,
+    }
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    path = tmp_path / "duplicated-node.json"
+    path.write_text(json.dumps(plan))
+    with pytest.raises(strip.Refusal) as excinfo:
+        strip._load_plan(str(path), plan["digest"])
+    assert excinfo.value.token == strip.REFUSE_PLAN_UNREADABLE
+    assert "same node more than once" in str(excinfo.value)
+
+
+def test_a_live_census_without_its_declaration_cannot_be_narrowed_by_the_PLAN(
+        stores, monkeypatch):
+    """⛔ THE `declared_population` FALLBACK WAS A HAND-EDITABLE ACKNOWLEDGEMENT (5).
+
+    `served = set(live[...]) or set(plan[...])` re-admitted the field the comment beside it
+    forbids: on a live-census shape WITHOUT the key, an edited plan declared the narrow
+    scope it wanted and the run published exit 0 over three untouched labels. The fallback
+    is now the module's own `RETIRED` constant, which no plan can edit.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    plan = _plan(graph, labels=["Object"])
+    plan["declared_population"] = ["Object"]      # the edit no digest covers
+    real_census = parity.census
+
+    def _census_without_the_declaration(*args, **kwargs):
+        report = real_census(*args, **kwargs)
+        report.pop("declared_population", None)
+        return report
+
+    monkeypatch.setattr(strip.parity, "census", _census_without_the_declaration)
+    result = _execute(graph, plan)
+    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert strip.result_exit_code(result) == 5, (
+        "a narrowed sweep published exit 0 from the plan's own declaration")
+
+
+def test_the_compatibility_break_is_disclosed_where_the_operator_reads_it():
+    """A plan OUTLIVES the build that printed it, so the break is stated in the tool (7).
+
+    The PR body is not an artefact an operator has: this module's docstring is.
+    """
+    text = strip.__doc__ or ""
+    assert "COMPATIBILITY" in text
+    for phrase in ("REFUSE_DIGEST_MISMATCH", "--expect-narrowed", "``6``"):
+        assert phrase in text, f"the compatibility note omits {phrase!r}"
