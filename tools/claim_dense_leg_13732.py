@@ -37,17 +37,38 @@ This is the finding that motivates the file, and it is checkable from the code,
 not inferred: ``window_quality_m2.write`` writes its population through
 ``proj._upsert_point_props({"id", "content"})`` (``window_quality_m2.py:850``;
 ``build_point_population`` only BUILDS the dicts, it writes nothing) — **no
-embedding key** — so neither store holds a vector for those nodes. Two
-consequences, both silent:
+embedding key** — and on the box M2 ran on, no node carried a vector.
+
+⛔ **THE REASON IS THE EMBEDDER, NOT THE PAYLOAD.** ``_upsert_point_props``
+DERIVES an embedding from ``content`` whenever the payload owns no ``embedding``
+key: ``tortoise/projection/entities.py:2968-2976`` — ``elif not op and
+p.get("content"): encode_for_row(p.get("content", ""),
+self.required_embedding_dim)``, inside an ``except Exception: pass``. So on a box
+WITH an installable embedder, M2's exact payload would have carried vectors; it
+did not because that box had none, ``encode_for_row`` raised, and the blanket
+``except`` swallowed it. The tree says so about itself at
+``tortoise/record_writer.py:1809``: *"the graph fold derives it and writes it
+straight onto the node, #7845"*. Consequences, both silent:
 
 1. no ``query_vec`` (no embedder on that box) means the vector strategy is never
    submitted, which the artifact declares as ``keyword_only``; and
-2. on a box WITH an embedder, the same population still yields a dense leg that
-   can find nothing, because no node carries an ``embedding`` to be near.
+2. no node carries an ``embedding`` to be near, because the derive path failed
+   silently — a fact about the BOX, not about the harness.
 
 So the claim population must be EMBEDDED AND WRITTEN before a dense arm can be
-measured at all, and this instrument's seeding step is that prerequisite — the
-one thing M2's harness lacked. ⚠️ ``record_vector.coverage`` compares
+measured at all, and this instrument's seeding step is that prerequisite — but
+what it buys is a vector under **this** run's embedder, written unconditionally
+by the instrument itself rather than inherited from the fold's best-effort
+branch, and therefore not dependent on the EMBED gate, on the adapters, or on
+the graph's prior state. It is not a repair of a payload M2 wrote "wrong": M2's
+payload was the production one, and it was right.
+
+Two consequences of that box, both silent:
+
+1. no ``query_vec`` (no embedder) means the vector strategy is never submitted,
+   which the artifact declares as ``keyword_only``; and
+2. no node carries an ``embedding`` to be near, because the derive path failed
+   silently — which is a fact about the BOX, not about the harness. ⚠️ ``record_vector.coverage`` compares
 ``record_vectors >= graph_vectors``, and **0 >= 0 is VERIFIED** — so an unseeded
 population does not fail the coverage gate, it *passes* it and then serves an
 empty record cohort as ``mechanism=pgvector, reason=ok``. That is why step
@@ -134,9 +155,30 @@ USAGE
     # the measurement (needs a corpus, an embedder, and a record at that tenant):
     uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
     TORTOISE_RECORD_DSN=... TORTOISE_RECORD_SINGLE_TENANT=1 \\
+    TORTOISE_RECORD_ORG_ID=<org> TORTOISE_RECORD_GRAPH_ID=<graph> \\
     TORTOISE_RECORD_JOURNAL=/path/to/journal \\
     uv run python tools/claim_dense_leg_13732.py --points 900 --deep 50 \\
         --out /tmp/claim-dense-13732.json
+
+⛔ ``TORTOISE_RECORD_ORG_ID``/``TORTOISE_RECORD_GRAPH_ID`` are NOT optional and
+not implied by ``TORTOISE_RECORD_SINGLE_TENANT``: :func:`tortoise.record_writer.record_tenant`
+returns the env PAIR and refuses a HALF-configured one, so exporting only the
+declaration yields ``no_tenant`` before any arm runs (measured: ``record_tenant()
+-> None`` with the declaration alone). The tenant is never guessed.
+
+⛔ THE ``record_dense`` ARM NEEDS A STEP THIS TREE DOES NOT HAVE YET. This
+instrument writes the population to the GRAPH only (:func:`_seed_graph` is a
+direct projection write that emits NO journal record), while the record is fed
+**exclusively** by a journal fold (``tortoise/record_vector.py:247``: *"the record
+is a journal fold with NO backfill"*), folded by ``tools/record_runner.py apply``.
+The population's ids are minted by the M2 harness (``pt-12186…``), so nothing else
+in the tree writes them. Consequently :func:`record_population_vectors` returns
+``0`` on **every** tenant today and the instrument REFUSES
+``record_population_absent`` — unless the population is first written through a
+**journaled** door and folded (``python -m tortoise record-reconcile`` /
+``tools/record_runner.py apply``) BEFORE this run. The guard is deliberately not
+relaxed: publishing a ``record_dense`` figure over ids the record does not hold is
+exactly the ``#5090`` Q2 false PASS the id-scoped half exists to stop.
 
 Exit codes: ``0`` ran · ``2`` precondition refused (named) · ``3`` an arm's trace
 contradicted its own declaration · ``4`` argument error.
@@ -433,7 +475,9 @@ def classify(cmp: dict) -> str:
     # ⛔ ``TRADE`` IS A GAIN THAT COSTS COVERAGE — never a move that loses BOTH.
     # Requiring only ``found_deep < 0`` labelled a double-negative a ``TRADE``,
     # which is the softer word for a plain regression and contradicts the
-    # committed ``trade_rule`` ("a GAIN at k=3 that lowers found@deep").
+    # committed ``trade_rule`` ("a GAIN at k=3 that lowers found@deep"). It is
+    # the field the artifact quotes as the verdict, so the softer word is the one
+    # mislabel that flatters the arm.
     if cmp["delta_pp"] > 0 and cmp["found_deep_delta_pp"] < 0:
         return "TRADE"
     return "GAIN" if cmp["delta_pp"] > 0 else "LOSS"
@@ -553,7 +597,24 @@ def require_embedder():
     """The embedder, or a refusal — a dense arm without one does not exist."""
     from tortoise.embeddings import EmbeddingModel
 
-    model = EmbeddingModel.get()
+    try:
+        model = EmbeddingModel.get()
+    except Exception as exc:  # EmbedderUnavailableError when REQUIRED is armed
+        # #4861: `get()` RAISES, rather than answering None, when
+        # `TORTOISE_EMBEDDING_MODEL_REQUIRED` is truthy — that raise is the
+        # flag's whole point on a request path. Here it must stay a NAMED
+        # precondition: an uncaught traceback would present as a crash (exit 1)
+        # instead of the refusal this artifact promises (exit 2), for an input
+        # the operator controls.
+        raise Refused(
+            "embedder_required_unavailable",
+            f"TORTOISE_EMBEDDING_MODEL_REQUIRED is armed and the model cannot be "
+            f"loaded ({exc.__class__.__name__}) — the flag makes `EmbeddingModel.get()` "
+            f"raise instead of answering None, so no dense arm can run. Either "
+            f"install the extras (`uv sync --extra embeddings --extra parity`) or "
+            f"unset the flag; this instrument will not publish a keyword-only arm "
+            f"under a dense arm's name",
+        ) from exc
     if model is None:
         raise Refused(
             "no_embedder",
@@ -835,14 +896,25 @@ def _query(sdk, arm: str, text: str, deep: int, trace: list[dict]) -> list[dict]
 
 
 def _seed_graph(proj, population: list[dict], model) -> int:
-    """Write the claim population to the GRAPH with its derived vector.
+    """Write the claim population to the GRAPH with an explicit vector.
 
-    ⛔ THE VECTOR IS THE POINT OF THIS STEP — M2's population was written with
-    ``{"id", "content"}`` and no embedding, which is why its dense leg could not
-    have found anything even on a box that had one. The write goes through the
-    real projection door (``_upsert_point_props``), so the property shape is the
-    production one and the full-text index the lexical arm reads is the
-    production index.
+    ⛔ THE VECTOR IS THE POINT OF THIS STEP, but NOT for the reason the first cut
+    of this file gave: ``_upsert_point_props`` DERIVES an embedding from
+    ``content`` on a box that has an embedder
+    (``projection/entities.py:2968-2976``), so M2's ``{"id", "content"}``
+    payload would have carried one there — it carried none because M2's box had
+    no embedder and the derive path's ``except Exception: pass`` ate the failure.
+    What this step buys is a vector written **unconditionally, by this
+    instrument, under this run's embedder** — not inherited from a best-effort
+    branch whose behaviour depends on the EMBED gate, the adapter, and whatever
+    the node held before. The write goes through the real projection door
+    (``_upsert_point_props``), so the property shape is the production one and
+    the full-text index the lexical arm reads is the production index.
+
+    ⚠️ A GRAPH WRITE ONLY. This is a direct projection write and emits NO journal
+    record, so it cannot put this population's ids in the record — see
+    :func:`record_population_vectors` and the README's runbook for the step that
+    must, and is absent.
     """
     vectors = model.encode([row["content"] for row in population])
     for row, vec in zip(population, vectors, strict=True):
@@ -911,10 +983,11 @@ def run_measurement(args: argparse.Namespace) -> int:
     if scope is None:
         raise Refused(
             "no_tenant",
-            "no record tenant resolved for this process — set "
-            "TORTOISE_RECORD_SINGLE_TENANT=1 and the SDK's graph, or the "
-            "record's RLS policies read a GUC nobody set and every read returns "
-            "zero rows",
+            "no record tenant resolved for this process — export the PAIR "
+            "TORTOISE_RECORD_ORG_ID and TORTOISE_RECORD_GRAPH_ID *and* "
+            "TORTOISE_RECORD_SINGLE_TENANT=1 (record_tenant() refuses a half-"
+            "configured pair rather than completing it); without it the record's "
+            "RLS policies read a GUC nobody set and every read returns zero rows",
         )
     coverage = require_coverage(
         record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn)

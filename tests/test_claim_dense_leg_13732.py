@@ -17,9 +17,12 @@ later run must not be free to choose after it sees the numbers:
    be reported and be about the wrong store;
 3. **the coverage gate's zero trap** — `coverage` compares
    `record_vectors >= graph_vectors`, and **0 >= 0 is verified**, so an unseeded
-   population PASSES it and serves an empty cohort as `pgvector/ok`. That is
-   exactly the shape M2's population had (written with no embedding), so the
-   guard is asserted rather than assumed;
+   population PASSES it and serves an empty cohort as `pgvector/ok`. ⛔ M2's
+   population had no vectors because **its box had no embedder**, NOT because its
+   write payload lacked an `embedding` key — `_upsert_point_props` DERIVES one
+   from `content` (`projection/entities.py:2968-2976`, inside an
+   `except Exception: pass`), so the same payload on a box with an embedder would
+   have carried vectors. The guard is asserted rather than assumed either way;
 3b. **and the ID-SCOPED half of that guard** — `coverage` is a LABEL-WIDE count
    by design (`#11395` step 2), so it verifies any tenant that holds *some*
    embedded `Point` rows, including one that holds NONE of THIS population's ids.
@@ -277,7 +280,8 @@ class TestPaired:
 
         The committed ``trade_rule`` says *"a GAIN at k=3 that lowers
         found@deep"*. Gating ``TRADE`` on ``found_deep_delta_pp < 0`` alone
-        labelled a plain regression as a trade, which is the softer word for it.
+        labelled a plain regression as a trade, which is the softer word for it —
+        and it is the field the artifact quotes as the verdict.
         """
         cmp = {
             "delta_pp": -8.0,
@@ -471,6 +475,29 @@ class TestRefusals:
     def test_seeded_guard_passes_a_seeded_pair(self, tool_mod):
         tool_mod.require_seeded(786, 800)  # no raise
 
+    def test_a_required_embedder_that_cannot_load_is_a_NAMED_refusal(self, tool_mod, monkeypatch):
+        """`EmbeddingModel.get()` RAISES when REQUIRED is armed — catch it by name.
+
+        ⛔ Measured pre-fix: with `TORTOISE_EMBEDDING_MODEL_REQUIRED` truthy and a
+        load failure, `get()` raises `EmbedderUnavailableError` (#4861) — its
+        whole point on a request path — and `main()` catches only `Refused`, so
+        the operator got a traceback and exit 1 where the artifact promises
+        `REFUSED[...]` and exit 2. Same shape as the `record_dsn` finding, one
+        expression earlier.
+        """
+        from tortoise.embeddings import EmbeddingModel
+
+        class _Boom(RuntimeError):
+            pass
+
+        def _raise(cls, *a, **k):
+            raise _Boom("required but unreachable")
+
+        monkeypatch.setattr(EmbeddingModel, "get", classmethod(_raise))
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_embedder()
+        assert ei.value.code == "embedder_required_unavailable"
+
     def test_the_population_guard_refuses_a_cohort_the_record_does_not_hold(self, tool_mod):
         """The label-wide count can be VERIFIED over a population in neither store.
 
@@ -661,6 +688,76 @@ class TestRecordMembership:
         )
 
 
+# ── 5b. the two mechanisms the arms REST on (a mutation survivor is a hole) ──
+
+
+class TestTheArmsConstruction:
+    """The pure helpers above are fed synthetic traces; these pin the CALLERS.
+
+    ⛔ Measured pre-fix: deleting `"embedding": list(vec)` from `_seed_graph`,
+    and flipping `if arm != ARM_LEXICAL:` to `if True:` (making the lexical arm
+    silently the hybrid arm), each left the whole suite GREEN. Both are the
+    difference between "three single-variable arms" and "three reads of the
+    same arm", so the two assertions whose absence mattered most were missing.
+    """
+
+    def test_seed_graph_writes_an_explicit_vector_per_row(self, tool_mod):
+        written = []
+
+        class _Proj:
+            def _upsert_point_props(self, props):
+                written.append(props)
+
+        class _Model:
+            def encode(self, texts):
+                return [[0.1, 0.2, 0.3] for _ in texts]
+
+        population = [
+            {"id": "pt-12186000000", "content": "alpha beta gamma"},
+            {"id": "pt-12186000001", "content": "delta epsilon zeta"},
+        ]
+        seeded = tool_mod._seed_graph(_Proj(), population, _Model())
+
+        assert seeded == len(population)
+        assert [p["id"] for p in written] == [r["id"] for r in population]
+        for props in written:
+            # ⛔ the point of the step: the vector is EXPLICIT, not left to the
+            # fold's best-effort derive branch (projection/entities.py:2968).
+            assert props["embedding"] == [0.1, 0.2, 0.3], props
+            assert props["content"], props
+
+    def test_the_lexical_arm_does_not_submit_the_dense_leg(self, tool_mod, monkeypatch):
+        """`lexical` must read with NO embedder; the other arms must not patch."""
+        from tortoise import embeddings
+
+        seen = []
+
+        class _Sdk:
+            def tortoise_fts_query(self, text, **kwargs):
+                seen.append(embeddings.EmbeddingModel.get())
+                return []
+
+        monkeypatch.setattr(
+            embeddings.EmbeddingModel,
+            "get",
+            classmethod(lambda cls, *a, **k: "A-MODEL"),
+        )
+
+        tool_mod._query(_Sdk(), tool_mod.ARM_LEXICAL, "q", 50, [])
+        assert seen == [None], (
+            "the lexical arm handed the read an embedder — it would be the hybrid "
+            "arm wearing the lexical arm's name"
+        )
+
+        for arm in (tool_mod.ARM_GRAPH_DENSE, tool_mod.ARM_RECORD_DENSE):
+            seen.clear()
+            tool_mod._query(_Sdk(), arm, "q", 50, [])
+            assert seen == ["A-MODEL"], (arm, seen)
+
+        # and the patch is restored, not left installed for a later arm
+        assert embeddings.EmbeddingModel.get() == "A-MODEL"
+
+
 # ── 6. the contradiction test, structurally ───────────────────────────────
 
 
@@ -712,8 +809,27 @@ class TestContradictionTest:
         "db.idx.vector.queryNodes",  # a graph ANN read would bypass the record
         "CREATE VECTOR INDEX",  # the index that must stay on the record
         "CREATE INDEX FOR",  # ditto, engine-native spelling
-        "INSERT INTO",  # the instrument does not seed record rows
-        "CREATE TABLE",  # nor the record's schema
+        "CREATE INDEX ON",  # ditto, plain-Cypher spelling
+    )
+
+    #: ⛔ THE RECORD HALF IS A WRITE-STATEMENT BAN, NOT ONE SPELLING. An earlier
+    #: cut denied `INSERT INTO` alone, and a five-item denylist is defeated by an
+    #: ordinary synonym on a connection this instrument ALREADY OPENS: `upsert
+    #: into public.point …` satisfies `record_population_absent` in three lines
+    #: and then publishes a `record_dense` recall of ~100 % that is a figure
+    #: about its own seed — the `#5090` Q2 false PASS this guard exists to stop.
+    #: So every SQL write shape the tree could plausibly issue is banned, matched
+    #: case-insensitively over the CODE literals. Residual, stated rather than
+    #: implied: a statement assembled at runtime from non-adjacent pieces (`"ups"
+    #: + "ert into"`) is invisible to any literal scan — the same residual the
+    #: index half carries, and the reason the runbook says not to relax it.
+    RECORD_WRITE_RE: ClassVar[re.Pattern[str]] = re.compile(
+        r"\b(?:"
+        r"insert\s+into|upsert\s+into|merge\s+into|delete\s+from|"
+        r"update\s+\S+\s+set|truncate\s+(?:table\s+)?\S+|alter\s+table|"
+        r"create\s+table|copy\s+\S+\s+(?:from|to)"
+        r")\b",
+        re.IGNORECASE,
     )
 
     def test_the_instrument_creates_no_graph_vector_index_and_seeds_no_rows(self):
@@ -722,6 +838,35 @@ class TestContradictionTest:
             f"{found} appear in the instrument's CODE — the dense leg comes from "
             f"the RECORD (#11481 V1), and a graph vector index here would "
             f"reverse a landed decision inside a measurement tool"
+        )
+
+    def test_the_record_half_bans_every_write_spelling_not_just_INSERT_INTO(self):
+        """A synonym must not be enough to seed the record from the harness.
+
+        ⛔ Measured on the pre-fix pin (48 passed with these injected into
+        `_seed_graph`): `cur.execute("upsert into public.point (id,
+        embedding_vec) values (%s, %s)", …)` and `merge into public.point …`.
+        """
+        literals = _code_string_literals(ast.parse(TOOL.read_text()))
+        assert not [lit for lit in literals if self.RECORD_WRITE_RE.search(lit)], (
+            "the instrument carries a SQL WRITE statement — the record is fed by a "
+            "journal fold (record_vector.py:247), never by this harness"
+        )
+        # …and the ban is live, not vacuous: every spelling reds.
+        for spelling in (
+            "INSERT INTO public.point (id) VALUES (%s)",
+            "upsert into public.point (id) values (%s)",
+            "MERGE INTO public.point USING x ON TRUE",
+            "update public.point set embedding_vec = %s",
+            "delete from public.point where id = %s",
+            "truncate table public.point",
+            "alter table public.point add column x int",
+            "copy public.point from stdin",
+        ):
+            assert self.RECORD_WRITE_RE.search(spelling), spelling
+        # …and a legitimate read does NOT red (the guard is about writes).
+        assert not self.RECORD_WRITE_RE.search(
+            "select count(*) from public.point where id = any(%s)"
         )
 
     def test_the_scan_reads_code_literals_and_not_comments_or_prose(self):
