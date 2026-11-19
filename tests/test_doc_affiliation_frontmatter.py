@@ -647,11 +647,18 @@ def test_research_doc_frontmatter_parses_as_yaml() -> None:
                         f"{texts!r} became {got_list!r}"
                     )
                     continue
+<<<<<<< HEAD
                 # `strict=True` is unreachable here (the guard above already
                 # `continue`d on any length mismatch) and is the honest form:
                 # this arm exists to catch a truncation, so a future refactor
                 # that loses the guard should raise, not silently compare fewer.
                 for raw_item, got_item in zip(texts, got_list, strict=True):
+=======
+                for raw_item, got_item in zip(texts, got_list, strict=True):
+                    # `strict=True` is free here: the length equality above already
+                    # `continue`s when the lists differ, so this asserts nothing new
+                    # and B905 gets its explicit parameter.
+>>>>>>> origin/main
                     if raw_item in wholly_comment:
                         # (A) already named this item's loss; a second reason from
                         # _type_mismatch would contradict it in the same string.

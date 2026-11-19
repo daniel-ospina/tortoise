@@ -6154,25 +6154,25 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
             ("21452", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
-        # documents that state them — a row per document, because a row scopes to
-        # one FILE and the consume pair was re-pointed in one document while the
-        # definition stayed wrong in both.
+        # documents that state them — a row per document, because a row scopes to one
+        # FILE and the consume pair was re-pointed in one document while the definition
+        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
             ("7031", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("12074", "subject_binding_available,"),
-            ("12127", "and not subject_binding_available(graph):"),
+            ("12110", "subject_binding_available,"),
+            ("12163", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("7031", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
-        # message rather than an IndexError (the guard below now says so).
+        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`.
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("12074", "subject_binding_available,"),
-            ("12127", "and not subject_binding_available(graph):"),
+            ("12110", "subject_binding_available,"),
+            ("12163", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
@@ -6410,12 +6410,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("20208", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
-            ("12047", "_registry_cache = PackRegistry(packs_dir)"),
+            ("12083", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
-            # `:10063`/`:10116` stayed GREEN).
-            ("12074", "subject_binding_available,"),
-            ("12127", "and not subject_binding_available(graph):"),
+            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`.
+            ("12110", "subject_binding_available,"),
+            ("12163", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("1186", '"sha256": sha, "turns": None'),
@@ -6539,10 +6539,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `return OrgInfoResponse(` — is 15279 (the call itself is `:15280`). The three offsets
         # (+29 `nodes_used`, +39 `max_nodes`, +77 END) still hold EXACTLY at the new START, which
         # is how the figures below were re-derived rather than nudged: `grep -n
-        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15202`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15231` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15241` (inside it), and `:15279` is
-        # the blank line immediately before `return OrgInfoResponse(` at `:15280`.
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15225`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15254` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15264` (still inside it). The END was re-derived
+        # at the `#13486` head -- `return OrgInfoResponse(` -> `:15303`, so END = `:15302` (+77 at this START).
         #
         # ⛔ RE-DERIVED AGAIN at the merge of `origin/main` `c0463806db` then `f6793959a2`
         # (this cut): the span is now 15225-15302 (+23 at BOTH ends from the `0774035055`

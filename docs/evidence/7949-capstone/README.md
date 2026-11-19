@@ -1184,7 +1184,11 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 
 The pipeline's OWN path WAS `TortoiseSDK.capture_session` (**DELETED by #4282**, 2026-10-27 —
 this bundle's probes now drive the private `sdk._capture_session`) →
+<<<<<<< HEAD
 `sdk._extract_session_v2` (`sdk.py:20478`; called at `:19367`) →
+=======
+`sdk._extract_session_v2` (`sdk.py:20506`; called at `:19395`) →
+>>>>>>> origin/main
 `extractor_v2.extract_session_v2` (`extractor_v2.py:14668`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is

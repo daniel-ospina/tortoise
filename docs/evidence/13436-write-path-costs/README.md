@@ -4,10 +4,16 @@ type: evidence
 domain: platform
 doc_status: final
 created: 2026-11-17
+<<<<<<< HEAD
 issue: "#13436"
 subjects.team: epistemic-team
 aboutSubjects: write-path cost measurement, subject endpoint latency, Postgres record, FalkorDB cache
 aboutObjects: "#13436, #13224, tools/measure_13436_write_costs.py"
+=======
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#13436, #13445, tools/measure_13436_write_costs.py"
+>>>>>>> origin/main
 ---
 
 # `#13436` P7 — the three write-path costs, measured (diagnosis only)

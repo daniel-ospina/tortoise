@@ -1,5 +1,5 @@
 ---
-title: "Tortoise — Canonical Ontology v3.36"
+title: "Tortoise — Canonical Ontology v3.37"
 type: data
 domain: data
 status: live
@@ -11,7 +11,7 @@ aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.36
+# Tortoise — Canonical Ontology v3.37
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -1039,7 +1039,7 @@ strategy, plan, goal, target    # commitment-state family (state-centric, 2026-0
 > dev:`incident` — a service deviates from its SLO/standard, product-strategy:
 > `customerProblem` — an unmet customer need) and `risk` is its potential form — a dev
 > `risk` POINT (claim) that a problem may occur; when the problem materializes, the
-> claim point is superseded/retracted and the materialized `bug`/`incident` Object
+> claim point is superseded/deprecated and the materialized `bug`/`incident` Object
 > carries the state (Point supersession is Point→Point; Object creation is separate).
 > **State-centric alignment (2026-08-12):** `strategy`/`plan`/`goal`/`target`
 > are STATE objects (superseded when a new commitment lands — the old strategy
@@ -1164,15 +1164,15 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 
 ### Point Status Vocabulary (canonical, #432/#690)
 
-| Status | Kind | Write path | Transitions to | Notes |
-|--------|------|------------|----------------|-------|
-| `draft` | initial (opt-in, #1088) | `create_point(status='draft')`, `EventAPI._point`, the capture/extraction writers | `live` | Inert for EP computation; promoted by `promote_point` / `update_point(status='live')`, and — for its OWN minted ids — by the capture ingest pass. An AUTHOR-explicit draft on a folded/pre-existing point is never retro-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
-| `live` | active | `create_point` (the default since #1088), `create_operator` (fills a NEVER-SET source, and writes the operator node's own `status='live'` — `'draft'` when the source is not promoted, #5089), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
-| `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
-| `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + **restatement-scoped edge disposition** (semantic edges are triaged per edge, not bulk-transferred) |
-| `outdated` | terminal (legacy flag) | `invalidate_point`, `supersede_point` (legacy flag) | *(none)* | Back-compat boolean; co-exists with `status`. Terminal on every read surface and for every lifecycle transition (#2498) — the pre-#2498 `→ retracted` allowance let a dead claim be re-terminalized |
-| `archived` | terminal (reserved) | *(no v1 SDK write path)* | *(none)* | Reserved for future lifecycle operations |
+| Status | Kind | Transitions to | Notes |
+|--------|------|----------------|-------|
+| `draft` | initial (opt-in, #1088) | `live`, `deprecated`, `superseded` | Inert for EP computation; promoted by `promote_point` / `update_point(status='live')`, and — for its OWN minted ids — by the capture ingest pass. An AUTHOR-explicit draft on a folded/pre-existing point is never retro-promoted (#1088). A no-status `create_point` is `live`, so draft must be asked for |
+| `live` | active | `deprecated`, `superseded` | Full EP participation |
+| `deprecated` | terminal | *(none)* | **Ended, and nothing replaced it.** `archived` is accepted on write as a synonym and stored as this word (#11824) |
+| `superseded` | terminal | *(none)* | **Ended because something replaced it** — the successor is named. Structural replacement via the CORRECTS edge + **restatement-scoped edge disposition** (semantic edges are triaged per edge, not bulk-transferred); `supersede_point` also sets the legacy `outdated` flag |
 
+> **`retracted`, `outdated` and `archived` are read-side legacy**, not statuses: **in this model** no verb produces them, while every reader still treats them as ended over stored rows (#12855). ⚠️ The code is not yet aligned: `retract_point` **still writes `retracted` today** — a stated residual of #11824, not a description of the model. The `outdated` boolean likewise remains a second, flag-based dead marker (#2498) that readers — including EP's currency predicate — must continue to honour.
+>
 > **`challenged` is NOT a state** — it is a DERIVED condition emerging from the presence of a NAND operator edge on a live point, queryable as such:
 >
 > ```cypher
@@ -1524,7 +1524,7 @@ adds `decay_clause('n')` to `_fold_point_invalidated`'s SET when it lands.
 |----------|----------|
 | Ontology concept vs implementation detail? | **Derived behavior**, documented here; no new stored entity |
 | Dedicated edge type (DEPENDS_ON)? | **No** — reverse traversal of IMPL/NAND operators is sufficient; a stored DEPENDS_ON edge would duplicate structure and drift |
-| Representation of "potentially invalidated"? | **Elevated posterior variance** (v > 0.04 → contested), not a stored `pointStatus` — statuses are `{draft, live, retracted, superseded, outdated, archived}` (§5); `outdated` is set only by an explicit terminalizing write (`supersede_point` / `invalidate_point`), never auto-inferred — it does **not** identify a supersession (§4.7) |
+| Representation of "potentially invalidated"? | **Elevated posterior variance** (v > 0.04 → contested), not a stored `pointStatus` — statuses are `{draft, live, deprecated, superseded}` (§5), with `retracted`/`outdated`/`archived` read-side legacy over stored rows (#12855); `outdated` is set only by an explicit terminalizing write (`supersede_point` / `invalidate_point`), never auto-inferred — it does **not** identify a supersession (§4.7) |
 | Terminal claims' posterior after terminalization? | **Decay to vacuity** (0.5, posterior (1,1)) at the terminalizing write + rebuild fold (#2490) — never a frozen pre-terminal posterior; `ep_alpha`/`ep_beta` retained as the sole recovery vector |
 | Interaction with CORRECTS? | CORRECTS is the *structural* replacement; cascading invalidation is the *belief-level* consequence — both fire from the same write (`supersede_point` → `_mark_dirty`) |
 

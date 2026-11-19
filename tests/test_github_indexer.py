@@ -981,7 +981,11 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6268`, `excluded = _terminal_object_statuses()` at `:5934` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
+<<<<<<< HEAD
     coherent un-supersede does clear `superseded` (`sdk.py:54246-54255`), and this
+=======
+    coherent un-supersede does clear `superseded` (`sdk.py:54284-54293`), and this
+>>>>>>> origin/main
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1104,11 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
+<<<<<<< HEAD
     `sdk.py:54246-54255`) — so each poll minted another `-reopened`
+=======
+    `sdk.py:54284-54293`) — so each poll minted another `-reopened`
+>>>>>>> origin/main
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6268`).
@@ -1451,7 +1459,11 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
+<<<<<<< HEAD
     JSONL replay of either (`sdk.py:54094-54096`); it is NOT reachable through
+=======
+    JSONL replay of either (`sdk.py:54132-54134`); it is NOT reachable through
+>>>>>>> origin/main
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3236,6 +3248,7 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # expected FIRST-line text of each pin was searched for at the current tree and
     # each resolved at exactly +150 (53911→54061, 54063→54213, 54512→54662). A pin
     # resolved by arithmetic on a number you did not measure is how these rot.
+<<<<<<< HEAD
     # ⛔ RE-DERIVED AGAIN at the `origin/main` (`c0463806dbb4`) merge of `#13345`:
     # the branch's own live-write arm AND that merge both moved this tail, so
     # neither side's numbers held at the merged tree. Measured the same way — the
@@ -3249,6 +3262,29 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("sdk.py", 54246, 54255): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
     ("sdk.py", 22421, 22596): ("def update_knowledge(", None),
     ("sdk.py", 54695, 54695): ("SET n += $props", None),
+=======
+    #
+    # ⛔ RE-DERIVED AGAIN at the `#13486` head (measured at `origin/main` `f6793959a2ae`
+    # first, then at the branch): the whole set was RED ON `main` already, and the
+    # two files moved by DIFFERENT amounts:
+    #   * `entities.py` — one uniform insertion above `:5934`, so every address in
+    #     the reopened-fold region moved by exactly **+12** (`5922→5934`,
+    #     `6186-6192→6198-6204`, `6267-6269→6279-6281`). `:5128-5130` did NOT move
+    #     (it sits above the insertion), which is why the shift is applied per
+    #     address from the measured text and not to the whole file.
+    #   * `sdk.py` — `#13486`'s comment lane adds a net +49 lines above `:54000` and
+    #     +39 above `:22000`, on top of `main`'s own +22, so the deltas are NOT one
+    #     number: `54061→54132` (**+71**), `54213→54284` (**+71**), `54662→54733`
+    #     (**+71**), `22388→22449` (**+61**, and its range end `22563→22602` **+39**,
+    #     measured by locating that exact line rather than by reusing either delta).
+    # Both were confirmed address-by-address against the pinned text (13 entities +
+    # 4 sdk) before the numbers were written, and the test re-checks every one.
+    ("sdk.py", 54132, 54134): (
+        "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
+    ("sdk.py", 54284, 54293): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 22449, 22602): ("def update_knowledge(", None),
+    ("sdk.py", 54733, 54733): ("SET n += $props", None),
+>>>>>>> origin/main
 }
 
 
