@@ -9401,7 +9401,7 @@ class TestConsentSeam:
             "page-view capture waits for it, so with no emit every visit that "
             "does not re-decide consent is silently uncounted — clicks with no "
             "denominator (#13645)")
-        assert f"'{self.EVENT}'" in _without_html_comments(_product_teams_html()), (
+        assert f"'{self.EVENT}'" in _code_only(_product_teams_html()), (
             f"the niche page no longer listens for `{self.EVENT}` — its page "
             "view would then fire only when the decision happens mid-visit")
 
@@ -9839,7 +9839,12 @@ class TestProductTeamsIdentity:
             "defect and an undercount (blocked requests read as nobody clicked)")
 
     def test_the_three_funnel_events_are_named_in_the_source(self):
-        html = _without_html_comments(_product_teams_html())
+        # `_code_only`, not `_without_html_comments`: that helper strips HTML
+        # comments only, so a JS comment quoting the three event names left this
+        # row green over a page whose `EVENTS` table was commented out — every
+        # CTA click and the consent event then threw `ReferenceError` and the
+        # experiment raised nothing, with no red anywhere (#13696 round 5, P1).
+        html = _code_only(_product_teams_html())
         for event in PRODUCT_TEAMS_EVENTS:
             assert f"'{event}'" in html, (
                 f"the page never names the `{event}` event. The owner decision "
