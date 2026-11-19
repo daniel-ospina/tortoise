@@ -38,6 +38,7 @@ Run (the first three need no database; the live ones need the docker lane)::
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import uuid
@@ -162,10 +163,8 @@ try:  # pragma: no cover - environment probe
         # module leaks into everything that imports it. A close() that raises
         # must not turn a reachable lane into a skip, so it is swallowed.
         if _probe is not None:
-            try:
+            with contextlib.suppress(Exception):  # teardown of a dead handle
                 _probe.close()
-            except Exception:  # pragma: no cover - teardown of a dead handle
-                pass
         if _old_uri is not None:
             os.environ["TORTOISE_DB_URI"] = _old_uri
         else:
