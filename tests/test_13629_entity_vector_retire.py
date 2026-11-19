@@ -6172,6 +6172,97 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE VOCABULARY WAS STILL FOUR COPIES, MEASURED AS A MATRIX (`#13788`, measured at
+        # `6504b28f`). A 1853-legal-row sweep with a RUNTIME ORACLE found 451 stop-arm false
+        # PASSes (27.2 %) and 0 wrong refusals, all of it one root: `_container_literal`,
+        # `_const_index_candidates`, `_spliced_sequence_elements` and the zip arm's type test each
+        # knew a different subset. They are one resolver now (`_sequence_options`), and these rows
+        # are the five classes that sweep named — every one refused beside its honest control.
+        #
+        # F1: the zip arm TYPE-TESTED each column instead of resolving it (320 of the 451).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(zip(list(("embedding",)), (_encode(ev),)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(zip(("embedding",), (_encode(ev),)[:]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= zip(("embedding",) if _f() else ("x",), (_encode(ev),))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= zip((_p := ("embedding",)), (_encode(ev),))
+        return None
+    _write(props)
+""",
+        # F2: the container-candidate resolver ignored `.copy()`, `+` and `*` (108 rows).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([{"embedding": _encode(ev)}]).copy()[0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([{"embedding": _encode(ev)}] + [])[0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (2 * [{"embedding": _encode(ev)}])[0]
+        return None
+    _write(props)
+""",
+        # F3: the splice missed a CONSTANT INDEX — one spelling over from the round before (15).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *[["embedding", _encode(ev)]][0])
+        return None
+    _write(props)
+""",
+        # F4: a `{**X}` comprehension source was given up on as unreadable (2).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {**{"embedding": 1}}}
+        return None
+    _write(props)
+""",
+        # F5: the pairs rule named `list`/`tuple` but not `set(...)` (6 rows) — while its own
+        # `_pairs_store_the_vector` docstring says a SET literal is an iterable of pairs, and
+        # three sibling arms already name `set`.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= set([("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(set([("embedding", _encode(ev))]))
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -6186,6 +6277,40 @@ def _upsert_object(props, ev):
     # ⛔ AND THE HONEST STOP ARMS MUST STILL CERTIFY, or the rule is an inert enforcer: a
     # removal, a bare exit, and a non-store statement before the exit are all write-stops.
     accepted = (
+        # ⛔ THE ONE-SEQUENCE-RESOLVER MUST NOT SWALLOW A NON-STORE (`#13788`, measured at
+        # `6504b28f`): a zip whose value column is empty or names no property, a `set(...)` of
+        # non-stores, a `+` of non-stores and a `{**X}` source naming no property are all honest
+        # write-stops. Without these rows a resolver that answered "yes" to any of those would
+        # pass every refused row — and the sweep above measured 0 wrong refusals, which is the
+        # property these controls exist to keep.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= zip(list(("embedding_model",)), (_m(),))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= set([("embedding_model", _m())])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= ([{"embedding_model": _m()}] + [])[0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {**{"embedding_model": 1}}}
+        return None
+    _write(props)
+""",
         # ⛔ THE SPLICE FLATTENER MUST NOT SWALLOW A NON-STORE (`#13788`, measured at
         # `794eb162`): a splice of a sequence that names no property, a repetition by zero,
         # and a conditional whose branches place nothing are honest write-stops. Without these
