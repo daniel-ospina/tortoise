@@ -3055,6 +3055,18 @@ _PROVENANCE_RECORD_MARKERS = (
     "OVERRIDES: the generated-artifact practice",
 )
 
+#: The per-row block #13626's `cut` deleted — as the three lines that IDENTIFY it, verbatim from
+#: `73c26022db^:config/surface-manifest.yml`. Its title was `⛔ PROVENANCE, not a value: …`, NOT
+#: the record's current one, which is exactly why the below-header arm below is keyed on every
+#: marker rather than on the new title (#13626 review ISSUE 2): a lane that `git show`s this block
+#: back and pastes it below the first key carries no new title at all, and a title-keyed arm read
+#: that restore as green.
+_RESTORED_PER_ROW_BLOCK = (
+    "  # ⛔ PROVENANCE, not a value: `served_from` below is `main`'s cell, written by a re-cut — this\n"
+    "  # reach this row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`\n"
+    "  # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the\n"
+)
+
 
 def test_the_provenance_record_lives_in_the_header_a_cut_re_emits():
     """A `cut` re-emits `MANIFEST_HEADER` alone, so the record must live there (#13626 ISSUE 3).
@@ -3087,12 +3099,28 @@ def test_the_provenance_record_lives_in_the_header_a_cut_re_emits():
             "lane actually reads is missing a recorded fact (and the header equality test above "
             "should already have reded: the two copies disagree)")
     # …and it must not ALSO sit in a per-row block below the first key: a re-cut deletes that
-    # copy, so a second one would be the drift this guard exists to stop.
+    # copy, so a second one would be the drift this guard exists to stop. ⛔ KEYED ON EVERY MARKER,
+    # not on the record's new title (#13626 review ISSUE 2): the block #13626 deleted opened
+    # `⛔ PROVENANCE, not a value: …`, so the most likely regression — a lane restoring that block
+    # from git history, which this test's own docstring documents as the loss — carries NONE of
+    # the new wording, and a title-keyed arm stayed green on it. Two of the markers DO fire on it
+    # (asserted below), which is what makes this arm read LOSS rather than a change of wording.
     below_header = committed_doc.split("manifest_version:", 1)[1]
-    assert "PROVENANCE OF THE PER-ROW CELLS" not in below_header, (
-        "the provenance record is duplicated as a per-row comment below the header; a re-cut "
-        "deletes per-row comments, so the copy that survives is the header's and the other is "
-        "a drift waiting to happen")
+    for marker in _PROVENANCE_RECORD_MARKERS:
+        assert marker not in below_header, (
+            f"the provenance record is duplicated as a per-row comment below the header "
+            f"({marker!r} appears there); a re-cut deletes per-row comments, so the copy that "
+            "survives is the header's and the other is a drift waiting to happen — the same "
+            "#13626 loss this guard exists to stop, re-introduced by hand")
+    # …and this arm reads LOSS, so it must fire on the restore it names. The probe is the deleted
+    # block's own wording, and the two assertions are its non-vacuity proof: without them a later
+    # re-keying of this arm could go green on the regression again (which is precisely ISSUE 2).
+    assert _PROVENANCE_RECORD_MARKERS[0] not in _RESTORED_PER_ROW_BLOCK, (
+        "the probe carries the record's NEW title, so it does not reproduce the gap review "
+        "ISSUE 2 names — keep it to the wording the deleted block actually used")
+    assert any(m in _RESTORED_PER_ROW_BLOCK for m in _PROVENANCE_RECORD_MARKERS), (
+        "no marker fires on the restored per-row block, so the arm above would be green on the "
+        "exact regression it names")
 
 
 #: The fragment of the line that went stale under `#13052` (`4a5ffa0a14`, the seven-door
