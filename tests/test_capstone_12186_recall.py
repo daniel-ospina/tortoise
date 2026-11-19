@@ -451,6 +451,91 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
         f"while diverging from {door_entity!r}/{door_limit!r}: {door_para!r}")
 
 
+def test_the_arms_pass_the_arguments_the_door_notes_say_they_do():
+    """The note's ARGUMENT half, driven — not compared to itself.
+
+    ⛔ MEASURED DEFECT this pins, and it survived the fix above. That test reads the
+    doors' signatures and then asserts the note names `entity_type='object'` /
+    `limit=KMAX`; **nothing read what the arms actually pass**. Both halves red as
+    survivors at `eb00ee8c` → this file's head:
+
+        mutant A  tools/capstone_12186_recall.py:508
+                  _query_rows(door, ctx, row["name"], KMAX) -> (..., 10)
+                  (KMAX stays 15, so every f-string in the note still agrees)
+                  result: 0 RED — the record keeps publishing "the arms call
+                  limit=15" after the arms stop calling it.
+        mutant B  tools/capstone_12186_recall.py:451
+                  entity_type="object" -> "point" in `_query_rows`
+                  result: 0 RED — same defect, the other argument.
+
+    This is the exact shape that test rejects on the DOOR side (`_user_door_binding`
+    compared a derived sentence to itself). Here the sentence is compared to the
+    CALL: `measure_arm` is driven for every arm `ARMS` declares, with a recording
+    sdk, and the arguments it receives are compared against the literals the
+    door's own note publishes — extracted FROM the note, so a note reworded to a
+    different argument reds instead of quietly agreeing with the code again.
+
+    Hermetic like the rest of this file: no graph, no measurement, ~50 ms.
+    """
+    def _record(arms_seen: list, door_calls: list):
+        class _Sdk:
+            def tortoise_fts_query(self, query, **kwargs):
+                door_calls.append({"query": query, **kwargs})
+                return []
+
+        def _fts_rows(sdk, cls, query, **kwargs):
+            # `capture_prior` is handed the entity type POSITIONALLY (`_query_rows`
+            # calls `ctx["fts_rows"](wrapped, "object", query, limit=...)`), so it is
+            # recorded under the same key the SDK kwarg uses — the note makes one
+            # claim about the arms, whichever door carries it.
+            door_calls.append({"entity_type": cls, "query": query, **kwargs})
+            return []
+
+        return {"sdk": _Sdk(), "fts_rows": _fts_rows, "modes": {},
+                "legs": {}, "leg_reasons": {}, "rerank_ran": 0}
+
+    # The note is the claim; the call is what must satisfy it. Read the entity_type
+    # and (where stated) the limit out of each door's own prose.
+    stated = {}
+    for door in cap.DOORS:
+        note = cap.DOOR_NOTES[door]
+        ent = re.search(r"entity_type='([a-z_]+)'", note)
+        assert ent, (
+            f"DOOR_NOTES[{door!r}] names no `entity_type='...'` for the arms to "
+            f"pass, so this pin has nothing to hold it to: {note!r}")
+        lim = re.search(r"\blimit=(\d+)", note)
+        stated[door] = (ent.group(1), int(lim.group(1)) if lim else None)
+
+    # `user_search`'s note publishes the argument the whole shipped-window caveat
+    # rests on, so it must state one; `capture_prior`'s does not claim a `limit`.
+    assert stated["user_search"][1] == cap.KMAX, (
+        f"DOOR_NOTES['user_search'] publishes `limit={stated['user_search'][1]}` but "
+        f"the arms run at KMAX={cap.KMAX}: the caveat `recall@k is a shipped-window "
+        f"figure only for k <= the doors' default` is stated against a window this "
+        f"instrument does not measure")
+
+    row = {"id": "p1", "name": "the merge-base", "cls": "core"}
+    for arm, door, _env in cap.ARMS:
+        calls: list = []
+        ctx = _record([], calls)
+        cap.measure_arm(arm, door, [row], ctx)
+        assert len(calls) == 1, (
+            f"arm {arm!r} (door {door!r}) made {len(calls)} read(s) for one query; "
+            f"this pin drives one and compares the arguments: {calls!r}")
+        call = calls[0]
+        want_entity, want_limit = stated[door]
+        assert call["query"] == row["name"], (arm, call)
+        assert call.get("entity_type") == want_entity, (
+            f"arm {arm!r} passes entity_type={call.get('entity_type')!r} while its "
+            f"door note says the arms pass {want_entity!r} — the note describes a "
+            f"call the instrument does not make")
+        if want_limit is not None:
+            assert call.get("limit") == want_limit, (
+                f"arm {arm!r} passes limit={call.get('limit')!r} while its door note "
+                f"says the arms pass limit={want_limit} — this is the survivor that "
+                f"kept `limit=15` published after the arms moved to another window")
+
+
 def test_the_artifact_names_a_reachable_head_to_run_its_commands_against(artifact):
     """`code_head` is truthful but UNREACHABLE, so the record must name a stand-in.
 
