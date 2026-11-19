@@ -1409,6 +1409,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # was re-located by its own text at this tree (one hit each), never nudged:
     # the declared FULLTEXT row, the `def _create_fulltext_index(`, and the
     # `_FULLTEXT_INDEX_LABEL_FIELDS` loop header.
+    #
+    # ⛔ The third anchor is the LOOP's own header line, not the call in its body
+    # one line below it: §1 names "the `_FULLTEXT_INDEX_LABEL_FIELDS` loop at",
+    # so the row must point at the loop. Both forms occur exactly once in the
+    # file, so neither is self-evidently correct — #13746 settled this on `main`
+    # (`:21889`), and this row must not be moved back onto the call site.
     ("tortoise/projection/__init__.py", 21004, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21004`"),
     ("tortoise/projection/__init__.py", 21447, "def _create_fulltext_index(",
