@@ -1394,11 +1394,11 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
     #: than a weak one.
     foreign = REPO / ".git" / "a-path-another-thread-read.txt"
 
-    def _another_thread_reads() -> None:
-        def _probe() -> None:
-            with contextlib.suppress(OSError):
-                foreign.read_text(encoding="utf-8")
+    def _probe() -> None:
+        with contextlib.suppress(OSError):
+            foreign.read_text(encoding="utf-8")
 
+    def _another_thread_reads() -> None:
         thread = threading.Thread(target=_probe, daemon=True)
         thread.start()
         thread.join(timeout=_INDEX_TIMEOUT_S)
@@ -1417,10 +1417,16 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
         "below would then be vacuous"
     )
     #: `everything` carries the frame NAME as well as the path, and that half is
-    #: asserted here rather than merely collected: the attribution is only right
-    #: if the foreign read is attributed to the frame that MADE it, not to
-    #: `_label_hits` by a rule that merely happens to exclude it.
-    assert {name for p, name in everything if p == foreign} == {"_probe"}, (
+    #: asserted here rather than merely collected: the name recorded for the
+    #: foreign read must be the frame that MADE it, not the recorder's own.
+    #: ⛔ IT PINS THE NAME CAPTURE, NOT THE ATTRIBUTION RULE: the name is
+    #: stored before that rule runs, so a path filter, a thread check or a
+    #: deleted rule leaves this assertion GREEN — the exclusion and drift arms
+    #: are what catch those. `_probe` is hoisted out of the thread closure so the
+    #: expected name comes from its own code object rather than a string literal,
+    #: which a rename or an inline would red with a message blaming the recorder.
+    assert ({name for p, name in everything if p == foreign}
+            == {_probe.__code__.co_name}), (
         "the recorder attributed the other thread's read to "
         f"{[name for p, name in everything if p == foreign]} instead of the frame "
         "that made it — the `everything` payload is what makes that visible, and "
@@ -1499,10 +1505,17 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "below would then be vacuous"
     )
     #: The frame NAME half of `everything` is asserted, not just collected: the
-    #: read must be attributed to `_an_ambient_read`, the frame that made it. A
-    #: rule that excluded it for any other reason (a path filter, a thread check)
-    #: would satisfy the exclusion below while mis-naming what made the read.
-    assert {name for p, name in everything if p == ambient} == {"_an_ambient_read"}, (
+    #: name recorded for this read must be the frame that made it, not
+    #: `_label_hits`'s own. ⛔ IT PINS THE NAME CAPTURE, NOT THE ATTRIBUTION RULE,
+    #: and the difference is measurable: the name is stored before the rule that
+    #: decides `scoped` runs, so replacing that rule with a path filter — or
+    #: deleting it — leaves this assertion GREEN, and the exclusion arms below are
+    #: what catch those (measured: `if caller is _LABEL_HITS_CODE and
+    #: self.is_relative_to(REPO):` reds only the drift arm; a deleted rule reds
+    #: only the two exclusion assertions). An earlier cut of this comment claimed
+    #: the name assertion covered that class, and it does not.
+    assert ({name for p, name in everything if p == ambient}
+            == {_an_ambient_read.__code__.co_name}), (
         "the recorder attributed the same-thread read to "
         f"{[name for p, name in everything if p == ambient]} instead of the frame "
         "that made it"
