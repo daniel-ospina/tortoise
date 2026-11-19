@@ -2879,8 +2879,8 @@ class TestThe12244TheCaptureAnchorCollapsesAMergedPair:
                           event_log_path=str(events / "events.jsonl"),
                           namespace=f"test_suite_{os.urandom(4).hex()}")
         try:
-            survivor = sdk.create_object("Acme Holdings")
-            carrier = sdk.create_object("The Team")
+            survivor = sdk._create_object("Acme Holdings")
+            carrier = sdk._create_object("The Team")
             apply_entity_merge(sdk, carrier["id"], survivor["id"],
                                method="exact", similarity=1.0)
             sdk._extract_session_v2(
@@ -2943,8 +2943,8 @@ class TestThe12244TheCaptureAnchorCollapsesAMergedPair:
                           event_log_path=str(events / "events.jsonl"),
                           namespace=f"test_suite_{os.urandom(4).hex()}")
         try:
-            survivor = sdk.create_object("Acme Holdings")
-            carrier = sdk.create_object("The Team")
+            survivor = sdk._create_object("Acme Holdings")
+            carrier = sdk._create_object("The Team")
             apply_entity_merge(sdk, carrier["id"], survivor["id"],
                                method="exact", similarity=1.0)
             g = sdk._get_proj().g

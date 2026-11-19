@@ -448,7 +448,7 @@ class _TracedSdk:
 
     def tortoise_fts_query(self, *args, **kwargs):
         kwargs.setdefault("leg_trace", self._sink)
-        return self._sdk.tortoise_fts_query(*args, **kwargs)
+        return self._sdk._tortoise_fts_query(*args, **kwargs)
 
 
 def _query_rows(door: str, ctx: dict, query: str, limit: int) -> tuple[list[dict], dict]:
@@ -1030,7 +1030,7 @@ def run(args: argparse.Namespace) -> int:
         # (`tests/test_rerank_pool.py`'s census refuses an undisclosed re-pick at every
         # site; the ARMS below run the lever ON on purpose and are on its
         # intentional-keep list, with the reason recorded there).
-        sdk.tortoise_fts_query("warm", entity_type="object", limit=1,
+        sdk._tortoise_fts_query("warm", entity_type="object", limit=1,
                               _rerank_candidates=False)
         indexed, waited = wait_indexed(proj, len(rows))
         timings["index_wait_s"] = round(time.time() - t_mark, 1)

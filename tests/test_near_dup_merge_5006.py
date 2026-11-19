@@ -1356,8 +1356,8 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         """The measured pair: `"The Team"` merged INTO `"Acme Holdings"`."""
         from tortoise.entity_resolver import apply_entity_merge
 
-        survivor = sdk.create_object("Acme Holdings")
-        carrier = sdk.create_object("The Team")
+        survivor = sdk._create_object("Acme Holdings")
+        carrier = sdk._create_object("The Team")
         apply_entity_merge(sdk, carrier["id"], survivor["id"],
                            method="exact", similarity=1.0)
         return survivor, carrier
@@ -1373,7 +1373,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         from tortoise.near_dup_merge import apply_merge_union
 
         survivor, carrier = self._merged_pair(sdk)
-        pt = sdk.create_point("statement", "the team meets weekly")
+        pt = sdk._create_point("statement", "the team meets weekly")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12244_a"})
 
@@ -1408,7 +1408,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
                 "canonical_name:'twin', objectKind:'other', status:'live'})")
         g.query("CREATE (o:Object {id:'obj-12244-twin-b', name:'the twin', "
                 "canonical_name:'twin', objectKind:'other', status:'live'})")
-        pt = sdk.create_point("statement", "a claim about the twin")
+        pt = sdk._create_point("statement", "a claim about the twin")
         g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_b"})
 
         res = apply_merge_union(
@@ -1436,7 +1436,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         survivor, carrier = self._merged_pair(sdk)
         g = sdk._get_proj().g
         g.query("CREATE (o:Object {name:'team', status:'live'})")
-        pt = sdk.create_point("statement", "the team meets weekly")
+        pt = sdk._create_point("statement", "the team meets weekly")
         g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_c"})
 
         res = apply_merge_union(
@@ -1481,7 +1481,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         sdk._get_proj().g.query(
             "MATCH (o:Object {id:$sid}) SET o.status = 'superseded'",
             params={"sid": survivor["id"]})
-        pt = sdk.create_point("statement", "the team meets weekly")
+        pt = sdk._create_point("statement", "the team meets weekly")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12244_d"})
 
@@ -1515,7 +1515,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         from tortoise.near_dup_merge import apply_merge_union
 
         survivor, carrier = self._merged_pair(sdk)
-        assert sdk.delete_entity(survivor["id"]) is not False
+        assert sdk._delete_entity__svc(survivor["id"]) is not False
         g = sdk._get_proj().g
         assert g.query("MATCH (o:Object {id:$sid}) RETURN o.id",
                        params={"sid": survivor["id"]}).result_set == []
@@ -1523,7 +1523,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         assert g.query("MATCH (o:Object {id:$cid}) RETURN o.resolved_from",
                        params={"cid": carrier["id"]}).result_set == [
             [survivor["id"]]]
-        pt = sdk.create_point("statement", "the team meets weekly")
+        pt = sdk._create_point("statement", "the team meets weekly")
         g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_e"})
 
         res = apply_merge_union(
