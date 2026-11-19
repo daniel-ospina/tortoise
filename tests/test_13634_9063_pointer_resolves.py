@@ -268,6 +268,26 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
         "#9063 is the open tracker for declared priors",
         "#9063 remains the open tracker",
         "#9063 is still the open tracker for declared priors",
+        # One row per ALTERNATIVE of every form, so an alternative cannot be deleted without reddening
+        # a row (a 60-mutation sweep found 13 unpinned alternatives: #13675 review, round 6).
+        "declared priors are open (#9063)",
+        "remains an open issue (#9063).",
+        "remains an open tracker (#9063).",
+        "remains open; #9063",
+        "remains open at #9063",
+        "#9063 now is open on declared priors.",
+        "#9063 still is open on declared priors.",
+        "the open issue is #9063",
+        "the open question remains #9063",
+        "the open tracker in #9063",
+        "#9063 is now the open tracker for declared priors.",
+        "#9063 stays the open tracker for declared priors.",
+        "an unsettled belief-model question in #9063",
+        # Pins the trailing `\b` of the marker class: `readable` is not a record marker, so this is the
+        # claim, not a record (without the `\b` it would be stripped and GREEN).
+        'The entry is no longer readable: "remains open (#9063)".',
+        # Pins the 14-char window: the gap here is 39 chars, so widening `{0,14}` to `{0,40}` launders it.
+        'The entry read the surrounding paragraph and it says "remains open (#9063)".',
         "the open tracker is #9063",
         "the open question is #9063",
         'The refusal says nothing about it: "whether declared priors exist remains open (#9063)".',

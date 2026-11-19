@@ -206,7 +206,7 @@ they are kept as the recorded reason the change was made, not as outstanding wor
   endings spelled on the achievement axis** — `GOAL_ENDING_STATES = {abandoned, superseded}`
   (**⟨code⟩** `sdk.py:393`; `abandoned` *is* `deprecated` for a goal) — and the write boundary
   **refuses** a goal that ends on one axis while leaving the other running, in either direction
-  (**⟨code⟩** `_refuse_inconsistent_goal_ending`, `sdk.py:6384`).
+  (**⟨code⟩** `_refuse_inconsistent_goal_ending`, cited by SYMBOL).
 - As written ("separate", "orthogonal"), the doc reads as *either axis can express an ending*. It
   cannot: `status` ends the record, `goalState` never does (**⟨code⟩** `live.py:159` reads
   status/outdated/isClosed/slot and nothing else).
@@ -341,7 +341,7 @@ F1, a closed node keeps both its full-strength posterior and its vote.
 `goalState ∈ {superseded, abandoned}`; **⟨code⟩** `live.py:159` never reads `goalState`;
 **⟨measured⟩** EP still counts a `goalState='abandoned'`, `status='live'` goal. So the same record is
 *ended* to its derived caches and *live* to belief. The write boundary now refuses to create that shape
-(`sdk.py:6384`), but stored rows predate it and the reader rule is what must be coherent.
+(`sdk.py::_refuse_inconsistent_goal_ending`), but stored rows predate it and the reader rule is what must be coherent.
 
 ---
 
@@ -360,9 +360,9 @@ F1, a closed node keeps both its full-strength posterior and its vote.
    while the Object read family excludes a four-word subset (**⟨code⟩** `commit_ops.py:88`:
    `{superseded, deprecated, archived, retracted}`). Whether a completed work item should stop being
    evidence is a model decision; I did not take it.
-4. **Declared priors for entities.** Their absence is **not an accident of the code**: no writer
-   exists, and `set_point_baseline` refuses a non-Point (the writer is `:Point`-only — a code fact,
-   not a recorded decision) (`sdk.py::TortoiseSDK.set_point_baseline`, cited by SYMBOL). ⛔ **#9063 raised this question,
+4. **Declared priors for entities.** Their absence is **a code fact, not a recorded decision**: no writer
+   exists, and `set_point_baseline` refuses a non-Point (the writer is `:Point`-only)
+   (`sdk.py::TortoiseSDK.set_point_baseline`, cited by SYMBOL). ⛔ **#9063 raised this question,
    reserved it to the owner, and closed COMPLETED on 2026-10-20 WITHOUT deciding it** — so
    `remains open (#9063)` pointed a reader at a **closed** issue for a question that is still
    undecided. That is the state today: the question is open, and **no open issue tracks it** (#9063's
