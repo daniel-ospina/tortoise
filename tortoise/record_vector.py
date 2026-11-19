@@ -570,8 +570,47 @@ class Coverage:
     graph can serve, so retiring the graph's copy loses no row that the record has
     not got.
 
+    ⚠️ A FOURTH residual is the ``trivial`` verdict's own, and it is the SAME one-way
+    contract rather than a new one: a trivially-verified label is cached exactly like
+    any other VERIFIED verdict — stickily, for the life of the process
+    (``_cached_coverage``) — so a label that was empty when it was measured inherits
+    the gain-case residual above (a graph that later gains vector-bearing nodes is
+    not re-measured until a restart). It is stated here because the marker is what
+    makes that state visible: an operator who sees ``trivial`` on a label they are
+    about to populate should not read the verdict as a backfill certificate.
+
     ⚠️ ``reason`` is the one-line account for the trace/log, never a substitute
     for the counts.
+
+    ⛔ ``trivial`` IS THE NON-VACUITY MARKER, and it exists because
+    ``record_vectors >= graph_vectors`` has a degenerate TRUE (#13798): ``0 >= 0``
+    holds for a label that holds nothing in EITHER store, so an unseeded deployment
+    reported the SAME ``verified`` as a fully backfilled one — and *"the record
+    caught up"* became a finding the count never established
+    (`tools/claim_dense_leg_13732.py` hit it first: an unseeded population PASSES
+    the gate and is then served as ``mechanism=pgvector, reason=ok``). So the
+    two-zero case is reported **``verified=True, trivial=True``** — the RELATION
+    holds, the EVIDENCE does not — while every other satisfied count is
+    ``verified=True, trivial=False``. A gate that compares two things needs a
+    non-vacuity witness; this field is that witness, defaulted and additive so no
+    consumer's verdict moves.
+
+    ⛔ ADDITIVE ON PURPOSE, and the reason is not politeness: the two-zero state is
+    a REAL state this gate must keep serving. With nothing in either store the two
+    stores answer identically, so refusing it would change deployment behaviour for
+    a harmless state (`#13798`), and the consumer that must refuse — a MEASUREMENT —
+    already does, on its own terms. What changes here is that the state is
+    TELLABLE: a consumer that may not read a vacuous pass as evidence asks
+    ``verdict.verified and not verdict.trivial``.
+
+    The invariant is **``trivial`` ⇒ ``verified``** — three reachable states, not
+    four: SUBSTANTIVE (verified, not trivial), TRIVIAL (verified, trivial) and
+    UNVERIFIED (not verified, never trivial, because one side being unmeasurable is
+    ``None`` and never ``0``). It is enforced at this module's ONE construction site
+    (:func:`coverage`) and the dataclass does not police a hand-built verdict — a
+    direct ``Coverage(verified=False, trivial=True)`` is nonsense this type does not
+    raise on, and no in-tree site builds one. The unmeasurable arms are pinned NOT
+    to be swallowed by the marker.
     """
 
     label: str
@@ -579,6 +618,9 @@ class Coverage:
     record_vectors: int | None
     graph_vectors: int | None
     reason: str
+    #: Did ``verified`` come from a comparison with nothing on either side?
+    #: ``0 >= 0`` is arithmetically true and evidentially empty (#13798).
+    trivial: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -587,6 +629,7 @@ class Coverage:
             "record_vectors": self.record_vectors,
             "graph_vectors": self.graph_vectors,
             "reason": self.reason,
+            "trivial": self.trivial,
         }
 
 
@@ -758,6 +801,14 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
     *"are the two sets equal"* (`#11395`'s step 2 is a coverage claim; the two
     stores' vectors are the same function of the same datum, pinned by
     `tests/test_13220_record_label_embeddings.py`).
+
+    ⛔ A SATISFIED COUNT FROM TWO ZEROES IS MARKED ``trivial`` (#13798), because
+    ``0 >= 0`` is a vacuous pass: an unseeded population satisfies this gate just as
+    a backfilled one does, and before the marker both read as ``verified=True``. The
+    verdict still comes back VERIFIED — refusing would change deployment behaviour
+    for a state where the two stores answer identically — but the reason and
+    :attr:`Coverage.trivial` now say the evidence was two zeroes, so *"the record
+    caught up"* is not a reading this count can be given by mistake.
     """
     cached = _cached_coverage(label, scope, record_dsn)
     if cached is not None:
@@ -781,11 +832,24 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
                                reason="the record's vector count could not be measured")
         else:
             verified = record_vectors >= graph_vectors
+            # ⛔ 0 >= 0 IS TRUE, AND IT IS NOT EVIDENCE (#13798). The comparison is
+            # kept — with nothing in either store the two stores answer
+            # identically, so there is nothing here to refuse — and the vacuity is
+            # MARKED instead, so "verified because both sides are zero" cannot be
+            # read as "the record caught up". Both sides zero is the only way to
+            # reach it: a zero record against a non-zero graph is a genuine
+            # shortfall, and an unmeasurable side is ``None`` above, never ``0``.
+            trivial = verified and record_vectors == 0 and graph_vectors == 0
+            reason = (f"the record holds {record_vectors} vector(s) for "
+                      f"{label}, the graph serves {graph_vectors}")
+            if trivial:
+                reason += (
+                    " — BOTH SIDES ARE EMPTY, so this verification is TRIVIAL: the "
+                    "count compared two zeroes and did not show the record holds "
+                    "anything")
             verdict = Coverage(
                 label=label, verified=verified, record_vectors=record_vectors,
-                graph_vectors=graph_vectors,
-                reason=(f"the record holds {record_vectors} vector(s) for "
-                        f"{label}, the graph serves {graph_vectors}"))
+                graph_vectors=graph_vectors, reason=reason, trivial=trivial)
     key = _coverage_key(label, scope, record_dsn)
     if key is not None:
         # ⛔ A VERIFIED VERDICT IS STICKY, AND THAT IS A STATED RESIDUAL, not an
@@ -2196,6 +2260,21 @@ def searcher(
                 raise RecordVectorDeclined(
                     f"the record's `{entity_type}` vector coverage is not proven "
                     f"({verdict.reason}) — the graph branch answers")
+            if verdict.trivial:
+                # ⛔ THE VACUOUS PASS IS REPORTED ON THE PATH THAT SERVES IT (#13798).
+                # The branch above logs its `reason` only when it DECLINES, which a
+                # verified verdict never reaches — so a label holding nothing in
+                # either store served an EMPTY cohort as `mechanism=pgvector,
+                # reason=ok`, indistinguishable in the trace from a backfilled label
+                # answering the same read. This line is the difference, and it
+                # DECIDES NOTHING: the read proceeds exactly as before, because with
+                # both sides empty the two stores answer identically (which is why
+                # the two-zero case is marked rather than refused).
+                logging.getLogger(LOG_NAME).debug(
+                    "record dense leg: `%s` coverage is verified TRIVIALLY (%s) — "
+                    "the record holds no vector for this label and neither did the "
+                    "graph, so this read is empty because the POPULATION is empty",
+                    entity_type, verdict.reason)
             # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
             # whose fold actually stops writing has a graph worth refusing.
             contracted = entity_type in MIRROR_RETIRED_LABELS
