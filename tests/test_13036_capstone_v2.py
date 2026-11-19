@@ -296,11 +296,13 @@ def seeded(tmp_path, monkeypatch):
     why the seeder opens that namespace on the same db file the request-scoped SDK
     will open. Embedded (no Docker) mirrors the ``test_mcp_http.py`` fixture.
     """
-    from tortoise.mcp_server import create_http_app
+    from contextlib import asynccontextmanager
+
     from starlette.applications import Starlette
     from starlette.routing import Mount
     from starlette.testclient import TestClient
-    from contextlib import asynccontextmanager
+
+    from tortoise.mcp_server import create_http_app
 
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     db = str(tmp_path / "capstone.db")
@@ -603,14 +605,14 @@ class TestListKnowledgeKinds:
     def test_batch_kind_answers_a_collection(self, seeded):
         """No batch was seeded, so the CORRECT payload is an empty collection —
         asserted as a collection, so a `None`/error regression still fails."""
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_list_knowledge", {"kind": "batch"})
         assert status == 200
         rows = out.get("results") if isinstance(out, dict) else out
         assert isinstance(rows, (list, tuple)), out
 
     def test_namespace_kind_answers_the_pack_namespaces(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_list_knowledge",
                                 {"kind": "namespace"})
         assert status == 200
@@ -632,7 +634,7 @@ class TestListKnowledgeKinds:
 
     def test_diary_kind_reads_the_seeded_author(self, seeded):
         """`kind='diary'` is PER-AUTHOR. Seed one entry so the arm is not vacuous."""
-        door, s, sdk = seeded
+        door, _s, sdk = seeded
         sdk.create_point("diary", "Seeded diary entry for the read arm.",
                          authoredBy="capstone-author")
         status, out = door.call("tortoise_list_knowledge",
@@ -751,7 +753,7 @@ class TestWritesAreReadableBack:
     ])
     def test_entity_write_returns_an_id_the_get_lane_reads_back(
             self, seeded, type_, name):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_create_entity",
                                 {"type": type_, "name": name})
         assert status == 200
@@ -766,7 +768,7 @@ class TestWritesAreReadableBack:
         assert got.get("id") == new_id, got
 
     def test_event_write_is_readable_back(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_create_entity",
                                 {"type": "event", "name": "Capstone Event",
                                  "props": {"eventKind": "core:action"}})
@@ -778,7 +780,7 @@ class TestWritesAreReadableBack:
         assert got.get("id") == new_id, got
 
     def test_document_write_is_readable_back(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_create_entity",
                                 {"type": "document", "name": "Capstone Doc",
                                  "props": {"documentKind": "note"}})
@@ -793,8 +795,8 @@ class TestWritesAreReadableBack:
     def test_point_write_carries_the_one_belief_kind(self, seeded):
         """A point is `:Point {pointKind: statement}` — ONE belief kind, never a
         new one (#10977 / comment 6781757043)."""
-        door, s, _ = seeded
-        status, out = door.call("tortoise_create_entity",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_create_entity",
                                 {"type": "point",
                                  "name": "One belief kind, asserted."})
         node = out.get("node") or out
@@ -803,7 +805,7 @@ class TestWritesAreReadableBack:
     def test_operator_write_returns_an_id_the_get_lane_reads_back(self, seeded):
         """`create_operator` over a FRESH pair (the seeded pair already carries
         IMPL, and the mechanism set is closed — #12067)."""
-        door, s, _ = seeded
+        door, _s, _ = seeded
         a = door.call("tortoise_create_entity",
                       {"type": "point", "name": "Operator source claim."})[1]
         b = door.call("tortoise_create_entity",
@@ -864,7 +866,7 @@ class TestWritesAreReadableBack:
     def test_delete_dry_run_previews_the_seeded_node(self, seeded):
         """`dry_run` must not delete — the payload names what WOULD go, and a
         confirmation token proves the preview was computed against the node."""
-        door, s, sdk = seeded
+        door, s, _sdk = seeded
         status, out = door.call("tortoise_delete",
                                 {"id": s["claim"], "dry_run": True})
         assert status == 200
@@ -881,7 +883,7 @@ class TestWritesAreReadableBack:
         """The 6th `create_entity` arm (`type='diary'`) — the absorbed
         `tortoise_diary_write` door. Seeding a diary through the SDK would
         bypass the transport and leave the whole write arm unproven."""
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_create_entity",
                                 {"type": "diary",
                                  "name": "A diary entry written over the wire.",
@@ -895,7 +897,7 @@ class TestWritesAreReadableBack:
         assert node["id"] in _ids(rows), rows
 
     def test_register_source_returns_the_seeded_url(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         url = "https://example.test/capstone-source"
         status, out = door.call("tortoise_register_source",
                                 {"url": url, "sourceKind": "web"})
@@ -919,7 +921,7 @@ class TestWritesAreReadableBack:
         evidence statement. A write that filed nothing would pass a
         no-error-only check.
         """
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_write_question",
                                 {"options": ["Ship it", "Hold it"],
                                  "evidence": ["The suite is green."],
@@ -962,7 +964,7 @@ class TestWritesAreReadableBack:
         """`tortoise_ingest({})` returns a CONSTANT batch id and all-zero counts,
         so an empty-bundle case proves nothing. This ingests a real point and
         asserts the receipt counted it AND that it is readable back."""
-        door, s, _ = seeded
+        door, _s, _ = seeded
         bundle = {"points": [{"content": "An ingested capstone point.",
                                "kind": "statement"}]}
         status, out = door.call("tortoise_ingest", {"bundle": bundle})
@@ -984,7 +986,7 @@ class TestWritesAreReadableBack:
         with code -32008, and an earlier draft's only assertion ("not the
         stdio-only error") passed on that refusal. This asserts the write.
         """
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_mine_knowledge_from_session",
                                 {"items": [{"content":
                                             "A mined statement from the capstone."}]})
@@ -1055,8 +1057,8 @@ class TestGraphOverviewSections:
             f"{expected.__name__}: {out!r}")
 
     def test_taxonomy_section_counts_every_seeded_kind(self, seeded):
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "taxonomy"})
         assert out.get("Point", 0) >= 3, out
         assert out.get("Object", 0) >= 1, out
@@ -1065,8 +1067,8 @@ class TestGraphOverviewSections:
         assert out.get("Event", 0) >= 1, out
 
     def test_stale_section_answers_its_envelope(self, seeded):
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "stale"})
         assert set(out) >= {"stale", "count", "cutoff", "limit"}, out
         assert isinstance(out["stale"], list), out
@@ -1074,10 +1076,10 @@ class TestGraphOverviewSections:
 
     def test_graphs_and_namespaces_name_the_served_tenant(self, seeded):
         door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
-                                {"section": "graphs"})
+        _status, out = door.call("tortoise_graph_overview",
+                                 {"section": "graphs"})
         assert f"org_{s['org']}" in {str(g) for g in out}, out
-        status, ns = door.call("tortoise_graph_overview",
+        _status, ns = door.call("tortoise_graph_overview",
                               {"section": "namespaces"})
         assert all(isinstance(r, dict) for r in ns), ns
         assert all("namespace" in r for r in ns), ns
@@ -1085,23 +1087,23 @@ class TestGraphOverviewSections:
     def test_tags_section_answers_an_empty_list_when_none_are_seeded(self, seeded):
         """No tag is seeded, so `[]` is correct — asserted as the list value so
         a crash or an envelope still fails."""
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "tags"})
         assert out == [], out
 
     def test_structure_section_counts_the_seeded_operator(self, seeded):
         """The seeded IMPL operator must be visible here — that is the arm's
         whole question."""
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "structure"})
         assert out.get("operators") == 1, out
         assert out.get("total", 0) >= 3, out
 
     def test_pointkinds_section_counts_the_seeded_statements(self, seeded):
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "pointkinds"})
         assert isinstance(out, list) and out, out
         by_kind = {row["kind"]: row["count"] for row in out
@@ -1109,8 +1111,8 @@ class TestGraphOverviewSections:
         assert by_kind.get("statement", 0) >= 2, out
 
     def test_status_section_names_the_served_graph(self, seeded):
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "status"})
         assert out.get("connected") is True, out
         assert isinstance(out.get("counts"), dict), out
@@ -1119,7 +1121,7 @@ class TestGraphOverviewSections:
 
     def test_topics_section_echoes_the_seeded_entity(self, seeded):
         door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "topics",
                                  "entity_id": s["claim"]})
         assert out.get("id") == s["claim"], out
@@ -1128,8 +1130,8 @@ class TestGraphOverviewSections:
     def test_validate_domain_accepts_a_real_domain(self, seeded):
         """`validate_domain` takes a DOMAIN NAME from the pack set; `core` is
         not one and is refused by name. Proving the arm needs a real domain."""
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "validate_domain",
                                  "domain": "dev"})
         assert out.get("domain") == "dev", out
@@ -1137,16 +1139,16 @@ class TestGraphOverviewSections:
         assert isinstance(out.get("violations"), list), out
 
     def test_unknown_domain_is_refused_naming_the_valid_set(self, seeded):
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "validate_domain",
                                  "domain": "core"})
         assert isinstance(out, dict) and "error" in out, out
         assert "known:" in out["error"], out
 
     def test_audit_section_walks_the_seeded_nodes(self, seeded):
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "audit"})
         assert out.get("node_count", 0) >= 3, out
         assert out.get("edge_count", 0) >= 2, out
@@ -1155,7 +1157,7 @@ class TestGraphOverviewSections:
     def test_combined_summary_counts_the_seeded_nodes(self, seeded):
         """No `section=` → the combined summary. It must COUNT the seed: a
         Point count of zero over a seeded graph is the wrong-payload failure."""
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_graph_overview", {})
         assert status == 200
         assert isinstance(out, dict), out
@@ -1169,8 +1171,8 @@ class TestGraphOverviewSections:
             assert key in out, f"combined summary dropped {key!r}: {out}"
 
     def test_health_section_reports_ok_against_the_seeded_graph(self, seeded):
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "health"})
         assert out.get("status") == "ok", out
         assert out.get("falkordb") == "connected", out
@@ -1178,7 +1180,7 @@ class TestGraphOverviewSections:
 
     def test_sources_section_contains_the_seeded_source(self, seeded):
         door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "sources"})
         assert isinstance(out, list), out
         assert s["source"] in {
@@ -1187,8 +1189,8 @@ class TestGraphOverviewSections:
     def test_dream_health_section_is_http_excluded(self, seeded):
         """The one `section=` value that is NOT servable on this lane. Recorded
         as an explicit refusal assertion, never silently skipped."""
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
+        door, _s, _ = seeded
+        _status, out = door.call("tortoise_graph_overview",
                                 {"section": "dream_health"})
         assert isinstance(out, dict) and "error" in out, out
         assert "HTTP" in str(out["error"]), out
@@ -1298,8 +1300,8 @@ class TestConfidenceArms:
         assert status == 200
         assert isinstance(out, dict), out
         assert "error" not in out, out
-        assert "no_dirty_state_http" != out.get("diagnostic"), out
-        assert "no_factors" != out.get("diagnostic"), out
+        assert out.get("diagnostic") != "no_dirty_state_http", out
+        assert out.get("diagnostic") != "no_factors", out
         confidences = out.get("confidences")
         assert isinstance(confidences, dict) and confidences, out
         assert s["claim"] in confidences, out
@@ -1380,7 +1382,7 @@ class TestRelationshipsAndRemainingReads:
         assert got.get("id") == mit["id"], got
 
     def test_review_link_candidates_answers_both_directions(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_review_link_candidates", {})
         assert status == 200
         assert isinstance(out, dict), out
@@ -1395,7 +1397,7 @@ class TestRelationshipsAndRemainingReads:
         assert s["claim"] in json.dumps(events), out
 
     def test_diary_read_returns_the_seeded_entry(self, seeded):
-        door, s, sdk = seeded
+        door, _s, sdk = seeded
         sdk.create_point("diary", "Diary read arm entry.", authoredBy="reader")
         status, out = door.call("tortoise_diary_read",
                                 {"agent_name": "reader"})
@@ -1414,7 +1416,7 @@ class TestRelationshipsAndRemainingReads:
         assert f"org_{s['org']}" in {str(g) for g in out}, out
 
     def test_list_namespaces_returns_the_pack_namespaces(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_list_namespaces", {})
         assert status == 200
         assert isinstance(out, list) and out, out
@@ -1422,7 +1424,7 @@ class TestRelationshipsAndRemainingReads:
         assert all("namespace" in r for r in out), out
 
     def test_list_batches_answers_a_collection(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_list_batches", {})
         assert status == 200
         rows = out.get("results") if isinstance(out, dict) else out
@@ -1430,7 +1432,7 @@ class TestRelationshipsAndRemainingReads:
         assert rows == [], out
 
     def test_check_connection_reports_the_seeded_graph(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_check_connection", {})
         assert status == 200
         assert out.get("connected") is True, out
@@ -1439,7 +1441,7 @@ class TestRelationshipsAndRemainingReads:
     def test_check_structure_answers_a_report(self, seeded):
         """No epistemic gates are seeded, so the correct report is EMPTY —
         asserted as the list the door returns, so a crash/None fails."""
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_check_structure", {})
         assert status == 200
         assert isinstance(out, list), out
@@ -1448,17 +1450,17 @@ class TestRelationshipsAndRemainingReads:
     def test_graph_set_recording_round_trips_BOTH_ways(self, seeded):
         """A one-way check passes on a hardcoded `{"recording": True}` payload;
         flipping it is what makes this a round trip."""
-        door, s, _ = seeded
-        status, on = door.call("tortoise_graph_set_recording",
-                               {"recording": True})
+        door, _s, _ = seeded
+        _status, on = door.call("tortoise_graph_set_recording",
+                                {"recording": True})
         assert on.get("recording") is True, on
-        status, off = door.call("tortoise_graph_set_recording",
+        _status, off = door.call("tortoise_graph_set_recording",
                                 {"recording": False})
         assert off.get("recording") is False, off
         assert off.get("graph_id") == on.get("graph_id"), (on, off)
 
     def test_manage_sources_lists_the_configured_sources(self, seeded):
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_manage_sources", {"action": "list"})
         assert status == 200
         assert isinstance(out, dict), out
@@ -1473,7 +1475,7 @@ class TestRelationshipsAndRemainingReads:
 
         MEASURED: `enable` cannot be driven on this lane — it requires a
         connected GitHub account — so it is recorded in ARM_GAPS, not faked."""
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, off = door.call("tortoise_manage_sources",
                                 {"action": "disable",
                                  "source": "github_documents"})
@@ -1491,7 +1493,7 @@ class TestRelationshipsAndRemainingReads:
         `canonical_name`, so two identical names return the SAME id and no
         ambiguity pair can be produced (measured). Recorded in ARM_GAPS rather
         than presented as a pass."""
-        door, s, _ = seeded
+        door, _s, _ = seeded
         status, out = door.call("tortoise_approve_merge",
                                 {"candidate_id": "no-such-candidate",
                                  "action": "merge"})
