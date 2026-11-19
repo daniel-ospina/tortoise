@@ -1320,14 +1320,32 @@ def run_measurement(args: argparse.Namespace) -> int:
         )
 
     graph_name = args.graph or f"claimdense_{os.getpid()}"
-    sdk = TortoiseSDK(namespace=args.namespace, graph_name=graph_name)
-    proj = sdk._get_proj()
-    # ⛔ THE WRITE IS A STORE OPERATION TOO, AND IT FAILS FIRST ON A DEAD STORE
-    # (`#13745` review round 13). Guarding the prefix READ but not the seed left
-    # the realistic case — a graph that will not answer at all — still producing
+    # ⛔ OPENING THE STORE IS A STORE OPERATION TOO, AND IT IS THE ONE A DEAD
+    # STORE FAILS ON (`#13745` review round 16). `_get_proj()` runs the OPEN-TIME
+    # HEALTH PROBE (`FalkorProjection.from_uri(..., skip_health_check=False)`), so
+    # a graph that is simply DOWN raises HERE — before the write guard below ever
+    # runs. Guarding only the write therefore left the realistic case producing
     # exit 1, a traceback and no artifact, because `main()` catches only
-    # `Refused`. The read guard covers a store that accepts writes and refuses
-    # reads; this one covers a store that is simply down.
+    # `Refused`; the round-13 comment claimed that case was covered, and it was
+    # not. This guard is the one that covers "the store is down".
+    try:
+        sdk = TortoiseSDK(namespace=args.namespace, graph_name=graph_name)
+        proj = sdk._get_proj()
+    except Refused:
+        raise
+    except Exception as exc:
+        raise Refused(
+            "graph_unopenable",
+            f"the graph could not be OPENED ({exc.__class__.__name__}: {exc}) — a "
+            f"store that will not answer the open-time health probe cannot be "
+            f"measured against, so this run publishes no artifact rather than a "
+            f"result about a graph it never reached",
+        ) from exc
+    # ⛔ AND THE WRITE IS A STORE OPERATION TOO (`#13745` review round 13). This
+    # one covers the NARROWER case the open probe cannot: a store that accepts
+    # the open and then refuses the write. `except Refused: raise` is what keeps a
+    # `Refused` raised INSIDE the seed (the embedder answered no vector) from
+    # being re-labelled as a store fault — see `#13745` review round 15.
     try:
         written = _seed_graph(proj, population)
     except Refused:

@@ -1402,6 +1402,13 @@ class _FakeGraph:
     # (`#13745` review round 14, finding 1: repointing the down-graph test at the
     # WRITE left that guard asserted nowhere, so deleting it stayed green).
     prefix_unreadable: ClassVar[bool] = False
+    # ⛔ AND AN UNOPENABLE GRAPH IS ITS OWN CASE (`#13745` review round 16). A
+    # store that is DOWN fails the OPEN-TIME health probe inside `_get_proj()`,
+    # before `_seed_graph` is ever called — so the write guard cannot see it and
+    # the run still reached `main()` as a traceback. `unreadable`/`down`/
+    # `prefix_unreadable` all require a store that answered the open, so without
+    # a knob of its own the guard that actually covers "the store is down" is
+    # asserted nowhere. The knob lives on `_FakeSDK`, which owns `_get_proj`.
 
     def __init__(self, rows: int):
         self._rows = rows
@@ -1435,11 +1442,21 @@ class _FakeSDK:
     # population is always 3 rows here; a test that sets this to anything else
     # makes the two artifact fields DISAGREE.
     prefix_rows: ClassVar[int] = 3
+    # a graph that fails the OPEN-TIME health probe — declared HERE, on the class
+    # that reads it, so a test that builds `_FakeSDK` directly still gets a default
+    unopenable: ClassVar[bool] = False
 
     def __init__(self, **_kw):
         self._proj = _FakeProj(self.prefix_rows)
 
     def _get_proj(self):
+        if self.unopenable:
+            # the real shape: `FalkorProjection.from_uri` runs the open-time
+            # health probe and raises a plain RuntimeError when it cannot answer
+            raise RuntimeError(
+                "DB health check failed on open (server/production mode). "
+                "Run with an embedded store or fix the connection."
+            )
         return self._proj
 
 
@@ -1480,6 +1497,7 @@ class TestTheDocumentedRunPath:
         graph_down: bool = False,
         prefix_unreadable: bool = False,
         seed_refused: str | None = None,
+        graph_unopenable: bool = False,
     ):
         self.coverage_kwargs = {}
         corpus = tmp_path / "corpus"
@@ -1536,6 +1554,7 @@ class TestTheDocumentedRunPath:
         _FakeGraph.unreadable = graph_unreadable
         _FakeGraph.down = graph_down
         _FakeGraph.prefix_unreadable = prefix_unreadable
+        _FakeSDK.unopenable = graph_unopenable
 
         def _seed(_proj, pop):
             if seed_refused is not None:
@@ -1833,13 +1852,15 @@ class TestTheDocumentedRunPath:
             )
 
     def test_a_DOWN_graph_is_a_named_refusal_not_a_traceback(self, tool_mod, monkeypatch, tmp_path):
-        """⛔ THE PREFIX COUNT IS A READ TOO (`#13745` review round 12).
+        """⛔ THE SEED WRITE IS A STORE OPERATION TOO (`#13745` review round 13).
 
-        The id-scoped read was made unmeasurable-but-handled; the PREFIX-wide
-        coverage count three lines above it was not, and `main()` catches only
-        `Refused` — so a store that answered neither shape gave the operator exit
-        1, a traceback and NO artifact, bypassing every named refusal this file
-        promises. A dead graph is the realistic "unreadable" case.
+        The prefix READ was made a named refusal in round 12; the seed WRITE that
+        runs before it was not, and `main()` catches only `Refused` — so a store
+        that accepts the open and then refuses the write gave the operator exit 1,
+        a traceback and NO artifact. (The round-12 PREFIX-scan pin lives in
+        `test_a_failing_PREFIX_SCAN_is_a_named_refusal_not_a_traceback`; this test
+        used to carry that name, which sent a reader looking for `graph_unreadable`
+        to a test that never exercises it.)
         """
         with pytest.raises(tool_mod.Refused) as ei:
             self._drive(
@@ -1853,6 +1874,36 @@ class TestTheDocumentedRunPath:
             )
         assert ei.value.code == "graph_unwritable"
         assert not (tmp_path / "down.json").exists(), "a refused run publishes nothing"
+
+    def test_a_graph_that_cannot_be_OPENED_is_a_named_refusal(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ THE OPEN IS WHAT A DEAD STORE ACTUALLY FAILS ON (`#13745` round 16).
+
+        `_get_proj()` runs the OPEN-TIME health probe
+        (`FalkorProjection.from_uri(..., skip_health_check=False)`), so a graph
+        that is simply down raises there — BEFORE `_seed_graph`, and therefore
+        outside the round-13 write guard, whose comment claimed to cover exactly
+        this case while the probe eight lines above it stayed unguarded. `main()`
+        catches only `Refused`, so the realistic dead-store run still produced
+        exit 1, a traceback and no artifact. Measured: without the open guard this
+        test fails with the raw `RuntimeError`, not a `Refused`.
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            self._drive(
+                tool_mod,
+                monkeypatch,
+                tmp_path,
+                out=str(tmp_path / "unopenable.json"),
+                preregistered_n=M2_N,
+                record_ok=True,
+                graph_unopenable=True,
+            )
+        assert ei.value.code == "graph_unopenable", ei.value.code
+        # ⛔ 2, not 3: 3 means "published, but not the complete paired answer" and
+        # this path publishes NOTHING (the arm codes are pinned elsewhere).
+        assert ei.value.exit_code == 2, ei.value.exit_code
+        assert not (tmp_path / "unopenable.json").exists(), "a refused run publishes nothing"
 
     def test_a_ZERO_denominator_does_not_publish_a_verified_gate(
         self, tool_mod, monkeypatch, tmp_path
