@@ -1605,12 +1605,25 @@ def _mutator_stores_the_vector(call) -> bool:
     import ast
 
     name = _callee_name(call)
-    if name in ("update", "dict", "__ior__", "ior"):
+    if name in ("update", "dict", "__ior__", "ior", "or_"):
         # `props.update(embedding=…)` / `props.update(**{…})` / `props |= dict(embedding=…)`
         # / `props.__ior__([("embedding", vec)])` / `operator.ior(props, {…})` — one mapping,
         # three spellings. `ior` is the FUNCTOR form of `|=`; `setitem` was recognised one
         # round earlier and `ior` was left behind, which is the same one-verb-over gap.
+        # ⛔ AND `operator.or_` IS THE NON-IN-PLACE FUNCTIONAL `|`, which the review of this
+        # commit measured CERTIFIED GATED (`props = operator.or_(props, {"embedding": vec})`)
+        # — the same store as `props | {…}`, through the one spelling the include list did not
+        # name. Both are here now because the list is the vocabulary: a spelling absent from it
+        # is a false PASS, not a missing nicety.
         return _mapping_stores_the_vector(call)
+    if name in ("pop", "popitem"):
+        # ⛔ A REMOVAL IS NOT A STORE, and the caller-vocabulary rule below would otherwise
+        # refuse the dict writer's own write-stop: `props.pop("embedding", _MISSING)` is
+        # `(receiver, PROPERTY, non-constant)` to the third-argument test, which was written
+        # for `_set(props, "embedding", vec)`. Measured in the review of this commit: the
+        # parent certified that stop arm and this branch refused it. `_removes_embedding` is
+        # the arm that certifies a removal; nothing a `pop` can carry places a vector.
+        return False
     if name not in ("__setitem__", "setdefault"):
         # ⛔ ANY OTHER CALLEE — INCLUDING `setattr` AND `operator.setitem`: the helper-argument
         # spelling (`_set(props, "embedding", vec)`, `setattr(props, "embedding", vec)`,
@@ -1620,6 +1633,12 @@ def _mutator_stores_the_vector(call) -> bool:
         # (measured: removing it changes no verdict), so it is gone rather than left in place
         # looking load-bearing. A `_read(props, "embedding", default)` is refused too — that
         # costs a refactor, and refusing costs nothing that this gate exists to protect.
+        # ⛔ THE SAME OVER-REFUSAL REACHES A NON-REMOVAL HELPER: `_note("embedding", reason)`
+        # (a report with the property and a live value) is refused as if it were a store. It is
+        # disclosed rather than special-cased because there is no callee list to narrow it
+        # with — an include list is what this rule already is; naming a LOGGER would be a
+        # second one, and a name this gate has never seen must answer fail-closed. `pop` IS
+        # separated above, because removing the property is the write-stop itself.
         #
         # ⛔ AND IT CARRIES THE MAPPING-OPERAND TEST TOO, for one reason: a `*`-starred
         # MAPPING operand (`_set(props, *[{"embedding": vec}])`) is the same store as the

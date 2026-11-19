@@ -3836,6 +3836,23 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …and `operator.or_`, the NON-IN-PLACE functional `|`: the same store as
+        # `props = props | {"embedding": vec}`, through the one synonym the include list did
+        # not name — measured CERTIFIED GATED by the first review of this commit.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = operator.or_(props, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = operator.or_(props, dict(embedding=_encode(ev)))
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4429,6 +4446,25 @@ def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         _read(props, "embedding", None)
         props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        # ⛔ AND A REMOVAL WITH A SENTINEL DEFAULT IS STILL THE WRITE-STOP, not a store: the
+        # third-argument rule (written for `_set(props, "embedding", vec)`) reads
+        # `pop("embedding", _MISSING)` as `(receiver, PROPERTY, non-constant)` and refused it —
+        # measured by the first review of this commit, which found the parent CERTIFIED it.
+        # `pop` is separated in `_mutator_stores_the_vector` for exactly this shape.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.pop("embedding", _MISSING)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        dict.pop(props, "embedding", _MISSING)
         return None
     _write(props)
 """,
