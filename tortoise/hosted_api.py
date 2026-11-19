@@ -8552,6 +8552,24 @@ async def health():
     a saturated capture gate refuses `POST /v1/sessions` while every other route
     — including this one — is healthy, and restarting the process would neither
     drain the extractions holding the slots nor clear a burst of arrivals.
+
+    Embedder check (#13674): ``embedder`` publishes ``EmbeddingModel.status()`` —
+    ``available``, ``state`` (``ready``/``cooldown``/``unavailable``),
+    ``failure_kind``, the intra-op ``threads`` pin, the load bound
+    ``load_timeout_s`` and, for the attempt in flight, ``load_in_progress`` plus
+    ``load_in_progress_s`` — plus ``model``, ``last_error``,
+    ``cooldown_remaining_s`` and ``load_elapsed_s``. The authoritative full set is
+    ``_EMBEDDER_HEALTH_KEYS``, which the DEGRADED arm publishes exactly. It exists
+    because the dense leg being OFF —
+    keyword-only reads for every query, with every published surface saying
+    ``ok`` — was invisible except in a ``fly logs`` line nobody watched. It does
+    NOT fold into ``status``: a loading or cooling-down embedder means
+    keyword-only reads, which #2952 requires each read to DECLARE; folding it in
+    would pin a deployment degraded forever after one failed load (#10185) and
+    put a restart loop's worth of 503s on the deploy gate. ⛔ Its DEGRADED arm
+    (``_embedder_health``'s never-raise branch) returns the SAME key set with
+    every value ``null`` plus ``error`` — ``available: null`` therefore means
+    "this block could not be read", NOT "the model is unavailable".
     """
     try:
         db = _HEALTH_PROBE.snapshot()

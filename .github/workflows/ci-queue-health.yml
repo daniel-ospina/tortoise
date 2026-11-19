@@ -457,5 +457,5 @@ jobs:
               echo "::warning::${state} — the PR wait was not witnessed (a feed was cut at the page cap — the queued or the in-progress one, which share one flag — or the pending/requested leg was cut at its page cap, or a WAITING PR-event run — queued, pending or requested — has no measurable current-attempt age), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
             fi
           fi
-          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED, PR-BACKLOGGED or PR-UNWITNESSED (five exit-0 shapes, all but OK and cleared warned); 1 = FLOOD stands; 2 = could not measure)"
+          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED, PR-BACKLOGGED, PR-UNWITNESSED or PR-NEVER-DISPATCHED (six exit-0 shapes, all but OK and cleared warned); 1 = FLOOD stands; 2 = could not measure)"
           exit "$rc"

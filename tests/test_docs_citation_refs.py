@@ -553,11 +553,86 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     mutation is pinned as a witness below.
     """
     answers: list[tuple[str, bool]] = []
+    # ⛔ ONE LIMIT THIS CLASS DOES NOT COVER, STATED BECAUSE IT CANNOT BE INFERRED (#13831
+    # review): a HARD-WRAPPED answer is not detected — the window is cut at the first
+    # newline, so `prints only the\ntwo comment-only modules` and `returns\nnothing` are
+    # skipped. Pre-existing, and the live document does not wrap; it is named here so the
+    # closure claim above is read as "closed under formatting ON ONE LINE".
+    # ⛔ AND A SECOND LIMIT, measured by TWO review cycles on the SAME sentence family
+    # (#13845): a claim that names the command by PRONOUN — "the command this clause
+    # prescribes returns NOTHING AT ALL" — carries no command token, so no shape rule can
+    # reach it; and a command SHORTENED to a fragment is reachable only if the caller passes
+    # that fragment as `cmd`. Both are handled by the callers (the two literal tripwires in
+    # the claim list, and the second `_typed_answers_to_tortoise_cmd` call over
+    # `` `-- tortoise/` ``), NOT by this function — so this docstring states the boundary
+    # rather than implying the class is closed over every way a document can point at the
+    # command. The residual is a sentence that refers to the measurement without naming it
+    # at all; the live document states those as PAST TENSE with their head named, which is
+    # a convention kept by reading, not by an assertion (the label exemption that tried to
+    # enforce it mechanically was measured fail-open and false-blocking, and is deleted).
     for match in re.finditer(
             r"`?" + re.escape(cmd)
-            + r"`?[\s*]*(?:(?:still|now|actually|also)\s+)?"
+            + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
+        # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
+        # cycle 3, P1). The short form a caller may pass is a SUBSTRING of every longer
+        # `git diff … -- <pathspec>` invocation, so the tail of a sentence the writer fixed
+        # to explicit revs matched here and was graded against THIS head's measurement.
+        # That refused two TRUE, head-named sentences on an empty set — measured: `git diff
+        # --name-only origin/main...2a7f24e241 -- tortoise/` names exactly
+        # `tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` (true at any head),
+        # and `git diff --name-only e61694255a...2584a86ec1 -- tortoise/` prints FIVE paths
+        # there. Both passed only while this head happened to be non-empty, and both would
+        # have been REFUSED on a docs-only head — a false block on the guard whose job is to
+        # protect history, the one direction this file's docstring forbids.
+        # So an occurrence that is the PATHSPEC of a longer invocation is skipped: the
+        # writer named the revs, which is exactly what this document's own rule asks for,
+        # and this arm cannot fetch that head. A STANDALONE short-form claim is still graded
+        # (the witness below pins that half, so the skip cannot widen into silence), and a
+        # full `… origin/main...HEAD -- tortoise/` claim is still graded — by the caller's
+        # `cmd` pass, which is the spelling that names THIS head.
+        # RESIDUAL, stated: a standalone short-form claim about ANOTHER head is graded
+        # against this head, because nothing here reads which head a bare `-- tortoise/` is
+        # about. Such a claim has to carry its head in the full command form, which this rule
+        # then skips — which is why the live document spells its own history that way.
+        # The executed test is stated with the code below (a `git diff` with NO backtick and
+        # no sentence break between it and this occurrence); it was tightened twice after
+        # being measured fail-open, and each tightening's measurement is recorded there.
+        # ⛔ AND THE INVOCATION MUST NOT CROSS A SENTENCE BREAK (#13845 review, cycle 5,
+        # MEASURED): the first cut of this skip was `git\s+diff\b[^`\n]*$`, which matched
+        # ANY unbackticked `git diff` earlier on the same LINE, so
+        # `Some history here. We ran git diff earlier. `-- tortoise/` prints ONE path at this
+        # head.` returned `[]` and the arm went GREEN while the same claim with the prose
+        # changed returned an answer and RED — one dropped backtick defeated it.
+        # (Requiring the text to END with the `-- ` separator does not work: the separator is
+        # the START of this match, so it is never in `_before` — measured, the rule matched
+        # nothing and the true head-named history was refused again.)
+        # What separates a pathspec of a live invocation from a claim about one is that the
+        # invocation runs on: no sentence boundary (a `.` followed by whitespace) between
+        # `git diff` and the occurrence. `origin/main...2a7f24e241` has dots, but none
+        # followed by a space, which is exactly the discrimination wanted.
+        # ⛔ AND A BACKTICK BETWEEN THEM ENDS IT (#13845 review, cycle 6, MEASURED — this
+        # is the rule the first cut had and the sentence-break test replaced; BOTH are
+        # needed, and the measurements say why). The sentence-only test still skipped a
+        # claim that merely SHARED a sentence with another invocation:
+        #
+        #   "See `git diff origin/main...HEAD -- docs/` for the docs; `-- tortoise/` prints
+        #    the two COMMENT-ONLY modules at this head."            -> [] (skipped)  WRONG
+        #   "…`-- tortoise/` prints ONE path at this head" on the LIVE document (:134,
+        #    93 chars after a `-- docs/00_index.md` command, no `. ` between)  -> GREEN WRONG
+        #
+        # In both, a backtick sits between `git diff` and the occurrence: the first command's
+        # code span CLOSED, so this occurrence starts its own span and its own claim. Ten of
+        # the document's twenty-one `-- tortoise/` occurrences are that class. The true
+        # pathspec case (`(`git diff … -- tortoise/` names exactly …)`) has NO backtick
+        # between, because both sides are inside ONE span.
+        _before = doc[max(0, match.start() - 200):match.start()]
+        _invocation = re.search(r"git\s+diff\b", _before)
+        if _invocation:
+            _gap = _before[_invocation.start():]
+            if "`" not in _gap and not re.search(r"\.\s", _gap):
+                continue
         rest = doc[match.end():match.end() + 90]
         rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
         window = f"{match.group(1)} {rest}".strip()
@@ -972,6 +1047,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     for _formatted_spelling in (
             "prints `two` paths",
             "**prints** the two COMMENT-ONLY modules",
+            "_prints_ the two comment-only modules",
+            "__prints__ the two comment-only modules",
+            "`prints` the two comment-only modules",
             "prints _two_ paths",
             "Prints two paths",
             "prints now only one path",
@@ -1040,11 +1118,50 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "rather than rendering a failed read as the measurement "
             "(#13795 review, finding 1)")
     _measured = " ".join(_tortoise_set) if _tortoise_set else "NOTHING"
+
+    # ⛔ THE HEAD-LABEL EXEMPTION IS GONE, AND THAT IS THE FIX (#13845 review, cycle 4,
+    # MEASURED BOTH WAYS). It existed so a TRUE claim that names its head would not be
+    # refused by THIS head's measurement — and it failed on both edges:
+    #
+    #   FAIL-OPEN  `[0-9a-f]{7,40}` matches a plain NUMBER and hex-shaped WORDS, so
+    #              `The repair landed 1234567 commits ago and the `tortoise/` set above is
+    #              EMPTY.` was GREEN — any nearby number exempted a refuted claim. The word
+    #              `defaced` did the same.
+    #   FALSE BLOCK  the positional rule took `re.search`'s EARLIEST match, which was the
+    #              preceding clause's `NOT at this head:`, and refused a claim the document
+    #              had genuinely labelled.
+    #
+    # Refining it a third time would be the same bet twice more. The convention that makes it
+    # unnecessary is the one the live document already follows: history is spelled so the arm
+    # cannot read it as a live answer — a PAST-TENSE verb (`returned`, `named`, `printed`),
+    # which is not in the verb list, or a restructure that puts the named head first and the
+    # command after it (46f3e9ff5b, and the pathspec skip in the short-form arm). The COST is
+    # declared rather than hidden: a head-labelled PRESENT-tense claim is still refused in
+    # BOTH directions — an emptiness claim on a non-empty head AND a membership claim on
+    # an empty one (`at `2a7f24e241`, `-- tortoise/` names exactly those two modules` is
+    # true at that head and refused here, measured). The live document carries none: its
+    # history is past tense, or a kept pathspec of a longer invocation.
     for _claim, _claim_is_empty in (
             *((_c, True) for _c in (
                 f"neither is `{_tortoise_cmd}`",
                 f"{_tortoise_cmd}` -> empty",
                 f"{_tortoise_cmd}` prints NOTHING",
+                # ⛔ AND THE PARAPHRASE THAT NAMES NO VERB (#13845 review, P2) — measured:
+                # the three command-shaped spellings above were all the arm read, and the
+                # live document stated the same refuted direction as "the `tortoise/` set
+                # above is EMPTY", which no entry matches: the shape detector needs an
+                # answer form immediately after the command, so a sentence that refers to
+                # the set by NAME rather than re-running the command is invisible to it.
+                # Mutation-pinned: restoring that spelling in a doc whose set is non-empty
+                # reds HERE and nowhere else.
+                "the `tortoise/` set above is EMPTY",
+                # …and the two the SECOND review cycle measured, both abbreviations of
+                # the same command: one names it by pronoun ("the command this clause
+                # prescribes"), the other shortens it to `` `-- tortoise/` ``. Pinned as
+                # literals because no shape rule can reach a pronoun — see the declared
+                # limit in the module docstring.
+                "returns NOTHING AT ALL (the diff carries no `tortoise/` path)",
+                "`-- tortoise/` returns NOTHING",
             )),
             *((_c, False) for _c in (
                 f"{_tortoise_cmd}` is NOT empty",
@@ -1055,14 +1172,83 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
                 "which two `tortoise/` paths this diff carries",
             )),
     ):
-        # contradiction iff the claim's direction equals the measurement's (a member claim
-        # when the set is empty, or an emptiness claim when it is not).
-        assert _claim_is_empty != bool(_tortoise_set) or _claim not in doc, (
+        # contradiction iff the claim's direction EQUALS the measurement's (a member claim
+        # when the set is empty, or an emptiness claim when it is not) — so `_consistent` is
+        # the case where they differ, written out rather than inlined, because the first cut
+        # of this guard negated the whole disjunction and let an UNLABELLED emptiness claim
+        # through (measured: the mutation below stayed green, which is a bypass, not a fix).
+        # ⛔ AND THERE IS NO HEAD-LABEL EXEMPTION (see the convention stated above): a
+        # membership/emptiness claim in the refuted direction is refused whether or not a
+        # head is named, because the exemption that was supposed to tell "history about
+        # another head" from "a live claim" was measured fail-open (a plain number, or the
+        # word `defaced`, counted as a label) AND false-blocking. The document states history
+        # so this arm cannot read it as a live answer instead — past-tense verbs, or the
+        # named head first and the command after it.
+        _consistent = _claim_is_empty != bool(_tortoise_set)
+        assert _consistent or _claim not in doc, (
             f"05-verify.md asserts {_claim!r} — an answer to `{_tortoise_cmd}` in the "
             f"direction the tree refutes at this head, where that command prints "
             f"{_measured}. A guard that pins a MEASUREMENT must not pin its SIGN either "
             "(#13489 review, P1; #13750 review, cycle 1; #13728 review, P1)")
-    for _answer, _claims_empty in _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd):
+    # ⛔ AND THE ABBREVIATED SPELLING (#13845 review, cycle 2): the document shortens the
+    # command to `` `-- tortoise/` `` in several places, so an answer typed against the
+    # SHORT form was invisible to the arm above — the same half-closure one layer down.
+    # Both spellings are read; a claim naming the command by pronoun is not, and that
+    # residual is declared in the module docstring rather than left implied.
+    # ⛔ DECLARED RESIDUAL, #13818 (recorded there with the measurement): this arm knows ONE
+    # pathspec — `-- tortoise/` and its abbreviation. The D5 row's stated authority is the
+    # PER-ROW form (`-- <that row's own path>`), and nothing reads it, so a claim of that
+    # shape passes green whatever the tree says: measured on this PR's review cycle 3, two
+    # such claims (`05-verify.md:102` naming no pathspec, `:134` naming
+    # `-- tests/test_7949_capstone_measure.py`) were false at that head and invisible here.
+    # The repair is a general arm deriving the pathspec from the claim, not N more literals.
+    # ⛔ PINNED IN BOTH DIRECTIONS (#13845 review, cycle 3, P1), because the fix that stops
+    # the arm over-blocking is exactly the kind that turns into a silent hole:
+    #   * the pathspec of a LONGER invocation is SKIPPED — this is the discrimination the
+    #     pre-fix arm lacked, and both spellings below returned a claim there (measured on
+    #     the pre-fix code: two answers, both collateral, neither about this head);
+    #   * a STANDALONE short form is still GRADED — the control, without which a skip that
+    #     widened to every occurrence would look green while grading nothing.
+    assert _typed_answers_to_tortoise_cmd(
+        "(`git diff --name-only origin/main...2a7f24e241 -- tortoise/` names exactly "
+        "`tortoise/activation_scorecard.py`)", "-- tortoise/") == [], (
+        "the short-form arm grades the pathspec of a command pinned to ANOTHER rev against "
+        "THIS head's measurement, so true, head-named history is refused on any empty head "
+        "(#13845 review, cycle 3, P1)")
+    assert _typed_answers_to_tortoise_cmd(
+        "(`git diff --name-only e61694255a...2584a86ec1 -- tortoise/` prints FIVE paths "
+        "there)", "-- tortoise/") == [], (
+        "the same skip must cover a SECOND rev range — the shape is 'the pathspec of a "
+        "longer invocation', never that one particular range (#13845 review, cycle 3, P1)")
+    assert _typed_answers_to_tortoise_cmd(
+        "and `-- tortoise/` prints NOTHING at this head", "-- tortoise/") == [
+            ("prints NOTHING at this head", True)], (
+        "the skip widened to a STANDALONE short-form claim — the control this witness exists "
+        "for: a rule that silences the live question hides every refuted claim "
+        "(#13845 review, cycle 3, P1)")
+    # ⛔ AND THE LIVE DOCUMENT'S OWN PINNED COMMANDS ARE SKIPPED — read off the document, so
+    # the witness tracks its spelling instead of quoting one sentence and rotting. This is the
+    # measurement that made the P1 a red build rather than a theory: before the boundary,
+    # `_typed_answers_to_tortoise_cmd(doc, "-- tortoise/")` returned FOUR answers on this
+    # document, two of them true history about other revs refused on any empty-`tortoise/`
+    # head (`returns ONE module`, `names exactly …`) and one its own head had already
+    # falsified (`returns ONE path, tortoise/record_vector.py`).
+    _live_invocations = re.findall(r"\(`git diff [^`]*-- tortoise/`", doc)
+    assert _live_invocations, (
+        "the live document no longer spells a `git diff … -- tortoise/` invocation, so this "
+        "witness reads nothing — restore the shape or retire the witness, do not leave it "
+        "vacuous (#13845 review, cycle 3, P1)")
+    for _invocation in _live_invocations:
+        assert _typed_answers_to_tortoise_cmd(
+            _invocation + " names exactly `tortoise/activation_scorecard.py`",
+            "-- tortoise/") == [], (
+            f"the short-form arm grades {_invocation!r} — a command pinned to something other "
+            "than this head — against THIS head's measurement, so the document's correctly "
+            "head-pinned history is refused on any head where `-- tortoise/` is empty and "
+            "passes only by luck elsewhere (#13845 review, cycle 3, P1)")
+    for _answer, _claims_empty in (
+            *_typed_answers_to_tortoise_cmd(doc, _tortoise_cmd),
+            *_typed_answers_to_tortoise_cmd(doc, "-- tortoise/")):
         assert _claims_empty != bool(_tortoise_set), (
             f"05-verify.md types {_answer!r} as the answer to `{_tortoise_cmd}`, which "
             f"prints {_measured} at this head — a typed present-tense ANSWER to a head-bound "
