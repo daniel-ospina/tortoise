@@ -6422,7 +6422,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("12141", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
-            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#12745`'s line at `sdk.py:64` and `#13466`'s +5 above the pair then took it to `12111`/`12164` and `12116`/`12169`, `#13556`'s own insert a further `+20` to `12136`/`12189`, and the head this row is now read at carries `+32` more on both — `12168`/`12221`, which is what the two rows below carry.
+            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13456`'s `from . import derived_embedding` insert at `sdk.py:45` and `#13466`'s +5 above the pair then took it to `12111`/`12164` and `12116`/`12169`, `#13556`'s own insert a further `+20` to `12136`/`12189`, and the head this row is now read at carries `+32` more on both — `12168`/`12221`, which is what the two rows below carry.
             ("12168", "subject_binding_available,"),
             ("12221", "and not subject_binding_available(graph):"),
         ), "sdk"),

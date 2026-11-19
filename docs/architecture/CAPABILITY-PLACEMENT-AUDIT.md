@@ -121,7 +121,7 @@ file — `search_engine.py` FTS
 `:3098`, walk `:4780-4784`, operator leg `:6667`, subject probe `:7025-7028` (plus its `Event` leg `:7028`, and
 `subject_binding_available()` at `:7031-7044`), label scan `:4708-4710`, HNSW
 `:4123`, label derivation `:3003`, index note `:3070`; `projection/__init__.py` `("Object", ["name"])`
-`:6869`; `sdk.py`'s second `capture_redactions` writer `:2876` (on this tree `:2891`); `audit.py`'s carrier probe `:2452`/`:2463`;
+`:6869`; `sdk.py`'s second `capture_redactions` writer `:2876` (on this tree `:2914`); `audit.py`'s carrier probe `:2452`/`:2463`;
 and `mcp_server.py`'s `entity_type` passthrough `:5529` (on this tree `:5577`) — and the drift figure
 above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the `main` set, and an earlier
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
