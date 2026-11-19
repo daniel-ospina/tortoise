@@ -6551,6 +6551,23 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE SAME RULE ON THE **VALUE** SIDE, WHERE IT IS A RESIDUAL AND MUST BE PINNED
+        # IN BOTH DIRECTIONS (`#13788`, measured at `bcb710a5`). A `Starred` in the VALUE
+        # (`*rest`) spreads an UNKNOWN number of elements, so the flattened index of everything
+        # after it depends on a binding the walk does not follow. The TAIL pairing is still
+        # right-aligned against the value's trailing elements, which is why this row — the tail
+        # target binds the property — is REFUSED and must stay refused: it is attributable to the
+        # `if tail:` pairing (dropping that arm certifies this writer).
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    rest = ["a", "key"]
+    *_r, x = *rest, key
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     key = "embedding"
@@ -7385,6 +7402,35 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE VALUE-SIDE `Starred` BOUNDARY, BOTH DIRECTIONS PINNED (`#13788`, measured at
+        # `bcb710a5`). A `Starred` in the unpack VALUE spreads an UNKNOWN number of elements, so
+        # the walk does not flatten it — and an unnamed boundary is the exact defect the reviews
+        # of `4748044f7d` kept finding. Two rows:
+        #  - an HONEST control: `x` is paired with the star itself, binds nothing, and in this
+        #    fixture `rest = ("a", "b")` leaves `x = "a"` — nothing is stored, so the writer
+        #    must CERTIFY (if this row ever refuses, the arm has started inventing positions);
+        #  - a MEASURED, DISCLOSED FALSE PASS: `x, *r = *rest, 1` with `rest = ("embedding",)`
+        #    binds `x = "embedding"` and PLACES the vector (runtime-checked), and the row still
+        #    CERTIFIES. It is pinned as a residual, exactly like the folding-key and `zip`
+        #    residuals beside it, so a future fix reds here and must argue the boundary first.
+        """
+def _upsert_object(props, ev):
+    rest = ("a", "b")
+    x, y, *r = *rest, 1
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    rest = ("embedding",)
+    x, *_r = *rest, 1
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
         # ⛔ THE `zip` RESIDUAL THAT STAYS RESIDUAL (`#13788`): a zip whose COLUMNS ARE NAMES is
         # data flow this module does not do, and the two narrowings of the literal form must
         # each keep an honest writer certified — a keys literal naming ANOTHER property, a
@@ -7777,6 +7823,26 @@ def _upsert_object(props, ev):
     # this tuple is that these rows are NOT stores: widening acceptance here needs the doctrine
     # argued first, not a quiet key-reading improvement.
     over_refused = (
+        # ⛔ THE VALUE-SIDE `Starred` IS THE THIRD PERMITTED OVER-REFUSAL, and it is the price of
+        # not following a value's binding (`#13788`, measured at `bcb710a5`). `*rest` spreads an
+        # UNKNOWN number of elements, so a HEAD target positioned after it may or may not land
+        # where the positional pairing puts it; the arm therefore FAILS CLOSED. In this fixture
+        # `rest = ["a", "b"]` binds `y = "b"`, so nothing is stored and the refusal costs an
+        # honest writer its gate — refused anyway, because the alternative is pairing a position
+        # the walk cannot resolve. Closing it needs the value's own binding model (residual #6),
+        # not a wider pairing here: dropping the head pairing would CERTIFY this writer and also
+        # silently lose the refusals the same arm exists for. Pinned here so widening it has to
+        # argue the doctrine first.
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    rest = ["a", "b"]
+    x, y, *r = *rest, key
+    if not _derived_mirror_required("object"):
+        props[y] = _encode(ev)
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):

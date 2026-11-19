@@ -3155,6 +3155,14 @@ def _mutator_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -
        AFTER it take the TRAILING ones, and the starred name absorbs the middle — so
        `x, *_r = key, 1` and `*_r, x = 1, 2, key` are REFUSED while `*_r, x = 1, key, 2`
        (which binds `x = 2`) still CERTIFIES.
+       ⛔ AND A `Starred` IN THE UNPACK **VALUE** IS STILL HERE (`#13788`, measured at
+       `bcb710a5`): the target-side rule above says nothing about `x, *r = *rest, 1`, where the
+       star spreads an UNKNOWN number of elements. Two pinned rows name the two directions —
+       `*_r, x = *rest, key` (the tail target binds the property) is REFUSED, while
+       `x, *r = *rest, 1` with `rest = ("embedding",)` CERTIFIES a writer that places the
+       vector; and `x, y, *r = *rest, key` with `props[y]` is REFUSED although `y` binds
+       `rest[1]` (a fail-closed over-refusal, pinned in `over_refused`). Resolving any of them
+       needs the value's own binding model.
        ⛔ AND NEITHER DIRECTION HERE IS "SAFE", which CORRECTS the wording this section
        carried: it said under-approximating "can only lose refusals, never add an acceptance,
        which is why it is the safe one to stop at". Losing a refusal IS the dangerous direction
@@ -3405,6 +3413,23 @@ def _property_alias_names(scope) -> frozenset[str]:
             # that stores, while a mis-pair invents a refusal for an honest one. What cannot
             # happen either way is a widened ACCEPTANCE — `alias_keys` is EMPTY on the mirror arm
             # — and that is the invariant, not "under-approximation is harmless".
+            # ⛔ THE VALUE SIDE HAS ITS OWN STAR AND IT IS **NOT** RESOLVED (`#13788`, measured at
+            #    `bcb710a5`). The rule above pairs a `Starred` in the TARGET; a `Starred` in the
+            #    VALUE (`x, *r = *rest, 1`, `x, y, *r = *rest, key`) spreads an UNKNOWN number of
+            #    elements, so the flattened index of every element after it depends on a binding
+            #    this walk does not follow (data flow — residual #6 of `_mutator_stores_the_vector`).
+            #    BOTH directions are real and both are now PINNED in the fixture family, because an
+            #    unnamed boundary is the defect this series keeps re-finding:
+            #     - a HEAD target positioned AFTER a value star is paired with a value element
+            #       whose true position depends on the star's length, so the pairing may be wrong
+            #       and this arm FAILS CLOSED: `x, y, *r = *rest, key; props[y] = vec` is REFUSED
+            #       although `y` binds `rest[1]` in that fixture (pinned in `over_refused`);
+            #     - a head target paired WITH the star itself binds nothing — the ordinary
+            #       residual direction: `x, *r = *rest, 1; props[x] = vec` CERTIFIES, and with
+            #       `rest = ("embedding",)` it PLACES the vector (pinned in `accepted` as a
+            #       measured, disclosed false PASS).
+            #    Neither is a reason to stop pairing on the value: resolving it needs the value's
+            #    own binding model, which is the residual named above — not another arm here.
             if isinstance(sub, ast.Assign) and len(sub.targets) == 1 and isinstance(
                     sub.targets[0], ast.Tuple | ast.List):
                 target_elts = list(sub.targets[0].elts)
