@@ -1898,6 +1898,21 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     for target in ("docker://prod:6379/a@b", "docker://staging:6379/a@b"):
         with pytest.raises(strip.Refusal):
             strip.uri_fingerprint(target)
+    # ⛔ A PATH-LESS target has no `/`, so the ambiguity guard above cannot fire and the
+    # query used to survive INSIDE the host — returned verbatim into the plan, `--json`
+    # and the drift message. Measured regression against the previous commit.
+    assert strip.uri_fingerprint("docker://prod:6379?api_key=s3cret") == \
+        "docker://prod:6379"
+    assert strip.uri_fingerprint("docker://:pw@host:6379?api_key=s3cret") == \
+        "docker://host:6379"
+    assert strip.uri_fingerprint("docker://prod:6379#frag") == "docker://prod:6379"
+    assert strip.uri_fingerprint("docker://prod:6379?api_key=s3cret") != \
+        strip.uri_fingerprint("docker://staging:6379?api_key=s3cret")
+    # ⛔ …and the REFUSAL must still name the remedy. This assertion exists because the
+    # remedy sentence was unpinned: deleting it left the whole suite green.
+    with pytest.raises(strip.Refusal) as refused:
+        strip.uri_fingerprint("docker://:pa/ss@host:6379/g")
+    assert "ercent-encode" in str(refused.value)
     # A query/fragment is not target identity and may carry a credential — it is dropped
     # rather than re-emitted in the path.
     assert strip.uri_fingerprint("docker://prod:6379/g?api_key=s3cret") == \
@@ -3029,6 +3044,28 @@ def test_the_census_json_never_carries_the_graph_password(monkeypatch, tmp_path,
     # …the helper is the STRIPPER's own fingerprint, not a second spelling of it.
     assert parity._report_uri("docker://:pw@h:6379/g") == strip.uri_fingerprint(
         "docker://:pw@h:6379/g")
+
+
+def test_census_main_withholds_the_resolver_message_that_quotes_the_credential(
+        monkeypatch, capsys):
+    """⛔ The census's generic catch interpolated `{exc}`, and `resolve_graph_name` casts
+    the authority's port through `urllib`, whose `ValueError` QUOTES the offending token —
+    for `docker://:pa/ss@host:6379/g` that token is `pa`, a fragment of the graph password.
+    Measured through `parity.main` before the fix: stderr carried "…as 'pa'". The
+    stripper sibling already withheld it (`_unexpected_failure`); this arm, in the same
+    PR three files over, did not.
+    """
+    def _raise(*a, **k):
+        raise ValueError("Port could not be cast to integer value as 'pa'")
+
+    monkeypatch.setattr(parity.census_mod, "resolve_graph_name", _raise)
+    rc = parity.main(["--uri", "docker://:pa/ss@host:6379/g",
+                      "--record-dsn", "postgresql://x",
+                      "--org-id", "o", "--graph-id", "g"])
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "'pa'" not in err and "pa/ss" not in err, err
+    assert "ValueError" in err          # the TYPE is safe and is kept
 
 
 def test_census_main_separates_parity_from_the_strip_precondition(monkeypatch,

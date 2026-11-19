@@ -2161,12 +2161,22 @@ def uri_fingerprint(uri: str) -> str:
             "host. Percent-encode the credential ('/' → '%2F', '?' → '%3F', '#' → '%23') "
             "or pass the graph name out of band with `--graph-name`.")
     # 3. The query and the fragment are not target identity, and `?api_key=…` is a
-    #    credential — drop them from the PATH, after the host is known.
-    cut = min(
-        (i for i in (path.find("?"), path.find("#")) if i >= 0),
-        default=len(path),
-    )
-    path = path[:cut]
+    #    credential — drop them from BOTH segments. ⛔ FROM THE HOST TOO, and that is not
+    #    symmetry for its own sake: a PATH-LESS target (`docker://prod:6379?api_key=…`)
+    #    has no `/` at all, so the ambiguity guard above cannot fire and the query stays
+    #    inside `host` — measured, `docker://prod:6379?api_key=s3cret` was returned
+    #    VERBATIM into the plan, `--json` and the drift message, and
+    #    `docker://:pw@host:6379?api_key=s3cret` returned the query alongside the host.
+    #    Cutting only `path` left the credential in the one branch that has no path.
+    def _drop_query_fragment(segment: str) -> str:
+        i = min(
+            (k for k in (segment.find("?"), segment.find("#")) if k >= 0),
+            default=len(segment),
+        )
+        return segment[:i]
+
+    host = _drop_query_fragment(host)
+    path = _drop_query_fragment(path)
     return f"{scheme}://{host}/{path.lstrip('/')}" if path else f"{scheme}://{host}"
 
 

@@ -923,10 +923,18 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"entity_vector_parity_census: REFUSED — {exc}\n")
         return 3
     except Exception as exc:  # an unreadable side is a refusal
+        # ⛔ THE MESSAGE IS WITHHELD, THE TYPE IS KEPT. `resolve_graph_name` casts the
+        # authority's port through `urllib`, whose `ValueError` QUOTES the offending token:
+        # for `docker://:pa/ss@host:6379/g` that token is `pa`, a fragment of the graph
+        # password, printed to an operator's terminal. The stripper sibling withholds it
+        # the same way (`_unexpected_failure`); this arm — in the same PR, three files
+        # over — still interpolated `{exc}` and leaked it. The census writes this report to
+        # a `--json` file an operator pastes, which is why `_report_uri` above already
+        # refuses to fall back to the raw URI.
         sys.stderr.write(
             f"entity_vector_parity_census: REFUSED — the run could not complete "
-            f"({type(exc).__name__}: {exc}). A census that cannot be run is a "
-            "refusal, not a pass.\n")
+            f"({type(exc).__name__}; the message is withheld because it can quote the "
+            "graph credential). A census that cannot be run is a refusal, not a pass.\n")
         return 3
 
     print(render(report, graph_name))
