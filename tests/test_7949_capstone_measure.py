@@ -16571,76 +16571,39 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
 
     # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while that file IS in this diff (it
-    # carries the `declared_relation_predicates()` re-point read below), and the
-    # document's own row carries the cite this pin reads off it. A
-    # phrase-only assertion was green over that,
+    # re-point — `sdk.py:28559` → `:28592`", while that file IS in this diff (four numeric
+    # re-points, none of them that pair) and the document's own row reads `sdk.py:28718`. A phrase-only assertion was green over that,
     # re-landed, and was green again: that is the class this pin exists to close. No count
     # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
-    for stale in ("carries TWO numeric re-points", "a document that carries two"):
-        assert stale not in text, (
-            f"D5 states `{stale}` about `04-plan.md`. The `hosted_api.py` "
-            "`:15202-15279` -> `:15262-15339` move it is paired with is `origin/main`'s "
-            "own and is INHERITED, not contributed (`git show origin/main:docs/epics/"
-            "2026-11-04-7949-extractor-v4-capstone/04-plan.md` already carries "
-            "`:15262-15339`). Do not re-inflate the count")
-    assert "carries ONE numeric re-point" not in text, (
-        "D5 states that `04-plan.md` carries a numeric re-point in this PR's diff, and the "
-        "claim this assertion exists to stop is the PAIR it used to name, not the fact: "
-        "measured at this head `git diff --name-only origin/main...HEAD -- "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` is EMPTY — the file is "
-        "NOT in this diff, so no re-point of it is this PR's. What is also false is the "
-        "`sdk.py:28559` -> `:28592` pair: no version of that row carries it at this head")
-    # ⛔ DERIVED FROM `04-plan.md`, never typed (#13746 review round 4, P1). This asserted
-    # the literal `sdk.py:28607`, which was that row's value at this branch's BASE and
-    # stopped being true the moment this branch re-pointed the row: at this head
-    # `04-plan.md` carries `sdk.py:28682` (`grep -n 'declared = declared_relation_predicates()'
-    # tortoise/sdk.py` -> 28682), while `28607` is `created. An EXPLICIT or prior ``draft``
-    # is NOT retro-promoted`. A typed number that has to equal ANOTHER document's number is
-    # the same head-bound figure this file exists to forbid — so the expectation is read off
-    # `04-plan.md` here, and D5 is held to THAT, whichever head this runs at.
-    plan_row = next(
-        (ln for ln in _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8").splitlines()
-         if "declared_relation_predicates()" in ln), None)
-    assert plan_row, (
-        "`04-plan.md` must carry the `declared_relation_predicates()` cite this row is "
-        "about; it was not found — re-derive the row, do not drop the check")
-    plan_number = re.search(r"`?sdk\.py:(\d+)`?", plan_row)
-    assert plan_number, (
-        "`04-plan.md`'s `declared_relation_predicates()` row must carry a `sdk.py:<line>` "
-        f"cite; the row reads {plan_row[:200]!r}")
-    expected_cite = f"sdk.py:{plan_number.group(1)}"
-    # ⛔ BOUND TO THE AFFIRMATIVE CLAUSE, not just present somewhere in the row (#13746
-    # review round 5, P1 — measured). A bare `expected_cite in text` is a SUBSTRING test, and
-    # this row necessarily NEGATES the old address ("no longer reads `sdk.py:28607`"), so a
-    # row rewritten to say the OPPOSITE of the live cite still satisfied it: the reviewer
-    # replaced the affirmative clause with "does NOT carry `sdk.py:28682` — its row reads the
-    # old address" and the whole file went green. The cite is therefore read out of the
-    # clause that BINDS it — the number D5 says is "the value it carries at this head" — so
-    # a negation cannot satisfy the check, and neither can a stale derivation: mutating
-    # `04-plan.md` instead of D5 now REDs on the comparison below (measured).
-    # ⚠️ Residual, stated: this reads prose, so a reworded binding REDs (fail-closed — a
-    # reword must be re-derived), and a deliberate rewrite that keeps the binding phrase
-    # while asserting the opposite is a review question, not a pin's.
-    #
-    # The BINDING is the number the clause attributes to that claim: the LAST cite before
-    # `which is the value it carries at this head`. Taking the last one is what
-    # discriminates the affirmation from the negation above it — this row says "no longer
-    # reads `:28607` … re-points it to `:28682`, which is the value it carries at this
-    # head", and a plain leftmost regex would bind the NEGATED number.
-    bind_at = text.find("which is the value it carries at this head")
-    assert bind_at >= 0, (
-        "D5 must state AFFIRMATIVELY which cite `04-plan.md`'s row carries at this head "
-        "(the shape `<cite>` … `which is the value it carries at this head`) — it does "
-        f"not, so nothing in the row binds `{expected_cite}` to a live address")
-    bound = re.findall(r"`?(sdk\.py:\d+)`?", text[:bind_at])
-    assert bound, (
-        "the clause `which is the value it carries at this head` names no cite before it "
-        "— it must bind a `sdk.py:<line>` to that claim")
-    assert bound[-1] == expected_cite, (
-        f"D5 binds `{bound[-1]}` to `which is the value it carries at this head`, but "
-        f"`04-plan.md`'s row reads `{expected_cite}` — re-derive the address; the two "
-        "documents must not disagree")
+    # ⛔ NO COUNT IS ASSERTED, IN EITHER DIRECTION (#13750 review, cycle 3 — MEASURED).
+    # This arm used to forbid the phrases "carries TWO numeric re-points" / "carries ONE
+    # numeric re-point" while its own message asserted FOUR, and both were wrong at the
+    # next head: `git diff origin/main...HEAD --numstat -- .../04-plan.md` measures `2 2`
+    # over two hunks, and only one of the four pairs the message listed was this diff's
+    # (two already read that way on `origin/main`, one named `:28607` where the base reads
+    # `:28682`, and the range's TARGET was typed as the base's own value). A count in
+    # prose AND a count in the guard is the same head-bound figure twice, which is D5's
+    # own thesis — so the PAIRS are pinned and every count spelling is refused.
+    for _stale_count in ("carries ONE numeric re-point", "carries TWO numeric re-point",
+                         "carries THREE numeric re-point", "carries FOUR numeric re-point",
+                         "a document that carries two"):
+        assert _stale_count not in text, (
+            f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
+            "figure and this arm has already been wrong in both directions; name the "
+            "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
+            "`:15261-15338` -> `:15262-15339`), which `git diff --numstat` measures as "
+            "`2 2` over two hunks (#13750 review, cycle 3)")
+    for _pair in ("`sdk.py:28682` → `:28718`", ":15261-15338` → `:15262-15339`"):
+        assert _pair in text, (
+            f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
+            "this head. Both ends are pinned here because the range's TARGET was once "
+            "typed as the base's own value while its SOURCE was already re-derived "
+            "(#13750 review, cycle 3)")
+    assert "sdk.py:28718" in text, (
+        "D5 no longer names `sdk.py:28718`, the value `04-plan.md`'s own row carries at "
+        "this head (`grep -n 'declared_relation_predicates()' "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
+        "address; do not drop it")
 
     assert not failures, (
         "D5's present-tense anchors are not the lines they name "

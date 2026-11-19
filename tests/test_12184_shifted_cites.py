@@ -102,7 +102,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # entry in it and NOTHING red — the document went on naming held addresses over a tree that had
     # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
     # the list into a guard.
-    (_AUDIT, "`:2914`", _SDK, 2914, "SET s.capture_redactions=$redactions"),
+    (_AUDIT, "`:2914`", _SDK, 2914, "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"),
     (_AUDIT, "`sdk.py:37480`", _SDK, 37480, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     (_AUDIT, "`:37503`", _SDK, 37503, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     # ⛔ The three rows below pin SITES the pair rows above cannot reach, because those rows carry
@@ -119,21 +119,28 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "the `-[r]->` walk (`sdk.py:37503`)", _SDK, 37503, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     (_AUDIT, "they are `:37480` and", _SDK, 37480, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
-    # (`:3005`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
+    # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is a docstring line at this
-    # head, at `f07b73b1de` and on `origin/main`, where the statement is `:57276` (the `#13550` /
-    # `#13584` integration inserted 186 lines above it). A cite re-derived before a merge is stale
-    # after it, which is D5's own rule; the pin is what makes the next one red instead of silent.
+    # head and on `origin/main`, where the statement is `:57387` (the `#13550` / `#13584`
+    # integration inserted 186 lines above it, and later merges 111 more — 297 in all). ⛔ AND EACH
+    # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
+    # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57387` is
+    # NOT that head's), and `57276 + 111 = 57387` is `origin/main`'s and this head's. Measured per
+    # head with `git show <rev>:tortoise/sdk.py | grep -n 'entity_type="event"'` — an earlier cut of
+    # this comment named `:57387` for BOTH heads and so contradicted its own 186 (#13750 review).
+    # A cite re-derived before a merge is stale after it, which is D5's own rule; the pin is what
+    # makes the next one red instead of silent.
     # ⚠️ This branch's own `#5425` seam wrap sits ABOVE this cite and is written LINE-COUNT NEUTRAL
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
-    # ⛔ The "comparable" denominator: the pair this branch re-derives (`sdk.py:57387` at THIS head —
-    # `:57276` on `origin/main`, so this branch moved it `+111`; ⛔ an earlier cut of this comment named
-    # the `origin/main` address and said "nothing moved", which that `+111` refutes and which would have
-    # sent a reader to `:57276`, the `#9572` comment line, not the statement) names a line past the
-    # pin's `sdk.py` (56,415 lines), so the header
-    # counts it as drifted rather than compared — measured at this head: 212 comparable, 120 of them
-    # drifted, plus the three past the pin's files = 123 of the 215.
+    # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
+    # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
+    # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
+    # those three (`sdk.py:57387`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
+    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +111 since
+    # the head this pin was written at, so the token moves WITH the line — a pin whose token and
+    # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
     (_AUDIT, '`sdk.py:57423` passes `"event"`', _SDK, 57423, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -145,12 +152,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
     # ⛔ The Object half of the same declaration had NO row, and that absence is ISSUE 1 of the
-    # `#13489` review: §2.5's header cited `:6869`, and the three addresses the row quoted for the
-    # declaration (`:6933`/`:6934`/`:6939`) never held it — they are unrelated strings in this file
-    # at the pin AND at `main`, so the 64/65/70 deltas from `:6869` describe no declaration at all:
-    # against the addresses that DO hold it (`:6984`/`:6985`/`:6990`) the deltas are 115/116/121.
-    # And `:6989` is the
-    # `("Object", ["name"])` row that had no pin at all, so the
+    # `#13489` review: §2.5's header cited `:6869`, which `:6984`/`:6985`/`:6990` had left 115/116/121
+    # lines behind — and `:6989` is the `("Object", ["name"])` row that had no pin at all, so the
     # one sibling a reader would actually chase was the uncovered one. An absent pin is not
     # coverage; the header now names it beside its three siblings and this row resolves it.
     (_AUDIT, "`:6989`", _PI, 6989, '("Object", ["name"])'),
@@ -212,7 +215,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
 #: header must carry, target file, 1-based line **on this branch's tree**, verbatim fragment on that
 #: line). Five of these
-#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5666` were in NO pin at all
+#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5722` were in NO pin at all
 #: before this one, and the header named none of the eight — which is the defect
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
 #: ⚠️ The sdk/hosted_api rows here were `main`'s figures until `#13363` re-derived them: that branch's
@@ -228,7 +231,7 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":2724-2726", _CP, 2724, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     (":2776", _CP, 2776, "tail_denied = forbidden | {"),
     (":3841", _CP, 3841, 'if table == "point"'),
-    (":5666", _ENT, 5722, "s.summary=coalesce($summary, s.summary, '')"),
+    (":5722", _ENT, 5722, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
     # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:23982` is a DELETE
     # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
@@ -292,13 +295,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
-    # 2: `:6989` is BOTH the §1 label-scan table row's own key (already in this document) and the
-    # §2.5 header enumeration's disclosure of THIS tree's Object declaration, added by `#13489` beside
-    # its three siblings. Two sites, one spelling — a single pin resolves the line, and the count is
-    # what stops a third occurrence appearing unannounced. Measured at THIS head, on the token
-    # this row was re-pointed TO: `grep -o '\`:6989\`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md
-    # | wc -l` -> 2, while `origin/main` carries 0 — so 2 is this branch's count, and `origin/main`'s
-    # OLD tokens are gone (backticked, `:6938` and `:6939` are 0 here and 2 and 1 on `origin/main`).
+    # 2: `:6989` is BOTH the header region's disclosure of THIS tree's Object declaration (it sits
+    # before `## 1.`) and the §2.5 label-scan table row's own key. Two sites, one spelling — a single
+    # pin resolves the line, and the count is what stops a third occurrence appearing unannounced.
+    # BOTH spellings arrive with this branch's re-derivation (`f9e1bcc66a`), not with `#13489`:
+    # `origin/main` carries ZERO of them, and this head carries two. Measured at THIS head:
+    # `grep -o '\`:6989\`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 2.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6989`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
@@ -453,9 +455,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "123 of this document's 215",
-        "dedupes the **327** as-written spellings to 215 — **112**",
-        "327 written spellings → 215 pairs → 112 collisions → 123 drifters of the 215",
+        "122 of this document's 214",
+        "dedupes the **327** as-written spellings to 214 — **113**",
+        "327 written spellings → 214 pairs → 113 collisions → 122 drifters of the 214",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -824,7 +826,7 @@ def test_the_resolver_reds_on_a_double_applied_offset() -> None:
     since this control was written, and a hardcoded `4907` rotted into a line that no longer holds the
     note — the do-nothing control then failed for the wrong reason (the note check, not the content arm).
     """
-    loop_line = 4921
+    loop_line = 5074
     note_line = next(
         i + 1
         for i, line in enumerate((REPO / _SE).read_text(encoding="utf-8").splitlines())
@@ -856,10 +858,8 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX}
     # 48: `#13489`'s review added the `:6989` row (`("Object", ["name"])`, the §2.5 address that
-    # had NO pin at all, which is how `:6869` stayed behind its three siblings — the deltas this
-    # row used to quote (64/65/70) belong to the OLD addresses `:6933`/`:6934`/`:6939`, NOT to the
-    # re-pointed `:6984`/`:6985`/`:6990`/`:6989`, whose deltas from `:6869` are 115/116/121/120 — a
-    # delta quoted without the addresses it was measured on is the same rot this pins against), and row
+    # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6984`/`:6985`/`:6990`
+    # sit 115/116/121 lines below `:6869`, while `:6989`, the row that had no pin, is the 120th), and row
     # 13b's Source-writer pin (`sdk.py:21692` — `:21648` before `#13486` moved the writer) is the
     # same shape added again, for the same reason.
     # 48 -> 52 at review cycle 3: four rows added for corrections whose sites had NO pin at all
@@ -872,7 +872,8 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # row names — measured above the rows. The pair pins could not see them: a `:37467` anywhere on
     # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6989` was.
     # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
-    # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`).
+    # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`),
+    # and 297 by this head (`:57387`).
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
     assert len(_PINS) == 59
 
@@ -941,7 +942,7 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
     ⛔ **AND THE DEFECT RETURNED ON `main` UNDER A DIFFERENT NUMBER — which is why the third assertion below
     exists.** `#13290` re-pointed this paragraph by a delta and landed on `:4489-4490`: also a plain label
     scan, but a DIFFERENT one — `run_vector_query`'s `MATCH (n:{label}) WHERE n.embedding IS NOT NULL RETURN
-    count(*)`, not the `run_structural_query` scan the table row quotes at `:4725-4727`. Measured on
+    count(*)`, not the `run_structural_query` scan the table row quotes at `:4878-4880`. Measured on
     `origin/main` at that re-cut: the table row named `:4708-4710`, the verdict paragraph named
     `:4489-4490` — two addresses for one reader, in one table, again. The `:4350-4351` assertion cannot see
     it (`origin/main` reads 0 there), so this test would have passed over the live defect; the
@@ -949,7 +950,7 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
 
     ⛔ **AND IT RETURNED A THIRD TIME, WHICH IS WHY THE LAST ARM AGREES THE TWO SPELLINGS INSTEAD OF
     ASSERTING ONE LITERAL — the measured witness that a literal cannot see an agreement.** `#13466`
-    re-derived §2.1's TABLE row to `:4725-4727` and left this verdict paragraph at the pre-move
+    re-derived §2.1's TABLE row to `:4878-4880` and left this verdict paragraph at the pre-move
     `:4708-4710`, so `main` again gave TWO addresses for one reader (`:4723` is
     `where_clause = " AND ".join(conditions)`, the statement BEFORE the scan; `:4708-4710` there is the
     comment block that justifies the kind clause). This test's first
@@ -959,18 +960,18 @@ def test_the_section_2_1_verdict_names_the_same_label_scan_line_as_its_table() -
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     assert "`none`: `search_engine.py:4878-4880`, a plain label scan" in text, (
-        "§2.1's verdict paragraph no longer names the label scan at `:4725-4727`; re-derive it from "
+        "§2.1's verdict paragraph no longer names the label scan at `:4878-4880`; re-derive it from "
         "the statement rather than applying a delta to the address beside it."
     )
     assert "`none`: `search_engine.py:4350-4351`" not in text, (
         "§2.1's verdict paragraph names the label scan at `:4350-4351` while the table above it names "
-        "the same reader row at `:4725-4727` — two addresses for one reader, and only one of them can "
+        "the same reader row at `:4878-4880` — two addresses for one reader, and only one of them can "
         "open at any head. That is the defect class this file exists for."
     )
     assert "`none`: `search_engine.py:4489-4490`" not in text, (
         "§2.1's verdict paragraph names `:4489-4490`, which is `run_vector_query`'s "
         "`MATCH (n:{label}) WHERE n.embedding IS NOT NULL RETURN count(*)` — a different plain label "
-        "scan from the `run_structural_query` one the table row quotes at `:4725-4727`. `#13290` reached "
+        "scan from the `run_structural_query` one the table row quotes at `:4878-4880`. `#13290` reached "
         "it by applying a delta to `:4350-4351` instead of opening the statement, which is the same "
         "offset-not-content failure as the `:4549` re-point this file was written for. Re-derive from "
         "the fragment (`grep -n 'MATCH (n:{label_str})'`), never from the address beside it."
@@ -1016,7 +1017,7 @@ def test_the_main_set_enumeration_names_the_group_it_was_missing() -> None:
 
     * CONTENT — each of the eight carries, **on this branch's tree** (the tree this test reads),
       the fragment the document quotes for it. `_PINS` reaches five of them; `:2485`, `:2542` and
-      `projection/entities.py:5666` were in NO pin before this one. ⛔ The earlier form of this
+      `projection/entities.py:5722` were in NO pin before this one. ⛔ The earlier form of this
       bullet justified the same rows as "at `main` (the working tree: this branch is docs-only, so
       `main`'s `.py` files are this tree's)" — that was true when it was written and is FALSE for
       the rows `#13363` re-derived: `sdk.py` moved `+22` and `hosted_api.py` `+6`/`+18`, so those
@@ -1093,10 +1094,10 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     — ⚠️ **so they do NOT open at the pin above** — and each is named here by the cite it became"*. Every
     number in that sentence is therefore an address AT `ae54df166d`, not at this tree.
 
-    `#13489`'s first cut re-pointed the Object entry from `:6869` to `:6989` — this tree's value, correct
-    for §2.5's row — the Object declaration there is `:6989`, which is `:6869` + 69 IN
-    `projection/__init__.py` (an address delta, not a document distance) — and WRONG under a sentence
-    that announces the other head. A
+    `#13489`'s first cut re-pointed the Object entry from `:6869` to `:6938` — the value THAT cut's own
+    head carries, `:6869` + 69 IN `projection/__init__.py` (an address delta, not a document distance);
+    this tree's value for §2.5's row has since moved on from it, and re-pointing the header to the
+    current one is WRONG under a sentence that announces the other head. A
     `⚠️ CORRECTED` marker records that the text changed, never that the change was right: the
     FALSE CORRECTION this file's own docstring is built around, one head over.
 
@@ -1109,15 +1110,14 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     ⚠️ The assertion is on the `:6869` ADJACENCY, not on `:6989`'s absence — but it does NOT follow
     that disclosure is free, and an earlier form of this docstring said it was. The declaration must sit
     DIRECTLY above `` :6869`; ``; anything between them breaks the adjacency this arm reads. And
-    disclosing this tree's figure appends a THIRD `:6989` occurrence, which
-    `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` counts at 2 today (§2.5's row and
-    this header's own disclosure already carry it twice). So a header that
-    names both heads is a TWO-file edit, not a rewrite of this one: keep the declaration above
-    `` :6869`; ``, put the disclosure AFTER the semicolon, and move `_TOKEN_OCCURRENCES[':6989']` to 3
-    in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
+    disclosing this tree's figure appends a SECOND `:6989` occurrence, and
+    `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` already declares 2 — which IS
+    the count this document carries, so that disclosure is in place. A further one is a TWO-file
+    edit: keep the declaration above `` :6869`; ``, put it AFTER the semicolon, and bump
+    `_TOKEN_OCCURRENCES[':6989']` in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
     deletes the only protection on the entry that actually suffered the false correction. The document's
-    own shape puts the branch figure FIRST with the head in parens (`:33637` **on this branch**
-    (`:33583` at the head named above)), not the reverse.
+    own shape puts the DECLARED head's figure FIRST with this tree's after it in parens (`:33583`
+    there, `:33637` at this head), not the reverse.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     # ⛔ THE WHOLE ENUMERATION, not one entry (review cycle 3, F1). `#13466` re-pointed FOUR of its
@@ -1164,7 +1164,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "§2.5's row); putting it here re-points a history cite to a working-tree address, the "
         "`⚠️ CORRECTED` failure this file exists to stop. Restore `:6869` directly above a `;`. To ALSO "
         "disclose this tree's figure, keep the declaration where it is, append the disclosure AFTER the "
-        "semicolon, and bump `_TOKEN_OCCURRENCES[':6989']` to 3 in the same change — otherwise "
+        "semicolon, and bump `_TOKEN_OCCURRENCES[':6989']` (currently 2) in the same change — otherwise "
         "`test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` reds. Do not loosen either arm."
     )
 
