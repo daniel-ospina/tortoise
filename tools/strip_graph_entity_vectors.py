@@ -83,10 +83,26 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     plan's ENTRY list, never from its `total_nodes` count — a count is a field a hand can
     edit into a plan whose set is empty.
 ``REFUSE_WRITE_ERROR``
-    A removal statement raised on the FIRST batch, so **no node was stripped**. Exit is
-    ``2`` like every other pre-write refusal: the state is exactly "nothing was written,
-    safe to retry once the store error is understood", which is what a wedge, a timeout or
-    an oversized ``--batch`` actually produces.
+    A removal statement raised on the FIRST batch, so no EARLIER statement had completed
+    — and therefore **no node is KNOWN to have been stripped**. Exit is ``2`` like every
+    other pre-write refusal. ⛔ THE CLAIM IS SCOPED TO WHAT IS MEASURED: ``attempted``
+    counts statements ISSUED, not writes LANDED — the same distinction that rejected
+    ``sum(removed.values())`` on the other side of this token. A client-side read timeout,
+    or a socket dropped AFTER the server applied the batch, raises here with the batch
+    already landed, and a wedge, a timeout or an oversized ``--batch`` are exactly the
+    things that produce that shape. So this is not a promise that the store is untouched;
+    it is the one fact the count supports. A retry after a part-landed batch is safe by
+    construction anyway — the live set no longer matches the plan and the re-run refuses
+    with ``REFUSE_PLAN_STALE`` rather than stripping twice.
+``REFUSE_TARGET_UNPARSEABLE``
+    The graph target's userinfo boundary cannot be determined, so no credential-free
+    fingerprint of it exists — see `uri_fingerprint`. Exit is ``2``. ⛔ Refused rather
+    than guessed because the two halves of the requirement cannot both be met on an
+    ambiguous URI: cutting at the last ``@`` keeps the password out of the plan but can
+    DROP the host, and dropping the host makes two different targets compare EQUAL, which
+    is a fail-open on the very check that stops a plan approved against production from
+    executing against staging. Percent-encode the credential (``/`` → ``%2F``) and the
+    target becomes parseable.
 ``REFUSE_WRITE_FAILED``
     A removal statement raised AFTER at least one batch had already been stripped. Exit is
     ``6``, not ``2``: the graph is PART-STRIPPED, and the only correct next action is to
@@ -231,6 +247,7 @@ REFUSE_TARGET_DRIFT = "REFUSE_TARGET_DRIFT"
 REFUSE_NOTHING_TO_STRIP = "REFUSE_NOTHING_TO_STRIP"
 REFUSE_WRITE_ERROR = "REFUSE_WRITE_ERROR"
 REFUSE_WRITE_FAILED = "REFUSE_WRITE_FAILED"
+REFUSE_TARGET_UNPARSEABLE = "REFUSE_TARGET_UNPARSEABLE"
 
 REFUSALS = (
     REFUSE_NO_PLAN,
@@ -244,6 +261,7 @@ REFUSALS = (
     REFUSE_NOTHING_TO_STRIP,
     REFUSE_WRITE_ERROR,
     REFUSE_WRITE_FAILED,
+    REFUSE_TARGET_UNPARSEABLE,
 )
 
 
@@ -1966,32 +1984,68 @@ def uri_fingerprint(uri: str) -> str:
     name, the same tenant and the same node set, so a name-only comparison would let a
     plan approved against production execute against staging.
 
-    ⛔ THE USERINFO→HOST BOUNDARY IS THE LAST ``@`` OF EVERYTHING AFTER THE SCHEME, and
-    the path split must come AFTER that boundary, never before it. Partitioning on the
-    first ``/`` first — the obvious reading — cuts a password that CONTAINS a ``/`` in
-    half, so ``docker://:pa/ss@host:6379/g`` yields authority ``:pa`` and path
-    ``ss@host:6379/g``, there is no ``@`` left to strip, and this function handed back the
-    credential VERBATIM. That is not hypothetical here: `tortoise/__main__.py` builds
-    `legacy_uri = f"docker://:{password}@{host}:{port}/tortoise"` from the RAW
-    `FALKORDB_PASSWORD`, with no percent-encoding, so a password containing ``/`` reaches
-    this function in exactly that shape — and the plan, the ``--json`` output and the
-    ``REFUSE_TARGET_DRIFT`` message are all places an operator pastes.
+    ⛔ THE USERINFO→HOST BOUNDARY IS THE LAST ``@`` OF THE AUTHORITY WINDOW, and it must
+    be found BEFORE the path is split. Partitioning on the first ``/`` first — the obvious
+    reading — cuts a password that CONTAINS a ``/`` in half, so ``docker://:pa/ss@host:6379/g``
+    yields authority ``:pa`` and path ``ss@host:6379/g``, there is no ``@`` left to strip,
+    and this function handed back the credential VERBATIM. That is not hypothetical here:
+    `tortoise/__main__.py` builds `legacy_uri = f"docker://:{password}@{host}:{port}/tortoise"`
+    from the RAW `FALKORDB_PASSWORD`, with no percent-encoding, so a password containing
+    ``/`` reaches this function in exactly that shape — and the plan, the ``--json`` output
+    and the ``REFUSE_TARGET_DRIFT`` message are all places an operator pastes.
 
-    The same boundary rule is already recorded repo-wide (#720 P2 conf 68,
-    `tortoise/__main__.py::_mask_uri_userinfo`, which #2983 hardened further): a password
-    may carry ``/``, ``?``, ``#`` or ``@`` even though RFC-invalid, so bounding the region
-    on any of them re-emits credential material. Following that recorded rule means
-    over-reaching past a genuine query/fragment in a malformed URI, which is
-    diagnosability loss and never a leak.
+    ⛔ AND A FINGERPRINT IS A COMPARISON KEY, NOT A DISPLAY, so the fix for the leak must
+    not buy safety with a FALSE EQUALITY. Cutting at the last ``@`` unconditionally DROPS
+    the host whenever that ``@`` sat in the path or query, and two different deployments
+    then fingerprint identically — measured: ``docker://prod:6379/a@b`` and
+    ``docker://staging:6379/a@b`` both rendered ``docker://b``, so `execute`'s
+    `REFUSE_TARGET_DRIFT` check could not see the host change and a plan approved against
+    production could run against staging. The canonical display masker
+    (`tortoise/__main__.py::_mask_uri_userinfo`) accepts that over-reach because its
+    output is only ever *rendered*; this value is COMPARED, so it may not.
+
+    Both properties are therefore held by REFUSING the one shape that cannot satisfy both:
+
+    1. The query and the fragment are dropped first. Neither is part of the target
+       identity, and both can carry a credential (`?api_key=…`) that the path-preserving
+       return below would otherwise re-emit.
+    2. If an ``@`` appears AFTER the first ``/`` of what is left, the userinfo boundary is
+       genuinely ambiguous — that text is either a password containing ``/`` or an ``@``
+       inside the graph name, and nothing in the URI distinguishes them. Cut at the last
+       ``@`` and the credential is hidden but the host is lost (false equality); cut at the
+       first ``/`` and the host survives but the credential leaks. So it raises
+       `REFUSE_TARGET_UNPARSEABLE` and the operator percent-encodes the password.
+    3. Otherwise the userinfo is stripped from the authority window and host/port/name are
+       preserved, which is both halves of the job.
+
+    The boundary rule itself is already recorded repo-wide (#720 P2 conf 68,
+    `tortoise/__main__.py::_mask_uri_userinfo`, hardened by #2983/#2987): a password may
+    carry ``/``, ``?``, ``#`` or ``@`` even though RFC-invalid, so bounding the region on
+    any of them re-emits credential material.
     """
     scheme, sep, rest = uri.partition("://")
     if not sep:
         return uri
-    at = rest.rfind("@")
-    if at >= 0:
-        rest = rest[at + 1:]             # drop `user:password@` up to the LAST '@'
+    # 1. Query and fragment are not identity, and `?api_key=…` is a credential.
+    cut = min(
+        (i for i in (rest.find("?"), rest.find("#")) if i >= 0),
+        default=len(rest),
+    )
+    rest = rest[:cut]
+    # 2. An `@` past the first `/` is the ambiguous shape — refuse it instead of picking
+    #    which of the two properties to break.
+    if rest.rfind("@") > rest.find("/") >= 0:
+        raise Refusal(
+            REFUSE_TARGET_UNPARSEABLE,
+            f"the graph target {scheme}://… cannot be fingerprinted: an '@' appears after "
+            "the first '/', which is either a password containing '/' or an '@' inside "
+            "the graph name, and the two are indistinguishable. Guessing would either "
+            "print the credential or fold two different hosts onto one fingerprint (and "
+            "a folded fingerprint is what stops REFUSE_TARGET_DRIFT from seeing a "
+            "production→staging swap). Percent-encode the credential ('/' → '%2F') so "
+            "the target becomes parseable.")
     authority, _, path = rest.partition("/")
-    host = authority
+    host = authority.rpartition("@")[2]      # drop `user:password@`
     return f"{scheme}://{host}/{path.lstrip('/')}" if path else f"{scheme}://{host}"
 
 
@@ -2433,6 +2487,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"strip_graph_entity_vectors: REFUSED — {exc}. A census that cannot be "
                 "run is a refusal, not a pass, and nothing was removed.\n")
             return 3
+        except Refusal as exc:
+            # ⛔ `build_plan` can refuse on its own — a target whose userinfo boundary is
+            # ambiguous raises `REFUSE_TARGET_UNPARSEABLE` from the fingerprint. Caught
+            # here so it exits 2 with its token, rather than escaping as a traceback and
+            # being read as exit 1 ("usage") when nothing about the invocation is wrong.
+            sys.stderr.write(f"strip_graph_entity_vectors: {exc.token} — {exc}\n")
+            return 2
         print(render_plan(plan))
         if args.plan_out:
             Path(args.plan_out).write_text(json.dumps(plan, indent=2) + "\n")

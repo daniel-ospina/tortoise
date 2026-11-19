@@ -1701,6 +1701,26 @@ def test_the_two_token_refusals_are_raised_by_main_before_any_write(monkeypatch,
         assert token in capsys.readouterr().err
 
 
+def test_build_plan_refuses_an_ambiguous_target_before_it_prints_anything(stores):
+    """⛔ THE WIRING FALSIFIER for `REFUSE_TARGET_UNPARSEABLE`: `build_plan` fingerprints
+    the target it is about to put in the plan, so the refusal has to arrive as a
+    `Refusal` carrying its token — not as a traceback out of `uri_fingerprint`, and not
+    as a plan whose `graph_uri` is a truncated fragment of the real target.
+
+    Both halves are asserted: the plan is NOT produced, and the credential appears
+    nowhere in the message.
+    """
+    graph, _record = stores
+    graph.add("Object", "obj-1")
+    with pytest.raises(strip.Refusal) as excinfo:
+        strip.build_plan(
+            g=graph, record_dsn="postgresql://x", org_id="org", graph_id="graph",
+            graph_name="g", graph_uri="docker://:pa/ss@prod:6379/g",
+            labels=None, batch=strip.DEFAULT_BATCH)
+    assert excinfo.value.token == strip.REFUSE_TARGET_UNPARSEABLE
+    assert "pa/ss" not in str(excinfo.value)
+
+
 def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     """The plan approves a TARGET, and it must not circulate the password to name one.
 
@@ -1718,14 +1738,35 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     # `/` before the userinfo→host boundary cut the password in half, left no `@` to
     # strip, and returned the credential VERBATIM — and `tortoise/__main__.py` builds
     # `docker://:{password}@host:port/tortoise` from the RAW password, so this shape is
-    # reachable from an ordinary `FALKORDB_PASSWORD`. Pinned on the LEAK, not on the
-    # rendering: the assertion is that no fragment of the credential survives.
-    leaked = strip.uri_fingerprint("docker://:pa/ss@falkordb.internal:6379/tortoise")
-    assert leaked == "docker://falkordb.internal:6379/tortoise", leaked
-    assert "pa/ss" not in leaked and "ss@" not in leaked and "pa" not in leaked.split("/")[-1]
-    # …and the target is still DISTINGUISHED, so the fix did not buy safety by
-    # collapsing every credentialed URI to a constant.
-    assert leaked != strip.uri_fingerprint("docker://:pa/ss@other-host:6379/tortoise")
+    # reachable from an ordinary `FALKORDB_PASSWORD`.
+    #
+    # ⛔ AND IT IS REFUSED, not silently cut at the last `@`. Cutting there hides the
+    # credential but DROPS the host, and a fingerprint is a COMPARISON KEY: the two
+    # targets below would fold onto one value, which is exactly what stops
+    # `REFUSE_TARGET_DRIFT` seeing a production→staging swap. Both properties matter, and
+    # only a refusal holds both — so the falsifier pins BOTH halves: no leak AND no
+    # false equality.
+    with pytest.raises(strip.Refusal) as ambiguous:
+        strip.uri_fingerprint("docker://:pa/ss@falkordb.internal:6379/tortoise")
+    assert ambiguous.value.token == strip.REFUSE_TARGET_UNPARSEABLE
+    assert "pa/ss" not in str(ambiguous.value)
+    # The same ambiguity with an `@` in the NAME is the shape that used to fold two
+    # different hosts onto `docker://b`: prod and staging must never compare equal.
+    for target in ("docker://prod:6379/a@b", "docker://staging:6379/a@b"):
+        with pytest.raises(strip.Refusal):
+            strip.uri_fingerprint(target)
+    # A query/fragment is not target identity and may carry a credential — it is dropped
+    # rather than re-emitted in the path.
+    assert strip.uri_fingerprint("docker://prod:6379/g?api_key=x@y") == \
+        "docker://prod:6379/g"
+    assert strip.uri_fingerprint("docker://prod:6379/g?api_key=s3cret") == \
+        "docker://prod:6379/g"
+    # …and the ordinary host-distinguishing property survives, so the refusal did not buy
+    # safety by collapsing credentialed URIs to a constant.
+    assert strip.uri_fingerprint("docker://:pa%2Fss@prod:6379/tortoise") == \
+        "docker://prod:6379/tortoise"
+    assert strip.uri_fingerprint("docker://:pa%2Fss@prod:6379/tortoise") != \
+        strip.uri_fingerprint("docker://:pa%2Fss@staging:6379/tortoise")
     # A bare db-path carries no credential and is passed through unchanged, so the
     # embedded lane's fingerprint is its path and the plan stays readable.
     assert strip.uri_fingerprint("/tmp/x.db") == "/tmp/x.db"
