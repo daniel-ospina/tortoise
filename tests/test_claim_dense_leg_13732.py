@@ -1680,11 +1680,11 @@ class TestTheDocumentedRunPath:
         ⛔ `require_graph_population`'s message names only the two VECTOR-side
         causes because a missing ROW cannot occur after this run's seed: every
         population row is upserted through the fold with an explicit `embedding`,
-        and there is no `try` around the write, so a failed upsert raises out of
-        the run before the guard is asked. Two rounds tried to pin that on the
-        message's wording and failed in both directions — a synonym passed, and an
-        accurate edit that mentioned a row false-reddened (`#13745` reviews rounds
-        6-7). This asserts the fact the wording rests on.
+        and no handler SWALLOWS a failed write, so a failure ends the run before the
+        guard is asked. Two rounds tried to pin that on the message's wording and
+        failed in both directions — a synonym passed, and an accurate edit that
+        mentioned a row false-reddened (`#13745` reviews rounds 6-7). This asserts
+        the fact the wording rests on, and nothing about the wording.
         """
         tree = ast.parse(TOOL.read_text())
         seed = next(
@@ -1692,9 +1692,21 @@ class TestTheDocumentedRunPath:
             for n in ast.walk(tree)
             if isinstance(n, ast.FunctionDef) and n.name == "_seed_graph"
         )
-        assert not [n for n in ast.walk(seed) if isinstance(n, ast.Try)], (
-            "a `try` around the upsert would swallow a failed write and leave a "
-            "row uncreated — the message's cause list assumes a failure propagates"
+        # ⛔ A `try` is FINE when its handler re-raises (`except Exception as exc:
+        # raise Refused(...) from exc` is this file's house style); what would
+        # break the claim is a handler that SWALLOWS the failure. Pin the effect,
+        # not the syntax — a blanket ban false-reds a correct edit (`#13745`
+        # review round 7, finding 2).
+        swallowers = [
+            ast.unparse(handler)[:140]
+            for node in ast.walk(seed)
+            if isinstance(node, ast.Try)
+            for handler in node.handlers
+            if not any(isinstance(inner, ast.Raise) for inner in ast.walk(handler))
+        ]
+        assert not swallowers, (
+            "a handler that does not re-raise would swallow a failed write and "
+            f"leave a row uncreated: {swallowers}"
         )
         payloads = [
             node
@@ -1719,6 +1731,26 @@ class TestTheDocumentedRunPath:
         assert write_loops, (
             "the seed must write one row per population entry (a `for row, vec in "
             "zip(population, vectors, strict=True)` loop)"
+        )
+        # ⛔ AND THE WRITE MUST BE *IN* THAT LOOP, UNCONDITIONALLY. "A zip loop
+        # exists" is not "every row is written": a `continue` for a skipped row,
+        # or the fold call hoisted out of the loop, both leave rows uncreated while
+        # `written` still reports `len(population)` (`#13745` review round 7,
+        # finding 1 — both mutants were green against the shape-only assertion).
+        loop = write_loops[0]
+        assert any(
+            isinstance(node, ast.Call)
+            and "_upsert_point_props" in ast.unparse(node.func)
+            for node in ast.walk(loop)
+        ), "the fold must be CALLED inside the write loop, not once outside it"
+        skips = [
+            ast.unparse(node)[:140]
+            for node in ast.walk(loop)
+            if isinstance(node, (ast.If, ast.Continue, ast.Break, ast.Return))
+        ]
+        assert not skips, (
+            "the write loop must not skip a row — a conditional/continue/return "
+            f"there leaves rows uncreated while `written` still counts them: {skips}"
         )
 
     def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
