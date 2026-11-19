@@ -435,7 +435,10 @@ def _interleaved_medians(*fns, samples: int = 11) -> tuple[float, ...]:
 
     timings: list[list[float]] = [[] for _ in fns]
     for _ in range(samples):
-        for fn, acc in zip(fns, timings):
+        # `timings` is built from `fns` on the line above, so the two are equal
+        # length by construction — `strict=True` asserts that rather than
+        # silently truncating to the shorter one if a future edit breaks it.
+        for fn, acc in zip(fns, timings, strict=True):
             t0 = time.perf_counter()
             fn()
             acc.append((time.perf_counter() - t0) * 1000.0)
