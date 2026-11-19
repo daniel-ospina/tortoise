@@ -63,7 +63,7 @@
 #   silently skipped. `_preserve_labels` drops both but reads NO flag.
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
-#   `resolve_os_label` (`:438`), reached from `resolve_labels` — i.e. from install, repair and
+#   `resolve_os_label` (`:450`), reached from `resolve_labels` — i.e. from install, repair and
 #   `--print-labels` — and called by `--status` to READ the intent (it registers nothing) — so
 #   a runner this script registers under `on|auto` carries `ubuntu-24.04`; the autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
 #   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
@@ -271,6 +271,13 @@ for _size in CORES_PER_RUNNER CORES_RESERVED_FOR_AGENT_LANES DISK_PER_RUNNER_GB 
   case "${!_size}" in
     ''|*[!0-9]*) die "$_size must be a non-negative integer (got '${!_size}')" 1 ;;
   esac
+  # ⛔ AND A LENGTH BOUND, because "all digits" still lets a value THROUGH that bash then WRAPS:
+  # `$(( 10#18446744073709551617 * 4 ))` is `4` — a real, spurious 4 GB cap written onto a running
+  # job — and `$(( 10#36893488147419103232 * 4 ))` is `0`, the bound silently gone. Nine digits is far
+  # above every legitimate value here and far below the wrap point, so no product can leave the range
+  # the derived-bound guard checks.
+  _size_val="${!_size}"
+  [ "${#_size_val}" -le 9 ] || die "$_size must be at most 9 digits (got '$_size_val')" 1
 done
 # ⛔ THE TWO UNIT VALUES THAT ARE NOT INTEGERS GET THEIR OWN VALIDATION, because the digits-only loop
 # above would refuse them outright (a systemd timespan such as `1h` is not a number). An UNVALIDATED
@@ -296,6 +303,11 @@ for _unit_val in RESTART_SEC START_LIMIT_INTERVAL; do
     ms|s|sec|min|m|hr|h|d) : ;;
     *) die "$_unit_val has a suffix systemd would DROP (use ms/s/sec/min/m/hr/h/d, got '$_ts_val')" 1 ;;
   esac
+  # ⛔ AND THE MAGNITUDE HAS A CEILING TOO. systemd parses up to `9223372036855s` (13 digits, measured
+  # here) and DROPS anything past it (`9223372036854776s` → "Numerical result out of range") — landing
+  # back on `RestartSec`'s 100 ms default with the burst burnt out, the same end state a bad suffix
+  # produced. Thirteen digits is exactly that ceiling and far above any real value.
+  [ "${#_ts_body}" -le 13 ] || die "$_unit_val magnitude is beyond what systemd can parse (got '$_ts_val')" 1
 done
 
 # ⛔ THE DERIVED BOUND IS COMPUTED ONCE, HERE, AND BOTH READERS USE IT (the dry-run plan and the

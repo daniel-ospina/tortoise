@@ -2962,7 +2962,26 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
 
     # `install-ci-runner-x64.sh:740` AND the bare `:740` the section writes after the first one. The
     # lookbehind keeps `config.sh:76-81` (a DIFFERENT file, cited in the `--uninstall` paragraph) out.
+    # ⛔ THE END OF A RANGE IS CAPTURED AND CHECKED, not discarded. It used to be (`:432-\d+` matched,
+    # end ignored), and that is exactly how a re-measurement that bumped STARTS left six ends stale —
+    # three of them INVERTED (start > end) — while this pin stayed green and the sentences pointed at
+    # lines they never named. A range that does not run forwards is now red.
     ref = re.compile(r"(?:install-ci-runner-x64\.sh|(?<![A-Za-z0-9_.\-])):(\d+)(?:-\d+)?")
+    # ⛔ A RANGE'S END IS A SEPARATE CHECK, with its own two-group pattern — `ref` stays single-group
+    # because the sentences below index it as a string. The end used to be matched and DISCARDED here,
+    # which is how a re-measurement that bumped starts left six ends stale (three inverted) while this
+    # pin stayed green: a range that does not run forwards is now red.
+    range_ref = re.compile(r"(?:install-ci-runner-x64\.sh|(?<![A-Za-z0-9_.\-])):(\d+)-(\d+)")
+    for line in runbook[start:end]:
+        for rm in range_ref.finditer(line):
+            lo, hi = int(rm.group(1)), int(rm.group(2))
+            assert hi >= lo, (
+                f"the runbook cites the installer range {rm.group(0)}, whose end precedes its start — "
+                "re-derive BOTH numbers (ends drift when lines are inserted above them)"
+            )
+            assert hi <= len(installer), (
+                f"the runbook cites {rm.group(0)}, past the installer's EOF ({len(installer)} lines)"
+            )
     cited = {int(m.group(1)) for line in runbook[start:end] for m in ref.finditer(line)}
     assert cited, (
         "the runbook's installer section cites no installer line — re-anchor this pin rather than "
@@ -2973,39 +2992,39 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     anchors: dict[int, str] = {
         111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
         256: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
-        402: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        406: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        410: r"^fallback_engaged\(\) \{",
-        433: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
-        438: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
-        470: r"^resolve_labels\(\) \{",
-        509: r"label algebra: the UNION",  # "the union's label algebra at"
-        533: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        561: r"── status ──",  # the `--status` block
-        584: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        924: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        932: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        941: r"found NO runs-on label to check",  # zero labels -> exit 4
-        374: r"^\}$",  # "whose body ends at its `}` on"
-        1159: r"exit 5",  # the uncovered verdict
-        1181: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        1206: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1353: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1385: r'MODE" = labels',  # "`--print-labels`"
-        1412: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1417: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1420: r"FORK HEADROOM FIRST",  # "forks"
-        1440: r"DISK NEXT",  # "disk"
-        1447: r"CPU LAST",  # "cpu/memory"
-        1464: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1465: r'MODE" = uninstall',  # "`uninstall`"
-        1594: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1597: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1605: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1608: r"registration-token",  # "token"
-        1613: r"^    set -- --unattended",  # "one argv"
-        1615: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1625: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        414: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        418: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        422: r"^fallback_engaged\(\) \{",
+        445: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
+        450: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
+        482: r"^resolve_labels\(\) \{",
+        521: r"label algebra: the UNION",  # "the union's label algebra at"
+        545: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        573: r"── status ──",  # the `--status` block
+        596: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        936: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        944: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        953: r"found NO runs-on label to check",  # zero labels -> exit 4
+        386: r"^\}$",  # "whose body ends at its `}` on"
+        1171: r"exit 5",  # the uncovered verdict
+        1193: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        1218: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1365: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1397: r'MODE" = labels',  # "`--print-labels`"
+        1424: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1429: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1432: r"FORK HEADROOM FIRST",  # "forks"
+        1452: r"DISK NEXT",  # "disk"
+        1459: r"CPU LAST",  # "cpu/memory"
+        1476: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1477: r'MODE" = uninstall',  # "`uninstall`"
+        1606: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1609: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1617: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1620: r"registration-token",  # "token"
+        1625: r"^    set -- --unattended",  # "one argv"
+        1627: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1637: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -5842,6 +5861,40 @@ def test_an_overflowing_bound_is_refused_rather_than_silently_dropped(tmp_path: 
     that a bound nobody can read is REFUSED (exit 1), never coerced into a number.
     """
     env = _dropin_env(tmp_path, unit_present=True)
-    r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": "9223372036854775807"})
-    assert r.returncode == 1, f"an overflowing bound must be refused, got {r.returncode}: {r.stderr}"
-    assert "MemoryMax" in r.stderr, r.stderr
+    for bad in ("9223372036854775807", "18446744073709551617"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": bad})
+        assert r.returncode == 1, f"an overflowing bound must be refused, got {r.returncode}: {r.stderr}"
+        # either guard may refuse it (the operand length bound fires first now) — what must NOT happen
+        # is a silent success with a wrapped value
+        assert "MEM_PER_RUNNER_GB" in r.stderr or "MemoryMax" in r.stderr, r.stderr
+
+
+def test_a_timespan_magnitude_systemd_cannot_parse_is_refused(tmp_path: Path):
+    """⛔ THE SUFFIX WAS ONLY HALF THE PARSE. systemd accepts up to ~9.2e12 s (`9223372036855s` parses,
+    `9223372036854776s` is "Numerical result out of range") and DROPS anything past it — which lands on
+    `RestartSec`'s 100 ms default with `StartLimitBurst` burnt out, the same end state a bad suffix
+    produced. A suffix check alone therefore still admits a value systemd ignores.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    for bad in ("999999999999999999999s", "9223372036854776s", "12345678901234h"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": bad})
+        assert r.returncode == 1, f"{bad!r} is beyond what systemd can parse and must be refused, got {r.returncode}"
+    for good in ("9223372036855s", "30s", "1h"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": good})
+        assert r.returncode == 0, f"{good!r} parses in systemd and must be accepted, got {r.returncode}: {r.stderr}"
+
+
+def test_a_sizing_unit_that_would_wrap_is_refused_before_the_product(tmp_path: Path):
+    """⛔ THE OVERFLOW GUARD ALONE WAS NOT ENOUGH: it refused only the wrap-to-NEGATIVE half, while a
+    magnitude ≥ 2^64 wraps to a SMALL POSITIVE or to 0 — `$(( 10#18446744073709551617 * 4 ))` is `4`
+    (a real, spurious 4 GB cap written onto a running job) and `$(( 10#36893488147419103232 * 4 ))` is
+    `0` (the bound silently gone, guard silent because it tested the already-wrapped value). The length
+    bound on the operands makes the wrap unreachable.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    for bad in ("18446744073709551617", "36893488147419103232", "9223372036854775807"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": bad})
+        assert r.returncode == 1, f"{bad!r} would wrap and must be refused, got {r.returncode}"
+    for good in ("0", "2", "8", "16"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": good})
+        assert r.returncode == 0, f"{good!r} must be accepted, got {r.returncode}: {r.stderr}"
