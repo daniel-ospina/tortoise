@@ -673,9 +673,18 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # is not only words: `is`, `->`, `→`, `=` and `:` are listed too, so
             # `prints -> two paths`, `prints is two paths`, `prints : two paths` and
             # `prints -> tortoise/x.py` were SKIPPED by a strip that only knew the verbs —
-            # a doubled form in a spelling the docstring declared closed. No member or
-            # emptiness token starts with any of these, so stripping them re-exposes the
-            # real head and can never invent one.
+            # a doubled form in a spelling the docstring declared closed.
+            # ⛔ `is` IS STRIPPED AS A BARE PREFIX, DELIBERATELY WITHOUT A WORD BOUNDARY
+            # (#13831 review, round 3, P2). The normalisation above deletes `` ` ``/`*`/`_`,
+            # so the document's glued spellings — ``is`two` paths`` and `is_empty` — arrive
+            # here as `istwo` / `isempty`, and the strip is what re-exposes `two` / `empty`
+            # there. The cost is measured and stated rather than implied: a token that merely
+            # STARTS with `is` loses those two characters, so `prints istwo paths` types as
+            # MEMBERSHIP and `prints isempty` as EMPTINESS (both were SKIPPED before this
+            # strip). Do NOT "tidy" a `\b` onto `is`: measured, adding one reds the PINNED
+            # glued row below and drops `is_empty` back to a skip — a single-line "cleanup"
+            # that would otherwise pass every check while re-opening the hole. The pinned row
+            # is what makes that cleanup fail loudly instead of silently.
             low = re.sub(r"^(?:->|→|=|:|is)\s*", "", low, count=1, flags=re.IGNORECASE)
         if re.match(r"(?:nothing\s+but\b|none\s+other\s+than\b)", low):
             # an emptiness WORD doing membership duty — `nothing but the two modules`
@@ -1245,7 +1254,10 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             # a path keeps its `.py`, which the window cuts at -- so the reported tuple is
             # the pre-dot prefix. Asserted with the cut, not the full path, so the row pins
             # the DIRECTION rather than re-stating a truncation this file already documents.
-            "prints -> tortoise/x"):
+            "prints -> tortoise/x",
+            # the GLUED spelling: the markup normalisation turns ``is`two` `` into `istwo`,
+            # so only a boundary-less `is` strip reaches the head (#13831 review, P2).
+            "prints is`two` paths"):
         assert _typed_answers_to_tortoise_cmd(
             f"`{_tortoise_cmd}` {_doubled_form}", _tortoise_cmd
         ) == [(_doubled_form, False)], (
