@@ -2179,9 +2179,14 @@ def write_gate(entity_type: str, *,
                 # `("org-B", "graph-B")` installed: the gate answered False).
                 # `_declared_scope` is the ONE resolver both doors use and it REFUSES a
                 # half tuple, which is the answer this arm wants.
+                # ⛔ AND THE TEST IS `is not None`, NOT TRUTHINESS (review round 6):
+                # `(org_id or graph_id)` re-opens the same fail-open for `(None, "")` and
+                # `("", None)` — measured, the gate answered False under an ambient
+                # tenant for both. Only BOTH-absent means "nobody declared one", and that
+                # is the one shape which still resolves the ambient tenant.
                 scope=(
                     (org_id, graph_id)
-                    if (org_id or graph_id) else None),
+                    if (org_id is not None or graph_id is not None) else None),
                 record_dsn=record_dsn,
                 graph_population=graph_population)
         except Exception as exc:  # a raising gate is not a permission

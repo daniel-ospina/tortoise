@@ -1036,6 +1036,18 @@ def mirror_verdict(entity_type: str, *,
             "copy is kept")
     resolved = _declared_scope(scope)
     if resolved is None:
+        # ⛔ A DECLARED BUT INCOMPLETE TENANT IS A DIFFERENT ANSWER FROM NO DECLARATION
+        # (review round 6). `_declared_scope` refuses a half pair by design, and this
+        # sentence used to describe that refusal as *"no tenant … and none was declared"* —
+        # false in both clauses for a caller that DID declare one and may well run with an
+        # ambient tenant installed. The refusal is right either way; the account has to be
+        # too, or the operator is sent to look for a missing env var that is not the
+        # problem.
+        if scope is not None:
+            return True, (
+                "the tenant this caller DECLARED is not a whole (org_id, graph_id) pair, "
+                "so it is refused rather than silently resolved against the ambient "
+                "tenant — a mis-scoped read returns zero rows under RLS with no error")
         return True, (
             "no tenant is installed on this process and none was declared, so the "
             "record cannot be asked about a label")

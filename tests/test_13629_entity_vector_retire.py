@@ -2458,8 +2458,14 @@ def test_an_uncountable_projection_yields_NO_supplier_rather_than_a_zero(stores,
     assert "has not proved" in reason or "cannot be asked" in reason, reason
 
 
+@pytest.mark.parametrize("org_id,graph_id", [
+    ("org-A", ""),      # a declared org with an empty graph
+    ("", "graph-A"),    # the MIRROR — pinned because `if org_id` survives the first row
+    (None, ""),         # neither half usable, and one of them explicitly absent
+    ("", None),         # …and its mirror: `if (org_id or graph_id)` lets both through
+])
 def test_a_HALF_tenant_declaration_is_refused_not_downgraded_to_the_ambient_one(
-        stores, monkeypatch):
+        stores, monkeypatch, org_id, graph_id):
     """⛔ A HALF DECLARED TENANT MUST NOT FALL BACK TO THE AMBIENT ONE (fail-open).
 
     `write_gate` used to build `scope=(org_id, graph_id) if (org_id and graph_id) else None`.
@@ -2485,14 +2491,17 @@ def test_a_HALF_tenant_declaration_is_refused_not_downgraded_to_the_ambient_one(
         emits, reason = strip.write_gate(
             "object",
             graph_population=strip.graph_vector_population(_Projection(graph)),
-            org_id="org-A", graph_id="",
+            org_id=org_id, graph_id=graph_id,
             record_dsn="postgresql://localhost/record")
 
     assert emits is True, (
         "a half tenant declaration was answered from the AMBIENT tenant's record — one "
         f"tenant's strip certified from another tenant's measurement: {reason}")
-    assert "no tenant" in reason, (
-        f"the refusal did not name the missing tenant half: {reason}")
+    # ⛔ AND THE ACCOUNT IS THE DECLARATION'S, not the no-declaration sentence: a caller
+    # that DID declare a tenant must not be told that "none was declared" (review round 6
+    # — the refusal was right and its reason was false in both clauses).
+    assert "DECLARED is not a whole" in reason, (
+        f"a refused DECLARATION was reported as no declaration at all: {reason}")
 
 
 # ── preview is the default and writes nothing ───────────────────────────────
