@@ -1344,7 +1344,8 @@ class EmbeddingModel:
         (#2952) while this path logged WARNING.
 
         ⛔ THE DEFECT THIS EXISTS TO REMOVE. ``get()`` blocks its caller for up
-        to ``_LOAD_TIMEOUT_S`` (90 s) while the model loads, and during a warm
+        to ``_LOAD_TIMEOUT_S`` (300 s since #13674; 90 s when this was written)
+        while the model loads, and during a warm
         window it blocks on ``cls._lock`` for the WHOLE load — the caller's own
         ``load_timeout`` cannot bound it, because the time is spent waiting for
         a lock another thread holds, not in its own join. The hosted lifespan

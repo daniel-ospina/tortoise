@@ -180,8 +180,9 @@ install_tolerant_tempdir_cleanup()
 #
 # The opt-out above (#7015) removes the warm-up that would have ABSORBED that
 # load, so the first `create_point` (`encode_for_store` -> `EmbeddingModel.get`)
-# pays it in-line. The product default (`_LOAD_TIMEOUT_S = 90.0`) is a REQUEST-path
-# trade: blocking longer is worse than degrading. A pytest process is the OPPOSITE
+# pays it in-line. The product default is a REQUEST-path trade (300.0 since
+# #13674, derived from the measured 156.5 s cold import; 90.0 when this was
+# written). A pytest process is the OPPOSITE
 # trade — it has a 15m shard watchdog and ~5m of real work — so abandoning a load
 # that would have finished is strictly worse than waiting for it.
 #
@@ -200,9 +201,16 @@ install_tolerant_tempdir_cleanup()
 # budget goes as high as the headroom allows, because the failure it prevents is
 # ABANDONMENT: the worst cold load this incident OBSERVED was 204.64s (the
 # previously-hanging test passed at 133.55s and 204.64s once the budget covered
-# it), so 240 left only 1.17x over what we have actually seen. It stays at or
-# under the hosted pre-warm's 300.0 (`hosted_api.py`), so this lane never
-# out-budgets the lane that runs the same cold torch import.
+# it), so 240 left only 1.17x over what we have actually seen.
+#
+# ⛔ RELATIVE TO THE PRODUCT DEFAULT THIS IS NOW THE LOWER NUMBER (`#13674` raised
+# it 90.0 -> 300.0, which is the shard's own --timeout and therefore not a value
+# this lane could adopt). That is DELIBERATE and safe in this direction: the lane
+# firing first is exactly what it exists for, and a load that reaches 270 s in a
+# test is reported as a load at 270 s instead of letting pytest kill the item.
+# `tests/test_read_status.py::test_the_test_lane_never_out_budgets_the_hosted_
+# prewarm` pins that the lane never out-budgets the hosted pre-warm; being BELOW
+# the product default cannot violate it.
 
 # #10010: the HuggingFace cache must NOT follow a redirected `$HOME`.
 #

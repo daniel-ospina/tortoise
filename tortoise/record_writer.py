@@ -2008,7 +2008,8 @@ def derived_embedding_columns(
         # call runs on the CALLER's thread, inside `write_live_record`, BEFORE any
         # cache fold (`write_live_record`'s docstring says so verbatim) — so an
         # unbounded wait for a cold embedder stalls the user's request, not a
-        # background fold. `get()` blocks up to `_LOAD_TIMEOUT_S` (90 s) and, in a
+        # background fold. `get()` blocks up to `_LOAD_TIMEOUT_S` (300 s since
+        # #13674; 90 s when this was written) and, in a
         # warm window, on the load another thread is running; the graph's own
         # folds already opt in (`projection/entities.py`: `_upsert_object`,
         # `_upsert_subject`, the document and Event arms) precisely so a live
