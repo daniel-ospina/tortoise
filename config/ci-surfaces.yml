@@ -2821,6 +2821,17 @@ surfaces:
   # `tortoise/record_writer.py`/`record_projection.py` — the only modules it drives —
   # are `core` triggers, so `core` is the surface whose diff must actually run it.
   - test_13418_source_and_document_derivation.py
+  # #13557/#13558 (PR #13833 review, P1): the state-answer routing pins — the
+  # commitment population, the ended population, their duality, and the question
+  # selector. `core` for the same reason the sibling above gives: the modules it
+  # guards (`tortoise/commitments.py`, `tortoise/state_intent.py`, and the
+  # `tortoise/sdk.py` routing seam) are `core` triggers, so a diff to any of them
+  # must actually run it. MEASURED before this row: `classify_test_file(...)`
+  # returned `None`, so the module was selected by NO leg on ANY diff while
+  # `integrity()` independently reported it as drift. Verify with:
+  #   printf 'tortoise/commitments.py\ntortoise/state_intent.py\n' \
+  #     | python tools/ci_selection.py --event pull_request --changed-files -
+  - test_13557_13558_reachable_reads.py
   # #13634 follow-up: the "declared priors are the open decision in #9063" claim — the refusal
   # message in `tortoise/sdk.py` and the v3.38 changelog entry (via `docs/ONTOLOGY-CHANGELOG.md`).
   # `classify_test_file` is EXACT membership over the surfaces, so an unregistered file is selected by
