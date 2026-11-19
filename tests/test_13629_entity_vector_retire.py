@@ -475,7 +475,7 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
     # "emits" — the record's coverage does not stop a write nobody gated.
     emits, reason = strip.write_gate("object")
     assert emits is True
-    assert "writes `embedding` without an early-exit" in reason
+    assert "writes `embedding` without an `if`" in reason
     # …and the reason NAMES the writers, so an operator can read which code to fix.
     assert "_upsert_object" in reason
     # ⛔ AND IT NAMES THE WRITERS THE FOLD MAP ALONE MISSED. `tortoise.sdk::_update_entity`
@@ -499,7 +499,7 @@ def test_a_comment_mentioning_the_gate_is_not_a_gate(tmp_path, monkeypatch):
         "tortoise.projection.entities", "_upsert_event")
     assert gated is False
     assert "tortoise.projection.entities::_upsert_event" in why
-    assert "without an early-exit" in why
+    assert "without an `if`" in why
 
 
 def _fake_writer_module(tmp_path, monkeypatch, body, name="fake_writer_13629"):
@@ -640,9 +640,9 @@ def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
     """
     for source in (WRITER_PROSE_ONLY, WRITER_DEAD_BRANCH, WRITER_UNCALLED):
         module = _fake_writer_module(tmp_path, monkeypatch, source)
-        gated, why = strip._writer_consults_gate(module, "_upsert_object")
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"{source!r} was accepted as a gate"
-        assert "without an early-exit" in why
+        assert "without an `if`" in why
 
     for source in WRITER_CALL_BUT_UNGATED:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -651,13 +651,53 @@ def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
 
     for source in WRITER_RETURNED_NOT_DECIDING:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
-        gated, why = strip._writer_consults_gate(module, "_upsert_object")
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"a RETURNED-but-dying gate was accepted: {source!r}"
 
     for source in WRITER_RETURNED_AND_DECIDING:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         assert strip._writer_consults_gate(
             module, "_upsert_object", ("object",))[0] is True, source
+
+    # ⛔ AND THE ENCODE-GUARD FORM — the shape `#13617` implements, and the one that decides
+    # whether the gate can EVER open. Asserted here on purpose: an earlier revision DEFINED
+    # this shape and never used it, so round 5's P1 fix was unpinned and reverting it left
+    # every test green.
+    module = _fake_writer_module(tmp_path, monkeypatch, WRITER_ENCODE_GUARD)
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is True
+
+    # …and the guard must STORE, not MENTION: "prose is not evidence" applies one level
+    # below the mention check too. Mutation: accept any embedding-named argument or string
+    # inside the guarded branch and both cases below go green.
+    for mention in ('_log("object embedding still mirrored")', "print(embedding)"):
+        module = _fake_writer_module(tmp_path, monkeypatch, f"""
+def _upsert_object(ev):
+    embedding = _encode(ev)
+    if _derived_mirror_required("object"):
+        {mention}
+    return _write(ev, embedding)
+""")
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a {mention!r} MENTION opened the gate"
+
+    # …and a guard in dead code, or in a nested scope, is not THIS function's guard.
+    for source in ("""
+def _upsert_object(ev):
+    if False:
+        if mirror_required("object"):
+            embedding = 1
+    return _write(ev)
+""", """
+def _upsert_object(ev):
+    def inner():
+        if mirror_required("object"):
+            embedding = 1
+    return _write(ev)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a guard in dead/nested code opened the gate: {source!r}"
 
     module = _fake_writer_module(tmp_path, monkeypatch, WRITER_GATED)
     assert strip._writer_consults_gate(module, "_upsert_object", ("object",))[0] is True

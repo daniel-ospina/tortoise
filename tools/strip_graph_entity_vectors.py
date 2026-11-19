@@ -359,12 +359,20 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     label and whose body touches ``embedding`` (or returns/raises) — so the guard sits on
     the write itself, which is what `#13617` does.
 
-    ⛔ STATED RESIDUAL: a writer with TWO write sites, only one guarded, is not detectable
-    here — proving that needs data flow this check does not do. The requirement it CAN
-    enforce is "the gate guards a store of this label in this function", and a write-stop
-    that leaves a second site open is a defect in that write-stop. What the check refuses
-    is a gate call anywhere that is not guarding a store; what it cannot prove is that it
-    guards ALL of them.
+    ⛔ STATED RESIDUALS, all three, because a completeness claim narrower than the code is
+    how the next lane re-derives false confidence:
+
+    1. **Two write sites, one guarded** — undetectable without data flow this check does
+       not do. The requirement it CAN enforce is "the gate guards A store of this label in
+       this function"; a write-stop that leaves a second site open is a defect in that
+       write-stop.
+    2. **No ordering** — the walk does not relate the `if`'s POSITION to the store, so an
+       accepted guard placed AFTER an unconditional store still clears the function. What
+       narrows this in practice is that the guarded body must itself store, which a
+       pointless late guard does not do.
+    3. **Dead code and nested scopes are pruned, not analysed** — a guard wrapped in
+       `if False:` or inside an inner `def`/lambda is not counted (`_reachable_ifs`), but
+       neither is a guard behind a runtime-false condition this check cannot evaluate.
 
     ⛔ A RETURNED VALUE IS NOT ACCEPTED, even when it is the gate's own answer.
     ``self._write(ev); return mirror_required("object")``, ``return (self._write(ev),
@@ -388,49 +396,72 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     import ast
 
     wanted = set(entity_types)
-    for sub in ast.walk(node):
-        if not isinstance(sub, ast.If):
-            continue
+    for sub in _reachable_ifs(node):
         if isinstance(sub.test, ast.Constant):
             continue                          # `if False:` — dead, decides nothing
         if not _asks_about(sub.test, wanted):
             continue
-        # ⛔ THE GUARDED BODY MUST TOUCH THE STORE. An `if` that asks and then bumps a
-        # counter is not a write-stop; the store has to sit in the branch the answer
-        # controls. `Return`/`Raise` covers the early-exit form, `embedding` covers the
-        # encode-guard form `#13617` uses.
-        body = sub.body
+        # ⛔ THE GUARDED BODY MUST **STORE**, NOT MENTION. An `if` that asks and then logs
+        # about the embedding is not a write-stop — and a text match is exactly the "prose
+        # is not evidence" defect this file already fixed once at the mention level, which
+        # round 5 re-admitted one layer down by matching any embedding-ish name or string.
+        # `Return`/`Raise` covers the early-exit form; a store-shaped node covers the
+        # encode-guard form `#13617` uses (`embedding = derived_embedding.encode(...)`).
         if any(isinstance(child, ast.Return | ast.Raise)
-               for statement in body for child in ast.walk(statement)):
+               for statement in sub.body for child in ast.walk(statement)):
             return True
-        if any(_mentions_embedding(statement) for statement in body):
+        if any(_stores_embedding(statement) for statement in sub.body):
             return True
     return False
 
 
-def _mentions_embedding(node) -> bool:
-    """Does this statement reference the stored vector (name, attribute or Cypher text)?"""
+def _reachable_ifs(node):
+    """Every `if` in the function's OWN body — not inside a nested def, not in dead code.
+
+    ⛔ A guard wrapped in `if False:` or sitting in an uncalled inner `def` is not a
+    write-stop for this function, and an `ast.walk` sees both. This walk prunes a
+    constant-tested branch and any nested function scope, so what it yields is code that
+    can actually run here.
+    """
     import ast
 
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Name | ast.Attribute):
-            text = sub.id if isinstance(sub, ast.Name) else sub.attr
-            if "embedding" in text:
-                return True
-        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
-                and "embedding" in sub.value:
-            return True
-    return False
+    stack = list(node.body)
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            continue                      # a nested scope is not this function's guard
+        if isinstance(current, ast.If):
+            yield current
+            if not isinstance(current.test, ast.Constant):
+                stack.extend(current.body)
+                stack.extend(current.orelse)
+            continue                      # a constant test: neither branch can run
+        if isinstance(current, ast.While | ast.For | ast.AsyncFor | ast.With
+                      | ast.AsyncWith | ast.Try):
+            for field in ("body", "orelse", "finalbody"):
+                stack.extend(getattr(current, field, []) or [])
+            for handler in getattr(current, "handlers", []) or []:
+                stack.extend(handler.body)
+            continue
+        if isinstance(current, ast.IfExp):
+            continue
+        stack.extend(child for child in ast.iter_child_nodes(current)
+                     if isinstance(child, ast.stmt))
 
 
 def _asks_about(test, wanted: set[str]) -> bool:
-    """Does this test CALL the gate about one of ``wanted`` (a label's entity types)?"""
+    """Does this test CALL the gate about one of ``wanted`` (a label's entity types)?
+
+    ⛔ THE FIRST ARGUMENT MUST BE A STRING CONSTANT NAMING THIS LABEL. `_update_entity` and
+    `restore_graph` each store five labels, so one gate call is not a fact about all of
+    them: a partial write-stop shaped `if _derived_mirror_required("object"):
+    props.pop("embedding")` leaves the Source/Event stores unconditional. A computed
+    argument is refused because the tool cannot tell which label was asked about.
+    """
     import ast
 
     # ⛔ SHORT-CIRCUITED AWAY IS NOT ASKED. `if g("object") or True:` contains the call and
-    # its answer decides nothing — the branch is taken either way. A constant operand of a
-    # boolean operator makes the whole test constant in the direction that matters, so the
-    # test is refused rather than read as a gate.
+    # its answer decides nothing — the branch is taken either way.
     for sub in ast.walk(test):
         if isinstance(sub, ast.BoolOp):
             for operand in sub.values:
@@ -453,6 +484,53 @@ def _asks_about(test, wanted: set[str]) -> bool:
     return False
 
 
+def _stores_embedding(node) -> bool:
+    """Does this statement ASSIGN the stored vector, or set it from Cypher?
+
+    ⛔ DELIBERATELY NARROW. An earlier version also accepted any CALL that passed an
+    embedding-named argument, which made `print(embedding)` inside the guarded branch read
+    as "the store sits under the guard" — a mention, not a write, opening a delete-
+    authorising gate. So the accepted shapes are the two that actually store: an
+    assignment to an embedding-named target (`embedding = derived_embedding.encode(...)`,
+    the `#13617` form) and a Cypher fragment that sets the property
+    (`set_embedding_clause(...)`, `SET n.embedding = …`). A helper that stores the vector
+    through an argument must be refactored to assign it — which costs a line and never the
+    race.
+    """
+    import ast
+
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign):
+            targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+            for target in targets:
+                if _names_embedding(target):
+                    return True
+        elif isinstance(sub, ast.Call):
+            # The repo's Cypher vector writers name themselves (`set_embedding_clause`,
+            # `clear_embedding`), so a CALL to one is a store — unlike a bare read.
+            callee = sub.func
+            name = getattr(callee, "id", None) or getattr(callee, "attr", None) or ""
+            if "set_embedding" in name or "clear_embedding" in name:
+                return True
+    return False
+
+
+def _names_embedding(node) -> bool:
+    """Only a STORE/ARGUMENT-shaped reference counts — never a bare read or a log string."""
+    import ast
+
+    if isinstance(node, ast.Name):
+        return "embedding" in node.id
+    if isinstance(node, ast.Attribute):
+        return "embedding" in node.attr
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        # A Cypher fragment that ASSIGNS the property (`SET n.embedding = …`,
+        # `set_embedding_clause(...)`), not a log line that happens to name it.
+        text = node.value
+        return ".embedding =" in text or "set_embedding" in text
+    return False
+
+
 def _writer_consults_gate(module_name: str, symbol: str,
                           entity_types: tuple[str, ...] | None = None) -> tuple[bool, str]:
     """``(gated, reason)`` for ONE ``module::symbol`` writer of a retired label."""
@@ -472,8 +550,10 @@ def _writer_consults_gate(module_name: str, symbol: str,
     if ungated:
         return False, (
             f"`{module_name}::{symbol}` (definition at line(s) "
-            f"{', '.join(str(n) for n in ungated)}) writes `embedding` without an "
-            f"early-exit `if {WRITE_GATE_SYMBOL}(<this label>): return/raise`")
+            f"{', '.join(str(n) for n in ungated)}) writes `embedding` without an `if` "
+            f"that asks `{WRITE_GATE_SYMBOL}`/`_derived_mirror_required` about THIS label "
+            "and either stores the vector in the guarded branch or returns/raises from "
+            "it")
     return True, f"{module_name}::{symbol} calls the gate"
 
 
