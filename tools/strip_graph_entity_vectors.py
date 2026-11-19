@@ -1174,7 +1174,7 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
     and this repo proves the shape exists: `embeddings.py` pops that triple while keeping
     the vector.
 
-    The accepted shapes are four: `embedding = derived_embedding.encode(...)` (the `#13617`
+    The accepted shapes are three: `embedding = derived_embedding.encode(...)` (the `#13617`
     form), `props["embedding"] = …`, `n.embedding = …`, and a Cypher clause string **that
     REACHES A STATEMENT RUNNER** — either passed directly to one
     (`session.run("… SET n.embedding = $e …")`) or assigned to a local and then passed to
@@ -1188,6 +1188,11 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
     import ast
 
     clause_names, run_names = _clause_flow(scope)
+    # ⛔ A KEY BOUND TO THE PROPERTY'S OWN STRING IS THE SAME KEY (`#13647`, measured at
+    # `98eec2ca`): `key = "embedding"; props[key] = _encode(ev)` placed the vector on the stop
+    # arm and certified the writer. Resolving it is still static — the name is a local bound to
+    # a CONSTANT in this scope — so the exact-property precision is preserved. STOP ARM ONLY:
+    # on the mirror arm this would be a new acceptance.
     alias_keys = _property_alias_names(scope) if anywhere else frozenset()
     for sub in (_own_walk(node) if anywhere else _unconditional_walk(node)):
         if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign):
@@ -1202,24 +1207,37 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                        for target in targets):
                     return True           # `q = "SET n.embedding = $e"; session.run(q)`
                 continue                  # text nothing runs
-            if isinstance(sub, ast.AugAssign) and (
-                    (isinstance(sub.value, ast.Dict) and _dict_stores_the_vector(sub.value))
-                    or (anywhere and _mapping_argument_stores_the_vector(sub.value))):
-                # `props |= {"embedding": vec}` — a merge that places the vector. ⛔ THE
-                # CONSTRUCTOR SPELLING IS THE SAME MERGE (`props |= dict(embedding=vec)`),
-                # recognised STOP-ARM ONLY: on the mirror arm it would WIDEN acceptance.
+            if isinstance(sub, ast.AugAssign) and isinstance(sub.value, ast.Dict) \
+                    and _dict_stores_the_vector(sub.value):
+                # `props |= {"embedding": vec}` — a merge that places the vector.
                 return True
-            # ⛔ AND A REBUILT MAPPING IS THE SAME STORE, one expression form over: the
-            # operator and method forms above are recognised only in the spellings that
-            # happened to have been written down, so `props = {**props, "embedding": …}`,
-            # `props = props | {"embedding": …}` and `props |= dict(embedding=…)` each
-            # certified a stop arm that placed the vector (measured fail-OPEN at
-            # `98eec2ca`). STOP ARM ONLY, like every other widening here: on the mirror
-            # arm the same recognition would make the destructive gate ACCEPT a writer it
-            # refuses today, and a fix may add refusals, never acceptances.
+            # ⛔ A MAPPING LITERAL ASSIGNED IN THE ARM IS A STORE TOO, and a `{**{…}}` merge
+            # needs the RECURSIVE form — hence `stop_arm=True` here and `anywhere`-only, both
+            # for the same reason: this is a refusal the mirror arm does not make, and a fix
+            # may add refusals, never acceptances. Measured GATED at `8637df0fde` for
+            # `props = {"embedding": _encode(ev)}` and `props = {**props, "embedding": …}`.
+            if anywhere and isinstance(value, ast.Dict) \
+                    and _dict_stores_the_vector(value, stop_arm=True):
+                return True
+            # ⛔ AN UNPACKED OR CHAINED TARGET IS STILL A STORE (`#13647` round 12). The
+            # mirror arm's rule is "EVERY target names the property", which is right where
+            # a missed recognition costs a refactor and a false PASS on the STOP arm —
+            # where it certified `props["embedding"], props["embedding_model"] = vec, model`
+            # and `x = props["embedding"] = vec` (both measured GATED at `8637df0fde`).
+            # Deliberately `anywhere`-only: see `_mutator_stores_the_vector` on why a fix
+            # may add refusals and never acceptances.
+            if anywhere and _mixed_assignment_stores_the_vector(targets, value):
+                return True
+            # ⛔ AND A REBUILT MAPPING IS THE SAME STORE (`98eec2ca`): `props = props |
+            # {"embedding": …}`, `props = {**props, "embedding": …}` and the writer being
+            # HANDED either place the property through no mutator and no embedding-named
+            # target, so every other arm here misses them. `_rebuild_stores_the_vector` is
+            # deliberately narrow (a MERGE, never a plain literal) so a mention such as
+            # `_audit({"embedding": props.get(…)})` stays a mention.
             if anywhere and _rebuild_stores_the_vector(value):
                 return True
-            if not all(_names_embedding(target) or (anywhere and _keyed_by_alias(target, alias_keys))
+            if not all(_names_embedding(target)
+                       or (anywhere and _keyed_by_alias(target, alias_keys))
                        for target in targets):
                 continue
             if value is None or isinstance(value, ast.Constant):
@@ -1253,14 +1271,6 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                 for argument in sub.args:
                     if isinstance(argument, ast.Dict) and _dict_stores_the_vector(argument):
                         return True
-            # ⛔ AND A WRITER HANDED THE REBUILT MAPPING IS THE SAME STORE: `_write({**props,
-            # "embedding": vec})`. Narrow by construction — `_rebuild_stores_the_vector`
-            # asks for a merge (`**`/`|`) or a `dict(embedding=…)`, so a plain literal
-            # handed to a logger (`_audit({"embedding": props.get(…)})`) is a mention and
-            # stays a mention.
-            if anywhere and any(_rebuild_stores_the_vector(operand)
-                                for operand in _call_operands(sub)):
-                return True
             # ⛔ AND THE MUTATOR'S METHOD SPELLING IS THE SAME STORE, which the vocabulary
             # above missed: it recognises the OPERATOR form `props |= {"embedding": vec}`
             # and `update(…)` but not the methods those survive as
@@ -1274,7 +1284,279 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # accepts, and a fix may add refusals, never acceptances.
             if anywhere and _mutator_stores_the_vector(sub):
                 return True
+            # ⛔ AND A WRITER HANDED A REBUILT MAPPING IS THE SAME STORE (`98eec2ca`):
+            # `_write({**props, "embedding": vec})`. Narrow by construction —
+            # `_rebuild_stores_the_vector` asks for a MERGE (`**`/`|`) or a `dict(embedding=…)`,
+            # so a plain literal handed to a logger (`_audit({"embedding": props.get(…)})`)
+            # is a mention and stays one.
+            if anywhere and any(_rebuild_stores_the_vector(operand)
+                                for operand in _call_operands(sub)):
+                return True
+        elif isinstance(sub, ast.For | ast.AsyncFor) and anywhere:
+            # ⛔ THE LOOP TARGET IS AN ASSIGNMENT TARGET. `for props["embedding"] in
+            # _encode(ev):` places the vector on every iteration, and no assignment arm can
+            # see it (measured GATED at `8637df0fde`). Stop-arm only, like every recognition
+            # in this family: on the mirror arm it would widen what the gate ACCEPTS.
+            if _unpacked_target_stores_the_vector(sub.target, sub.iter):
+                return True
+        elif isinstance(sub, ast.NamedExpr) and anywhere:
+            # `if (embedding := _encode(ev)):` — a walrus IS an assignment with a target,
+            # and it was certified while the plain `embedding = …` was refused.
+            if _unpacked_target_stores_the_vector(sub.target, sub.value):
+                return True
+        elif isinstance(sub, ast.comprehension) and anywhere:
+            # `[x for props["embedding"] in _vecs(ev)]` — a comprehension target is an
+            # assignment target too, and it iterates. ⛔ THE `anywhere` HERE IS BELT AND
+            # BRACES, AND PROVABLY SO: `_unconditional_nodes` PRUNES `ListComp`/`SetComp`/
+            # `DictComp`/`GeneratorExp` without descending, so the MIRROR walk never yields an
+            # `ast.comprehension` at all. The qualifier cannot be reddened by any test because
+            # the branch is unreachable without it — stated here rather than left to look like
+            # an unpinned guard (the review that found this called the mutant "survived"; it is
+            # EQUIVALENT, and this is the evidence).
+            if _unpacked_target_stores_the_vector(sub.target, sub.iter):
+                return True
+        elif isinstance(sub, ast.With | ast.AsyncWith) and anywhere:
+            # `with _ctx() as props["embedding"]:` binds the property to a value this check
+            # cannot see, so it is refused rather than assumed to be a clear (fail-closed).
+            # ⛔ STILL NOT SEEN, and named rather than implied: a COMPUTED key
+            # (`props[KEY] = vec` where `KEY = "embedding"`) — resolving the constant is data
+            # flow this check does not do, so it reads as a store of nothing.
+            if any(item.optional_vars is not None and _target_names_the_vector(item.optional_vars)
+                   for item in sub.items):
+                return True
     return False
+
+
+def _mixed_assignment_stores_the_vector(targets, value) -> bool:
+    """Does a MULTI-TARGET, UNPACKED or CHAINED assignment place the vector?
+
+    ⛔ THE STORE VOCABULARY WAS PER-TARGET AND EXACT, and spellings a real writer writes
+    in ONE statement fell outside it. Measured fail-OPEN at `8637df0fde` — each certified a
+    STOP arm that placed the vector it was told to stop writing:
+
+        props["embedding"], props["embedding_model"] = _encode(ev), _m()  # unpacked
+        x = props["embedding"] = _encode(ev)                              # chained
+        [props["embedding"], _m] = [_encode(ev), 1]                      # list target
+
+    The first is the unpacked form of the IDENTITY TRIPLE this repo stores beside the
+    vector (`embedding_text_hash`/`embedding_model`/`embedding_revision`); the second is
+    the chained form of the same store. Both were refused as stores because the mirror arm
+    asks `all(_names_embedding(target) …)`, and a `Tuple` target or a `Name` sibling
+    answers False for the whole assignment.
+
+    ⛔ STOP-ARM ONLY (`anywhere=True`, at the call site), for the reason
+    `_mutator_stores_the_vector` states: on the mirror arm the identical recognition would
+    WIDEN what the destructive gate accepts, and a fix may add refusals, never acceptances.
+    The mirror-arm rows in `test_the_stop_arm_must_not_store_the_vector` pin exactly that.
+
+    ⛔ PAIRED, so a REMOVAL is not read as a store: `props["embedding"], x = None, 1`
+    assigns the PLACEHOLDER, which is exactly the `embedding = None` this file already
+    refuses to count — and so does the one-element unpack `props["embedding"], = (None,)`,
+    which an earlier `len(elements) > 1` guard mis-refused (it made the code narrower than
+    this docstring). A target element is paired with its own value when the RHS is an
+    unpacked literal of the SAME LENGTH, and only a NON-CONSTANT paired value counts.
+    """
+    return any(_unpacked_target_stores_the_vector(target, value) for target in targets)
+
+
+def _unpacked_target_stores_the_vector(target, value) -> bool:
+    """One assignment target, unwrapped recursively: `Tuple`/`List`/`Starred`/exact name.
+
+    ⛔ RECURSION IS THE POINT. `(props["embedding"], _m), _h = (vec, 1), 2` puts the store
+    one level deeper than the first version looked, and `*props["embedding"], = _vecs(ev)`
+    hides it behind a `Starred`; both certified a STOP arm at `8637df0fde`.
+    """
+    import ast
+
+    if isinstance(target, ast.Starred):
+        return _unpacked_target_stores_the_vector(target.value, value)
+    if isinstance(target, ast.Tuple | ast.List):
+        paired = (isinstance(value, ast.Tuple | ast.List)
+                  and len(value.elts) == len(target.elts))
+        return any(
+            _unpacked_target_stores_the_vector(
+                element, value.elts[index] if paired else value)
+            for index, element in enumerate(target.elts))
+    if not _names_embedding(target):
+        return False
+    return value is not None and not isinstance(value, ast.Constant)
+
+
+def _target_names_the_vector(target) -> bool:
+    """Does this target name the vector anywhere in it, whatever value it receives?
+
+    For the bindings whose VALUE the walk cannot see — `with _ctx() as props["embedding"]`
+    binds an unknown — so the answer cannot depend on the value at all.
+    """
+    import ast
+
+    if isinstance(target, ast.Starred):
+        return _target_names_the_vector(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        return any(_target_names_the_vector(element) for element in target.elts)
+    return _names_embedding(target)
+
+
+def _mapping_stores_the_vector(call) -> bool:
+    """Does this call carry a MAPPING operand that sets the vector?
+
+    ⛔ ONE HELPER FOR THE THREE SPELLINGS A MAPPING ARRIVES AS, because they were fixed one
+    at a time and each fix left the other two open: a dict LITERAL, a SEQUENCE OF PAIRS
+    (`dict([("embedding", vec)])`), and a ``**`` operand — which has `keyword.arg is None`,
+    so the named-keyword test that predates this helper cannot see it at all. All three
+    carry the same two narrowings as every other arm: EXACT property name, NON-CONSTANT
+    value.
+    """
+    import ast
+
+    if any(keyword.arg == EMBEDDING_PROPERTY
+           and not isinstance(keyword.value, ast.Constant)
+           for keyword in call.keywords):
+        return True
+    return any(_mapping_operand_stores_the_vector(argument) for argument in call.args) or any(
+        keyword.arg is None
+        and isinstance(keyword.value, ast.Dict)
+        and _dict_stores_the_vector(keyword.value, stop_arm=True)
+        for keyword in call.keywords)
+
+
+def _mapping_operand_stores_the_vector(node) -> bool:
+    """One operand of a mapping call, without the call: literal, pairs, or `*`-starred.
+
+    ⛔ RECURSIVE BECAUSE THE OPERAND CAN BE A CONTAINER OF MAPPINGS: `props.update(*[{…}])`
+    spreads a LIST whose element is the mapping, and the flat test saw a list of dicts,
+    found no `(key, value)` pair in it, and certified the stop arm.
+    """
+    import ast
+
+    if isinstance(node, ast.Starred):
+        return _mapping_operand_stores_the_vector(node.value)
+    if isinstance(node, ast.Dict):
+        return _dict_stores_the_vector(node, stop_arm=True)
+    if isinstance(node, ast.List | ast.Tuple):
+        return (_pairs_store_the_vector(node)
+                or any(_mapping_operand_stores_the_vector(element) for element in node.elts))
+    # ⛔ NOT A `dict(...)` CONSTRUCTOR OPERAND HERE. One was written and it was PROVABLY
+    # INERT: `_stores_embedding`'s call arm asks `_rebuild_stores_the_vector` about every
+    # operand of every call statement, and that helper already delegates the constructor
+    # spelling to `_mapping_argument_stores_the_vector` — so removing this branch changed no
+    # verdict on any of the 140 fixtures (measured). Left out rather than kept looking
+    # load-bearing.
+    return False
+
+
+def _pairs_store_the_vector(node) -> bool:
+    """Does this list/tuple literal hold an `(EXACT property, non-constant)` pair?"""
+    import ast
+
+    return any(
+        isinstance(element, ast.Tuple | ast.List) and len(element.elts) == 2
+        and isinstance(element.elts[0], ast.Constant)
+        and element.elts[0].value == EMBEDDING_PROPERTY
+        and not isinstance(element.elts[1], ast.Constant)
+        for element in node.elts)
+
+
+def _two_argument_store(arguments) -> bool:
+    """Is this `(EXACT property, non-constant value)` as the FIRST TWO arguments?
+
+    The two-argument form of a mapping write — `props.__setitem__("embedding", vec)`,
+    `setdefault("embedding", vec)`, and the helper form `_set(props, "embedding")`-adjacent
+    spellings. ⛔ A `Starred` ARGUMENT IS NON-CONSTANT, so this answers True for
+    `__setitem__("embedding", *[])` — the parent refused that and the splice would otherwise
+    have lost the refusal; the caller therefore runs it over the raw list as well.
+    """
+    import ast
+
+    return (len(arguments) >= 2
+            and isinstance(arguments[0], ast.Constant)
+            and arguments[0].value == EMBEDDING_PROPERTY
+            and not isinstance(arguments[1], ast.Constant))
+
+
+def _third_argument_stores_the_vector(call) -> bool:
+    """Does this call NAME the property exactly, in a position a writer would name it in?
+
+    `setattr(props, "embedding", vec)`, `operator.setitem(props, "embedding", vec)` and a
+    project helper's `_set(props, "embedding", vec)` are one three-argument shape; the
+    KEYWORD spellings of the same call (`_set(props, "embedding", value=vec)`,
+    `_set(props, key="embedding", value=vec)`, `record.set("embedding", value=vec)`) are the
+    same fact said differently, and they were certified GATED while the positional form was
+    already refused — a difference in SPELLING, not in whether the vector is placed.
+
+    ⛔ OVER-REFUSAL IS THE ACCEPTED COST, and the docstring says so rather than implying a
+    discriminator it does not have: `_read(props, "embedding", default)` is REFUSED too,
+    because the third argument is a non-constant NAME in a read exactly as in a write. Only
+    a read whose default is a LITERAL (`_read(props, "embedding", None)`) reads as a read.
+    """
+    import ast
+
+    arguments = list(call.args)
+    # ⛔ SPLICE A `Starred` LITERAL HERE TOO. The splice existed only in
+    # `_mutator_stores_the_vector`'s `__setitem__` branch, so the HELPER spelling
+    # `_set(props, *["embedding", vec])` — a genuine store — certified the stop arm while
+    # `_set(props, "embedding", vec)` was refused.
+    raw = list(arguments)
+    spliced: list = []
+    for argument in raw:
+        if isinstance(argument, ast.Starred) \
+                and isinstance(argument.value, ast.List | ast.Tuple):
+            spliced.extend(argument.value.elts)
+        else:
+            spliced.append(argument)
+    arguments = spliced
+    # ⛔ BOTH FORMS, because SPLICING CAN ALSO REMOVE A REFUSAL. `props.__setitem__(
+    # "embedding", *[])` splices to ONE argument, so the spliced-only test would skip it —
+    # while the parent's flat reading of the raw args counted the `Starred` node as the
+    # non-constant second argument and refused it. A fix may add refusals, never acceptances,
+    # so the raw form is tested too (and the two are not duplicates: each covers a case the
+    # other misses, and dropping either reddens the suite).
+    if _two_argument_store(arguments) or _two_argument_store(raw):
+        return True
+    if (len(arguments) >= 3
+            and isinstance(arguments[1], ast.Constant)
+            and arguments[1].value == EMBEDDING_PROPERTY
+            and not isinstance(arguments[2], ast.Constant)):
+        return True
+    # ⛔ A ``**`` OPERAND IS THE SAME FACTS ONE LEVEL IN. `keyword.arg` is `None` for it, so the
+    # two rules below cannot see a `key`/`value` pair it carries — and
+    # `_set(props, **{"key": "embedding", "value": vec})` certified the stop arm while its
+    # keyword spelling was refused. Same two narrowings, applied to the mapping's values.
+    starred = [keyword.value for keyword in call.keywords
+               if keyword.arg is None and isinstance(keyword.value, ast.Dict)]
+    live_keyword = (
+        any(keyword.arg is not None and not isinstance(keyword.value, ast.Constant)
+            for keyword in call.keywords)
+        or any(not isinstance(value, ast.Constant)
+               for mapping in starred for value in mapping.values))
+    named_as_value = (
+        any(keyword.arg is not None and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == EMBEDDING_PROPERTY for keyword in call.keywords)
+        or any(isinstance(value, ast.Constant) and value.value == EMBEDDING_PROPERTY
+               for mapping in starred for value in mapping.values))
+    # `record.set("embedding", value=vec)` / `_set(props, "embedding", value=vec)` — the
+    # property as a POSITIONAL constant anywhere before the value, which then arrives as a
+    # keyword (so the three-positional-argument test above never sees it).
+    named_positionally = any(
+        isinstance(argument, ast.Constant) and argument.value == EMBEDDING_PROPERTY
+        for argument in arguments)
+    if named_positionally and live_keyword:
+        return True
+    # `_set(props, embedding=vec)` — the property's own name as the keyword.
+    if any(keyword.arg == EMBEDDING_PROPERTY
+           and not isinstance(keyword.value, ast.Constant)
+           for keyword in call.keywords):
+        return True
+    # `_set(props, key="embedding", value=vec)` — the property as a CONSTANT VALUE beside a
+    # live one. Both halves are required, so `key="embedding", default=None` stays a read.
+    if named_as_value and live_keyword:
+        return True
+    # `_set(props, **{"embedding": vec})` — the ``**`` spelling of the helper argument. The
+    # siblings above each have one, and this one did not, so the same call in this spelling
+    # certified a stop arm that places the vector.
+    return any(keyword.arg is None and isinstance(keyword.value, ast.Dict)
+               and _dict_stores_the_vector(keyword.value, stop_arm=True)
+               for keyword in call.keywords)
 
 
 def _mutator_stores_the_vector(call) -> bool:
@@ -1292,66 +1574,83 @@ def _mutator_stores_the_vector(call) -> bool:
     writer that stores exactly when the gate said stop, which lifts
     `REFUSE_WRITE_STILL_EMITS` — the boolean that authorises deleting the only readable
     copy of a fingerprint.
+
+    ⛔ STATED RESIDUALS — AND THEY ARE *FALSE PASSES*, NOT FAIL-CLOSED. This helper is the
+    one place whose misses certify a writer, so the direction has to be stated correctly: a
+    stop-arm spelling it does not name leaves the arm looking clean, `_fold_consults_gate`
+    reports the writer write-stopped, and `REFUSE_WRITE_STILL_EMITS` does not fire — the
+    strip proceeds into a live writer. An unnamed shape is therefore a silent delete, which
+    is why this is an INCLUDE list and why each residual below is named:
+
+    1. **A mapping reached through a NAME the arm did not build** — `props |= merged` /
+       `props.update(merged)` where `merged` is a PARAMETER, a call result or a
+       comprehension. (The literal form is caught: `merged = {"embedding": vec}` in the arm
+       is refused by `_stores_embedding`'s dict-literal arm, but following the name is data
+       flow this check does not do — the same gap `_clause_flow` closes for clause STRINGS.)
+    2. **A `dict`/mapping built from a generator, `**kwargs`, or a project helper**
+       (`props.update(_props_for(vec))`, `dict((k, v) for …)`).
+    3. **Dynamic forms** — `getattr(props, "__setitem__")(…)`, `exec`, `globals()[…]`: out of
+       AST reach by construction, the same caveat `_asks_the_gate` states for the gate call.
+    4. **A COMPUTED property key** — `props[KEY] = vec` where `KEY = "embedding"` and
+       `props[NAME_FOR_EMBEDDING]`. Resolving the constant is data flow this check does not
+       do, so the assignment reads as a store of nothing. (It used to be named only inside
+       the `With`-arm comment, where a reader of the ASSIGNMENT vocabulary would not find it.)
+
+    ⛔ WHAT IS *NOT* A RESIDUAL ANY MORE: a store reached through a HELPER ARGUMENT
+    (`_set(props, "embedding", vec)`) used to be listed here as "indistinguishable from
+    `_read(props, "embedding")`". That was false — the two differ in ARITY and in the
+    property's position — so the third-positional-argument rule below recognises it. Cycle 2
+    of this review measured the old claim and it was the only reason the shape stayed open.
     """
     import ast
 
     name = _callee_name(call)
-    if name in ("setitem", "ior"):
-        # ⛔ THE `operator` FUNCTIONAL SPELLINGS ARE THE SAME STORES. `operator.setitem(props,
-        # "embedding", vec)` is literally what `props["embedding"] = vec` compiles to, and
-        # `operator.ior(props, {"embedding": vec})` is what `props |= {…}` does; both placed
-        # the vector on the stop arm and still certified the writer at `8637df0f` (measured).
-        # A METHOD that happens to be named `setitem` matches too — stop-arm only, so the
-        # cost is a refactor and never a strip.
-        arguments = list(call.args)
-        if name == "setitem":
-            return (len(arguments) >= 3
-                    and isinstance(arguments[1], ast.Constant)
-                    and arguments[1].value == EMBEDDING_PROPERTY
-                    and not isinstance(arguments[2], ast.Constant))
-        return (len(arguments) >= 2
-                and _mapping_argument_stores_the_vector(arguments[1]))
-    if name == "update":
-        # ⛔ `props.update(dict(embedding=vec))` — the CONSTRUCTOR spelling of the mapping the
-        # shared `update` arm already refuses as a literal. Stop-arm only, for the same
-        # reason as the branch below: a fix may add refusals, never acceptances.
-        return (any(_mapping_argument_stores_the_vector(argument) for argument in call.args)
-                or any(_mapping_argument_stores_the_vector(keyword.value)
-                       for keyword in call.keywords))
-    if name == "setattr":
-        # `setattr(props, "embedding", vec)` — (receiver, PROPERTY, value)
-        arguments = list(call.args)
-        return (len(arguments) >= 3
-                and isinstance(arguments[1], ast.Constant)
-                and arguments[1].value == EMBEDDING_PROPERTY
-                and not isinstance(arguments[2], ast.Constant))
-    if name not in ("__setitem__", "setdefault", "__ior__"):
-        return False
-    arguments = list(call.args)
-    if (name == "__setitem__" and isinstance(call.func, ast.Attribute)
-            and isinstance(call.func.value, ast.Name) and call.func.value.id == "dict"):
-        arguments = arguments[1:]    # `dict.__setitem__(props, KEY, value)` — one arg more
-    if name == "__ior__":
-        # `props.__ior__({"embedding": vec})` — the method spelling of `props |= {…}`
-        return any(_mapping_argument_stores_the_vector(argument)
-                   for argument in arguments)
-    # `props.__setitem__("embedding", vec)` / `props.setdefault("embedding", vec)`
-    if (len(arguments) >= 2
-            and isinstance(arguments[0], ast.Constant)
-            and arguments[0].value == EMBEDDING_PROPERTY
-            and not isinstance(arguments[1], ast.Constant)):
-        return True
-    # ⛔ AND THE KEYWORD SPELLING IS THE SAME STORE: `props.__setitem__("embedding",
-    # value=vec)` certified a stop arm that placed the vector (measured fail-OPEN at
-    # `98eec2ca`) because only positional arguments were read. Both halves are required —
-    # a `key=` naming the property AND a non-constant `value=` — so `setdefault(
-    # key="embedding", default=None)` (a placeholder) is still not a store.
-    by_name = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
-    key = by_name.get("key")
-    stored = by_name.get("value") or by_name.get("default")
-    return (isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
-            and isinstance(stored, ast.AST)
-            and not isinstance(stored, ast.Constant))
+    if name in ("update", "dict", "__ior__", "ior"):
+        # `props.update(embedding=…)` / `props.update(**{…})` / `props |= dict(embedding=…)`
+        # / `props.__ior__([("embedding", vec)])` / `operator.ior(props, {…})` — one mapping,
+        # three spellings. `ior` is the FUNCTOR form of `|=`; `setitem` was recognised one
+        # round earlier and `ior` was left behind, which is the same one-verb-over gap.
+        return _mapping_stores_the_vector(call)
+    if name not in ("__setitem__", "setdefault"):
+        # ⛔ ANY OTHER CALLEE — INCLUDING `setattr` AND `operator.setitem`: the helper-argument
+        # spelling (`_set(props, "embedding", vec)`, `setattr(props, "embedding", vec)`,
+        # `operator.setitem(props, "embedding", vec)`) is `(receiver, PROPERTY, value)` with
+        # the property the EXACT constant, and refusing it is the safe direction. A named
+        # branch for those two callees existed and was provably redundant with this one
+        # (measured: removing it changes no verdict), so it is gone rather than left in place
+        # looking load-bearing. A `_read(props, "embedding", default)` is refused too — that
+        # costs a refactor, and refusing costs nothing that this gate exists to protect.
+        #
+        # ⛔ AND IT CARRIES THE MAPPING-OPERAND TEST TOO, for one reason: a `*`-starred
+        # MAPPING operand (`_set(props, *[{"embedding": vec}])`) is the same store as the
+        # keyword and ``**`` spellings that are already refused, and the splicer below only
+        # splices `Starred` LIST/TUPLE literals — so without this the spelling certified a
+        # stop arm. ⛔ ONLY A `Starred` OPERAND, because a PLAIN literal handed to an unknown
+        # callee is a MENTION, not a store (`_audit({"embedding": props.get("embedding")})`
+        # reports, it does not write) — and refusing it costs an honest writer its gate.
+        return (_third_argument_stores_the_vector(call)
+                or any(isinstance(argument, ast.Starred)
+                       and _mapping_operand_stores_the_vector(argument)
+                       for argument in call.args))
+    # The UNBOUND `dict.__setitem__(props, …)` / `dict.setdefault(props, …)` forms need no
+    # argument shift of their own: the receiver lands in argument position 0, so the
+    # two-argument test does not see the property first, and
+    # `_third_argument_stores_the_vector` recognises the shape instead (an earlier shift was
+    # inert once that rule existed — measured, and removed rather than left in place looking
+    # load-bearing).
+    #
+    # ⛔ AND THE `Starred` SPLICE IS NOT DUPLICATED HERE. `props.__setitem__(*["embedding",
+    # vec])` is a two-argument store, and the first version of this fix spliced it in BOTH
+    # helpers — so neither copy could redden on its own (measured, cycle 7) and the pair read
+    # as defence in depth while being unpinned. The splice and the two-argument test live in
+    # `_third_argument_stores_the_vector`, which this branch already falls through to.
+    return (
+        # …and the `**` spelling: `props.__setitem__(**{"embedding": vec})`, plus any of
+        # the helper-argument forms (`props.__setitem__(key="embedding", value=vec)`) —
+        # the receiver form shares the caller vocabulary one branch up, so it must share
+        # the recognition too rather than only the positional test.
+        _mapping_stores_the_vector(call)
+        or _third_argument_stores_the_vector(call))
 
 
 def _rebuild_stores_the_vector(node) -> bool:
@@ -1387,6 +1686,11 @@ def _rebuild_stores_the_vector(node) -> bool:
     """
     import ast
 
+    # ⛔ `value` CAN BE `None` — an AnnAssign with no value (`props["embedding"]: str`) reaches
+    # here, and `_own_walk(None)` raised `AttributeError` out of the destructive gate instead
+    # of answering it. A gate that raises is not a gate.
+    if node is None:
+        return False
     for leaf in _own_walk(node):
         if isinstance(leaf, ast.Dict):
             merges = any(key is None for key in leaf.keys)
@@ -1471,11 +1775,26 @@ def _mapping_argument_stores_the_vector(node) -> bool:
     return False
 
 
-def _dict_stores_the_vector(node) -> bool:
-    """Does this dict LITERAL set the vector to a non-constant value?"""
+def _dict_stores_the_vector(node, *, stop_arm: bool = False) -> bool:
+    """Does this dict LITERAL set the vector — directly, or through a `{**{…}}` merge?
+
+    ⛔ `stop_arm` GATES THE *RECURSION*, NOT THE DIRECT TEST, and that split is load-bearing:
+    the direct form `{"embedding": vec}` is a store whichever arm asks, while the `**` merge
+    is recognised ONLY where a missed store is a false PASS. The two mirror-arm call sites
+    are not `anywhere`-gated (the `AugAssign` dict arm and `update(…)`'s positional args), so
+    an ungated recursion would have WIDENED the destructive gate's acceptance: measured at
+    cycle 2, `if gate(l): props |= {**{"embedding": vec}}` went REFUSED → GATED. A fix may
+    add refusals, never acceptances.
+    """
     import ast
 
     for key, value in zip(node.keys, node.values, strict=False):
+        # ⛔ A `**` OPERAND'S KEY IS `None`, and its VALUE is another mapping:
+        # `{**{"embedding": vec}}` sets the property through a merge the flat loop cannot see
+        # (measured GATED at `8637df0fde`). Recursing keeps the two narrowings.
+        if stop_arm and key is None and isinstance(value, ast.Dict) \
+                and _dict_stores_the_vector(value, stop_arm=stop_arm):
+            return True
         if (isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
                 and not isinstance(value, ast.Constant)):
             return True

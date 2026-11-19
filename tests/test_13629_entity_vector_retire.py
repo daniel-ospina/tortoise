@@ -3817,11 +3817,22 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ …and the CONSTRUCTOR spelling of the mapping the literal forms already refuse.
+        # ⛔ …and the CONSTRUCTOR spelling of the mapping the literal forms already refuse,
+        # in its bare and its `*`-spread form — the spread one is what pins the constructor
+        # rule for an operand nested inside a container (`_rebuild_stores_the_vector` is the
+        # single recogniser: `dict(...)` there delegates to
+        # `_mapping_argument_stores_the_vector`).
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update(dict(embedding=_encode(ev)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(*[dict(embedding=_encode(ev))])
         return None
     _write(props)
 """,
@@ -3870,6 +3881,470 @@ def _upsert_object(props, ev):
         key = "embedding"
         props[key] = _encode(ev)
         return None
+    _write(props)
+""",
+        # ⛔ #13647 round 12 — the store vocabulary this line did not carry:
+        # an unpacked/chained/Starred/mapping TARGET, a mapping mutator's
+        # functional + constructor spellings, and the `for`/`with`/walrus
+        # binding arms. Every row below certified a stop arm that placed
+        # the vector (or, in `accepted`, was falsely refused by an earlier
+        # version of the same fix).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props["embedding"], props["embedding_model"] = _encode(ev), _m()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        embedding, _identity = _encode(ev), _m()
+        return None
+    props["embedding"] = embedding
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        x = props["embedding"] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        [props["embedding"], _m] = [_encode(ev), 1]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        for props["embedding"] in _encode(ev):
+            _log("placed")
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict([("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {**{"embedding": _encode(ev)}}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(**{"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        (props["embedding"], _m), _h = (_encode(ev), 1), 2
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        *props["embedding"], = _vecs(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props["embedding"], = (_encode(ev),)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {"embedding": _encode(ev)}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, "embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, "embedding", value=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, key="embedding", value=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, embedding=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**{**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(**{**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__ior__({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        if (embedding := _encode(ev)):
+            _log(embedding)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _xs = [_m() for props["embedding"] in _vecs(ev)]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        with _ctx() as props["embedding"]:
+            _log("bound")
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        with _ctx() as (props["embedding"], _m):
+            _log("bound")
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        with _ctx() as (*props["embedding"], _m):
+            _log("bound")
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        with _ctx() as ((props["embedding"], _q), _m):
+            _log("bound")
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        with _ctx() as [props["embedding"], _m]:
+            _log("bound")
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        with _ctx() as [(props["embedding"], _q), _m]:
+            _log("bound")
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(*("embedding", _encode(ev)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(*("embedding", _encode(ev), "extra"))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, *["embedding", _encode(ev)])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, *[{"embedding": _encode(ev)}])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__("embedding", *[])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        dict.setdefault(props, "embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(*[{"embedding": _encode(ev)}])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"key": "embedding", "value": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, "embedding", **{"value": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(key="embedding", value=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(*["embedding", _encode(ev)])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.setdefault(*["embedding", _encode(ev)])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        dict.setdefault(props, "embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+async def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        async for props["embedding"] in _vecs(ev):
+            pass
+        return None
+    _write(props)
+""",
+        """
+async def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        async with _ctx() as props["embedding"]:
+            _log("bound")
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update((("embedding", _encode(ev)),))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict([["embedding", _encode(ev)]])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props["embedding"], _x = (None,)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props["embedding"], props["embedding_model"] = _encode(ev), _m()
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        x = props["embedding"] = _encode(ev)
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props.update(**{"embedding": _encode(ev)})
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props |= dict(embedding=_encode(ev))
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props.__setitem__("embedding", _encode(ev))
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props |= {**{"embedding": _encode(ev)}}
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props.update({**{"embedding": _encode(ev)}})
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        for props["embedding"] in _encode(ev):
+            _log("x")
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props = {"embedding": _encode(ev)}
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        _set(props, "embedding", _encode(ev))
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        if (embedding := _encode(ev)):
+            _log(embedding)
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        _xs = [_m() for props["embedding"] in _vecs(ev)]
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        with _ctx() as props["embedding"]:
+            _log("bound")
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        with _ctx() as (props["embedding"], _m):
+            _log("bound")
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        _set(props, **{"embedding": _encode(ev)})
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        operator.ior(props, {"embedding": _encode(ev)})
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props |= {"embedding_model": _m()}
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props.update({"embedding_model": _m()})
     _write(props)
 """,
     )
@@ -3933,6 +4408,158 @@ def _upsert_object(props):
 def _upsert_object(props):
     if not _derived_mirror_required("object"):
         props.setdefault(key="embedding", default=None)
+        return None
+    _write(props)
+""",
+        # ⛔ #13647 round 12 — the store vocabulary this line did not carry:
+        # an unpacked/chained/Starred/mapping TARGET, a mapping mutator's
+        # functional + constructor spellings, and the `for`/`with`/walrus
+        # binding arms. Every row below certified a stop arm that placed
+        # the vector (or, in `accepted`, was falsely refused by an earlier
+        # version of the same fix).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props["embedding"], props["embedding_model"] = None, None
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _read(props, "embedding", None)
+        props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _read(props, key="embedding", default=None)
+        props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        with _ctx() as cur:
+            _log(cur)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _xs = [_m() for _i in _vecs(ev)]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _a, _b = 1, 2
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict([("embedding_model", _m())])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict([("embedding", None)])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev, **kwargs):
+    if not _derived_mirror_required("object"):
+        props.update(**kwargs)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev, **kwargs):
+    if not _derived_mirror_required("object"):
+        _set(props, **kwargs)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props["embedding"]: str
+        props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict([("embedding",)])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"meta": {"embedding": _encode(ev)}}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(embedding=None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__("embedding_model", _m())
+        props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        dict.setdefault(props, "embedding_model", _m())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(embedding=None)
+        props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(*_pair(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, *_pair(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props["embedding"], = (None,)
         return None
     _write(props)
 """,
