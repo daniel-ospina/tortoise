@@ -1737,20 +1737,55 @@ class TestTheDocumentedRunPath:
         # or the fold call hoisted out of the loop, both leave rows uncreated while
         # `written` still reports `len(population)` (`#13745` review round 7,
         # finding 1 — both mutants were green against the shape-only assertion).
-        loop = write_loops[0]
-        assert any(
-            isinstance(node, ast.Call)
-            and "_upsert_point_props" in ast.unparse(node.func)
+        # ⛔ THE LOOP IS THE ONE THAT CONTAINS THE FOLD CALL, not `write_loops[0]`:
+        # a legitimate validation pre-pass is also `for … in zip(…)`, and pointing
+        # the assertions at it reports the fold as "outside the write loop" when it
+        # is inside (`#13745` review round 8, finding 2).
+        fold_loops = [
+            candidate
+            for candidate in write_loops
+            if any(
+                isinstance(node, ast.Call)
+                and "_upsert_point_props" in ast.unparse(node.func)
+                for node in ast.walk(candidate)
+            )
+        ]
+        assert fold_loops, "the fold must be CALLED inside the write loop, not once outside it"
+        loop = fold_loops[0]
+        # ⛔ UNCONDITIONAL = the fold call is not nested under an `if`. A conditional
+        # RAISE is fine — it ends the run, so no row goes quietly missing — which is
+        # why this walks the fold call's ancestors for `If` only and does not ban
+        # `if` outright (that false-red an edit the tool itself prescribes:
+        # capturing `_upsert_point_props`'s return and refusing at the bad row,
+        # `#13745` review round 8, finding 1). A `try` stays allowed when its
+        # handler re-raises, checked above.
+        parents: dict[ast.AST, ast.AST] = {}
+        for node in ast.walk(loop):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        write_call = next(
+            node
             for node in ast.walk(loop)
-        ), "the fold must be CALLED inside the write loop, not once outside it"
+            if isinstance(node, ast.Call) and "_upsert_point_props" in ast.unparse(node.func)
+        )
+        guarded = []
+        node = write_call
+        while node is not loop and node in parents:
+            node = parents[node]
+            if isinstance(node, ast.If):
+                guarded.append(ast.unparse(node)[:120])
+        assert not guarded, (
+            "the fold call must be UNCONDITIONAL within the write loop — a "
+            f"conditional write lets a row go unwritten: {guarded}"
+        )
         skips = [
             ast.unparse(node)[:140]
             for node in ast.walk(loop)
-            if isinstance(node, (ast.If, ast.Continue, ast.Break, ast.Return))
+            if isinstance(node, (ast.Continue, ast.Break, ast.Return))
         ]
         assert not skips, (
-            "the write loop must not skip a row — a conditional/continue/return "
-            f"there leaves rows uncreated while `written` still counts them: {skips}"
+            "the write loop must not skip a row — a continue/break/return there "
+            f"leaves rows uncreated while `written` still counts them: {skips}"
         )
 
     def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
