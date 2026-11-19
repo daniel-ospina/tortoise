@@ -6778,11 +6778,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ THE SAME TREATMENT FOR THE CONTENT-REVIEW FILTER (#13589 review, P3). The pin row
     # added for this clause scopes to the phrase `the content-review queue filter that cite
-    # named`, which is DISCRIMINATING (`:28067` is the file's only `dedup_reviewed IS NULL`),
+    # named`, which is DISCRIMINATING (`:28178` is the file's only `dedup_reviewed IS NULL`),
     # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
-    # scoped line — and D5 IS ONE LINE carrying `:28067` four times, so a row satisfied by any
+    # scoped line — and D5 IS ONE LINE carrying `:28178` six times, so a row satisfied by any
     # of them cannot tell the clause being re-pointed from another occurrence staying put.
-    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28067`" left the
+    # ⛔ `:28067` is NOT the live cite here, and an earlier cut of this comment called it the
+    # file's only `dedup_reviewed IS NULL` (#13746 review, P2). Measured at this head:
+    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28178` (the only hit), while
+    # `sed -n '28067p'` -> `# Tier 1: hash vs existing decisions (pointKind-scoped, N11).`
+    # `:28067` is the MIDDLE waypoint of D5's own re-point chain (`:28019` -> `:28067`, main's
+    # `#13551`; `:28067` -> `:28178`, main's `#13724`), so D5 still prints it four times and it
+    # is still not what the clause says. The live value — and the one the pin row above
+    # asserts — is `:28178`. (`:28141`/`:28142` are the `def` and signature lines, which is a
+    # different statement again; this comment used to conflate all three.)
+    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28178`" left the
     # row GREEN. The sentence is therefore read WHOLE, with its number DERIVED from the
     # source, so both halves are graded: a source move the document did not follow reds, and
     # a document re-point the source did not make reds.
