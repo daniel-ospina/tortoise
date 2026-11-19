@@ -99,7 +99,7 @@ also reported paired, excluding any query whose window was degraded on **either*
 | `#12368` on the **capture prior** (write path) | 274 (26 excluded) | 0.8321 → 0.9891 | **+15.69 pts** | +43 / −0 | < 1e-12 |
 | `#12368` on the **user door** | 265 (35 excluded) | 0.8340 → 0.9887 | **+15.47 pts** | +41 / −0 | < 1e-12 |
 | `#12297` rerank on the user door (armed) | 266 (34 excluded) | 0.9887 → 1.0000 | +1.13 pts | +3 / −0 | 0.25 |
-| **the door itself** — internal path vs the user's surface | 272 (28 excluded) | 0.9890 → 0.9890 | 0.00 pts | +0 / −0 | 1.0 |
+| **the door itself** — internal path vs the user's surface | 272 (29 excluded) | 0.9890 → 0.9890 | 0.00 pts | +0 / −0 | 1.0 |
 
 The last row is a finding, not a null: **on this corpus the user surface and the internal candidate
 path reach the canonical identically** (0 gains, 0 losses across 272 clean queries), so a
