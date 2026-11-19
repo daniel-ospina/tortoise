@@ -1531,6 +1531,28 @@ def _mapping_literal_stores_the_vector(node) -> bool:
     if isinstance(node, ast.IfExp):
         return (_mapping_literal_stores_the_vector(node.body)
                 or _mapping_literal_stores_the_vector(node.orelse))
+    # ⛔ AND A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE SAME MAPPING (`#13788` F4):
+    # `[{"embedding": vec}][0]` is the literal itself, one constant index in, and it CERTIFIED
+    # the ASSIGN arm (`props = [{"embedding": vec}][0]`, runtime-checked to leave the key)
+    # beside `props = {"embedding": vec}` refused. Answered HERE rather than in
+    # `_rebuild_stores_the_vector`'s walk so there is ONE rule for "is this expression a
+    # mapping that stores" — the same reason the `.copy()` arm above lives here. The index
+    # must be a CONSTANT and the container a List/Tuple LITERAL: an index that is a name or
+    # an expression is the stated data-flow residual, not a wrapper.
+    # ⛔ AND THE CONTAINER MAY BE A WRAPPER OF THE LITERAL, not the literal itself
+    # (`#13788`, measured at `40db94f1`): `[{"embedding": vec}][0:][0]` and
+    # `list([{"embedding": vec}])[0]` CERTIFIED while `[{"embedding": vec}][0]` was
+    # refused — the container arms and the index arm were added in the same round and only
+    # met when the literal was BARE. `_container_literal` answers the transparent
+    # container wrappers (a FULL slice, `list(…)`/`tuple(…)`) and nothing else.
+    if isinstance(node, ast.Subscript) and (index := _constant_index(node.slice)) is not None:
+        container = _container_literal(node.value)
+        if container is None:
+            return False
+        elements = container.elts
+        if -len(elements) <= index < len(elements):
+            return _mapping_literal_stores_the_vector(elements[index])
+        return False
     return False
 
 
@@ -1555,6 +1577,12 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     if isinstance(node, ast.List | ast.Tuple):
         return (_pairs_store_the_vector(node)
                 or any(_mapping_operand_stores_the_vector(element) for element in node.elts))
+    # ⛔ A MAPPING-BUILDING CALL NEEDS NO ARM HERE, and that is MEASURED rather than assumed
+    # (`#13788` F6): `props.update(dict.fromkeys(["embedding"], vec))` and its siblings are
+    # answered by `_rebuild_stores_the_vector`, which `_stores_embedding` asks for every
+    # operand of every call — a route added here changed no verdict on any fixture, so it is
+    # not kept looking load-bearing (the same standard as the constructor arm removed from
+    # `_pairs_operand_stores_the_vector`).
     # ⛔ AND THE PAIRS LITERAL ONE WRAPPER IN IS THE SAME OPERAND. This helper is what
     # `update(...)` asks; `_pairs_operand_stores_the_vector` is what the `|=` arm asks — and
     # keeping the two apart meant `props.update([("embedding", vec)])` was refused while
@@ -1577,47 +1605,17 @@ def _mapping_operand_stores_the_vector(node) -> bool:
 #: would re-open the hole at the next spelling nobody thought of. The `endswith("Dict")`
 #: suffix still carries the CamelCase `collections` family (`OrderedDict`, `UserDict`, and a
 #: project's own `*Dict` subclass) — the lowercase/other-named ones have to be named here.
-#: ⛔ AND `fromkeys` IS ONE (`#13788`, measured at this head): it builds a mapping too, from
-#: `(KEYS, VALUE)` rather than a dict operand — see `_fromkeys_stores_the_vector` for why the
-#: list was the hole and not the operand rule.
-_MAPPING_CONSTRUCTORS = ("dict", "defaultdict", "Counter", "ChainMap", "fromkeys")
+#: ⛔ `MappingProxyType` IS THE SPELLING THE LIST MISSED (`#13788` F6, measured at
+#: `78cbe4da`): it is a mapping-like merge source (`|=` / `update()` both merge it), and a
+#: proxy around a literal this check CAN read — `props |= types.MappingProxyType({"embedding":
+#: vec})` CERTIFIED a stop arm that stores while the bare literal was refused. `fromkeys`
+#: needs its own arm below (its operands are a KEY SEQUENCE and one value, not a mapping).
+_MAPPING_CONSTRUCTORS = ("dict", "defaultdict", "Counter", "ChainMap", "MappingProxyType")
 
 
 def _is_mapping_constructor(name: str) -> bool:
     """Does this callee name build a MAPPING — a merge source, not a pairs iterable alone?"""
     return name.endswith("Dict") or name in _MAPPING_CONSTRUCTORS
-
-
-def _fromkeys_stores_the_vector(call) -> bool:
-    """Does this `fromkeys` call place the vector — `dict.fromkeys(["embedding"], vec)`?
-
-    ⛔ IT BUILDS A MAPPING AND IT CERTIFIED A STOP ARM (measured at this head, `#13788`):
-    `props |= dict.fromkeys(["embedding"], _encode(ev))` and its `props.update(…)` twin
-    both left `REFUSE_WRITE_STILL_EMITS` lifted, while `props |= {"embedding": …}` and
-    `props.update([("embedding", …)])` were refused. The INCLUDE list named the
-    constructors that take DICT operands, and `fromkeys` takes `(KEYS, VALUE)` — so the
-    operand rule saw no mapping operand and the pairs rule saw no pair, and nothing asked.
-    Same argument that put `Counter`/`ChainMap` in the list: the question is "does this call
-    build a MAPPING", and this one builds it from a literal this check can read.
-
-    ⛔ THE FIRST OPERAND IS THE **KEYS**, so it is read as an ELEMENT, not as a value: a bare
-    string is NOT the key — `dict.fromkeys("embedding", vec)` yields the keys `"e"`, `"m"`,
-    … and places nothing named `embedding` — so only a LIST/TUPLE/SET literal that names the
-    property exactly counts. The value must be a NON-CONSTANT operand:
-    `dict.fromkeys(["embedding"])` defaults it to `None`, the pre-guard reset, which places
-    nothing.
-    """
-    import ast
-
-    keys = call.args[0] if call.args else None
-    if not isinstance(keys, ast.List | ast.Tuple | ast.Set):
-        return False
-    if not any(isinstance(element, ast.Constant) and element.value == EMBEDDING_PROPERTY
-               for element in keys.elts):
-        return False
-    value = call.args[1] if len(call.args) > 1 else next(
-        (keyword.value for keyword in call.keywords if keyword.arg == "value"), None)
-    return value is not None and not isinstance(value, ast.Constant)
 
 
 def _constructor_stores_the_vector(call) -> bool:
@@ -1644,15 +1642,27 @@ def _constructor_stores_the_vector(call) -> bool:
     `REFUSE_WRITE_STILL_EMITS` on a writer that stores exactly when the gate says stop.
 """
     import ast
-    name = _callee_name(call)
-    # ⛔ `fromkeys` IS A CONSTRUCTOR WITH ITS OWN OPERAND SHAPE (`#13788`, measured at this
-    # head): `(KEYS, VALUE)`, so the operand/pairs rules below cannot see the key it builds.
-    # Asked here rather than at each site, because this helper is the ONE recognition of the
-    # constructor spelling for the `|=`/assign/`update(…)`/hand-off positions alike.
-    if name == "fromkeys":
-        return _fromkeys_stores_the_vector(call)
-    if not _is_mapping_constructor(name):
-        return False
+    if not _is_mapping_constructor(_callee_name(call)):
+        # ⛔ `dict.fromkeys(["embedding"], vec)` IS A MAPPING THE SAME MERGES TAKE (`#13788` F6,
+        # measured at `78cbe4da`): `dict.fromkeys` returns a real dict, so `props |=` /
+        # `update()` / a rebuild all place the vector — and it is CERTIFIED because its
+        # operands are a KEY SEQUENCE and ONE value, not a mapping the loops below can read.
+        # Recognised narrowly, like every other arm here: the callee must be `fromkeys`, the
+        # first positional must be a list/tuple/SET literal containing the EXACT property name,
+        # and the value (the second positional, or the implied `None`) must be non-constant.
+        # A computed key sequence is the stated residual (the same data-flow limit the
+        # mutator docstring names), and `fromkeys(["embedding"])` alone places `None`.
+        # ⛔ `Set` IS THE THIRD LITERAL FORM, not a widening: `dict.fromkeys({"embedding"},
+        # vec)` builds the same mapping at runtime, and this arm is stop-arm only.
+        if _callee_name(call) != "fromkeys" or not call.args:
+            return False
+        keys = call.args[0]
+        named = (isinstance(keys, ast.List | ast.Tuple | ast.Set)
+                 and any(isinstance(element, ast.Constant)
+                         and element.value == EMBEDDING_PROPERTY
+                         for element in keys.elts))
+        return (named and len(call.args) >= 2
+                and not isinstance(call.args[1], ast.Constant))
     return (_mapping_argument_stores_the_vector(call)
             # …and EACH OPERAND BY THE *OPERAND* RULE, not the ARGUMENT rule (`#13788` F1,
             # measured at `10184e6d`). The argument rule's dict-literal arm calls
@@ -1690,10 +1700,14 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     (`zip(("embedding",), (vec,))`, `map(...)`, a generator expression) is the stated residual
     — extracting a pair out of a call result is data flow this module does not do, and it is
     disclosed here rather than left to be rediscovered. ⛔ THE SAME RESIDUAL COVERS A MAPPING
-    BUILT BY A CALL THAT IS NOT A CONSTRUCTOR: `dict.fromkeys(["embedding"], vec)` and
-    `dict(zip(keys, values))` place the vector and are CERTIFIED (measured at `716991951e`),
-    because answering them needs the call's RESULT — a key list read through a literal match,
-    or a zip of names — which is the data flow stated above, not a wrapper or an operand.
+    BUILT BY A CALL THAT IS NOT A RECOGNISED BUILDER: `dict(zip(keys, values))` places the
+    vector and is CERTIFIED (measured at `716991951e`), because answering it needs the call's
+    RESULT — a zip of names — which is the data flow stated above, not a wrapper or an
+    operand. ⛔ `dict.fromkeys(["embedding"], vec)` USED TO BE IN THIS RESIDUAL AND IS NOT
+    ANY MORE (`#13788` F6, measured at `78cbe4da`): its operands are a KEY SEQUENCE and one
+    value, both statically readable, so `_constructor_stores_the_vector` recognises it when
+    the key list is a literal containing the EXACT property name; a COMPUTED key sequence
+    (`dict.fromkeys(_keys(), vec)`) remains a residual, and the fixture pins it.
 
     ⛔ AND IT IS NOT THE MAPPING RULE — `{"embedding": vec}` has no pair in it, so this
     helper answers False for the mapping spelling BY DESIGN. Every caller that can be handed
@@ -1757,6 +1771,16 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         name = _callee_name(node)
         if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
             return _operand_stores_the_vector(node.args[0])
+        # ⛔ THE ITEMS VIEW IS THE SAME PAIRS ITERABLE (`#13788`, measured at `40db94f1`):
+        # `update({"embedding": vec}.items())` and the comprehension over it
+        # (`{k: v for k, v in {"embedding": vec}.items()}`) both place the key and both
+        # CERTIFIED, while `update({"embedding": vec})` was refused. The mapping under
+        # `.items()` is a LITERAL the check can read (`_mapping_operand_stores_the_vector`
+        # decides it, wrappers included). `.keys()`/`.values()` place no vector and are not
+        # answered here.
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "items"
+                and not node.args and not node.keywords):
+            return _mapping_operand_stores_the_vector(node.func.value)
         copied = _transparent_copy_operand(node)
         if copied is not None:
             # ⛔ BOTH SPELLINGS: the value under `.copy()` may be the PAIRS literal or the
@@ -1779,6 +1803,33 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         return False                  # `zip(…)`, `map(…)`, a builder: residual, stated above
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
         return _operand_stores_the_vector(node.value)
+    # ⛔ A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE SAME OPERAND (`#13788` F4, measured
+    # at this head). The slice arm above follows `[pairs][:]` but not `[pairs][0]`, so
+    # `props.update([[("embedding", vec)]][0])`, `props |= [{…"embedding"…}][0]` and the
+    # constructor spelling `props |= dict([{…}][0])` CERTIFIED a stop arm that stores — 68
+    # measured spellings in the sweep this was found with, every one runtime-checked to leave
+    # `{"embedding": VEC}` in `props`. The index is a CONSTANT into a LITERAL, so this is
+    # static: no name to follow, no computed key, no call result.
+    # ⛔ NARROW ON PURPOSE, and the narrowing is what keeps it from being a second rule: an
+    # index that is a NAME / an expression / negative-out-of-range is NOT evaluated (that is
+    # the stated data-flow residual), and the container must be a List/Tuple LITERAL, so
+    # `pairs[0]` bound elsewhere still answers False. STOP-ARM REACH ONLY, like every other
+    # arm in this helper: the three stop-arm call sites are the mutator rule, the
+    # `anywhere`-gated `|=` arm and the rebuild rule, and no mirror-arm fixture changes
+    # verdict (measured — `tests/test_13629_entity_vector_retire.py` is green, and that suite
+    # carries the mirror-arm pins that a widening would redden).
+    # ⛔ AND THE CONTAINER MAY BE A WRAPPER OF THE LITERAL (`#13788`, measured at
+    # `40db94f1`) — the same gap the mapping rule above carries: `[pairs][0:][0]` and
+    # `list([pairs])[0]` CERTIFIED beside `[pairs][0]` refused. One helper answers both
+    # rules, so the two cannot answer the same spelling differently.
+    if isinstance(node, ast.Subscript) and (index := _constant_index(node.slice)) is not None:
+        container = _container_literal(node.value)
+        if container is None:
+            return False
+        elements = container.elts
+        if -len(elements) <= index < len(elements):
+            return _operand_stores_the_vector(elements[index])
+        return False
     if isinstance(node, ast.IfExp):
         return (_operand_stores_the_vector(node.body)
                 or _operand_stores_the_vector(node.orelse))
@@ -1805,6 +1856,83 @@ def _operand_stores_the_vector(node) -> bool:
     """
     return (_mapping_operand_stores_the_vector(node)
             or _pairs_operand_stores_the_vector(node))
+
+
+def _constant_index(node) -> int | None:
+    """The integer an index expression IS — `0`, `-1`, `+2` — or `None` if it is not constant.
+
+    ⛔ ONE ANSWER FOR BOTH OPERAND RULES (`#13788` F4). A constant index into a container
+    LITERAL is the element itself (`[{"embedding": vec}][0]`), so both rules follow it; the
+    spelling has to be read the same way in both or the fix is half a rule again — and a
+    NEGATIVE index is `UnaryOp(USub, Constant(1))`, not `Constant(-1)`, which is exactly the
+    "one constant spelling over" shape this series keeps meeting (measured: `[{"embedding":
+    vec}][-1]` stayed CERTIFIED while `[…][0]` was refused).
+
+    Deliberately CONSTANT-ONLY: an index that is a name or an expression is not evaluated.
+    """
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd)
+            and isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, int)):
+        return (-node.operand.value if isinstance(node.op, ast.USub)
+                else node.operand.value)
+    return None
+
+
+def _is_full_slice(node) -> bool:
+    """Does this subscript index select the WHOLE container — `[:]`, `[0:]`, `[::1]`?
+
+    ⛔ `[0:]` IS A FULL SLICE AND IT IS SPELLED AS A LOWER BOUND (`#13788`, measured at
+    `40db94f1`): `[{"embedding": vec}][0:][0]` still CERTIFIED after the bare `[:]` form was
+    answered, because `0:` is `Slice(lower=Constant(0))`, not `Slice()`. Only a lower bound
+    of `0` qualifies — any other bound, or a step other than `1`, changes WHICH element the
+    outer index selects, so resolving it would answer about a different element.
+    """
+    import ast
+
+    if not isinstance(node, ast.Slice):
+        return False
+
+    def _is_zero(expr) -> bool:
+        return expr is None or (isinstance(expr, ast.Constant) and expr.value == 0)
+
+    def _is_one(expr) -> bool:
+        return expr is None or (isinstance(expr, ast.Constant) and expr.value == 1)
+
+    return _is_zero(node.lower) and node.upper is None and _is_one(node.step)
+
+
+def _container_literal(node):
+    """The List/Tuple LITERAL this expression IS behind a transparent container wrapper.
+
+    ⛔ ONE ANSWER FOR BOTH OPERAND RULES (`#13788`, measured at `40db94f1`). The container
+    arms (`[<mapping>][0]`, `update([<pairs>][0])`) required the literal to be BARE, so the
+    same element reached through a wrapper that builds or returns the same container
+    CERTIFIED while its unwrapped spelling was refused:
+
+        props.update([{"embedding": vec}][0:][0])      CERTIFIED
+        props.update(list([{"embedding": vec}])[0])    CERTIFIED
+
+    Both are runtime-checked to leave `{"embedding": VEC}` in `props`.
+
+    ⛔ NARROW ON PURPOSE: only a FULL slice (`[:]` — a lower/upper/step changes WHICH element
+    the index selects, so resolving it would mis-answer, and a partial slice is not a
+    wrapper) and `list(…)`/`tuple(…)` over a single positional argument. A container bound to
+    a NAME stays the stated data-flow residual: `pairs[0]` still answers False.
+    """
+    import ast
+
+    if isinstance(node, ast.List | ast.Tuple):
+        return node
+    if isinstance(node, ast.Subscript) and _is_full_slice(node.slice):
+        return _container_literal(node.value)
+    if (isinstance(node, ast.Call) and not node.keywords and len(node.args) == 1
+            and _callee_name(node) in ("list", "tuple")):
+        return _container_literal(node.args[0])
+    return None
 
 
 def _pairs_store_the_vector(node) -> bool:
@@ -1922,9 +2050,6 @@ def _third_argument_stores_the_vector(call) -> bool:
     # siblings above each have one, and this one did not, so the same call in this spelling
     # certified a stop arm that places the vector.
     # ⛔ AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
-    # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
-    # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows. The
-    # AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
     # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
     # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows.
     # ⛔ AND THE NAMED SCANS ABOVE ARE NO LONGER A DIFFERENT QUESTION (`#13788` F5): a wrapper
@@ -2173,12 +2298,19 @@ def _rebuild_stores_the_vector(node) -> bool:
             # ⛔ AND THE UNION'S COMPREHENSION OPERAND IS THE SAME MERGE (measured at
             # `45b5f88a`): `props = props | {"embedding": vec for …}` places exactly what
             # `props | {"embedding": vec}` places, and this arm accepted only the literal.
-            if any((isinstance(side, ast.Dict) and _dict_stores_the_vector(side))
-                   or (isinstance(side, ast.DictComp)
-                       and _pairs_operand_stores_the_vector(side))
+            # ⛔ AND A UNION OPERAND IS ANSWERED BY THE OPERAND RULE, NOT BY TWO TYPE TESTS:
+            # the `**`-in-a-display spelling one union over (`{**{…}} | {}`) and the mapping
+            # WRAPPERS (`.copy()`, `if…else`) in the same position were certified while
+            # their bare spellings were refused — the same half-a-rule shape this series
+            # keeps closing. `_mapping_operand_stores_the_vector` carries the stop-mode Dict
+            # recursion, the comprehension, the `Starred`/container arms and both wrappers;
+            # a non-mapping operand (`a | b` for sets, a constructor) still answers False
+            # here, so no honest union is swept in.
+            if any(_mapping_operand_stores_the_vector(side)
                    for side in (leaf.left, leaf.right)):
                 return True
-        elif isinstance(leaf, ast.Call) and _is_mapping_constructor(_callee_name(leaf)):
+        elif isinstance(leaf, ast.Call) and (_is_mapping_constructor(_callee_name(leaf))
+                                            or _callee_name(leaf) == "fromkeys"):
             # ONE recognition, not two: the CONSTRUCTOR spelling is answered by
             # `_constructor_stores_the_vector` (both operand forms, both call sites), and a
             # second implementation of the same rule is how two answers to one question drift
