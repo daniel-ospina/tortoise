@@ -3318,6 +3318,11 @@ _NESTED_QUOTED_APPROVAL_WITHOUT_AN_ID = (
 # reader, so it is ACCEPTED. Closing it silently would make the residual list over-claim.
 _HTML_LABEL_IS_NOT_A_RECORD = (
     "> <b>Owner approval of the exact changes</b> — given in-session.")
+# ⛔ A LABEL SPLIT ACROSS TWO ADJACENT EMPHASIS RUNS IS A DECLARED FAIL-OPEN (review round
+# 8): it renders as one bold label to a reader but is not ONE run to this reader, so it is
+# ACCEPTED. Driven so the disclosure is measured rather than claimed.
+_APPROVAL_LABEL_SPLIT_ACROSS_RUNS = (
+    "> **Owner** **approval of the exact changes** — given in-session, no comment cited.")
 # ⛔ THE POINTER'S FORWARD FORM NAMING A CONTAINER (#13669 cycle 5): ``its own issue
 # tracker`` is a container, not a home, and is REFUSED — the stop-list binds only the
 # reversed form, so this cost is driven as a fixture rather than left to be discovered.
@@ -3344,6 +3349,11 @@ _APPROVAL_RECORD_AS_A_LATER_PLUS_BULLET = (
 _APPROVAL_RECORD_BEHIND_A_HEADING_AFTER_AN_ITEM = (
     "> - Retired the legacy predicate in §4.5.\n"
     "> ### **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ AND A DEEPER HEADING (review round 8): `#{1,6}` is the declared class and only `###`
+# was driven — narrowing both heading classes to `#{1,3}` left the whole suite GREEN.
+_APPROVAL_RECORD_BEHIND_A_H4_HEADING_AFTER_AN_ITEM = (
+    "> - Retired the legacy predicate in §4.5.\n"
+    "> #### **Owner approval of the exact changes** — given in-session, no comment cited.")
 
 
 # ⛔ THE BLOCK-LEVEL MARKERS THAT START A PARAGRAPH (review round 5):
@@ -3514,10 +3524,10 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     true prose, stated rather than glossed: the test reads the NEWEST block alone, which
     passes, and a lane sweeping the corpus should expect these two.
     ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT, all named here so the next lane meets
-    them as known rather than as a bug — and **three are fail-OPEN**, which is the
-    direction that matters: an unread record, an unread HTML label and an id borrowed
-    from a contrastive parenthetical all PASS, so this arm reduces the vacuity #13669
-    measured rather than ending it:
+    them as known rather than as a bug — and **four are fail-OPEN**, which is the
+    direction that matters: an unread record, an unread HTML label, a label split across
+    two runs and an id borrowed from a contrastive parenthetical all PASS, so this arm
+    reduces the vacuity #13669 measured rather than ending it:
       - an UNBOLDED, or MID-PARAGRAPH, record is OUT OF SCOPE and therefore **PASSES**:
         ``Owner approval: comment `NNN`.`` in plain prose, and ``The change landed.
         **Owner approval …**``, are not read as records — emphasis is the corpus's only
@@ -3538,6 +3548,11 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         emphasis RUN to this reader and is therefore **not read as a record** (fail-open,
         out of scope: the corpus writes ``**`` exclusively — no ``<b>`` or ``<strong>``
         appears in the file);
+      - a label NOT CONTAINED IN A SINGLE EMPHASIS RUN is therefore **PASSES** (fail-open,
+        out of scope): ``**Owner** **approval of the exact changes**``, ``**Owner
+        <b>approval</b> …**`` and ``**[Owner approval …](url)**`` render as the label but
+        are not ONE run to this reader, so ``_opening_approval_label`` returns ``None``;
+        driven by ``_APPROVAL_LABEL_SPLIT_ACROSS_RUNS`` so the shape is measured;
       - an id anywhere in the label's SENTENCE still satisfies it and therefore **PASSES**,
         so a contrastive parenthetical naming another id (v3.37's shape) is accepted, and
         telling WHICH of two ids records the approval needs the comment's own text — the
@@ -3887,6 +3902,7 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                             _APPROVAL_RECORD_AS_A_LATER_ASTERISK_BULLET,
                             _APPROVAL_RECORD_AS_A_LATER_PLUS_BULLET,
                             _APPROVAL_RECORD_BEHIND_A_HEADING_AFTER_AN_ITEM,
+                            _APPROVAL_RECORD_BEHIND_A_H4_HEADING_AFTER_AN_ITEM,
                             _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS,
                             _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS,
                             _APPROVAL_RECORD_BEHIND_A_HEADING,
@@ -3921,6 +3937,9 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # …and the declared HTML fail-OPEN is ACCEPTED, which is what the residual list says
     # (#13669 cycle 5): an HTML-bold label is not an emphasis run to this reader.
     _refuse_an_approval_record_with_no_resolvable_home(_HTML_LABEL_IS_NOT_A_RECORD)
+    # …and the label split across two emphasis runs is the other declared fail-OPEN, so it
+    # is ACCEPTED (review round 8).
+    _refuse_an_approval_record_with_no_resolvable_home(_APPROVAL_LABEL_SPLIT_ACROSS_RUNS)
     with pytest.raises(AssertionError) as nested_without_an_id:
         _refuse_an_approval_record_with_no_resolvable_home(
             _NESTED_QUOTED_APPROVAL_WITHOUT_AN_ID)
