@@ -6595,9 +6595,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15264` (still inside it). The END was re-derived
         # at the `#13486` head -- `return OrgInfoResponse(` -> `:15303`, so END = `:15302` (+77 at this START).
         #
-        # ⛔ RE-DERIVED AGAIN at THIS head (`1b1d108ca4`), where the range is `:15261-15338` — the
-        # START was still reading `15225` (a `main`-era value) while only the END had been moved to
-        # `15338`, so the row was half-re-derived and landed on `warnings = list(...)`:
+        # ⛔ RE-DERIVED AGAIN at the `1b1d108ca4` head (a `main` commit), range `:15261-15338` — the
+        # START still read `15225` (a `main`-era value) while only the END had moved to `15338`, so
+        # the row was half-re-derived and `:15225` opened on a comment line, not the span head:
         # `grep -n 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15261`,
         # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15290` (inside the span),
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15300` (still inside it), and the END is
