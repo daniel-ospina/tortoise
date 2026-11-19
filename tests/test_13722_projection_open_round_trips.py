@@ -33,14 +33,28 @@ THE THREE THINGS THIS FILE PINS, each a way the fix could be defeated:
    a deploy.
 
 HOW DISCRIMINATING A REVERT IS (measured, so a later reader inherits the real
-number): reverting the probe to `count(n)` reddens **3 of these 7 arms** on a
+number): reverting the probe to `count(n)` reddens **3 of these 8 arms** on a
 lane with a store — "one query, no aggregate", the open's wire-count filter,
-and the scaling/control arm — and **1 of 7** where those two live arms skip.
-(Measured at this head: `3 failed, 4 passed` with the probe reverted, and
-`1 failed, 6 passed` with the aggregate filter narrowed back to
-`GRAPH.QUERY`.)
+and the scaling/control arm — and **1 of 6** where those two live arms skip
+(the cite pin is not one of them).
+(Measured at this head. STORE lane — all eight arms run: `3 failed, 5 passed`
+with the probe reverted, `1 failed, 7 passed` with the aggregate filter
+narrowed back to `GRAPH.QUERY`, and `8 passed` as it stands. NO-STORE lane —
+six arms run, the two live ones skip: `1 failed, 5 passed, 2 skipped` with the
+probe reverted and `6 passed, 2 skipped` as it stands. Each figure names the
+lane it was taken on: a reader who re-runs the documented command without a
+store must get the SECOND pair, and treating the store lane's `8 passed` as
+this file's no-store result is how "1 of 7" outlived the arm it counted.)
 
-Run (the first five need no database; the live ones need the docker lane)::
+A FOURTH, CHEAPER PIN rides along because this branch's own insert is what moved it: the
+fix adds 30 lines at ``tortoise/projection/__init__.py:12099``, so EVERY ``file.py:NNNN``
+cite below that point shifts by +30 — including the one the #7949 capstone probe's
+``_a4_pointkind`` docstring quotes to explain the blank-``pointKind`` fold. A cite is pinned
+to its CONTENT, never to a delta someone re-added (#12184's false-correction lesson), so the
+row below re-derives the line from the fragment it quotes and reds if the evidence points
+somewhere else.
+
+Run (the first five and the cite pin need no database; the two live arms need the docker lane)::
 
     TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \\
         tests/test_13722_projection_open_round_trips.py -q
@@ -49,6 +63,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -420,7 +435,10 @@ def _interleaved_medians(*fns, samples: int = 11) -> tuple[float, ...]:
 
     timings: list[list[float]] = [[] for _ in fns]
     for _ in range(samples):
-        for fn, acc in zip(fns, timings):
+        # `timings` is built from `fns` on the line above, so the two are equal
+        # length by construction — `strict=True` asserts that rather than
+        # silently truncating to the shorter one if a future edit breaks it.
+        for fn, acc in zip(fns, timings, strict=True):
             t0 = time.perf_counter()
             fn()
             acc.append((time.perf_counter() - t0) * 1000.0)
@@ -486,3 +504,51 @@ def test_the_open_probe_is_flat_in_a_large_graph(_live_uri):
         f"{_CONTROL_RATIO}x separation). Together those two numbers are the "
         "defect this file exists for: if the probe is as expensive as the "
         "aggregate, it IS the aggregate.")
+
+
+# ── 6: the evidence cite this branch's own insert moved ────────────────────
+#
+# The fix inserts 30 lines at `tortoise/projection/__init__.py:12099`, so every
+# `file.py:NNNN` cite BELOW it shifts by +30. The #7949 capstone probe quotes the
+# blank-`pointKind` synthesis block to justify `A4`'s third reported state, and a
+# cite that is 30 lines off reads exactly like a correct one — the reader opens the
+# line, sees an unrelated statement, and silently discounts the passage.
+#
+# Pinned to CONTENT, not to a delta: the row derives the cited line from the
+# fragment the probe actually quotes, and reds if that fragment is not there.
+# (#12184: a re-derivation that re-applied its own delta produced a FALSE cite, and
+# a `⚠️ CORRECTED` marker records that text changed — never that it changed right.)
+
+_ROOT = Path(__file__).resolve().parent.parent
+_CAPSTONE_PROBE = _ROOT / "docs/evidence/7949-capstone/probes/capstone_measure.py"
+_PROJECTION_INIT = _ROOT / "tortoise/projection/__init__.py"
+_CITE_RE = re.compile(r"tortoise/projection/__init__\.py:(\d+)(?:-(\d+))?")
+_POINTKIND_FRAGMENT = "# Ensure pointKind is present"
+
+
+def test_the_capstone_probe_cites_the_pointkind_block_where_it_lives():
+    """The evidence cite this branch's +30-line insert moved must land on its content."""
+    quoted = [ln for ln in _CAPSTONE_PROBE.read_text(encoding="utf-8").splitlines()
+              if _POINTKIND_FRAGMENT in ln and _CITE_RE.search(ln)]
+    assert len(quoted) == 1, (
+        "expected exactly one probe line quoting `"
+        f"{_POINTKIND_FRAGMENT}` beside a `tortoise/projection/__init__.py:NNNN` cite; "
+        f"found {len(quoted)}: {quoted!r}. Keep the cite on the line that quotes the "
+        "fragment so it stays re-derivable.")
+
+    m = _CITE_RE.search(quoted[0])
+    start = int(m.group(1))
+    end = int(m.group(2) or start)
+    src = _PROJECTION_INIT.read_text(encoding="utf-8").splitlines()
+
+    assert 1 <= start <= end <= len(src), (
+        f"the probe cites projection/__init__.py:{start}-{end}, outside the file "
+        f"({len(src)} lines)")
+    assert _POINTKIND_FRAGMENT in src[start - 1], (
+        f"the probe cites projection/__init__.py:{start} for `{_POINTKIND_FRAGMENT}`, but "
+        f"that line is {src[start - 1].strip()!r} — the cite was not re-derived after a "
+        "shift. Search the fragment and re-point the number.")
+    block = "\n".join(src[start - 1:end])
+    assert 'clean["pointKind"] = ""' in block, (
+        f"the probe's cited range {start}-{end} must cover the blank-`pointKind` "
+        f"assignment it quotes; it does not:\n{block}")
