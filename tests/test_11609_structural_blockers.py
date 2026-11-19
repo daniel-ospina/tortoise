@@ -579,10 +579,15 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                 # `ast.parse("*b, A, *c = 1, object, 2")` SUCCEEDS — only `compile()` rejects
                 # two stars ("multiple starred expressions in assignment") — and this reader
                 # walks `ast.parse`, so a source file it really sees can reach this branch.
-                # Refusing to pair makes NO claim: the earlier binding stands and the call is
-                # still REPORTED. Pairing instead places `A` beside `object` and answers `[]`,
-                # which is a LOST site in the false-PASS direction (AGENTS.md A/B). Pinned by
-                # the two-star row at the end of the starred block below.
+                # Refusing to pair makes NO claim, and it is never WORSE than pairing. At MODULE
+                # scope the import binding stands and the call is REPORTED (that is the pinned
+                # row). Inside a block the target name is recorded as a block-local, so
+                # `_resolve` answers the bound-but-unvalued `{SHADOWED}` default (`#13657`) and
+                # the site is dropped — pairing changes nothing there, and pairing at module
+                # scope LOSES the site, which is why the guard is the strictly better branch.
+                # Pairing places `A` beside `object` and answers `[]`: a LOST site in the
+                # false-PASS direction (AGENTS.md A/B). Pinned by the two-star row at the end of
+                # the starred block below.
                 and len(stars) <= 1
                 and not any(isinstance(e, ast.Starred) for e in value_elts)
                 and len(value_elts) >= len(target.elts) - len(stars)
