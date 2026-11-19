@@ -509,102 +509,107 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     `docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md` stated, in three
     cells, that `tools/hosted_api_cite_census.py --check` "exits 0" / "reports every
     stated figure `== measured`" / "reports both figures `== measured`". MEASURED at
-    that head the verb exits **1** with twelve `STALE` lines — and it exits 1 on
-    `origin/main` too (`git diff --name-only origin/main...HEAD -- tortoise/` is
-    empty, so the two modules whose notes it grades are identical to `main`'s), which
-    means no merge of that branch could have made the claim true.
+    that head the verb exits **1** with twelve `STALE` lines, which means no merge of
+    that branch could have made the claim true.
 
     ⛔ AND NOTHING READ THOSE CELLS. This file resolves POINTERS (a `file:line` that
     must land on text), and the D5 arms in `test_7949_capstone_measure.py` are scoped
     to D5's own markdown line — so a FALSE PASS survived several review rounds inside
     the document whose subject is stale claims.
 
-    This is the same policy this file already enforces, one layer up: the recorded
-    convention is that assertions are made **by NAME**, never by a number that rots
-    (`docs/architecture/S2-DECISION-SEAM.md`), and an exit code a document does not
-    measure is that class of number. Because the census's own state is `main`'s drift
-    rather than the branch's, the honest text names the COMMAND and the head it must
-    be read at. So this arm asserts (a) the green literals are GONE, (b) the command
-    is still discoverable (deleting a false green must send the reader to the verb,
-    not away from it), and (c) the inherited-red attribution is still stated, so the
-    next reader is sent to `--refresh`/`main` and not asked to "fix" `main`'s census
-    inside a docs PR.
+    ⛔ THEN THE FIRST FIX FROZE THE OTHER SIGN OF THE SAME COIN (#13750 review, cycle 1,
+    MEASURED). That repair pinned the verdict it had measured — "`--check` is RED" and
+    "`git diff --name-only origin/main...HEAD -- tortoise/` is empty" — as LITERALS, so
+    when this PR's own `--refresh` made the verb exit 0 and put two comment-only
+    `tortoise/` modules into the diff, the guard went GREEN over a document asserting a
+    red and an empty set the tree no longer showed. A guard that pins a MEASUREMENT has
+    to READ the measurement; a frozen sign is the same defect as a frozen number.
 
-    NON-VACUITY, MEASURED: on the pre-fix document **leg (a) reds**
-    (`AssertionError: 05-verify.md asserts '--check` exits 0'`). Legs (b) and (c)
-    already HELD there — the command string and the inherited-red attribution were
-    both present while the false green sat beside them — so they are REGRESSION
-    legs: they keep the reader pointed at the verb and at the inherited-red
-    attribution after the deletion, and an edit that drops either reds here.
+    So the arms come in three kinds, and the difference is the point:
+      (a) AGREEMENT — the verdict the document states is compared against `_sweep`, the
+          census module's OWN checker, run in-process here. A green claim reds on a
+          stale tree and a red claim reds on a current one, so neither sign is carryable;
+      (b) POINTERS — the document still names the verb (deleting a false verdict must
+          send the reader to the command, never away from it) and names every path
+          `_note_paths` returns — the two `tortoise/` notes the verb grades and the test
+          and tool rows it also lists — which is WHICH files the verdict is about;
+      (c) RETIRED SPELLINGS — the phrasings that were FALSE against this tree are
+          refused by name, so a hand edit cannot quietly restore one. If a future head
+          really does empty that path list, re-scope (c) deliberately instead of letting
+          the old sentence back in.
     """
+    from tools.hosted_api_cite_census import _note_paths, _sweep, census
+
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
-    for green in (
+
+    # (a) AGREEMENT, measured in-process by the checker the document quotes.
+    verdict = _sweep(census(), refresh=False)
+    _green_claims = (
         "--check` exits 0",
         "--check` reports every stated figure `== measured`",
         "--check` reports both figures `== measured`",
-    ):
-        assert green not in doc, (
-            f"05-verify.md asserts {green!r}. `tools/hosted_api_cite_census.py --check` "
-            "is RED at this head (exit 1, `STALE` lines) and is red on `origin/main` "
-            "too, so a merge would put a false PASS claim into a document beside a "
-            "checker that refutes it. State the COMMAND and the head it must be read "
-            "at — never a green (#13489 review, P0)")
+    )
+    # ⛔ BOTH DIRECTIONS ARE FALSIFIABLE BY THE TEXT THAT SURVIVES (#13750 review, cycle 2).
+    # An earlier cut tested the red branch only against three frozen `_green_claims`
+    # spellings, and the document's LIVE green sentence was not one of them — so a stale
+    # tree passed over a document still asserting a green (measured: `_sweep` red on a
+    # mutated census, all three spellings absent, `exits 0` present). The two strings below
+    # are the ones the document actually uses, so each direction now has a real witness.
+    _green_witness = "every stated figure is the measured one"
+    if verdict == 0:
+        assert _green_witness in doc, (
+            "`tools/hosted_api_cite_census.py --check` exits 0 at this head (measured "
+            "here, in-process, with the module's own `_sweep`), and 05-verify.md does "
+            f"not carry its own output line {_green_witness!r}. State the verdict the verb "
+            "prints at the head being merged; a document that keeps a red it no longer "
+            "measures sends the next reader to repair drift that does not exist "
+            "(#13750 review, cycle 1)")
+    else:
+        for green in (*_green_claims, "exits 0", _green_witness):
+            assert green not in doc, (
+                f"05-verify.md asserts {green!r} while `--check` exits {verdict} here "
+                "(measured in-process with the module's own `_sweep`). A merge would put "
+                "a false PASS claim into a document beside a checker that refutes it. "
+                "State the COMMAND and the head it must be read at — never a green "
+                "(#13489 review, P0)")
+
+    # (b) POINTERS — the verb, and the modules the verdict is about.
     assert "tools/hosted_api_cite_census.py --check" in doc, (
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
-        "— removing the false green must send the reader to the verb, not delete the "
+        "— removing a false verdict must send the reader to the verb, not delete the "
         "pointer to it (#13489 review, P0)")
-    assert "git diff --name-only origin/main...HEAD -- tortoise/" in doc, (
-        "05-verify.md no longer states the command that shows the census red is "
-        "INHERITED (`tortoise/` is not in this diff, so both graded modules are "
-        "`origin/main`'s). Without it the next reader reads the red as this branch's, "
-        "or is asked to repair `main`'s drift inside a docs PR "
-        "(#13489 review, P0)")
-    # ⛔ THE ANTI-NEGATION LEG (#13489 review, P1 — MEASURED). The leg just above only requires
-    # the command to be PRESENT, and it occurs six times in this file. The split is MEASURED at
-    # the pre-fix document (`16ace39823`) rather than asserted, because an earlier cut of this
-    # comment stated it wrong (#13489 review, P3): THREE assert the list is empty (`-> empty`
-    # x1, `is empty` x2), ONE asserts the opposite ("… is NOT empty, and neither is `git diff
-    # --name-only origin/main...HEAD -- tortoise/`"), ONE quotes the opposite only in order to
-    # refute it ("returns exactly those two" — FALSE in every half), and ONE names the command
-    # with no verdict at all ("read them from …"). So the false sentence SATISFIED that leg —
-    # and the cell contradicted itself, five sentences apart. Presence was never the property
-    # being relied on; AGREEMENT is, so that is what is asserted here.
-    #
-    # NON-VACUITY, MEASURED: on the pre-fix document the first tuple member below IS present
-    # (`grep -c 'and neither is'` -> 1) and this leg reds on it; it is green only after the
-    # clause is deleted. The third member refuses the same claim in the other spelling the cell
-    # used to carry — `… tortoise/` "returns exactly those two" — and the QUOTES are what tell
-    # that quoted retraction apart from a re-assertion (the pattern matches only the unquoted
-    # form, so the retraction that still records the false spelling stays legal).
     _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    assert _tortoise_cmd in doc, (
+        "05-verify.md no longer states the command that shows which `tortoise/` paths "
+        "the census verdict is about. Without it the reader cannot tell whether the two "
+        "graded notes are `origin/main`'s or this branch's (#13489 review, P0)")
+    for _path in _note_paths():
+        assert _path in doc, (
+            f"05-verify.md no longer names `{_path}` in the census paragraph. `--refresh` "
+            "rewrites exactly those notes, so naming them is what tells the reader WHICH "
+            "`tortoise/` modules the verdict is about; the empty-list reading that stood "
+            "here before was FALSE at this head (#13750 review, cycle 1)")
+
+    # (c) RETIRED SPELLINGS — each was measured FALSE against the tree at this head.
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is NOT empty",
         f"{_tortoise_cmd}` returns exactly those two",
+        f"{_tortoise_cmd}` -> empty",
+        f"{_tortoise_cmd}` prints NOTHING",
     ):
         assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints 0 lines at "
-            "this head (the `#12943` modules landed on `main`, so they sit on BOTH sides "
-            "of the merge and contribute no path here), so the sentence is refuted by the "
-            "very command it quotes — and it satisfied the presence-only leg above while "
-            "contradicting the empty claims beside it (#13489 review, P1)")
-    assert any(f"{_tortoise_cmd}` {_word}" in doc
-               for _word in ("is empty", "-> empty", "is EMPTY")), (
-        "05-verify.md must still state, in words, that the `tortoise/` path list is EMPTY "
-        "— naming the command is not an answer, and deleting the FALSE reading must leave a "
-        "reader who can see which way the measurement went (#13489 review, P1)")
-    # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
-    # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
-    # head they were measured at". The first cut of the repair said "at the head that still
-    # carried those modules" — a DESCRIPTION of a head, not one a reader can open, so the
-    # statements stayed exactly as uncheckable as before and this arm stayed green over
-    # them: `activation_scorecard.py` being the only `tortoise/` module `#12943` did not
-    # touch is true of `2584a86ec1` and false of THIS head (no `tortoise/` path is in the
-    # diff at all), so without a head the sentence reads as this head's.
-    #
-    # NON-VACUITY, MEASURED: reds on that cut (no SHA in the paragraph); green once the
-    # MERGE head is named beside the statements.
+            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints the two "
+            "comment-only modules this branch's `--refresh` re-took, so the sentence is "
+            "refuted by the very command it quotes (#13489 review, P1; #13750 review, "
+            "cycle 1 — the empty claim was true of an earlier head and is not true of "
+            "this one)")
+
+    # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
+    # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
+    # head beside it the sentence reads as current — which is exactly how the two module
+    # statements above it went stale in the first place.
     _module_claim = [p for p in doc.split("\n\n") if "`#12943` did not touch" in p]
     assert _module_claim, (
         "05-verify.md no longer states which `tortoise/` module `#12943` did not touch — "
@@ -613,12 +618,9 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         assert "2584a86ec1" in _para, (
             "05-verify.md states that `activation_scorecard.py` was the only `tortoise/` "
             "module `#12943` did not touch WITHOUT naming the head it was measured at. "
-            "At this head that file is not in the diff at all, so the sentence is the MERGE "
-            "head's; name it beside the claim (`2584a86ec1`, with the merge-base command "
-            "that prints its set) or the two module statements stay uncheckable "
-            "(#13489 review, P1)")
-
-
+            "That count is the MERGE head's; name it beside the claim (`2584a86ec1`, with "
+            "the merge-base command that prints its set) or the two module statements stay "
+            "uncheckable (#13489 review, P1)")
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
     """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21496`.
 
