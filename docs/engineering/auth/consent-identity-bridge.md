@@ -292,11 +292,40 @@ declared in `config/required-bindings.yml` so the deploy preflight fails closed 
 **not** be the service-role key (key reuse across purposes) and must **not** be the anon key — public by
 construct, independently of this page (before §9 step 4 the consent page embedded it in HTML; the page
 now embeds nothing, so the reason is the key's own distribution, not a surface we later remove).
-Rotation is `kid`-scoped; two `kid`s are accepted during a
-rotation window. ⚠️ **That window is NOT BUILT yet** — it is the goal this paragraph states, and §9 step 1
-records the accepted-`kid` allowlist as deliberately unbuilt (one key is configured, so an allowlist of one
-is vacuous). Until it lands, a rotation is a VALUE SWAP that must land on both halves together and kills
-in-flight assertions for their ≤120 s TTL.
+
+**A `kid`-keyed SET is what makes rotation non-silent (#10794), and it is BUILT.** `CONSENT_TOKEN_KEYS`
+holds `<kid>=<secret>,<kid>=<secret>` and `CONSENT_TOKEN_CURRENT_KID` names the one that **mints**;
+every kid in the set **verifies**. With `CONSENT_TOKEN_KEYS` absent the deployment is the single-secret
+shape it was before — one key, kid `consent-1` — so a deploy of this change needs no config change and
+the tokens a running deployment already holds keep verifying.
+
+> **OVERRIDES:** the common "one signing secret, rotation is a value swap" default — a set of
+> `kid`-identified keys, because the two halves are provisioned by different mechanisms (Fly's copy is
+> CI-staged, Pages' is typed into a dashboard) and a coordinated swap is what split them once already
+> (#10488). Publish-new / accept-both / retire-old is the procedure below.
+
+**The rotation window is publish-new, accept-both, retire-old** — and each step is one variable:
+
+1. **Publish.** Add the new kid beside the old in `CONSENT_TOKEN_KEYS` on **both** halves, and point
+   `CONSENT_TOKEN_CURRENT_KID` at it. From then on the new key mints and the **old one still verifies** —
+   nothing in flight is killed.
+2. **Wait out the longest in-flight lifetime:** **≤120 s** for a consent assertion (`exp`) and
+   **≤15 min** for an attempt key (`CONSENT_ATTEMPT_TTL_S`). ⚠️ The attempt key is the NEW half of this
+   window (#10794): the AS signs the flow reference and the app half verifies its MAC, so a rotation
+   that lands between the two halves breaks mid-flow adoption for up to 15 minutes. It fails *closed and
+   quiet* — the app half treats an unverifiable key as absent, mints its own, and the visitor meets
+   `403 flow_not_yours` after sign-in (the #10487 shape). That is why the window is stated in minutes
+   here rather than in seconds.
+3. **Retire.** Remove the old kid from `CONSENT_TOKEN_KEYS` on both halves. A value it signed is now
+   refused as an **unknown kid** — not silently accepted, which is the property the pre-set verifier
+   never had.
+
+Throughout, keep `CONSENT_TOKEN_SECRET` holding the **current** kid's value: a half that has not learned
+about key sets yet (an older deployment, a stale preview) still signs and verifies with it. That value is
+**not** itself a verification key while `CONSENT_TOKEN_KEYS` is set — the two are never merged, so "still
+in the environment" never means "still accepted". The key-drift fingerprint (§2.5) compares the **current**
+kid's key, so a correct rotation reads `AGREE` once both halves are on the same current kid and a
+half-migrated one reads `MISMATCH` — which is the reading an operator wants during step 1.
 
 ### 2.4 Consent fixation — the attack this contract **adds**, and which half defeats it
 
@@ -456,6 +485,14 @@ deleted file takes the whole monitor with it. The same verb is documented for `a
 **A rotation is THREE steps over TWO sources, and only step 1 is automated.** Measured: after the dashboard
 value was corrected, the **already-deployed** Function kept signing with the **old** key until a new
 deployment existed — Pages bakes env at deploy time. So:
+
+⚠️ **With `CONSENT_TOKEN_KEYS` set (§2.3, #10794) a rotation is NO LONGER a coordinated value swap** —
+that is the whole point of the set. The three steps below are still how a value reaches both halves;
+the `kid` set is what makes step 2 survivable, because the old key stays ACCEPTED while the new one is
+being published, and the fingerprint compares the CURRENT kid's key on each half (so a half-migrated
+deployment reads `MISMATCH` until both are moved — the reading an operator wants mid-rotation, not a
+regression). While `CONSENT_TOKEN_KEYS` is unset the old single-secret rule applies unchanged: the swap
+must land on both halves together and kills in-flight assertions for their ≤120 s TTL.
 
 1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET` (prompts; or `--body "$NEW"`) — then land (or
    `workflow_dispatch`) the `deploy-hosted` run so Fly picks it up.
@@ -707,7 +744,8 @@ is **DELIVERED** by this diff (`functions/api/consent/start.ts`, `functions/api/
 
 | Remaining step | Why it is its own unit |
 |---|---|
-| 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261030000001_oauth_consent_tickets.sql`; the accepted-`kid` allowlist is deliberately NOT BUILT (ONE `CONSENT_TOKEN_SECRET` is configured, so an allowlist of one is vacuous and §2.3’s two-`kid` rotation window does not exist yet — a key rotation is a VALUE SWAP that invalidates in-flight tokens, and the verifier accepts any non-empty `kid` for presence only, so treat that promise in §2.3/`§5` as IMPLEMENTATION WORK, not as a property)) | infrastructure; the mechanism choice is §2.3 |
+| 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261030000001_oauth_consent_tickets.sql`) | infrastructure; the mechanism choice is §2.3 |
+| 1b. ~~The accepted-`kid` allowlist — §2.3's two-`kid` rotation window~~ — **DELIVERED** (#10794): `CONSENT_TOKEN_KEYS` + `CONSENT_TOKEN_CURRENT_KID`, unknown kid REFUSED, current kid mints. A rotation is no longer a VALUE SWAP that invalidates in-flight tokens — see the procedure in §2.3 | it needed a key SET to be worth anything (an allowlist of one is vacuous), and it is the foundation the signed attempt key below rests on |
 | 2. ~~`POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params)~~ — **DELIVERED**, see the paragraph after this table | the AS half; testable in Python (`tests/test_oauth_*`), and it had to land **before** any page change so the bearer path stays live meanwhile |
 | 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED** (evidence: `tests/test_oauth_consent_bff_routes.py`, incl. the TS→Python token round trip, the per-attempt key that closes the ownerless window, and the startup pin `tests/test_oauth_consent_bridge.py::test_startup_installs_the_SHARED_register`) | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
 | 4. ~~The page rewrite~~ — **DELIVERED** (#3524 §9 step 4). The page authenticates nobody: no provider buttons, no password form, no cookie write, no inline client, no bearer. It reads the per-attempt key from its own URL, mints the bound assertion from the session origin, and redeems it at `POST /oauth/consent`. Unauthenticated `GET /oauth/authorize` now 302s to `{app}/auth?next=/api/consent/start?{query}`. Evidence: `tests/test_oauth_consent_page_step4.py` (65 cases / 47 test functions: the bounce, the REAL `signup.html` return-to allowlist executed over the emitted URL, the page's inline script run under node, byte-exact `state`, a bound token redeeming to a live code, and the org chooser — sole-team, multi-team with the pick posted, and an unresolvable preview leaving Authorize inert) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |

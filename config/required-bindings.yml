@@ -382,6 +382,43 @@ projects:
           .github/scripts/fly-managed-secrets.txt) — the BFF mints with it and
           the AS verifies with it, so a mismatch makes every redemption
           `invalid_token` with no other symptom.
+          ⛔ WHEN `CONSENT_TOKEN_KEYS` IS SET THIS VALUE IS NOT A SIGNING KEY —
+          the set is authoritative (it is never merged with this one). Keep it
+          holding the CURRENT kid's value anyway: a half that has not learned
+          about key sets yet (an older deployment, a stale preview) signs and
+          verifies with it, and this binding is still `required` so the
+          preflight keeps demanding SOMETHING there.
+
+      # #10794: the `kid`-KEYED key set — §2.3's rotation window, BUILT. Both are `recommended`
+      # because absence is the single-secret deployment and is fully supported: `CONSENT_TOKEN_KEYS`
+      # unset means "one key, kid `consent-1`, exactly as before this change". Declared rather than
+      # left silent so the deploy preflight can SEE them — an operator who sets a key set on one half
+      # and not the other gets a split the fingerprint reports (it publishes the CURRENT kid's key).
+      # ⛔ The SAME names must be set on the hosted API (Fly): the AS mints the attempt key and the
+      # app half verifies it, so this is now a THIRD consumer of the same key material and a rotation
+      # touches both halves — see `docs/engineering/auth/consent-identity-bridge.md` §2.3 for the
+      # publish-new / accept-both / retire-old procedure and its bounded window.
+      - name: CONSENT_TOKEN_KEYS
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          OPTIONAL key set, `<kid>=<secret>,<kid>=<secret>`. When set it is
+          AUTHORITATIVE: it replaces CONSENT_TOKEN_SECRET for signing and
+          verification (never merged). Every kid VERIFIES; only the current one
+          MINTS. Each entry splits on its FIRST `=`, so a base64 secret keeps
+          its padding byte-exact. Retiring a kid is how a rotation's window
+          CLOSES — a value it signed is then refused as an unknown kid.
+
+      - name: CONSENT_TOKEN_CURRENT_KID
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          Which kid in CONSENT_TOKEN_KEYS MINTS. Unset ⇒ the FIRST kid in the
+          list (declared order). It must name a kid the set holds: a deployment
+          minting under a name no verifier can select is reported as
+          unprovisioned rather than minting into a void.
 
       # #3524 §9 step 3 — the two knobs the mint/bounce routes read. Both carry a correct
       # in-code default (the AS origin and the app origin), so absence is NOT an outage:

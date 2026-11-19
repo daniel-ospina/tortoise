@@ -85,6 +85,23 @@ OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on
     bundle: #4054 removed the UMD script and #4178 keeps `VITE_SUPABASE_ANON_KEY`
     non-load-bearing, so do NOT read "designed to be shipped" as "this app ships it").
     Unset ⇒ the arm is unavailable and the bearer path is unaffected.
+  * ``CONSENT_TOKEN_KEYS`` — OPTIONAL key set, ``<kid>=<secret>,<kid>=<secret>``: §2.3's rotation
+    window, BUILT. When set it is AUTHORITATIVE — it replaces ``CONSENT_TOKEN_SECRET`` for both
+    signing and verification (the two are never MERGED, so "still in the environment" never means
+    "still accepted"). Every kid in the set VERIFIES; only the current one MINTS. Each entry splits
+    on its FIRST ``=``, so a base64 secret keeps its padding byte-exact.
+  * ``CONSENT_TOKEN_CURRENT_KID`` — which kid MINTS. Unset ⇒ the FIRST kid in
+    ``CONSENT_TOKEN_KEYS`` (declared order, so a rotation is one variable's value rather than a
+    guess). It must name a kid in the set: a deployment that mints under a name no verifier selects
+    is reported as unprovisioned instead of minting into a void.
+  * **ROTATION IS PUBLISH-NEW, ACCEPT-BOTH, RETIRE-OLD** — and it is no longer a coordinated value
+    swap. (1) Add the new kid beside the old on BOTH halves and point ``CONSENT_TOKEN_CURRENT_KID``
+    at it; from then on the new key mints and the old one still verifies. (2) Wait out the longest
+    in-flight lifetime — ≤120 s for a consent assertion, ≤15 min for an attempt key. (3) Remove the
+    old kid from ``CONSENT_TOKEN_KEYS`` on both halves; from then on a value it signed is refused as
+    an UNKNOWN kid rather than silently accepted. Set ``CONSENT_TOKEN_SECRET`` to the CURRENT kid's
+    value throughout, so a half that has not learned about key sets yet (an older deployment, a
+    stale preview) still signs and verifies with the current key.
   * ``CONSENT_TOKEN_ISSUER`` — optional, defaults to ``https://app.premiselabs.co`` (the session
     origin). A token whose `iss` differs is refused, so this must match the minting origin.
   * the shared `jti` store — installed from `hosted_api._lifespan` (above). If nothing is
@@ -107,8 +124,9 @@ never returns one), so "do the halves agree?" is unanswerable from the configura
 ``tools/consent_key_check.py`` compares them. The fingerprint is NOT the key, not a prefix of it, and
 not invertible, and it hands a guessing attacker nothing the live verifier does not already answer
 for them — the full argument, including why 12 hex and why no domain prefix, is on
-``CONSENT_KEY_FINGERPRINT_HEX_CHARS``. ⛔ ``kid`` is NOT in the comparison: one key is configured, so
-a ``kid`` comparison would be a second, always-equal field that reads like evidence.
+``CONSENT_KEY_FINGERPRINT_HEX_CHARS``. ⛔ ``kid`` is NOT in the comparison, and under a KEY SET the
+fingerprint is the CURRENT kid's key: the question the field answers is "do the two halves SIGN with
+the same bytes". Fingerprinting a retired kid would report a working rotation as a split.
 """
 
 from __future__ import annotations
@@ -149,15 +167,42 @@ DEFAULT_CONSENT_TOKEN_ISSUER = "https://app.premiselabs.co"
 #: step 2), and the set is EXACT: an unknown bind key is refused, because a verifier that ignored
 #: them would accept a future contract it does not implement.
 BIND_FIELDS = ("client_id", "redirect_uri", "code_challenge", "state")
-#: §2.1 — the header this verifier emits/accepts. ``kid`` is checked for presence only: §2.3 makes
-#: rotation ``kid``-scoped ("two `kid`s are accepted during a rotation window") and the accepted-kid
-#: list belongs with the secret provisioning in §9 step 1. Pinning one literal here would make a
-#: rotation impossible to perform without editing code, which is the opposite of what `kid` is for.
+#: §2.1 — the header this verifier emits/accepts. ⛔ ``kid`` is LOAD-BEARING, not presence-only: it
+#: SELECTS the key (`consent_token_keys`), and an unknown kid is REFUSED. §2.3's rotation window
+#: ("two `kid`s are accepted during a rotation window") is BUILT by that lookup — current + previous
+#: both verify because both are in the configured set, and minting uses `CONSENT_TOKEN_CURRENT_KID`.
+#: Before the key set existed this verifier checked presence only, because pinning one literal would
+#: have made a rotation impossible to perform without editing code; a SET is what turns the field
+#: into the mechanism it was always for.
 CONSENT_TOKEN_ALG = "HS256"
 CONSENT_TOKEN_TYP = "JWT"
 
 _SECRET_ENV = "CONSENT_TOKEN_SECRET"
 _ISSUER_ENV = "CONSENT_TOKEN_ISSUER"
+
+#: The KEY SET (§2.3's `kid`-scoped rotation, BUILT — see `consent_token_keys`).
+#:
+#: ``CONSENT_TOKEN_KEYS="<kid>=<secret>,<kid>=<secret>,..."``. A kid NAMES a key so the two halves
+#: can accept more than one at once; the split is on the FIRST ``=`` only, so a base64 secret
+#: carrying its own padding (``…=``) survives byte-exact — which matters because a secret is an
+#: HMAC key, never a normalised value (see the whitespace arm of `_secret_state`).
+_KEYS_ENV = "CONSENT_TOKEN_KEYS"
+#: Which kid MINTS. Unset ⇒ the FIRST kid in ``CONSENT_TOKEN_KEYS`` (declared order, so a rotation
+#: is "put the new key first" or "set this" and never a guess).
+_CURRENT_KID_ENV = "CONSENT_TOKEN_CURRENT_KID"
+
+#: The kid a SINGLE-secret deployment's tokens carry: it is what the TypeScript minter stamps
+#: (``consent-bridge.ts::mintConsentToken``) and what `mint_consent_token` has always defaulted to.
+#: It is the LEGACY kid, synthesised when ``CONSENT_TOKEN_KEYS`` is absent, so an existing
+#: deployment's in-flight tokens keep verifying across the deploy that introduces the key set.
+LEGACY_KID = "consent-1"
+
+#: A kid is a NAMED INDEX, not secret material, so it is shape-checked and nothing more: printable
+#: ASCII without the segment separator this module uses (``.``), because a kid carrying a dot would
+#: make `<kid>.<random>.<mac>` ambiguous — and the ambiguity would be resolved by the VERIFIER, i.e.
+#: attacker-influenced parsing on the one value that selects the key. Bounded so a kid cannot be
+#: used to smuggle a value through the attempt-key carrier.
+_KID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 #: A consent token is ~1 KB. The cap is defence-in-depth against a hostile header/body value, and
 #: it is checked before any parse so a huge token cannot cost a base64 decode.
@@ -270,13 +315,152 @@ CONSENT_KEY_FINGERPRINT_RE = re.compile(rf"[0-9a-f]{{{CONSENT_KEY_FINGERPRINT_HE
 _SECRET_PROBLEM_CODES = ("not_set", "padded", "reused_credential", "too_short", "not_utf8")
 
 
+def parse_consent_token_keys() -> tuple[dict[str, str] | None, str | None]:
+    """``(kid → secret, fault)`` for ``CONSENT_TOKEN_KEYS``; ``(None, None)`` when it is ABSENT.
+
+    Absent (`None, None`) is not a fault: it is the single-secret deployment, and it is the shape
+    every deployment has today. A fault is a string that SAYS what is wrong with the value — it is
+    returned rather than raised because the caller's contract is a typed 503, never a 500.
+
+    ⛔ ONE PARSER, AND THE TYPESCRIPT HALF MIRRORS IT. `consent-bridge.ts::consentKeySet` parses
+    the same string with the same rules, because the two halves must agree on WHICH BYTES a kid
+    names or a rotation turns into a silent 401 (the #10488 class, one field along). The
+    cross-half table test is where the two are held together.
+    """
+    raw = os.environ.get(_KEYS_ENV, "")
+    if not raw.strip():
+        return None, None
+    keys: dict[str, str] = {}
+    for entry in raw.split(","):
+        kid, sep, secret = entry.partition("=")
+        if not sep:
+            return None, (
+                f"{_KEYS_ENV} has an entry with no '=' — every entry is `<kid>=<secret>`, so "
+                f"{entry.strip()[:64]!r} names no secret")
+        kid = kid.strip()
+        if not _KID_RE.match(kid):
+            return None, (
+                f"{_KEYS_ENV} has a kid that is not 1-64 characters of [A-Za-z0-9_-] — a kid is "
+                "the NAME a key is selected by, and one carrying this module's separator could "
+                "re-select another key")
+        if kid in keys:
+            return None, (
+                f"{_KEYS_ENV} names the kid {kid!r} twice — the second entry would silently "
+                "replace the first, so which key a name refers to would depend on list order")
+        if not secret:
+            return None, f"{_KEYS_ENV} gives the kid {kid!r} an EMPTY secret"
+        keys[kid] = secret
+    if not keys:                                  # unreachable via the loop, kept total
+        return None, f"{_KEYS_ENV} is set but names no key"
+    return keys, None
+
+
+def consent_token_current_kid() -> str | None:
+    """The kid that MINTS, or ``None`` when this deployment has no usable key set.
+
+    ``CONSENT_TOKEN_CURRENT_KID`` when it names a configured kid; otherwise the FIRST kid in
+    ``CONSENT_TOKEN_KEYS``. The fallback is declared order rather than alphabet or age: an operator
+    who wants the other one says so, and a rotation is then one variable's value.
+
+    ``None`` on an unusable set (a malformed list, an unusable key, a current kid that names
+    nothing) — the same verdict `consent_token_secret_problem()` gives, from the same parse, so a
+    deployment can never MINT with a key the verifier refuses or vice versa.
+    """
+    if consent_token_secret_problem() is not None:
+        return None
+    keys, _ = parse_consent_token_keys()
+    if keys is None:
+        return LEGACY_KID
+    configured = os.environ.get(_CURRENT_KID_ENV, "").strip()
+    return configured or next(iter(keys))
+
+
+def consent_token_keys() -> dict[str, str]:
+    """``kid → secret`` for every ACTIVE key, current one included.
+
+    Every kid in this mapping VERIFIES; only `consent_token_current_kid` MINTS. That asymmetry is
+    the rotation window: publish the new kid beside the old on both halves, let in-flight values
+    signed by the old one finish their (≤120 s token / ≤15 min attempt) life, then remove the old
+    entry — at which point a value signed with it is refused as an unknown kid rather than
+    silently accepted.
+
+    Empty when this deployment has no usable key (unset, or any key refused) — the verifier's
+    callers gate on `consent_token_secret_problem()` first, so an empty mapping never reaches a
+    signature comparison.
+    """
+    if consent_token_secret_problem() is not None:
+        return {}
+    keys, _ = parse_consent_token_keys()
+    if keys is None:
+        return {LEGACY_KID: os.environ[_SECRET_ENV]}
+    return dict(keys)
+
+
+def _key_problem(secret: str, *, label: str) -> tuple[str, str] | None:
+    """The provisioning fault of ONE key, or ``None``. `label` is what the message names.
+
+    Shared by both modes on purpose: a key in ``CONSENT_TOKEN_KEYS`` is the same kind of value as
+    the single ``CONSENT_TOKEN_SECRET`` and must clear the same four checks. A rotation that
+    introduced a guessable or padded key would otherwise be accepted by the half that learned
+    about key sets first — the exact silent split #10488 exists to expose, moved one deploy later.
+    """
+    if secret != secret.strip():
+        return ("padded",
+                f"{label} has leading or trailing whitespace — the minting side (the BFF, "
+                "§9 step 3) reads the value verbatim, so a padded value is a DIFFERENT HMAC key "
+                "and every redemption would answer `invalid_token`. Set it byte-exact")
+    for name in _REUSED_KEY_ENVS:
+        other = os.environ.get(name, "")
+        if other and secret in (other, other.strip()):
+            return ("reused_credential",
+                    f"{label} is also {name} — §2.3 requires a DEDICATED secret, so the "
+                    "arm is treated as unprovisioned rather than trusting a reused key")
+    try:
+        length = len(secret.encode("utf-8"))
+    except UnicodeEncodeError:      # a lone surrogate in the env value: not a key we can sign with
+        return ("not_utf8",
+                f"{label} is not encodable as UTF-8, so it cannot be an HMAC key")
+    if length < _MIN_SECRET_BYTES:
+        return ("too_short",
+                f"{label} is {length} bytes — a key shorter than {_MIN_SECRET_BYTES} bytes "
+                "is guessable, so the arm is treated as unprovisioned")
+    return None
+
+
 def _secret_state() -> tuple[str, str] | None:
     """``(code, message)`` for an unusable key, ``None`` when it can be used (§2.3).
 
     ONE statement of the provisioning rule, so the 503's description and the ``/health`` block
     (§2.5) can never disagree about whether this deployment has a working key — the divergence
     #10447 spent a whole issue removing from ``/health`` and ``/v1/version``.
+
+    ⛔ ONE BAD KEY TURNS THE WHOLE ARM OFF, including a key that is not the current one. Any subset
+    that still verified would be a set the operator cannot see: the question this function answers
+    is "is this deployment's key material usable", and a half-usable set answers it with a 401 per
+    flow rather than a named fault. The `reason` code is the coarse provisioning CLASS (the closed
+    set in `_SECRET_PROBLEM_CODES`) while the MESSAGE names the offending kid — the class is what
+    `/health` and the key-drift monitor publish, and it carries no key material.
     """
+    keys, fault = parse_consent_token_keys()
+    if fault is not None:
+        # A MALFORMED SET is reported as `not_set`, the "no usable key here" class, rather than as a
+        # sixth code: `tools/consent_key_check.py::REASON_CODES` is a closed set that a drift monitor
+        # and the runbook both key their REMEDY off, and growing it is a deliberate act across four
+        # artifacts (the tool says so itself). The message — read by an operator and by the typed
+        # 503's description — names the malformation exactly, so nothing is lost but the label.
+        return "not_set", fault
+    if keys is not None:
+        current = os.environ.get(_CURRENT_KID_ENV, "").strip()
+        if current and current not in keys:
+            return ("not_set",
+                    f"{_CURRENT_KID_ENV}={current!r} is not one of the kids in {_KEYS_ENV} "
+                    f"({', '.join(sorted(keys))}) — a deployment would MINT with a name no "
+                    "verifier can select")
+        for kid, secret in keys.items():
+            problem = _key_problem(secret, label=f"the {_KEYS_ENV} key for kid {kid!r}")
+            if problem is not None:
+                return problem
+        return None
     raw = os.environ.get(_SECRET_ENV, "")
     if not raw:
         return "not_set", f"{_SECRET_ENV} is not set"
@@ -293,25 +477,9 @@ def _secret_state() -> tuple[str, str] | None:
                 f"{_SECRET_ENV} has leading or trailing whitespace — the minting side (the BFF, "
                 "§9 step 3) reads the value verbatim, so a padded value is a DIFFERENT HMAC key "
                 "and every redemption would answer `invalid_token`. Set it byte-exact")
-    secret = raw
-    for name in _REUSED_KEY_ENVS:
-        other = os.environ.get(name, "")
-        # Compared against BOTH spellings of the reused credential: an operator who padded the
-        # service-role key must not slip past the dedicated-secret rule by that accident.
-        if other and secret in (other, other.strip()):
-            return ("reused_credential",
-                    f"{_SECRET_ENV} is also {name} — §2.3 requires a DEDICATED secret, so the "
-                    "arm is treated as unprovisioned rather than trusting a reused key")
-    try:
-        length = len(secret.encode("utf-8"))
-    except UnicodeEncodeError:      # a lone surrogate in the env value: not a key we can sign with
-        return ("not_utf8",
-                f"{_SECRET_ENV} is not encodable as UTF-8, so it cannot be an HMAC key")
-    if length < _MIN_SECRET_BYTES:
-        return ("too_short",
-                f"{_SECRET_ENV} is {length} bytes — a key shorter than {_MIN_SECRET_BYTES} bytes "
-                "is guessable, so the arm is treated as unprovisioned")
-    return None
+    # Compared against BOTH spellings of the reused credential: an operator who padded the
+    # service-role key must not slip past the dedicated-secret rule by that accident.
+    return _key_problem(raw, label=_SECRET_ENV)
 
 
 def consent_token_secret_problem() -> str | None:
@@ -362,7 +530,9 @@ def consent_key_fingerprint(key: str | None = None) -> str | None:
     expose, with a green light in front of it.
 
     ``key`` is for tests and for callers that already hold a key; the default reads the deployment's
-    configured one.
+    configured one — under a key set, the CURRENT kid's key, because the agreement this field exists
+    to prove is "do the two halves SIGN with the same bytes". The retired kids are still accepted,
+    so fingerprinting one of those would report a healthy rotation as a split.
     """
     raw = key if key is not None else consent_token_secret()
     if not raw:
@@ -395,7 +565,14 @@ def consent_token_key_health() -> dict:
 
 
 def consent_token_secret() -> str | None:
-    """The HMAC key, or ``None`` when the arm is not provisioned (§2.3).
+    """The CURRENT HMAC key — the one that MINTS — or ``None`` when the arm is not provisioned.
+
+    ⛔ ONE ANSWER UNDER BOTH MODES, because there is one thing this function is for: the key the
+    SIGNER uses. With ``CONSENT_TOKEN_KEYS`` it is the current kid's key; without it, the single
+    secret. `consent_token_keys()` is the verifying question ("which kids does this deployment
+    accept") and must not be confused with this one — a caller that signed with a NON-current key
+    would keep minting values the moment a rotation began, which is the state `kid` exists to
+    leave behind.
 
     Read per call, not cached at import: provisioning is an operator action on a running platform,
     and a value cached at import would make a rollback to unset invisible until the next deploy.
@@ -403,7 +580,13 @@ def consent_token_secret() -> str | None:
     Returned BYTE-EXACT as the operator set it (never stripped) — see the whitespace arm of
     `consent_token_secret_problem`, which is what makes that safe.
     """
-    return None if consent_token_secret_problem() else os.environ[_SECRET_ENV]
+    if consent_token_secret_problem() is not None:
+        return None
+    keys, _ = parse_consent_token_keys()
+    if keys is None:
+        return os.environ[_SECRET_ENV]
+    current = os.environ.get(_CURRENT_KID_ENV, "").strip() or next(iter(keys))
+    return keys[current]
 
 
 def consent_token_issuer() -> str:
@@ -583,7 +766,11 @@ def verify_consent_token(token: str, *, presented: dict) -> dict:
         # token" for a request that has no business holding one, and would make a missing secret
         # look like a broken browser. The description names WHICH operator action is needed.
         raise _unavailable(problem)
-    secret = consent_token_secret()
+    # ⛔ THE VERIFYING question, not the signing one: EVERY active kid is accepted here, while
+    # `consent_token_secret()` (the current key) is what the mint uses. Collapsing the two would
+    # make the rotation window vanish — the previous key would stop verifying the instant a new one
+    # began signing, which is the silent cutover `kid` replaces.
+    keys = consent_token_keys()
 
     parts = token.split(".")
     if len(parts) != 3:
@@ -606,9 +793,18 @@ def verify_consent_token(token: str, *, presented: dict) -> dict:
     kid = header.get("kid")
     if not isinstance(kid, str) or not kid.strip():
         raise _refuse("kid is missing")
+    # ⛔ AN UNKNOWN kid IS REFUSED, never compared against a default key. Falling back to "the only
+    # key" would make `kid` decorative: a token minted by a RETIRED key (or by a sibling deployment
+    # whose kid this one does not hold) would verify against bytes it was not signed with, and the
+    # rotation window would silently never close. The refusal names no kid and lists nothing —
+    # `kid` is chosen by whoever minted the token, and an enumeration of the configured set would
+    # hand a probe the deployment's key names.
+    key = keys.get(kid)
+    if key is None:
+        raise _refuse("kid is not in the configured key set")
 
     signing_input = f"{parts[0]}.{parts[1]}".encode()
-    expected = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+    expected = hmac.new(key.encode(), signing_input, hashlib.sha256).digest()
     if not hmac.compare_digest(expected, _b64url_decode(parts[2], "signature")):
         raise _refuse("signature does not verify")
 
@@ -946,7 +1142,7 @@ async def consume_consent_jti(jti: str, expires_at: float) -> None:
 
 def mint_consent_token(*, user_id: str, email: str | None, bind: dict,
                        secret: str | None = None, issuer: str | None = None,
-                       ttl_s: int = CONSENT_TOKEN_TTL_S, kid: str = "consent-1",
+                       ttl_s: int = CONSENT_TOKEN_TTL_S, kid: str | None = None,
                        jti: str | None = None, now: float | None = None) -> str:
     """Build the §2.1 token. REFERENCE INVERSE — the minting authority is the session origin.
 
@@ -956,10 +1152,17 @@ def mint_consent_token(*, user_id: str, email: str | None, bind: dict,
     let the tests mint exactly what §2.1 specifies. `secret` defaults to the configured
     ``CONSENT_TOKEN_SECRET``; passing one explicitly is how a test builds the
     "minted elsewhere, this AS has no key" state §8's checklist warns about.
+
+    ``kid`` defaults to the deployment's CURRENT kid (`consent_token_current_kid`), which is
+    ``consent-1`` on a single-secret deployment — byte-identical to what this function always
+    stamped. A caller may still name one (a test building a previous-kid token); it must be a kid
+    this deployment ACCEPTS, which the verifier enforces by refusing an unnamed one.
     """
     key = secret if secret is not None else consent_token_secret()
     if not key:
         raise ValueError(f"{_SECRET_ENV} is not set, so no consent token can be signed")
+    if kid is None:
+        kid = consent_token_current_kid() or LEGACY_KID
     if set(bind) != set(BIND_FIELDS):
         raise ValueError(f"bind must be exactly {BIND_FIELDS}, got {sorted(bind)}")
     issued_at = time.time() if now is None else float(now)
@@ -981,3 +1184,4 @@ def mint_consent_token(*, user_id: str, email: str | None, bind: dict,
     )
     mac = hmac.new(key.encode(), signing_input.encode(), hashlib.sha256).digest()
     return f"{signing_input}.{_b64url_encode(mac)}"
+

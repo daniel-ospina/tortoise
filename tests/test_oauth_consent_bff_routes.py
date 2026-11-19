@@ -458,6 +458,28 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   out.cases = cases;
   out.status = cases[0].status;
   out.body = cases[0].body;
+} else if (scenario === "key_set") {
+  // #10794 — the KEY-SET PARSER, on both halves, over the same table of env shapes. The two
+  // implementations are separate code in separate languages and they decide WHICH BYTES a kid
+  // names; a one-sided edit makes a rotation mint under one key and verify under another, which
+  // presents as `401 invalid_token` on every redemption with no other symptom. So the shapes (not
+  // the results) are the input and the Python half answers the same table in the test.
+  const bridge = await import(CONSENT + "/../../_shared/auth/consent-bridge.ts");
+  out.cases = (opts.shapes || []).map((shape) => {
+    const e = {};
+    if (shape.keys !== undefined) e.CONSENT_TOKEN_KEYS = shape.keys;
+    if (shape.current !== undefined) e.CONSENT_TOKEN_CURRENT_KID = shape.current;
+    if (shape.secret !== undefined) e.CONSENT_TOKEN_SECRET = shape.secret;
+    const set = bridge.consentKeySet(e);
+    return {
+      label: shape.label,
+      kids: set ? [...set.keys.keys()] : null,
+      current: set ? set.currentKid : null,
+      signingSecret: set ? (set.keys.get(set.currentKid) ?? null) : null,
+      secret: bridge.consentSecret(e) ?? null,
+      mintKid: bridge.consentCurrentKid(e) ?? null,
+    };
+  });
 } else if (scenario.startsWith("start_")) {
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
@@ -2678,3 +2700,101 @@ def test_the_key_route_answers_every_non_GET_verb_itself() -> None:
         assert cases[label]["nextCalled"] is False, (
             f"{label} was handed to next() — the asset server's 404 is what this arm prevents"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #10794 — the `kid`-keyed key set, CROSS-HALF
+#
+# `CONSENT_TOKEN_KEYS` is parsed twice, in two languages: `consent_token.py::parse_consent_token_keys`
+# (the AS, which VERIFIES) and `consent-bridge.ts::consentKeySet` (the app, which MINTS). They decide
+# which BYTES a kid names. A one-sided edit — a trimmed secret, a different split, a different
+# fallback kid — makes a rotation mint under one key and verify under another, and the symptom is
+# `401 invalid_token` on every redemption with the mint still answering 200 (the #10488 class, one
+# field along). So the TABLE below is the input to both implementations and the assertions compare
+# their answers, rather than each half being checked against itself.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_KEY_SET_OLD = "consent-key-OLD-0123456789abcdef0123456789abcdef"
+_KEY_SET_NEW = "consent-key-NEW-0123456789abcdef0123456789abcdef"
+
+#: Every shape an operator (or a typo) can present. Literal on purpose: a computed set would make
+#: the table auto-agree with whatever the code under test does.
+_KEY_SET_SHAPES = [
+    {"label": "legacy_single_secret", "secret": _TEST_SECRET},
+    {"label": "two_kids_declared_order", "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}"},
+    {"label": "current_named", "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}", "current": "new"},
+    # A base64 secret carries its own padding, and each entry splits on its FIRST `=` so it survives.
+    {"label": "base64_padding_kept", "keys": f"k1={_KEY_SET_OLD}=="},
+    {"label": "current_names_nothing", "keys": f"old={_KEY_SET_OLD}", "current": "typo"},
+    {"label": "no_separator", "keys": "no-separator-here"},
+    {"label": "duplicate_kid", "keys": f"k1={_KEY_SET_OLD},k1={_KEY_SET_NEW}"},
+    {"label": "empty_secret", "keys": "k1="},
+    # Absent-or-blank is the LEGACY deployment, not a fault: `None, None` from the Python parser and
+    # the single-secret shape from TypeScript.
+    {"label": "blank_keys_falls_back", "keys": "   ", "secret": _TEST_SECRET},
+    # Whitespace is not a kid name: the strip happens before the membership test on BOTH halves.
+    {"label": "whitespace_current_is_unset",
+     "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}", "current": "   "},
+    # A kid carrying the attempt-key separator could re-select another key (#10794).
+    {"label": "kid_with_dot", "keys": f"k.1={_KEY_SET_OLD}"},
+]
+
+
+def _set_consent_key_env(monkeypatch, shape: dict) -> None:
+    for name in ("CONSENT_TOKEN_KEYS", "CONSENT_TOKEN_CURRENT_KID", "CONSENT_TOKEN_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    if shape.get("keys") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_KEYS", shape["keys"])
+    if shape.get("current") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", shape["current"])
+    if shape.get("secret") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_SECRET", shape["secret"])
+
+
+def test_the_key_set_is_PARSED_the_SAME_WAY_by_both_halves(monkeypatch) -> None:
+    """THE cross-half pin: same shapes in, same kids/current/signing-bytes out.
+
+    `secret` is compared too, because "the same kid" is worthless if the two halves then sign with
+    different bytes — that is precisely the split #10488's fingerprint exists to detect, and a
+    parser that normalised on one side would CREATE it rather than report it.
+    """
+    from tortoise import consent_token
+
+    out = _run("key_set", shapes=_KEY_SET_SHAPES)
+    assert [c["label"] for c in out["cases"]] == [s["label"] for s in _KEY_SET_SHAPES], out
+
+    for shape, ts in zip(_KEY_SET_SHAPES, out["cases"], strict=True):
+        _set_consent_key_env(monkeypatch, shape)
+        # The EFFECTIVE set, i.e. what the verifier will accept — not the raw parse. On the legacy
+        # deployment the parse is `None` and this function synthesises the one key under `LEGACY_KID`,
+        # which is exactly the set the app half must also see.
+        accepted = consent_token.consent_token_keys()
+        py_kids = list(accepted) if accepted else None
+        fault = consent_token.consent_token_secret_problem()
+        py_current = consent_token.consent_token_current_kid()
+        py_secret = consent_token.consent_token_secret()
+
+        assert ts["kids"] == py_kids, (
+            f"{shape['label']}: the two halves disagree about which kids exist — "
+            f"TS {ts['kids']} vs Python {py_kids} (fault={fault!r})")
+        assert ts["current"] == py_current, (
+            f"{shape['label']}: the halves disagree about which kid MINTS — "
+            f"TS {ts['current']!r} vs Python {py_current!r}")
+        assert ts["secret"] == py_secret, (
+            f"{shape['label']}: the halves disagree about the SIGNING BYTES for that kid — "
+            f"TS {ts['secret']!r} vs Python {py_secret!r}")
+        assert ts["mintKid"] == py_current, (
+            f"{shape['label']}: `consentCurrentKid` and `consent_token_current_kid` disagree — "
+            "the mint route would stamp a kid the AS refuses")
+
+
+def test_the_padding_of_a_base64_secret_SURVIVES_the_parse_on_both_halves() -> None:
+    """Named separately because it is the shape a "tidy" edit breaks first.
+
+    Splitting each entry on its LAST `=` (or using a `split("=")` bound to exactly two parts) would
+    strip a secret's own padding — silently signing with different bytes than the other half holds.
+    """
+    shape = next(s for s in _KEY_SET_SHAPES if s["label"] == "base64_padding_kept")
+    out = _run("key_set", shapes=[shape])
+    assert out["cases"][0]["secret"] == _KEY_SET_OLD + "==", out["cases"][0]
+    assert out["cases"][0]["kids"] == ["k1"], out["cases"][0]
