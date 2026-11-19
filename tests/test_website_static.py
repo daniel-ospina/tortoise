@@ -222,13 +222,41 @@ def _render_pricing_fn(html: str) -> str:
     return m.group(0)
 
 
-def _function_refs(html: str, fn_name: str) -> str:
+def _function_refs(html: str, fn_name: str, page: str = "product.html") -> str:
+    """`page` labels the failure. A message that hard-codes one file name sends
+    the next reader to a page that is fine, now that the extractor serves both
+    product pages (#13696 review 2, finding 3)."""
     m = re.search(rf"function {fn_name}\(.*?\n    \}}", html, re.S)
-    assert m, f"{fn_name}() not found in product.html"
+    assert m, f"{fn_name}() not found in {page}"
     return m.group(0)
 
 
-def _render_code(html: str, fn_name: str) -> str:
+def _pricing_init_code(html: str, page: str = "product.html") -> str:
+    """The statement that decides which prices a visitor sees FIRST.
+
+    `setBilling` is itself compared by `test_the_two_pages_render_from_the_same_code`,
+    but the call that CHOOSES its argument sits at the page's top level, outside
+    every captured function — so a page could keep the function identical and
+    still open on the other billing mode. Measured before this helper existed
+    (#13696 review 2, finding 4): flipping the campaign page's init to
+    `setBilling('monthly')` left all 135 rows GREEN while that page opened on
+    $19/$25/$149 against `/tortoise`'s $15/$20/$119 annual.
+    """
+    hits = [ln.strip() for ln in html.splitlines()
+            if "PRICING.display.annual_default" in ln and "setBilling" in ln]
+    assert hits, (
+        f"{page} no longer wires its billing default from the shared table "
+        "(`if (PRICING.display.annual_default) setBilling(...)`). Without it the "
+        "page opens on whatever `setBilling` was left at, not the mode "
+        "`pricing.json` names, so every price on it is quoted in the wrong "
+        "billing period (#13645).")
+    assert len(hits) == 1, (
+        f"{page} wires the billing default {len(hits)} time(s): {hits!r}. Two "
+        "wiring statements can disagree, and only the last one runs.")
+    return hits[0]
+
+
+def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
     """One page's render function with its COMMENT LINES removed.
 
     The two product pages explain the same code with different comments — and
@@ -242,7 +270,7 @@ def _render_code(html: str, fn_name: str) -> str:
     """
     out: list[str] = []
     in_block = False
-    for line in _function_refs(html, fn_name).splitlines():
+    for line in _function_refs(html, fn_name, page).splitlines():
         stripped = line.strip()
         if in_block:
             in_block = "*/" not in stripped
@@ -6938,7 +6966,7 @@ class TestProductSetIsServedUnderTheOneHost:
     # its links are already correct (no `href="/"`, no `OLD_PRODUCT_PATHS` member),
     # so this closes a #11764-shaped hole rather than fixing a live defect.
     ROOT_SERVED = ("index.html", "contact.html", "privacy.html", "tos.html", "dpa.html",
-                  "tortoise-for-product-teams.html")
+                   "tortoise-for-product-teams.html")
     # The app origin's page population, pinned for the same reason `_pages` is: the guard
     # below walks a non-recursive glob, so a page added to a subdirectory (or served from
     # `apps/dashboard/index.html`, which lives OUTSIDE `public/`) would leave coverage with
@@ -7221,8 +7249,9 @@ class TestPricingSourceIsShared:
         `renderPricing` / `renderSelfHost` / `setBilling`. Every row above
         reads the STATIC cards, and
         `test_the_pages_format_prices_through_the_shared_function` only asserts
-        that the string `window.tortoiseFmtPrice(` OCCURS — so the render every
-        real visitor receives was read by no test at all. Measured at
+        that the string `window.tortoiseFmtPrice(` OCCURS — so no row read the
+        CAMPAIGN page's render at all (product.html's bodies are read elsewhere,
+        the niche page's were read by nothing). Measured at
         `1608357fc7`, before this row: changing the campaign page's call to
         `window.tortoiseFmtPrice(price, currentBilling, 0)` left all 133 rows
         GREEN while that page quoted $19/$25/$149 "annually" against
@@ -7236,7 +7265,7 @@ class TestPricingSourceIsShared:
         them. `_render_code` drops comment lines only, so the two pages may keep
         explaining themselves differently.
         """
-        by_name = {name: {fn: _render_code(path.read_text(encoding="utf-8"), fn)
+        by_name = {name: {fn: _render_code(path.read_text(encoding="utf-8"), fn, name)
                           for fn in self.RENDER_FUNCTIONS}
                    for name, path in PRODUCT_PAGES_SHARING_PRICING}
         left_name, right_name = (name for name, _ in PRODUCT_PAGES_SHARING_PRICING)
@@ -7250,6 +7279,29 @@ class TestPricingSourceIsShared:
                 "prints another page's tier names (#13645, #13696 review 1).\n"
                 f"--- {left_name} ---\n{left}\n"
                 f"--- {right_name} ---\n{right}")
+
+    def test_both_pages_init_to_the_same_billing_mode(self):
+        """The render is compared; the statement that SEEDS it was not.
+
+        #13696 review 2, finding 4. `setBilling` is held identical above, but the
+        top-level `if (PRICING.display.annual_default) setBilling(...)` that
+        chooses its argument sits OUTSIDE every captured function, and the only
+        row that read it (`test_init_wiring_honors_annual_default`) reads
+        `product.html` alone. Measured before this row: flipping the campaign
+        page's init to `setBilling('monthly')` left all 135 rows GREEN while
+        that page opened on $19/$25/$149 against `/tortoise`'s $15/$20/$119
+        annual — the same divergence one statement earlier in the same file.
+        """
+        by_name = {name: _pricing_init_code(path.read_text(encoding="utf-8"), name)
+                   for name, path in PRODUCT_PAGES_SHARING_PRICING}
+        left_name, right_name = (name for name, _ in PRODUCT_PAGES_SHARING_PRICING)
+        left, right = by_name[left_name], by_name[right_name]
+        assert left == right, (
+            f"the billing default is wired differently in {left_name} and "
+            f"{right_name}, so a visitor lands on different prices depending "
+            "on which product page they arrived at (#13645):\n"
+            f"--- {left_name} ---\n{left}\n"
+            f"--- {right_name} ---\n{right}")
 
     def test_the_static_cards_on_both_pages_carry_the_shared_numbers(self):
         """…and the identical copy is also the CORRECT one.
@@ -7633,24 +7685,36 @@ class TestProductTeamsIdentity:
         architecture = (REPO_ROOT / "website" / "website_architecture.md").read_text(
             encoding="utf-8")
         route = PRODUCT_TEAMS_URL.removeprefix("https://premiselabs.co")
-        assert route in architecture, (
-            f"`website/website_architecture.md` no longer records {route} — the "
-            "host map is where a later reader learns this page is served at the "
-            "COMPANY ROOT and is deliberately not a `PRODUCT_PAGES` member. "
-            "Without it the routing record makes the prefix look like the place "
-            "this page belongs, and 301ing it there is a 404 on the URL the owner "
-            "asked for.")
-        entry = next((ln for ln in architecture.splitlines() if route in ln), "")
+        # ⛔ BIND ON THE ROUTE, NOT ON THE STRING. The route is a SUBSTRING of the
+        # page's file name (`website/tortoise-for-product-teams.html`), so a
+        # `route in line` test is satisfied by a bullet that names only the FILE
+        # — the route can then disappear from the host map and this gate stays
+        # green (measured at the previous head: rewriting the bullet's first line
+        # to start with the file name left it PASSING). The doc writes routes in
+        # backticks, so the bullet's own heading is the route in backticks; and
+        # binding to a line that STARTS with `- ` stops an earlier mention of the
+        # route elsewhere in the document from stealing the binding.
+        marker = f"`{route}`"
+        lines = architecture.splitlines()
+        start = next((i for i, ln in enumerate(lines)
+                      if ln.startswith("- ") and marker in ln), None)
+        assert start is not None, (
+            f"`website/website_architecture.md` has no host-map bullet headed "
+            f"{marker} — the host map is where a later reader learns this page is "
+            "served at the COMPANY ROOT and is deliberately not a "
+            "`PRODUCT_PAGES` member. Without it the routing record makes the "
+            "prefix look like the place this page belongs, and 301ing it there "
+            "is a 404 on the URL the owner asked for.")
         # The recorded decision is a MULTI-LINE bullet: bind to the bullet, not to
         # the line, so re-wrapping the prose does not red this row while moving
-        # the decision out of the bullet does.
-        lines = architecture.splitlines()
-        start = next(i for i, ln in enumerate(lines) if route in ln)
+        # the decision out of the bullet does. Blank lines inside the bullet are
+        # skipped rather than treated as its end, for the same reason.
         bullet = [lines[start]]
         for ln in lines[start + 1:]:
-            if ln.startswith("- ") or not ln.strip():
+            if ln.startswith(("- ", "#", "|")):
                 break
-            bullet.append(ln)
+            if ln.strip():
+                bullet.append(ln)
         entry = "\n".join(bullet)
         assert "INDEXED" in entry, (
             f"the architecture doc's {route} entry no longer states the page is "
