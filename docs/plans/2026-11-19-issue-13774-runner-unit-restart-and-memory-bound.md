@@ -15,7 +15,7 @@ sentinel is 0 — see R9).
 **Team:** organisation-design-team
 
 **Architecture:** the installer keeps delegating unit creation to GitHub's `svc.sh` and adds **one** step,
-executed **immediately after the `fi` at `:1490` — outside the `[ ! -f "$UNIT_DIR/$(unit_for "$name")" ]` guard**
+executed **immediately after the `fi` at `:1686` — outside the `[ ! -f "$UNIT_DIR/$(unit_for "$name")" ]` guard**
 **[R2-fix: P1 — "between install and start" is positionally ambiguous; as an indented line it lands INSIDE the
 guard, which is the branch this fleet's already-installed boxes never take]**, writing
 `<UNIT_DIR>/<unit>.d/10-restart-and-memory.conf` idempotently (`cmp` before `install`, `daemon-reload` only on
@@ -38,12 +38,12 @@ aggregate. Stated here, in R4 and in the runbook step.
 
 | Surface | What it is | Test layer | Why this layer |
 |---|---|---|---|
-| install loop, after the `fi` at `:1490` | where the drop-in write is called (outside the guard) | installer unit test (hermetic `CI_RUNNER_UNIT_DIR` seam, `:158`) | the only observable place without touching `/etc` |
+| install loop, after the `fi` at `:1686` | where the drop-in write is called (outside the guard) | installer unit test (hermetic `CI_RUNNER_UNIT_DIR` seam, `:158`) | the only observable place without touching `/etc` |
 | the **guard-false** branch (`svc.sh install` skipped, unit already present) | the branch every already-installed box takes | own arm: unit pre-created, assert drop-in written + `svc.sh install` ABSENT from the argv log | step 4 of v2 was negative-only and the mutation "indent into the guard" survived all arms **[R2-fix]** |
 | `<UNIT_DIR>/<unit>.d/10-restart-and-memory.conf` | the artifact systemd reads | content + **section-position** assertion | a key in the wrong section is silently ignored |
-| `systemctl daemon-reload` | applies the drop-in (including to a live unit) | `sudo`-stub argv log **and** a `systemctl` stub on PATH (the sudo stub execs its argv, `tests/…:2370`) | must fire on change, not on every pass |
-| uninstall loop (`:1400-1412`) **and** the orphan-unit branch (`:1377`) | remove the unit today, the drop-in never | new arms: our file removed, **foreign files survive**, the printed orphan remedy names it **[R2-fix: P1/P2]** | a surviving drop-in governs a future unit of the same name |
-| `docs/ops/ci-runner-x64.md` (map bullet at `:534`) | operator-facing refs | existing pin, new section placed **below** the map | the pin picks the FIRST bullet carrying a ref (`tests/…:2767`) |
+| `systemctl daemon-reload` | applies the drop-in (including to a live unit) | `sudo`-stub argv log **and** a `systemctl` stub on PATH (the sudo stub execs its argv, `tests/…:2376`) | must fire on change, not on every pass |
+| uninstall loop (`:1515-1637`) **and** the orphan-unit branch (`:1558-1561`) | remove the unit today, the drop-in never | new arms: our file removed, **foreign files survive**, the printed orphan remedy names it **[R2-fix: P1/P2]** | a surviving drop-in governs a future unit of the same name |
+| `docs/ops/ci-runner-x64.md` (map bullet at `:534`) | operator-facing refs | existing pin, new section placed **below** the map | the pin picks the FIRST bullet carrying a ref (`tests/…:2773`) |
 | converger (`runner_autoscale.py`) | NOT touched | — | it counts listeners, not units |
 
 **Tech Stack:** bash (installer), pytest (tests), systemd 255 (cgroup v2).
@@ -65,7 +65,7 @@ aggregate. Stated here, in R4 and in the runbook step.
 
 1. **Fixture** — a new install-mode helper: `CI_RUNNER_UNIT_DIR` pinned, `sudo` stub (logs argv, execs), a
    `systemctl` stub earlier on PATH, `.runner` pre-existing (so no download), `svc.sh` stubs,
-   **`--fallback off`** (a `gh` stub that echoes makes `fallback_engaged` die exit 2 at `:279-280`), and
+   **`--fallback off`** (a `gh` stub that echoes makes `fallback_engaged` die exit 2 at `:533`), and
    **`CI_RUNNER_MEM_PER_RUNNER_GB="2"` explicitly** — `_NEUTRAL_HEADROOM` pins it to `0` for every arm
    (`tests/…:168`), which under R9 OMITS `MemoryMax=` and would make step 2's six-key assertion unpassable by
    construction. Step 8's arm overrides it to `0` deliberately.
@@ -86,11 +86,11 @@ aggregate. Stated here, in R4 and in the runbook step.
 9. **Test** — validator: a non-integer `CI_RUNNER_MEM_MAX_FACTOR` and a malformed `CI_RUNNER_START_LIMIT_INTERVAL`
    each refuse with exit 1 **[R2-fix: P2]**.
 10. **Implement** — knobs next to the sizing knobs, each with its rationale comment; add the three INTEGER knobs to
-    the existing validator list (`:249-252`, which fails on non-digits) and validate the interval separately with a
+    the existing validator list (`:268-273`, which fails on non-digits) and validate the interval separately with a
     timespan pattern (`^[0-9]+(s|min|h|d)+$`) because `1h` is not an integer **[R2-fix: P2]**.
-11. **Implement** — `write_unit_dropin()` near `unit_for()`, called **immediately after the `fi` at `:1490`**;
+11. **Implement** — `write_unit_dropin()` near `unit_for()`, called **immediately after the `fi` at `:1686`**;
     **not** in `--repair-labels`, which never installs and may run against a REMOTE install
-    (`:347-349`, `:1170`) **[R2-fix: P2 — v2 named a non-existent `--repair` path]**.
+    (`:524`, `:1244`) **[R2-fix: P2 — v2 named a non-existent `--repair` path]**.
 12. **Implement** — dry run prints the drop-in path and the keys it would write.
 13. **Implement** — uninstall loop, guarded and VERIFIED: `[ -d "$UNIT_DIR/$unit.d" ] && { sudo rm -f
     "$UNIT_DIR/$unit.d/10-restart-and-memory.conf"; sudo rmdir --ignore-fail-on-non-empty "$UNIT_DIR/$unit.d";
@@ -98,7 +98,7 @@ aggregate. Stated here, in R4 and in the runbook step.
     $unit — remove it by hand"; rc=3; }; }` — the `[ -d ]` guard is not cosmetic: `--ignore-fail-on-non-empty`
     ignores ONLY `ENOTEMPTY`, and on a target with no `.d/` directory it exits **1** with `No such file or
     directory` (measured), so an unguarded call would report a clean uninstall as rc=3; and the verify step is
-    what stops the same flag from swallowing our own failed `rm`. The orphan-unit branch (`:1377`) does the same
+    what stops the same flag from swallowing our own failed `rm`. The orphan-unit branch (`:1558-1561`) does the same
     and its printed remedy (`sudo rm -f $UNIT_DIR/$u`) is extended to name the drop-in
     **[cycle-3 fix: `ENOENT` is not ignored by that flag; and add the no-`.d/` case to step 7's arm]**.
 14. **Docs** — `docs/ops/ci-runner-x64.md`, section placed **below the map bullet**: the six keys, the `[Unit]`
@@ -134,7 +134,7 @@ aggregate. Stated here, in R4 and in the runbook step.
 - R10 the wrapper's `exit 0` deaths (codes 0/1/5, unknown) are not retried by `on-failure` → accepted, documented
   residual; `always` would restart session-conflict in a loop.
 - R11 the new knobs are unvalidated by the existing digits-only validator, and one is a systemd TIMESPAN → the
-  integer knobs join `:249-252`'s list, the interval gets its own pattern → step 9.
+  integer knobs join `:268-273`'s list, the interval gets its own pattern → step 9.
 
 **Out of scope — must NOT be raised** (note, file, do not chase): changing `MEM_PER_RUNNER_GB`/`MEM_PER_RUNNER_MB`;
 the runner's job-loss reporting latency (#10591); Docker/FalkorDB sidecar memory; per-cell CPU ceilings; units

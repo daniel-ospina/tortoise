@@ -63,7 +63,7 @@
 #   silently skipped. `_preserve_labels` drops both but reads NO flag.
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
-#   `resolve_os_label` (`:467`), reached from `resolve_labels` — i.e. from install, repair and
+#   `resolve_os_label` (`:483`), reached from `resolve_labels` — i.e. from install, repair and
 #   `--print-labels` — and called by `--status` to READ the intent (it registers nothing) — so
 #   a runner this script registers under `on|auto` carries `ubuntu-24.04`; the autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
 #   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
@@ -265,7 +265,7 @@ case "$COUNT" in
 esac
 # The sizing overrides get the same treatment: a bound nobody can read must be REFUSED, never
 # arithmetically coerced into a number ($(( )) turns 'x' into 0, i.e. silently into no bound).
-for _size in CORES_PER_RUNNER CORES_RESERVED_FOR_AGENT_LANES DISK_PER_RUNNER_GB \
+for _size in COUNT CORES_PER_RUNNER CORES_RESERVED_FOR_AGENT_LANES DISK_PER_RUNNER_GB \
              DISK_RESERVE_GB MEM_PER_RUNNER_GB MEM_RESERVE_GB FORKS_PER_RUNNER \
              START_LIMIT_BURST MEM_MAX_FACTOR; do
   case "${!_size}" in
@@ -284,8 +284,13 @@ for _size in CORES_PER_RUNNER CORES_RESERVED_FOR_AGENT_LANES DISK_PER_RUNNER_GB 
   # `set -uo pipefail`): `mem_need_gb=$(( COUNT * 08 + 0 ))` errors and LEAVES `mem_need_gb` UNSET, so
   # the next line's `"$mem_need_gb"` is a `set -u` violation and the installer ABORTS with exit 1 — a
   # loud abort on a USAGE code with the memory refusal never reached, not a vanished guard over a zero
-  # exit. Normalising in ONE place closes the class for forks, disk, cpu, memory and the derived bound
-  # — instead of hardening the four `$(( ))` sites one review at a time.
+  # exit. ⛔ `COUNT` IS IN THIS LIST, and it was the one value the class still had: the `case` above
+  # checks it is digits, and FOUR headroom gates (forks, disk, cpu, memory) read it as
+  # `$(( COUNT * … ))`. Left out, `--count 010` sized the box for OCTAL 8 while `seq 1 010`
+  # installed TEN — an oversubscribed install that every gate had approved, with the printed line
+  # saying `010x2` beside a need computed from 8. Normalising in ONE place closes the class for the
+  # count, forks, disk, cpu, memory and the derived bound — instead of hardening the four `$(( ))`
+  # sites one review at a time.
   printf -v "$_size" '%d' "$(( 10#$_size_val ))"
 done
 # ⛔ THE TWO UNIT VALUES THAT ARE NOT INTEGERS GET THEIR OWN VALIDATION, because the digits-only loop
@@ -338,6 +343,17 @@ MEM_MAX_GB=$(( 10#$MEM_PER_RUNNER_GB * 10#$MEM_MAX_FACTOR ))
 if [ "$(( 10#$MEM_PER_RUNNER_GB ))" -gt 0 ] && [ "$MEM_MAX_GB" -le 0 ]; then
   MEM_MAX_GB=       # make the invalidity unmissable to any later read
   die "MemoryMax would not be a positive number of GB from MEM_PER_RUNNER_GB=$MEM_PER_RUNNER_GB x MEM_MAX_FACTOR=$MEM_MAX_FACTOR — refusing to write a bound that is not one" 1
+fi
+# ⛔ AND A CEILING AT SYSTEMD'S OWN, because a product that parses fine in bash can still be one
+# systemd DROPS. `MemoryMax=` is a uint64 of BYTES, so anything at or above 17179869184G is
+# "Numerical result out of range" and the key is IGNORED — a drop-in that reads as a bound while
+# the unit runs unbounded, which is the same deception the `0G` sentinel arm (R9) refuses. The
+# operand length bound does NOT imply this one: each operand may be 9 digits, so the product can
+# reach 999999999 x 999999999 = 999999998000000001G, far past systemd's maximum (measured on
+# systemd 255.4: `17179869184G` is refused, `17179869183G` is accepted).
+MEM_MAX_GB_MAX=17179869183
+if [ "$MEM_MAX_GB" -gt "$MEM_MAX_GB_MAX" ]; then
+  die "MemoryMax would be $MEM_MAX_GB from MEM_PER_RUNNER_GB=$MEM_PER_RUNNER_GB x MEM_MAX_FACTOR=$MEM_MAX_FACTOR, beyond what systemd can parse (max ${MEM_MAX_GB_MAX}G) — refusing to write a bound systemd will IGNORE" 1
 fi
 
 runner_dir() { # $1 = instance number: instance 1 keeps the base dir, the rest get -<n>

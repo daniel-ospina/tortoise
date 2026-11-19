@@ -531,22 +531,22 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:1638` (the scale loop) · the two mode blocks the
-  paragraphs below cite: `install` `:1441` (arch refusal dies at `:1446`) and `uninstall` `:1500` ·
-  guards at `:1441-1497` (forks `:1449`, disk `:1469`, cpu/memory `:1476`) · sha256 pin +
-  registration at `:1649-1650` (verify `:1649`, token `:1652`, one argv `:1657`, `config.sh`
-  `:1659`; the run at `:1641` is the dry-run echo) · systemd install/start at `:1669-1678` · label
-  resolution at `:435-489` (`fallback_engaged` `:439`, `resolve_os_label` `:467`, `resolve_labels`
-  `:499`, whose body ends at its `}` on `:536`) · the union's label algebra at `:538-553` and the
-  repair that uses it, `repair` `:1210` · the label-coverage block `:613-1188` (its header `say` at
-  `:613`, its three no-verdict arms at `:953`, `:961` and `:970`, the uncovered verdict at `:1188`)
-  and the `--status` block that contains it `:590-1190` · `--print-labels` `:1414`.
+- `--count N` → `tools/install-ci-runner-x64.sh:1654` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:1457` (arch refusal dies at `:1462`) and `uninstall` `:1516` ·
+  guards at `:1457-1513` (forks `:1465`, disk `:1485`, cpu/memory `:1492`) · sha256 pin +
+  registration at `:1665-1675` (verify `:1665`, token `:1668`, one argv `:1673`, `config.sh`
+  `:1675`; the run at `:1657` is the dry-run echo) · systemd install/start at `:1685-1694` · label
+  resolution at `:451-552` (`fallback_engaged` `:455`, `resolve_os_label` `:483`, `resolve_labels`
+  `:515`, whose body ends at its `}` on `:552`) · the union's label algebra at `:554-569` and the
+  repair that uses it, `repair` `:1226` · the label-coverage block `:629-1204` (its header `say` at
+  `:629`, its three no-verdict arms at `:969`, `:977` and `:986`, the uncovered verdict at `:1204`)
+  and the `--status` block that contains it `:606-1206` · `--print-labels` `:1430`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:256`): a `--count 0
   --uninstall` is a usage error (exit 1), not a silent no-op that reports success having deregistered
-  nothing. `CI_RUNNER_OS_LABEL` is validated in the same place (:462-465), so a typo is refused in
+  nothing. `CI_RUNNER_OS_LABEL` is validated in the same place (:478-481), so a typo is refused in
   `--status` and `--uninstall` too — not only in the three modes that resolve labels.
 - **`--repair-labels` UNIONS — it can ADD a label, and the ONLY labels it removes are the two named
-  carve-outs below; never `ubuntu-latest` or a custom label a workflow targets** (:1210-1403). The
+  carve-outs below; never `ubuntu-latest` or a custom label a workflow targets** (:1226-1419). The
   absolute form of that sentence was wrong one bullet later — `test-slow` and `workflow-lint` name
   the version pin, and the version-pin carve-out removes it — so the carve-outs are named here as the
   removals they are. It reads the runner's CURRENT labels and PUTs `current ∪ computed`, because the old
@@ -558,7 +558,7 @@ falls back.
   GitHub owns (`self-hosted`, `Linux`/`macOS`/`Windows`, `X64`/`ARM64`/`ARM` — refused by the API with
   HTTP 422) are left out of the body, and the before/after sets plus the derived `removed=[…]` list
   are printed BEFORE the PUT, so a removal would be visible in the output instead of inferred from a
-  queue that never moves. An unreadable current label set is a REFUSAL (:1235) — never "use
+  queue that never moves. An unreadable current label set is a REFUSAL (:1251) — never "use
   the computed set", which is the same strip through a different door — but it refuses THAT RUNNER,
   not the batch: it reports exit 3 and continues, because with `--count 2` an earlier runner's PUT
   may already have succeeded and exit 2 promises "nothing was changed" (`:111-138`). The same holds
@@ -570,16 +570,16 @@ falls back.
   workflow targets it": it stripped `ubuntu-latest` from the only pool answering the REQUIRED
   `python-ci-gate` aggregate (runs 40898791192 / 40901844458 — `jobs=0`, every PR blocked). The only
   removals left are the two named carve-outs below, and both are PRINTED.
-  ⛔ **`relabelled …` IS A CLAIM ABOUT THE SERVER, NOT ABOUT THE PUT'S EXIT STATUS** (:1382): the
+  ⛔ **`relabelled …` IS A CLAIM ABOUT THE SERVER, NOT ABOUT THE PUT'S EXIT STATUS** (:1398): the
   Set verb's own 200 carries the runner's resulting label set, and every label the repair asked for
   must be in it. A pool has already reported `set_labels ok=16 fail=0` for a label that was never
   attached (#6897), so a write that is accepted but not reflected is exit 3 with the returned set in
   the warning — never a `relabelled` line over a state nobody looked at.
-  ⛔ **`--repair-labels --fallback off` is REFUSED (exit 2, before any read or PUT)** (:1217-1219):
+  ⛔ **`--repair-labels --fallback off` is REFUSED (exit 2, before any read or PUT)** (:1233-1235):
   a union cannot DETACH `ubuntu-latest`, so that invocation used to be accepted, print `removed=[]`,
   say `relabelled …` and exit 0 while the label it was asked to remove stayed attached. Detaching is
   the gate's writer; by hand it is `DELETE repos/<repo>/actions/runners/<id>/labels/ubuntu-latest`.
-- **⚠️ TWO NAMED CARVE-OUTS from that union, and neither is the fallback label** (:562-568).
+- **⚠️ TWO NAMED CARVE-OUTS from that union, and neither is the fallback label** (:578-594).
   `foreign-arch` is ALWAYS dropped; the version pin only where **this run's resolution** claims it —
   `CI_RUNNER_OS_LABEL=on`, or `auto` on a host whose `/etc/os-release` reports the pinned release —
   so in the claiming state **the one spelling this box may claim (`ubuntu-24.04`) joins the union and
@@ -591,7 +591,7 @@ falls back.
   (#10275). Both classes are PRINTED, never silently skipped — keeping either makes a false PASS
   permanent — and
   `_preserve_labels` drops both on re-registration, reading NO flag. The WRITERS that can put the
-  class back are the repair above and `tools/install-ci-runner-x64.sh::resolve_os_label` (`:467`) on
+  class back are the repair above and `tools/install-ci-runner-x64.sh::resolve_os_label` (`:483`) on
   the install side. ⛔ WHICH STATE A BOX IS IN CANNOT BE READ OFF THIS PAGE — the flag is an
   environment value on the box, so `systemctl show -p Environment runner-autoscale.service` (or just
   `env`) is the measurement, and the LIVE label set is read back with
@@ -632,7 +632,7 @@ falls back.
      `self-hosted-x64` and KEPT on `ubuntu-latest` — that keep is exactly the measured false red (an
      arm64 box wins an `ubuntu-latest` job and dies in "Set up job", one shard per run). The
      host-derived label is the one witness a caller cannot talk the script out of.
-- **`--status` answers "who answers this `runs-on:` label"** (:613-1188): per label the workflows
+- **`--status` answers "who answers this `runs-on:` label"** (:629-1204): per label the workflows
   name, it counts the ONLINE self-hosted runners that CAN answer it (the sub-pool for that label's
   architecture, so a two-arch pool is not misread as erosion), prints `N of M online runner(s)` —
   and only ONLINE carriers count, with the offline ones printed as context — and reports
@@ -641,8 +641,8 @@ falls back.
   from BOTH `.github/workflows/*.yml` and `*.yaml`, in every documented `runs-on:` form (a scalar, a
   flow array in either quoting, a block sequence, and a `group:`/`labels:` mapping — a runner GROUP
   is consumed, never counted as a label), and a `runs-on:` it cannot read as a STATIC label set is
-  refused (`:961`), never cleared: a partial read is not a coverage verdict. It reads nothing at all
-  → `:953`; it parses the files but finds no label to check → `:970`. All three are exit **4**.
+  refused (`:977`), never cleared: a partial read is not a coverage verdict. It reads nothing at all
+  → `:969`; it parses the files but finds no label to check → `:986`. All three are exit **4**.
   ⛔ **`0` is not a verdict on its own.** A zero answer is the incident ONLY when this pool is ASKED
   to serve that label — read from `CI_RUNNER_OS_LABEL` in the invoking shell, which is why the
   intent read can only ADD a verdict, never subtract one: `n > 0` (a measured carrier) outvotes a
@@ -652,9 +652,9 @@ falls back.
   readings — #6897's pin applied correctly, or erosion to zero — because one shell cannot tell them
   apart; `ubuntu-latest` at zero is likewise a report (that is the healthy state). `0 < n < M` is
   `⚠️ PARTIAL`, and its remedy is class-correct: only the bare pin is re-applied by this script.
-  Exit **5** when the pool IS asked for a required label and answers with none (:1188).
+  Exit **5** when the pool IS asked for a required label and answers with none (:1204).
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:1499-1621`; the proof is `is_runner_install` at `:431`, which accepts `.runner` or  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
+  gone** (`:1515-1637`; the proof is `is_runner_install` at `:447`, which accepts `.runner` or  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
   operator input, so "a directory exists at this path" is not evidence of a runner — the earlier
@@ -694,8 +694,8 @@ falls back.
   operator or a future `--status && …` guard, not a change any caller currently reads.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:1441`, the `MODE = install`
-  block; the refusal itself dies at `:1446`). `--status`, `--repair-labels` and `--print-labels` are
+  arch refusal still governs every INSTALL — and only an install (`:1457`, the `MODE = install`
+  block; the refusal itself dies at `:1462`). `--status`, `--repair-labels` and `--print-labels` are
   **not** gated by the host's architecture: they reach only `gh`, download nothing and run no local
   binary, so a runner can be inspected or relabelled from any host.
 
@@ -820,7 +820,7 @@ belongs to). It drives the script as a subprocess in a hermetic env — a temp b
 
 One flag decides whether a box claims a version-pinned hosted label (`ubuntu-24.04`). **Both sides
 now live in this tree and read the same three values.** The WRITERS: `resolve_os_label` in
-`tools/install-ci-runner-x64.sh` (`:459`), reached from `resolve_labels` — so install, repair and
+`tools/install-ci-runner-x64.sh` (`:483`), reached from `resolve_labels` — so install, repair and
 `--print-labels` all emit it, and `--status` calls it to READ the intent (it registers nothing) —
 plus `runner_autoscale.py::_os_labels` for the ORPHANED re-registration path, and `tools/install-runner-autoscale-schedule.sh`, which renders the value into
 the timer so a scheduled fill inherits the box's choice. The READER that decides the version-pin
@@ -1258,7 +1258,9 @@ MemoryMax=8G
   lexicographically, so a box carrying a manual one ignores a later installer change. When the installer
   starts writing on such a box, remove the manual file: `sudo rm
   /etc/systemd/system/<unit>.service.d/restart.conf && sudo systemctl daemon-reload`. `--uninstall` removes
-  **only** `10-restart-and-memory.conf` and never the `.d/` directory — other operators' drop-ins stay.
+  **only** `10-restart-and-memory.conf`, and the `.d/` directory only if that leaves it EMPTY
+  (`sudo rmdir --ignore-fail-on-non-empty`, `:433`) — a drop-in another operator wrote is left where
+  it is, which is why the directory survives on a box that carries one.
 - **`Restart=on-failure` does NOT cover the wrapper's `exit 0` deaths.** `run-helper.sh.template` exits `0`
   for listener codes 0/1/5 and for unknown codes; code 5 is *"Session Conflict — stop the service, no retry
   needed"*, so retrying it would be a loop (`Restart=always` would do exactly that). Those units end
