@@ -6237,8 +6237,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # at this head rather than carried, because a red on `main` blocks every head.
         # ⛔ THAT REPAIR IS PAIR-SCOPED: it re-points the `pi_hooks` pair only, and the
         # rows above it are pins on files under `tortoise/` (`sdk.py`, `search_engine.py`,
-        # `pack_registry.py`), which this branch does not touch — `git diff --stat`
-        # `origin/main...HEAD -- tortoise/` is EMPTY. Read "repaired" as "this pair is
+        # `pack_registry.py`), which this branch does not touch — `git diff --name-only origin/main...HEAD`
+        # ` -- <those three files>` prints NOTHING (the bare `-- tortoise/` spelling is FALSE here). Read "repaired" as "this pair is
         # re-pointed", never as a claim about any other row. (Written at `b6003e180e`,
         # when the `sdk` rows sat one line behind; `main` re-derived them — GREEN here.)
         # The two `def`s are always

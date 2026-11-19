@@ -3262,8 +3262,10 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # A row recorded as "found by its pinned text" must name text that actually finds
     # it, or the record does not reproduce the address it explains.
     #
-    # ⛔ RE-DERIVED AGAIN (#13728) at `main` `a6fed32ab4` — the merge base this branch
-    # is 0 behind — because every row above had gone stale there: the required `test
+    # ⛔ RE-DERIVED AGAIN (#13728) at `main` `a6fed32ab4` — the head it was measured at,
+    # NOT this branch's merge base (that has since moved to `945817d22a`, so a reader who
+    # runs `git merge-base origin/main HEAD` gets a different sha and must not read the
+    # derivation as stale for it) — because every row above had gone stale there: the required `test
     # (d)` shard was RED on `main` itself, with all four inputs
     # (`tortoise/projection/entities.py`, `tortoise/sdk.py`, this file, and the pin
     # walker's own `tortoise/indexer/github_indexer.py` apart from comment prose) byte-

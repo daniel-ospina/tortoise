@@ -458,9 +458,15 @@ def test_a_pointer_at_a_whole_FILE_is_not_scanned_as_a_symbol(tmp_path: Path) ->
         "a pointer naming a whole FILE was scanned as a symbol — the required "
         "`test` job reds on prose that moved nothing"
     )
-    assert files, (
-        "the whole-FILE pointers were DROPPED instead of LISTED — the split must "
-        "classify them, not discard them"
+    # ⛔ NAME THE TARGET, do not merely assert the list is non-empty (#13728 review,
+    # P2). The tree above also carries `tests/test_widget.py`, which `_classify`
+    # routes to FILE unconditionally through `_NOT_A_SYMBOL`, so `assert files` passed
+    # even for an implementation that DROPPED the unknown-extension pointer — the one
+    # case this arm exists to cover. Measured: an impl that drops only
+    # `test_widget.zzz` still leaves `files == ['tests/test_widget.py']`.
+    assert any(named.endswith("test_widget.zzz") for _, _, named in files), (
+        "the unknown-extension whole-FILE pointer was DROPPED instead of LISTED "
+        f"— files={[named for _, _, named in files]}"
     )
 
     # …and the scan still finds a REAL symbol pointer in the same tree, so the
