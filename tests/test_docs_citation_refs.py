@@ -643,6 +643,7 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         _tautology = False
         _at_most = False
         _nothing_but = False
+        _not_only = False
         _before = None
         while _before != low:
             _before = low
@@ -661,6 +662,16 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                     _tautology = True
                 elif re.match(r"(?:at\s+most|no\s+more\s+than)\b", low):
                     _at_most = True
+                elif negated and re.match(r"(?:only|just)\b", low):
+                    # ⛔ `not only X` / `not just X` IS AN IDIOM, NOT A NEGATION (#13831
+                    # review, round 5, P1). It asserts that X is EXCEEDED — the head is
+                    # asserted AND more — so the head's own direction survives: `not only
+                    # two paths` is MEMBERSHIP ("at least two") and `not only empty` is
+                    # MEMBERSHIP too ("more than empty"). Letting the generic inversion run
+                    # turned the first into EMPTINESS, i.e. a refuted membership claim read as
+                    # emptiness and passing GREEN at the empty head this guard runs at — the
+                    # fail-open direction, measured.
+                    _not_only = True
                 low = _filler
             # ⛔ AND A DOUBLED FORM (`prints contains …`) — a listed verb can sit where
             # the answer should start, and the head token is what follows it (#13795
@@ -681,18 +692,22 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # `isempty`, and the strip is what re-exposes `two` / `empty` in it. Those are
             # MUTATIONS of the document's `… is <answer>` form, not quotations of it: measured,
             # `05-verify.md` contains ZERO `` is` `` and ZERO `_empty` occurrences — its `is`
-            # is always followed by whitespace — so they are named as mutations, which is the
-            # convention the markup comment above already states for the same reason (a
-            # witness attributed to the tree goes stale the moment the tree stops writing it).
+            # is glued to a BACKTICK or an UNDERSCORE (the document does glue it to `.`, `,`
+            # and `"` in prose — a different thing, not claimed here) — so they are named as
+            # mutations, the convention the markup comment above already states for the same
+            # reason: a witness attributed to the tree goes stale when the tree stops writing it.
             # The cost is measured too: a token that merely STARTS with `is` loses those two
             # characters, so `prints istwo paths` types as MEMBERSHIP and `prints isempty` as
             # EMPTINESS (both were SKIPPED before this strip).
             # ⛔ AND BOTH SURVIVORS ARE PINNED, so a "cleanup" cannot drop one silently: the
             # doubled MEMBERSHIP spelling is a row in the loop below, and the doubled EMPTINESS
             # spelling (`prints is_empty`) is asserted with the other emptiness witnesses.
-            # MEASURED, adding a `\b` to the `is` alternative reds exactly the first of them
-            # and drops the second back to a skip — two rows, both loud, instead of a
-            # single-line tidy-up that passes every check while re-opening the hole.
+            # MEASURED, adding a `\b` to the `is` alternative reds the FIRST of them at its
+            # own assertion and drops the second back to a skip. Both live in one test
+            # function, so the first failure aborts the second — the emptiness row is the
+            # same-class witness behind it, not a second simultaneous red. Stated that way
+            # rather than as "two loud rows": how many assertions fire is a claim about the
+            # runner, not about the detector.
             low = re.sub(r"^(?:->|→|=|:|is)\s*", "", low, count=1, flags=re.IGNORECASE)
         if re.match(r"(?:nothing\s+but\b|none\s+other\s+than\b)", low):
             # an emptiness WORD doing membership duty — `nothing but the two modules`
@@ -834,7 +849,11 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # the loop reached BEHIND a filler or a doubled form (`is still not empty`). NOT
         # for `nothing but …`: that read is membership and `not nothing but X` is not its
         # negation (both parse to membership), so it keeps its direction (see above).
-        if negated and not _nothing_but:
+        if _not_only:
+            # The idiom asserts EXCEEDING the head, so the answer is MEMBERSHIP whichever
+            # direction the head token alone would give — the inversion must not run.
+            claims_empty = False
+        elif negated and not _nothing_but:
             claims_empty = not claims_empty
         answers.append((window, claims_empty))
     return answers
@@ -1289,6 +1308,30 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the shape detector types {_not_nothing_but!r} as EMPTINESS — a negated "
             "`nothing but …` is still a MEMBERSHIP claim, so a refuted one passes green "
             "(#13831 review, P2)")
+    # ⛔ AND `not only X` / `not just X` IS THE IDIOM, WHICH ASSERTED X AND MORE — so the head's
+    # own direction survives the negation (#13831 review, round 5, P1). The generic inversion
+    # turned `not only two paths` (MEMBERSHIP: at least two) into EMPTINESS, which is a refuted
+    # membership claim passing GREEN at the empty head this guard runs at — the fail-open
+    # direction. `not only empty` is pinned too, because it must stay MEMBERSHIP ("more than
+    # empty") rather than flip the other way; `not two paths` is the control that keeps the
+    # ordinary inversion, so removing `_not_only` cannot be "fixed" by deleting the toggle.
+    for _not_only_spelling in (
+            "prints not only two paths",
+            "prints not just two paths",
+            "prints not only the two comment-only modules",
+            "prints not only empty"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_not_only_spelling}", _tortoise_cmd
+        ) == [(_not_only_spelling, False)], (
+            f"the shape detector types {_not_only_spelling!r} as EMPTINESS — `not only` / "
+            "`not just` asserts that the head is EXCEEDED, so the answer is MEMBERSHIP and a "
+            "refuted one would pass green (#13831 review, round-5 P1)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints not two paths", _tortoise_cmd
+    ) == [("prints not two paths", True)], (
+        "the ordinary head negation must still invert — `prints not two paths` is "
+        "EMPTINESS, and the `not only` idiom must not be generalised into it "
+        "(#13831 review, round-5 P1)")
     # ⛔ AND THE SAME STRIP FOR THE NON-WORD FORMS (#13831 review, P2): `is`, `->`, `→`, `=`
     # and `:` are listed answer FORMS, so a doubled form on one of them is the same class as
     # a doubled verb — and the docstring now says so. Each row below was SKIPPED before that
