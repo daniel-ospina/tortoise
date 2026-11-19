@@ -1314,10 +1314,65 @@ _TORTOISE_SET_DIRECTION_CLAIM = re.compile(
     # green while the same claim in the long spelling redded.
     r"|`-- tortoise/`"
     r"|`tortoise/` set[^`]{0,40}?)"
-    r"\s*(?:prints?|->|returns?|is)\s*`?"
+    # ⛔ ` there -> ` IS THE DOCUMENT'S OWN SPELLING (#13802 merge round P1). Without
+    # this the answer sits one word further from the command and BOTH detectors miss
+    # it — measured in a real `--depth 1` clone: `… -- tortoise/` there ->
+    # `tortoise/x.py`` stayed green while the same answer with no `there` red. The
+    # document's own historical instance of that shape is de-typed in the same change,
+    # so this catches a claim and never the pointer.
+    r"(?:\s+there)?\s*(?:prints?|->|returns?|is)\s*`?"
     r"(?:(?:NOT|not)\s+)?"
-    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two|ONE module|TWO modules)"
+    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two|ONE module|TWO modules"
+    # ⛔ A `tortoise/` PATH NAMED AS THE ANSWER (#13802 merge round P1): the membership
+    # direction, in the spelling the document itself used to carry.
+    r"|`?tortoise/[A-Za-z0-9_./-]+\.py`?)"
     r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`")
+
+
+def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_verb_class():
+    """⛔ A PATTERN GUARD WITH NO WITNESS IS THE BLACKLIST IT REPLACED, ONE LEVEL UP.
+
+    The five-literal ban this replaced was measured leaking FOUR spellings the document had
+    actually used; the first cut of the PATTERN then leaked the whole MEMBERSHIP direction —
+    measured in a real `--depth 1` clone as `15 passed, 1 skipped` over an injected
+    membership claim, while the emptiness form red. On that checkout the measured sibling
+    SKIPS, so nothing else covered it. Every spelling below is pinned, in BOTH directions,
+    including the ` there -> ` form the document itself used to carry; the pointer and
+    past-tense forms are pinned as MUST-NOT-REFUSE, because refusing the document's own
+    pointer to the command is the same defect in the other direction
+    (#13795 review, note 5; #13802 merge round, finding 1).
+    """
+    _cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    for _claimed in (
+        # emptiness
+        f"`{_cmd}` prints NO path at all",
+        f"`{_cmd}` prints NOTHING",
+        "`-- tortoise/` returns NOTHING",
+        "`tortoise/` set above is EMPTY",
+        f"neither is `{_cmd}`",
+        # membership
+        f"`{_cmd}` prints `tortoise/hosted_api.py`",
+        f"`{_cmd}` returns exactly those two",
+        f"`{_cmd}` returns ONE module",
+        # the answer one word further from the command — the document's own historical form
+        f"`{_cmd}` there -> `tortoise/activation_scorecard.py`",
+    ):
+        assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
+            f"the direction detector does not see {_claimed!r}, so that spelling of a "
+            "head-bound answer about the `-- tortoise/` set walks through green — measured, "
+            "and it is how the emptiness-only first cut leaked the whole membership "
+            "direction (#13802 merge round, finding 1)")
+    for _allowed in (
+        f"`{_cmd}` is the command that answers it at the head you merge",
+        "at `2584a86ec1` the command printed no path at all",
+        "read the set from `git diff --name-only origin/main...HEAD`",
+    ):
+        assert not _TORTOISE_SET_DIRECTION_CLAIM.search(_allowed), (
+            f"the direction detector REFUSES {_allowed!r}, which states the command (or "
+            "records a PAST-tense reading at a named head) and asserts no current direction "
+            "— refusing it would over-block the document's own pointer, the same defect in "
+            "the other direction (#13795 review, note 5)")
+
 
 #: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
 #: docs/00_index.md` prints NOTHING at this head, so a document that types what it printed
