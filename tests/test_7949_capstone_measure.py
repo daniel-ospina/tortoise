@@ -16477,7 +16477,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
     # re-point — `sdk.py:28559` → `:28592`", while after the rebase that file is not in
     # this diff at all (`git diff --name-only origin/main...HEAD` does not list it) and the
-    # document's own row reads `sdk.py:28607`. A phrase-only assertion was green over that,
+    # document's own row carries the `declared_relation_predicates()` cite read below. A
+    # phrase-only assertion was green over that,
     # re-landed, and was green again: that is the class this pin exists to close. No count
     # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
     for stale in ("carries TWO numeric re-points", "a document that carries two"):
@@ -16492,12 +16493,30 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "Measured after the rebase: that file is not in `git diff --name-only "
         "origin/main...HEAD` at all, so this diff contributes NO re-point there — and the "
         "pair the clause used to name (`sdk.py:28559` -> `:28592`) does not describe the "
-        "document either, whose row reads `sdk.py:28607`")
-    assert "sdk.py:28607" in text, (
-        "D5 no longer names `sdk.py:28607`, the value `04-plan.md`'s own row carries at "
-        "this head (`grep -n 'declared_relation_predicates()' "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
-        "address; do not drop it")
+        "document either, whose row reads the `declared_relation_predicates()` cite")
+    # ⛔ DERIVED FROM `04-plan.md`, never typed (#13746 review round 4, P1). This asserted
+    # the literal `sdk.py:28607`, which was that row's value at this branch's BASE and
+    # stopped being true the moment this branch re-pointed the row: at this head
+    # `04-plan.md` carries `sdk.py:28682` (`grep -n 'declared = declared_relation_predicates()'
+    # tortoise/sdk.py` -> 28682), while `28607` is `created. An EXPLICIT or prior ``draft``
+    # is NOT retro-promoted`. A typed number that has to equal ANOTHER document's number is
+    # the same head-bound figure this file exists to forbid — so the expectation is read off
+    # `04-plan.md` here, and D5 is held to THAT, whichever head this runs at.
+    plan_row = next(
+        (ln for ln in _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8").splitlines()
+         if "declared_relation_predicates()" in ln), None)
+    assert plan_row, (
+        "`04-plan.md` must carry the `declared_relation_predicates()` cite this row is "
+        "about; it was not found — re-derive the row, do not drop the check")
+    plan_number = re.search(r"`?sdk\.py:(\d+)`?", plan_row)
+    assert plan_number, (
+        "`04-plan.md`'s `declared_relation_predicates()` row must carry a `sdk.py:<line>` "
+        f"cite; the row reads {plan_row[:200]!r}")
+    expected_cite = f"sdk.py:{plan_number.group(1)}"
+    assert expected_cite in text, (
+        f"D5 must name `{expected_cite}`, the value `04-plan.md`'s own row carries at this "
+        "head (read off that row, not typed: the literal this check used to carry went "
+        "stale the moment the row was re-pointed). Re-derive the address; do not drop it")
 
     assert not failures, (
         "D5's present-tense anchors are not the lines they name "

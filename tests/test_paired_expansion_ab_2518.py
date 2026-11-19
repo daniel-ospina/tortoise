@@ -2545,7 +2545,8 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     #   · arm on the brief's directory + the probe (round 1): a head touching neither
     #     SKIPs — all three assertions unreachable, dead code exactly where the cell
     #     cannot have gone stale — while a head that edits either is ARMED and REDs
-    #     (`extra` = 11 or 12);
+    #     (`extra` = 12 armed by the brief alone, 11 by the probe alone or by both,
+    #     since the probe is itself one of the twelve);
     #   · arm on the brief's directory alone (round 2): same skip, and a maintenance
     #     edit to the record REDs on the twelve paths a one-file diff cannot carry;
     #   · arm on `--diff-filter=A` (round 3, "the diff that CREATES the record"): the
@@ -2557,6 +2558,15 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     # comparison is unconditional. It needs no git (armed on the suite job's shallow
     # checkout too) and is falsifiable in both directions — editing the cell without
     # updating the constant REDs immediately, which is the point.
+    #
+    # ⚠️ WHAT THIS PIN IS, stated so nobody over-reads it (#13746 review round 4, P1):
+    # it is a LOCK on the record, not a re-derivation of it. It cannot prove the cell's
+    # enumeration matches the authoring diff's file list — that diff was merged long
+    # ago and the tree has moved, and no live command reproduces it. What it proves is
+    # that the cell cannot be edited without the edit being visible in a second place,
+    # which is the failure this lane exists to stop (a lane re-pointing the cell at a
+    # new head). A coordinated edit to both sides is a REVIEW question, and the record's
+    # own sentence already assigns it to the reviewer.
     extra = named - _RECORDED_TOUCHED_PATHS
     assert not extra, (
         f"the cell names paths the recorded change does not carry: {sorted(extra)} "
@@ -2565,6 +2575,15 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     assert not missing, (
         "the cell no longer names these paths the recorded change carries, so its "
         f"set is incomplete: {sorted(missing)}")
+    # ⚠️ The `tortoise/` arm below reads the CELL, not the branch's diff, and that
+    # difference is deliberate rather than a lost check (#13746 review round 4, F7, which
+    # flagged the move as a coverage reduction while the trigger was still diff-keyed).
+    # The claim this file's cell makes is "no retrieval behaviour changed" ABOUT THE RECORD;
+    # asking a live branch's diff whether it touches `tortoise/` is a different assertion —
+    # and a false block on every unrelated PR that legitimately edits the product, which is
+    # one of the shapes this lane exists to remove. What still guards the surface: this arm
+    # reds the moment the cell names a `tortoise/` path, and the three set assertions above
+    # red on any edit to the cell that is not also made to the frozen record.
     assert not [p for p in named if p.startswith("tortoise/")], (
         "the R3 claim is 'no retrieval behaviour changed', and the cell now names "
         f"the product: {sorted(p for p in named if p.startswith('tortoise/'))}")
