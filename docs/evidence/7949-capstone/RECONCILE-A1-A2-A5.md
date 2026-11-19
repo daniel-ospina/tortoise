@@ -94,14 +94,14 @@ is §7's lesson one merge later: **a count is only as good as the base it was ta
 record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
-`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:21637` (`relation_write = apply_relation_edges(` —
-the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:21636`, and the
+`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:21673` (`relation_write = apply_relation_edges(` —
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:21672`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
 - `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:12487`,
-  `relation_write.py:7`, `sdk.py:21624`), against the *"that comment and no consumer at all"* this
+  `relation_write.py:7`, `sdk.py:21660`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
   and one of them the **call** (`:700`): a declared hierarchy over a pair the story *states* is routed

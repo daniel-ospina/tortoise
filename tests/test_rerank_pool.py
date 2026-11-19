@@ -1539,7 +1539,12 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # `tortoise_fts_query` is the TRACING WRAPPER the capture prior goes through: it
         # forwards its caller's kwargs and adds only `leg_trace`, so injecting an opt-out
         # there would make the wrapper measure a different read than `_fts_rows` performs.
-        "tools/capstone_12186_recall.py": frozenset({"_query_rows", "tortoise_fts_query"}),
+        # ⛔ ITS ENTRY IS 47 LINES DOWN, not here: the merge of `origin/main` brought this
+        # registration and this branch carried its own for the same key, so a bare union
+        # would have been two dict keys with the same literal (ruff F601, and the second
+        # silently wins). The surviving entry is the branch's — it is main's pair PLUS `run`,
+        # whose warm-up argument is recorded there — and these lines keep main's rationale
+        # for registering the file at all.
         # ⛔ A MIRROR of `extractor_v2._fts_rows`, which keeps the rerank ON
         # DELIBERATELY: `sdk.py`'s `_rerank_candidates` docstring records the
         # departure verbatim — "the capture path (`extractor_v2._fts_rows`)
