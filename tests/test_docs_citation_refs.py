@@ -1264,10 +1264,16 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
 #: draws between `printing `1 1` at a head of its own` and `both print `1 1``.
 _TORTOISE_SET_DIRECTION_CLAIM = re.compile(
     r"(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
+    # ⛔ THE SHORTHAND TOO (#13802 review, round 4, P2): the document writes
+    # "`-- tortoise/` returns NOTHING" as well as the full command, and a pattern that
+    # knows only the long spelling walks past a false claim in the shorthand — measured,
+    # `and \`-- tortoise/\` returns exactly those two modules at this head` came back
+    # green while the same claim in the long spelling redded.
+    r"|`-- tortoise/`"
     r"|`tortoise/` set[^`]{0,40}?)"
     r"\s*(?:prints?|->|returns?|is)\s*`?"
     r"(?:(?:NOT|not)\s+)?"
-    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two)"
+    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two|ONE module|TWO modules)"
     r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`")
 
 #: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
