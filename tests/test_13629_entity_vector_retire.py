@@ -4081,6 +4081,17 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE PLAIN-ASSIGN `if…else` MAPPING HAS ITS OWN ROW (`#13788` F7): the arm in
+        # `_mapping_literal_stores_the_vector` was the ONLY route for this spelling and no
+        # fixture reddened it — reverting it left the suite green while re-certifying a stop
+        # arm that stores.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {"embedding": _encode(ev)} if _flag(ev) else {}
+        return None
+    _write(props)
+""",
         # ⛔ …AND THE SAME CONSTRUCTOR ONE SPELLING OVER IS THE SAME STORE: REBUILT rather
         # than merged. `_rebuild_stores_the_vector` named `dict` and only `dict`, so
         # `props = OrderedDict({"embedding": vec})` was CERTIFIED while

@@ -1970,9 +1970,6 @@ def _third_argument_stores_the_vector(call) -> bool:
     # certified a stop arm that places the vector.
     # ⛔ AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
     # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
-    # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows. The
-    # AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
-    # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
     # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows.
     # ⛔ AND THE NAMED SCANS ABOVE ARE NO LONGER A DIFFERENT QUESTION (`#13788` F5): a wrapper
     # around a `key=`/`value=` pair DOES have statically readable values once it is unwrapped
