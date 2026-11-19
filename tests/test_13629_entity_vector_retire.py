@@ -4440,6 +4440,47 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE WRITER HANDED A REBUILT MAPPING IS THE SAME STORE (`#13788` F4, measured at
+        # `45b5f88a`). `_dict_stores_the_vector`'s `{**{…}}` recursion is gated on `stop_arm`,
+        # and `_rebuild_stores_the_vector` — the route that answers `_write({**props, …})` —
+        # asked it with the default OFF while being reached only under `anywhere`. The
+        # recursion was therefore INERT on this route: all five rows below CERTIFIED while
+        # `_write({**props, "embedding": vec})` directly above was refused.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**{"embedding": _encode(ev)}.copy()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, **{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = props | {**{"embedding": _encode(ev)}}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write(props | {**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
         # …the KEYWORD spelling of the same mutator
         """
 def _upsert_object(props, ev):
@@ -4730,6 +4771,7 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -5335,6 +5377,25 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE STOP-MODE REBUILD ROUTE (`#13788` F4): the
+        # strengthened recursion must not swallow a MENTION or an identity-triple rebuild —
+        # `_write({**props, **extra})` merges an unknown and names no key, and
+        # `_write({**props, "embedding_model": …})` merges only the identity triple.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, **extra})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, "embedding_model": _m()})
+        return None
+    _write(props)
+""",
+
         # ⛔ THE HONEST-STOP CONTROLS FOR THE `**`-IN-A-DISPLAY WRAPPER ARM (`#13788` F3): the
         # operand rule keeps the two narrowings (EXACT property, NON-CONSTANT value) behind the
         # wrapper, so the pre-guard reset and the identity triple must still CERTIFY.

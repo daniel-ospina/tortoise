@@ -1834,6 +1834,9 @@ def _third_argument_stores_the_vector(call) -> bool:
     # ⛔ AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
     # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
     # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows. The
+    # AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
+    # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
+    # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows.
     # two NAMED scans above stay literal-only on purpose — they read the mapping's VALUES
     # (`key=`/`value=` spellings), which is a different question from "does this operand
     # place the vector", and a wrapper has no statically readable values.
@@ -2000,7 +2003,17 @@ def _rebuild_stores_the_vector(node) -> bool:
     for leaf in _own_walk(node):
         if isinstance(leaf, ast.Dict):
             merges = any(key is None for key in leaf.keys)
-            if merges and _dict_stores_the_vector(leaf):
+            # ⛔ AND THE `{**{…}}` MERGE IS READ IN STOP MODE (`#13788` F4, measured at
+            # `45b5f88a`). `_dict_stores_the_vector`'s `**` recursion is gated on
+            # `stop_arm`, and this route — the writer being HANDED a rebuilt mapping — asked
+            # it with the default OFF while being reached only under `anywhere`. So the
+            # recursion was inert here and five spellings CERTIFIED beside their
+            # non-merge siblings refused: `_write({**{"embedding": vec}})`, its `.copy()`,
+            # `_write({**props, **{"embedding": vec}})`, `props = props | {**{"embedding":
+            # vec}}` and `_write(props | {**{"embedding": vec}})` (the last two through the
+            # union arm below, whose `_own_walk` also yields the display). Refusal-only:
+            # both call sites of this helper are `anywhere`-gated.
+            if merges and _dict_stores_the_vector(leaf, stop_arm=True):
                 return True       # `{**props, "embedding": vec}`
         elif isinstance(leaf, ast.BinOp) and isinstance(leaf.op, ast.BitOr):
             # `props | {"embedding": vec}` — the union's literal operand merges by
