@@ -1682,8 +1682,22 @@ class TestTheDocumentedRunPath:
         conditional `raise`, a re-raising `try`, a validation pre-pass all reddened)
         AND blind (a `contextlib.suppress`, a ternary write, a truncated iterable
         all passed) — `#13745` reviews rounds 7-9. Count the WRITES instead: every
-        syntactic way of skipping a row shows up at the fold call, so this one
-        assertion covers them all and forbids nothing legitimate.
+        syntactic way of skipping a row shows up at the fold call, so one assertion
+        covers the shapes and forbids nothing legitimate.
+
+        ⛔ BUT COUNTING WRITES IS ONLY AS COMPLETE AS THE POPULATION IT COUNTS
+        (`#13745` review round 10, P1). With three identical-shape rows the coverage
+        was DATA-dependent, not syntax-dependent: a skip keyed on a property the
+        fixture never varies stays green — measured, `if not row["content"]:
+        continue` → the whole suite PASSED. That is not a hypothetical edit: the
+        production write path this seed mirrors computes no vector for falsy content
+        (`projection/entities.py` — "computes neither for an operator, falsy content,
+        an unavailable embedder, …"), so "preserve the existing vector when the text
+        is empty" is the plausible defensive change — and its consequence is a
+        silently short population behind a green guard. The fixture therefore VARIES
+        every property a skip could key on, and the empty-content row is load-bearing
+        rather than decorative: this seed writes a vector for every row regardless of
+        the text.
         """
         written: list[str] = []
 
@@ -1692,23 +1706,42 @@ class TestTheDocumentedRunPath:
                 written.append(props["id"])
                 return (True, True, frozenset())
 
-        population = [{"id": f"pt-{i:06d}", "content": f"claim {i}"} for i in range(3)]
+        # falsy content · production-shaped id · varying text length — one row each
+        population = [
+            {"id": "pt-000000", "content": "claim 0"},
+            {"id": "pt-12186-7f3a9c2e", "content": ""},
+            {"id": "pt-000002", "content": "a production-shaped claim row, longer than the rest"},
+        ]
         try:
             count = tool_mod._seed_graph(
                 _Proj(), population, encode_many=lambda texts: [[0.1, 0.2] for _ in texts]
             )
-        except tool_mod.Refused:
-            # A named refusal ABORTS the run before any arm is scored, so a row the
-            # seed cannot write never becomes a partly scored population — the other
-            # correct outcome. Anything else (a skip, a conditional write, a
-            # swallowed failure) leaves rows uncreated and falls through to the
-            # assertion below.
-            return
-        assert written == [row["id"] for row in population], (
+        except tool_mod.Refused as exc:
+            # ⛔ A REFUSAL IS NOT A CORRECT OUTCOME FOR THIS POPULATION (`#13745`
+            # review round 10, P2). Returning here asserted nothing, and it hid the
+            # one fault it can actually observe: a seed that writes every row and
+            # THEN refuses makes every run unmeasurable — the outcome this test
+            # exists to catch, not to excuse. No legitimate refusal is reachable
+            # from here either: `_seed_graph`'s only refusals are
+            # `seed_vectors_missing` (a length mismatch, or a `None` vector), and the
+            # stub above answers a vector for every row. Those two genuine paths are
+            # pinned by `test_seed_graph_refuses_a_row_it_could_not_embed`.
+            pytest.fail(f"a well-formed population must be seeded, not refused: {exc}")
+        # ⛔ SORTED, because a graph upsert has no order dependency (`#13745` review
+        # round 10, P2): comparing to the population's own order banned a legitimate
+        # batching/reordering seed (`reversed(list(zip(…)))` → RED) while catching no
+        # hole that the sorted form misses.
+        assert sorted(written) == sorted(row["id"] for row in population), (
             "the seed must write one row per population entry — a skipped or "
             f"conditional write leaves a hole: {written}"
         )
-        assert count == len(population), count
+        # ⛔ NOT `count == len(population)` ALONE (`#13745` review round 10, P2):
+        # `_seed_graph` ends `return len(population)`, so that comparison is
+        # tautological with respect to the writes — a seed that wrote 1 of 3 rows
+        # still returns 3 — and it reads as a third independent check without being
+        # one. Tying it to `written` is what makes the returned count a claim about
+        # the rows rather than about the return statement.
+        assert count == len(written) == len(population), (count, written)
 
     def test_a_failed_seed_write_PROPAGATES(self, tool_mod):
         """The other half: a failed upsert must end the run, not be swallowed.
