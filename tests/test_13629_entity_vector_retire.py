@@ -3916,6 +3916,45 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …and one TRANSPARENT WRAPPER in, which is where the pairs rule was leaking:
+        # `.copy()`, `list(…)`, `tuple(…)`, a whole-list slice and an `if`-expression around
+        # the same literal all place the vector and all were CERTIFIED (measured by the review
+        # of this branch) — one `.copy()` re-opened the hole the plain spelling had closed.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))].copy()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= list([("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= tuple([("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))][:]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))] if _flag(ev) else []
+        return None
+    _write(props)
+""",
         # ⛔ …and the DUNDER ALIAS of the same function (`operator.__or__ is operator.or_`),
         # in all three spellings the review of this branch measured CERTIFIED: the functional,
         # the METHOD form on the mapping, and the unbound `dict.__or__(props, …)`. A tuple that
@@ -4619,6 +4658,18 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= [("embedding_model", _m())]
+        return None
+    _write(props)
+""",
+        # ⛔ AND A CONTAINER OF MAPPINGS IS NOT AN ITERABLE OF PAIRS: `dict.__ior__` rejects
+        # `[{"embedding": vec}]` with a `ValueError` (element 0 has length 1, 2 required), so
+        # this is not a store — and the `update` arm's recursive container rule, borrowed here,
+        # refused it. That is a refusal the branch never had, on a statement Python rejects
+        # outright; it stays CERTIFIED so the vocabulary says what the language says.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [{"embedding": _encode(ev)}]
         return None
     _write(props)
 """,

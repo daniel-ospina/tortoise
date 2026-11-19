@@ -1214,21 +1214,21 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                     # `isinstance(..., ast.Dict)` narrowing walked past it (measured CERTIFIED
                     # by the review of this branch while the CALL form
                     # `props.update([("embedding", vec)])` was already refused).
-                    # ⛔ STOP-ARM ONLY IS LOAD-BEARING: the mirror arm's widest arm is reached
-                    # for EVERY statement, and recognizing a new spelling there is a new
+                    # ⛔ STOP-ARM ONLY IS LOAD-BEARING: the mirror arm's arm is reached for
+                    # EVERY statement, and recognizing a new spelling there is a new
                     # ACCEPTANCE, not a new refusal — measured: the same recognition
                     # unconditionally turned a `refused` mirror-arm fixture GATED. A fix may add
                     # refusals, never acceptances.
-                    or (anywhere and _mapping_operand_stores_the_vector(sub.value))):
-                # `props |= {"embedding": vec}` — a merge that places the vector. ⛔ AND THE
-                # ITERABLE-OF-PAIRS SPELLING IS THE SAME MERGE: `props |= [("embedding", vec)]`
-                # (and its tuple twin) is accepted by `dict.__ior__` exactly as the literal is,
-                # and the `isinstance(..., ast.Dict)` narrowing this arm used to carry walked
-                # straight past it — measured CERTIFIED by the review of this branch, while the
-                # CALL form `props.update([("embedding", vec)])` was already refused. One
-                # operand rule, not two: `_pairs_store_the_vector` keeps the same two
-                # narrowings, so `props |= [("embedding", None)]` and
-                # `props |= [("embedding_model", _m())]` stay certified.
+                    # ⛔ AND IT IS `_pairs_operand_stores_the_vector`, NOT the `update` arm's
+                    # recursive container rule. `dict.__ior__` takes an iterable of PAIRS; it
+                    # does not take a container of MAPPINGS, so borrowing that rule refused
+                    # `props |= [{"embedding": vec}]` — a statement Python rejects outright —
+                    # and turned a refusal the branch never had into a new one (measured).
+                    or (anywhere and _pairs_operand_stores_the_vector(sub.value))):
+                # `props |= {"embedding": vec}` — a merge that places the vector. The same
+                # narrowing as everywhere else: EXACT property name, NON-CONSTANT value, so
+                # `props |= [("embedding", None)]` and `props |= [("embedding_model", _m())]`
+                # stay certified.
                 return True
             # ⛔ A MAPPING LITERAL ASSIGNED IN THE ARM IS A STORE TOO, and a `{**{…}}` merge
             # needs the RECURSIVE form — hence `stop_arm=True` here and `anywhere`-only, both
@@ -1461,6 +1461,45 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     # spelling to `_mapping_argument_stores_the_vector` — so removing this branch changed no
     # verdict on any of the 140 fixtures (measured). Left out rather than kept looking
     # load-bearing.
+    return False
+
+
+def _pairs_operand_stores_the_vector(node) -> bool:
+    """The ITERABLE-OF-PAIRS operand, through the wrappers a refactor puts around it.
+
+    `dict.__ior__` and `dict.update` both accept a sequence of `(key, value)` pairs, so
+    `props |= [("embedding", vec)]` places the vector exactly as `props |= {"embedding": vec}`
+    does — and so does the same literal one TRANSPARENT wrapper in: `.copy()`, `list(...)`,
+    `tuple(...)`, a whole-list slice, or an `if`-expression whose branches are both literals.
+    Measured by the review of this branch: every one of those was CERTIFIED, i.e. one
+    `.copy()` re-opened the hole the plain spelling had just closed.
+
+    ⛔ WHAT THIS DELIBERATELY DOES NOT DO — the two halves that are a DIFFERENT rule:
+    a container of MAPPINGS (`[{…}]`) is NOT an iterable of pairs (`dict.__ior__` rejects it
+    with a `ValueError`), so it is not recognized here; and a pairs iterable BUILT BY A CALL
+    (`zip(("embedding",), (vec,))`, `map(...)`, a generator expression) is the stated residual
+    — extracting a pair out of a call result is data flow this module does not do, and it is
+    disclosed here rather than left to be rediscovered.
+    """
+    import ast
+
+    if isinstance(node, ast.Starred):
+        return _pairs_operand_stores_the_vector(node.value)
+    if isinstance(node, ast.List | ast.Tuple):
+        return _pairs_store_the_vector(node)
+    if isinstance(node, ast.Call):
+        name = _callee_name(node)
+        if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
+            return _pairs_operand_stores_the_vector(node.args[0])
+        if (name == "copy" and isinstance(node.func, ast.Attribute)
+                and not node.args and not node.keywords):
+            return _pairs_operand_stores_the_vector(node.func.value)
+        return False                  # `zip(…)`, `map(…)`, a builder: residual, stated above
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
+        return _pairs_operand_stores_the_vector(node.value)
+    if isinstance(node, ast.IfExp):
+        return (_pairs_operand_stores_the_vector(node.body)
+                or _pairs_operand_stores_the_vector(node.orelse))
     return False
 
 
