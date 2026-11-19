@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1323** | **100** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,150** | **838** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,132 here, and only `9,150` reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,157** | **838** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,132 / 9,150 here, and only `9,157` reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -845,7 +845,8 @@ this tree (it read `2,360` at the branch's own cut), and **Appendix A moved by e
 both in `tortoise/oauth.py` (`sweep_oauth_retention` **3049 → 3112**, **3053 → 3116**, **+63**),
 from `main`'s `oauth.py` `74 +/11 −` — the `file:line`-versus-SCALAR gap this section describes,
 once more: the pins stayed green over a table that had already rotted. `--all-surface` is
-re-measured too (**9,150 / 838**), because its row claims to name this tree.
+re-measured too (**9,157 / 838**, the extra seven sites being the review's own new pins in
+`tests/`), because its row claims to name this tree.
 
 </details>
 
