@@ -27,12 +27,16 @@
  *    (#3485/#3503) instead of looping. The carrier is `consent_retry=1` on the return target
  *    (`CONSENT_RETRY_PARAM`), deliberately NOT `stale=1`.
  *  - **A store fault is a 503, never a redirect** (property 3).
- *  - **Every hard failure is a PAGE, not a JSON blob** (#10884, #10865 arm B). All five refusal
- *    arms below answer `consentRefusalPage(...)`: the status is unchanged (`403` stays `403`, `503`
+ *  - **Every REFUSAL is a PAGE, not a JSON blob** (#10884, #10865 arm B). All five refusal arms
+ *    below answer `consentRefusalPage(...)`: the status is unchanged (`403` stays `403`, `503`
  *    stays `503`, which is what the deliberate 403 exemption is carried by), the machine reason
  *    moves to the `x-consent-refusal` header, and the body is prose a visitor can act on. The
  *    reader of this file should NOT "restore" the `json(...)` bodies — they are the defect those
  *    issues were filed for.
+ *    TWO `json(...)` returns deliberately survive, and "refusal" is the word that keeps this
+ *    sentence true of them: the `400 invalid_request` at the top (a CALLER error whose message the
+ *    client, not the visitor, is the reader of) and the terminal `200` flow state (a decided
+ *    outcome, not a refusal — #10865's owner comment records it as a different contract).
  *
  * RE-VALIDATION IS NOT SKIPPED ON THE RETURN LEG, even though the params arrive from our own
  * redirect: they arrive from a BROWSER, so they are untrusted input every time. `validate()`

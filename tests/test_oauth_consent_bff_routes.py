@@ -32,9 +32,12 @@ shipped ones.
 WHAT THIS FILE PINS, AND WHAT IT DOES NOT (#10487 residual)
 -----------------------------------------------------------
 The PRESENTATION half is now delivered (#10884/#10865 arm B): `/api/consent/start` renders a page
-for every hard failure instead of raw JSON, with the status unchanged and the machine reason in
+for every REFUSAL arm instead of raw JSON, with the status unchanged and the machine reason in
 `x-consent-refusal` — `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`
-enumerates ALL of them, not the four either issue names by line.
+enumerates ALL of them, not the four either issue names by line. Two `json(...)` returns survive on
+purpose and are classified in the guard's own docstring (`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`):
+the `400 invalid_request` caller error, and the terminal `200` flow state (#10865 records that as a
+different contract).
 
 The STORE FAULT ITSELF is still unfixed, and that is a different question from its face. Which
 store call raises, and why, is **not determinable from outside** (#10487's body said so; #10884

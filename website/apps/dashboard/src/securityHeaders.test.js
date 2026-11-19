@@ -113,9 +113,9 @@ const HTML_SITES = [
   ['website/apps/dashboard/functions/auth/confirm.ts', 1],
   ['website/apps/dashboard/functions/admin/[[path]].ts', 3],
   // 2026-11-19 (#10884/#10865 arm B): the consent route's refusal page. ONE
-  // construction site (`consentRefusalPage`), so one stamp — and it is the fifth
-  // HTML producer to arrive with no stamp at all would have been a page whose URL
-  // carries a per-attempt key, served with no policy.
+  // construction site (`consentRefusalPage`), so one stamp — and arriving with no
+  // stamp at all would have been a page whose URL carries a per-attempt key,
+  // served with no policy. It is the fifth HTML producer in this list.
   ['website/apps/dashboard/functions/_shared/auth/consent-refusal.ts', 1],
   // TWO HTML paths: the root marketing document (`RELAXED_CSP`) and the stray
   // authorization-response refusal (#10088 ask 3), which stamps the strict
