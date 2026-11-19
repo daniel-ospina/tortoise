@@ -1494,7 +1494,7 @@ def _poolable_label(text: str) -> bool:
     unresolvable value must be "assume it can reach the pool".
 
     This is the same rule the installer already applies from the other side:
-    `tools/install-ci-runner-x64.sh:759-764` REFUSES an expression rather than skipping it —
+    `tools/install-ci-runner-x64.sh:936-941` REFUSES an expression rather than skipping it —
     "A matrix expression (`runs-on: ${{ matrix.os }}`) is the same case for a different
     reason: its label set is not static, so there is nothing to verdict" — and the refusal
     is `exit 4`, never a silent 0. (An earlier version of this paragraph cited `:377-378`
