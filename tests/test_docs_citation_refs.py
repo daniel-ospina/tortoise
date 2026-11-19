@@ -913,6 +913,27 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "arm exists for, and it is refused in EVERY checkout because the ban is on the "
         "TEXT, not on a reading this clone may be unable to take (#13802 review, round 4, "
         "P2). State the command and let the reader run it at the head they merge")
+    # ⛔ AND A LEDGER OF THE SPELLINGS THAT ACTUALLY SHIPPED AND SURVIVED A MERGE — carried
+    # over from `origin/main`'s `#13807` arm at the merge of this branch (#13802 merge).
+    # The shape matcher above anchors on the command or on `the `tortoise/` set`, so a
+    # verdict whose SUBJECT is a deictic that names neither — the document's own
+    # "the three table rows … are NOT in the diff at this head (measured above: that command
+    # returns nothing for all three)" — reaches NO verb form of it, and MEASURED at the
+    # pre-merge heads it was GREEN through both of this branch's arms. `main` retires that
+    # class BY NAME because a name list is the only arm that can see a subject the shape
+    # cannot anchor; it is a SUBSTRING ban, so it also fires on a QUOTED RETRACTION — the
+    # over-block `main`'s docstring accepts and documents. The two arms are kept BESIDE each
+    # other (as they are on `main`) because neither is a superset: the shape half reads a
+    # RE-WORDING of a known form, and this half reads an OLD form under a subject no shape
+    # rule reaches.
+    _surviving = _census_membership_verdicts(doc)
+    assert not _surviving, (
+        f"05-verify.md spells a RETIRED `-- tortoise/` membership verdict: {_surviving!r}. "
+        f"`{_tortoise_cmd}` is HEAD-BOUND — the set is a property of the head it was run "
+        "at — so the document states the COMMAND and lets the reader read it at the head "
+        "being merged. These are the exact spellings that were FALSE at a head and "
+        "survived anyway (#13746 review, finding 7; #13807 review, F1), so the fix for a "
+        "hit is to delete the typed membership and keep the command")
     # (c1) above is the always-live refusal and it lives HERE, base-free. The MEASURED
     # classifier (c2) still lives in
     # `test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree`, deliberately
@@ -1576,6 +1597,170 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
 #: an emptiness word. The HISTORICAL form ("printed no path at the head this was written
 #: for") is past tense and deliberately allowed — that is the same line the numstat arm
 #: draws between `printing `1 1` at a head of its own` and `both print `1 1``.
+#: The command whose output the `#7949` bundle's census paragraph quotes. Named here (never
+#: interpolated from a measurement) because every arm below is a TEXT ban.
+_TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
+
+
+#: Spellings the `#7949` bundle used to state a `-- tortoise/` MEMBERSHIP verdict in the
+#: AFFIRMATIVE direction — that the diff carries these modules. Retired by name.
+_TORTOISE_MEMBERSHIP_SPELLINGS = (
+    "THREE are in this head",
+    "two comment-only `tortoise/` modules",
+    "prints exactly `tortoise/activation_scorecard.py`",
+    "which two `tortoise/` paths this diff carries",
+    "prints the two modules named above",
+    "`activation_scorecard.py` IS in the diff",
+    f"{_TORTOISE_CENSUS_CMD}` is NOT empty",
+    f"{_TORTOISE_CENSUS_CMD}` returns exactly those two",
+    f"{_TORTOISE_CENSUS_CMD}` prints the two COMMENT-ONLY modules",
+    f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
+    "the `tortoise/` set above is the two COMMENT-ONLY modules",
+    # ⛔ AND THE AFFIRMATIVE ROW IN THE ABBREVIATED SHAPE (#13807 review round 5, F2 —
+    # MEASURED). The ledger carried the abbreviated form in the EMPTINESS direction only
+    # (`-- tortoise/` returns NOTHING, below), so the mirror-image affirmative spelling was
+    # read by NEITHER arm: (c-i) had no such row, and (c-ii) requires the FULL command, which
+    # an abbreviation never matches. It was LIVE in `05-verify.md:134` and green — the same
+    # one-sided blindness `#13746` finding 7 recorded, in the abbreviated shape. The row is
+    # added together with the document edit that removes the string, because an
+    # unconditional ban row would otherwise red the document it polices.
+    "`-- tortoise/` returns ONE module",
+    # ⛔ AND THE ORDER-REVERSED FORM (#13807 review round 6, F2 — MEASURED, and it was LIVE).
+    # Every row above is either a bare phrase or a COMMAND-THEN-ANSWER string, and the
+    # answer-form matcher requires the command to PRECEDE the verdict. A sentence that puts
+    # the ANSWER FIRST and the command after it therefore slipped past both arms while it was
+    # FALSE at the head it described — the spelling below is the one that did, and it survived
+    # round 5's abbreviated-command work because that closed the ABBREVIATION axis, not the
+    # ORDER axis. Retired by name for that reason; the ordering sensitivity it exposes is
+    # DECLARED in `_census_membership_verdicts`'s docstring rather than fixed by teaching the
+    # matcher to read prose in either order, because a heuristic that guesses in the permissive
+    # direction is a FALSE PASS — the same trade this ledger already states twice.
+    "carries `tortoise/` paths",
+)
+#: Spellings that state the NEGATIVE direction — that the set is EMPTY. Mirror images of the
+#: list above, and every bit as carryable: the set is a property of the HEAD the command was
+#: run at, so a verdict in either direction is stale one merge later.
+_TORTOISE_EMPTY_SPELLINGS = (
+    f"neither is `{_TORTOISE_CENSUS_CMD}`",
+    f"{_TORTOISE_CENSUS_CMD}` -> empty",
+    f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
+    # ⛔ THE TWO THAT WERE STILL LIVE IN THE DOCUMENT (#13807 review round 3, F1, MEASURED).
+    # The three rows above retire the spellings that sit BESIDE the command, and the document
+    # states the same head-bound emptiness verdict WITHOUT it — a direct hit at
+    # `05-verify.md:147` (`at THIS head the `tortoise/` set above is EMPTY`) and at `:139`
+    # before this round (`… that command prints NO path at all`). Both were measured GREEN by
+    # every arm while present. A ledger scoped to "the command, then the answer" cannot see
+    # an answer whose SUBJECT is the set in the previous sentence — which is this document's
+    # house style, so the gap is not hypothetical.
+    "prints NO path at all",
+    "the `tortoise/` set above is EMPTY",
+    # ⛔ AND THE ABBREVIATED-COMMAND FORMS (#13807 review round 4, finding 1, MEASURED). The
+    # two rows above still assumed the answer sat beside SOMETHING. Four more verdicts were
+    # live in the document with the command ABBREVIATED (`-- tortoise/`, `that command`) or
+    # omitted altogether, and every arm returned `[]` over them — while a claim that is
+    # FALSE at this head in the same abbreviated shape stayed GREEN (`at this head
+    # `-- tortoise/` returns ONE module` -> `14 passed`). These four were the live phrasings;
+    # they are retired by name for the same reason as every other row.
+    "returns NOTHING AT ALL",
+    "`-- tortoise/` returns NOTHING",
+    "that command returns nothing for all three",
+    "contributes no `tortoise/` path at all",
+    # ⛔ `"this diff carries no `tortoise/` path"` IS DELIBERATELY **NOT** A ROW, and the
+    # reason is a live counterexample rather than taste: that exact string still occurs in
+    # the document exactly once, as a QUOTED RETRACTION (“‘this diff carries no `tortoise/`
+    # path’ — which the `--refresh` above made FALSE”). Retiring it would red the document
+    # for retracting a falsehood, i.e. the over-block this ledger already documents. The
+    # clause that ASSERTED it was rewritten to a structural statement (`#12943` landed on
+    # `main`, so it sits on both sides of the merge) that needs no reading of the set at all.
+)
+#: Both directions, because a ban that covers one of them is the defect these lists record.
+_TORTOISE_RETIRED_SPELLINGS = (
+    *_TORTOISE_MEMBERSHIP_SPELLINGS,
+    *_TORTOISE_EMPTY_SPELLINGS,
+)
+
+
+def _census_membership_verdicts(doc: str) -> list[str]:
+    """Every retired `-- tortoise/` membership verdict still spelled in `doc`.
+
+    ⛔ A TEXT BAN, AND THAT IS DELIBERATE (#13807 review, F1, and the false-red direction
+    set out in the next paragraph — settled together). The set
+    is HEAD-BOUND in both directions: it is a property of the head the command was run at,
+    so `#7949`'s own sentences about it go stale on the next merge. Judging them by
+    re-measuring the CURRENT head is therefore not a guard but a false-red generator — at
+    any head carrying a `tortoise/` path (i.e. essentially every product change) the
+    emptiness list would red a sentence that is true of the head it names. And under a
+    shallow checkout the measurement is unavailable at all, so a measurement-keyed arm
+    asserted NOTHING in the job that gates the merge (F1, measured: the three-dot walk exits
+    `128` with `fatal: bad revision`). Reading the document's TEXT needs neither the merge
+    base nor a data model, so this arm fires in every environment.
+
+    The classification arm below is the SHAPE half of the same policy
+    (`_typed_answers_to_tortoise_cmd`); this one is the ledger of exact spellings that
+    actually shipped and survived a merge — including the ones that do not sit beside the
+    command, which a shape match cannot reach.
+
+    ⛔ SCOPE: THIS PAIR OF ARMS POLICES ONE COMMAND — `-- tortoise/` — AND NOTHING
+    ELSE (#13807 review round 9, P2). The ledger and the shape matcher are both keyed
+    to `_TORTOISE_CENSUS_CMD`, so a head-bound verdict about `docs/00_index.md`, the
+    epic's `04-plan.md`, or any other path's residual sails past them; a green here is
+    the absence of RETIRED `-- tortoise/` SPELLINGS, never a proof that the section
+    contains no head-bound claim. Stated so the next lane does not read a green as
+    completeness.
+
+    ⛔ THE OVER-BLOCK THIS ACCEPTS, STATED RATHER THAN HIDDEN (#13807 review round 3, F3).
+    Matching is an unconditional substring test, so a QUOTED RETRACTION that re-spells one
+    of these strings verbatim is refused, where `_typed_answers_to_tortoise_cmd`'s
+    answer-form rule deliberately lets it through — carrying a retraction is not asserting
+    it. This is a category-B cost (something right is refused) taken over a category-A one
+    (something wrong slips through), because the arm it replaces asserted NOTHING at all in
+    the gating job. MEASURED, so it is not theoretical: appending `… said the command
+    `prints exactly `tortoise/activation_scorecard.py``, and that was FALSE at the head it
+    was written for` to the document REDS this arm today.
+
+    The escape is one edit, and it is the one the document already uses everywhere: retract
+    WITHOUT re-spelling the retired string (`the sentences that used to sit here are
+    DELETED, not softened`), or state the command. A retraction-aware carve-out was
+    CONSIDERED AND REJECTED: every version of it is a heuristic over prose (which span is
+    inert? which sentence is a retraction?), and a heuristic that guesses wrong in the
+    permissive direction is a FALSE PASS — the failure class this whole PR exists to close.
+    Narrow, blunt and stated beats wide, clever and silently wrong.
+
+    ⛔ A SECOND OVER-BLOCK, FOUND IN ROUND 4 AND ALSO ACCEPTED (#13807 review round 4,
+    finding 3): a TRUE verdict ATTRIBUTED TO A NAMED HEAD — ``at `49dc839715`,
+    `git diff --name-only origin/main...HEAD -- tortoise/` prints NOTHING`` — is refused
+    too. That is uncomfortable, because the section's own rule is "a count names the head it
+    was read at" and this file REQUIRES a named head elsewhere (the `2584a86ec1` assert pins
+    exactly that). It is accepted anyway because the same ledger cannot tell an attributed
+    verdict from an unattributed one without parsing prose, and the sentence the rule wants
+    is one edit away: name the head AND state the command, which is what every surviving
+    clause in the section does. Stated here rather than left to be discovered as a bug.
+
+    ⛔ AND THE OPERATIVE BOUNDARY, STATED PLAINLY (#13807 review round 4, finding 1). The
+    answer-form matcher requires the FULL command string; this ledger carries the
+    abbreviated forms that shipped (`-- tortoise/`, `that command`) as exact rows, in BOTH
+    directions — the emptiness row from round 4 and the affirmative row from round 5, the
+    latter being the half that was still live and still green when round 4 closed — but a
+    FUTURE re-wording onto a NEW phrasing — an abbreviated command this ledger has not seen
+    before — is not detected. The class is finite in both arms, and a guard may be narrow;
+    what it may not do is describe itself as complete.
+
+    ⛔ AND THE ORDER SENSITIVITY IS DECLARED HERE (#13807 review round 6, F2 — MEASURED).
+    `_typed_answers_to_tortoise_cmd` requires the command to PRECEDE the answer, so a
+    sentence that states the verdict FIRST and names the command AFTER it is invisible to the
+    shape half. That is not hypothetical: one such sentence was live in `05-verify.md` and
+    FALSE at its own head, with every arm green, and it survived round 5's
+    abbreviated-command work because that closed the ABBREVIATION axis, not the ORDER axis.
+    The order half is NOT fixed by teaching the matcher to read prose in either order (a
+    permissive heuristic over prose is a FALSE PASS — the same reason a retraction-aware
+    carve-out was rejected above); it is closed where it was measured, by retiring that
+    spelling BY NAME in the ledger, and this declaration is the part that keeps the next lane
+    from mistaking the shape half for complete.
+    """
+    return [spelling for spelling in _TORTOISE_RETIRED_SPELLINGS if spelling in doc]
+
+
+
 _TORTOISE_NAMED_HEAD = re.compile(r"(?:`[0-9a-f]{7,40}`|\b[0-9a-f]{7,40}\b|#\d{3,6})")
 
 
