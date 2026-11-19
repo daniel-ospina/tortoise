@@ -102,11 +102,11 @@ def _claimed_open(issue: int):
         # Form 2 is the MIRROR word order and gets the same copula family — widening only form 1
         # left `#9063 is open` / `#9063 stays open` / `#9063 remain open` green (measured).
         r"#" + n + r"\s+(?:(?:still|now)\s+)?(?:remain(?:s)?|is|are|stay(?:s)?)\s+"
-        r"(?:an?\s+)?open(?:\s+(?:question|issue|tracker))?",
+        r"(?:(?:still|now)\s+)?(?:an?\s+)?open(?:\s+(?:question|issue|tracker))?",
         # The NOUN forms — this file is named after "the open tracker", and it was the one shape
         # the claim family did not cover (`#9063 is the open tracker`, `the open question is #9063`).
         r"open\s+(?:issue|question|tracker)\s+(?:is|in|remains)\s+#" + n,
-        r"#" + n + r"\s+(?:is|remains|stays)\s+the\s+open\s+(?:issue|question|tracker)",
+        r"#" + n + r"\s+(?:is|remains|stays)\s+(?:(?:still|now)\s+)?the\s+open\s+(?:issue|question|tracker)",
         # The retired sdk.py wording's OWN shape, which mentions neither `open` next to the copula
         # nor a link: "…are the open belief-model decision in #9063".
         r"(?:open|unsettled)\s+(?:[\w-]+\s+){0,3}(?:decision|question)\s+in\s+#" + n,
@@ -236,8 +236,14 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
         "#9063 is open on declared priors.",
         "#9063 stays open on declared priors.",
         "#9063 remain open on declared priors.",
+        "#9063 is still open on declared priors.",
+        "#9063 are open on declared priors.",
+        "declared priors are the open belief-model decision in #9063",
+        "declared priors are tracked by #9063",
+        "declared priors are tracked in #9063",
         "#9063 is the open tracker for declared priors",
         "#9063 remains the open tracker",
+        "#9063 is still the open tracker for declared priors",
         "the open tracker is #9063",
         "the open question is #9063",
         'The refusal says nothing about it: "whether declared priors exist remains open (#9063)".',

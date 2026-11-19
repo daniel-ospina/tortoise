@@ -648,8 +648,13 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 # COMPLETED on 2026-10-20 WITHOUT deciding it. No open issue tracked it at the
 # time of writing (that is a tracker state, not a fact this comment can keep
 # true — filing one is a legitimate future), so silence here must not be read
-# as a decision. WIDENING EITHER TUPLE IS THAT DECISION; they are single
-# constants because the query is already id-anchored and EP-predicated.
+# as a decision. ⛔ `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 correction quotes the
+# PRE-#13675 wording of this sentence ("…which #9063 reserves to the owner…",
+# present tense, pinned to `sdk.py:646-647`); that text is no longer here, and
+# the changelog is owner-gated, so the quote stays historical rather than
+# silently disagreeing with this file.
+# WIDENING EITHER TUPLE IS THAT DECISION; they are single constants because
+# the query is already id-anchored and EP-predicated.
 _CALIBRATION_EVIDENCE_KINDS = ("statement", "observation", "hypothesis")
 _CALIBRATION_GATED_LABELS = ("Point",)
 
@@ -41528,7 +41533,8 @@ class TortoiseSDK:
                 # closed COMPLETED on 2026-10-20 WITHOUT deciding it (the same reading is recorded in
                 # `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 correction, #13641, and stated in the code at
                 # `_CALIBRATION_EVIDENCE_KINDS`). So a caller who followed it found a closed issue and
-                # no answer, and the question is tracked by NO open issue.
+                # no answer, and the question was tracked by no open issue at the time of
+                # writing (a tracker state is not a fact this comment can keep true).
                 # ⛔ The correction is recorded HERE and deliberately NOT in the message: a tracker
                 # state is not something a shipped string can keep true (the issue may be filed
                 # tomorrow), and the archaeology of what an earlier wording said is not a fact a
