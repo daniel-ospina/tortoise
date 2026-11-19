@@ -242,10 +242,13 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     block alone (unioning it would re-admit the very shadow Python says wins), and EXCEPT a
     DESTRUCTURING target, where the reading that preceded this PR ignored the target entirely
     and therefore kept a binding the assignment overwrites: `A, b = object, A` … `A(app)` is not
-    a site here and WAS one under the reader that preceded `#13585`, because `A` is `object`.
-    That is a false BLOCK the PRE-`#13585` reader emitted — `main` carries the element-wise
-    pairing too and answers `[]`, so it is not a main regression — and it is pinned so the
-    element-wise reading cannot decay back into "ignore the target".
+    a site here and WAS one there, because `A` is `object`. That is a false BLOCK the
+    PRE-`#13585` reader (`888eda1368^`) emits and this head does not — measured, and pinned so
+    the element-wise reading cannot decay back into "ignore the target". It is NOT `origin/main`
+    today that emits it: measured on the base `#13628` was written against (`66ddcf305a`, two
+    commits after `#13585` merged), `main` answers `[]` for the same source too, because `#13585`
+    had already replaced the target-skipping reader; on `origin/main` today the same source still
+    answers `[]`, so the mirror row is not where the series' difference shows.
 
     ⛔ EVERY BINDING IS REPLAYED INTO THE BLOCK THAT OWNS IT, AND A CALL IS RESOLVED THROUGH THE
     WHOLE CHAIN (`#13585 review` P3). A FLAT replay cannot say which block a binding belongs to,
@@ -536,17 +539,28 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         DESTRUCTURING assignment binds element by element — `A, b = A, object` binds `A` to the
         adapter — but `_dotted` answers only a dotted EXPRESSION, so a `Tuple` value was `None`
         and every name in the target was recorded `SHADOWED`. That lost the alias, so
-        `A, b = A, object` … `A(app)` reported `[]` at the pre-fix head, while `main` answers
-        `[3]` — it carries this same pairing — so the pre-fix head LOST a site `main` reports.
-        Same shape as the store arm, one level down: the pin's headline claim goes green over a
+        `A, b = A, object` … `A(app)` reported `[]` at the head while the PRE-`#13585` reader —
+        which skipped every non-`Name` target and therefore never dropped the import binding —
+        reported the site. (Measured: on the base `#13628` was written against (`66ddcf305a`,
+        two commits after `#13585` merged) `main` answers `[]` too, so naming `main` there would
+        be FALSE — `#13585` had already removed that reader; on `origin/main` today the same
+        source answers `[3]`, because this series' value-side fix landed at `9d1b1eba`.) Same
+        false PASS as the store arm, one level down: the pin's headline claim goes green over a
         module that really wires the adapter.
 
         So pair a destructuring target with a destructuring value whenever the arity matches
         (recursing through nested tuples/lists, and through ONE `Starred`, whose middle slice is
         skipped because a slice has no static value: the elements AFTER it are paired from the
-        right, `a, *b, c = (1, 2, 3, 4)` → `c` is `4`). That parenthesised arm is the ONLY
-        starred path here: a bare starred target (`*a = [1]`) is a `SyntaxError`, so there is
-        no separate `Starred`-target arm to keep in sync with it.
+        right, `a, *b, c = (1, 2, 3, 4)` → `c` is `4`). That parenthesised arm is the only
+        starred arm that PAIRS. A bare starred target also reaches this function: `ast.parse`
+        accepts `*a = [1]` as a `Starred` target even though the COMPILER rejects it (`SyntaxError:
+        starred assignment target must be in a list or tuple`) — and this reader parses with
+        `ast.parse`, which is exactly why the arm is reachable from source that could never run.
+        Either form makes NO CLAIM (the bare form reaches the `return []` arm; the comma form
+        `*A, = [object]`, which IS valid Python, passes the arity guard and returns zero pairs),
+        so `*A, = [object]` … `A(app)` reports a site it should not. That is the DECLARED
+        over-read direction (a false BLOCK, never a false PASS) and it is recorded here so the
+        shape is a decision a reader can see rather than an untested accident.
 
         ⛔ AN UNPAIRABLE DESTRUCTURING MAKES NO CLAIM AT ALL (`return []`), rather than binding
         every name `SHADOWED`. The value is determinate at run time but unreadable here, so
@@ -554,8 +568,27 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         that lost sites: `A, b = build_pair()` … `A(app)` is a wiring the pre-`#13585` reader
         reported and the `SHADOWED` fallback dropped. Making NO claim leaves any earlier binding
         in force (the name is still recorded as a block-local by `_note_binding`, so it does not
-        leak an enclosing block's meaning), which is what the PRE-`#13585` reader did for every
-        non-`Name` target and the only option that can neither invent a site nor lose one.
+        leak an enclosing block's meaning).
+
+        ⛔ THAT "LEAVES THE EARLIER BINDING IN FORCE" IS BLOCK-LOCAL. The earlier cut stated it
+        unconditionally (and attributed it to `main`, which was the PRE-`#13585` reader); the
+        review at `4a91cbc19293` measured the difference (recorded in #13628's post-merge note,
+        P2). It holds when the earlier binding
+        shares the assignment's block. Across a block boundary `_resolve` answers `SHADOWED` for
+        a name that is bound-but-unvalued, so the SAME source answers differently by scope —
+        measured with this head, the base `#13628` was written against (`66ddcf305a`) and the
+        pre-`#13585` reader:
+
+            module    `A, b = build_pair()` … `A(app)`         head [3]  base []  pre [3]
+            function  `def wire(app): A, b = build_pair(); …`   head []   base []  pre [4]
+
+        The function row is the FALSE-PASS direction and it is a KNOWN residual, recorded here
+        rather than claimed away: a `SHADOWED` there is also defensible (Python really does
+        rebind the name to an unreadable value), and settling it is not this PR's change. It is
+        filed as `#13657` — `_resolve`'s bound-but-unvalued `SHADOWED` default, the two rows
+        above, and the latitude (`1330` destructuring assignments in `tortoise/`, `0` targeting
+        an adapter/module alias today). The module row is what keeps the shape this PR closes
+        reachable.
         """
         if isinstance(target, ast.Name):
             return [(target.id, value)]
@@ -580,7 +613,8 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                     pairs.extend(_binding_pairs(element, value_elts[offset]))
                 return pairs
             return []  # an unreadable sequence value: make no claim (see above)
-        return []  # an Attribute/Subscript STORE binds nothing — see `_target_names`
+        return []  # an Attribute/Subscript STORE binds nothing, and a bare `Starred` target's
+        # slice has no static value — see `_target_names`
 
     def _parameter_names(args: ast.arguments) -> list[str]:
         names = [param.arg for param in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
@@ -1778,18 +1812,24 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # ⛔ THE VALUE SIDE OF THE SAME FIX (`#13585` P2, measured after the store rows above).
     # `_dotted` answers only a dotted EXPRESSION, so a DESTRUCTURING value read as `None` and
     # every name in the target was bound `SHADOWED` — the alias was lost, and a module that
-    # really wires the adapter through `A, b = A, object` reported `[]` — a site `main` reports,
-    # since `main` carries this same pairing. That is a false PASS in the direction this reader
-    # exists to prevent. The mirror row below is the polar control: `A, b = object, A` is `[]` on
-    # `main` as well, and the runtime there is a `TypeError`, so the empty answer is correct on
-    # both readings. Element-wise pairing answers both directions; ignoring the target, which is
-    # what the PRE-`#13585` reader did, answers neither.
+    # really wires the adapter through `A, b = A, object` reported `[]`. The PRE-`#13585` reader
+    # reported the site (it skipped every non-`Name` target, so it never dropped the import
+    # binding), which makes this a REGRESSION in the false-PASS direction against THAT reader,
+    # and the mirror row below is the polar control: there too it reported a site, and that
+    # report was wrong — `A` is `object`. Element-wise pairing answers both directions; ignoring
+    # the target, which is what the pre-`#13585` reader did, answers neither. MEASURED, so the
+    # name is not a guess: on the base `#13628` was written against (`66ddcf305a`, two commits
+    # after `#13585` merged) BOTH rows answer `[]` — that tree carries the false PASS, not the
+    # false BLOCK. On `origin/main` TODAY the value row answers `[3]` and the mirror `[]`: the
+    # value row now agrees with the pre-`#13585` reader (`[3]`), and the mirror does not (it was
+    # `[3]` there and is `[]` today) — that removal is the false BLOCK the element-wise reading
+    # closes.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "A, b = A, object\n"
         "A(app)\n"
     ), ("a DESTRUCTURING value erased the alias — `A, b = A, object` binds `A` to the adapter "
-        "and the head reported `[]` (`main` reported this site)")
+        "and the head reported `[]` (the pre-`#13585` reader reported this site)")
     assert _adapter_instantiation_sites(
         "import tortoise.tool_registry as tr\n"
         "x, tr = 1, tr\n"
@@ -1812,14 +1852,14 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A, b = object, A\n"
         "A(app)\n"
     ) == [], ("`A, b = object, A` reads as a site — element-wise pairing must place the value "
-              "where it BELONGS, not report every destructuring (the pre-`#13585` reader "
-              "reported a site here; `main` and this head both answer `[]`)")
+              "where it BELONGS, not report every destructuring (the pre-`#13585` reader reported "
+              "a site here, and that report was wrong)")
     # ⛔ AN UNPAIRABLE DESTRUCTURING MAKES NO CLAIM (`_binding_pairs`'s `return []`). `A` IS in
     # the target here — that is the whole point: the value is a CALL, so the pair is
     # undeterminable and the reader must leave the import binding in force rather than claim
     # `SHADOWED`. Restoring the pre-fix claim (`[(name, None) for name in _target_names(target)]`)
-    # binds `A` `SHADOWED` and reds this row — the documented false PASS (`main` reported the
-    # site) would otherwise return with every row green.
+    # binds `A` `SHADOWED` and reds this row — the documented false PASS (the pre-`#13585`
+    # reader reported the site) would otherwise return with every row green.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "A, b = build_pair()\n"
@@ -1849,11 +1889,15 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A(app)\n"
     ), ("a STAR before the tail misplaced the right-anchored element — `A` is the LAST value "
         "in `*rest, A = 1, 2, 3, A`, so a left-anchored offset loses the site")
-    # the arity guard: with one star the value needs at least `n - 1` items. An EMPTY star is
-    # the only shape that separates `>=` from `>`, and it must be a longer TARGET with a short
-    # value (`A, b, *rest = 2, 3` binds `A = 2`, `rest = []`). Pairing it honestly stops the
-    # call being a site; falling through the guard makes no claim, which leaves the import
-    # binding in force and would REPORT the site — so the `== []` is what reds `>=` → `>`.
+    # the arity guard: with one star the value needs at least `n - 1` items. This row is the
+    # EXACT-BOUNDARY shape — a longer TARGET with a short value (`A, b, *rest = 2, 3` binds
+    # `A = 2`, `rest = []`), so the star captures nothing and only `>=` (not `>`) admits the
+    # pairing. Pairing it honestly stops the call being a site; falling through the guard makes
+    # no claim, which leaves the import binding in force and would REPORT the site — so the
+    # `== []` reds a guard that drops the boundary. MEASURED for `>=` → `>`: this row AND every
+    # star-free equal-arity row that asserts `== []` red that same `return []` path, and the
+    # FIRST failure observed is the nested row above, NOT this one — so this row is
+    # the boundary pin, not the only discriminator.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "A, b, *rest = 2, 3\n"
