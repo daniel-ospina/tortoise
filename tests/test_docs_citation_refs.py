@@ -634,50 +634,87 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "That count is the MERGE head's; name it beside the claim (`2584a86ec1`, with "
             "the merge-base command that prints its set) or the two module statements stay "
             "uncheckable (#13489 review, P1)")
-def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
-    """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21496`.
+def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed():
+    """The doc attributed a `docs/00_index.md` cite re-point to THIS diff; it re-points none.
 
-    `05-verify.md` stated, as the row's re-point at the head being merged, a pair the
-    tree refutes at BOTH ends: neither `sdk.py:19449` nor `sdk.py:19485` occurs in
-    `docs/00_index.md` at this head or on `main`, while the diff's actual re-point is
-    `sdk.py:21474` -> `:21496` (2-dot and 3-dot `--numstat` both `3 3`). It survived
-    several review rounds for the same reason the census green did: the D5 arms in
+    `05-verify.md` said, in the D5 cell and again in the file-table row, that this
+    repair re-points the capstone row's cite (`:21604` -> `:21679` -> `:21715`) — and
+    that the `docs/00_index.md` change in this diff IS that re-point. Measured at
+    `7069b3725b`, both halves are `main`'s, not this branch's:
+
+        git show origin/main:docs/00_index.md | grep -o 'sdk[.]py:[0-9]*'
+        grep -o 'sdk[.]py:[0-9]*' docs/00_index.md
+        -> the SAME pair on both sides (`:21715`, `:28178`)
+        git show e679d22286:tortoise/sdk.py | cmp - tortoise/sdk.py
+        -> identical, so `#13724`'s move is already on this branch's base
+
+    So the one changed line in that file is the `#12296` row's DESCRIPTION of its own
+    `:27861` clause, and the sentence was the document's own defect class — a typed
+    head-bound figure — applied to the document it lives in. It survived several review
+    rounds for the same reason the census green did: the D5 arms in
     `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
     file-table section, so nothing read it.
 
-    The arm is deliberately GIT-FREE (no other leg in the suite shells out): a
-    re-point's NEW side must resolve in the file at the head being merged, and its OLD
-    side must NOT — which is exactly what "re-pointed" means, and it is checkable
-    from the working tree alone.
-
-    NON-VACUITY, MEASURED: on the pre-fix document the regex does not match at all
-    (it stated ``re-pointing that row's `sdk.py:19449` → `:19485` at the merge head``,
-    with no `cite from`), so `assert m` reds; and had it matched, the new side
-    `19485` is absent from `docs/00_index.md` (`grep -c 'sdk.py:19485'` -> 0), so the
-    second leg reds too.
+    NON-VACUITY, MEASURED: on the pre-fix document this arm reds on the first
+    attribution spelling found (`THAT shift is this repair's, not main's`), because the
+    measured cite sets are EQUAL — no cite moves, so no re-point can be this diff's.
+    The prohibition is applied only where the measurement supports it: on a head whose
+    diff really does move a cite, the attribution is legitimate and this leg stands
+    down, while the resolution leg below still has to hold.
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
-    m = re.search(
-        r"re-pointing that row's `sdk\.py` cite from \*\*`:(\d+)`\*\*.*?"
-        r"to \*\*`:(\d+)`\*\*",
-        doc, re.S)
-    assert m, (
-        "05-verify.md no longer states the index row's re-point as "
-        "`from **`:OLD`** ... to **`:NEW`**`. State it with both ends named, so this "
-        "arm can check the pair against the file the re-point lands in "
-        "(#13489 review, cycle 5)")
-    old, new = m.groups()
     index = (DOCS / "00_index.md").read_text(encoding="utf-8")
-    assert f"sdk.py:{new}" in index, (
-        f"05-verify.md says the row's cite is re-pointed to `sdk.py:{new}`; "
-        f"`docs/00_index.md` does not carry that cite at this head, so the document "
-        "names a line the file it describes does not point at "
-        "(#13489 review, cycle 5)")
-    assert f"sdk.py:{old}" not in index, (
-        f"05-verify.md calls `sdk.py:{old}` the PRE-re-point value, but "
-        f"`docs/00_index.md` still carries it — either the re-point did not happen "
-        "or the pair is stale (#13489 review, cycle 5)")
+
+    # The attribution class, as the pre-fix document carried it. Every spelling below
+    # asserts that THIS DIFF moved a cite in `docs/00_index.md`, so each is refused while
+    # the measured cite sets are equal.
+    _attributions = (
+        "for exactly ONE cite",
+        "re-points it once more",
+        "re-pointed it once more",
+        "re-pointed that cite once more",
+        "THAT shift is this repair",
+        "this diff's ONLY change to `docs/00_index.md` is a CONTENT re-derivation",
+    )
+
+    probe = subprocess.run(
+        ["git", "show", "origin/main:docs/00_index.md"],
+        cwd=REPO, capture_output=True, text=True, check=False)
+    if probe.returncode == 0:
+        _main = sorted(re.findall(r"sdk\.py:(\d+)", probe.stdout))
+        _head = sorted(re.findall(r"sdk\.py:(\d+)", index))
+        if _main == _head:
+            for phrase in _attributions:
+                assert phrase not in doc, (
+                    f"05-verify.md says this diff re-points a `docs/00_index.md` cite "
+                    f"({phrase!r}), but that file's cite set is IDENTICAL on "
+                    f"`origin/main` and at this head ({_head}) — no cite moves here, so "
+                    "no re-point is this diff's. State the command (`git diff "
+                    "--word-diff=plain origin/main...HEAD -- docs/00_index.md`) and let "
+                    "the reader re-derive it (#13746 review round 3, P2)")
+            assert ("git diff --word-diff=plain origin/main...HEAD -- docs/00_index.md"
+                    in doc), (
+                "05-verify.md no longer states the command that decides whether this "
+                "diff re-points a cite in `docs/00_index.md` — without it the sentence is "
+                "uncheckable at the head a reader merges (#13746 review round 3, P2)")
+
+    # A re-point's NEW side has to resolve in the file it lands in, whatever the diff
+    # did: the cites the document presents as the row's CURRENT values must name the
+    # content the sentence says they name, at this head. Git-free, so it holds on a
+    # checkout that cannot read `origin/main`.
+    _sdk = (REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8").splitlines()
+    for _cite, _needle in (
+            ("sdk.py:21715", "_capture_stats_with_step_witness("),
+            ("sdk.py:28178", "dedup_reviewed IS NULL")):
+        assert _cite in index, (
+            f"05-verify.md presents `{_cite}` as the row's current value; "
+            "`docs/00_index.md` carries no such cite (#13746 review round 3, P2)")
+        _n = int(_cite.rsplit(":", 1)[-1])
+        assert _needle in _sdk[_n - 1], (
+            f"05-verify.md presents `{_cite}` as the row's current value, but "
+            f"`tortoise/sdk.py:{_n}` is {_sdk[_n - 1].strip()!r} — the cite does not "
+            "name the content the sentence says it names (#13746 review round 3, P2)")
 
 
 if __name__ == "__main__":  # pragma: no cover
