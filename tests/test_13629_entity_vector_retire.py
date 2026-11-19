@@ -2290,6 +2290,10 @@ def test_the_destructive_arm_hands_the_gate_the_runs_own_denominator(
     graph.add("Object", "obj-2")
     record.holds("object", "obj-1")
     _fresh_record_leg(monkeypatch, record_vectors=1)
+    # ⛔ THE AMBIENT LEG IS DELETED, so the `--record-dsn` flag is the ONLY source the
+    # destructive hop can draw from (`_fresh_record_leg` otherwise sets it to the same
+    # string the plan declares, and a dropped argument then looks identical).
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
     _cli_harness(monkeypatch, graph)
 
     plan = {
@@ -2314,6 +2318,21 @@ def test_the_destructive_arm_hands_the_gate_the_runs_own_denominator(
                        "--org-id", "o", "--graph-id", "g",
                        "--execute", "--plan", str(plan_path),
                        "--confirm-plan-digest", plan["digest"]]) == 0
+
+    # ⛔ THE DECLARED RECORD LEG AND TENANT, on the DESTRUCTIVE hop (review round 8).
+    # Dropping `record_dsn` here substitutes the AMBIENT store: `record_serve.open_record`
+    # resolves `TORTOISE_RECORD_DSN` when the value is `None`, and `execute` takes its
+    # parity AND coverage verdict from the live census it runs with it — so a covering
+    # ambient store would certify a strip whose copy lives elsewhere. That is the
+    # false-PASS direction, and the `record_dsn` drift check does not compare this field.
+    # The ambient variable is REMOVED first, because `_fresh_record_leg` sets it to the
+    # same string the plan declares and would otherwise stand in for the argument.
+    assert executed.get("record_dsn") == "postgresql://localhost/record", (
+        "the destructive arm lost the run's declared record leg — its live pre-write "
+        f"census then reads the AMBIENT store: {executed.get('record_dsn')!r}")
+    assert (executed.get("org_id"), executed.get("graph_id")) == ("o", "g"), (
+        "the destructive arm carried the tenant's halves interchanged: "
+        f"{executed.get('org_id')!r}/{executed.get('graph_id')!r}")
 
     supply = executed.get("graph_population")
     assert callable(supply), (
@@ -2529,6 +2548,88 @@ def test_a_HALF_tenant_declaration_is_refused_not_downgraded_to_the_ambient_one(
     # — the refusal was right and its reason was false in both clauses).
     assert "DECLARED is not a whole" in reason, (
         f"a refused DECLARATION was reported as no declaration at all: {reason}")
+
+
+def test_the_tenant_pair_reaches_the_record_query_in_the_DECLARED_ORDER_on_every_hop(
+        stores, monkeypatch):
+    """⛔ THE PAIR'S ORDER, AT THE POINT WHERE IT BECOMES A QUERY (review round 8).
+
+    `_declared_scope` accepts a TRANSPOSED pair silently — both halves are non-empty
+    strings — so `(graph_id, org_id)` measures a different tenant and the gate answers from
+    the wrong record. Round 7 pinned that at the ONE hop it edited (`write_gate` →
+    `mirror_verdict`); the same pair is transposed by every intermediate hop, and a matrix
+    of the whole measurement context measured **118 passed** at each of the other seven.
+    Their consequence is fail-closed under RLS (a swapped org matches no rows → unverified
+    → the mirror is kept), which is why they ranked P3 — but a swap is invisible, and
+    "invisible but currently harmless" is one schema change away from a wrong-tenant
+    verdict.
+
+    ⛔ ASSERTING AT THE QUERY COVERS THE WHOLE CHAIN TRANSITIVELY. The two internal
+    pass-throughs (`label_write_gate` → `write_gate`, `readiness_probe` →
+    `label_write_gate`) are exercised by every path below, so a transposition there moves
+    the scope the count stub OBSERVES. The three entry hops are driven with `org` and
+    `graph` DISTINCT strings, because equal halves cannot reveal a transposition.
+
+    The recorder is CLEARED per hop on purpose: `ASKED_SCOPE` is module-level state, and a
+    stale value from an earlier hop would make the assertion vacuous.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    census_strip = _census_strip()
+    monkeypatch.setattr(census_strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    # ⛔ DISTINCT halves: `("same", "same")` is invariant under transposition.
+    ORG, GRAPH = "org-A", "graph-A"
+
+    from tortoise import record_vector
+
+    def _fresh_hop() -> None:
+        """Clear the observed scope AND the coverage cache.
+
+        ⛔ BOTH, or the second hop onward is a CACHE HIT: the verdict for
+        `(object, ("org-A","graph-A"), dsn)` is memoised by the first hop, and a cached
+        verdict never calls `_record_vector_count` — so the recorder keeps the previous
+        hop's scope and the assertion goes vacuous.
+        """
+        ASKED_SCOPE.clear()
+        record_vector.reset_coverage_cache()
+
+    def _assert_query_order(hop: str) -> None:
+        asked = ASKED_SCOPE.get("scope")
+        assert asked is not None, (
+            f"{hop}: the record count was taken with NO scope, so the declared tenant "
+            f"never reached the query ({ASKED_SCOPE!r})")
+        assert (asked.org_id, asked.graph_id) == (ORG, GRAPH), (
+            f"{hop}: the tenant reached the record query INTERCHANGED, so the count came "
+            f"from a different tenant: {asked!r}")
+
+    # ── hop 1: `build_plan` → `readiness_probe` → … → the query.
+    _fresh_hop()
+    strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id=ORG, graph_id=GRAPH,
+        graph_name="g", graph_uri="docker://x/g", labels=["Object"],
+        batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+    _assert_query_order("preview (`build_plan`)")
+
+    # ── hop 2: `execute`'s own live re-check probe.
+    _fresh_hop()
+    plan = _plan(graph, labels=["Object"])
+    plan["org_id"], plan["graph_id"] = ORG, GRAPH
+    _execute(graph, plan, org_id=ORG, graph_id=GRAPH, expect_narrowed=True,
+             graph_population=strip.graph_vector_population(_Projection(graph)))
+    _assert_query_order("destructive (`execute`)")
+
+    # ── hop 3: the census CLI's `_write_gate` (the TOP-LEVEL module it resolves).
+    _fresh_hop()
+    probe = parity._write_gate(_Projection(graph), org_id=ORG, graph_id=GRAPH,
+                              record_dsn="postgresql://localhost/record")
+    probe("Object")
+    _assert_query_order("census (`_write_gate`)")
 
 
 # ── preview is the default and writes nothing ───────────────────────────────
