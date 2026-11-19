@@ -1594,13 +1594,13 @@ if [ "$MODE" = uninstall ]; then
       # deleting the whole `.d` directory would take another operator's drop-in with it.
       remove_unit_dropin "$unit" || rc=3
     elif [ -e "$UNIT_DIR/$unit" ]; then
-      # ⛔ THIS IS A THIRD `--uninstall` PATH AND IT USED TO REPORT CLEAN WITH OUR DROP-IN STILL ON DISK:
-      # a runner dir with `.runner` + `config.sh` but no `svc.sh` cannot be uninstalled by `svc.sh`, so
-      # this arm bails out — and then, once the operator has removed the unit file by hand, the NEXT run
-      # deletes the runner dir and exits 0 while `10-restart-and-memory.conf` survives in the `.d/`. The
-      # orphan arm above already removes it (and appends `&& sudo rm -f …` to its remedy); this one did
-      # neither, so the drop-in outlived the runner it was written for.
-      remove_unit_dropin "$unit" || rc=3
+      # ⛔ THIS ARM CANNOT FINISH, SO IT MUST NOT TOUCH THE DROP-IN. The unit file is STILL INSTALLED
+      # here — that is the whole condition — so our `Restart=`/`StartLimit*`/`MemoryMax=` keys are LIVE
+      # on a live unit, and removing them would quietly UNBOUND a serving runner while reporting only a
+      # warning. (An attested round shipped exactly that: the teardown was put on this arm and missing
+      # from the arm that completes.) The drop-in goes on the paths that actually remove the unit: the
+      # `svc.sh` arm above, and the delete arm below, whose unit is already gone. This arm NAMES both
+      # files instead, because the operator has to do that removal by hand.
       # ⛔ AND NO BACKTICKS IN THIS `say`: the string is double-quoted, so a backticked command would
       # be SUBSTITUTED — a hand-removal hint that strips the unit file before the operator reads it.
       say "WARNING: $unit is installed but $d has no svc.sh, so it cannot be uninstalled from here — LEFT the directory and its registration intact. Remove the unit by hand (sudo rm -f $UNIT_DIR/$unit) and our drop-in with it (sudo rm -f $UNIT_DIR/$unit.d/10-restart-and-memory.conf), then re-run"; rc=3; continue
@@ -1623,6 +1623,11 @@ if [ "$MODE" = uninstall ]; then
       last="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)"
       say "WARNING: could not deregister $name — LEFT $d and its registration intact so this can be retried; it may still be listed in the repo, check --status${last:+ (last output: $last)}"; rc=3; continue
     fi
+    # ⛔ THE UNIT IS ALREADY GONE ON THIS PATH (no `svc.sh` and no unit file — otherwise the arm above
+    # bailed out), so OUR DROP-IN IS DEBRIS AND GOES WITH THE DIRECTORY. Without this, the run that
+    # COMPLETES the uninstall was the one that left `10-restart-and-memory.conf` on disk to govern a
+    # future unit of the same name — the exact artifact `remove_unit_dropin` exists to remove.
+    remove_unit_dropin "$unit" || rc=3
     if ! sudo rm -rf "$d"; then
       # ⛔ THE DELETE IS THE LAST DESTRUCTIVE STEP AND ITS STATUS IS THE ONE THAT USED TO BE
       # DISCARDED. `set -e` is off and `rc` was untouched, so a `sudo rm` that failed reported

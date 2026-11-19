@@ -63,7 +63,7 @@ and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`
   POOL-ONLY label: `self-hosted`, and equally the bare custom `self-hosted-x64` above, since no
   GitHub-hosted runner carries either. The `test-slow` pin's
   header in `.github/workflows/python-ci.yml:2181` is "Do NOT change it back to `ubuntu-latest`, and
-  never to `self-hosted`", and the reason is recorded at `:2153-2155` — a `self-hosted` pin removes
+  never to `self-hosted`", and the reason is recorded at `:2151-2181` — a `self-hosted` pin removes
   the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS and "the
   aggregate stays pending — not answered yet" instead of being answered by the pool.
   **Four departures are recorded below** — `CI_SHARD_ROUTING=pool-split` names
@@ -531,11 +531,11 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:1654` (the scale loop) · the two mode blocks the
+- `--count N` → `tools/install-ci-runner-x64.sh:1659` (the scale loop) · the two mode blocks the
   paragraphs below cite: `install` `:1457` (arch refusal dies at `:1462`) and `uninstall` `:1516` ·
   guards at `:1457-1513` (forks `:1465`, disk `:1485`, cpu/memory `:1492`) · sha256 pin +
-  registration at `:1665-1675` (verify `:1665`, token `:1668`, one argv `:1673`, `config.sh`
-  `:1675`; the run at `:1657` is the dry-run echo) · systemd install/start at `:1685-1694` · label
+  registration at `:1667-1680` (verify `:1670`, token `:1673`, one argv `:1678`,
+  `config.sh` `:1680`; the run at `:1662` is the dry-run echo) · systemd install/start at `:1689-1699` · label
   resolution at `:451-552` (`fallback_engaged` `:455`, `resolve_os_label` `:483`, `resolve_labels`
   `:515`, whose body ends at its `}` on `:552`) · the union's label algebra at `:554-594` and the
   repair that uses it, `repair` `:1226` · the label-coverage block `:629-1204` (its header `say` at
@@ -654,7 +654,7 @@ falls back.
   `⚠️ PARTIAL`, and its remedy is class-correct: only the bare pin is re-applied by this script.
   Exit **5** when the pool IS asked for a required label and answers with none (:1204).
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:1515-1637`; the proof is `is_runner_install` at `:447`, which accepts `.runner` or  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
+  gone** (`:1515-1642`; the proof is `is_runner_install` at `:447`, which accepts `.runner` or  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
   operator input, so "a directory exists at this path" is not evidence of a runner — the earlier
@@ -882,7 +882,7 @@ lane's to take. It was rejected on measurement, not on taste:
 | run | what ran | result |
 | --- | --- | --- |
 | `40981781885` (`main`, plain `ubuntu-latest`) | pool won 5 of 9 legs by the fallback race | **5 of 5 pool legs killed**; 4 of 4 hosted legs passed in 10-12 m of a 20 m budget |
-| `40986603502` (head `5a2ae6aa1`, split ON) | odd → `self-hosted-x64`, even/canary → `ubuntu-latest` | 3 of 4 pool legs failed — two on `redis ConnectionError 111 localhost:6379`, not on the budget; `test (i)` (**the canary**) was taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s |
+| `40986603502` (head `5a2ae6aa1`, split ON) | odd → `self-hosted-x64`, even/canary → `ubuntu-latest` | 3 of 4 pool legs failed — two on `redis ConnectionError 111 localhost:6384`, not on the budget; `test (i)` (**the canary**) was taken by `pi-runner-vm-5` (ARM64) and killed at 32 m 12 s |
 
 So the split ships **available and off**: `tools/ci_selection.py::resolve_shard_routing()` is the one
 decision point, `CI_SHARD_ROUTING=pool-split` opts in, and **unset / empty / `hosted-only` / any

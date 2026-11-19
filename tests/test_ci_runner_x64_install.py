@@ -3047,6 +3047,8 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
 
     # cited number -> a regex the line at that number must match, i.e. what the sentence names
     anchors: dict[int, str] = {
+        1689: r'^  if \[ ! -f "\$UNIT_DIR/\$\(unit_for "\$name"\)" \]; then',  # systemd block header
+        1667: r'^    say "downloading \$url"',  # "registration at" (the block's first line)
         111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
         256: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
         447: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
@@ -3080,13 +3082,12 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
         1492: r"CPU LAST",  # "cpu/memory"
         1515: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
         1516: r'MODE" = uninstall',  # "`uninstall`"
-        1654: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1657: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1665: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1668: r"registration-token",  # "token"
-        1673: r"^    set -- --unattended",  # "one argv"
-        1675: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1685: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        1659: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1662: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1670: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1673: r"registration-token",  # "token"
+        1678: r"^    set -- --unattended",  # "one argv"
+        1680: r'\./config\.sh "\$@"',  # "`config.sh`"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -3151,11 +3152,11 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
         # the install guards, through the memory-headroom `say`
         (1457, 1513): [r"headroom: cpu ok", r"^fi$"],
         # `--uninstall` deletes only what it can PROVE
-        (1515, 1637): [r'^  exit "\$rc"$', r"^fi$"],
+        (1515, 1642): [r'^  exit "\$rc"$', r"^fi$"],
         # registration: the sha256 pin through `config.sh`
-        (1665, 1675): [r'\./config\.sh "\$@"'],
+        (1667, 1680): [r'\./config\.sh "\$@"'],
         # systemd install/start: `svc.sh install` through `svc.sh start`
-        (1685, 1694): [r"svc\.sh start"],
+        (1689, 1699): [r"svc\.sh start"],
     }
 
     spans = {
@@ -6031,12 +6032,12 @@ def test_uninstall_removes_only_our_dropin_and_never_another_operators(tmp_path:
     assert foreign.exists(), "another operator's drop-in must SURVIVE our uninstall"
 
 
-def test_uninstall_without_svc_sh_still_removes_our_dropin(tmp_path: Path):
-    """⛔ THE THIRD `--uninstall` PATH. A runner dir carrying `.runner` + `config.sh` but NO `svc.sh`
-    cannot be deregistered from here, so that arm bails out with rc=3 — but it used to leave OUR
-    drop-in on disk, and once the operator removed the unit file by hand the NEXT run deleted the
-    runner dir and exited 0 with `10-restart-and-memory.conf` still governing that unit name. The
-    orphan arm already removes it; this one did not, and no arm covered the arm.
+def test_uninstall_bails_out_without_svc_sh_and_leaves_the_live_dropin_alone(tmp_path: Path):
+    """⛔ THE BAIL-OUT ARM MUST NOT TOUCH THE DROP-IN. It fires when the runner dir has no `svc.sh` AND
+    the unit file is still installed, so it cannot deregister from here and exits 3 — and the unit is
+    still INSTALLED, which means our `Restart=`/`StartLimit*`/`MemoryMax=` keys are live on a serving
+    unit. Removing them here unbound that runner while printing only a warning. (Measured in an
+    attested round: the teardown was on this arm and missing from the arm that completes.)
     """
     env = _uninstall_env(tmp_path)
     unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
@@ -6050,9 +6051,43 @@ def test_uninstall_without_svc_sh_still_removes_our_dropin(tmp_path: Path):
 
     r = _run("--uninstall", "--count", "1", env=env)
     assert r.returncode == 3, f"this arm cannot deregister, so it must report 3, got {r.returncode}"
-    assert not ours.exists(), "our drop-in must be removed even on the arm that cannot use svc.sh"
+    assert ours.exists(), (
+        "our drop-in must SURVIVE here: the unit is still installed, so these keys are live on a "
+        "serving runner — removing them would unbound it silently"
+    )
     assert runner.exists(), "the runner dir must survive: it holds the only state a retry can use"
-    assert "10-restart-and-memory.conf" in r.stdout + r.stderr, "the hand-removal hint must NAME our drop-in"
+    out = r.stdout + r.stderr
+    assert "10-restart-and-memory.conf" in out, (
+        "the hand-removal hint must NAME our drop-in — the operator removes it, not this arm"
+    )
+
+
+def test_uninstall_that_completes_removes_the_dropin_of_the_unit_already_gone(tmp_path: Path):
+    """⛔ THE PATH THAT ACTUALLY FINISHES. No `svc.sh` and NO unit file on disk: nothing to uninstall, so
+    the run deregisters, deletes the runner dir and exits 0 — and it used to leave
+    `10-restart-and-memory.conf` behind to govern a future unit of the same name. The arm that cannot
+    finish was the one removing it; the arm that finishes was not, the inverse of `remove_unit_dropin`'s
+    own invariant.
+    """
+    env = _uninstall_env(tmp_path)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    (runner / "config.sh").write_text("#!/bin/sh\nexit 0\n")  # no svc.sh
+    ours = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"  # unit file absent on purpose
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("[Service]\nRestart=on-failure\n")
+    foreign = ours.parent / "restart.conf"
+    foreign.write_text("[Service]\nRestart=on-failure\n")
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 0, f"a completing uninstall must exit 0, got {r.returncode}: {r.stderr}"
+    assert not runner.exists(), "the runner dir must be deleted on the completing path"
+    assert not ours.exists(), (
+        "our drop-in must go with the runner: its unit is already gone, so a survivor would silently "
+        "govern a FUTURE unit of the same name"
+    )
+    assert foreign.exists(), "another operator's drop-in must still survive — the `.d` directory is shared"
 
 
 def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_path: Path):
