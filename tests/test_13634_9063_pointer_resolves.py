@@ -109,6 +109,11 @@ def _claimed_open(issue: int):
     #9063"*, or from the correction paragraph that quotes the old claim in order to disown it.
     """
     n = re.escape(str(issue))
+    # A reference is written with markdown emphasis in this repo's own prose — `**#9063**`, `*#9063*`,
+    # `` `#9063` `` — and a claim that bolds its issue is the same claim (measured: the exact retired
+    # sentence with `(**#9063**)` was GREEN). `_unquoted()` drops `*`/`_`; the code-span ticks are
+    # accepted here so a claim written as a code span still names the issue.
+    h = r"`?#" + n + r"`?"
     forms = (
         # The copula is NOT pinned to "remains": the claim family is `COPULA [still] [a] open
         # [(question|issue|tracker)] [SEP] (#N | in #N | see #N)`, and `remain` / `is` / `are` /
@@ -118,26 +123,40 @@ def _claimed_open(issue: int):
         # `remains open — #9063`), each measured GREEN before it was added here.
         r"(?:remain(?:s)?|is|are|stay(?:s)?)\s+(?:still\s+)?(?:an?\s+)?open"
         r"(?:\s+(?:question|issue|tracker))?\s*(?:[\(\[]|,|;|:|\u2014)?\s*"
-        r"(?:see\s+|in\s+|at\s+)?#" + n,
+        r"(?:see\s+|in\s+|at\s+)?" + h,
         # Form 2 is the MIRROR word order and gets the same copula family — widening only form 1
         # left `#9063 is open` / `#9063 stays open` / `#9063 remain open` green (measured).
-        r"#" + n + r"\s+(?:(?:still|now)\s+)?(?:remain(?:s)?|is|are|stay(?:s)?)\s+"
+        h + r"\s+(?:(?:still|now)\s+)?(?:remain(?:s)?|is|are|stay(?:s)?)\s+"
         r"(?:(?:still|now)\s+)?(?:an?\s+)?open",
         # The NOUN forms — this file is named after "the open tracker", and it was the one shape
         # the claim family did not cover (`#9063 is the open tracker`, `the open question is #9063`).
-        r"open\s+(?:issue|question|tracker)\s+(?:is|in|remains)\s+#" + n,
-        r"#" + n + r"\s+(?:is|remains|stays)\s+(?:(?:still|now)\s+)?the\s+open\s+(?:issue|question|tracker)",
+        r"open\s+(?:issue|question|tracker)\s+(?:is|in|remains)\s+" + h,
+        h + r"\s+(?:is|remains|stays)\s+(?:(?:still|now)\s+)?the\s+open\s+(?:issue|question|tracker)",
         # The retired sdk.py wording's OWN shape, which mentions neither `open` next to the copula
         # nor a link: "…are the open belief-model decision in #9063".
-        r"(?:open|unsettled)\s+(?:[\w-]+\s+){0,3}(?:decision|question)\s+in\s+#" + n,
+        r"(?:open|unsettled)\s+(?:[\w-]+\s+){0,3}(?:decision|question)\s+in\s+" + h,
         # The same claim with the issue FIRST and a linking preposition — the README's own retired
         # wording ("the refusal names #9063 as the open belief-model decision") was the one shape the
         # family missed, so re-introducing THAT sentence stayed GREEN (measured).
-        r"#" + n + r"\s+(?:as|is)\s+(?:the\s+)?(?:open|unsettled)\s+"
+        h + r"\s+(?:as|is)\s+(?:the\s+)?(?:open|unsettled)\s+"
         r"(?:[\w-]+\s+){0,3}(?:decision|question)",
-        r"tracked\s+(?:by|in)\s+#" + n,  # tracked by #9063
+        r"tracked\s+(?:by|in)\s+" + h,  # tracked by #9063
     )
     return re.compile("|".join(forms), re.I)
+
+
+_EMPHASIS = re.compile(r"[*_]")
+
+
+def _unquoted(text: str) -> str:
+    """A passage with correction-quotes removed and markdown emphasis dropped.
+
+    ⛔ Emphasis is NOT meaning: the repo bolds the issue in exactly the sentences this guard forbids
+    (`remains open (**#9063**)`), and matching the raw text let that rewrite stay GREEN (measured).
+    De-emphasising AFTER the correction-quote strip keeps `*"…"*` a strip-able record (the `"` is
+    what makes it a quote) while making `**#9063**` and `*open tracker*` the plain text they read as.
+    """
+    return _EMPHASIS.sub("", _QUOTED_IN_CORRECTION.sub(" ", text))
 
 
 @pytest.fixture
@@ -204,7 +223,7 @@ def test_no_v338_entry_calls_9063_the_open_tracker():
     claim = _claimed_open(9063)
     offending = []
     for block in blocks:
-        unquoted = _QUOTED_IN_CORRECTION.sub(" ", block)
+        unquoted = _unquoted(block)
         for match in claim.finditer(unquoted):
             offending.append(unquoted[max(0, match.start() - 60): match.end() + 60])
 
@@ -244,7 +263,7 @@ def test_no_v338_entry_calls_9063_the_open_tracker():
 )
 def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
     """A correction quotes the claim in order to DISOWN it — stripping must cover every glyph family."""
-    unquoted = _QUOTED_IN_CORRECTION.sub(" ", passage)
+    unquoted = _unquoted(passage)
     assert not _claimed_open(9063).search(unquoted), (
         "a correction recording the withdrawn claim was treated as an assertion: " + passage
     )
@@ -302,6 +321,19 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
         "#9063 remains an open question",
         "#9063 is the open question for declared priors",
         "#9063 is the open issue for declared priors",
+        # The README's own retired wording, in the document's own BOLD — emphasis is not meaning, and
+        # the plain row above let the bolded rewrite stay GREEN (measured, round 8).
+        "Whether entity declared priors should exist at all remains open (**#9063**)",
+        "**#9063** is still open on declared priors",
+        "remains open (**#9063**)",
+        "`#9063` remains the open question",
+        "#9063 is the *open tracker* for declared priors",
+        # Form 6's inner alternatives and both `{0,3}` bounds, each of which no other form reaches.
+        "#9063 is the open belief-model question",
+        "#9063 as unsettled belief-model decision",
+        "#9063 as the open belief-model question",
+        "an open alpha beta gamma question in #9063",
+        "#9063 as the open alpha beta gamma decision",
         # Pins the trailing `\b` of the marker class: `readable` is not a record marker, so this is the
         # claim, not a record (without the `\b` it would be stripped and GREEN).
         'The entry is no longer readable: "remains open (#9063)".',
@@ -322,7 +354,7 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
 )
 def test_an_ASSERTION_of_the_claim_is_caught_in_every_phrasing(passage):
     """The mirror: a marker word NEARBY must not launder an assertion, and both word orders count."""
-    unquoted = _QUOTED_IN_CORRECTION.sub(" ", passage)
+    unquoted = _unquoted(passage)
     assert _claimed_open(9063).search(unquoted), (
         "an assertion of the #9063 claim escaped the guard: " + passage
     )
@@ -368,7 +400,7 @@ def test_every_record_marker_introduces_a_skipped_span(marker):
         f"the pin passage for {marker!r} no longer CONTAINS the claim, so this row proves nothing "
         f"about stripping: {passage}"
     )
-    unquoted = _QUOTED_IN_CORRECTION.sub(" ", passage)
+    unquoted = _unquoted(passage)
     assert not _claimed_open(9063).search(unquoted), (
         f"the record marker {marker!r} no longer introduces a skipped span, so a legitimate "
         f"correction would become a false BLOCK: {passage}"
