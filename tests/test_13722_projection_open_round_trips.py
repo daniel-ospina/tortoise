@@ -151,12 +151,21 @@ try:  # pragma: no cover - environment probe
 
     _old_uri = os.environ.get("TORTOISE_DB_URI")
     os.environ["TORTOISE_DB_URI"] = _DB_URI
+    _probe = None
     try:
         _probe = _ProbeSDK()
         _probe._get_proj().g.query("RETURN 1")
-        _probe.close()
         FALKORDB_AVAILABLE = True
     finally:
+        # Close on BOTH paths: a probe whose check RAISED still holds an open
+        # connection, and leaving it to the interpreter is a connection this
+        # module leaks into everything that imports it. A close() that raises
+        # must not turn a reachable lane into a skip, so it is swallowed.
+        if _probe is not None:
+            try:
+                _probe.close()
+            except Exception:  # pragma: no cover - teardown of a dead handle
+                pass
         if _old_uri is not None:
             os.environ["TORTOISE_DB_URI"] = _old_uri
         else:
@@ -244,32 +253,98 @@ def test_a_steady_state_open_is_bounded_and_a_read_is_one_round_trip(
         f"tenant's whole graph on every request: {offending!r}")
 
 
+#: The two node counts of the SCALING differential. Both samples run in ONE
+#: process against ONE graph over ONE connection, so they pay the same round
+#: trip, the same client and the same host load — what differs between them is
+#: only the scan the statement does.
+_SMALL_NODES = 2_000
+_LARGE_NODES = 50_000
+
+#: The statement #13722 REMOVED, kept here as the same-run CONTROL. It is the
+#: O(n) work the fix deletes, so timing it on the same graph calibrates the box
+#: instead of assuming its speed.
+_PRE_FIX = "MATCH (n) RETURN count(n) LIMIT 1"
+
+#: Growth bound: O(1) probe cost is a flat line. MEASURED on docker FalkorDB
+#: (lane, this change): probe 0.70 ms @2k -> 0.85 ms @50k = **1.2x**, while the
+#: pre-fix statement went 0.76 -> 4.41 ms = **5.8x** over the same range. 2.5x
+#: sits between them with ~2x headroom on BOTH sides, so a loaded lane cannot
+#: false-red it and a re-introduced scan cannot pass it.
+_SCALING_BOUND = 2.5
+
+#: The control must be measurably slower than the probe. MEASURED at 50k:
+#: count(n) 4.41 ms vs the probe's 0.85 ms = **5.2x**, vs a bare `RETURN 1` at
+#: 0.68 ms (so the probe's cost IS the round trip, not a scan). This is the arm
+#: a REVERT reddens: reverting the fix makes the probe and the control the same
+#: statement, and the ratio collapses to ~1.0. 2x leaves 2.6x of headroom.
+_CONTROL_RATIO = 2.0
+
+
+def _median_ms(fn, samples: int = 11) -> float:
+    """Median wall clock of *fn*.
+
+    Medians over repeated samples, because one scheduler hiccup must not decide
+    a scaling claim — and both halves below are RATIOS of two such medians, so
+    they compare a run against itself rather than against a fixed number of
+    milliseconds that belongs to the host.
+    """
+    import statistics
+    import time
+
+    timings = []
+    for _ in range(samples):
+        t0 = time.perf_counter()
+        fn()
+        timings.append((time.perf_counter() - t0) * 1000.0)
+    return statistics.median(timings)
+
+
 @pytest.mark.skipif(not FALKORDB_AVAILABLE,
                     reason="Live FalkorDB (Docker) not available")
 def test_the_open_probe_is_flat_in_a_large_graph(_live_uri):
-    """The probe's cost does not grow with the graph.
+    """The probe's cost does not grow with the graph — measured against ITSELF.
 
-    Deliberately loose — it is a scaling assertion, not a performance test. The
-    pre-fix statement measured 0.9 ms @1k, 7.6 ms @100k and 21.7 ms @300k nodes
-    versus 0.4-0.6 ms flat; the ceiling absorbs a loaded CI box while still
-    failing an O(n) statement at 50k nodes.
+    ⛔ WHY THIS IS A DIFFERENTIAL AND NOT A WALL-CLOCK CEILING (review, #13722).
+    The first cut of this arm asserted a 10 ms median at 50k nodes — and the
+    pre-fix statement it exists to catch measures **4.41 ms** there (measured on
+    the lane, matching the issue's table: 1.9 ms @20k, 7.6 ms @100k). So the
+    defect PASSED the row that names it: reverting the fix left this arm green,
+    and an O(graph) probe re-introduced at <=50k nodes would have shipped.
+
+    Both halves of the claim are therefore ratios sampled in the SAME run, on
+    the SAME graph, over the SAME connection:
+
+    1. SCALING — the probe at 50k vs the same probe at 2k (O(1) work is a flat
+       line; the pre-fix scan grows 5.8x across this range).
+    2. THE CONTROL — the probe vs the pre-fix statement itself on the 50k
+       graph. This is the arm a revert reddens directly: the two samples become
+       the same statement and the ratio collapses to ~1.
     """
     from tortoise.projection import FalkorProjection
 
     proj = FalkorProjection.from_uri(_live_uri, graph_name=_GRAPH)
-    proj.g.query("UNWIND range(1, 50000) AS i "
+    proj.g.query("MATCH (n) RETURN 1 LIMIT 1")  # warm the connection
+
+    proj.g.query(f"UNWIND range(1, {_SMALL_NODES}) AS i "
                  "MERGE (:Point {id: 'rt13722_' + toString(i)})")
+    small_ms = _median_ms(proj._probe_ok)
 
-    import statistics
-    import time
+    proj.g.query(f"UNWIND range({_SMALL_NODES + 1}, {_LARGE_NODES}) AS i "
+                 "MERGE (:Point {id: 'rt13722_' + toString(i)})")
+    large_ms = _median_ms(proj._probe_ok)
+    control_ms = _median_ms(lambda: proj.g.query(_PRE_FIX))
 
-    samples = []
-    for _ in range(5):
-        t0 = time.perf_counter()
-        assert proj._probe_ok() is True
-        samples.append((time.perf_counter() - t0) * 1000.0)
-    median = statistics.median(samples)
-    assert median < 10.0, (
-        f"the open probe took {median:.1f} ms on a 50k-node graph — that is "
-        "the unbounded-scan shape #13722 removed (flat cost is ~0.5 ms), paid "
-        "on EVERY projection open and the hosted lane opens one per request")
+    growth = large_ms / max(small_ms, 1e-6)
+    assert growth < _SCALING_BOUND, (
+        f"the open probe grew {growth:.1f}x from {_SMALL_NODES} to "
+        f"{_LARGE_NODES} nodes ({small_ms:.2f} ms -> {large_ms:.2f} ms; bound "
+        f"{_SCALING_BOUND}x). Its cost is supposed to be O(1) — cost that "
+        "rises with the graph is the unbounded-scan shape #13722 removed, paid "
+        "on EVERY projection open, and the hosted lane opens one per request.")
+
+    assert large_ms * _CONTROL_RATIO <= control_ms, (
+        f"the open probe cost {large_ms:.2f} ms on a {_LARGE_NODES}-node graph "
+        f"against {control_ms:.2f} ms for the pre-fix `{_PRE_FIX}` (needs "
+        f"{_CONTROL_RATIO}x separation). Together those two numbers are the "
+        "defect this file exists for: if the probe is as expensive as the "
+        "aggregate, it IS the aggregate.")
