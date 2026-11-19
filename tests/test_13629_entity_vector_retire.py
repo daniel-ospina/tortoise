@@ -39,7 +39,8 @@ that fails OPEN the day someone deletes a branch.
 | `test_the_plan_is_STRIP_READY_from_a_fresh_process_when_the_record_covers` | coverage clears a plan in a fresh process, and the READY reason is the measurement | `strip_ready: True` without the two counts beside it — an assertion nobody can check |
 | `test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason` | **#13796** acceptance (b)+(c) — the refusal is the MEASUREMENT | a short record certifies a strip, or refuses with "not proved" when the counts were taken |
 | `test_the_destructive_arm_hands_the_gate_the_runs_own_denominator` | **#13796**'s reachability on the `--execute` arm — the second of `main`'s two hops | the destructive path drops the population while the preview keeps it, so `execute` re-checks an unsatisfiable gate (measured: 107 passed under that mutant) |
-| `test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_stripper` | `_write_gate`'s version-skew arm answers with the FAIL-CLOSED twin, never with a measurement it could not take | an old stripper is answered by a probe that reports `ready` with no counts behind it |
+| `test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_stripper` | `_write_gate`'s version-skew arm answers with the FAIL-CLOSED twin, never with a measurement it could not take | an old stripper is answered by a probe that reports `ready` with no counts behind it (measured: the mutant survived at 112 passed until the writers and the tenant door were both held open) |
+| `test_execute_rechecks_the_gate_with_the_runs_own_measurement_context` | **#13796**'s THIRD hop — `execute`'s OWN re-check probe, built seconds before the first delete | the destructive re-check loses the denominator and refuses `REFUSE_WRITE_STILL_EMITS` on a covered graph (measured: 112 passed under that mutant before this test) |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -2291,21 +2292,38 @@ def test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_str
     could not build, would report `ready` with no counts behind it — the unmeasured gate
     #13796 is about, restored in the second tool.
 
-    ⛔ ORDER IS LOAD-BEARING: the fallback's own polarity is measured FIRST, while
-    `readiness_probe` still resolves. Removing it is what makes `strip_readiness` refuse on
-    a real old tree, so calling it afterwards is not possible — and asserting only the
-    identity would pin which function was returned without pinning that it refuses.
+    ⛔ THE ORDER IS FORCED BY THE DELEGATION, NOT BY POLARITY (corrected after review).
+    `strip_readiness` is `return readiness_probe()(label)`, so once `readiness_probe` is
+    removed the fallback RAISES `NameError` rather than refusing — measured. The polarity
+    is therefore measured FIRST, while the name still resolves; asserting only the
+    identity would pin which function came back without pinning what it says.
+
+    ⛔ AND THE REFUSAL MUST BE THE COVERAGE ARM'S, or this asserts nothing about
+    measurement: on this tree `#13647`'s writer check refuses `:Object` first (#13806), so
+    an unpatched run answers `ready is False` for the WRITER's reason and a
+    `strip_readiness` that invented a denominator still passes (measured: **112 passed**
+    under `readiness_probe(graph_population=lambda _: 0)` before this correction). Two
+    gates are held open for that: the writers are certified, and an AMBIENT TENANT is
+    installed — without a tenant the verdict refuses at the tenant door and the invented
+    denominator is never consulted either.
     """
     graph, record = stores
     graph.add("Object", "obj-1")
     record.holds("object", "obj-1")
     _fresh_record_leg(monkeypatch, record_vectors=1)
     census_strip = _census_strip()
+    monkeypatch.setattr(census_strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    from tortoise.record_writer import use_record_tenant
 
-    # ── the fallback REFUSES: no measurement context, so no label can be cleared.
-    ready, reason = census_strip.strip_readiness("Object")
+    # ── the fallback REFUSES FOR THE MEASUREMENT: no context, so nothing is cleared.
+    with use_record_tenant("org", "graph"):
+        ready, reason = census_strip.strip_readiness("Object")
     assert ready is False, (
         f"the unmeasured fallback certified a strip it never measured: {reason}")
+    assert "has not proved" in reason, (
+        "the refusal was not the coverage arm's — so this test cannot say the fallback is "
+        f"unmeasured: {reason}")
 
     # ── and on a tree without `readiness_probe`, that name is what `_write_gate` returns.
     monkeypatch.delattr(census_strip, "readiness_probe", raising=False)
@@ -2315,6 +2333,70 @@ def test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_str
     assert fallback is census_strip.strip_readiness, (
         "a stripper without `readiness_probe` was answered by something other than the "
         f"fail-closed twin: {fallback!r}")
+
+
+def test_execute_rechecks_the_gate_with_the_runs_own_measurement_context(
+        stores, monkeypatch):
+    """⛔ `execute`'s OWN probe — the third hop, and the one round 2 named but nobody pinned.
+
+    `execute` loads a plan from disk, so it never calls `build_plan` and its coverage cache
+    starts empty. Immediately before the first delete it builds its OWN readiness probe for
+    the live parity re-check, with the same measurement context. Measured on this head:
+    dropping `graph_population=graph_population` from THAT call left the file at **112
+    passed** — round 2's finding named both mutants and round 3 pinned only `main`'s call,
+    one hop up. With the context gone, `mirror_verdict` takes the cache-only arm, every
+    label reports *"has not proved"*, and the destructive run refuses
+    `REFUSE_WRITE_STILL_EMITS` on a fully backfilled graph — #13796's exact symptom, on the
+    path that deletes.
+
+    ⛔ THE ASSERTION IS BEHAVIOURAL, NOT STRUCTURAL: the real `execute` runs to completion
+    (no `Refusal`, exit 0) with the writers certified and a covering record, which is the
+    outcome the denominator buys — and it is what settles the reviewer's UNVERIFIED row
+    (`does the mutant actually raise REFUSE_WRITE_STILL_EMITS?`). The captured probe kwargs
+    are checked too, so a mutant that keeps the argument but empties it still reds.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    plan = _plan(graph, labels=["Object"])
+
+    captured: dict = {}
+    real_probe = strip.readiness_probe
+
+    def _spy(**kwargs):
+        captured.update(kwargs)
+        # ⛔ ASKED AT BUILD TIME, not after the strip: the supplier is a live count of the
+        # graph's vector-bearing nodes, so a reading taken afterwards answers 0 because the
+        # removal already happened — that would measure this test's own ordering, not the
+        # wiring.
+        supplier = kwargs.get("graph_population")
+        captured["population_at_build"] = supplier("object") if callable(supplier) else None
+        return real_probe(**kwargs)
+
+    monkeypatch.setattr(strip, "readiness_probe", _spy)
+
+    result = _execute(graph, plan, expect_narrowed=True,
+                      graph_population=strip.graph_vector_population(
+                          _Projection(graph)))
+
+    assert captured, "`execute` never built a readiness probe — the re-check was skipped"
+    assert callable(captured.get("graph_population")), (
+        "the destructive re-check was built without this run's denominator, so every "
+        f"label answers 'has not proved' (#13796) seconds before a delete: {captured!r}")
+    assert captured["population_at_build"] == 1, (
+        "the destructive re-check carried a supplier that is not this graph's own count: "
+        f"{captured['population_at_build']!r}")
+    # ⛔ AND THE DECLARED RECORD LEG on this hop too (round 2's F2; its siblings cover the
+    # other two sites by deleting the ambient variable, which is also the right test here
+    # — `_execute` passes `record_dsn="postgresql://x"` while the helper sets the ambient
+    # to a different store, so the explicit value is the only one that can arrive).
+    assert captured.get("record_dsn") == "postgresql://x", (
+        f"the destructive re-check lost the run's declared record leg: {captured!r}")
+    assert strip.result_exit_code(result) == 0, result
+    assert graph.vector_keys("Object") == set(), "the strip did not run"
 
 
 # ── preview is the default and writes nothing ───────────────────────────────
