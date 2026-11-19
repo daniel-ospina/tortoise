@@ -6503,7 +6503,9 @@ def _upsert_object(props, ev):
         # CORRECT refusals the previous commit had, because each of these binds the property to
         # a simple target. The rule used instead: elements BEFORE the star take the LEADING
         # values, elements AFTER it take the TRAILING ones. The `*_r, x = 1, 2, key` row is the
-        # shape the earlier fix lost; `*_r, x = 1, key, 2` stays in the accepted tuple.
+        # shape the earlier fix lost; the two MIS-PAIR CONTROLS live in the ACCEPTED tuple —
+        # `*_r, x = 1, key, 2` (binds `x = 2`) and `x, *_r = 1, key` (binds `x = 1`) — so an
+        # over-refusal regression in this new code cannot ship green.
         """
 def _upsert_object(props, ev):
     key = "embedding"
@@ -7667,6 +7669,31 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k in dict(embedding_model=1)}
+        return None
+    _write(props)
+""",
+        # ⛔ THE MIS-PAIR CONTROLS for the `Starred` pairing in `_property_alias_names`
+        # (`#13788`, delta review of `bcb710a547`): Python binds `x = 2` in the first and `x = 1`
+        # in the second, and puts the PROPERTY in the starred name — so both are honest writers,
+        # i.e. the direction that pairing exists to protect. The branch's earlier index pairing
+        # REFUSED exactly these, and no other rule did, so without them an over-refusal
+        # regression in that brand-new code ships green: with these two absent, re-adding the
+        # historical index pairing reddened 0 of 461 rows (measured by the delta review).
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    *_r, x = 1, key, 2
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    x, *_r = 1, key
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
         return None
     _write(props)
 """,
