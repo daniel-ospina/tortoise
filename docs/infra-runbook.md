@@ -4259,6 +4259,45 @@ operator who read the line above as "CI defends this" would never run it.
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 | TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 | TORTOISE_RECORD_SERVE | ✅ **A live Fly secret, armed `prefer` out-of-band** (a **mode flag**, not a credential — no secret material to rotate) — declared `fly-only:#13209`, so it is deliberately absent from version control; the `fly secrets unset` in §"Arming the READ path" below must delete that declaration in the same change | — | — (no GitHub secret, so CI stays `off`) |
+| TORTOISE_EMBEDDER_WARMUP | ✅ **A live Fly secret — the embedder warm-up's ON/OFF EMERGENCY SWITCH** (a **warm-up switch**, not a credential — no secret material to rotate; `0`/`false`/`no`/`off` **DISABLE** the warm-up, anything else including unset leaves it **ON**) — declared `fly-only:#13674`, so it is deliberately absent from version control; the `fly secrets unset` in §"The embedder warm-up switch" below must delete that declaration in the same change | — | — (no GitHub secret, and it must stay OUT of the deploy payload: a deploy-set emergency switch is not out of band) |
+
+### The embedder warm-up switch — `TORTOISE_EMBEDDER_WARMUP` (#13674)
+
+> ⛔ **This is a WARM-UP switch, not a request-path kill switch.** With it `0`, the app still loads
+> the model on the **first request that needs an embedding**, cold, under its own bound. Turning it
+> off MOVES the cost to that first request; it does not remove it. The check is
+> `tortoise/embeddings.py::_embedder_warmup_enabled` (`:40-50`, `env_flag(..., True)` — shipped
+> default **ON**), and it gates **three** surfaces:
+>
+> 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1296`;
+> 2. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
+>    `:3225-3235` (the consumer that runs on the deployed box);
+> 3. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
+>    read at `:432`.
+>
+> Number 2 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
+> path, so a box that looks quiet to an SDK-based check can still be paying the load.
+
+**When to flip it.** #13674 Scope item 3 records the `0` value verbatim — *"`TORTOISE_EMBEDDER_WARMUP=0`
+is the *emergency* switch it is, not the steady state"*. Production has run it at `0` while the
+embedder could not load (`entrypoint.sh:427-430`): paying boot cost for a model the app will not load
+is pure cost. The cost context is why the lever exists: a ~432 MB model on a 2 cpu / 4096 MB box whose
+cold import measured **156.5 s** (`import torch` 24.1 s + `sentence_transformers` 132.4 s).
+
+```bash
+fly secrets set TORTOISE_EMBEDDER_WARMUP=0 -a tortoise-y4mjjq     # stop paying warm-up cost, deliberately
+fly secrets unset TORTOISE_EMBEDDER_WARMUP -a tortoise-y4mjjq     # back to the shipped default (ON)
+```
+
+⚠️ **An unset does not finish the job.** The provenance gate REFUSES a `fly-only:` name that no longer
+exists on Fly, so `fly secrets unset` must delete this name's declaration from
+`.github/scripts/fly-managed-secrets.txt` in the same change — or move it to the version-controlled
+route (`fly-toml-env`) once the secret is gone. That is fail-closed and intended: the exception exists
+for a REAL out-of-band secret, so its removal is a visible revert rather than a silent staleness.
+
+⚠️ **The `fly-only:` ruling is still owed.** `#13674` records the lever's emergency nature but does not
+carry the `OVERRIDES:` marker the token's contract requires (`.github/scripts/fly-managed-secrets.txt:51-60`,
+`:78-90`), so the ref is checkable by **shape only** until that ruling lands on the issue.
 
 ### Arming the READ path — `TORTOISE_RECORD_SERVE` (epic #7879, #12941)
 

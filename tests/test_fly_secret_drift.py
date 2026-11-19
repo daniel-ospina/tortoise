@@ -2044,11 +2044,13 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         "deploy-set value"
     )
     # ── #13674: the embedder warm-up's EMERGENCY SWITCH ──────────────────────
-    # `TORTOISE_EMBEDDER_WARMUP` gates both warm-up consumers — the engine-init
-    # load (`tortoise/embeddings.py:40-50`, `env_flag(..., True)`) and the boot
-    # pre-warm (`entrypoint.sh:427`) — and production RAN it at `0` while the
-    # embedder could not load, which is what makes it a live operator switch and
-    # not a deploy-set value (#13674 Scope item 3: "`TORTOISE_EMBEDDER_WARMUP=0`
+    # `TORTOISE_EMBEDDER_WARMUP` gates THREE warm-up surfaces — the SDK
+    # engine-init warm-up (`tortoise/embeddings.py::start_warm_up`, gated at
+    # `:1296`), the HOSTED lifespan pre-warm (`tortoise/hosted_api.py::_lifespan`,
+    # `:3225-3235` — the consumer that runs on the deployed box this declaration
+    # unblocks), and the boot pre-warm (`entrypoint.sh:432`) — and production RAN
+    # it at `0` while the embedder could not load, which is what makes it a live
+    # operator switch and not a deploy-set value (#13674 Scope item 3: "`TORTOISE_EMBEDDER_WARMUP=0`
     # is the *emergency* switch it is, not the steady state"; the merged fix
     # #13692 records the production state verbatim at `entrypoint.sh:427-430`).
     #
@@ -2076,7 +2078,7 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     #   * `[env]` (`TORTOISE_EMBEDDER_WARMUP = "1"` added to `fly.toml`) -> the
     #     `not in env_keys` assertion below is NOT the first red: the GATE refuses
     #     that shape (`STALE DECLARATION … is an assigned key in fly.toml's [env]
-    #     table`, `check-fly-secret-drift.py:1383-1389`), so this test reds earlier
+    #     table`, `check-fly-secret-drift.py:1389-1394`), so this test reds earlier
     #     on `assert "STALE DECLARATION" not in r.stdout`. Kept anyway — the reason
     #     the #13209 `workflow_secret_refs` belt above is kept: the gate and this
     #     file are different readers, and a divergence in either should red HERE.
@@ -2619,6 +2621,45 @@ def test_a_fly_only_name_is_not_shown_as_absent_from_the_app():
         "the Secrets Matrix tells an operator these names are not on the app, "
         "while the manifest declares them `fly-only:` — which the provenance "
         "gate only accepts for a name that IS on Fly:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_every_fly_only_member_is_documented_in_the_runbook():
+    """A declared out-of-band lever named NOWHERE in the runbook has no operator surface.
+
+    `fly-only:` exists because the name is deliberately unversioned, so
+    `docs/infra-runbook.md` is the only place an operator can learn it exists,
+    what it gates, and how to revert it (#13814 review, F4 — measured with
+    `git grep -n TORTOISE_EMBEDDER_WARMUP -- docs/infra-runbook.md` -> no match).
+    Nothing red on that absence: the Fly-column guard above asserts
+    `fly_only & seen`, an INTERSECTION, and the existing rows satisfied it for the
+    members that already had them.
+
+    So the predicate is the review's own: **every** `fly-only:` member must be
+    NAMED in the runbook, derived from the manifest on every run — never a list
+    here. It is deliberately a mention test and not a matrix-row test: the tokens
+    document themselves in the place their own mechanics live (§8.3 for #661,
+    §"Arming the READ path" for #13209), so requiring one particular shape would
+    red on a correct file. Red on the pre-fix tree, where the new member's name
+    is absent from the runbook entirely.
+    """
+    sources = _manifest_sources(REAL_MANIFEST)
+    fly_only = {n for n, s in sources.items() if s.startswith("fly-only:")}
+    assert fly_only, "the shipped manifest declares no fly-only: name — the reader is wrong"
+
+    text = REAL_RUNBOOK.read_text()
+    # Non-vacuity: a runbook read that returned the wrong file, or a truncated
+    # one, must not pass by naming nobody.
+    assert "Secrets Matrix" in text, "REAL_RUNBOOK did not read docs/infra-runbook.md"
+
+    missing = sorted(name for name in fly_only if name not in text)
+    assert not missing, (
+        "these names are declared `fly-only:` — deliberately unversioned, so the "
+        "runbook is the operator's ONLY surface for them — yet they appear "
+        f"nowhere in docs/infra-runbook.md: {missing}. Document the lever where an "
+        "operator would look for it: what it gates, the polarity, the "
+        "`fly secrets set`/`unset` pair, and the rule that unsetting it must delete "
+        'the declaration in the same change (see §"Arming the READ path" and §8.3).'
     )
 
 
