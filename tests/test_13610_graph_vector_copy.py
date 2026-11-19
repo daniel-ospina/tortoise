@@ -689,7 +689,8 @@ def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
     fully backfilled one, so *"the record caught up"* was a finding the count never
     established. `tools/claim_dense_leg_13732.py` met it first — an unseeded
     population PASSES this gate and is then served as `mechanism=pgvector,
-    reason=ok`.
+    reason=empty_results` — the SAME token a backfilled label answering the same
+    empty read records, which is why the instrument could not tell the two apart.
 
     ⛔ `verified` STAYS TRUE, deliberately: with nothing in either store the two
     stores answer identically, so refusing would change deployment behaviour for a
@@ -909,7 +910,7 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
       * the trace trio catches BOTH shapes: the escaped one above, and the in-leg one
         (`mechanism=pgvector`, `degraded=True`, `reason=query_failed`).
 
-    So the trio is the load-bearing pair, and `graph.queries == []` is still not
+    So the trio is the load-bearing set, and `graph.queries == []` is still not
     redundant with it: it pins a property the trace cannot report at all — that no
     work was spent on the graph for a cohort known empty on both sides.
     """
@@ -934,8 +935,8 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
         f"is not evidence that anything was served: {trace}")
     assert "TRIVIALLY" in caplog.text, (
         "a trivially-verified label served an empty cohort with nothing in the trace "
-        "saying why — `mechanism=pgvector, reason=ok` is then indistinguishable from "
-        f"a catch-up: {caplog.text!r}")
+        "saying why — `mechanism=pgvector, reason=empty_results` is then "
+        f"indistinguishable from a catch-up: {caplog.text!r}")
     assert "BOTH SIDES ARE EMPTY" in caplog.text, (
         f"the trace names the state but not its evidence: {caplog.text!r}")
 
