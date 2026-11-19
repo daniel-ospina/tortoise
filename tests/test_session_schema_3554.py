@@ -3747,7 +3747,7 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         distinction is load-bearing in the OTHER direction from the obvious guess: teaching
         ``_PARAGRAPH_START_RE`` a `|` row start changes nothing (0 of the fixtures move),
         while the STRIPPER is where the fix lives — ``_LEADING_LIST_MARKER_RE`` taught
-        `|\s+` does consume the cell delimiter and closes the shape
+        `|\\s+` does consume the cell delimiter and closes the shape
         (``_APPROVAL_RECORD_IN_A_TABLE_ROW`` PASS → REFUSED, measured), so the shape stays
         green only while the delimiter sits in front of the run. The bare-`|` form that
         consumes no space changes nothing either, and is not a row start. Measured PASS
