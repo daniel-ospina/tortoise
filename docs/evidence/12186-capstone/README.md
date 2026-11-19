@@ -144,9 +144,10 @@ can re-derive.
 | 10 | 2 887 | 41 | 0.0142 | 24 | 17 / 300 |
 | 15 | 4 320 | 55 | 0.0127 | 31 | 24 / 300 |
 
-So ~2.3 % of what a user is handed at the production-style width is a near-duplicate of something
-else in the same window, and the share does not grow with k — a wider window adds rows of which
-proportionally fewer are near-duplicates.
+So **~2.3 % of the top 3** rows is a near-duplicate of something else in the same window. The head
+numbers are the user arm's, but **3 is the capture prior's production window, not the user's** — at
+the user door's own shipped width (`limit=10`, §5) the rate is **1.4 %**. The share does not grow
+with k — a wider window adds rows of which proportionally fewer are near-duplicates.
 
 ### 3b. Mints a duplicate (`#11901`'s own definition) — the write path
 
@@ -250,11 +251,25 @@ uv run python tools/test_lane.py run -- tests/test_capstone_12186_recall.py -q
 over 5 arms × 300 queries, 145 s for the 411 variant reads.
 
 ⛔ **The committed [`measurement.json`](./measurement.json) is not byte-identical to a run at its
-`code_head`** — one block was inserted by hand afterwards, and the record declares it in
-`post_run_edits`: the `cleanup` block was added by hand, because the tool at `code_head` has no
-`cleanup` builder at all (`git show 318950c6e0:tools/capstone_12186_recall.py | grep -c cleanup`
-→ `0`). **Every figure in the record is run output**; a reproduction at `code_head` yields the same
-numbers without that one declaration block, and any later run writes the block itself and records
+`code_head`** — **three** things were done by hand afterwards, and the record declares every one of
+them in `post_run_edits`:
+
+1. **`cleanup`** — the block was added by hand, because the tool at `code_head` has no `cleanup`
+   builder at all (`git show 318950c6e0:tools/capstone_12186_recall.py | grep -c cleanup` → `0`).
+2. **`arms`** — the three `user_search*` arms' `door_note` **prose** was restated. The note as run
+   read *"at the MCP tool `tortoise_search`'s own defaults"*, which is false about two default
+   values: the doors default to `entity_type='point'` / `limit=10`, while the arms call
+   `entity_type='object'` (the population IS `:Object` names) at `limit=15`. See §5. **A
+   reproduction at `code_head` therefore carries the OLD, false note on those three arms** even
+   though every figure it prints is correct.
+3. **`paired`** — each paired block gained `ids_truncated_at` / `gain_ids_truncated` /
+   `loss_ids_truncated`. `gain_ids`/`loss_ids` are capped at 20 while `gains`/`losses` are not, so
+   a block publishing `gains: 43` beside 20 ids let a reader re-derive 20 as the count. The cap is
+   now published; no id list and no figure changed.
+
+**Every figure in the record is run output**, and none of the three touches one. A reproduction at
+`code_head` yields the same numbers, with the `cleanup` block absent, the false `door_note` on three
+arms, and the `paired` cap unmarked. Any later run writes all three itself and records
 `post_run_edits: []`.
 
 ⛔ **`code_head` `31bce52ddb` is the RUN head and is not reachable from this branch.** It predates

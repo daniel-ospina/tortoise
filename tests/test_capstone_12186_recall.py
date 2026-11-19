@@ -351,11 +351,31 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
     """
     import inspect
 
-    from tortoise import mcp_server
+    from tortoise import mcp_server, selfhost_api
 
     sig = inspect.signature(mcp_server.tortoise_search)
     door_entity = sig.parameters["entity_type"].default
     door_limit = sig.parameters["limit"].default
+
+    # ⛔ BOTH doors, not one. The note says "both doors default to 'point' / 10", and
+    # reading only the MCP signature enforced half of that: raising the REST route's
+    # `Query(10)` to `Query(50)` would make the note false about the REST door with the
+    # suite green — and `limit=10` on REST is load-bearing, because it is what makes
+    # §5's `k <= 10` bound TRUE. FastAPI wraps the default in `Query`, hence `.default`.
+    rest_sig = inspect.signature(selfhost_api.search)
+    assert "entity_type" not in rest_sig.parameters, (
+        "the REST door now takes its own `entity_type`, so it no longer inherits the "
+        "SDK default the note attributes to it — DOOR_NOTES must be re-stated")
+    rest_limit = rest_sig.parameters["limit"].default
+    rest_limit = getattr(rest_limit, "default", rest_limit)
+    assert rest_limit == door_limit, (
+        f"the two doors disagree on `limit` (MCP {door_limit!r}, REST "
+        f"{rest_limit!r}) while DOOR_NOTES says they share one default")
+    # …and, for completeness, that the REST route really resolves to the same verb.
+    rest_body = inspect.getsource(selfhost_api.search)
+    assert "tortoise_fts_query" in rest_body, (
+        "the REST `/v1/search` route no longer calls `sdk.tortoise_fts_query`, so it is "
+        "no longer the door this record measured through")
 
     note = cap.DOOR_NOTES["user_search"]
 
@@ -477,6 +497,51 @@ def test_the_artifact_names_a_reachable_head_to_run_its_commands_against(artifac
     assert any(f"{s}:tools/capstone_12186_recall.py" in readme for s in alternatives), (
         "README §6's reproduction command must run against the reachable commit, "
         "not the rebased-away run head")
+
+    # ⛔ RESOLVE IT — the three assertions above are satisfied by a sha that does not
+    # EXIST. Measured: patching `318950c6e0` -> `deadbeef00` in BOTH the note and
+    # README §6 stayed GREEN, so this pin could not detect the very defect it exists
+    # for (a reader running `git show <sha>:...` and getting `fatal: invalid object
+    # name`). A token-shaped string is not a commit; ask git.
+    #
+    # A SHALLOW clone genuinely cannot answer (the repo carries the #10356
+    # shallow-channel trap elsewhere), and skipping there is honest — but it must be
+    # decided by the narrow question "is this a shallow repo", never by "did the
+    # lookup fail", because a made-up sha fails the lookup too.
+    import subprocess
+
+    def _git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], cwd=str(README.parent),
+                              capture_output=True, text=True)
+
+    shallow = _git("rev-parse", "--is-shallow-repository").stdout.strip() == "true"
+    for alt in sorted(alternatives):
+        resolved = _git("rev-parse", "--verify", "--quiet", f"{alt}^{{commit}}")
+        if resolved.returncode != 0 and shallow:
+            pytest.skip(f"shallow clone cannot resolve {alt} — not verifiable here")
+        assert resolved.returncode == 0, (
+            f"`code_head_note` offers {alt!r} as the commit a reader should run the "
+            f"commands against, but `git rev-parse {alt}^{{commit}}` fails — the "
+            f"anchor is still dead")
+        alt_sha = resolved.stdout.strip()
+        assert _git("merge-base", "--is-ancestor", alt_sha, "HEAD").returncode == 0, (
+            f"{alt!r} resolves but is NOT an ancestor of this branch, so a reader "
+            f"checking out the PR still cannot reach it")
+        # …and the note's actual claim: the run's two INPUTS are the same blobs there.
+        for path in ("tools/capstone_12186_recall.py",
+                     "docs/evidence/12186-capstone/queries.json"):
+            at_alt = _git("rev-parse", f"{alt_sha}:{path}")
+            at_run = _git("rev-parse", f"{artifact['code_head']}:{path}")
+            if at_run.returncode != 0 and shallow:
+                pytest.skip(f"shallow clone cannot resolve the run head — {path}")
+            assert at_alt.returncode == 0, (
+                f"{path} does not exist at {alt!r} — the note claims it is identical "
+                f"to the run's blob")
+            assert at_run.returncode == 0, (
+                f"{path} does not exist at `code_head` {artifact['code_head'][:12]}")
+            assert at_alt.stdout.strip() == at_run.stdout.strip(), (
+                f"`{path}` is NOT byte-identical between {alt!r} and the run head — "
+                f"the note's whole justification for the re-anchor is that it is")
 
 
 def test_a_binding_that_is_not_the_measured_call_never_renders_as_measured():
@@ -647,6 +712,31 @@ def test_the_paired_block_in_the_artifact_accounts_for_every_query(artifact):
         assert cell["queries_compared"] + cell[
             "excluded_degraded_on_either_side"] == artifact["pin"]["queries"], name
         assert cell["gains"] + cell["losses"] <= cell["queries_compared"], name
+
+        # ⛔ A capped id list beside an uncapped COUNT is a silent subset. Measured:
+        # `capture_prior_pre_lever -> capture_prior` publishes `gains: 43` beside 20
+        # ids and said nothing, so a reader re-deriving the count from the ids got 20
+        # — the `tortoise/truncation.py::mark_truncation` class. `gains`/`losses`
+        # carry the totals; these assert the cap is PUBLISHED and that the published
+        # flag actually matches whether it bit.
+        assert cell["ids_truncated_at"] == cap.IDS_LIMIT, (
+            f"{name}: `ids_truncated_at` must publish the cap ({cap.IDS_LIMIT})")
+        assert len(cell["gain_ids"]) == min(cell["gains"], cap.IDS_LIMIT), (
+            f"{name}: `gain_ids` has {len(cell['gain_ids'])} entries for "
+            f"{cell['gains']} gains — the list is neither full nor capped at "
+            f"{cap.IDS_LIMIT}")
+        assert len(cell["loss_ids"]) == min(cell["losses"], cap.IDS_LIMIT), (
+            f"{name}: `loss_ids` has {len(cell['loss_ids'])} entries for "
+            f"{cell['losses']} losses")
+        assert cell["gain_ids_truncated"] == (cell["gains"] > cap.IDS_LIMIT), name
+        assert cell["loss_ids_truncated"] == (cell["losses"] > cap.IDS_LIMIT), name
+        # …and every listed id is a real query, so a padded list cannot satisfy the
+        # length check above.
+        known = set(artifact["arms"]["user_search"]["per_query"])
+        assert set(cell["gain_ids"]) <= known, (name, "unknown gain id")
+        assert set(cell["loss_ids"]) <= known, (name, "unknown loss id")
+        assert len(set(cell["gain_ids"])) == len(cell["gain_ids"]), (name, "dup gain id")
+        assert len(set(cell["loss_ids"])) == len(cell["loss_ids"]), (name, "dup loss id")
 
 
 # ── the README, against the artifact ─────────────────────────────────────────
@@ -844,6 +934,54 @@ def test_the_two_restated_prose_figures_are_pinned_and_not_only_the_tables(artif
         f"README §5 must restate the mint rate as {rate!r} (the artifact's "
         f"`arms.mint_rate.shipped.rate`), so the declared upper bound cannot "
         f"contradict §3b's table with a green suite")
+
+    # §3a's headline sentence — the k=3 cell, and the k=10 cell it is NOT.
+    # ⛔ MEASURED: the sentence read "~2.3 % of what a user is handed at the
+    # production-style width". 2.3 % IS the k=3 cell (0.0229), but 3 is the CAPTURE
+    # PRIOR's production window (`cap.KS` docstring) — the user door's shipped width
+    # is 10, where the rate is 1.4 %. So the figure was right and its label was
+    # wrong; §5's own new sentence is what made the clash visible.
+    us = artifact["arms"]["user_search"]["duplicate_rate_in_window"]
+    k3 = f"~{us['3']['rate'] * 100:.1f} %"
+    k10 = f"{us['10']['rate'] * 100:.1f} %"
+    assert f"{k3} of the top 3" in flat, (
+        f"README §3a must state the duplicate rate as {k3!r} **at k=3** — the k=3 "
+        f"cell, labelled with the window it belongs to")
+    assert f"the rate is **{k10}**" in flat, (
+        f"README §3a must also quote the user door's own shipped width (k=10, "
+        f"{k10!r}) so the two windows cannot be confused")
+
+
+def test_every_declared_post_run_edit_is_named_in_the_readme(artifact):
+    """A provenance ledger the doc under-reports is the defect this PR exists to close.
+
+    ⛔ MEASURED: `post_run_edits` carried TWO entries (`cleanup`, `arms`) while README §6
+    said "one block was inserted by hand" and named only `cleanup`. The `arms` entry was
+    added by the round-1 fix to the `door_note` prose, after §6's paragraph was written —
+    so the document told a reader the only divergence from a reproduction was `cleanup`,
+    when a reproduction would also carry the OLD, FALSE note on three arms.
+
+    Asserting the ledger and the prose agree is cheap; the failure it prevents is
+    expensive, because §6 is what a reader trusts when deciding whether to re-run.
+    """
+    edits = artifact["post_run_edits"]
+    flat = " ".join(README.read_text().split())
+    for edit in edits:
+        assert f"`{edit['field']}`" in flat, (
+            f"`post_run_edits` declares a hand edit to {edit['field']!r}, but README §6 "
+            f"never names it — the ledger says {len(edits)} edit(s) "
+            f"({[e['field'] for e in edits]}), and the document must not under-report it")
+    # The count, stated in prose, must not contradict the ledger either. "three" is
+    # written out in §6's lead sentence; a rewording that drops it is fine as long as
+    # no OTHER number is claimed, so only the digit-word for a WRONG count is refused.
+    words = {1: "one", 2: "two", 3: "three"}
+    n = len(edits)
+    for wrong_n, word in words.items():
+        if wrong_n == n:
+            continue
+        assert f"**{word}** things were done by hand" not in flat, (
+            f"README §6 claims **{word}** hand edits; the artifact declares {n} "
+            f"({[e['field'] for e in edits]})")
 
 
 def test_the_readme_quotes_the_paired_deltas_the_artifact_holds(artifact):

@@ -139,6 +139,12 @@ DEFAULT_PIN = EVIDENCE_DIR / "queries.json"
 KS: tuple[int, ...] = (3, 5, 10, 15)
 KMAX = max(KS)
 
+#: How many ids a paired block lists per side. The COUNTS (`gains`/`losses`) are never
+#: capped; only the id lists are, and `ids_truncated_at` publishes the cap and the
+#: `*_truncated` flags say whether it actually bit, so a reader re-deriving the count
+#: from the ids cannot silently get the cap instead of the total.
+IDS_LIMIT = 20
+
 #: The capture prior's own window. Quoted separately because a rate at another
 #: width is not the rate the write path pays.
 PRIOR_WINDOW = 3
@@ -612,8 +618,17 @@ def paired(before: dict, after: dict, k: int) -> dict:
         "losses": len(losses),
         "p": p,
         "p_display": (f"<1e-{int(-math.log10(p))}" if 0 < p < 1e-12 else f"{p:.4g}"),
-        "gain_ids": gains[:20],
-        "loss_ids": losses[:20],
+        "gain_ids": gains[:IDS_LIMIT],
+        "loss_ids": losses[:IDS_LIMIT],
+        # ⛔ A capped list beside an uncapped COUNT is a silent subset unless the cap is
+        # published: the artifact printed `gains: 43` next to 20 ids and said nothing,
+        # so a reader re-deriving the gain count from the published ids got 20 — the
+        # `tortoise/truncation.py` class (`mark_truncation`) this repo forbids. `gains`
+        # and `losses` above already carry the true totals, so the only missing fact was
+        # that the lists are capped, and where.
+        "ids_truncated_at": IDS_LIMIT,
+        "gain_ids_truncated": len(gains) > IDS_LIMIT,
+        "loss_ids_truncated": len(losses) > IDS_LIMIT,
     }
 
 

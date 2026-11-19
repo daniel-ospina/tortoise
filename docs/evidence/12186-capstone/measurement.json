@@ -8233,7 +8233,10 @@
     "losses": 0,
     "p": 1.0,
     "p_display": "1",
-    "queries_compared": 272
+    "queries_compared": 272,
+    "ids_truncated_at": 20,
+    "gain_ids_truncated": false,
+    "loss_ids_truncated": false
    }
   },
   "capture_prior_pre_lever -> capture_prior": {
@@ -8271,7 +8274,10 @@
     "losses": 0,
     "p": 2.2737367544323206e-13,
     "p_display": "<1e-12",
-    "queries_compared": 274
+    "queries_compared": 274,
+    "ids_truncated_at": 20,
+    "gain_ids_truncated": true,
+    "loss_ids_truncated": false
    }
   },
   "user_search -> user_search_rerank": {
@@ -8292,7 +8298,10 @@
     "losses": 0,
     "p": 0.25,
     "p_display": "0.25",
-    "queries_compared": 266
+    "queries_compared": 266,
+    "ids_truncated_at": 20,
+    "gain_ids_truncated": false,
+    "loss_ids_truncated": false
    }
   },
   "user_search_pre_lever -> user_search": {
@@ -8330,7 +8339,10 @@
     "losses": 0,
     "p": 9.094947017729282e-13,
     "p_display": "<1e-12",
-    "queries_compared": 265
+    "queries_compared": 265,
+    "ids_truncated_at": 20,
+    "gain_ids_truncated": true,
+    "loss_ids_truncated": false
    }
   }
  },
@@ -8374,6 +8386,12 @@
    "field": "arms",
    "run_head": "31bce52ddbb3b3f0bc93093e2988b42c0e5536ba",
    "why": "the `user_search*` arms' `door_note` PROSE was restated after the run. It read \"at the MCP tool `tortoise_search`'s own defaults\", which is false about two default values: the tool's own defaults are `entity_type='point'` and `limit=10` (`tortoise/mcp_server.py::tortoise_search`), while the arms call `entity_type='object'` (the population IS `:Object` names) at `limit=15`. The note now states the VERB/ARGUMENTS split instead. NO FIGURE IS AFFECTED \u2014 this is the note, not the readings; the recall/duplicate/mint figures are unchanged run output."
+  },
+  {
+   "declared": "2026-11-19",
+   "field": "paired",
+   "run_head": "31bce52ddbb3b3f0bc93093e2988b42c0e5536ba",
+   "why": "each paired block gained three DECLARATION fields after the run \u2014 `ids_truncated_at` (=20, the tool's `IDS_LIMIT`), `gain_ids_truncated` and `loss_ids_truncated` \u2014 because `gain_ids`/`loss_ids` were capped at 20 while `gains`/`losses` were not, so a block publishing `gains: 43` beside 20 ids let a reader re-derive 20 as the count. No id list was changed and no FIGURE was changed: the three fields state a property of the code (`gains`/`losses` already carried the true totals) and are recomputable from the block itself."
   }
  ],
  "timings": {
