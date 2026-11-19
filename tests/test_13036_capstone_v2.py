@@ -396,6 +396,37 @@ def test_every_live_tool_is_accounted_for():
         f"{sorted(unknown)} — a case for a retired name belongs to row V3")
 
 
+def test_the_declared_coverage_matches_the_tools_this_file_ACTUALLY_CALLS():
+    """`_DRIVEN_BY_TEST` must equal the set of tools passed to ``door.call(...)``.
+
+    Without this, the accounting gate above is only as honest as a hand-typed
+    tuple: delete a test (or gut it) and the tuple keeps claiming coverage
+    forever. That is the same silent-drift class the file exists to catch, so it
+    is read off the AST rather than trusted.
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path(__file__).read_text())
+    called = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "call"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            called.add(node.args[0].value)
+
+    declared = set(_DRIVEN_BY_TEST)
+    assert not declared - called, (
+        "declared as driven but NEVER called by any test (the list has drifted): "
+        f"{sorted(declared - called)}")
+    assert not called - declared - set(UNDRIVEN), (
+        "called by a test but not declared in _DRIVEN_BY_TEST: "
+        f"{sorted(called - declared - set(UNDRIVEN))}")
+
+
 def test_undriven_entries_name_a_mechanism():
     """`UNDRIVEN` is a finding only when it says why — never a bare label."""
     for name, reason in UNDRIVEN.items():
