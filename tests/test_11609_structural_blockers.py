@@ -536,10 +536,10 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         DESTRUCTURING assignment binds element by element — `A, b = A, object` binds `A` to the
         adapter — but `_dotted` answers only a dotted EXPRESSION, so a `Tuple` value was `None`
         and every name in the target was recorded `SHADOWED`. That lost the alias, so
-        `A, b = A, object` … `A(app)` reported `[]` at the pre-fix head. `main` answers `[3]`
-        as well — it carries this same pairing — so this is a pre-existing false PASS the fix
-        closes, not a regression against `main`. Same false PASS as the store arm, one level down: the pin's headline claim goes
-        green over a module that really wires the adapter.
+        `A, b = A, object` … `A(app)` reported `[]` at the pre-fix head, while `main` answers
+        `[3]` — it carries this same pairing — so the pre-fix head LOST a site `main` reports.
+        Same shape as the store arm, one level down: the pin's headline claim goes green over a
+        module that really wires the adapter.
 
         So pair a destructuring target with a destructuring value whenever the arity matches
         (recursing through nested tuples/lists, and through ONE `Starred`, whose middle slice is
@@ -1778,13 +1778,12 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # ⛔ THE VALUE SIDE OF THE SAME FIX (`#13585` P2, measured after the store rows above).
     # `_dotted` answers only a dotted EXPRESSION, so a DESTRUCTURING value read as `None` and
     # every name in the target was bound `SHADOWED` — the alias was lost, and a module that
-    # really wires the adapter through `A, b = A, object` reported `[]`. That is a false PASS in
-    # the direction this reader exists to prevent, and `main` answers `[3]` too (it carries the
-    # same pairing), so it is a pre-existing gap this fixes rather than a regression. The mirror
-    # row below is the polar control: `A, b = object, A` is `[]` on `main` as well, and the
-    # runtime there is a `TypeError`, so the empty answer is correct on both readings.
-    # Element-wise pairing answers both directions; ignoring the target, which is what the
-    # PRE-`#13585` reader did, answers neither.
+    # really wires the adapter through `A, b = A, object` reported `[]` — a site `main` reports,
+    # since `main` carries this same pairing. That is a false PASS in the direction this reader
+    # exists to prevent. The mirror row below is the polar control: `A, b = object, A` is `[]` on
+    # `main` as well, and the runtime there is a `TypeError`, so the empty answer is correct on
+    # both readings. Element-wise pairing answers both directions; ignoring the target, which is
+    # what the PRE-`#13585` reader did, answers neither.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "A, b = A, object\n"
@@ -2232,7 +2231,7 @@ def test_the_product_assertion_is_reachable_from_a_stub_root(tmp_path):
     a stub root. That is what makes the CALLER falsifiable. Reverting the call inside it to the
     pre-PR inline `"rest_spec" in source.read_text(...)` comprehension now reports the
     comment-only module and reds the first row here; while the assertion was inlined in the
-    test that only ever sees the product tree, the same revert reded 0 of 46 rows, because the
+    test that only ever sees the product tree, the same revert reded nothing, because the
     real population's only mention of the field sits in the module the comprehension excludes
     by name.
 
@@ -2395,7 +2394,7 @@ def _assert_no_product_rest_spec_reads(root: Path) -> None:
 
     ⛔ #13585 review P2#1 landed on exactly this call. The pin used to invoke the scan inline
     (`readers = _rest_spec_readers(scanned, repo)`) and no falsifier could reach it: reverting
-    it to the pre-PR `"rest_spec" in source.read_text(...)` comprehension reded 0 of 46 rows,
+    it to the pre-PR `"rest_spec" in source.read_text(...)` comprehension reded nothing,
     because the real population's only mention of the field sits in the module that
     comprehension excludes by name. Keeping the ASSERTION and its call in a function that
     takes the ROOT — instead of leaving them as the tail of a test that only ever sees the
