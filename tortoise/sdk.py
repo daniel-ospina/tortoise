@@ -18514,56 +18514,90 @@ class TortoiseSDK:
         # uses, so without the scope an armed handle refuses the create hot
         # path. The declaration is a lane, not an exemption — the append above
         # is the commit point and every write here follows it.
-        with _live_write_scope("create_point"):
-            self._graph_write_with_retry(
-                lambda: proj.g.query(
-                    "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
-                    params=_create_params,
-                ),
-                what="create_point CREATE(:Point)",
-            )
-            # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
-            # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
-            # a per-query race and `proj` is as valid after a retry as before it
-            # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
-            # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
-            #
-            # #7209: the follow-up writes of a fresh create ride the SAME bounded
-            # retry as the CREATE above. Before this they were bare `proj.g.query`
-            # calls, so a rebuild's per-query abort landing here aborted the write
-            # AFTER the Point had already landed — leaving a half-materialized
-            # point (no TAGGED / no extractedFrom edges), which is a finding that
-            # provenance and tag reads cannot reach: the same "the map loses a
-            # finding" outcome by a narrower route. Every statement in these two
-            # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
-            # documented no-op on re-run), so re-issuing one after an engine ABORT
-            # cannot duplicate anything — the abort means the statement did not
-            # land, exactly the contract `retryable_aborted_write` is built on.
-            tags = props.get("tags") or []
-            if isinstance(tags, (list, tuple)):
+        #
+        # ⛔ #13829 — THIS IS THE FOLD, and it ASKS BEFORE IT TOUCHES THE CACHE.
+        # This door writes the cache by hand instead of through
+        # `live_write`'s fold leg, so it is the one that must consume the
+        # derived-cache verdict itself: when the org's `graph_storage` reading is
+        # at/over its hard stop, the allowance gate no longer refuses the write at
+        # the door (the door declared `truth_carried=True`) — it publishes a
+        # `CacheFoldDenial`, and this block is what makes that a cache SKIP rather
+        # than an unenforced cap.
+        #
+        # Why SKIPPING the whole block is the correct granularity, and not a
+        # per-statement decision: a half-folded event is worse than an unfolded
+        # one. The Point CREATE, the TAGGED edges, the extractedFrom edges and the
+        # EP dirty-mark are ONE event's projection; writing some of them would
+        # leave the cache holding an edge to a node it does not have, which no
+        # replay-shaped read can interpret. Declining all of them leaves the cache
+        # exactly as it was before this write, and the record holds the event, so
+        # `derived = replay(journal)` folds the whole event later, atomically.
+        #
+        # ⚠️ Nothing is lost and nothing is refused: the journal line and the
+        # record row are already committed above (the `WriteNotLandedError` gate
+        # two lines up proves the record took it), reads for this point fall back
+        # to the record, and the outcome is NAMED on the returned `LiveWrite`
+        # (`cache_fold`) rather than being silent. #10976 is untouched — no byte is
+        # deleted here, the cache simply stops growing.
+        from .allowance_gate import cache_fold_denial
+        _cache_denial = cache_fold_denial()
+        if _cache_denial is not None:
+            _logger.warning(
+                "create_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                "The journal and the record hold the write; the point is served "
+                "from the record until a replay folds it.",
+                pid, getattr(_cache_denial, "detail", _cache_denial))
+        else:
+            with _live_write_scope("create_point"):
                 self._graph_write_with_retry(
-                    lambda: self._sync_tags(proj, pid, tags),
-                    what="create_point TAGGED edges",
+                    lambda: proj.g.query(
+                        "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
+                        params=_create_params,
+                    ),
+                    what="create_point CREATE(:Point)",
                 )
-            # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
-            if props.get("extractedFrom"):
-                self._graph_write_with_retry(
-                    lambda: proj._link_source(pid, props["extractedFrom"],
-                                              source_versions=_source_versions),
-                    what="create_point extractedFrom edges",
-                )
-                # Inheritance gate dirty-mark: a freshly-sourced point is always
-                # inherit-eligible on the next EP run (no interval wait, #398).
-                # #2952: a born point carries no `inherited_at` stamp, so the
-                # `REMOVE n.inherited_at` the generic helper
-                # (`_invalidate_inheritance_gate`) issues is a no-op on the final
-                # state — and a no-op write on the node still costs a fulltext
-                # re-add. The `extractedFrom` invalidation therefore happens in
-                # the PROPS (see the up-front pop of `inherited_at` above): a
-                # caller-supplied stamp is dropped BEFORE the CREATE map is built
-                # instead of being written and then taken back out, so this path
-                # is ONE graph write too. The EP dirty-marking half is issued once
-                # below.
+                # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
+                # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
+                # a per-query race and `proj` is as valid after a retry as before it
+                # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
+                # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
+                #
+                # #7209: the follow-up writes of a fresh create ride the SAME bounded
+                # retry as the CREATE above. Before this they were bare `proj.g.query`
+                # calls, so a rebuild's per-query abort landing here aborted the write
+                # AFTER the Point had already landed — leaving a half-materialized
+                # point (no TAGGED / no extractedFrom edges), which is a finding that
+                # provenance and tag reads cannot reach: the same "the map loses a
+                # finding" outcome by a narrower route. Every statement in these two
+                # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
+                # documented no-op on re-run), so re-issuing one after an engine ABORT
+                # cannot duplicate anything — the abort means the statement did not
+                # land, exactly the contract `retryable_aborted_write` is built on.
+                tags = props.get("tags") or []
+                if isinstance(tags, (list, tuple)):
+                    self._graph_write_with_retry(
+                        lambda: self._sync_tags(proj, pid, tags),
+                        what="create_point TAGGED edges",
+                    )
+                # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
+                if props.get("extractedFrom"):
+                    self._graph_write_with_retry(
+                        lambda: proj._link_source(pid, props["extractedFrom"],
+                                                  source_versions=_source_versions),
+                        what="create_point extractedFrom edges",
+                    )
+                    # Inheritance gate dirty-mark: a freshly-sourced point is always
+                    # inherit-eligible on the next EP run (no interval wait, #398).
+                    # #2952: a born point carries no `inherited_at` stamp, so the
+                    # `REMOVE n.inherited_at` the generic helper
+                    # (`_invalidate_inheritance_gate`) issues is a no-op on the final
+                    # state — and a no-op write on the node still costs a fulltext
+                    # re-add. The `extractedFrom` invalidation therefore happens in
+                    # the PROPS (see the up-front pop of `inherited_at` above): a
+                    # caller-supplied stamp is dropped BEFORE the CREATE map is built
+                    # instead of being written and then taken back out, so this path
+                    # is ONE graph write too. The EP dirty-marking half is issued once
+                    # below.
 
         # Apply the starting belief (only on new creation, not dedup).
         #
