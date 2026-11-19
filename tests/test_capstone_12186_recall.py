@@ -123,8 +123,17 @@ def _committed_json(path: Path) -> dict:
 # ── the near-duplicate rule ──────────────────────────────────────────────────
 
 def test_the_key_folds_case_whitespace_and_the_separator_class():
-    assert cap.near_dup_key("The  Merge-Base") == "merge base"
-    assert cap.near_dup_key("the_merge/base") == "merge base"
+    # ⛔ EVERY MEMBER of the declared class, not three of four (round 25, F3). README
+    # §3a names the class `-` `_` `.` `/`, and these two assertions exercised only
+    # `-`, `_` and `/`: removing `.` from `near_dup_key`'s fold left the whole suite
+    # GREEN at 55 passed (measured), while `near_dup_key("x.y")` still returned `y`.
+    # A class pin that does not name every member of the class is a pin on the
+    # examples, not on the rule — so each separator gets its own case.
+    assert cap.near_dup_key("The  Merge-Base") == "merge base"      # `-`
+    assert cap.near_dup_key("the_merge/base") == "merge base"       # `_` and `/`
+    assert cap.near_dup_key("the.merge base") == "merge base"       # `.`
+    # …and a path with every separator in it, which is the shape the population holds.
+    assert cap.near_dup_key("scripts/x.py") == "scripts x py"
 
 
 def test_a_leading_article_is_dropped_because_it_is_the_duplicate_noun_class():
@@ -246,22 +255,34 @@ def test_build_pin_refuses_to_overwrite_without_force(tmp_path, monkeypatch):
 
 # ── the comparisons block ────────────────────────────────────────────────────
 
-def test_the_artifact_refuses_the_cross_corpus_comparison_by_name():
+def test_the_artifact_refuses_the_cross_corpus_comparison_by_name(artifact):
     """The 0.7133 baseline and #11901's cells are DIFFERENT populations.
 
     A capstone that prints 0.93 beside 0.7133 invites the reader to subtract
     them. `_comparisons` names both and says why not, so the refusal travels with
     the artifact instead of living in a reviewer's memory.
+
+    ⛔ AND THE REFUSAL MUST BE IN THE ARTIFACT, not only in its builder (round 25, F1).
+    Both tests here called `cap._comparisons({})` and never read the committed block —
+    `grep -n 'comparisons' tests/test_capstone_12186_recall.py` showed only builder
+    calls — so the artifact could hold `{"different_corpus_from": {},
+    "within_run_comparisons_that_ARE_valid": []}` and the suite stayed GREEN at 55
+    passed, while README §1 tells the reader the artifact "refuses that comparison by
+    name (`comparisons.different_corpus_from`)". The artifact is the evidence a reader
+    opens, so the assertion reads IT; the builder is kept as an equality check.
     """
-    comp = cap._comparisons({})
+    comp = artifact["comparisons"]
+    assert comp == cap._comparisons(artifact["arms"]), (
+        "the committed `comparisons` block is not what the tool builds — the "
+        "refusal the record points a reader at is no longer its own output")
     named = " ".join(comp["different_corpus_from"])
     assert "0.7133" in named
     assert "#11901" in named
     assert comp["same_corpus_as"] == []
 
 
-def test_the_comparisons_block_accepts_only_within_run_pairs():
-    comp = cap._comparisons({})
+def test_the_comparisons_block_accepts_only_within_run_pairs(artifact):
+    comp = artifact["comparisons"]
     joined = " ".join(comp["within_run_comparisons_that_ARE_valid"])
     assert "capture_prior -> user_search" in joined
     assert "user_search_rerank" in joined
@@ -2224,6 +2245,21 @@ LEVER_COLUMNS: dict[str, tuple[str, str]] = {
 #: must not claim visibility, in any wording.
 LEVER_DECLARATION_ROWS = ("verdict", "m3")
 
+#: ⛔ §4's FOURTH COLUMN, which no assertion read (round 25, F2). Each row cites the
+#: artifact block that carries its figure, and a citation is a claim a reader acts on:
+#: following it must land on a block that holds the row's number. Measured at this head,
+#: all three measured rows could cite a DIFFERENT block — `#12368` pointed at the
+#: capture-prior pair (whose delta is the OTHER one, +15.69) under a row stating +15.47,
+#: and the fold/rerank rows pointed anywhere — with the suite GREEN at 55 passed. So each
+#: citation is pinned, flattened and `_mentions`-bounded like every other cell.
+LEVER_EVIDENCE: dict[str, tuple[str, ...]] = {
+    "underscore": ('paired["user_search_pre_lever -> user_search"]',),
+    "fold": ("arms.mint_rate",),
+    "rerank": ("arms.user_search_rerank", "merged_lever_visibility"),
+    "verdict": ("declared", "§5"),
+    "m3": ("#12349",),
+}
+
 
 def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
     """§4, ROW BY ROW — the table a reader leaves with, lever by lever.
@@ -2267,9 +2303,16 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
         row = _one_row(rows, marks, key)
         shipped = _flat(row[1])
         verdict = _flat(row[2])
+        evidence = _flat(row[3])
         want_shipped, want_verdict = LEVER_COLUMNS[key]
         want_shipped = derived_shipped.get(key, want_shipped)
         assert want_shipped, f"§4 `{key}` has no shipped-state expectation"
+        #: ⛔ THE CITED BLOCK (round 25, F2) — checked before the phrase pins, because a
+        #: row whose citation does not hold its own figure is the more damaging half.
+        for cite in LEVER_EVIDENCE[key]:
+            assert _mentions(evidence, _flat(cite)), (
+                f"§4 `{key}` cites a block that is not {cite!r}, where its figure "
+                f"lives: {row[3]!r}")
         assert shipped.startswith(want_shipped), (
             f"§4 `{key}` shipped state {row[1]!r} does not start with "
             f"{want_shipped!r}")
