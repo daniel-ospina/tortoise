@@ -2162,6 +2162,14 @@ def _reader_citations(
     different checker. A region that comes back inverted raises rather than
     returning an empty list.
 
+    ⛔ DELETION IS COVERED BY A COVERAGE INVARIANT, NOT BY A COUNT FLOOR. A
+    non-vacuity floor (`len(cites) >= N`) passes a list with a reader's own cite
+    edited out, because the floor was always BELOW the real count — so the
+    article's claim "re-reads every cite above" was vacuous for whichever cite
+    vanished (#13814 review round 6). Every numbered entry that names a reader
+    must therefore still contribute at least one cite to THAT entry, asserted
+    below against the parse itself rather than against a number in the test.
+
     `symbol` is the function named for that cite (`::start_warm_up` and so on), or
     `None` where none is named INLINE. The numbered-list symbol is tracked per
     ENTRY, so reader 2's cite cannot inherit reader 1's function. The two prose
@@ -2178,6 +2186,10 @@ def _reader_citations(
     #: numbered ENTRY -> the reader that entry names, so the prose's ranges can be
     #: bound to the readers ITS OWN SENTENCE names for them.
     by_ordinal: dict[int, str] = {}
+    #: numbered ENTRY -> how many cites IT contributed. A reader named by an entry
+    #: whose own cite was edited out has 0 here, which is the deletion the count
+    #: floor could never see.
+    entry_cites: dict[int, int] = {}
     #: readers named by ordinal whose range cites have not been reached yet. The
     #: sentence wraps across lines in BOTH artifacts, so this outlives one line.
     pending: list[str] = []
@@ -2222,7 +2234,21 @@ def _reader_citations(
             if bound is None and pending:
                 bound = pending.pop(0)
                 ordinal_bound += 1
+            if ordinal is not None and symbol is not None:
+                # The cite belongs to the numbered ENTRY that named this reader.
+                entry_cites[ordinal] = entry_cites.get(ordinal, 0) + 1
             cites.append((current, lo, hi, bound))
+    # DELETION: every entry that named a reader must still carry at least one cite
+    # of its own. Editing a reader's cite out leaves the artifact telling a
+    # reviewer that N readers are pinned while the list pins N-1 — the shape a
+    # count floor cannot detect (#13814 review round 6: deleting reader 3's
+    # `:1592` from the manifest numbered list left all 142 tests green).
+    uncovered = sorted(set(by_ordinal) - set(entry_cites))
+    assert not uncovered, (
+        f"{artifact}: the numbered list names a reader for entry {uncovered}, but no cite "
+        f"in that entry is attributed to it — a cite was edited out, so the list claims a "
+        f"reader it no longer pins (per-entry cites: {dict(sorted(entry_cites.items()))})"
+    )
     # Non-vacuity, and it is the whole point: if that sentence is deleted or
     # reworded the ranges silently fall back to the needle-only check, which
     # passes a range re-pinned onto ANY flag-reading line — the wrong reader
