@@ -317,13 +317,15 @@ class TestPaired:
         }
         assert tool_mod.classify(cmp) == "LOSS"
 
-    def test_the_preregistered_bar_decides_not_the_run_n(self, tool_mod):
+    def test_a_larger_run_cannot_buy_an_easier_bar(self, tool_mod):
         """⛔ A corpus that builds MORE claims must not tighten its own bar.
 
-        The observed bar falls as n grows, so gating on it would let a run with
-        a bigger population call the same absolute move a ``GAIN`` under a
-        threshold the pre-registration never declared. The committed bar
-        decides; the observed one is disclosure.
+        The observed bar falls as n grows, so gating on it ALONE would let a run
+        with a bigger population call the same absolute move a ``GAIN`` under a
+        threshold the pre-registration never declared. The pre-registered bar
+        binds in that direction — and the run's own bar binds in the other (see
+        ``test_a_run_below_the_preregistered_n_cannot_buy_an_easier_bar``), which
+        is why the gate is ``max`` of the two and not "the pre-registered one".
         """
         cmp = {
             "delta_pp": 4.0,
@@ -361,6 +363,44 @@ class TestPaired:
         # the delta clears the pre-registered bar and NOT the run's own.
         assert cmp["delta_pp"] > pre_registered and cmp["delta_pp"] < observed
         assert tool_mod.classify(cmp) == "UNRESOLVED"
+
+    def test_the_emitted_bar_is_the_one_the_gate_used(self, tool_mod):
+        """⛔ The artifact EMITS the deciding bar, so it must be the gate's own.
+
+        `detectable_pp_gated` carried `detectable_pp_preregistered`
+        unconditionally while `classify` gated on `max(...)` — so on the
+        `600 <= built_n < 786` band the artifact named a bar the label had not
+        used, and the emitted `population_mismatch.note` pointed a reader AT that
+        field as "the one that decided". One home for both, and it is
+        `gated_bar_pp`.
+        """
+        for cmp in (
+            {"detectable_pp": 5.12, "detectable_pp_preregistered": 4.47},
+            {"detectable_pp": 3.23, "detectable_pp_preregistered": 4.47},
+            {"detectable_pp": 4.47, "detectable_pp_preregistered": None},
+            {"detectable_pp": None, "detectable_pp_preregistered": None},
+        ):
+            bars = [b for b in (cmp["detectable_pp"], cmp["detectable_pp_preregistered"]) if b]
+            assert tool_mod.gated_bar_pp(cmp) == (max(bars) if bars else None), cmp
+
+    def test_no_text_still_says_the_preregistered_bar_alone_decides(self, tool_mod):
+        """The superseded rule, pinned as ABSENT — three statements carried it.
+
+        `bd349877` took `max(...)`; `paired`'s docstring, the `preregistered_n`
+        comment and the artifact's own `population_mismatch.note` kept saying the
+        pre-registered bar decides and is "the harder bar at the larger n" —
+        false for the `600 <= built_n < 786` range the fix was written for, and
+        the note is a field the artifact publishes.
+        """
+        src = TOOL.read_text()
+        for stale in (
+            "THE PRE-REGISTERED ONE IS THE GATE",
+            "the PRE-REGISTERED bar still decides",
+            "harder bar at the larger n",
+            "the observed one is DISCLOSURE",
+        ):
+            assert stale not in src, f"the superseded bar rule survives: {stale!r}"
+        assert "STRICTER" in tool_mod.BAR_RULE, "BAR_RULE must state the rule"
 
     def test_gain_and_loss(self, tool_mod):
         up = {
@@ -1088,6 +1128,171 @@ class TestTheWiringTheReviewFixed:
         assert tool_mod.classify(cmp) == "UNRESOLVED"
         cmp["delta_pp"] = 5.50  # above BOTH
         assert tool_mod.classify(cmp) == "GAIN"
+
+
+# ── 5c. THE DOCUMENTED RUN PATH, DRIVEN END TO END ────────────────────────
+
+
+class _FakeGraph:
+    def __init__(self, rows: int):
+        self._rows = rows
+
+    def query(self, _cypher):
+        # The run-level `graph_unseeded` guard reads this: a zero count refuses the
+        # RUN (the population was written without embeddings), so a fake that
+        # reports zero would never reach the arms this class is about.
+        return types.SimpleNamespace(result_set=[[f"pt-12186{i:06d}"] for i in range(self._rows)])
+
+
+class _FakeProj:
+    def __init__(self, rows: int):
+        self.g = _FakeGraph(rows)
+
+
+class _FakeSDK:
+    def __init__(self, **_kw):
+        self._proj = _FakeProj(3)
+
+    def _get_proj(self):
+        return self._proj
+
+
+class TestTheDocumentedRunPath:
+    """⛔ THE RUNBOOK'S OWN INVOCATION, EXECUTED — not the helper it relies on.
+
+    `#13734` round 4, finding 1: `--out` (the flag every document prescribes)
+    swallowed the incomplete-run exit code, and the pin that existed called the
+    pure helper `_exit_code`, which is why the revert stayed green. `afc93edcbf`
+    fixed the branch and pinned the SHAPE; the behavioural half is here, because
+    the shape pin says where the `return` sits and this one says what a caller
+    sees.
+
+    ⛔ THE ARMS ARE FAKED; THE WIRING IS THE SHIPPED ONE. `require_corpus`,
+    `require_embedder`, the record preconditions, `_seed_graph` and `_read_arm`
+    are stubs, so no store, corpus or embedder is needed — everything from the
+    population build to the exit code is `run_measurement` as it ships.
+    """
+
+    BLOCK_MESSAGE = (
+        "TORTOISE_RECORD_DSN is not set — the record's dense leg cannot be read, "
+        "and the graph's leg under the record's name is not this measurement"
+    )
+
+    def _drive(self, tool_mod, monkeypatch, tmp_path, *, out: str, preregistered_n: int):
+        corpus = tmp_path / "corpus"
+        corpus.mkdir(exist_ok=True)
+        rows = [
+            {"id": f"pt-12186{i:06d}", "content": f"claim {i}", "query": f"query {i}"}
+            for i in range(3)
+        ]
+        monkeypatch.setattr(tool_mod, "require_corpus", lambda _d: [corpus / "a.jsonl"])
+        monkeypatch.setattr(tool_mod, "require_embedder", lambda: None)
+        monkeypatch.setattr(tool_mod, "_resolve_dsn", lambda _explicit: None)
+
+        def _no_record(_dsn):
+            raise tool_mod.Refused("no_record_dsn", self.BLOCK_MESSAGE)
+
+        monkeypatch.setattr(tool_mod, "require_record", _no_record)
+        monkeypatch.setattr(tool_mod, "_git_head", lambda: "deadbeef")
+        monkeypatch.setattr(tool_mod, "_seed_graph", lambda _proj, pop: len(pop))
+        monkeypatch.setattr(
+            tool_mod,
+            "_read_arm",
+            # The lexical arm misses every claim, the dense arms hit: the pairing
+            # then has discordant pairs, so the resolution bars are computed
+            # instead of being `None` (an all-agreeing trace has none).
+            lambda _sdk, arm, queries, _deep, _sanitise: (
+                {qid: (5 if arm == tool_mod.ARM_LEXICAL else 1) for qid, _ in queries},
+                [],
+                {"arm": arm, "ran": True, "mechanisms": ["index"]},
+            ),
+        )
+        monkeypatch.setattr("tools.window_quality_m2.harvest_turn_texts", lambda _s, _n: ([{}], {}))
+        monkeypatch.setattr(
+            "tools.window_quality_m2.build_point_population",
+            lambda _texts, _points, sanitise=None, stats=None: [dict(r) for r in rows],
+        )
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+
+        args = types.SimpleNamespace(
+            sessions_dir=str(corpus),
+            dsn="",
+            population=preregistered_n,
+            points=3,
+            min_population=1,
+            deep=tool_mod.DEEP_LIMIT_DEFAULT,
+            namespace="claimdense_test",
+            graph="",
+            out=out,
+        )
+        return tool_mod.run_measurement(args)
+
+    def test_the_documented_out_run_exits_3_and_names_the_refusal(
+        self, tool_mod, monkeypatch, tmp_path, capsys
+    ):
+        """`--out` must not change the exit status nor silence the refusal."""
+        target = tmp_path / "claim-dense-13732.json"
+        rc = self._drive(tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N)
+        err = capsys.readouterr().err
+        assert target.exists(), "the artifact must still be written"
+        assert rc == 3, f"--out swallowed the incomplete-run exit (rc={rc})"
+        assert f"REFUSED[no_record_dsn]: {self.BLOCK_MESSAGE}" in err, err
+
+    def test_the_stdout_run_keeps_the_same_exit_and_the_same_refusal(
+        self, tool_mod, monkeypatch, tmp_path, capsys
+    ):
+        """The two output modes must be the same run with a different sink."""
+        rc = self._drive(tool_mod, monkeypatch, tmp_path, out="", preregistered_n=M2_N)
+        got = capsys.readouterr()
+        assert rc == 3
+        assert json.loads(got.out)["arms"]["record_dense"]["blocked"] == "no_record_dsn"
+        assert f"REFUSED[no_record_dsn]: {self.BLOCK_MESSAGE}" in got.err, got.err
+
+    def test_the_artifact_names_the_arms_OWN_reason_not_a_cohort_story(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ Finding 3, asserted through the artifact rather than the branch.
+
+        `not_measured` used to describe every code as a cohort problem, so on the
+        common box (no `TORTOISE_RECORD_DSN`) it asserted *"the record does not
+        hold this population's cohort"* while `arms["record_dense"]["message"]`
+        in the SAME artifact carried the true `no_record_dsn` text: two
+        contradictory explanations, the false one pointing the next lane at the
+        `#13210` backfill instead of at their env.
+        """
+        target = tmp_path / "a.json"
+        self._drive(tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N)
+        artifact = json.loads(target.read_text())
+        blocked_notes = [n for n in artifact["not_measured"] if "BLOCKED[" in n]
+        assert blocked_notes, artifact["not_measured"]
+        assert (
+            blocked_notes[0]
+            == f"the `record_dense` arm — BLOCKED[no_record_dsn]: {self.BLOCK_MESSAGE}"
+        ), blocked_notes[0]
+        assert artifact["arms"]["record_dense"]["message"] == self.BLOCK_MESSAGE
+
+    def test_the_emitted_bar_fields_agree_with_the_emitted_note(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ Finding 4: the note points a reader at `detectable_pp_gated`.
+
+        When the run is undersized the OBSERVED bar is the larger one, so the
+        field claiming to name the deciding bar must carry the observed one. It
+        carried the pre-registered one, making the note's own sentence false.
+        """
+        target = tmp_path / "b.json"
+        # 5 pre-registered, 3 built -> the two bars differ, so both fields exist.
+        self._drive(tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=5)
+        artifact = json.loads(target.read_text())
+        cmp = artifact["comparisons"]["graph_dense_vs_lexical"]["primary"]
+        assert cmp["detectable_pp"] > cmp["detectable_pp_preregistered"], cmp
+        assert (
+            artifact["comparisons"]["graph_dense_vs_lexical"]["detectable_pp_gated"]
+            == (cmp["detectable_pp"])
+        ), "the emitted bar is not the one the gate used"
+        note = artifact["population_mismatch"]["note"]
+        assert "STRICTER" in note, note
+        assert "disclosure only" not in note, note
 
 
 # ── 6. the contradiction test, structurally ───────────────────────────────

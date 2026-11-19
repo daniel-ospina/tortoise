@@ -232,6 +232,21 @@ POWER = 0.80
 #: reader should carry into an unknown corpus; the run re-states the OBSERVED one.
 DISCORDANCES: tuple[float, ...] = (0.05, 0.10, 0.20, 0.30)
 
+#: ⛔ THE BAR RULE, STATED ONCE — as a value, because the artifact EMITS it.
+#: `detectable_effect_pp` DECREASES in n, so neither bar is universally harder:
+#: the pre-registered bar (n = 786) is the larger one only when the run built MORE
+#: claims than that, and `--min-population` is 600, so `600 <= built_n < 786` is
+#: reachable from the documented recipe. `classify` and :func:`gated_bar_pp`
+#: therefore take the STRICTER of the two, and every statement of the rule — the
+#: docstring, the emitted note, and the emitted `detectable_pp_gated` field — says
+#: that instead of "the pre-registered one decides", which held only for the
+#: larger-n half of the range.
+BAR_RULE = (
+    "the STRICTER of the pre-registered bar and this run's own"
+    " (`max`, because the detectable effect falls as n grows, so neither is"
+    " always the harder one)"
+)
+
 
 class Refused(RuntimeError):
     """A precondition that could not be met — named, never silently skipped.
@@ -393,14 +408,18 @@ def paired(
     ``found_at_deep`` is compared on the SAME pairing, so a delta that only
     re-orders the same candidate set is tellable from one that shrinks coverage.
 
-    ⛔ TWO THRESHOLDS, AND THE PRE-REGISTERED ONE IS THE GATE. ``detectable_pp``
-    is the bar for the n THIS run built; ``detectable_pp_preregistered`` is the
-    bar committed in ``preregistration.json`` before any number existed. A run
-    that builds MORE claims gets a SMALLER observed bar, so gating on the
-    observed one would let a corpus change tighten the evidence needed and still
-    call the same absolute move a ``GAIN`` — the pre-registration would bind
-    nothing. The committed bar therefore decides (the conservative direction:
-    it is the harder bar at a larger n), and the observed one is DISCLOSURE.
+    ⛔ TWO THRESHOLDS, AND **BOTH** BIND — the bar is the ``max`` of them (see
+    :data:`BAR_RULE`; :func:`classify` is the one implementation).
+    ``detectable_pp`` is the bar for the n THIS run built;
+    ``detectable_pp_preregistered`` is the bar committed in
+    ``preregistration.json`` before any number existed. Gating on the OBSERVED one
+    alone would let a corpus change tighten the evidence needed and still call the
+    same absolute move a ``GAIN`` — the pre-registration would bind nothing.
+    Gating on the PRE-REGISTERED one alone has the opposite hole: the detectable
+    effect FALLS as n grows, so a run that built FEWER claims than the
+    pre-registration assumed cannot resolve a delta the committed bar calls
+    resolvable, and the label would over-claim for its own population. Neither bar
+    is universally the harder one, so neither alone is the gate.
     """
     if set(a) != set(b):
         raise ValueError("paired comparison over different id sets")
@@ -456,6 +475,24 @@ def _mcnemar_p(only_b: int, n_disc: int) -> float:
     return round(_binom_two_sided(only_b, n_disc), 6)
 
 
+def gated_bar_pp(cmp: dict) -> float | None:
+    """The resolution bar the label ACTUALLY used — the ``max`` of the two.
+
+    ⛔ ONE HOME, because the artifact EMITS this (`detectable_pp_gated`) and an
+    emitted field must not be free to disagree with the gate (see
+    :data:`BAR_RULE`). It did: the field carried the pre-registered bar
+    unconditionally while `classify` gated on `max`, so on the `600 <= built_n <
+    786` band — the exact band the `max()` fix was written for — the artifact
+    named a bar the label had not used.
+    """
+    bars = [
+        b
+        for b in (cmp.get("detectable_pp_preregistered"), cmp.get("detectable_pp"))
+        if b is not None
+    ]
+    return max(bars) if bars else None
+
+
 def classify(cmp: dict) -> str:
     """One word for a paired result — the label the PR body quotes.
 
@@ -477,12 +514,7 @@ def classify(cmp: dict) -> str:
     # would publish a delta the run cannot resolve as a `GAIN` — the inverse of
     # the class this gate exists to close. `max()` requires resolution at BOTH
     # n: the one the data has, and the one declared before the data.
-    bars = [
-        b
-        for b in (cmp.get("detectable_pp_preregistered"), cmp.get("detectable_pp"))
-        if b is not None
-    ]
-    bar = max(bars) if bars else None
+    bar = gated_bar_pp(cmp)
     resolved = bar is not None and abs(cmp["delta_pp"]) >= bar
     if p >= ALPHA or not resolved:
         return "UNRESOLVED"
@@ -1050,8 +1082,9 @@ def run_measurement(args: argparse.Namespace) -> int:
         record_blocked = exc
 
     # ⛔ THE PRE-REGISTERED n — the bar committed in `preregistration.json`
-    # BEFORE any number existed. It decides the verdict; the run's own n is
-    # recorded beside it as disclosure (see `paired`).
+    # BEFORE any number existed. It is ONE of the two bars that decide; the bar
+    # actually applied is their ``max`` (see :data:`BAR_RULE`), and the run's own
+    # n is carried beside it so a reader can see which one bound.
     preregistered_n = args.population
 
     sys.path.insert(0, str(REPO_ROOT))
@@ -1197,9 +1230,13 @@ def run_measurement(args: argparse.Namespace) -> int:
             # (always 4.47) while `classify` gated on the bar at the OBSERVED
             # discordance (5.47 at p_d = 0.30, 2.23 at 0.05) — so a reader quoting
             # it could conclude GAIN where the label said UNRESOLVED. The deciding
-            # bar is `primary`'s; the fixed-p_d figure is kept under a name that
-            # says what it is.
-            "detectable_pp_gated": cmp["detectable_pp_preregistered"],
+            # bar is `primary`'s, and it is the `max` of the two bars `classify`
+            # binds — naming only the pre-registered one re-stated the superseded
+            # rule in the field a reader is pointed at, and made the emitted note's
+            # "`detectable_pp_gated` names the one that decided" FALSE on the
+            # `600 <= built_n < 786` band (`#13734` round 4). The fixed-p_d figure
+            # is kept under a name that says what it is.
+            "detectable_pp_gated": gated_bar_pp(cmp),
             "detectable_pp_at_assumed_pd_0.20": round(
                 detectable_effect_pp(preregistered_n, DISCORDANCES[2]), 2
             ),
@@ -1246,7 +1283,7 @@ def run_measurement(args: argparse.Namespace) -> int:
                 "note": (
                     "the run built a different n than the pre-registration "
                     "declares. BOTH bars bind: the verdict was gated on "
-                    "max(pre-registered bar, this run's own bar), so a corpus "
+                    f"{BAR_RULE}, so a corpus "
                     "change can only make the bar STRICTER — a smaller run "
                     "cannot buy an easier bar (its own bar is the larger one "
                     "below n = 786) and a larger run cannot lower the declared "
