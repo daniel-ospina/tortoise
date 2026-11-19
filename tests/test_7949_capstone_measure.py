@@ -16339,6 +16339,39 @@ def _unpaired_backtick_run(line: str) -> int | None:
     return None
 
 
+def _first_mispaired_span(line: str) -> int | None:
+    """Offset of the first code span whose CONTENT carries a one-sided space, else None.
+
+    `_unpaired_backtick_run` proves the row is defective but reports where the greedy
+    pairing RUNS OUT — the tail of the damage, ~35 KB past the defect on this row. A
+    reader sent there hunts for a stray backtick in text that has none. This returns
+    the site markdownlint itself names (MD038 counts one finding per mis-paired span,
+    and the first finding is the first such span), so the failure message points at
+    the character to delete.
+
+    The `delimiter length > 1` exemption is markdownlint's own: a span delimited by
+    TWO backticks whose content begins and ends with a space is how this document
+    quotes a literal backticked phrase, and MD038 permits it — so it is not damage.
+    """
+    runs = [(match.start(), len(match.group())) for match in re.finditer(r"`+", line)]
+    index = 0
+    while index < len(runs):
+        offset, length = runs[index]
+        partner = next(
+            (later for later in range(index + 1, len(runs)) if runs[later][1] == length),
+            None,
+        )
+        if partner is None:
+            return None
+        content = line[offset + length : runs[partner][0]]
+        one_sided = content.startswith(" ") != content.endswith(" ")
+        padded = content.startswith(" ") and content.endswith(" ") and length == 1
+        if content.strip() and (one_sided or padded):
+            return offset
+        index = partner + 1
+    return None
+
+
 def test_every_bundle_table_row_carries_its_headers_cell_count():
     """A raw `|` in a cell is 178 docs-check findings, not one typo (#13489).
 
@@ -16420,12 +16453,15 @@ def test_the_D5_row_is_still_one_table_row():
     # PR). Same argument as the `|` above: the failure is one character, the report
     # is hundreds, and nothing local named it.
     unpaired = _unpaired_backtick_run(d5[0])
+    mispaired = _first_mispaired_span(d5[0])
     assert unpaired is None, (
-        f"the D5 row carries a backtick run with no partner of its own length at "
-        f"offset {unpaired} — every code span AFTER it is delimited by the wrong "
-        f"backticks, and the REQUIRED `docs` check reports one MD038 per mis-paired "
-        "span (measured: 234 findings from ONE stray backtick). Delete or add the "
-        "delimiter; do not re-word around it")
+        f"the D5 row carries a backtick run with no partner of its own length — every "
+        f"code span AFTER it is delimited by the wrong backticks, and the REQUIRED "
+        f"`docs` check reports one MD038 per mis-paired span (measured: 234 findings "
+        f"from ONE stray backtick). ⛔ The pairing RUNS OUT at offset {unpaired}, which "
+        f"is the tail of the damage and NOT where the defect is; the first mis-paired "
+        f"span starts at offset {mispaired} (markdownlint's first MD038) — look there "
+        "for the stray or missing delimiter. Delete or add it; do not re-word around it")
 
 
 
