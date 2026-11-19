@@ -267,6 +267,31 @@ def test_the_record_states_the_near_duplicate_rule_the_tool_ran(artifact):
     assert rule_shape.search(blocks[0]), (
         f"§3a's rule sentence no longer names {cap.NEARDUP_RULE!r}: {blocks[0]!r}")
 
+    #: THE SENTENCE'S OTHER COMPONENTS (round 29). The separators are pinned above and
+    #: the name above this, which left the two clauses that carry the RULE ITSELF read
+    #: by NOTHING: the fold's inputs (case, whitespace) and the article's DIRECTION.
+    #: Measured at this head: README:134 `fold case + whitespace` -> `fold case` and
+    #: README:135 `drop a **leading article**` -> `drop a **trailing article**` both
+    #: stayed GREEN at 56 passed — a record stating a rule the artifact's own `key`
+    #: refutes while claiming to be pinned here. §3a's rates cannot be re-derived from
+    #: `measurement.json` (aggregates only), so the stated rule IS the re-derivation
+    #: key. The article direction is taken FROM that key (which this test's first
+    #: assertion ties to `cap.NEARDUP_KEY_NOTE`), so the prose is compared against
+    #: what the tool DID rather than against a second copy of it, and the opposite
+    #: direction is asserted ABSENT.
+    sentence = _flat(blocks[0])
+    _assert_mentions(sentence, ("foldcase", "whitespace", "separatorclass"),
+                     "§3a's rule sentence")
+    article = re.search(r"(leading|trailing) article dropped", rule["key"])
+    assert article, (
+        f"the artifact's rule key names no article drop: {rule['key']!r}")
+    _assert_mentions(sentence, (f"dropa{article.group(1)}article",),
+                     "§3a's rule sentence")
+    opposite = "trailing" if article.group(1) == "leading" else "leading"
+    assert not _mentions(sentence, f"{opposite}article"), (
+        f"§3a drops a {opposite.upper()} article while the artifact's key drops a "
+        f"{article.group(1).upper()} one — the rule INVERTED: {blocks[0]!r}")
+
 
 
 def test_an_empty_name_is_never_a_duplicate_of_anything():
@@ -2365,6 +2390,44 @@ def test_the_readme_quotes_the_mint_rates_the_artifact_holds(artifact):
         f"minus {mint['shipped']['attached']} attached is not "
         f"{mint['in_window_not_attached']} — a residual that does not equal its own "
         f"subtraction makes 'the matcher failed' and 'retrieval failed' one number")
+
+    #: THE LEDGER'S OWN ARITHMETIC, not only its subtraction (round 29). Every cell
+    #: below is read, but the RELATIONS between them were not: `shipped.minted`
+    #: (`measurement.json`, `219`) and `retrieval_in_window_rate` (`0.9659`) were read
+    #: by nothing, so `minted 219 -> 999`, `rate 0.9659 -> 0.7777` and a per-class
+    #: `norm_only_attached 0 -> 7` all stayed GREEN at 56 passed. The published `rate`
+    #: IS `minted / pairs` and the window rate IS `retrieval_in_window / pairs`, so a
+    #: ledger publishing a numerator its own rate cannot come from is a figure a
+    #: re-deriver cannot reproduce — the first relation any reader checks.
+    assert mint["shipped"]["minted"] == (
+        mint["pairs"] - mint["shipped"]["attached"]), (
+        f"the mint ledger does not add up: {mint['pairs']} pairs minus "
+        f"{mint['shipped']['attached']} attached is not "
+        f"{mint['shipped']['minted']} minted — the published rate "
+        f"{mint['shipped']['rate']} is that quotient")
+    assert mint["shipped"]["rate"] == pytest.approx(
+        round(mint["shipped"]["minted"] / mint["pairs"], 4), abs=5e-5), (
+        f"the published mint rate {mint['shipped']['rate']} is not "
+        f"{mint['shipped']['minted']} / {mint['pairs']}")
+    assert mint["retrieval_in_window_rate"] == pytest.approx(
+        round(mint["retrieval_in_window"] / mint["pairs"], 4), abs=5e-5), (
+        f"the published in-window rate {mint['retrieval_in_window_rate']} is not "
+        f"{mint['retrieval_in_window']} / {mint['pairs']}")
+    assert sum(c["pairs"] for c in mint["by_class"].values()) == mint["pairs"], (
+        f"the per-class pair counts sum to "
+        f"{sum(c['pairs'] for c in mint['by_class'].values())}, not the ledger's "
+        f"own pair total {mint['pairs']}")
+    for cls_key, cls in mint["by_class"].items():
+        assert cls["shipped_attached"] + cls["in_window_not_attached"] == (
+            cls["retrieval_in_window"]), (
+            f"mint class {cls_key!r}: {cls['shipped_attached']} attached + "
+            f"{cls['in_window_not_attached']} not-attached is not "
+            f"{cls['retrieval_in_window']} in window")
+        assert cls["shipped_mint_rate"] == pytest.approx(
+            round((cls["pairs"] - cls["shipped_attached"]) / cls["pairs"], 4),
+            abs=5e-5), (
+            f"mint class {cls_key!r} publishes rate {cls['shipped_mint_rate']} over "
+            f"{cls['pairs']} pairs with {cls['shipped_attached']} attached")
     header, rows = _tables(README.read_text(), "canonical in window")
     assert [h.replace("*", "").strip() for h in header[1:]] == [
         "pairs", "canonical in window", "attached", "mint rate"], header
