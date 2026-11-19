@@ -659,7 +659,8 @@ _TORTOISE_RETIRED_SPELLINGS = (
 def _census_membership_verdicts(doc: str) -> list[str]:
     """Every retired `-- tortoise/` membership verdict still spelled in `doc`.
 
-    ⛔ A TEXT BAN, AND THAT IS DELIBERATE (#13807 review, F1/F4 — settled together). The set
+    ⛔ A TEXT BAN, AND THAT IS DELIBERATE (#13807 review, F1, and the false-red direction
+    set out in the next paragraph — settled together). The set
     is HEAD-BOUND in both directions: it is a property of the head the command was run at,
     so `#7949`'s own sentences about it go stale on the next merge. Judging them by
     re-measuring the CURRENT head is therefore not a guard but a false-red generator — at
@@ -720,10 +721,10 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           the bundle's own rule is what is enforced — state the COMMAND and read it at the
           head being merged.
           ⛔ NEITHER ARM TAKES A MEASUREMENT, AND THAT IS THE POINT (#13807 review,
-          F1 + F4, settled together). A measurement-keyed cut judged a sentence about ONE
-          head by re-measuring ANOTHER, which (F4) turned every head carrying a `tortoise/`
-          path — i.e. essentially every product change — into a red on a sentence that is
-          true of the head it names; and (F1) its direction came from `git diff
+          F1, plus the false-red direction settled with it). A measurement-keyed cut judged
+          a sentence about ONE head by re-measuring ANOTHER, which turned every head carrying
+          a `tortoise/` path — i.e. essentially every product change — into a red on a sentence
+          that is true of the head it names; and (F1) its direction came from `git diff
           origin/main...HEAD`, which the depth-1 `test` job cannot answer at all (`rc=128`,
           empty stdout), so it SKIPPED and asserted NOTHING in the only job that gates the
           merge — the inert-enforcer defect these arms replace. Reading TEXT needs no merge
@@ -820,7 +821,7 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "being merged. These are the exact spellings that were FALSE at a head and survived "
         "anyway: the affirmative ones for two merges on `main` because nothing read them "
         "(#13746 review, finding 7), and the emptiness ones because no shallow checkout "
-        "could reach the arm that would have read them (#13807 review F1/F2). ⛔ This is a "
+        "could reach the arm that would have read them (#13807 review, F1). ⛔ This is a "
         "ban BY NAME, in both directions: a paraphrase of the same verdict is (c-ii)'s "
         "business, so the fix for a hit is to delete the typed membership and keep the "
         "command.")
@@ -1035,7 +1036,8 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "command — the same class of defect in the other direction (#13795 review, note 5)")
 
     # (c-ii) THE DOCUMENT ASSERTIONS — no measurement, so both directions, always.
-    # ⛔ A TYPED VERDICT IS REFUSED IN EITHER DIRECTION (#13807 review, F1 + F4). The set is
+    # ⛔ A TYPED VERDICT IS REFUSED IN EITHER DIRECTION (#13807 review, F1, and the
+    # false-red direction it must not re-create). The set is
     # HEAD-BOUND: it is a property of the head the command was run at, so no direction is
     # "the refuted one" at an arbitrary head — a membership claim is false at a head that
     # prints nothing, and an emptiness claim is false at a head that prints a path, and
@@ -1061,7 +1063,8 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     ⛔ THREE things are pinned here, and none of them is observable from the bundle alone:
 
     1. **BOTH lists are read, in BOTH directions, and neither may SHRINK** (#13807 review,
-       F1/F3). The cut this replaces keyed the lists on a live measurement, so in the depth-1
+       F1; the SHRINK half is finding 5). The cut this replaces keyed the lists on a live
+       measurement, so in the depth-1
        checkout the `test` job uses it read neither — and no row anywhere changed colour when
        it was broken, which is why it took a fresh-context reviewer to find it. Each injected
        spelling below reds.
@@ -1081,7 +1084,8 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 
     The measurement the retired cut took is deliberately NOT re-taken: a membership is
     head-bound in both directions, so re-measuring THIS head both asserted nothing at depth 1
-    and turned any code PR's head into a false red (#13807 review, F1/F4).
+    and turned any code PR's head into a false red (#13807 review, F1, and the false-red
+    direction recorded in `_census_membership_verdicts`).
     """
     assert _TORTOISE_MEMBERSHIP_SPELLINGS == (
         "THREE are in this head",
@@ -1106,14 +1110,14 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
     ), (
         "the emptiness ledger changed — the mirror direction of the same head-bound claim, "
-        "retired for the same reason (#13807 review, F4)")
+        "retired for the same reason — head-bound in both directions (#13807 review, F1)")
 
     for _spelling in _TORTOISE_RETIRED_SPELLINGS:
         _injected = f"… and the earlier cut said {_spelling} about this bundle …"
         assert _spelling in _census_membership_verdicts(_injected), (
             f"arm (c-i) does not read the retired spelling {_spelling!r}. An unread row is "
             "indistinguishable from a clean document — the inert-enforcer defect this arm "
-            "replaces (#13807 review, F1/F3)")
+            "replaces (#13807 review, F1; each row pinned by name is finding 5)")
 
     # ⛔ CLONE-INDEPENDENCE, PINNED BEHAVIOURALLY (#13807 review, finding 4). If a probe is
     # ever reintroduced, this arm stops answering from the injected text alone — make the
@@ -1208,8 +1212,11 @@ def _measured_index_word_diff(
     moves no cite produces. The arm below then reds on a claim that is TRUE there, in
     `test`, the one job that gates the merge.
 
-    ⛔ THIS IS NOW THE FILE'S ONLY DEPTH-DEPENDENT LEG, AND IT STILL SKIPS (#13807 review,
-    finding 1). The `-- tortoise/` sibling that used to share this rule is GONE with its
+    ⛔ THIS IS NOW THE FILE'S ONLY DEPTH-DEPENDENT LEG, AND IT SKIPS WITH A REASON
+    (#13807 review, finding 1 — that finding measured this same leg rendering a failed read
+    as "moved nothing" on the pre-merge branch, which `main`'s `#13795` `_Unmeasurable`
+    already fixes; what this PR owes it is an accurate row, not a second repair).
+    The `-- tortoise/` sibling that used to share this rule is GONE with its
     dependence: that arm is a TEXT ban and takes no measurement, so it fires in every
     shard. This one cannot — a re-point is a property of the DIFF, not of the document —
     so an unmeasurable head SKIPS here rather than being read as "moved nothing". Scoping
