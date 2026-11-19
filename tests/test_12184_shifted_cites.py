@@ -142,10 +142,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
     # ⛔ The Object half of the same declaration had NO row, and that absence is ISSUE 1 of the
-    # `#13489` review: §2.5's header cited `:6869`, which the block's PRE-MOVE addresses
-    # (`:6933`/`:6934`/`:6939`, 64/65/70 lines below it) had left behind — the deltas belong to
-    # THOSE addresses: against the re-pointed `:6984`/`:6985`/`:6990` they are 115/116/121, so
-    # quoting 64/65/70 beside the new numbers would misattribute them. And `:6989` is the
+    # `#13489` review: §2.5's header cited `:6869`, and the three addresses the row quoted for the
+    # declaration (`:6933`/`:6934`/`:6939`) never held it — they are unrelated strings in this file
+    # at the pin AND at `main`, so the 64/65/70 deltas from `:6869` describe no declaration at all:
+    # against the addresses that DO hold it (`:6984`/`:6985`/`:6990`) the deltas are 115/116/121.
+    # And `:6989` is the
     # `("Object", ["name"])` row that had no pin at all, so the
     # one sibling a reader would actually chase was the uncovered one. An absent pin is not
     # coverage; the header now names it beside its three siblings and this row resolves it.
@@ -856,8 +857,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     docs = {row[0] for row in _PINS}
     assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX}
     # 48: `#13489`'s review added the `:6989` row (`("Object", ["name"])`, the §2.5 address that
-    # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6984`/`:6985`/`:6990`
-    # sit 64/65/70 lines below `:6869`, while `:6989`, the row that had no pin, is the 69th), and row
+    # had NO pin at all, which is how `:6869` stayed behind its three siblings — the deltas this
+    # row used to quote (64/65/70) belong to the OLD addresses `:6933`/`:6934`/`:6939`, NOT to the
+    # re-pointed `:6984`/`:6985`/`:6990`/`:6989`, whose deltas from `:6869` are 115/116/121/120 — a
+    # delta quoted without the addresses it was measured on is the same rot this pins against), and row
     # 13b's Source-writer pin (`sdk.py:21692` — `:21648` before `#13486` moved the writer) is the
     # same shape added again, for the same reason.
     # 48 -> 52 at review cycle 3: four rows added for corrections whose sites had NO pin at all
