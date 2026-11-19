@@ -1705,7 +1705,10 @@ def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
     directions it was checked:
       * `arms[*].mean_rank` — computed by the tool from the same `per_query` ranks
         (`round(rank_sum / in_window, 3)`) — was read by NO assertion
-        (`grep -c mean_rank tests/` was 0), so it could be set to 99.9 on every arm
+        (`grep -c mean_rank tests/test_capstone_12186_recall.py` was 0 — this FILE,
+        the one whose suite the sentence describes; the field is read by sibling
+        recall tests, which is a different claim), so it could be set to 99.9 on every
+        arm
         and every k with the suite GREEN (measured);
       * `arms[*].by_class` — the summarisation OF the per-`per_query` `cls`/`rank`
         rows — was reconciled by nothing, so `by_class.path["3"]` 0.9333 -> 0.9667
@@ -2516,13 +2519,20 @@ def _negates(text: str, phrase: str) -> bool:
     #: parenthetical such as `, as a rule,` — or an em-dash put the word INSIDE the
     #: documented three-word window and still read as un-negated (measured GREEN):
     #: `we do not, as a rule, drop a leading article` and
-    #: `never — under any circumstances — drop …`. (The parenthesis is NOT the axis —
-    #: `(we do not as a rule drop …)`, with parentheses and no commas, HIT the old
+    #: `never — under any circumstances — drop …`. (The OUTER parenthesis is NOT the
+    #: axis — `(we do not as a rule drop …)`, parentheses and no commas, HIT the old
     #: pattern too; the commas were the obstruction, and an earlier draft of this
-    #: comment misattributed it.) A false pass on the only polarity net the rerank and
-    #: write-path clauses have, so the separator class now admits punctuation on both
-    #: sides of each intervening word.
-    sep = r"[\s,;:\u2014\u2013-]+"
+    #: comment misattributed it.)
+    #: ⛔ BUT A PARENTHESIS **DIRECTLY AFTER THE PRIVATIVE** IS A SECOND, DISTINCT
+    #: OBSTRUCTION the comma does not cover (round 32, measured): `never (under any
+    #: circumstances) drop a leading article` and `we do not (as a rule) drop a leading
+    #: article` did NOT match `[\s,;:\u2014\u2013-]+` at all, because the character
+    #: after the privative is `(`, not a space or comma — so both read as UN-NEGATED and
+    #: stayed GREEN at 58 passed. This is not the misattribution above: there the paren
+    #: sat outside the argument, here it stands in the privative's own separator slot.
+    #: A bracket separates exactly as a comma does, so the class admits brackets and
+    #: sentence punctuation too, and both cases red.
+    sep = r"[\s,;:()\[\].!?\u2014\u2013/-]+"
     for privative in _PRIVATIVES:
         if re.search(rf"{privative}{sep}(?:\w+{sep}){{0,3}}{phrase_re}", text):
             return True
