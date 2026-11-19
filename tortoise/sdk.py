@@ -18033,6 +18033,14 @@ class TortoiseSDK:
                         "Revise it deliberately with "
                         "update_point(%r, ...), the addressed door.",
                         pid, _terminal, pid)
+                # ⛔ #13829 (review P2b, PR #13835): KEEP THIS DOOR'S REPLY. On
+                # the denied arm `update_point` answers the RECORD's view (the
+                # cache row as last held, overlaid with the properties it just
+                # recorded); discarding it and re-serving `get_point` reported the
+                # PRE-revision values in a success reply for a revision the record
+                # holds. On the normal arm it returns the same snapshot this
+                # reply already carried, so nothing moves.
+                _revision_applied = {}
                 if (props and not _terminal_fold_refused) or _word_applied:
                     # Only touch the existing point when the caller passed
                     # other props (or an applied word) — a pure dedup hit (no
@@ -18060,8 +18068,10 @@ class TortoiseSDK:
                         # ⛔ #13829 (review P2, PR #13835): this verb's own cache
                         # leg consumes the published verdict — that is what makes
                         # the cap bind on THIS arm (the default MCP dedup shape)
-                        # instead of being skipped by it.
-                        self.update_point(pid, **props)
+                        # instead of being skipped by it. Its RETURN is kept for
+                        # the reply below (review P2b): on the denied arm it is the
+                        # RECORD's view, not the stale cache row.
+                        _revision_applied = self.update_point(pid, **props) or {}
                     finally:
                         _WARN_SUPPRESS.reset(_tok)
                 else:
@@ -18075,7 +18085,7 @@ class TortoiseSDK:
                     # close.
                     _discard_published_cache_fold_denial()
                 return _with_end_receipt(
-                    {**self.get_point(pid),
+                    {**self.get_point(pid), **_revision_applied,
                      # `_merge_advisories`, never a second `**` splat: BOTH the
                      # kind↔layer note and the #10368 refusal ride the one
                      # `advisories` key, and a splat would REPLACE the list and

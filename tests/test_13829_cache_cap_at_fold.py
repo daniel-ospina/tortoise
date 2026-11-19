@@ -561,6 +561,11 @@ def test_the_default_dedup_arm_honours_the_same_verdict(journal_sdk):
         "skipped on the default MCP shape (#13829)")
     # … and the verdict did not outlive the write it describes.
     assert cache_fold_denial() is None
+    # ⛔ AND THE REPLY IS THE RECORD'S VIEW, not the stale cache row (review
+    # P2b): a success reply that reports the PRE-revision value for a revision
+    # the record holds is the same lie in the other direction. Mutant: drop
+    # `**_revision_applied` from the dedup arm's reply → this goes red.
+    assert reply.get("custom_field") == "after", reply
     # … AND THE RECORD TOOK IT, measured — otherwise "no cache write" would be
     # satisfied by a write that never happened at all.
     revised = [e for e in _journal(events)
