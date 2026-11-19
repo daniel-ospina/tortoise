@@ -982,17 +982,30 @@ def run(args: argparse.Namespace) -> int:
                 _attach_ctx(arms[arm], ctx)
                 arms[arm]["rerank_entries_ran"] = ctx["rerank_ran"]
                 arms[arm]["env"] = dict(env)
+            timings["arms_s"] = round(time.time() - t_mark, 1)
+            t_mark = time.time()
+
+            # ⛔ THE MINT ARM IS THE **SHIPPED** MATCHER AND MUST BE MEASURED INSIDE THIS
+            # GUARD (round 20, measured). It used to run AFTER the `finally` that
+            # restores the ambient environment, while recording no `env` field at all —
+            # so on a box exporting `TORTOISE_UNDERSCORE_TERMS=0` (the documented bisect
+            # switch, and exactly how the `*_pre_lever` arms are produced) the arm
+            # published as "shipped matcher" was measured on the PRE-LEVER retrieval
+            # path, and §3b/§4's `1.0000 -> 0.5328` came out of a window nobody declared.
+            # The comment above the loop states this hazard for every arm and left the
+            # last one out of it. The shipped state is set here explicitly (both vars
+            # popped) rather than inherited from the loop's last iteration.
+            for key in saved:
+                os.environ.pop(key, None)
+            _reset_ctx(ctx)
+            arms["mint_rate"] = mint_rate(pin, by_id, ctx)
+            _attach_ctx(arms["mint_rate"], ctx)
+            arms["mint_rate"]["env"] = {}
         finally:
             for key, value in saved.items():
                 os.environ.pop(key, None)
                 if value is not None:
                     os.environ[key] = value
-        timings["arms_s"] = round(time.time() - t_mark, 1)
-        t_mark = time.time()
-
-        _reset_ctx(ctx)
-        arms["mint_rate"] = mint_rate(pin, by_id, ctx)
-        _attach_ctx(arms["mint_rate"], ctx)
         timings["mint_rate_s"] = round(time.time() - t_mark, 1)
 
         pairs = {}

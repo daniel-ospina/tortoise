@@ -73,6 +73,7 @@ skipped on CI and would guard nothing. What is pinned is the reasoning surface.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
 import json
@@ -351,6 +352,48 @@ def test_the_artifact_measures_every_arm_the_capstone_quotes(artifact):
         assert arm in artifact["arms"], arm
     assert "mint_rate" in artifact["arms"]
     assert artifact["ks"] == list(cap.KS)
+
+
+def test_the_mint_arm_is_measured_inside_the_environment_guard():
+    """⛔ A MEASUREMENT TAKEN OUTSIDE THE GUARD IS A MEASUREMENT OF ANOTHER PATH (round 20).
+
+    `run()` pops `TORTOISE_UNDERSCORE_TERMS` / `TORTOISE_FUSED_RERANK` for every arm and
+    restores the ambient values in a `finally`. The mint arm — published as the
+    **shipped matcher**, and the source of §3b/§4's `1.0000 -> 0.5328` — used to be
+    measured AFTER that `finally`, and recorded no `env` field at all. On a box
+    exporting `TORTOISE_UNDERSCORE_TERMS=0` (the documented bisect switch, and exactly
+    how the `*_pre_lever` arms are produced) the arm then measured the PRE-lever
+    retrieval path while the record called it shipped, undeclared.
+
+    Asserted on the AST rather than on formatted text, so a reflow of `run()` cannot
+    false-red this, and MOVING THE CALL OUT OF THE `try` (the defect) does red it.
+    """
+    fn = next(n for n in ast.walk(ast.parse(inspect.getsource(cap.run)))
+              if isinstance(n, ast.FunctionDef))
+    calls = [n.lineno for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "mint_rate"]
+    assert calls, "`run()` no longer calls `mint_rate` — the mint arm is the shipped matcher"
+    guards = [n for n in ast.walk(fn) if isinstance(n, ast.Try) and any(
+        isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+        and c.func.attr == "pop" and isinstance(c.func.value, ast.Attribute)
+        and c.func.value.attr == "environ"
+        for stmt in n.finalbody for c in ast.walk(stmt))]
+    assert len(guards) == 1, (
+        f"expected exactly one env-restoring (`os.environ.pop` in its `finally`) "
+        f"try/finally in `run()`, found {len(guards)}")
+    inside = range(guards[0].body[0].lineno, guards[0].body[-1].end_lineno + 1)
+    assert calls[0] in inside, (
+        "`mint_rate` is measured OUTSIDE the env guard, so an ambient "
+        "`TORTOISE_UNDERSCORE_TERMS=0` turns the arm published as the SHIPPED matcher "
+        "into a second pre-lever arm without the record saying so — measure it inside "
+        "the `try`, with the shipped state set explicitly")
+    env_keys = {n.slice.value for n in ast.walk(fn)
+                if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)
+                and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)}
+    assert "env" in env_keys, (
+        "every arm records the `env` it ran under, and the mint arm must not be the "
+        "exception: without it a reader cannot tell which retrieval path §3b came from")
 
 
 def test_recall_is_monotone_in_k_on_every_arm(artifact):
@@ -1194,19 +1237,19 @@ def test_the_two_restated_prose_figures_are_pinned_and_not_only_the_tables(artif
     # §2a — the rerank arm's OWN pair…
     own = (f"{r_kw} of its {n_queries} windows were keyword-only and "
            f"{r_zero} queries returned nothing at all")
-    assert own in flat, (
+    assert _phrase_mentions(flat, own), (
         f"README §2a must quote the rerank arm's own degradation pair {own!r} "
         f"(artifact holds {r_kw} keyword-only / {r_zero} empty, NOT the shipped "
         f"arm's {s_kw}/{s_zero}) — this is the exact figure that regressed once")
     # …and it must say which arm's pair it is NOT, so a reader cannot reattribute it.
     not_shipped = f"not the shipped arm's {s_kw}/{s_zero}"
-    assert not_shipped in flat, (
+    assert _phrase_mentions(flat, not_shipped), (
         f"README §2a must name the shipped arm's pair ({not_shipped!r}) as the one "
         f"this sentence is NOT quoting; otherwise the two pairs are indistinguishable")
 
     # §5 — the mint rate restated as an upper bound, derived from the record.
     rate = f"{artifact['arms']['mint_rate']['shipped']['rate'] * 100:.1f} %"
-    assert f"The {rate} mint rate is therefore an" in flat, (
+    assert _phrase_mentions(flat, f"The {rate} mint rate is therefore an"), (
         f"README §5 must restate the mint rate as {rate!r} (the artifact's "
         f"`arms.mint_rate.shipped.rate`), so the declared upper bound cannot "
         f"contradict §3b's table with a green suite")
@@ -1220,10 +1263,10 @@ def test_the_two_restated_prose_figures_are_pinned_and_not_only_the_tables(artif
     us = artifact["arms"]["user_search"]["duplicate_rate_in_window"]
     k3 = f"~{us['3']['rate'] * 100:.1f} %"
     k10 = f"{us['10']['rate'] * 100:.1f} %"
-    assert f"{k3} of the top 3" in flat, (
+    assert _phrase_mentions(flat, f"{k3} of the top 3"), (
         f"README §3a must state the duplicate rate as {k3!r} **at k=3** — the k=3 "
         f"cell, labelled with the window it belongs to")
-    assert f"the rate is **{k10}**" in flat, (
+    assert _phrase_mentions(flat, f"the rate is **{k10}**"), (
         f"README §3a must also quote the user door's own shipped width (k=10, "
         f"{k10!r}) so the two windows cannot be confused")
 
@@ -1258,7 +1301,7 @@ def test_section_fives_numbered_limits_five_to_seven_state_the_figures_the_artif
     ident_pct = art_pin["shares"]["ident"] / art_pin["queries"] * 100
     path_pct = art_pin["shares"]["path"] / art_pin["queries"] * 100
     shares = f"{ident_pct:.0f} % / {path_pct:.0f} %"
-    assert f"({shares} against" in plain, (
+    assert _phrase_mentions(plain, f"({shares} against"), (
         f"README §5.5 must state the oversampling as `{shares}` — derived from the "
         f"artifact pin's `shares` ({art_pin['shares']}) over `queries` ({art_pin['queries']})")
     # …and the EXTERNAL production share it is compared against is named as such: no
@@ -1271,17 +1314,17 @@ def test_section_fives_numbered_limits_five_to_seven_state_the_figures_the_artif
     # §5.6 — the query count and the per-query quantum it implies.
     n = artifact["arms"]["user_search"]["n"]
     quantum = 100 / n
-    assert f"n = {n} queries" in plain, (
+    assert _phrase_mentions(plain, f"n = {n} queries"), (
         f"README §5.6 must state the run's window count as `n = {n} queries` "
         f"(artifact `arms.user_search.n`)")
-    assert f"±{quantum:.2f} pts" in plain, (
+    assert _phrase_mentions(plain, f"±{quantum:.2f} pts"), (
         f"README §5.6 must state one query's weight as ±{quantum:.2f} pts with "
         f"n = {n} — a different quantum beside the same n is a contradiction")
 
     # §5.7 — the exclusion count, and the denominator it is out of.
     excluded = artifact["paired"]["user_search_pre_lever -> user_search"]["paired"][
         "excluded_degraded_on_either_side"]
-    assert f"{excluded} of {n} user-door queries were excluded" in plain, (
+    assert _phrase_mentions(plain, f"{excluded} of {n} user-door queries were excluded"), (
         f"README §5.7 must state `{excluded} of {n} user-door queries were excluded` "
         f"(artifact paired['user_search_pre_lever -> user_search']."
         f"excluded_degraded_on_either_side = {excluded})")
@@ -1622,6 +1665,23 @@ def _mentions(text: str, token: str) -> bool:
             continue
         return True
     return False
+
+
+def _phrase_mentions(text: str, phrase: str) -> bool:
+    """`phrase` in `text`, WHITESPACE-TOLERANT and DIGIT-BOUNDED at both ends.
+
+    ⛔ THE TWO WAYS A `"..." in prose` PIN IS EVADED, and this closes both at once.
+    Whitespace: the README is LINE-WRAPPED, so a literal `in` misses a sentence that
+    spans two source lines (the sibling pin at `test_the_two_restated_prose_figures_
+    are_pinned...` documents this). Digits: a bare substring sees `14 of its 300`
+    INSIDE `114 of its 300` — measured, the whole §2a pair stayed green after a
+    leading `1` was prepended, and the same shape applied to `35 of 300 excluded`,
+    `±0.33 pts` -> `±10.33 pts`, `30 % / 10 %` -> `130 % / 10 %` and `18/6` ->
+    `118/6`. `_mentions` cannot help: it is defined on `_flat`, which deletes the
+    spaces a multi-word phrase needs. This is `_phrase_re` (the file's one
+    whitespace-tolerant form) wrapped in the digit lookarounds `_mentions` uses.
+    """
+    return re.search(rf"(?<!\d){_phrase_re(phrase)}(?!\d)", text) is not None
 
 
 def _negates(text: str, phrase: str) -> bool:
@@ -2138,14 +2198,14 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
         f"the one claim the record makes about a p = {rerank['p']} result: "
         f"{rerank_raw!r}")
 
-    #: The three-lever summary sentence. Its counts are DECLARED here and tied to the
-    #: §4 verdicts immediately below, so `one … is visible` -> `two … are visible`
-    #: cannot pass while §4 still says one YES-user, one NO and one write-path.
-    for key, want in (("underscore", "YES"), ("rerank", "NO"),
-                      ("fold", "YESonthewritepath")):
-        assert LEVER_COLUMNS[key][1].startswith(want), (
-            f"the abstract's three-lever sentence no longer matches §4's `{key}` "
-            f"verdict {LEVER_COLUMNS[key][1]!r}")
+    #: ⛔ THE THREE-LEVER SUMMARY SENTENCE IS CHECKED BY `_assert_headline_states`
+    #: AT THE END OF THIS TEST, AND BY NOTHING HERE (round 20). A loop used to sit on
+    #: this line asserting `LEVER_COLUMNS[key][1].startswith(want)` for a `want` taken
+    #: from a literal tuple three lines above it — two module literals compared to each
+    #: other, which no edit to the README can falsify, under a comment claiming it
+    #: stopped `one … is visible` -> `two … are visible`. The claim is real and IS
+    #: enforced: by the artifact-derived `_door_verdict_counts` call below. The dead
+    #: loop is removed rather than kept as decoration.
     #: ⛔ The COUNTS are derived from the artifact and matched on the RAW sentence.
     #: The literal tokens below are necessary but not sufficient: `_flat` deletes the
     #: spaces, so `noneofthemergedleversisvisibletoauser` CONTAINS
@@ -2257,15 +2317,18 @@ def test_the_readme_narrative_cannot_contradict_its_own_tables(artifact):
         "the two buckets are equal, so `attach` and `mint` are not distinguishable "
         "in this sentence and its direction cannot be pinned")
     sentence = _block(README.read_text(), f"{attached} of {mint['pairs']}")
-    # ⛔ THE CLOSED FORM, ASSERTED AGAINST THE DOCUMENT (round 19). The first cut compared
-    # `attached` with `int(tokens[2].split("of")[0])` — but `tokens[2]` was itself built
-    # from `mint['shipped']['attached']` twenty lines above, so the assertion could not
-    # fail for any mutation of either the artifact or the README: a self-comparison is
-    # not a pin. The document is the subject here, so the document is what is read.
-    assert re.search(_phrase_re(f"{attached} of {mint['pairs']}"), sentence), (
-        f"the `{tokens[2]}` restatement must state the figure in its closed form "
-        f"`{attached} of {mint['pairs']}` — `mint_rate.shipped.attached` over "
-        f"`mint_rate.pairs`")
+    # ⛔ THE CLOSED FORM IS NOT ASSERTED HERE, AND THAT IS DELIBERATE (round 20). Two
+    # cuts tried to, and both were INERT. The first was `attached ==
+    # int(tokens[2].split("of")[0])` — a SELF-COMPARISON, since `tokens[2]` is built
+    # from `mint['shipped']['attached']` twenty lines above, so no mutation of the
+    # artifact or the README could fail it. The second was
+    # `re.search(_phrase_re(marker), sentence)`, which is ENTAILED by `_block`'s own
+    # precondition: `_block` selects the block BY that marker (`marker in
+    # " ".join(b.split())`) and `_phrase_re` joins the same words with `\\s+`, a
+    # superset of what `str.split()` splits on — so no document edit that reaches this
+    # line can falsify it. The figure is read by the DOCUMENT-WIDE uniqueness assertion
+    # above (`tokens[2]` occurs exactly once, `_mentions`-checked); the three assertions
+    # below are what read the DIRECTION, and they bite.
     assert re.search(_phrase_re("into an attach"), sentence), (
         f"the `{tokens[2]}` restatement no longer says the duplicates become an "
         f"ATTACH — the figure is `mint_rate.shipped.attached`")
