@@ -127,8 +127,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⚠️ This branch's own `#5425` seam wrap sits ABOVE this cite and is written LINE-COUNT NEUTRAL
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
-    # ⛔ The "comparable" denominator: the pair this branch re-derives (`sdk.py:57276` — the seam above it
-    # is line-neutral, so nothing moved) names a line past the pin's `sdk.py` (56,415 lines), so the header
+    # ⛔ The "comparable" denominator: the pair this branch re-derives (`sdk.py:57387` at THIS head —
+    # `:57276` on `origin/main`, so this branch moved it `+111`; ⛔ an earlier cut of this comment named
+    # the `origin/main` address and said "nothing moved", which that `+111` refutes and which would have
+    # sent a reader to `:57276`, the `#9572` comment line, not the statement) names a line past the
+    # pin's `sdk.py` (56,415 lines), so the header
     # counts it as drifted rather than compared — measured at this head: 212 comparable, 120 of them
     # drifted, plus the three past the pin's files = 123 of the 215.
     (_AUDIT, '`sdk.py:57387` passes `"event"`', _SDK, 57387, 'entity_type="event"'),
