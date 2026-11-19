@@ -5100,6 +5100,10 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE UNBOUND `dict.setdefault(props, …)` ROW IS PINNED ABOVE, ONCE (`#13788`, the
+        # review's dead-weight note). It appeared TWICE, byte-identical, so one of the two
+        # asserted nothing the other did not — a duplicate row is dead weight in a tuple whose
+        # whole purpose is to be read as the vocabulary.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):

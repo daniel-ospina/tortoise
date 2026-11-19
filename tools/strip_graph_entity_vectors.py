@@ -2081,18 +2081,22 @@ def _comprehension_source_yields(source, _depth: int = 0):
     — "what does this clause iterate over?" — so they resolve it with ONE function instead of
     two vocabularies that drift. The first cut of the value-side term answered the BARE
     literal and left one transparent wrapper open, and that one wrapper re-opened the hole the
-    plain spelling had just closed, in TEN measured spellings at once:
+    plain spelling had just closed, in ELEVEN measured value-side spellings at once:
 
         props |= {k: _encode(ev) for k in ["embedding"][:]}                 # CERTIFIED
         props |= {k: _encode(ev) for k in [*["embedding"]]}               # CERTIFIED
         props |= {k: _encode(ev) for k in list(["embedding"])}            # CERTIFIED
+        props |= {k: _encode(ev) for k in tuple(["embedding"])}           # CERTIFIED
         props |= {k: _encode(ev) for k in ["embedding"] + []}              # CERTIFIED
         props |= {k: _encode(ev) for k in ["embedding"] * 1}               # CERTIFIED
         props |= {k: _encode(ev) for k in set(["embedding"])}              # CERTIFIED
         props |= {k: _encode(ev) for k in {"embedding": 1}}                # CERTIFIED
         props |= {k: _encode(ev) for k in {"embedding": 1}.keys()}         # CERTIFIED
-        props |= {k: _encode(ev) for k, _i in {"embedding": 1}.items()}    # CERTIFIED
         props |= {k: _encode(ev) for k in dict.fromkeys(["embedding"])}    # CERTIFIED
+        props |= {k: _encode(ev) for k in [x for x in ["embedding"]]}      # CERTIFIED
+
+    …and each is a ROW in `test_the_stop_arm_must_not_store_the_vector`'s `refused` tuple, so
+    the count above is checkable against the fixture rather than asserted here.
 
     A MAPPING is in that list because iterating one yields its KEYS, and `.items()` yields
     its `(key, value)` pairs — the same store reached through the view (the module already
@@ -2188,11 +2192,19 @@ def _comprehension_source_yields(source, _depth: int = 0):
 def _comprehension_source_pairs_the_property_with_a_value(source) -> bool:
     """Does one iteration of this clause yield `(EXACT property, non-constant)`?
 
-    ⛔ NOT THE PAIRS RULE, DELIBERATELY, and the difference is the ELEMENT LENGTH. That rule
-    mirrors what `dict([...])` accepts (exactly two), while an unpacking clause reads a longer
-    element as `(key, value, *rest)` — `{k: v for k, v, *rest in [("embedding", vec, 1)]}`
-    places the vector and CERTIFIED while the two-element source was refused (measured). Here
-    the question is the comprehension's own, so any length of two or more answers it, and the
+    ⛔ AN ADDITIVE LEG, NOT A REPLACEMENT FOR THE PAIRS RULE (`#13788`, measured). The
+    comprehension terms OR this beside `_pairs_operand_stores_the_vector` and
+    `_unpacked_element_stores_the_vector`, because the vocabularies are not the same set: this
+    one reads the SOURCE WRAPPERS (`set(...)`, `+ []`, `.items()`, an identity comprehension)
+    and the pairs rule reads a LIST'S OWN `.copy()`, which this one does not. Swapping rather
+    than OR-ing turned `[("embedding", vec)].copy()` from REFUSED into CERTIFIED — narrowing
+    acceptance is the one direction this file forbids.
+
+    ⛔ AND ITS ELEMENT LENGTH IS NOT THE PAIRS RULE'S: that rule mirrors what `dict([...])`
+    accepts (exactly two), while an unpacking clause reads a longer element as
+    `(key, value, *rest)` — `{k: v for k, v, *rest in [("embedding", vec, 1)]}` places the
+    vector and CERTIFIED while the two-element source was refused (measured). Here the
+    question is the comprehension's own, so any length of two or more answers it, and the
     exactly-two rule stays where it belongs.
     """
     import ast
