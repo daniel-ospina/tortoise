@@ -1956,15 +1956,17 @@ class TestGraphMembership:
     ⛔ The gate beside the seed is PREFIX-wide:
     ``n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL``. That count is
     above zero while the population is only PARTLY seeded, and the causes that
-    count can actually meet on THIS write path are three, not five: the seed
+    count can actually meet on THIS write path are TWO, not five: the seed
     payload always carries an explicit ``embedding``, so the fold takes its
     ``owns_embedding`` branch and never reaches the ``encode_for_row`` derive —
     an operator point, an EMBED-gate refusal (``#5008``) and a swallowed encode
     failure are UNREACHABLE here (``None`` from ``compute_embeddings`` is refused
     by name as ``seed_vectors_missing`` before any write). What is reachable: a
-    width mismatch (``#5004``), a vector the fold refuses as unusable
-    (``_writable_journalled_vector`` → ``None``), and a write that never reached
-    the row. These cases red the mutants that make the graph guard prefix-wide,
+    width mismatch (``#5004``), and a vector the fold refuses as unusable
+    (``_writable_journalled_vector`` → ``None``). A row this run never wrote is
+    NOT a cause — ``_seed_graph`` upserts every row and raises on failure — it is
+    the DEFENSIVE case the text pairing would catch, which is why the pairing is
+    kept. These cases red the mutants that make the graph guard prefix-wide,
     id-only, or blind to a row this run did not write — and the wiring pin reds
     moving it off the ``graph_dense`` arm.
     """
@@ -2047,16 +2049,20 @@ class TestGraphMembership:
         assert ei.value.code == "graph_population_absent"
         # the REACHABLE mechanisms are named, not just the arithmetic
         assert "WIDTH" in ei.value.message
-        assert "never reached the row" in ei.value.message
         assert "_writable_journalled_vector" in ei.value.message
-        # ⛔ AND THE UNREACHABLE ONES ARE NOT. The seed payload always carries an
-        # explicit `embedding`, so the fold never reaches its `encode_for_row`
-        # derive: naming an operator point, the EMBED gate or a swallowed encode
-        # failure sends the operator to a dead end (`#13745` review round 6,
-        # finding 3).
+        # ⛔ THE NUMBERS ARE THE OPERATOR'S DIAGNOSIS — pin them. `{matched}` →
+        # `{population_n}` makes the message say "holds an embedding for 786 of the
+        # 786" while refusing, and stayed green (`#13745` review round 5, finding 2).
+        assert "785 of the 786" in ei.value.message, ei.value.message
+        # ⛔ AND THE UNREACHABLE ONES ARE NOT NAMED. The seed payload always carries
+        # an explicit `embedding` (so the fold never reaches its `encode_for_row`
+        # derive), `_seed_graph` upserts EVERY row before this guard and raises on
+        # failure (so a missing row is not a cause either), and naming them sends
+        # the operator to a dead end (`#13745` review rounds 5-6).
         assert "operator point" not in ei.value.message, ei.value.message
         assert "EMBED gate" not in ei.value.message, ei.value.message
         assert "swallowed" not in ei.value.message, ei.value.message
+        assert "never reached the row" not in ei.value.message, ei.value.message
         # ⛔ AND IT MUST NOT PROMISE MORE THAN THE GUARD CAN SEE. It once said the
         # text pairing refuses a node that kept "an EARLIER text's vector" — which
         # the pairing cannot detect, because this run's text is written

@@ -890,7 +890,7 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
     PREFIX-wide question: ``MATCH (n:Point) WHERE n.id STARTS WITH … AND
     n.embedding IS NOT NULL`` counts whatever the prefix happens to hold, not
     what this run wrote. Ways that count is above zero while the population is
-    only partly seeded — and ⛔ ONLY THE THREE THIS WRITE PATH CAN REACH, because
+    only partly seeded — and ⛔ ONLY THE TWO THIS WRITE PATH CAN REACH, because
     a message that names an unreachable cause sends the operator to a dead end
     (``#13745`` review round 6, finding 3). ``_seed_graph`` calls
     ``_upsert_point_props`` with ``{"id", "content", "embedding"}``, so
@@ -905,18 +905,23 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
     * a vector the fold REFUSES as unusable — ``_writable_journalled_vector``
       answers ``None`` for an empty list, an implausibly long one, or one
       carrying a non-finite/non-numeric entry, and the payload then owns a
-      field with no usable value, so nothing is written;
-    * the write never reached the row at all — the node is absent, so the
-      ``MATCH`` does not return it (this is the ``--graph`` case as well: the
-      ids are deterministic, so a reused graph answers with nodes this run's
-      write may never have touched).
+      field with no usable value, so nothing is written.
+
+    ⛔ AND NOTHING ELSE. A row this run's own write never created cannot be the
+    explanation here: ``_seed_graph`` upserts every population row before this
+    guard runs and a failure raises straight out of it, so ``matched < n`` means
+    the VECTOR is missing, never the row. The text half of the pairing is still
+    kept — it is what would catch a store that lost a row, or a guard reading a
+    different graph than the seed wrote — but it is DEFENSIVE, not a cause to
+    name at an operator.
 
     ⛔ WHAT THE PAIRING PROVES, AND WHAT IT DOES NOT. It proves the write
     REACHED the node: the returned row's text must be the text this run asked
-    for, so a row that never landed — a node absent, or one still holding an
-    earlier population's text at that id — is not counted (``#13745`` review
-    round 3, finding 1: an earlier cut of this docstring claimed more than that,
-    and the claim was false).
+    for, so a row the seed did not write — a node absent, or one still holding an
+    earlier population's text at that id — is not counted. That is a DEFENSIVE
+    guard, not the cause of a shortfall (see "AND NOTHING ELSE" above;
+    ``#13745`` review round 3, finding 1: an earlier cut of this docstring
+    claimed more than that, and the claim was false).
 
     It does NOT prove the stored VECTOR is this run's. ``_upsert_point_props``
     rewrites ``n.content`` unconditionally (``"n.content=$content"``) while its
@@ -1011,7 +1016,7 @@ def require_graph_population(matched: int | None, population_n: int) -> None:
             f"vector alone rather than write one the index cannot hold, #5004), a "
             f"vector the fold refuses as unusable (`_writable_journalled_vector` "
             f"answers None for empty, over-long, or non-finite values, so nothing "
-            f"is written), or a write that never reached the row at all. A "
+            f"is written). A "
             f"`graph_dense` arm over that "
             f"population ranks only the seeded part, so its delta against "
             f"`record_dense` is a figure about the seed step and not about the leg",
@@ -1322,8 +1327,8 @@ def run_measurement(args: argparse.Namespace) -> int:
     # `graph_dense` ARM (not the run — see `require_graph_population`). The count
     # above is PREFIX-wide, so it asks *"does this graph hold any embedded
     # claim?"* — not *"did THIS run seed THIS population?"*. It passes over a
-    # partly seeded population (a width mismatch, a vector the fold refuses, a
-    # write that never landed) and over a `--graph` served from a previous run.
+    # partly seeded population (a width mismatch, a vector the fold refuses) and
+    # over a `--graph` served from a previous run.
     # `graph_population_vectors` asks the id-and-text scoped question; it is
     # computed HERE because it needs the graph, and consumed
     # INSIDE the arms loop, where only `graph_dense` reads graph vectors.

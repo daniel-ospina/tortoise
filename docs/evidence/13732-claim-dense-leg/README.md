@@ -149,10 +149,12 @@ instrument's seed payload ALWAYS carries an explicit `embedding`, so the fold ta
 EMBED-gate refusal (`#5008`) and a swallowed encode failure are **unreachable on this write path**
 (and a `None` from `compute_embeddings` is refused by name as `seed_vectors_missing` before a single
 write). What IS reachable: an embedding-**width mismatch** (the fold warns and leaves the node's
-vector alone rather than write one the index cannot hold, `#5004`); a vector the fold **refuses as
+vector alone rather than write one the index cannot hold, `#5004`); and a vector the fold **refuses as
 unusable** (`_writable_journalled_vector` answers `None` for an empty, over-long, or
-non-finite/non-numeric value, so nothing is written); and a **write that never reached the row** —
-including the `--graph` case, where the deterministic ids collide with nodes a previous run seeded.
+non-finite/non-numeric value, so nothing is written). ⛔ **Nothing else:** `_seed_graph` upserts every
+population row before the guard runs and raises on failure, so `matched < n` means the VECTOR is
+missing, never the row — the `--graph` case included, because the seed's own `MERGE` writes this run's
+text at every deterministic id it scores.
 
 `graph_population_vectors` therefore asks the **id-and-text** question — one `IN $ids` round trip
 returning `(id, content)`, paired in Python against the text this run asked for — and
@@ -177,13 +179,11 @@ The guard gates the **`graph_dense` arm, not the run** — the same scope, for t
 record gate above (`#13745` review round 1, finding 2). A partly seeded graph does **not** degrade
 `lexical`: that arm forces `EmbeddingModel.get()` to `None` and the full-text index it reads is built
 from `n.content`, which the fold writes **unconditionally** — only the vector is held back. Nor does
-it degrade `record_dense`, which reads Postgres. ⚠️ That sentence rides on the content write having
-REACHED the rows: a row the seed's write never landed for is the one case the text pairing does
-catch (it would count it short), and a text shortfall would hurt `lexical` too — so the assumption is
-stated rather than assumed away, and a `graph_population_absent` whose shortfall is textual is worth
-reading as `lexical`'s problem as well. Within the seed, every row is upserted and an exception
-propagates, so this is the defensive case, not the ordinary one. So the graph cohort is a
-precondition of exactly one arm, and refusing the run over it would throw away
+it degrade `record_dense`, which reads Postgres. (The content write is unconditional, and `_seed_graph`
+upserts every row before this guard and raises on failure, so a row this run did not write is a
+defensive case rather than an ordinary one — the text half of the pairing exists to catch it, and it
+is why a `graph_population_absent` is still worth reading against the population's own rows.) So the
+graph cohort is a precondition of exactly one arm, and refusing the run over it would throw away
 `record_dense_vs_lexical` — the lane's own headline question — while looking like a strict gate. When
 the graph cannot hold the cohort, the arm is recorded `BLOCKED[graph_population_absent]` by name, the
 other two arms measure, the graph comparisons are `UNMEASURED`, and the run exits **3**.
