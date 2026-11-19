@@ -285,6 +285,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -317,6 +318,18 @@ PR_BACKLOGGED = "PR-BACKLOGGED"
 #: as zero, and `DEFAULT_MAX_JOB_PROBES` for why an unprobed run cannot certify a
 #: census.
 PR_UNWITNESSED = "PR-UNWITNESSED"
+#: EVERY PR-event waiter was PROVED never dispatched, so there is no live wait — and
+#: there is nothing to wait FOR either: those runs have no job record and GitHub will
+#: never dispatch them (#13825). This is NOT ``OK``, deliberately: `OK` is this
+#: module's only healthy state and the string the fleet samples, and asserting health
+#: over a queue of dead runs is the false PASS #13825 exists to remove. It is also NOT
+#: a new EXIT semantic: like PR_STARVED / PR_BACKLOGGED / PR_UNWITNESSED it has no
+#: action available (measured: `/cancel` answers "Cannot cancel a workflow run that is
+#: completed" about a run that reads `status=queued` — tortoise#12906's population has
+#: no lever from our side), so it announces itself and exits 0. `starves_pr`,
+#: `delays_pr` are False and `congests_pr` is ``None``: no destructive act is
+#: authorised on the strength of an exclusion.
+PR_NEVER_DISPATCHED = "PR-NEVER-DISPATCHED"
 UNKNOWN = "UNKNOWN"
 
 EXIT_OK = 0
@@ -341,6 +354,7 @@ EXIT_FOR = {
     PR_STARVED: EXIT_OK,
     PR_BACKLOGGED: EXIT_OK,
     PR_UNWITNESSED: EXIT_OK,
+    PR_NEVER_DISPATCHED: EXIT_OK,
     UNKNOWN: EXIT_UNMEASURABLE,
 }
 
@@ -499,6 +513,72 @@ JOB_PROBE_TIMEOUT_SECONDS = 15
 JOB_SETTLE_SECONDS = 300.0
 
 
+#: How long a queued run must have EXISTED with ZERO job records before ``0`` may be
+#: taken as proof that it was never dispatched (#13825).
+#:
+#: ⛔ THIS IS NOT `JOB_SETTLE_SECONDS`, AND 300 s WOULD BE WRONG HERE. The two questions
+#: look alike and are not: `JOB_SETTLE_SECONDS` separates a DYNAMIC MATRIX's
+#: seconds-wide expansion window from a 7-day-frozen run. This one separates "no job
+#: record has been created yet" from "no job record will ever be created", and the
+#: measured window for the former is not seconds — it is the QUEUE WAIT itself.
+#: `docs/ops/ci-wall-clock.md` §1, over 54 `python-ci` runs on 2026-10-27, puts
+#: created → first job start at p50 **29.9 min**, p95 77.0 min, max **81.9 min**. A 300 s
+#: floor would sit ~1/6 of the way into the p50.
+#:
+#: ⛔ AND THE VALUE IS NOT THIS MODULE'S TO CHOOSE: `ci_check_repair` already owns the
+#: same question for the same class — `ZERO_JOB_MIN_AGE_S = 5400` ("young zero-job runs
+#: … the normal progressive-job-creation lag") — and its docstring states the derivation:
+#: "5400 s sits on the same side of the same measurement: past the measured maximum".
+#: TWO INSTRUMENTS MUST NOT ANSWER ONE QUESTION DIFFERENTLY, so this is pinned to that
+#: constant and `test_never_dispatched_floor_matches_the_repair_tool` reds if they drift.
+#: 5 400 s > 4 914 s (the measured 81.9 min max), i.e. a run is only provable at an age
+#: no observed queue wait has ever reached.
+#:
+#: ⛔ THE FLOOR IS THE SAFETY GUARD — the persistence TTL is not (see
+#: `NEVER_DISPATCHED_REPROOF_SECONDS`).
+NEVER_DISPATCHED_MIN_AGE_SECONDS = 5400.0
+
+#: How long a persisted never-dispatched proof is honoured before it must be RE-OBSERVED.
+#:
+#: ⛔ THIS IS A PERSISTENCE BOUND, NOT A SAFETY BOUND, and an earlier revision of this
+#: design sold it as the latter. The only event that invalidates a wrong proof is a
+#: dispatch, which also prunes the entry — so a TTL can never shorten a wrong exclusion;
+#: it can only stop a proof being treated as permanent. The guard that keeps a wrong
+#: proof from being ACQUIRED is `NEVER_DISPATCHED_MIN_AGE_SECONDS`.
+#:
+#: The value is derived from convergence, not taste: 128 proofs measured on this repo /
+#: `DEFAULT_MAX_QUEUE_PROBES` = 24 per pass × 10-minute cadence ≈ 54 min to walk the whole
+#: population, ×2 headroom ≈ 107 min → 7 200 s. A shorter TTL would expire proofs faster
+#: than the budget can re-observe them, and the population would flicker in and out of the
+#: exclusion; a longer one lengthens the window in which a proof survives unobserved.
+NEVER_DISPATCHED_REPROOF_SECONDS = 7200.0
+
+#: How many PR-event QUEUED runs one reading may probe at job level to prove non-dispatch.
+#:
+#: A budget, not a correctness knob, and it is bounded together with
+#: `QUEUE_PROBE_DEADLINE_SECONDS` because a COUNT alone does not bound wall clock: each
+#: probe may burn `JOB_PROBE_TIMEOUT_SECONDS` (15 s). Worst case for one reading is
+#: ``8 × 15 + 90 = 210 s`` (the in-progress probes plus this deadline), and `main()` takes
+#: a SECOND reading when it acts — the arithmetic this module's `DEFAULT_MAX_JOB_PROBES`
+#: comment already fixes at ``2 × 8 × 15 s = 240 s`` of a 600 s job — so the honest total is
+#: **2 × 210 = 420 s of 600 s**, leaving ~180 s for the four feed legs and checkout/setup.
+#: ⛔ The DEADLINE, not the count, is what makes that hold: with only a count, a pass whose
+#: probes all hang would overrun it. The count is what makes a pass USEFUL when the reads
+#: are fast (~0.2 s each, the measured case).
+#:
+#: A run the budget or the deadline never reaches stays ``never_dispatched=None``, i.e. it
+#: counts as WAITING — the fail-closed direction — and is reported as
+#: `pr_never_dispatched_unprobed` so the abstention is visible instead of being
+#: indistinguishable from a measured queue.
+DEFAULT_MAX_QUEUE_PROBES = 24
+
+#: Wall-clock cap, in seconds, on the QUEUED probe phase of one reading. See
+#: `DEFAULT_MAX_QUEUE_PROBES` for the arithmetic this is half of. Each probe's own timeout
+#: is clamped to the remaining deadline (`min(JOB_PROBE_TIMEOUT_SECONDS, remaining)`) so the
+#: phase cannot overrun by one full probe.
+QUEUE_PROBE_DEADLINE_SECONDS = 90.0
+
+
 class MeasureError(RuntimeError):
     """Could not measure. Fail closed: change nothing, exit 2."""
 
@@ -594,6 +674,49 @@ class QueuedRun:
     #: (`QueueHealth.pr_running_unmeasured`) so the abstention is visible instead of
     #: being silently identical to a measurement.
     has_live_job: bool | None = None
+    #: WAS THIS RUN PROVED NEVER DISPATCHED? (#13825) — True ONLY on the positive proof
+    #: (zero job records) taken under ALL FOUR conditions in `read_health`; `None`
+    #: everywhere else, INCLUDING "not measured".
+    #:
+    #: ⛔ THE THREE VALUES ARE NOT SYMMETRIC AND THE ASYMMETRY IS THE WHOLE SAFETY
+    #: ARGUMENT — it is the MIRROR IMAGE of `has_live_job`'s. There, the dangerous
+    #: direction is subtracting a run from `pr_running` (which manufactures PR-STARVED
+    #: and authorises a destructive cancel), so an unmeasured run counts as EXECUTING.
+    #: Here the dangerous direction is REMOVING a run from the wait population (which
+    #: silences the alarm this issue is about), so an unmeasured run counts as WAITING:
+    #:
+    #:   * ``True`` — PROVED: the run is in the `status=queued` leg, its attempt is
+    #:     REPORTED as 1, its own `updated_at` equals its `created_at`, that stamp has been
+    #:     still for `NEVER_DISPATCHED_MIN_AGE_SECONDS` (5 400 s), and its jobs read
+    #:     returned an INT `total_count == 0`. Only then is it excluded from `wait_runs`.
+    #:   * ``None`` — NOT MEASURED: no probe ran, the budget/deadline never reached it,
+    #:     the read abstained, or any of the four conditions failed. **It is a WAITER.**
+    #:     This is the default, so a caller that constructs a `QueuedRun` by hand (every
+    #:     existing fixture does) gets the pre-#13825 behaviour byte for byte.
+    #:
+    #: ⛔ A RUN FROM THE `pending`/`requested` LEGS IS NEVER ELIGIBLE, and that is
+    #: structural rather than a check: `read_health` only ever probes the `queued`
+    #: projection, and the pending/requested projection is built separately, so their
+    #: field stays at this default. MEASURED (2026-11-19): in the `pending` leg ZERO job
+    #: records is the NORMAL state of a waiting run — 4 of 4 sampled pending runs read
+    #: `total_count: 0`, including a 14-day-old one — because a concurrency group can be
+    #: held arbitrarily (`post-merge-validation.yml`: `validate` holds its group 30-60 min).
+    #: Proving non-dispatch there would be a FALSE proof by construction, not a cost.
+    never_dispatched: bool | None = None
+    #: DID THE PAYLOAD STATE THE ATTEMPT?
+    #:
+    #: ⛔ `_project` COERCES a missing, non-int, or non-positive `run_attempt` to ``1``
+    #: (documented there), which is right for aging a run and unusable as EVIDENCE that the
+    #: run is on its first attempt: `int(True) == 1`, `"2"` and a JSON `true` all land on
+    #: ``1``. A queued RE-RUN is exactly the shape that must never be proved never-dispatched
+    #: — `filter=latest` scopes the jobs view to the latest attempt, so an attempt-2 run
+    #: whose jobs have not landed yet reads `total_count: 0` while it is a genuine waiter
+    #: (#13825 review round 3). So the projection records whether the number was actually
+    #: REPORTED, and eligibility requires it, rather than inferring it from the coerced value.
+    #:
+    #: ``False`` is the safe default for a hand-built object (unprovable), and `_project`
+    #: always sets it explicitly.
+    attempt_reported: bool = False
 
     @property
     def is_pr(self) -> bool:
@@ -772,6 +895,30 @@ class QueueHealth:
     #: Why the verdict is what it is, in one clause per clause of the rule, so a
     #: reader can check the decision instead of trusting it.
     reasons: tuple[str, ...] = ()
+    #: Largest single workflow among LIVE queued runs — the population the FLOOD clause's
+    #: dominance test uses. `global_max_queued` keeps the feed truth; this one exists so no
+    #: existing key is re-scoped under a consumer (#13825 review round 3).
+    global_max_live_queued: int = 0
+    #: HOW MANY queued PR-event runs were PROVED never dispatched (#13825) — GitHub created
+    #: them and never dispatched them, so their `status=queued` is a frozen read and no
+    #: runner slot can ever serve them. They are EXCLUDED from `wait_runs` (and therefore
+    #: from `oldest_pr_queued_age_seconds`, `wait_witness_ids` and every age clause).
+    #:
+    #: ⛔ A LOWER BOUND, ALWAYS. Only a PROVEN run is counted (four conditions, 5 400 s
+    #: floor), so a cold probe cache makes this number SMALLER — which is the safe
+    #: direction: fewer exclusions means more runs counted as waiting, never fewer.
+    pr_never_dispatched: int = 0
+    #: The ids behind `pr_never_dispatched`, so a reader can audit the exclusion instead of
+    #: trusting a count. (The equivalent for `pr_running` is `pr_running_excluded`.)
+    never_dispatched_ids: tuple[int, ...] = ()
+    #: Of the ELIGIBLE population, how many the probe BUDGET/DEADLINE never reached versus
+    #: how many were reached and not proved. Both are still counted as WAITING. `None` when
+    #: no probe pass ran at all (a legacy caller), matching `pr_running_unmeasured_*`.
+    #: ⛔ The split is not decoration: the remedies are opposite (raise the budget / retry
+    #: the reading), and #12037 round 13 already established that a disjunction is not a
+    #: diagnosis.
+    pr_never_dispatched_unprobed: int | None = None
+    pr_never_dispatched_unread: int | None = None
     #: Cancel candidates, OLDEST FIRST. Empty unless the verdict is FLOOD and
     #: the offender is trim-safe; a non-empty tuple is the governor's whole
     #: action surface.
@@ -832,6 +979,26 @@ class QueueHealth:
         return f", unmeasured={self.pr_running_unmeasured}"
 
     @property
+    def _never_dispatched_token(self) -> str:
+        """Name the exclusion on the ONE string the fleet samples.
+
+        ⛔ ONLY WHEN POSITIVE, so every pre-#13825 reading renders byte-identically — and
+        the unproven complement is emitted beside it whenever a probe pass ran, because a
+        count with no denominator would let "budget-starved" read exactly like "measured
+        clear", which is the asymmetry this module refuses for `pr_running_unmeasured`.
+        """
+        if not self.pr_never_dispatched:
+            return ""
+        token = f", never_dispatched={self.pr_never_dispatched}"
+        if self.pr_never_dispatched_unprobed is not None or \
+                self.pr_never_dispatched_unread is not None:
+            unproven = (self.pr_never_dispatched_unprobed or 0) + \
+                (self.pr_never_dispatched_unread or 0)
+            if unproven:
+                token += f", never_dispatched_unproven={unproven}"
+        return token
+
+    @property
     def state_line(self) -> str:
         """The one-line state the fleet reads (#9115 acceptance 3).
 
@@ -869,7 +1036,16 @@ class QueueHealth:
             return (
                 f"CI: FLOOD({self.dominant_workflow or 'unknown'}, "
                 f"queued={self.queued_total}, pr_running={self.pr_running}"
-                f"{self._unmeasured_token})"
+                f"{self._unmeasured_token}{self._never_dispatched_token})"
+            )
+        if self.verdict == PR_NEVER_DISPATCHED:
+            # The residue IS the state here, so it is always named (the token below emits
+            # only when positive, and this branch is unreachable when it is zero).
+            return (
+                f"CI: PR-NEVER-DISPATCHED(queued={self.queued_total}, "
+                f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
+                f"pr_pending={self.pr_pending}"
+                f"{self._never_dispatched_token}{self._unmeasured_token})"
             )
         if self.verdict == PR_UNWITNESSED:
             # The one thing an UNWITNESSED wait must never print is a bare `OK`. The
@@ -919,7 +1095,8 @@ class QueueHealth:
                 f"CI: PR-UNWITNESSED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
                 f"pr_pending={self.pr_pending}, "
-                f"oldest={waited}, feed={feed}{census}{self._unmeasured_token})"
+                f"oldest={waited}, feed={feed}{census}{self._unmeasured_token}"
+                f"{self._never_dispatched_token})"
             )
         if self.verdict == PR_STARVED:
             oldest = self.oldest_pr_queued_age_seconds
@@ -927,7 +1104,8 @@ class QueueHealth:
             return (
                 f"CI: PR-STARVED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
-                f"pr_pending={self.pr_pending}{waited}{self._unmeasured_token})"
+                f"pr_pending={self.pr_pending}{waited}{self._unmeasured_token}"
+                f"{self._never_dispatched_token})"
             )
         if self.verdict == PR_BACKLOGGED:
             # `oldest` is the WHOLE claim here — it is the measurement that says the
@@ -938,7 +1116,8 @@ class QueueHealth:
             return (
                 f"CI: PR-BACKLOGGED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
-                f"pr_pending={self.pr_pending}{waited}{self._unmeasured_token})"
+                f"pr_pending={self.pr_pending}{waited}{self._unmeasured_token}"
+                f"{self._never_dispatched_token})"
             )
         # `pr_queued` and `pr_pending` are on the non-FLOOD line too: an `OK` that hid
         # a long PR backlog would be the same "slow CI" reading this tool exists to
@@ -946,7 +1125,8 @@ class QueueHealth:
         return (
             f"CI: {self.verdict}(queued={self.queued_total}, "
             f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
-            f"pr_pending={self.pr_pending}{self._unmeasured_token})"
+            f"pr_pending={self.pr_pending}{self._unmeasured_token}"
+            f"{self._never_dispatched_token})"
         )
 
     @property
@@ -1133,6 +1313,30 @@ class QueueHealth:
         caller that does not name its other targets gets the old per-run answer.
         """
         if self.congests_pr is None:
+            # ⛔ ONE GUARDED CLEARANCE, AND IT EXISTS TO KEEP THE #10641 DEADLOCK-BREAKER
+            # ALIVE FOR THE POPULATION IT WAS BUILT FOR (#13825 review round 3).
+            #
+            # `congests_pr` is `None` for a `PR-NEVER-DISPATCHED` reading (its wait was not
+            # measured because there IS no live wait), and the plain short-circuit below
+            # would then answer `None` for every run — including the aged zero-job runs
+            # `ci_check_repair` exists to cancel-and-rerun, whose repair is currently
+            # authorised exactly because they are the only witnesses. The regression that
+            # would cause is measured, not hypothetical: the repair is refused, the
+            # refusal is recorded, and `main()` escalates a refusal on an unmeasured queue
+            # to exit 1 — every 30 minutes, with the required check never produced.
+            #
+            # Why `False` is the honest answer HERE and not a fail-open: the question is
+            # "is anything OTHER than this run congested?", and answering it needs a LIVE
+            # witness. With none — and with the only former witnesses PROVED dead under
+            # four conditions at a 5 400 s floor — nothing independent of the target
+            # witnesses congestion. The repo-wide `congests_pr` stays `None`, so no
+            # repo-wide destructive act is authorised on the strength of an exclusion.
+            # ⛔ THE CONJUNCT IS LOAD-BEARING: a truncated or unwitnessed reading can ALSO
+            # have an empty witness set, and it must keep failing closed.
+            if (self.verdict == PR_NEVER_DISPATCHED and self.pr_never_dispatched
+                    and not self.wait_witness_ids
+                    and not self.truncated and not self.pending_truncated):
+                return False
             return None
         if not self.delays_pr:
             # No congestion at all: certainly none caused by this run.
@@ -1159,6 +1363,15 @@ class QueueHealth:
             "dominant_workflow": self.dominant_workflow,
             "dominant_queued": self.dominant_queued,
             "global_max_queued": self.global_max_queued,
+            # The live population the FLOOD clause compares against — see the field.
+            "global_max_live_queued": self.global_max_live_queued,
+            # ⛔ THE EXCLUSION #13825 EXISTS FOR, emitted so it is never invisible: the
+            # count is a LOWER BOUND, the ids are auditable, and the two abstentions
+            # (`null` when no probe pass ran) are the visible remainder.
+            "pr_never_dispatched": self.pr_never_dispatched,
+            "never_dispatched_ids": list(self.never_dispatched_ids),
+            "pr_never_dispatched_unprobed": self.pr_never_dispatched_unprobed,
+            "pr_never_dispatched_unread": self.pr_never_dispatched_unread,
             "pr_running": self.pr_running,
             # ⛔ THE TWO FACTS BEHIND `pr_running` (#12037), emitted so a consumer can
             # tell a census of EXECUTING runs from one that trusted the `status` string:
@@ -1285,6 +1498,14 @@ def _project(raw: Iterable[Mapping[str, Any]]) -> list[QueuedRun]:
         if not isinstance(run_id, int):
             continue
         attempt = run.get("run_attempt")
+        # ⛔ `reported` IS CARRIED SEPARATELY FROM THE COERCED VALUE (#13825). The
+        # coercion below is right for aging (a run whose attempt is not stated is aged
+        # as attempt 1, which is what every client did before #10641) and WRONG as
+        # evidence: `int(True) == 1`, and a string or absent field also lands on 1, so
+        # the coerced number cannot answer "is this run on its FIRST attempt?". Only
+        # the raw field can, and `never_dispatched` eligibility refuses a run whose
+        # attempt was not reported.
+        reported = type(attempt) is int and attempt > 0
         out.append(
             QueuedRun(
                 id=run_id,
@@ -1294,9 +1515,10 @@ def _project(raw: Iterable[Mapping[str, Any]]) -> list[QueuedRun]:
                 # `run_started_at` is the API's field name for the CURRENT
                 # attempt's start; `created_at` is attempt 1's creation and never
                 # moves — see `QueuedRun.wait_age_seconds`.
-                run_attempt=int(attempt) if isinstance(attempt, int) and attempt > 0 else 1,
+                run_attempt=int(attempt) if reported else 1,
                 run_started_at=str(run.get("run_started_at") or ""),
                 updated_at=str(run.get("updated_at") or ""),
+                attempt_reported=reported,
             )
         )
     return out
@@ -1375,6 +1597,10 @@ def classify_queue(
     probe_attempted: bool = False,
     unmeasured_unprobed: int | None = None,
     unmeasured_unread: int | None = None,
+    queue_probe_attempted: bool = False,
+    never_dispatched_unprobed: int | None = None,
+    never_dispatched_unread: int | None = None,
+    proof_warning: str | None = None,
 ) -> QueueHealth:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
@@ -1423,11 +1649,22 @@ def classify_queue(
     pr_running_excluded = tuple(run.id for run in pr_in_progress if run.has_live_job is False)
     pr_running_unmeasured = sum(1 for run in pr_in_progress if run.has_live_job is None)
     pr_queued_runs = [run for run in queued if run.is_pr]
+    # ⛔ A NEVER-DISPATCHED RUN IS NOT A WAITER (#13825), AND THE EXCLUSION HAPPENS HERE
+    # OR NOWHERE. `wait_runs` is the ONE join point every later clause derives from —
+    # `ages`, `oldest_pr_age`, `wait_witness_ids`, `starved_wait`, `backlogged_wait`,
+    # `pr_wait_measured` — so excluding a run from anything less than this leaves the age
+    # clauses reading the dead tail, and excluding it somewhere else creates two
+    # populations that disagree. `is True` and nothing else: `None` is UNPROVEN and stays a
+    # waiter (see `QueuedRun.never_dispatched` for why the abstention points at ALARMING).
+    pr_never_dispatched_runs = [run for run in pr_queued_runs if run.never_dispatched is True]
+    live_pr_queued_runs = [run for run in pr_queued_runs if run.never_dispatched is not True]
+    pr_never_dispatched = len(pr_never_dispatched_runs)
+    never_dispatched_ids = tuple(run.id for run in pr_never_dispatched_runs)
     # The other leg of the wait population — see the docstring. `waiting` is
     # deliberately NOT read here: `ci_check_repair._APPROVAL_PARKED_STATUSES` treats
     # it as human-parked, so it is neither a queue wait nor a cancel target.
     pr_pending_runs = [run for run in pending if run.is_pr]
-    wait_runs = pr_queued_runs + pr_pending_runs
+    wait_runs = live_pr_queued_runs + pr_pending_runs
 
     # The OFFENDER is decided over NON-PR queued runs only. A PR workflow with
     # many runs queued is the victim here, not the offender — naming it would aim
@@ -1445,8 +1682,21 @@ def classify_queue(
 
     global_tally: dict[str, int] = {}
     for run in queued:
+        # ⛔ THE RESIDUE IS NOT EVIDENCE OF WHO HOLDS THE QUEUE (#13825 review round 3).
+        # Counting never-dispatched runs here pins `global_max` at the residue's size, and
+        # the FLOOD clause's dominance comparison (`offender_queued < global_max`) can then
+        # never be satisfied — FLOOD becomes unreachable on exactly the queue this issue is
+        # about. `global_max_queued` is still emitted as FEED TRUTH (the count of the
+        # largest single workflow in the feed); what changes is the population the CLAUSE
+        # compares against, which is a statement about live work.
+        if run.never_dispatched is True:
+            continue
         global_tally[run.name] = global_tally.get(run.name, 0) + 1
-    global_max = max(global_tally.values()) if global_tally else 0
+    global_max_live = max(global_tally.values()) if global_tally else 0
+    feed_tally: dict[str, int] = {}
+    for run in queued:
+        feed_tally[run.name] = feed_tally.get(run.name, 0) + 1
+    global_max = max(feed_tally.values()) if feed_tally else 0
     global_leader = (
         max(global_tally, key=lambda name: (global_tally[name], name))
         if global_tally
@@ -1477,6 +1727,29 @@ def classify_queue(
     unreadable_pr_runs = sum(1 for age in ages if age is None)
     readable_pr_ages = [age for age in ages if age is not None]
     oldest_pr_age = max(readable_pr_ages) if readable_pr_ages else None
+
+    # ⛔ WHICH LEG HOLDS THE OLDEST WAIT (#13825). The never-dispatched exclusion
+    # applies to the QUEUED leg only, and it deliberately does NOT reach the
+    # `pending`/`requested` leg: there, zero job records is UNINFORMATIVE — a run held
+    # by a concurrency group has no job either (measured: every live pending run read
+    # `total_count: 0`) — so no proof is available on that leg at ANY age. The
+    # consequence is a residue this reading MUST be able to explain: after the queued
+    # zombies are excluded an operator still sees a 14-day `oldest`, and without this
+    # they cannot tell whether the fix failed or a pending-leg run is now the witness.
+    # Measured 2026-11-26: queued PR runs 157 -> 90 with 121 proved dead, `oldest`
+    # unchanged at 1 218 214s, and that witness was ONE `pending` run of `Python CI`.
+    # Named from the SAME tuple the max is taken over: a second max over a different
+    # list is how two answers to one question get minted.
+    _oldest_wait: tuple[QueuedRun, float] | None = None
+    for _run, _age in zip(wait_runs, ages, strict=True):
+        if _age is not None and (_oldest_wait is None or _age > _oldest_wait[1]):
+            _oldest_wait = (_run, _age)
+    _queued_leg_ids = {run.id for run in live_pr_queued_runs}
+    oldest_wait_leg: str | None = (
+        None if _oldest_wait is None
+        else "queued" if _oldest_wait[0].id in _queued_leg_ids
+        else "pending"
+    )
 
     # ⛔ WHICH RUNS ARE THE WITNESS? (see `congests_pr_apart_from`). The congestion
     # verdict is a claim about a WAIT, and the wait is one or more runs. Recording
@@ -1552,6 +1825,31 @@ def classify_queue(
         f"pr_running={pr_running} pr_queued={len(pr_queued_runs)} "
         f"pr_pending={len(pr_pending_runs)}",
     ]
+    # ⛔ AN EXCLUSION A READER CANNOT SEE IS THE DEFECT ONE LAYER DOWN (#13825). This is
+    # the same rule `pr_running_excluded` follows, applied to the population that can
+    # SILENCE an alarm instead of manufacturing one — so the count, the ids, and the
+    # abstentions that stopped it being larger are all named, and a store that could not
+    # be read is named too (an unreadable history makes MORE runs waiters, which is safe,
+    # but a reader must not have to infer that from a number that did not move).
+    if pr_never_dispatched or proof_warning:
+        nd_notes: list[str] = []
+        if pr_never_dispatched:
+            nd_notes.append(
+                f"{pr_never_dispatched} queued PR-event run(s) PROVED never dispatched "
+                f"(zero job records, attempt 1, an unmoved `updated_at` still for "
+                f"{NEVER_DISPATCHED_MIN_AGE_SECONDS:.0f}s) are EXCLUDED from the wait "
+                f"population {list(never_dispatched_ids)} — GitHub never dispatched them "
+                f"and no runner slot can serve them"
+            )
+        if queue_probe_attempted and (never_dispatched_unprobed or never_dispatched_unread):
+            nd_notes.append(
+                "the rest of the eligible population is UNPROVEN and therefore still "
+                "counted as WAITING: "
+                + _unmeasured_because(never_dispatched_unprobed, never_dispatched_unread)
+            )
+        if proof_warning:
+            nd_notes.append(proof_warning)
+        reasons.append("; ".join(nd_notes))
     # ⛔ A COUNT THAT EXCLUDED OR ABSTAINED ON A RUN MUST SAY SO (#12037). Silence here
     # would leave the two facts that change every clause above invisible: which runs were
     # read out of `pr_running` and PROVED not to be executing, and how many were never
@@ -1682,6 +1980,25 @@ def classify_queue(
             "dominant_workflow": offender,
             "dominant_queued": offender_queued,
             "global_max_queued": global_max,
+            # The population the FLOOD clause's dominance test compares against: the
+            # largest single workflow among LIVE queued runs. Emitted SEPARATELY rather
+            # than re-scoping `global_max_queued`, because a consumer comparing that key
+            # with `queued_total` must keep getting feed truth (#13825 review round 3).
+            "global_max_live_queued": global_max_live,
+            # ⛔ THE EXCLUSION, WITH ITS COUNT AND ITS IDS (#13825). `pr_never_dispatched`
+            # is a LOWER BOUND and says so: it counts only PROVEN runs, so a cold state
+            # file or a spent probe budget makes it smaller, never larger. The two
+            # abstention counts are the visible remainder, split by cause because they
+            # take opposite remedies (raise the budget/deadline vs retry the reading) —
+            # the #12037 round-13 rule, applied to the wait side of the tool.
+            "pr_never_dispatched": pr_never_dispatched,
+            "never_dispatched_ids": tuple(never_dispatched_ids),
+            "pr_never_dispatched_unprobed": (
+                never_dispatched_unprobed if queue_probe_attempted else None
+            ),
+            "pr_never_dispatched_unread": (
+                never_dispatched_unread if queue_probe_attempted else None
+            ),
             "pr_running": pr_running,
             # ⛔ THE TWO FACTS BEHIND `pr_running` (#12037), emitted so a consumer can
             # tell a census of EXECUTING runs from one that merely trusted the `status`
@@ -1862,7 +2179,20 @@ def classify_queue(
             f"(> max_pr_wait_seconds={max_pr_wait_seconds:.0f}s), so the REQUIRED "
             f"checks cannot answer inside that wait. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
-            f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
+            f"the witness is "
+            + (
+                f"a '{oldest_wait_leg}' leg run (#{_oldest_wait[0].id}) — a "
+                + (
+                    "queued run that was NOT proved never dispatched"
+                    if oldest_wait_leg == "queued"
+                    else "`pending`/`requested` run, on a leg where zero job records "
+                    "is not a proof (a concurrency hold has none either), so it is "
+                    "counted as WAITING"
+                )
+                if _oldest_wait is not None
+                else "a run of an unmeasured leg"
+            )
+            + f"; trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
             # ⛔ NOT "while a PR-event run is executing" (#12037 review round 9): this
             # clause is reached on `pr_running > 0`, and that count may be unmeasured runs,
             # so the old phrase re-asserted — 300 characters after the sentence corrected it
@@ -1907,13 +2237,29 @@ def classify_queue(
         return health(PR_STARVED)
 
     # ── the clauses, in the order that lets the cheapest refusal speak first ──
+    # ⛔ BEFORE EVERY OTHER CLAUSE, BECAUSE IT IS ABOUT THE POPULATION THEY ALL READ
+    # (#13825 review round 3). `no_flood()` and `healthy()` both return `OK`, and they are
+    # reached BEFORE the `not wait_runs` seam — so a queue whose only waiters were PROVED
+    # never dispatched printed `OK` through THOSE, not through the seam, which makes the
+    # seam the wrong place to decide it. This clause is unconditional on the flood
+    # shape: no live wait plus a proved residue is the residue's state, whether or not a
+    # reporting workflow happens to be dominating at the same time.
+    if not wait_runs and pr_never_dispatched:
+        reasons.append(
+            f"PR-NEVER-DISPATCHED: every PR-event run in the wait legs was PROVED never "
+            f"dispatched ({pr_never_dispatched} of them), so there is no live wait AND "
+            f"nothing for a runner slot to serve; starvation is neither witnessed nor "
+            f"disproved — not reported as OK"
+        )
+        return health(PR_NEVER_DISPATCHED, pr_queued=len(pr_queued_runs),
+                      oldest_pr_queued_age_seconds=None, pr_wait_measured=False)
     if offender_queued < min_dominant_queued:
         reasons.append(
             f"not a flood: offender_queued={offender_queued} < "
             f"min_dominant_queued={min_dominant_queued}"
         )
         return no_flood()
-    if offender_queued < global_max:
+    if offender_queued < global_max_live:
         # Another workflow (necessarily PR-event, since the offender is the
         # largest non-PR one) holds more of the queue. A queue whose bulk is PR
         # runs is PR CI with a backlog — the thing this tool exists to PROTECT —
@@ -1959,7 +2305,10 @@ def classify_queue(
         # already demoted the verdict, because "nothing read" is not "nothing there"),
         # and the fourth non-completed status (`waiting`) is approval-parked and never
         # read.
-        return health(OK, pr_queued=0, oldest_pr_queued_age_seconds=None,
+        #
+        # ⛔ AND WHEN THE EXCLUSION IS WHY THIS LEG IS EMPTY, THAT WAS DECIDED ABOVE —
+        # before `no_flood()`/`healthy()`, which both answer `OK` and are reached first.
+        return health(OK, pr_queued=len(pr_queued_runs), oldest_pr_queued_age_seconds=None,
                       pr_wait_measured=False)
     if oldest_pr_age is None:
         reasons.append(
@@ -2264,6 +2613,261 @@ def read_run_live_job(
     return False if len(statuses) < per_page else None
 
 
+# --- never-dispatched: the direct proof, its budget and its persistence ------
+
+
+def read_run_job_count(
+    repo: str,
+    run_id: int,
+    *,
+    timeout: float | None = None,
+) -> int | None:
+    """How many JOB RECORDS does this run have? ``None`` when that is not measurably known.
+
+    The only positive evidence that a queued run was NEVER DISPATCHED (#13825): a run
+    GitHub never dispatched has no job row, and a job row is never deleted. The two cheap
+    discriminators were measured and FALSIFIED first — `updated_at` stillness (the repo's
+    own fixtures model a legitimate frozen waiter: `tests/test_ci_queue_health.py:46-59`),
+    `pull_requests` emptiness (8 of 30 live PR runs are also empty), and `updated_at ==
+    created_at` (three live runs hold a job WITH that equality) — so this is the direct
+    question, asked directly.
+
+    Returns the INT ``total_count`` and nothing else, because that is the whole quantity
+    needed and this module already treats an int ``total_count`` as authoritative
+    (`read_run_live_job`: "When `total_count` IS an int it is AUTHORITATIVE").
+    ``per_page=1`` keeps the payload one row wide.
+
+    ``None`` — NOT MEASURED — for every way the question goes unanswered, and the caller
+    must abstain toward WAITING (the mirror of `read_run_live_job`'s abstention toward
+    EXECUTING, and for the mirror reason: under-counting the wait population silences an
+    alarm, so the unknown case must never land on the subtracting side):
+
+      * the read failed (``MeasureError``, a hang, auth) — swallowed here on purpose, since
+        one run's jobs surface refines one run and raising would turn a transient 5xx into
+        an unmeasurable QUEUE (exit 2) for every consumer;
+      * the payload is not a mapping, or ``total_count`` is ABSENT;
+      * ``total_count`` is present and **not an int**. ⛔ ``type(t) is int`` and not
+        ``isinstance``: ``isinstance(True, int)`` is True, so a JSON ``"total_count": true``
+        would otherwise read as the number 1 — i.e. as PROOF OF DISPATCH — from a payload
+        that stated no count at all. (The same guard `read_run_live_job` applies to
+        `run_attempt`.)
+      * the count is NEGATIVE, or the payload says ``0`` while RETURNING ROWS — a
+        self-contradicting payload proves nothing.
+
+    ⛔ ``0`` IS NOT BY ITSELF A PROOF. It is the raw answer to "how many job records";
+    turning it into ``never_dispatched`` requires the four eligibility conditions in
+    `read_health` (leg, reported attempt, an unmoved stamp, and the 5 400 s floor), because
+    a run inside its own dispatch window legitimately has none yet.
+    """
+    try:
+        data = gh_json(
+            [
+                "api",
+                f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=1",
+            ],
+            timeout=JOB_PROBE_TIMEOUT_SECONDS if timeout is None else timeout,
+        )
+    except MeasureError:
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    total = data.get("total_count")
+    if type(total) is not int or total < 0:
+        return None
+    rows = data.get("jobs")
+    if total == 0 and isinstance(rows, list) and rows:
+        return None
+    return total
+
+
+def _never_dispatched_eligible(
+    run: QueuedRun,
+    now: datetime,
+) -> bool:
+    """May a ``total_count == 0`` about THIS run prove it was never dispatched?
+
+    Three of the four conditions; the fourth (``total_count == 0``) is the probe's answer,
+    which is why this is asked BEFORE a probe is spent and again before a persisted proof is
+    honoured. Every clause is a measured, falsified-something guard:
+
+    1. **The leg.** ``read_health`` only ever passes the `status=queued` projection to the
+       prober, so a `pending`/`requested` run reaches this with its default and is
+       structurally ineligible — see `QueuedRun.never_dispatched` for the measurement that
+       makes that necessary rather than tidy (in the pending leg, ZERO job records is the
+       normal state of a waiting run).
+    2. **A REPORTED first attempt.** A queued RE-RUN must never be provable:
+       `filter=latest` scopes the jobs view to the LATEST attempt, so an attempt-2 run whose
+       jobs have not landed reads 0 while it is a genuine waiter.
+    3. **An UNMOVED stamp** (``updated_at == created_at``, both present). A re-run updates the
+       run object; a first attempt that has not been touched does not. ⛔ This is CORROBORATION
+       WITH A MEASURED LIMIT, not a proof: three live runs in one measurement held a job with
+       this equality, so ``updated_at`` moving is evidence of change and staying still is NOT
+       evidence of nothing having happened. It is here to catch re-runs, and the next clause
+       is what catches "nothing has happened YET".
+    4. **The FLOOR** — ``_settled_still`` over `NEVER_DISPATCHED_MIN_AGE_SECONDS` (5 400 s),
+       reusing the existing helper so an unreadable, future-dated, or merely-recent stamp all
+       abstain for free. This is the clause that makes "a run sitting in its own dispatch
+       window" unprovable, and it is the design's real safety guard.
+    """
+    if not run.is_pr:
+        return False
+    if not run.attempt_reported or run.run_attempt != 1:
+        return False
+    if not run.created_at or not run.updated_at or run.updated_at != run.created_at:
+        return False
+    return _settled_still(run.updated_at, now, NEVER_DISPATCHED_MIN_AGE_SECONDS)
+
+
+def _queue_probe_order_key(run: QueuedRun) -> tuple[int, datetime]:
+    """Oldest-created first, and CRASH-FREE on a stamp that will not parse.
+
+    ⛔ THE KEY IS THE RUN'S LIFETIME, NOT ITS WAIT AGE, and the difference is deliberate:
+    the question the probe answers is "has this run existed for a long time without ever
+    being dispatched", so `created_at` is the right clock — while every AGE CLAUSE in this
+    module must use `wait_age_seconds` (the CURRENT ATTEMPT's age), as
+    `classify_queue`'s own comment requires. This key feeds no age clause.
+
+    An unparseable stamp sorts LAST (``datetime.max``), which is safe for the budget:
+    the floor is what makes a run provable, so a drifted stamp that cannot claim an age
+    cannot claim to be provable either — it is simply probed after everything readable.
+    """
+    stamp = _parse_time(run.created_at)
+    if stamp is None:
+        return (1, datetime.max.replace(tzinfo=UTC))
+    return (0, stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC))
+
+
+def _load_queue_proofs(
+    path: str,
+    repo: str,
+    now: datetime,
+    feed_stamps: Mapping[int, str],
+) -> tuple[dict[int, dict[str, Any]], str | None]:
+    """Load the persisted never-dispatched proofs. **Never raises.**
+
+    Returns ``(proofs, warning)``. ``warning`` is a one-clause string naming what could not
+    be read, or ``None``. A store that cannot be trusted is EMPTY, not fatal: an unreadable
+    history must make MORE runs count as waiting, never crash a reading (the failure mode
+    where the observer goes dark exactly when the queue is degraded).
+
+    ⛔ EVERY RECORD IS VALIDATED, AND THE VALIDATION IS A SECURITY BOUNDARY, NOT HYGIENE.
+    A ``True`` that should not be honoured REMOVES a waiter from the alarm population — the
+    fail-open direction — and the store is a file this tool did not write in this process
+    (it survives runs, and an `actions/cache` restore can hand back an older copy). So a
+    record is honoured only when ALL of these hold; anything else DROPS it (the unhonoured
+    case is a waiter, which is the safe direction):
+
+      * ``never_dispatched`` is ``True`` **by identity** — not truthy. ``1``, ``"true"`` and
+        ``[]`` must all be rejected, because a truthiness test is how a store's schema drift
+        becomes an exclusion;
+      * ``run_id`` is an ``int`` (``type(...) is int``, so ``True`` is not 1 here either);
+      * ``proved_at`` is a number and ``0 <= now - proved_at < NEVER_DISPATCHED_REPROOF_SECONDS``
+        — ⛔ A FUTURE STAMP IS REJECTED OUTRIGHT, because ``now - proved_at < TTL`` is
+        satisfied FOR EVER by a clock-skewed or hand-edited future value, which would make a
+        wrong proof immortal. (Same rule as the skill-enforcer's `READ_PERSIST_FUTURE_SKEW_MS`
+        and `_settled_still`'s own future-stamp note.)
+      * ``updated_at`` is a ``str`` that PARSES, and equals the run's CURRENT stamp in the
+        feed — a stamp that has moved means something happened, so re-prove now;
+      * the run is STILL IN THE QUEUED FEED (pruned here, on LOAD, so a foreign or stale file
+        cannot accumulate entries for runs that left long ago).
+
+    ⛔ THE TYPE CHECKS PRECEDE `_parse_time`, WHICH RAISES ON A NON-STRING (`value.replace`):
+    "drop the entry" is only implementable if nothing on the drop path can raise.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}, None  # the correct first-pass state: nothing proved yet
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, f"the never-dispatched history at {path} could not be read ({exc})"
+    if not isinstance(data, Mapping):
+        return {}, f"the never-dispatched history at {path} is not an object"
+    if data.get("version") != 1:
+        return {}, (
+            f"the never-dispatched history at {path} carries version "
+            f"{data.get('version')!r}, not 1 — ignored rather than reinterpreted"
+        )
+    if data.get("repo") != repo:
+        return {}, (
+            f"the never-dispatched history at {path} was written for "
+            f"{data.get('repo')!r}, not {repo!r} — ignored"
+        )
+    records = data.get("proofs")
+    if not isinstance(records, list):
+        return {}, f"the never-dispatched history at {path} carries no `proofs` list"
+    now_epoch = now.timestamp()
+    proofs: dict[int, dict[str, Any]] = {}
+    #: Records that FAILED VALIDATION, as distinct from records legitimately pruned (the
+    #: run left the feed) or expired (the TTL). The first is a corrupt/foreign store and
+    #: must be REPORTED; the second is normal operation and must not cry wolf every pass.
+    invalid = 0
+    for record in records:
+        if not isinstance(record, Mapping):
+            invalid += 1
+            continue
+        run_id = record.get("run_id")
+        proved_at = record.get("proved_at")
+        proven = record.get("updated_at")
+        if record.get("never_dispatched") is not True:
+            invalid += 1
+            continue
+        if type(run_id) is not int:
+            invalid += 1
+            continue
+        if type(proved_at) is not int and type(proved_at) is not float:
+            invalid += 1
+            continue
+        if type(proven) is not str or _parse_time(proven) is None:
+            invalid += 1
+            continue
+        age = now_epoch - float(proved_at)
+        if age < 0 or age >= NEVER_DISPATCHED_REPROOF_SECONDS:
+            continue
+        if feed_stamps.get(run_id) != proven:
+            continue
+        proofs[run_id] = {
+            "run_id": run_id,
+            "never_dispatched": True,
+            "proved_at": proved_at,
+            "updated_at": proven,
+        }
+    if invalid:
+        return proofs, (
+            f"{invalid} record(s) in the never-dispatched history at {path} could not be "
+            f"honoured and were dropped (wrong types, or not a literal `true`) — the runs "
+            f"they named are counted as WAITING again"
+        )
+    return proofs, None
+
+
+def _save_queue_proofs(
+    path: str,
+    repo: str,
+    proofs: Mapping[int, Mapping[str, Any]],
+) -> str | None:
+    """Persist the proofs atomically. **Never raises**; returns a warning or ``None``.
+
+    Atomicity is not decoration: a pass killed mid-write (the job's own
+    `timeout-minutes: 10`, a cancelled run) must not leave a half file whose next read is
+    a parse error — that would silently reset the population to "nothing proved", which is
+    safe but wasteful, or worse, a truncated-but-parseable file, which the loader's
+    validation then has to catch.
+    """
+    payload = {"version": 1, "repo": repo, "proofs": list(proofs.values())}
+    tmp = f"{path}.tmp"
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError as exc:
+        return f"the never-dispatched history could not be written to {path} ({exc})"
+    return None
+
+
 def read_health(
     repo: str = REPO_DEFAULT,
     now: datetime | None = None,
@@ -2275,6 +2879,9 @@ def read_health(
     max_pages: int = DEFAULT_MAX_PAGES,
     max_pr_wait_seconds: float = DEFAULT_MAX_PR_WAIT_SECONDS,
     max_job_probes: int = DEFAULT_MAX_JOB_PROBES,
+    max_queue_probes: int = DEFAULT_MAX_QUEUE_PROBES,
+    queue_probe_deadline: float = QUEUE_PROBE_DEADLINE_SECONDS,
+    state_file: str | None = None,
 ) -> QueueHealth:
     """Measure the repo's queue. Raises ``MeasureError`` — never returns OK unread.
 
@@ -2315,6 +2922,20 @@ def read_health(
     if type(max_job_probes) is not int or max_job_probes < 1:
         raise MeasureError(
             f"max_job_probes must be an integer >= 1, got {max_job_probes!r}"
+        )
+    # Same refusal discipline for the queued budget (#13825), and for the same reason: a
+    # budget of 0 is the pre-#13825 mode (nothing is ever proved) and must be a LOUD
+    # argument error, not a silent revert. The deadline must be positive for the same
+    # reason — a zero deadline would spend nothing and report the whole population as
+    # unprobed while looking like a measurement.
+    if type(max_queue_probes) is not int or max_queue_probes < 1:
+        raise MeasureError(
+            f"max_queue_probes must be an integer >= 1, got {max_queue_probes!r}"
+        )
+    if not isinstance(queue_probe_deadline, (int, float)) or queue_probe_deadline <= 0:
+        raise MeasureError(
+            f"queue_probe_deadline must be a positive number of seconds, "
+            f"got {queue_probe_deadline!r}"
         )
     queued, queued_truncated = read_runs(repo, "queued", max_pages)
     running, running_truncated = read_runs(repo, "in_progress", max_pages)
@@ -2415,8 +3036,75 @@ def read_health(
     # every other read: an unmeasured queue is not a healthy one.
     pending, pending_truncated = read_runs(repo, "pending", max_pages)
     requested, requested_truncated = read_runs(repo, "requested", max_pages)
+
+    # --- never-dispatched: prove what can be proved, within BOTH bounds (#13825) ----
+    # ⛔ ONLY THE `status=queued` PROJECTION IS EVER PROBED, and that is a correctness
+    # rule, not a convenience: in the `pending`/`requested` legs ZERO job records is the
+    # normal state of a waiting run (measured 4/4 `total_count: 0`, one of them 14 days
+    # old), because a concurrency group can be held arbitrarily. Proving non-dispatch there
+    # would be a false proof by construction. The pending/requested projection is built
+    # below, separately, so their `never_dispatched` stays at its default (`None` ⇒ a
+    # WAITER) with no check to forget.
+    queued_runs = _project(queued)
+    feed_stamps = {run.id: run.updated_at for run in queued_runs}
+    proof_warning: str | None = None
+    proofs: dict[int, dict[str, Any]] = {}
+    if state_file:
+        proofs, proof_warning = _load_queue_proofs(state_file, repo, settle_now, feed_stamps)
+    eligible = [run for run in queued_runs if _never_dispatched_eligible(run, settle_now)]
+    # Honouring a persisted proof is gated by eligibility AGAIN, so a store written under
+    # an older evidence rule cannot outlive it: the loader already checks the run is still
+    # queued with an unchanged stamp, and this re-asks the other three conditions.
+    proven_ids: set[int] = {rid for rid in proofs if any(r.id == rid for r in eligible)}
+    suspects = sorted(
+        (run for run in eligible if run.id not in proven_ids),
+        key=_queue_probe_order_key,
+    )
+    # ⛔ TWO BOUNDS, AND THE WALL CLOCK IS THE ONE THAT HOLDS: the count keeps a pass
+    # useful when reads are fast (~0.2 s measured), and the deadline keeps it bounded when
+    # every read hangs. Using the injected `now` for the deadline would freeze it in tests
+    # that pass a fixed instant, so it is the real monotonic clock; the STAMPS it produces
+    # still come from `settle_now`, so one reading is judged against one instant.
+    queue_probe_started = time.monotonic()
+    probed_queue_ids: list[int] = []
+    #: Ids the probe REACHED but could not answer for. A probed run that read `> 0` is
+    #: MEASURED (a dispatched waiter) and belongs to neither abstention bucket — counting
+    #: it as "unread" would tell an operator to retry a reading that already answered.
+    unread_queue_ids: set[int] = set()
+    for run in suspects[:max_queue_probes]:
+        remaining = queue_probe_deadline - (time.monotonic() - queue_probe_started)
+        if remaining <= 0:
+            break
+        count = read_run_job_count(
+            repo, run.id, timeout=min(JOB_PROBE_TIMEOUT_SECONDS, remaining)
+        )
+        probed_queue_ids.append(run.id)
+        if count is None:
+            unread_queue_ids.add(run.id)
+        if count == 0:
+            proofs[run.id] = {
+                "run_id": run.id,
+                "never_dispatched": True,
+                "proved_at": settle_now.timestamp(),
+                "updated_at": run.updated_at,
+            }
+            proven_ids.add(run.id)
+    probed_queue = set(probed_queue_ids)
+    # The two abstentions have opposite remedies (raise the budget / ``-deadline`` vs retry
+    # the reading), so they are split exactly as `pr_running_unmeasured` is (#12037 round
+    # 13): a disjunction is not a diagnosis. A suspect that was probed and read `> 0` is
+    # MEASURED (a dispatched waiter), so it belongs to neither bucket.
+    nd_unprobed = sum(1 for run in suspects if run.id not in probed_queue)
+    nd_unread = sum(1 for run in suspects if run.id in unread_queue_ids)
+    if state_file:
+        save_warning = _save_queue_proofs(state_file, repo, proofs)
+        proof_warning = proof_warning or save_warning
+    queued_runs = [
+        replace(run, never_dispatched=True) if run.id in proven_ids else run
+        for run in queued_runs
+    ]
     return classify_queue(
-        _project(queued),
+        queued_runs,
         running,
         now,
         min_dominant_queued=min_dominant_queued,
@@ -2433,6 +3121,19 @@ def read_health(
         # The split behind `pr_running_unmeasured`, so the alert can name ONE remedy.
         unmeasured_unprobed=unmeasured_unprobed,
         unmeasured_unread=unmeasured_unread,
+        # ⛔ `bool(probed_queue_ids)` IS THE FACT THAT A PROBE PASS RAN, exactly as
+        # `probe_attempted` is for the census: without it `classify_queue` cannot tell
+        # "this caller never probes" (every pre-#13825 caller, and every hand-built
+        # fixture) from "a pass ran and the budget/deadline starved these runs", and it
+        # would print an abstention token on every legacy reading.
+        # ⛔ `bool(suspects)`, NOT `bool(probed_queue_ids)`: a pass whose deadline was already
+        # spent probed NOTHING and must still report the abstention — otherwise "asked and
+        # starved" renders exactly like "never asked", which is the asymmetry this module
+        # refuses everywhere else.
+        queue_probe_attempted=bool(suspects),
+        never_dispatched_unprobed=nd_unprobed,
+        never_dispatched_unread=nd_unread,
+        proof_warning=proof_warning,
     )
 
 
@@ -2512,6 +3213,37 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
+    parser.add_argument(
+        "--max-queue-probes",
+        type=int,
+        default=DEFAULT_MAX_QUEUE_PROBES,
+        help=(
+            "how many PR-event QUEUED runs one reading may probe at job level to prove "
+            "they were never dispatched (#13825; default see DEFAULT_MAX_QUEUE_PROBES). "
+            "An unprobed run counts as WAITING and is reported in "
+            "pr_never_dispatched_unprobed"
+        ),
+    )
+    parser.add_argument(
+        "--queue-probe-deadline",
+        type=float,
+        default=QUEUE_PROBE_DEADLINE_SECONDS,
+        help=(
+            "wall-clock cap in seconds on the queued probe phase of one reading (default "
+            "see QUEUE_PROBE_DEADLINE_SECONDS) — the bound that keeps the job's own "
+            "timeout from killing the reading"
+        ),
+    )
+    parser.add_argument(
+        "--state-file",
+        default=os.environ.get("CI_QUEUE_HEALTH_STATE") or "",
+        help=(
+            "where to persist proved never-dispatched run ids across passes (default "
+            "$CI_QUEUE_HEALTH_STATE, else empty = no persistence). The proof is a "
+            "lower bound either way; without a store every pass re-probes within the "
+            "budget and simply proves fewer runs"
+        ),
+    )
     return parser
 
 
@@ -2525,6 +3257,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "max_pages": args.max_pages,
         "max_pr_wait_seconds": args.max_pr_wait_seconds,
         "max_job_probes": args.max_job_probes,
+        "max_queue_probes": args.max_queue_probes,
+        "queue_probe_deadline": args.queue_probe_deadline,
+        "state_file": args.state_file or None,
     }
     try:
         health = read_health(args.repo, **measure_kwargs)

@@ -1860,7 +1860,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
 
     `docs/ops/ci-wall-clock.md` §1 line 50 (54 `python-ci` runs) measures the wait for a
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
-    this floor defers to is `tools/ci_queue_health.py:354`
+    this floor defers to is `tools/ci_queue_health.py:368`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
     and `ci-wall-clock.md` §6 lines 470-472 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal
@@ -4280,3 +4280,68 @@ def test_the_credential_remedy_prints_under_json_too(monkeypatch, capsys, tmp_pa
         "exit 1 means 'a user credential is needed'; without this line the caller "
         "sees only a non-zero exit")
     assert "credential that can trigger events" not in captured.out
+
+
+# ── #13825: the exclusion must not re-create the #10641 deadlock ─────────────
+
+
+def test_the_never_dispatched_vocabulary_matches_the_queue_tool():
+    """The token is duplicated here (the queue tool is an OPTIONAL import) and PINNED.
+
+    A drift between the two would make `queue_congestion_apart_from_measured` answer
+    `None` for every reading — fail-closed, so nothing unsafe, but the deadlock the
+    exemption exists to break would come back silently. This arm is what prevents it.
+    """
+    from tools import ci_queue_health as Q
+
+    assert R._QUEUE_NEVER_DISPATCHED_TOKEN == Q.PR_NEVER_DISPATCHED
+
+
+def test_R16_an_all_never_dispatched_queue_still_lets_the_zero_job_repair_fire(
+        monkeypatch, capsys, tmp_path):
+    """⛔ THE ROUTE ROUND 3 FOUND, END TO END THROUGH `main()` (#13825).
+
+    Before this change the reading is `PR-STARVED` (the aged zero-job runs are the
+    witnesses), `congests_pr is True`, and the self-witness exemption at
+    `apart is False` fires — the repair runs. After the exclusion the SAME runs are
+    PROVED never dispatched, the reading is `PR-NEVER-DISPATCHED`, and `congests_pr` is
+    `None` (no repo-wide clearance from an exclusion) — so with a single measured-ness
+    value the exemption would stop firing, the refusal would be recorded, and `main()`
+    would escalate an unmeasured queue carrying a refusal to exit 1 EVERY window while
+    the required check can never be produced. That is the alarm-fatigue class
+    `ci-check-repair-red-surface.md` §Fact 2 declares unsound.
+
+    `queue_congestion_apart_from_measured` is the second measured-ness that keeps the
+    per-run answer live. Mutation: drop the `or queue_congestion_apart_from_measured is
+    True` from the exemption (or the `and queue_apart_from_measured is not True` from the
+    escalation) — this reds on `rerun == []` and/or exit 1.
+    """
+    from tools import ci_queue_health as Q
+
+    target = 41480218593
+    dead = [Q.QueuedRun(id=target, name="Python CI", event="pull_request",
+                        created_at="2026-10-05T00:00:00Z", run_attempt=1,
+                        run_started_at="", updated_at="2026-10-05T00:00:00Z",
+                        never_dispatched=True, attempt_reported=True)]
+    reading = Q.classify_queue(dead, [], None)
+    assert reading.verdict == Q.PR_NEVER_DISPATCHED, reading.reasons
+    assert reading.congests_pr is None, "no repo-wide clearance from an exclusion"
+    assert reading.congests_pr_apart_from(target, also_repairable=frozenset({target})) is False
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: reading)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [
+        aged_run(target, jobs=0, age_s=5700.0, path="ci.yml", name="CI")])
+    monkeypatch.setattr(R, "_cancel", lambda repo, run: "cancelled")
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: "rerun")
+
+    code = R.main(["--repo", "o/r", "--no-live", "--apply", "--json",
+                   "--record", str(_flood_record(tmp_path))])
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert code == 0, (
+        "a per-run exemption that WAS measured must not escalate: the queue is not "
+        f"unmeasured, it is empty of live waiters. summary={summary}")
+    assert summary["prs"][0]["rerun"] != [], "the dead run's repair must still fire"
+    assert summary["repair_refused"] == 0

@@ -1285,6 +1285,27 @@ def test_pending_pr_runs_are_part_of_the_WAIT_POPULATION():
 
     with_leg = classify(young_queued, in_progress=serving, pending=old_pending)
     assert with_leg.pr_pending == 12, "the leg is COUNTED, not silently dropped"
+    # ⛔ AND THE READING MUST NAME WHICH LEG OWNS THE WITNESS (#13825). The
+    # never-dispatched exclusion is QUEUED-leg only — on the pending leg zero job
+    # records is not a proof — so after the exclusion an operator still meets a
+    # 14-day `oldest` and cannot tell "the fix did not work" from "a pending run is
+    # now the witness". Measured 2026-11-26: queued PR runs 157 -> 90, `oldest`
+    # unchanged at 1 218 214s, witness = ONE pending `Python CI` run.
+    joined = "\n".join(with_leg.reasons)
+    assert "the witness is a 'pending' leg run" in joined, joined
+    assert "is not a proof" in joined, (
+        "the pending leg's residue must say WHY it is still counted as waiting, or "
+        "the number reads as an unexplained backlog")
+
+    # The queued-leg witness says the opposite thing: this run WAS read and not
+    # proved, which is a different complaint (a probe that did not answer).
+    queued_witness = classify(starving_pr_runs(30, age_seconds=9000),
+                              in_progress=serving_pr_runs(1))
+    assert queued_witness.verdict == Q.PR_BACKLOGGED
+    queued_joined = "\n".join(queued_witness.reasons)
+    assert "the witness is a 'queued' leg run" in queued_joined, queued_joined
+    assert "NOT proved never dispatched" in queued_joined
+
     assert with_leg.verdict == Q.PR_BACKLOGGED, (
         "four hours of pending PR wait is a backlog, and it is the wait the budget "
         "applies to")
@@ -4707,3 +4728,481 @@ def test_a_fully_measured_census_keeps_its_line_byte_identical():
     health = classify(queued, in_progress=runs, probe_attempted=True)
     assert health.pr_running_unmeasured == 0
     assert "unmeasured=" not in health.state_line, health.state_line
+
+
+# ── #13825: a never-dispatched queued run is not a waiter ────────────────────
+#
+# The exclusion is the one change in this module that can SILENCE an alarm instead of
+# manufacturing one, so each row of the plan's Review Scope Contract gets an arm that
+# goes red when the guarded branch is deleted. The arms are named for the risk they
+# cover (`R1`, `R2`, …) so a mutation row can cite them.
+
+QUEUED = "queued"
+
+
+def nd_run(rid, *, age_seconds=14 * 86400, name="Python CI", event="pull_request",
+           attempt=1, attempt_reported=True, updated_at=None, never_dispatched=None,
+           has_live_job=None):
+    """A queued run shaped like the #13825 population: old, attempt 1, unmoved stamp."""
+    stamp = (NOW - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return Q.QueuedRun(
+        id=rid, name=name, event=event, created_at=stamp, run_attempt=attempt,
+        run_started_at="", updated_at=(stamp if updated_at is None else updated_at),
+        has_live_job=has_live_job, never_dispatched=never_dispatched,
+        attempt_reported=attempt_reported,
+    )
+
+
+def test_R1_a_proved_never_dispatched_run_is_NOT_a_waiter():
+    """The defect itself: a 14-day zero-job run must not witness PR-BACKLOGGED.
+
+    Mutation: delete `and run.never_dispatched is not True` from the `wait_runs` join and
+    the verdict returns to PR-BACKLOGGED with `oldest` back at 14 days — red.
+    """
+    zombie = nd_run(1, never_dispatched=True)
+    live = nd_run(2, age_seconds=600, never_dispatched=None)
+    health = classify([zombie, live], in_progress=starving_pr_runs(1))
+    assert health.verdict != Q.PR_BACKLOGGED
+    assert health.oldest_pr_queued_age_seconds == pytest.approx(600.0)
+    assert health.pr_never_dispatched == 1
+    assert health.never_dispatched_ids == (1,)
+    assert health.pr_queued == 2, "pr_queued stays FEED TRUTH — see R5"
+
+
+def test_R1_an_UNPROVEN_run_is_always_a_waiter():
+    """`None` is the fail-closed value, and it is the dataclass default.
+
+    Mutation: make the exclusion `is not False` (i.e. treat `None` as excluded) — the
+    zombie stays a waiter but every UNMEASURED run disappears from the population and
+    this arm reds on `oldest`.
+    """
+    for value in (None, False):
+        health = classify([nd_run(1, never_dispatched=value)], in_progress=[])
+        assert health.pr_never_dispatched == 0
+        assert health.oldest_pr_queued_age_seconds == pytest.approx(14 * 86400)
+
+
+def test_R2_a_run_inside_the_dispatch_window_is_never_proved():
+    """A 74 s-old run answering `total_count: 0` is NOT evidence — it is a queue wait.
+
+    ⛔ THIS IS THE ARM THE FIRST DESIGN LACKED. A 300 s floor admitted it; the measured
+    created→first-job-start distribution is p50 29.9 min, so the floor is 5 400 s.
+    Mutation: lower `NEVER_DISPATCHED_MIN_AGE_SECONDS` to 300 and this reds.
+    """
+    young = nd_run(1, age_seconds=74)
+    assert not Q._never_dispatched_eligible(young, NOW)
+    # ⛔ AND A RUN BETWEEN THE TWO CANDIDATE FLOORS, or lowering 5 400 -> 300 leaves this
+    # arm GREEN (measured: it passed with the floor mutated to `JOB_SETTLE_SECONDS`). A
+    # 16-minute-old queued run is well inside the measured p50 (29.9 min) queue wait.
+    for seconds in (1_000, 4_000):
+        mid = nd_run(10 + seconds, age_seconds=seconds)
+        assert not Q._never_dispatched_eligible(mid, NOW), seconds
+    old = nd_run(2, age_seconds=Q.NEVER_DISPATCHED_MIN_AGE_SECONDS + 1)
+    assert Q._never_dispatched_eligible(old, NOW)
+
+
+def test_R2_the_floor_is_the_REPAIR_tools_own_constant():
+    """Two instruments must not answer one question differently.
+
+    Mutation: change either constant — red. (The values are independent declarations
+    because `ci_queue_health` must not import the repair tool; the pin is what keeps them
+    honest.)
+    """
+    assert Q.NEVER_DISPATCHED_MIN_AGE_SECONDS == R.ZERO_JOB_MIN_AGE_S
+
+
+def test_R2_a_pending_leg_zero_job_run_is_never_proved_even_when_ancient():
+    """⛔ THE LEG IS PART OF THE PROOF, NOT A DETAIL (#13825 review round 3).
+
+    In the `pending`/`requested` legs ZERO job records is the NORMAL state of a waiting
+    run — a concurrency group can be held arbitrarily (measured 4/4 pending runs read
+    `total_count: 0`, one of them 14 days old). Proving non-dispatch there would be a
+    false proof by construction, so the probe is only ever pointed at the `queued`
+    projection and a pending run's field stays at its default.
+
+    Mutation: pass `_project(pending) + _project(requested)` through the prober too —
+    red (the pending run would be proved).
+    """
+    gh_calls = []
+
+    def fake_read_runs(repo, status, max_pages=5):
+        if status == "pending":
+            return ([{"id": 77, "name": "Python CI", "event": "pull_request",
+                      "created_at": "2026-10-05T03:00:00Z",
+                      "updated_at": "2026-10-05T03:00:00Z", "run_attempt": 1}], False)
+        return [], False
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(Q, "read_runs", fake_read_runs)
+        monkeypatch.setattr(Q, "read_run_job_count",
+                            lambda repo, rid, timeout=None: (gh_calls.append(rid), 0)[1])
+        health = Q.read_health("o/r", NOW, state_file=None)
+    finally:
+        monkeypatch.undo()
+    assert gh_calls == [], "the pending leg must never be probed"
+    assert health.pr_never_dispatched == 0
+    assert health.oldest_pr_queued_age_seconds == pytest.approx((NOW - datetime(
+        2026, 10, 5, 3, 0, 0, tzinfo=UTC)).total_seconds())
+
+
+def test_R11_a_queued_rerun_is_never_proved():
+    """`filter=latest` scopes jobs to the LATEST attempt, so an attempt-2 run reads 0.
+
+    Mutation: drop the `run_attempt != 1` guard — red.
+    """
+    assert not Q._never_dispatched_eligible(nd_run(1, attempt=2), NOW)
+
+
+def test_R11_an_unreported_attempt_is_never_proved():
+    """`_project` coerces a missing/garbled `run_attempt` to 1 — unusable as evidence.
+
+    ⛔ WITHOUT THIS ARM THE GUARD IS UNTESTED (round 3): a fixture that already carries
+    `run_attempt: 2` passes through the earlier arm and never exercises the raw-payload
+    gate. Mutation: drop `attempt_reported` from the predicate — red.
+    """
+    for bad in ({}, {"run_attempt": "2"}, {"run_attempt": True}, {"run_attempt": 0}):
+        row = {"id": 9, "name": "Python CI", "event": "pull_request",
+               "created_at": "2026-10-01T00:00:00Z",
+               "updated_at": "2026-10-01T00:00:00Z", **bad}
+        projected = Q._project([row])[0]
+        assert not Q._never_dispatched_eligible(projected, NOW), bad
+    ok = Q._project([{"id": 9, "name": "Python CI", "event": "pull_request",
+                      "created_at": "2026-10-01T00:00:00Z",
+                      "updated_at": "2026-10-01T00:00:00Z", "run_attempt": 1}])[0]
+    assert ok.attempt_reported is True
+    assert Q._never_dispatched_eligible(ok, NOW)
+
+
+def test_R11_a_moved_stamp_is_never_proved():
+    """A re-run moves the run object; a frozen first attempt does not. Mutation: drop the
+    equality guard — red."""
+    moved = nd_run(1, updated_at=None)
+    object.__setattr__(moved, "updated_at",
+                       (NOW - timedelta(seconds=86400)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    assert not Q._never_dispatched_eligible(moved, NOW)
+
+
+def test_R9_R10_the_job_count_reader_abstains_on_every_unusable_payload(monkeypatch):
+    """`0` must come from an INT `total_count` and nothing else.
+
+    Mutation: `isinstance(total, int)` instead of `type(total) is int` — the `true` case
+    reads as 1, i.e. as PROOF OF DISPATCH, and reds.
+    """
+    cases = [
+        ({"total_count": True}, None),          # bool is not a count
+        ({"total_count": "0"}, None),           # a string is not a count
+        ({"total_count": None}, None),          # absent
+        ({}, None),
+        ({"total_count": -1}, None),
+        ({"total_count": 0, "jobs": [{"id": 1}]}, None),   # self-contradicting
+        ({"total_count": 0, "jobs": []}, 0),
+        ({"total_count": 6, "jobs": [{"id": 1}]}, 6),
+        (["not", "a", "mapping"], None),
+    ]
+    for payload, expected in cases:
+        monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, _p=payload: _p)
+        assert Q.read_run_job_count("o/r", 1) == expected, payload
+
+
+def test_R9_R10_a_failed_probe_read_abstains_rather_than_reading_zero(monkeypatch):
+    def boom(args, timeout=None):
+        raise Q.MeasureError("500")
+
+    monkeypatch.setattr(Q, "gh_json", boom)
+    assert Q.read_run_job_count("o/r", 1) is None
+
+
+def test_R8_the_budget_and_the_deadline_both_bound_the_probe_pass(monkeypatch):
+    """Count AND wall clock: the count alone overruns when reads hang, the deadline alone
+    wastes a pass when they are fast. Mutation: drop the `remaining <= 0` break — with a
+    spent deadline every suspect is probed and this reds."""
+    suspects = [{"id": i, "name": "Python CI", "event": "pull_request",
+                 "created_at": "2026-10-01T00:00:00Z",
+                 "updated_at": "2026-10-01T00:00:00Z", "run_attempt": 1}
+                for i in range(1, 6)]
+
+    def fake_read_runs(repo, status, max_pages=5):
+        return (suspects if status == "queued" else []), False
+
+    probed = []
+
+    def fake_count(repo, rid, timeout=None):
+        probed.append((rid, timeout))
+        return 1  # dispatched: stays a waiter
+
+    monkeypatch.setattr(Q, "read_runs", fake_read_runs)
+    monkeypatch.setattr(Q, "read_run_job_count", fake_count)
+    health = Q.read_health("o/r", NOW, state_file=None, max_queue_probes=3,
+                           queue_probe_deadline=60)
+    assert [rid for rid, _ in probed] == [1, 2, 3], "the COUNT bounds it"
+    assert all(t is not None and t <= 15 for _, t in probed)
+    assert health.pr_never_dispatched == 0
+    assert health.pr_never_dispatched_unprobed == 2
+    assert health.pr_never_dispatched_unread == 0
+
+
+def test_R8_an_exhausted_deadline_probes_nothing(monkeypatch):
+    suspects = [{"id": 1, "name": "Python CI", "event": "pull_request",
+                 "created_at": "2026-10-01T00:00:00Z",
+                 "updated_at": "2026-10-01T00:00:00Z", "run_attempt": 1}]
+    monkeypatch.setattr(
+        Q, "read_runs",
+        lambda repo, status, max_pages=5: ((suspects if status == "queued" else []), False))
+    probed = []
+    monkeypatch.setattr(Q, "read_run_job_count",
+                        lambda repo, rid, timeout=None: (probed.append(rid), 0)[1])
+    health = Q.read_health("o/r", NOW, state_file=None, queue_probe_deadline=1e-9)
+    assert probed == []
+    assert health.pr_never_dispatched == 0, "nothing proved ⇒ still a waiter"
+    assert health.pr_never_dispatched_unprobed == 1
+
+
+def test_R8_the_budgets_are_validated_before_any_read():
+    """A `0` budget is the pre-#13825 mode and must be a LOUD argument error, not a silent
+    revert (the discipline `--max-job-probes` already follows)."""
+    with pytest.raises(Q.MeasureError):
+        Q.read_health("o/r", max_queue_probes=0)
+    with pytest.raises(Q.MeasureError):
+        Q.read_health("o/r", queue_probe_deadline=0)
+
+
+def test_R2_a_persisted_proof_is_honoured_then_EXPIRES(monkeypatch, tmp_path):
+    """The TTL is a PERSISTENCE bound: a proof must be re-observed. Mutation: drop the TTL
+    test — the second pass keeps the (now unattested) proof, and this reds."""
+    state = tmp_path / "proofs.json"
+    suspects = [{"id": 1, "name": "Python CI", "event": "pull_request",
+                 "created_at": "2026-10-01T00:00:00Z",
+                 "updated_at": "2026-10-01T00:00:00Z", "run_attempt": 1}]
+    monkeypatch.setattr(
+        Q, "read_runs",
+        lambda repo, status, max_pages=5: ((suspects if status == "queued" else []), False))
+    calls = []
+    monkeypatch.setattr(Q, "read_run_job_count",
+                        lambda repo, rid, timeout=None: (calls.append(rid), 0)[1])
+    first = Q.read_health("o/r", NOW, state_file=str(state))
+    assert first.pr_never_dispatched == 1
+    assert calls == [1]
+    # A second pass inside the TTL must NOT re-probe: the proof is honoured.
+    second = Q.read_health("o/r", NOW + timedelta(seconds=60), state_file=str(state))
+    assert second.pr_never_dispatched == 1
+    assert calls == [1], "a fresh proof is honoured, not re-probed"
+    # Past the TTL it must be re-observed.
+    calls.clear()
+    monkeypatch.setattr(Q, "read_run_job_count",
+                        lambda repo, rid, timeout=None: (calls.append(rid), None)[1])
+    late = Q.read_health("o/r", NOW + timedelta(
+        seconds=Q.NEVER_DISPATCHED_REPROOF_SECONDS + 60), state_file=str(state))
+    assert calls == [1], "an expired proof must be re-probed"
+    assert late.pr_never_dispatched == 0, "and an abstaining re-probe drops it"
+
+
+def test_R2_a_moved_stamp_invalidates_a_persisted_proof(monkeypatch, tmp_path):
+    state = tmp_path / "proofs.json"
+    row = {"id": 1, "name": "Python CI", "event": "pull_request",
+           "created_at": "2026-10-01T00:00:00Z",
+           "updated_at": "2026-10-01T00:00:00Z", "run_attempt": 1}
+    monkeypatch.setattr(Q, "read_runs",
+                        lambda repo, status, max_pages=5: (([row] if status == "queued" else []), False))
+    monkeypatch.setattr(Q, "read_run_job_count", lambda repo, rid, timeout=None: 0)
+    assert Q.read_health("o/r", NOW, state_file=str(state)).pr_never_dispatched == 1
+    # The run's stamp MOVES (compared with the stored one) ⇒ the proof may not be honoured.
+    moved = dict(row, updated_at="2026-10-01T00:00:03Z")
+    monkeypatch.setattr(Q, "read_runs",
+                        lambda repo, status, max_pages=5: (([moved] if status == "queued" else []), False))
+    monkeypatch.setattr(Q, "read_run_job_count", lambda repo, rid, timeout=None: None)
+    late = Q.read_health("o/r", NOW + timedelta(seconds=60), state_file=str(state))
+    assert late.pr_never_dispatched == 0
+
+
+@pytest.mark.parametrize("payload", [
+    "not json at all",
+    "[]",
+    '{"version": 2, "repo": "o/r", "proofs": []}',
+    '{"version": 1, "repo": "other/repo", "proofs": []}',
+    '{"version": 1, "repo": "o/r", "proofs": "nope"}',
+    '{"version": 1, "repo": "o/r", "proofs": [1, 2, 3]}',
+])
+def test_R3_R12_an_untrustworthy_store_is_EMPTY_and_warned_never_fatal(tmp_path, payload):
+    """Mutation: let the loader raise (or trust a foreign/other-version store) — red."""
+    state = tmp_path / "proofs.json"
+    state.write_text(payload)
+    proofs, warning = Q._load_queue_proofs(str(state), "o/r", NOW, {1: "x"})
+    assert proofs == {}
+    assert warning, "an unreadable store must SAY so, not silently read as empty"
+    assert warning in Q.classify_queue([], [], NOW, proof_warning=warning).reasons
+
+
+@pytest.mark.parametrize("record", [
+    # ⛔ THE STAMP HERE MUST PARSE, or the stamp check drops these and the identity guard
+    # is never exercised (measured: M13 "identity -> truthiness" survived an earlier
+    # version of this arm, because "x" failed `_parse_time` first).
+    {"run_id": 1, "never_dispatched": 1, "proved_at": 0,
+     "updated_at": "2026-10-01T00:00:00Z"},   # truthy, not True
+    {"run_id": 1, "never_dispatched": "true", "proved_at": 0,
+     "updated_at": "2026-10-01T00:00:00Z"},
+    {"run_id": True, "never_dispatched": True, "proved_at": 0, "updated_at": "x"},
+    {"run_id": 1, "never_dispatched": True, "proved_at": "0", "updated_at": "x"},
+    {"run_id": 1, "never_dispatched": True, "proved_at": 0, "updated_at": 5},
+    {"run_id": 1, "never_dispatched": True, "proved_at": 0, "updated_at": ""},
+])
+def test_R12_a_record_is_honoured_only_on_IDENTITY_and_typed_stamps(tmp_path, record):
+    """A truthy-but-not-`True` record is how a schema drift becomes an exclusion.
+
+    Mutation: `if record.get("never_dispatched"):` — the `1` and `"true"` rows red.
+    Mutation: call `_parse_time` before the `type(...) is str` check — the `5` row raises
+    `AttributeError` and this reds with an exception instead of a drop.
+    """
+    state = tmp_path / "proofs.json"
+    state.write_text(json.dumps({"version": 1, "repo": "o/r", "proofs": [record]}))
+    proofs, warning = Q._load_queue_proofs(
+        str(state), "o/r", NOW, {1: "2026-10-01T00:00:00Z"})
+    assert proofs == {}
+    assert warning and "could not be honoured" in warning, (
+        "an invalid record is REPORTED — a store whose records are all unusable is corrupt,"
+        " and silently reading it as empty hides that")
+
+
+def test_R12_a_FUTURE_dated_proof_is_rejected(tmp_path):
+    """`now - proved_at < TTL` is satisfied FOR EVER by a future stamp — the rule the
+    skill-enforcer's `READ_PERSIST_FUTURE_SKEW_MS` exists for. Mutation: drop the
+    `age < 0` test — red (the record is honoured)."""
+    state = tmp_path / "proofs.json"
+    stamp = "2026-10-01T00:00:00Z"
+    state.write_text(json.dumps({"version": 1, "repo": "o/r", "proofs": [
+        {"run_id": 1, "never_dispatched": True,
+         "proved_at": NOW.timestamp() + 3600, "updated_at": stamp}]}))
+    proofs, _ = Q._load_queue_proofs(str(state), "o/r", NOW, {1: stamp})
+    assert proofs == {}
+
+
+def test_R7_a_proof_for_a_run_that_LEFT_the_feed_is_pruned_on_load(tmp_path):
+    """Mutation: drop the `feed_stamps.get(run_id) != proven` test — red."""
+    state = tmp_path / "proofs.json"
+    stamp = "2026-10-01T00:00:00Z"
+    state.write_text(json.dumps({"version": 1, "repo": "o/r", "proofs": [
+        {"run_id": 1, "never_dispatched": True, "proved_at": NOW.timestamp(),
+         "updated_at": stamp}]}))
+    assert Q._load_queue_proofs(str(state), "o/r", NOW, {1: stamp})[0] != {}
+    assert Q._load_queue_proofs(str(state), "o/r", NOW, {})[0] == {}
+
+
+def test_R6_a_zombie_free_reading_is_byte_identical_and_gains_no_keys():
+    """Every pre-existing reading must render and serialise exactly as before, and the new
+    keys are ADDITIVE. Mutation: emit the token unconditionally — the state line reds."""
+    health = classify(flood_queued(12) + starving_pr_runs(9))
+    assert health.state_line == "CI: FLOOD(finding-provenance, queued=21, pr_running=0)"
+    payload = health.to_dict()
+    for key in ("pr_never_dispatched", "never_dispatched_ids",
+                "pr_never_dispatched_unprobed", "pr_never_dispatched_unread",
+                "global_max_live_queued"):
+        assert key in payload
+    assert payload["pr_never_dispatched"] == 0
+    assert payload["pr_never_dispatched_unprobed"] is None, (
+        "no probe pass ⇒ NULL, not 0: 'never asked' is not 'asked and starved'")
+
+
+def test_R5_the_exclusion_moves_every_derived_fact_TOGETHER():
+    """`oldest`, the witnesses, the ids and the verdict all come from ONE join point.
+
+    Mutation: exclude the zombie from `pr_never_dispatched_ids` but not from `wait_runs`
+    (or vice versa) — the `oldest` assertion reds.
+    """
+    zombie = nd_run(1, never_dispatched=True)
+    live = nd_run(2, age_seconds=7000, never_dispatched=None)
+    health = classify([zombie, live], in_progress=starving_pr_runs(1))
+    assert health.never_dispatched_ids == (1,)
+    assert health.oldest_pr_queued_age_seconds == pytest.approx(7000.0)
+    assert health.wait_witness_ids == (2,)
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.pr_queued == 2, "feed truth"
+    assert health.queued_total == 2
+
+
+def test_R13_a_residue_dominated_queue_can_still_name_a_FLOOD():
+    """`global_max` must not be pinned by the residue.
+
+    Mutation: tally `global_max` over ALL queued runs (the pre-#13825 behaviour) — the
+    offender can then never satisfy `offender_queued >= global_max` and this reds.
+
+    ⛔ AND THE CONVERSE IS THE GUARD: with no live non-PR offender, no FLOOD can be
+    manufactured at all (`offender is None` ⇒ `offender_queued == 0`).
+    """
+    residue = [nd_run(100 + i, never_dispatched=True) for i in range(20)]
+    offender = [nd_run(200 + i, name="finding-provenance", event="issue_comment",
+                       age_seconds=600, never_dispatched=None) for i in range(8)]
+    health = classify(residue + offender + starving_pr_runs(3))
+    assert health.verdict == Q.FLOOD
+    # FEED truth: the residue and the live PR waiters share a workflow name, so the largest
+    # single name in the FEED is 23 — while only 3 of those runs are live.
+    assert health.global_max_queued == 23, "feed truth: the residue IS the largest share"
+    assert health.global_max_live_queued == 8
+    only_residue = classify(residue + starving_pr_runs(3))
+    assert only_residue.verdict != Q.FLOOD
+
+
+def test_R17_an_all_never_dispatched_queue_is_not_OK_and_exits_0(capsys):
+    """`OK` is this module's only healthy state; asserting it over dead runs is the false
+    PASS #13825 removes. Mutation: return `health(OK, ...)` in the residue branch — red."""
+    residue = [nd_run(100 + i, never_dispatched=True) for i in range(5)]
+    health = classify(residue)
+    assert health.verdict == Q.PR_NEVER_DISPATCHED
+    assert health.state_line.startswith("CI: PR-NEVER-DISPATCHED(")
+    assert "never_dispatched=5" in health.state_line
+    assert Q.EXIT_FOR[Q.PR_NEVER_DISPATCHED] == 0
+    assert health.starves_pr is False and health.delays_pr is False
+    assert health.congests_pr is None, "no repo-wide clearance from an exclusion"
+
+
+def test_R16_the_per_run_deadlock_breaker_still_answers_FALSE():
+    """The #10641 exemption must survive the exclusion — otherwise `ci_check_repair`
+    refuses the only repair that can clear a zero-job run and escalates to exit 1.
+
+    Mutation: drop the guarded branch in `congests_pr_apart_from` — this reds (None).
+    """
+    residue = [nd_run(100 + i, never_dispatched=True) for i in range(3)]
+    health = classify(residue)
+    assert health.congests_pr_apart_from(100, also_repairable=frozenset({101, 102})) is False
+    # …but a CUT leg keeps failing closed on the same shape.
+    cut = classify(residue, truncated=True)
+    assert cut.congests_pr_apart_from(100, also_repairable=frozenset({101, 102})) is None
+
+
+def test_R18_the_issue_population_reproduces_and_the_fix_clears_the_alarm():
+    """The issue's own numbers, pinned hermetically (not read live, so it cannot rot):
+    `oldest` 1 214 984 s for the zombie, 15 622 s for the live leg, budget 5 400 s.
+
+    Before: PR-BACKLOGGED with `oldest` at 14 days. After: the zombie is excluded and the
+    alarm follows the LIVE population — which is still past the budget here (15 622 s),
+    so the state survives and only its witness changes.
+    """
+    zombie = nd_run(1, age_seconds=1214984, never_dispatched=True)
+    live = nd_run(2, age_seconds=15622, never_dispatched=None)
+    health = classify([zombie, live], in_progress=starving_pr_runs(1),
+                      max_pr_wait_seconds=5400)
+    assert health.verdict == Q.PR_BACKLOGGED
+    assert health.oldest_pr_queued_age_seconds == pytest.approx(15622.0)
+    # The measured live population today is UNDER the budget, which is why the fixture
+    # above uses the issue's own 15 622 s to keep the alarm reachable and the exclusion
+    # visible in one reading.
+    under = classify([zombie, nd_run(3, age_seconds=4886)], in_progress=starving_pr_runs(1),
+                     max_pr_wait_seconds=5400)
+    assert under.verdict != Q.PR_BACKLOGGED
+    assert under.oldest_pr_queued_age_seconds == pytest.approx(4886.0)
+
+
+def test_R19_an_eligible_run_reads_ZERO_and_is_then_excluded_end_to_end(monkeypatch):
+    """The full path: eligible + `total_count == 0` ⇒ proved ⇒ excluded, in one reading.
+
+    Mutation: skip the `replace(..., never_dispatched=True)` application — red."""
+    old = {"id": 1, "name": "Python CI", "event": "pull_request",
+           "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z",
+           "run_attempt": 1}
+    monkeypatch.setattr(Q, "read_runs",
+                        lambda repo, status, max_pages=5: (([old] if status == "queued" else []), False))
+    monkeypatch.setattr(Q, "read_run_job_count", lambda repo, rid, timeout=None: 0)
+    health = Q.read_health("o/r", NOW, state_file=None)
+    assert health.pr_never_dispatched == 1
+    assert health.never_dispatched_ids == (1,)
+    assert health.verdict == Q.PR_NEVER_DISPATCHED
+    assert health.pr_queued == 1, "the run is STILL counted as queued (feed truth)"
