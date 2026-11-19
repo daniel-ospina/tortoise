@@ -6589,7 +6589,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
         # further down), so the span moves by a uniform +66, and then by a further +18 when
-        # `#13841` inserted its D5 formatting guard — a UNIFORM +84 in total — and is
+        # `819a473cd4` (`#13841`) inserted the `Embedder check (#13674)` docstring paragraph
+        # above `org_info` — NOT a "D5 formatting guard", and NOT `#13845` (`8bdd34c631`),
+        # which touches no `hosted_api.py` line at all — a UNIFORM +84 in total — and is
         # `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
@@ -16813,6 +16815,27 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "this head. Both ends are pinned here because the range's TARGET was once "
             "typed as the base's own value while its SOURCE was already re-derived "
             "(#13750 review, cycle 3)")
+    # ⛔ THE +18 IS ATTRIBUTED TO THE COMMIT THAT INSERTED IT, AND TO WHAT IT INSERTED
+    # (#13878 review, F2 — MEASURED). The +84 is `c3309ec656`'s +66 plus ONE further +18, and
+    # the prose credited that +18 to `#13845` (`8bdd34c631`) as "its D5 formatting guard".
+    # Measured: `git show --numstat 8bdd34c631` touches `05-verify.md`, the pin file and
+    # `tests/test_docs_citation_refs.py`, and NOT `tortoise/hosted_api.py` — so it can move no
+    # line in the module the arithmetic is about; it RE-DERIVED the +66 in these documents.
+    # The 18 inserted lines are `819a473cd4`'s (`#13841`; `git diff --numstat 819a473cd4^
+    # 819a473cd4 -- tortoise/hosted_api.py` -> `18 0`): the `Embedder check (#13674)`
+    # docstring paragraph, which is why `point_count = await asyncio.to_thread(` reads
+    # `:15328` at `c3309ec656` and `:15346` from `819a473cd4` onward.
+    assert "819a473cd4" in text, (
+        "D5 no longer names `819a473cd4` (`#13841`), the commit whose 18 inserted `/health` "
+        "docstring lines the +84 is made of (#13878 review, F2). Unattributed, the +18 gets "
+        "credited to whatever commit is nearest — which is how it was credited to `#13845`.")
+    assert "inserted its D5 formatting guard" not in text, (
+        "D5 describes the +18 as a commit that 'inserted its D5 formatting guard'. No commit "
+        "did that: the 18 lines are `819a473cd4`'s `Embedder check (#13674)` docstring "
+        "paragraph (`git diff --numstat 819a473cd4^ 819a473cd4 -- tortoise/hosted_api.py` -> "
+        "`18 0`), and a doc-only commit cannot move a line in that module — which is why "
+        "`#13845` (`8bdd34c631`, three doc/test files, no `hosted_api.py`) is not the source "
+        "(#13878 review, F2). Name the commit and what it inserted.")
     assert "sdk.py:28718" in text, (
         "D5 no longer names `sdk.py:28718`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
