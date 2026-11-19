@@ -3178,9 +3178,11 @@ def test_the_reviewer_entry_point_names_every_fly_only_member():
     )
 
 
-#: The two violation LEADERS a `fly-only:` revert can meet, read from the
-#: CHECKER in the test below rather than trusted here: a renamed message must not
-#: leave the runbook quoting a state the gate no longer prints.
+#: The two violation LEADERS a `fly-only:` revert can meet. They are the SEARCH
+#: KEYS for the runbook's quotes, never the whole assertion: the test below also
+#: drives the real gate for each order and requires the quote to be a prefix of
+#: the message that run ACTUALLY prints (#13814 review P2-2 — a leader occurs many
+#: times in the checker, so a leader-only pin cannot see a renamed message).
 _FLY_ONLY_REMOVAL_REDS = ("UNDECLARED —", "STALE DECLARATION —")
 
 
@@ -3206,6 +3208,75 @@ def _embedder_warmup_runbook_section() -> str:
     return "\n".join(lines[heading:end])
 
 
+def _fly_only_removal_red_states() -> dict[str, str]:
+    """The EXACT violation the real gate prints for each half of a `fly-only:` revert.
+
+    Driven END-TO-END through `check-fly-secret-drift.py`, one fixture per order,
+    because a message is identified by more than its leader: `#13814` review P2-2
+    measured that reading only the LEADER out of the source cannot show what an
+    operator will see, and both leaders are non-unique in the checker (11x
+    `STALE DECLARATION —`, 2x `UNDECLARED —`), so renaming the leader of the exact
+    message the runbook quotes left the previous version of this guard GREEN.
+
+    The `UNDECLARED` fixture's manifest is literally named
+    `fly-managed-secrets.txt`, because that message quotes the file NAME and the
+    runbook quotes the message — a fixture with any other name would bind a
+    sentence an operator can never see.
+    """
+    name = "TORTOISE_EMBEDDER_WARMUP"
+    # Order 1: the declaration stands, the Fly secret is gone -> STALE DECLARATION.
+    declared_absent = _run(
+        _secrets_file(_ALL_DECLARED, "removal-declared-absent.json"),
+        manifest=_fly_only_manifest("removal-declared-absent.txt", f"{name}  fly-only:#13674\n"),
+    )
+    # Order 2: the declaration is gone, the Fly secret is still live -> UNDECLARED.
+    undeclared_manifest = Path(tempfile.mkdtemp(prefix="fly-secret-drift-undeclared-")) / (
+        "fly-managed-secrets.txt"
+    )
+    undeclared_manifest.write_text(_MANIFEST)
+    live_undeclared = _run(
+        _secrets_file([*_ALL_DECLARED, name], "removal-live-undeclared.json"),
+        manifest=undeclared_manifest,
+    )
+
+    emitted: dict[str, str] = {}
+    for proc, leader in (
+        (declared_absent, "STALE DECLARATION —"),
+        (live_undeclared, "UNDECLARED —"),
+    ):
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        line = next(
+            (
+                candidate.split("  - ", 1)[1]
+                for candidate in proc.stdout.splitlines()
+                if candidate.startswith("  - ")
+                and candidate.split("  - ", 1)[1].startswith(leader)
+                and name in candidate
+            ),
+            None,
+        )
+        assert line is not None, (
+            f"the gate printed no {leader!r} violation naming {name!r} — either its "
+            "message or its output shape moved, and this probe is stale. Update this "
+            f"probe and the runbook's removal guidance together:\n{proc.stdout}"
+        )
+        emitted[leader] = line
+    return emitted
+
+
+def _runbook_quoted_red_states(section: str) -> dict[str, str]:
+    """The verbatim violation text the runbook quotes, per half of the revert."""
+    quotes: dict[str, str] = {}
+    for line in section.splitlines():
+        for leader in _FLY_ONLY_REMOVAL_REDS:
+            if leader in quotes:
+                continue
+            match = re.search("`(" + re.escape(leader) + "[^`]*)`", line)
+            if match:
+                quotes[leader] = match.group(1)
+    return quotes
+
+
 def test_the_fly_only_removal_guidance_names_both_red_states():
     """Removing a `fly-only:` lever is RED in EITHER order, so the runbook must name both.
 
@@ -3216,25 +3287,32 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
     first — and the previous text named only the first, so the second order's
     failure read as "the revert broke something" (#13674, measured on the issue).
 
-    Both leaders are read from the CHECKER, so this cannot stay green while the
-    runbook quotes a state the gate no longer emits.
+    The runbook's quotes are bound to the gate's ACTUAL output, end-to-end, so this
+    cannot stay green while it quotes a sentence the gate no longer prints: the
+    quoted text must be a prefix of the message that run emits for that order.
+    (`#13814` review P2-2: the previous version read only the two LEADERS out of
+    the source, and both leaders occur many times there, so renaming the leader of
+    the exact quoted message — or rewording its body — left this guard green.)
     """
-    checker = (REPO_ROOT / ".github" / "scripts" / "check-fly-secret-drift.py").read_text()
-    for leader in _FLY_ONLY_REMOVAL_REDS:
-        assert leader in checker, (
-            f"{leader!r} is no longer a violation check-fly-secret-drift.py emits — update "
-            "this test and the runbook's removal guidance together"
-        )
-
     section = _embedder_warmup_runbook_section()
     # Non-vacuity: a section read that picked up the wrong region must not pass.
     assert "TORTOISE_EMBEDDER_WARMUP" in section, "the section reader found the wrong region"
-    missing = [leader for leader in _FLY_ONLY_REMOVAL_REDS if leader not in section]
+
+    quoted = _runbook_quoted_red_states(section)
+    missing = [leader for leader in _FLY_ONLY_REMOVAL_REDS if leader not in quoted]
     assert not missing, (
         "the runbook's `fly-only:` removal guidance names only some of the red states a "
         "revert can meet. A two-step revert is red in EITHER order, so naming one leaves "
         f"the other reading as a regression rather than as the expected interval: missing {missing}"
     )
+
+    emitted = _fly_only_removal_red_states()
+    for leader in _FLY_ONLY_REMOVAL_REDS:
+        assert emitted[leader].startswith(quoted[leader]), (
+            f"the runbook quotes a {leader!r} state the gate no longer prints. The runbook "
+            "is read by an operator mid-revert, so it must quote the message they will "
+            f"actually see.\n  quoted:   {quoted[leader]}\n  emitted:  {emitted[leader]}"
+        )
 
 
 def test_the_fly_column_guard_rejects_every_no_home_spelling(monkeypatch):
