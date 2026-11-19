@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "exit_code": null,
+  "heartbeat_at": 1795052917,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-P5b-1795052917-p3400249-52faaa43",
+  "lease_until": 1795060717,
+  "pid": 3400249,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795052917,
+  "state": "RUNNING",
+  "tag": "P5b",
+  "worktree": "/home/cmux/.worktrees/P5b"
+}
