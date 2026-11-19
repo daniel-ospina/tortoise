@@ -530,7 +530,7 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     `claims_empty` says which DIRECTION the answer asserts, and it is read from the HEAD of
     the answer — the head is advanced by stripping, UNTIL A WHOLE PASS CHANGES NOTHING,
     every leading negation (`not`/`never`/`n't`, each one inverting the direction — EXCEPT
-    the `not only` / `not just` idiom, below), every
+    the TWO idioms named below, `not only`/`not just` and `not nothing but`), every
     leading FILLER (`the`, `only`, `still`, `just`, `at least`, …) and every listed answer
     FORM — the WORD forms AND the punctuation ones (`is`, `->`, `→`, `=`, `:`), so a
     DOUBLED form (`prints contains …`, `prints -> …`, `prints is …`) is stripped too — and
@@ -552,12 +552,17 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     filler hidden behind another strip.
 
     So a head negation (`is NOT empty`, `never empty`, `isn't empty`) INVERTS the head
-    token's direction — with TWO exceptions, both because the negation is not the
-    claim's negation: `not only X` / `not just X` asserts that X is EXCEEDED (so the head's
-    own direction survives: `not only two paths` and `not only empty` are both MEMBERSHIP),
-    and `not nothing but X` is not the negation of a membership claim (`not nothing` =
-    something), so it keeps MEMBERSHIP too. `nothing but …` / `none other than …` are
-    MEMBERSHIP in their own right; `non-empty`/`nonempty` are MEMBERSHIP without needing the negation rule; and
+    token's direction — with TWO exceptions, and for ONE reason: in both, the negation is
+    not the claim's negation, so neither the inversion nor a bare-head reading applies.
+      • `not only X` / `not just X` asserts that X is EXCEEDED, so the reported direction is
+        MEMBERSHIP WHICHEVER direction the head token alone would give. `not only two paths`
+        and `not only empty` are both MEMBERSHIP — the second because the idiom OVERRIDES
+        the emptiness its bare head would have asserted, which is why the honest statement
+        is "always MEMBERSHIP", not "the head's direction survives".
+      • `not nothing but X` is not the negation of a membership claim (`not nothing` =
+        something), so it keeps MEMBERSHIP too.
+    `nothing but …` / `none other than …` are MEMBERSHIP in their own right;
+    `non-empty`/`nonempty` are MEMBERSHIP without needing the negation rule; and
     anything after the head token is context, not direction. A window whose head token is
     none of these (`is the command that answers it`, `is the command that prints the
     paths`) is not an answer and is skipped — refusing the document's own pointer to the
@@ -676,9 +681,11 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 elif negated and re.match(r"(?:only|just)\b", low):
                     # ⛔ `not only X` / `not just X` IS AN IDIOM, NOT A NEGATION (#13831
                     # review, round 5, P1). It asserts that X is EXCEEDED — the head is
-                    # asserted AND more — so the head's own direction survives: `not only
-                    # two paths` is MEMBERSHIP ("at least two") and `not only empty` is
-                    # MEMBERSHIP too ("more than empty"). Letting the generic inversion run
+                    # asserted AND more — so the answer is MEMBERSHIP WHICHEVER direction
+                    # the head token alone would give: `not only two paths` ("at least two")
+                    # and `not only empty` ("more than empty") are both MEMBERSHIP, the second
+                    # because the idiom OVERRIDES the emptiness its bare head would assert.
+                    # Letting the generic inversion run
                     # turned the first into EMPTINESS, i.e. a refuted membership claim read as
                     # emptiness and passing GREEN at the empty head this guard runs at — the
                     # fail-open direction, measured.
