@@ -67,6 +67,51 @@ drifted off the record (#10226 review, 2026-11-10) — and how one wave-1 destin
 from __future__ import annotations
 
 #: retired public method name -> the approved replacement to name in the failure.
+#: The #12901 FINAL-batch approving regions, quoted VERBATIM from
+#: `docs/product/beta-sdk-surface.md`'s "Discarded — and why" ledger, one cell per row the
+#: owner's ledger states once and this wave retires more than one name with. Same rule as
+#: the #11609 cells above: a group row is quoted once, never copied per name.
+_CREATE_ENTITY_GROUP_ROW = (
+    "| `create_subject`, `create_object`, `create_event`, `create_document`, "
+    "`create_point` | 5 | Collapsed into `create_entity(type=)`. The ontology models all "
+    "of them as entities. |"
+)
+_LINK_ENTITIES_GROUP_ROW = (
+    "| `create_operator`, `create_direct_edge`, `create_derivation`, "
+    "`link_source_to_entity` | 4 | → `link_entities`, which dispatches on the relation. |"
+)
+_DELETE_POINT_ROW = "| `delete_point`, `delete_point_wrapped` | 2 | → `delete_knowledge`. |"
+_UPDATE_POINT_ROW = "| `update_point`, `update_entity` | 2 | → `update_knowledge`. |"
+_RETRACT_ROW = (
+    "| `retract_point`, `invalidate_point` | 2 | → fields on `update_knowledge`. **Zep's "
+    "shape:** retraction is `invalid_at`/`expired_at` on the existing update, not a "
+    "separate verb. |"
+)
+_SUPERSEDE_ROW = (
+    "| `supersede`, `supersede_point` | 2 | → `supersede_knowledge`. They also "
+    "**disagree** — `supersede_point` carries a `valid_from` the other silently drops. |"
+)
+_QUERY_GROUP_ROW = (
+    "| `query`, `paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`. |"
+)
+_LIST_BATCH_ROW = (
+    "| `list_batch`, `list_batches` | 2 | → `list_knowledge(kind='batch')`. The batch "
+    "contents come back inline in the bounded, paged page. |"
+)
+_INGEST_GROUP_ROW = (
+    "| `ingest_corpus`, `index_file`, `session_index_health` | 3 | → "
+    "`index_sources_from_directory`. |"
+)
+_NARROW_READERS_ROW = (
+    "| narrow readers (`get_session`, `get_events`, `get_owned_entities`, "
+    "`get_provenance_chain`, …) | ~8 | → `get_entity`, except where a genuinely "
+    "different shape is returned. |"
+)
+_SOURCE_TRUST_ROW = (
+    "| `assess_source`, `set_source_tier`, `get_source_reliability` | 3 | → "
+    "`manage_source_trust` for the setter; reads via `list_sources`. |"
+)
+
 RETIRED_SDK_METHODS: dict[str, str] = {
     # #4282 phase 2.1 — the event-log cursor poll. Approved target:
     # `docs/product/beta-sdk-surface.md` row 11 (`poll_events`); cited by
@@ -199,6 +244,43 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     # there is no X. `docs/product/beta-sdk-surface.md` DOES record a destination for four of
     # them, which is a real disagreement between two artifacts; it is declared, per name, in
     # `UNHINTED_LIVE_DESTINATIONS` rather than resolved by picking a side here.
+    "annotate_ask_hits": "search_knowledge",
+    "audit": "graph_overview",
+    "create_derivation": "link_entities",
+    "create_direct_edge": "link_entities",
+    "create_document": "create_entity",
+    "create_event": "create_entity",
+    "create_object": "create_entity",
+    "create_operator": "link_entities",
+    "create_point": "create_entity",
+    "create_subject": "create_entity",
+    "delete_point": "delete_knowledge",
+    "delete_point_wrapped": "delete_knowledge",
+    "dream_health_check": "graph_overview",
+    "dream_health_state": "graph_overview",
+    "get_cross_lens_candidates": "review_link_candidates",
+    "get_events": "get_entity",
+    "get_owned_entities": "get_entity",
+    "get_session": "get_entity",
+    "get_source_reliability": "manage_source_trust",
+    "ingest_corpus": "index_sources_from_directory",
+    "invalidate_point": "update_knowledge",
+    "issue_insight": "search_knowledge",
+    "link_source_to_entity": "link_entities",
+    "list_batch": "list_knowledge",
+    "list_batches": "list_knowledge",
+    "list_graphs": "graph_overview",
+    "check_structure": "graph_overview",
+    "paginated_query": "list_knowledge",
+    "query": "list_knowledge",
+    "query_points_by_tag": "list_knowledge",
+    "retract_point": "update_knowledge",
+    "review_connections": "review_link_candidates",
+    "session_index_health": "index_sources_from_directory",
+    "summarize_structure": "graph_overview",
+    "supersede_point": "supersede_knowledge",
+    "topic_summarize": "search_knowledge",
+    "update_point": "update_knowledge",
 }
 
 #: The RECORDED destination of every name in the #4282 surplus block — one machine-readable
@@ -417,6 +499,39 @@ UNHINTED_LIVE_DESTINATIONS: dict[str, str] = {
         "would record an approval nobody wrote. The capability is not lost: the body "
         "survives as `_org_get`, which the hosted control plane reads."
     ),
+    "annotate_operator": (
+        "The beta ledger's operator row gives TWO destinations — `adjust_relationship` for strength and `update_knowledge` for annotation — and this name is the ANNOTATION arm, so the route is `update_knowledge`. The row is a choice between two approved names, which is exactly the shape `tests/test_sdk_retirement.py` refuses to resolve on an author's behalf, so the destination is the inventory's record and no hint is emitted (#3836 (c))."
+    ),
+    "belief_timeline": (
+        "The beta row splits by SHAPE — `check_confidence` where they are confidence context, `poll_events` where they are a timeline — and `belief_timeline` is the timeline arm, which is why the recorded destination is `poll_events` and not the confidence view. A row that names two approved targets is a choice, so the destination is the inventory's record, not an approval (#3836 (c))."
+    ),
+    "calibrate_summary": (
+        'The beta row gives `check_confidence` for the confidence view and `explore_connections` for the one name it drops outright (`recall_subgraph`); `calibrate_summary` is the confidence view. Two approved targets in one row is a choice, so no hint (#3836 (c)).'
+    ),
+    "mitigate_operator": (
+        "The operator row's STRENGTH arm is `adjust_relationship`, which is the destination the inventory records; the row also names `update_knowledge` for annotation, so the approving region states a choice rather than a single replacement and no hint is emitted (#3836 (c))."
+    ),
+    "promote_point": (
+        'The beta row collapses lifecycle/confidence STATE onto fields of `update_knowledge` (promote, baseline, quarantine) but also names `list_knowledge` for the drafts filter it carries in the same sentence — two approved targets, so the destination is recorded and not hinted (#3836 (c)).'
+    ),
+    "recall_gaps": (
+        'The recall row names `check_confidence` for the confidence view and `explore_connections` for `recall_subgraph`; the gaps question stays a confidence read. Two approved targets in the region, so the record carries the destination and the hint does not (#3836 (c)).'
+    ),
+    "recall_state": (
+        'Same region as `recall_gaps`: `check_confidence` is the recorded destination, the row also names `explore_connections`, and a two-target region authorises no single hint (#3836 (c)).'
+    ),
+    "recall_subgraph": (
+        'The ONLY name in this row the ledger DROPS rather than folds — *`recall_subgraph` is dropped, not folded — `explore_connections` answers that question*. That sentence names the destination and states that this name is not folded into `check_confidence`, which is why its recorded destination is the explorer; the region still names two targets, so no hint (#3836 (c)).'
+    ),
+    "session_context": (
+        'The context row splits by shape — `check_confidence` for confidence context, `poll_events` for a timeline — and this name is the session TIMELINE, so the inventory records `poll_events`. Two approved targets in one region, no hint (#3836 (c)).'
+    ),
+    "set_point_baseline": (
+        'Baseline is the second of the three lifecycle fields the beta row puts on `update_knowledge` (promote, baseline, quarantine); the same row also names `list_knowledge` for the drafts filter, so the region authorises a choice and the destination stays a record rather than a hint (#3836 (c)).'
+    ),
+    "volunteer_context": (
+        "The context row's timeline arm, recorded as `poll_events`. The region names two approved targets, so no hint is emitted (#3836 (c))."
+    ),
 }
 
 #: The #12901 wave-1 names' recorded destination, transcribed from the inventory's own
@@ -466,6 +581,50 @@ WAVE2_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
     "sweep_invite_ghost_memberships": (),
     "trash_graphs": (),
 }
+
+#: The `#12901` FINAL batch's recorded destination — the same shape and the same pin as
+#: the wave-1 and wave-2 cells above.
+#:
+#: Every name here LEFT the surface as a DEPARTURE (no single approved rename), which is
+#: why each is in `REMOVED_SDK_METHODS` rather than `RETIRED_SDK_METHODS`: the owner's
+#: ledger either names two destinations for its row (a CHOICE, which
+#: `tests/test_sdk_retirement.py` refuses to make on an author's behalf) or names none at
+#: all. The eleven names with a destination are the ones whose destination is LIVE on the
+#: surface today and therefore CANNOT carry a hint without asserting an approval that does
+#: not exist — each is declared in `UNHINTED_LIVE_DESTINATIONS`. The eighteen with `()`
+#: are the engine primitives and utilities for which the ledger records no destination.
+FINAL_DELETION_DESTINATIONS: dict[str, tuple[str, ...]] = {
+    "annotate_operator": ("update_knowledge",),
+    "belief_timeline": ("poll_events",),
+    "calibrate_summary": ("check_confidence",),
+    "mitigate_operator": ("adjust_relationship",),
+    "promote_point": ("update_knowledge",),
+    "recall_gaps": ("check_confidence",),
+    "recall_state": ("check_confidence",),
+    "recall_subgraph": ("explore_connections",),
+    "session_context": ("poll_events",),
+    "set_point_baseline": ("update_knowledge",),
+    "volunteer_context": ("poll_events",),
+    "compute_confidence": (),
+    "compute_reputation": (),
+    "create_edge": (),
+    "delete": (),
+    "delete_entity": (),
+    "diary_write": (),
+    "dream": (),
+    "get_confidence": (),
+    "get_point": (),
+    "ingest": (),
+    "org_create": (),
+    "reconcile_sessions": (),
+    "resolve_id": (),
+    "stale_points": (),
+    "test_guard": (),
+    "tortoise_fts_query": (),
+    "ulid": (),
+    "update": (),
+}
+
 
 #: removed public name -> why it is gone, and what a caller does instead (prose only).
 #:
@@ -931,6 +1090,124 @@ REMOVED_SDK_METHODS: dict[str, str] = {
         "signup token from operator tooling. **No** recorded destination — the same "
         "`signup_token_*` provisioning row."
     ),
+
+    # ── #12901 FINAL: annotate_operator ──
+    "annotate_operator": (
+        "Recorded destination `update_knowledge`. The beta ledger's operator row gives TWO destinations — `adjust_relationship` for strength and `update_knowledge` for annotation — and this name is the ANNOTATION arm, so the route is `update_knowledge`. The row is a choice between two approved names, which is exactly the shape `tests/test_sdk_retirement.py` refuses to resolve on an author's behalf, so the destination is the inventory's record and no hint is emitted (#3836 (c))."
+    ),
+    # ── #12901 FINAL: belief_timeline ──
+    "belief_timeline": (
+        "Recorded destination `poll_events`. The beta row splits by SHAPE — `check_confidence` where they are confidence context, `poll_events` where they are a timeline — and `belief_timeline` is the timeline arm, which is why the recorded destination is `poll_events` and not the confidence view. A row that names two approved targets is a choice, so the destination is the inventory's record, not an approval (#3836 (c))."
+    ),
+    # ── #12901 FINAL: calibrate_summary ──
+    "calibrate_summary": (
+        'Recorded destination `check_confidence`. The beta row gives `check_confidence` for the confidence view and `explore_connections` for the one name it drops outright (`recall_subgraph`); `calibrate_summary` is the confidence view. Two approved targets in one row is a choice, so no hint (#3836 (c)).'
+    ),
+    # ── #12901 FINAL: mitigate_operator ──
+    "mitigate_operator": (
+        "Recorded destination `adjust_relationship`. The operator row's STRENGTH arm is `adjust_relationship`, which is the destination the inventory records; the row also names `update_knowledge` for annotation, so the approving region states a choice rather than a single replacement and no hint is emitted (#3836 (c))."
+    ),
+    # ── #12901 FINAL: promote_point ──
+    "promote_point": (
+        'Recorded destination `update_knowledge`. The beta row collapses lifecycle/confidence STATE onto fields of `update_knowledge` (promote, baseline, quarantine) but also names `list_knowledge` for the drafts filter it carries in the same sentence — two approved targets, so the destination is recorded and not hinted (#3836 (c)).'
+    ),
+    # ── #12901 FINAL: recall_gaps ──
+    "recall_gaps": (
+        'Recorded destination `check_confidence`. The recall row names `check_confidence` for the confidence view and `explore_connections` for `recall_subgraph`; the gaps question stays a confidence read. Two approved targets in the region, so the record carries the destination and the hint does not (#3836 (c)).'
+    ),
+    # ── #12901 FINAL: recall_state ──
+    "recall_state": (
+        'Recorded destination `check_confidence`. Same region as `recall_gaps`: `check_confidence` is the recorded destination, the row also names `explore_connections`, and a two-target region authorises no single hint (#3836 (c)).'
+    ),
+    # ── #12901 FINAL: recall_subgraph ──
+    "recall_subgraph": (
+        'Recorded destination `explore_connections`. The ONLY name in this row the ledger DROPS rather than folds — *`recall_subgraph` is dropped, not folded — `explore_connections` answers that question*. That sentence names the destination and states that this name is not folded into `check_confidence`, which is why its recorded destination is the explorer; the region still names two targets, so no hint (#3836 (c)).'
+    ),
+    # ── #12901 FINAL: session_context ──
+    "session_context": (
+        'Recorded destination `poll_events`. The context row splits by shape — `check_confidence` for confidence context, `poll_events` for a timeline — and this name is the session TIMELINE, so the inventory records `poll_events`. Two approved targets in one region, no hint (#3836 (c)).'
+    ),
+    # ── #12901 FINAL: set_point_baseline ──
+    "set_point_baseline": (
+        'Recorded destination `update_knowledge`. Baseline is the second of the three lifecycle fields the beta row puts on `update_knowledge` (promote, baseline, quarantine); the same row also names `list_knowledge` for the drafts filter, so the region authorises a choice and the destination stays a record rather than a hint (#3836 (c)).'
+    ),
+    # ── #12901 FINAL: volunteer_context ──
+    "volunteer_context": (
+        "Recorded destination `poll_events`. The context row's timeline arm, recorded as `poll_events`. The region names two approved targets, so no hint is emitted (#3836 (c))."
+    ),
+    # ── #12901 FINAL: compute_confidence ──
+    "compute_confidence": (
+        'Engine primitive. The beta ledger names no replacement for it: the approved confidence read is `check_confidence` (a DIFFERENT computation — it returns the confidence view with its operators, while this one runs the EP maths and persists), so naming it would assert a fold the owner did not record.'
+    ),
+    # ── #12901 FINAL: compute_reputation ──
+    "compute_reputation": (
+        'Engine primitive with no ledger row and no approved replacement. The capability survives as `_compute_reputation`; the surface does not promise it.'
+    ),
+    # ── #12901 FINAL: create_edge ──
+    "create_edge": (
+        "Internal edge writer. The beta ledger's edge group covers `create_operator`/`create_direct_edge`/`create_derivation`/`link_source_to_entity` and deliberately NOT this one — it is the shared primitive those four call. No approved replacement exists to name."
+    ),
+    # ── #12901 FINAL: delete ──
+    "delete": (
+        'Internal delete dispatch. The approved deletions are `delete_knowledge` and `delete_memory_graph`, both of which reach this; the ledger records no replacement for the dispatcher itself, so no hint is emitted.'
+    ),
+    # ── #12901 FINAL: delete_entity ──
+    "delete_entity": (
+        'The entity-shaped arm behind `delete()`. It delegates to `_delete_entity`, the DETACH-DELETE primitive it is named after — which is the collision that made a plain rename silently recursive, so the body survives as `_delete_entity__svc`. The ledger records no replacement for it.'
+    ),
+    # ── #12901 FINAL: diary_write ──
+    "diary_write": (
+        "Journal write. The owner ledger's diary paragraph retires `diary_read` into `list_knowledge` and says nothing about the writer, and the inventory's own cell records no destination — so there is none to hint at."
+    ),
+    # ── #12901 FINAL: dream ──
+    "dream": (
+        'The whole-graph EP pass. No ledger row: `refresh_confidence` (row 26) is the approved recompute, and it is a different scope and a different cost class, so folding would change what the approved verb promises.'
+    ),
+    # ── #12901 FINAL: get_confidence ──
+    "get_confidence": (
+        "The lazy per-node confidence read. Recorded with no destination in the ledger; `check_confidence` (row 5) returns the confidence VIEW and is the approved read, but the owner's record does not fold this one into it."
+    ),
+    # ── #12901 FINAL: get_point ──
+    "get_point": (
+        "The engine's single-node read. The approved reader is `get_entity` (row 6), which is a different contract (kind dispatch and labels) and is not recorded against this name."
+    ),
+    # ── #12901 FINAL: ingest ──
+    "ingest": (
+        'The extraction/ingest entry. The approved write paths are `write_knowledge_batch` (row 13) and `mine_knowledge_from_session` (row 16); the ledger records neither against `ingest`, so no replacement is named.'
+    ),
+    # ── #12901 FINAL: org_create ──
+    "org_create": (
+        "Account provisioning. The beta doc's tenancy block makes account creation a CONSOLE operation and gives the SDK no verb for it, so there is no approved target — the body survives as `_org_create` for the hosted path."
+    ),
+    # ── #12901 FINAL: reconcile_sessions ──
+    "reconcile_sessions": (
+        "One-shot migration. The ledger's own row groups it with `backfill_v25`/`backfill_sources`/`backfill_about_entities` as *run once, then dead code carrying a public promise* — a migration has no replacement to name."
+    ),
+    # ── #12901 FINAL: resolve_id ──
+    "resolve_id": (
+        'Identifier-resolution helper. No ledger row and no approved replacement; the capability survives as `_resolve_id`.'
+    ),
+    # ── #12901 FINAL: stale_points ──
+    "stale_points": (
+        'The staleness listing. It is NOT one of the `graph_overview` aliases the ledger deletes, and it has no row of its own, so no destination is recorded for it.'
+    ),
+    # ── #12901 FINAL: test_guard ──
+    "test_guard": (
+        "**Kept and relocated**, per the ledger's own rename table: it guards the production-wipe incident so the code must survive, but it is test infrastructure and leaves the product SDK. A relocation names no surface replacement."
+    ),
+    # ── #12901 FINAL: tortoise_fts_query ──
+    "tortoise_fts_query": (
+        'The full-text leg. `search_knowledge` (row 3) is the approved search, but the ledger records no fold for this primitive, and the hybrid legs it feeds are internal.'
+    ),
+    # ── #12901 FINAL: ulid ──
+    "ulid": (
+        "A ULID generator — *not a memory operation*, in the ledger's own words. A utility has no approved surface replacement."
+    ),
+    # ── #12901 FINAL: update ──
+    "update": (
+        "Internal update dispatch. The approved revisions are `update_knowledge` (row 22) and `update_memory_graph` (row 30); the ledger's two rows that mention this name are about graph-field setters, not about it, so no replacement is recorded for the dispatcher."
+    ),
+
 }
 
 #: retired name -> the owner-approved region of `docs/product/beta-sdk-surface.md`
@@ -1107,6 +1384,43 @@ RETIRED_SDK_APPROVALS: dict[str, str] = {
         "decision. |"
     ),
     "file_human_approval": "| `file_human_approval` | 1 | → `record_decision`. |",
+    "annotate_ask_hits": _SEARCH_GROUP_ROW,
+    "audit": _VALIDATE_DOMAIN_ROW,
+    "create_derivation": _LINK_ENTITIES_GROUP_ROW,
+    "create_direct_edge": _LINK_ENTITIES_GROUP_ROW,
+    "create_document": _CREATE_ENTITY_GROUP_ROW,
+    "create_event": _CREATE_ENTITY_GROUP_ROW,
+    "create_object": _CREATE_ENTITY_GROUP_ROW,
+    "create_operator": _LINK_ENTITIES_GROUP_ROW,
+    "create_point": _CREATE_ENTITY_GROUP_ROW,
+    "create_subject": _CREATE_ENTITY_GROUP_ROW,
+    "delete_point": _DELETE_POINT_ROW,
+    "delete_point_wrapped": _DELETE_POINT_ROW,
+    "dream_health_check": _VALIDATE_DOMAIN_ROW,
+    "dream_health_state": _VALIDATE_DOMAIN_ROW,
+    "get_cross_lens_candidates": _DEDUP_ROW,
+    "get_events": _NARROW_READERS_ROW,
+    "get_owned_entities": _NARROW_READERS_ROW,
+    "get_session": _NARROW_READERS_ROW,
+    "get_source_reliability": _SOURCE_TRUST_ROW,
+    "ingest_corpus": _INGEST_GROUP_ROW,
+    "invalidate_point": _RETRACT_ROW,
+    "issue_insight": _SEARCH_GROUP_ROW,
+    "link_source_to_entity": _LINK_ENTITIES_GROUP_ROW,
+    "list_batch": _LIST_BATCH_ROW,
+    "list_batches": _LIST_BATCH_ROW,
+    "list_graphs": _GRAPH_OVERVIEW_ALIAS_ROW,
+    "check_structure": _GRAPH_OVERVIEW_ALIAS_ROW,
+    "paginated_query": _QUERY_GROUP_ROW,
+    "query": _QUERY_GROUP_ROW,
+    "query_points_by_tag": _QUERY_GROUP_ROW,
+    "retract_point": _RETRACT_ROW,
+    "review_connections": _DEDUP_ROW,
+    "session_index_health": _INGEST_GROUP_ROW,
+    "summarize_structure": _VALIDATE_DOMAIN_ROW,
+    "supersede_point": _SUPERSEDE_ROW,
+    "topic_summarize": _SEARCH_GROUP_ROW,
+    "update_point": _UPDATE_POINT_ROW,
 }
 
 #: retired name -> the ONE target-row ordinal its replacement was chosen from.
@@ -1166,6 +1480,43 @@ RETIRED_SDK_APPROVAL_ROWS: dict[str, int] = {
     "update_entity": 22,
     "file_decision": 20,
     "file_human_approval": 21,
+    "annotate_ask_hits": 3,
+    "audit": 9,
+    "create_derivation": 19,
+    "create_direct_edge": 19,
+    "create_document": 12,
+    "create_event": 12,
+    "create_object": 12,
+    "create_operator": 19,
+    "create_point": 12,
+    "create_subject": 12,
+    "delete_point": 24,
+    "delete_point_wrapped": 24,
+    "dream_health_check": 9,
+    "dream_health_state": 9,
+    "get_cross_lens_candidates": 10,
+    "get_events": 6,
+    "get_owned_entities": 6,
+    "get_session": 6,
+    "get_source_reliability": 18,
+    "ingest_corpus": 15,
+    "invalidate_point": 22,
+    "issue_insight": 3,
+    "link_source_to_entity": 19,
+    "list_batch": 4,
+    "list_batches": 4,
+    "list_graphs": 9,
+    "check_structure": 9,
+    "paginated_query": 4,
+    "query": 4,
+    "query_points_by_tag": 4,
+    "retract_point": 22,
+    "review_connections": 10,
+    "session_index_health": 15,
+    "summarize_structure": 9,
+    "supersede_point": 23,
+    "topic_summarize": 3,
+    "update_point": 22,
 }
 
 

@@ -317,7 +317,7 @@ class TestTheRiskAxis:
         constructions against its `field(init=False)` shape).
         """
         base = dict(name="tortoise_probe_bare", id="surface.probe.bare",
-                    description="probe", http_policy=True, sdk_method="query")
+                    description="probe", http_policy=True, sdk_method="_query")
         with pytest.raises(TypeError):
             ToolDefinition(**base)  # no `risk` at all — must not default to read
         with pytest.raises(TypeError):

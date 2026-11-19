@@ -401,6 +401,69 @@ label — a read tool can be handed to an agent without handing it a way to dest
 | `manage_deployment` | **Administration** — orgs, graphs, members, API keys, invitations, agent signup. |
 | utilities | `close` tears down connections; `ulid` generates an id. |
 
+### Removed from the surface — 2026-11-18 (#12901 FINAL batch — **the engine surface**)
+
+**These 29 methods are gone from the public `TortoiseSDK`, and the surface reaches its approved
+size.** With them, the live class carries **39 public methods** — the 39 approved method rows —
+plus the row-1 `Tortoise(...)` entry point, which is a class and not a method: **40 approved, 40
+live, 0 off-surface.** The `#12901` batch retired all 66 off-surface names at once; the other 37
+are RENAMES into approved targets and are recorded in `tortoise/sdk_retired.py::RETIRED_SDK_METHODS`
+with the hint that names their replacement. This section records the **29 departures** — the names
+whose owner-ledger row does not authorise a single replacement.
+
+**Every one was PRIVATISED, not deleted** — `def name` became `def _name` and the body is
+unchanged, so nothing the engine does was lost. Two of them needed a different private spelling
+because `_name` was already taken: `audit` → `_audit__svc` (it would have shadowed the audit-EVENT
+logger, swapping two bodies) and `delete_entity` → `_delete_entity__svc` (it would have shadowed
+the DETACH-DELETE primitive it delegates to, making it infinitely recursive). Both are recorded in
+the reason cells of `REMOVED_SDK_METHODS`.
+
+**Why these are departures and not renames.** Eleven of them have a destination the ledger records
+but do not have an *approval*: their owner row names **two** approved targets (a choice — the
+annotate/strength split, the confidence/timeline split, the promote/baseline/drafts split, the
+recall row) or states that the name is *dropped, not folded*. A hint on such a name would assert an
+approval nobody wrote, so the destination is recorded here and in
+`FINAL_DELETION_DESTINATIONS` and **no hint is emitted** (`#3836` (c)). The remaining eighteen are
+engine primitives, utilities and one relocation for which the ledger records no destination at all:
+`compute_confidence`, `compute_reputation`, `create_edge`, `delete`, `delete_entity`, `diary_write`,
+`dream`, `get_confidence`, `get_point`, `ingest`, `org_create`, `reconcile_sessions`, `resolve_id`,
+`stale_points`, `test_guard`, `tortoise_fts_query`, `ulid`, `update`.
+
+⚠️ `test_guard` is **kept and relocated**, in the ledger's own words — it guards the production-wipe
+incident, so its code survives, but it is test infrastructure and it leaves the product SDK.
+
+| Removed method | What it did | The 40-method target it was recorded against |
+|---|---|---|
+| `annotate_operator` | Annotate an operator Point with its four epistemic dimensions. **Body went PRIVATE** (`_annotate_operator`). | `update_knowledge` |
+| `belief_timeline` | The dated belief chain for a topic. **Body went PRIVATE** (`_belief_timeline`). | `poll_events` |
+| `calibrate_summary` | Audit graph calibration state, per-point. **Body went PRIVATE** (`_calibrate_summary`). | `check_confidence` |
+| `mitigate_operator` | Create a mitigation Point that dampens an operator's edges. **Body went PRIVATE** (`_mitigate_operator`). | `adjust_relationship` |
+| `promote_point` | Reviewer-gated draft to live promotion (promotes its operators too). **Body went PRIVATE** (`_promote_point`). | `update_knowledge` |
+| `recall_gaps` | The \"gaps\" recall — load-bearing claims with no support. **Body went PRIVATE** (`_recall_gaps`). | `check_confidence` |
+| `recall_state` | The \"state\" recall — what is true and how strongly held. **Body went PRIVATE** (`_recall_state`). | `check_confidence` |
+| `recall_subgraph` | The \"subgraph\" recall — the complete connected component. **Body went PRIVATE** (`_recall_subgraph`). | `explore_connections` |
+| `session_context` | \"What happened last session\" — diary, Points, Events, confidence. **Body went PRIVATE** (`_session_context`). | `poll_events` |
+| `set_point_baseline` | Set the Beta prior evidence for a claim. **Body went PRIVATE** (`_set_point_baseline`). | `update_knowledge` |
+| `volunteer_context` | Volunteer memory context for a turn window. **Body went PRIVATE** (`_volunteer_context`). | `poll_events` |
+| `compute_confidence` | Run EP belief propagation and return convergence data. **Body went PRIVATE** (`_compute_confidence`). | — |
+| `compute_reputation` | Derive a Subject's reputation from event outcomes. **Body went PRIVATE** (`_compute_reputation`). | — |
+| `create_edge` | The typed structural-edge writer the link verbs dispatch into. **Body went PRIVATE** (`_create_edge`). | — |
+| `delete` | One delete dispatch for a Point OR an entity. **Body went PRIVATE** (`_delete`). | — |
+| `delete_entity` | Delete any entity by ID (the entity-shaped arm behind `delete`). **Body went PRIVATE** (`_delete_entity__svc`). | — |
+| `diary_write` | Write an agent diary entry. **Body went PRIVATE** (`_diary_write`). | — |
+| `dream` | The whole-graph EP stabilization pass. **Body went PRIVATE** (`_dream`). | — |
+| `get_confidence` | Read one claim's EP confidence. **Body went PRIVATE** (`_get_confidence`). | — |
+| `get_point` | Read a Point by ID. **Body went PRIVATE** (`_get_point`). | — |
+| `ingest` | Heterogeneous bulk write with granularity and promotion policy. **Body went PRIVATE** (`_ingest`). | — |
+| `org_create` | Provision an org with its own graph namespace. **Body went PRIVATE** (`_org_create`). | — |
+| `reconcile_sessions` | Scan for unindexed sessions and reconcile them. **Body went PRIVATE** (`_reconcile_sessions`). | — |
+| `resolve_id` | Resolve a legacy/numeric/ULID id to the canonical Point id. **Body went PRIVATE** (`_resolve_id`). | — |
+| `stale_points` | Points not updated in N days. **Body went PRIVATE** (`_stale_points`). | — |
+| `test_guard` | Assert the connected graph is safe for destructive test teardowns. **Body went PRIVATE** (`_test_guard`). | — |
+| `tortoise_fts_query` | The full-text (RRF-fused) search leg. **Body went PRIVATE** (`_tortoise_fts_query`). | — |
+| `ulid` | A ULID generator. **Body went PRIVATE** (`_ulid`). | — |
+| `update` | One update dispatch for a Point OR an entity. **Body went PRIVATE** (`_update`). | — |
+
 ### Two problems this exposes
 
 **1. `capture_knowledge` mixes a read with writes.** Its members are `checkpoint` and
