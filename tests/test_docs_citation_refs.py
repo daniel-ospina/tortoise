@@ -592,32 +592,70 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "`tortoise/` modules the verdict is about; the empty-list reading that stood "
             "here before was FALSE at this head (#13750 review, cycle 1)")
 
-    # (c) RETIRED SPELLINGS — measured FALSE against the tree, so the arm READS the tree
-    # instead of freezing which direction the answer points.
+    # (c) BOTH DIRECTIONS, keyed on the MEASUREMENT — never on which direction it points.
     # ⛔ MEASURED (#13746 review, finding 7): this list was five literals assuming a NON-EMPTY
     # `-- tortoise/` set. `main`'s own `#13790`/`#13786` then re-took the same census figures,
     # so at this head the command prints NOTHING and every one of those five spellings became
     # the TRUE statement — the same class of error as the frozen sign this arm replaced
-    # (a guard that pins a MEASUREMENT has to READ it). The prohibition is therefore applied
-    # only where the measurement supports it.
-    _tortoise_set = subprocess.run(
+    # (a guard that pins a MEASUREMENT has to READ it).
+    # ⛔ AND THE ONE-SIDED REPAIR WAS A NO-OP — an inert enforcer (#13746 review, re-measured
+    # at `b7c818d4ad`). The five negations are skipped when the set is empty, so at an EMPTY
+    # head this arm made no assertion at all, while the document's AFFIRMATIVE direction was
+    # the false one and NOTHING read it: `prints exactly `tortoise/activation_scorecard.py``
+    # and "which two `tortoise/` paths this diff carries" survived here for two merges past
+    # the head where they became false. A guard on a claim that flips with the tree must
+    # refuse the FALSE direction for the measured state, so the affirmative spellings are
+    # refused when the set is EMPTY and the negative ones when it is NOT.
+    _tortoise_probe = subprocess.run(
         ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
-        cwd=REPO, capture_output=True, text=True, check=False).stdout.split()
-    for _negation in (
+        cwd=REPO, capture_output=True, text=True, check=False)
+    # ⛔ A FAILED MEASUREMENT IS NOT THE EMPTY ONE. Exit 0 with no stdout means "the set is
+    # empty"; a non-zero exit means "this checkout cannot answer" (no `origin/main` on a
+    # shallow clone), and reading those as the same thing would let an UNMEASURED head pick
+    # the affirmative ban — a fail-open guard. The arms run only on a real answer.
+    _tortoise_measured = _tortoise_probe.returncode == 0
+    _tortoise_set = _tortoise_probe.stdout.split() if _tortoise_measured else []
+    # Spellings that ASSERT a non-empty `-- tortoise/` set. They are false exactly when the
+    # measurement is empty, which is what makes them refutable rather than frozen.
+    _affirmative_spellings = (
+        "THREE are in this head",
+        "two comment-only `tortoise/` modules",
+        "prints exactly `tortoise/activation_scorecard.py`",
+        "which two `tortoise/` paths this diff carries",
+        "prints the two modules named above",
+        "`activation_scorecard.py` IS in the diff",
+    )
+    # Spellings that ASSERT an empty one. Mirror images, and every bit as carryable.
+    _negative_spellings = (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is NOT empty",
         f"{_tortoise_cmd}` returns exactly those two",
         f"{_tortoise_cmd}` -> empty",
         f"{_tortoise_cmd}` prints NOTHING",
-    ):
-        if not _tortoise_set:
-            # The empty claim is the measured one here; asserting it is not a defect.
-            continue
-        assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints "
-            f"{' '.join(_tortoise_set)!r}, so the sentence is refuted by the very command "
-            "it quotes (#13489 review, P1; #13750 review, cycle 1 — the empty claim was "
-            "true of an earlier head and is not true of this one)")
+    )
+    if not _tortoise_measured:
+        # Unmeasurable here (see above): neither direction is refutable, so neither is
+        # refused. The membership is ALSO read by every run with `origin/main` present,
+        # which is where a stale sentence is caught — this is the documented residual, not
+        # a silent pass.
+        pass
+    elif not _tortoise_set:
+        # The EMPTY reading is the measured one, so the affirmative sentences are the defect.
+        for _claim in _affirmative_spellings:
+            assert _claim not in doc, (
+                f"05-verify.md asserts {_claim!r}, which states a NON-EMPTY `{_tortoise_cmd}` "
+                "set. Measured here the command prints NOTHING, so the sentence is refuted "
+                "by the very command it names — and this is the direction the one-sided arm "
+                "left unread (it skipped the negations, so at an empty head it asserted "
+                "nothing at all). Delete the typed membership and keep the command "
+                "(#13746 review, finding 7)")
+    else:
+        for _claim in _negative_spellings:
+            assert _claim not in doc, (
+                f"05-verify.md asserts {_claim!r}. `{_tortoise_cmd}` prints "
+                f"{' '.join(_tortoise_set)!r}, so the sentence is refuted by the very "
+                "command it quotes (#13489 review, P1; #13750 review, cycle 1 — the empty "
+                "claim was true of an earlier head and is not true of this one)")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
