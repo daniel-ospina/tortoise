@@ -439,6 +439,20 @@ kill_timeout = 30
   TORTOISE_CONTROL_PLANE = "supabase"
   TORTOISE_REAUTH_WINDOW_SECONDS = "900"
   TORTOISE_MANUAL_LINKING_ENABLED = "1"
+  # ── #10794 — the CONSENT KEY SET's rotation knob, versioned ───────────────
+  # `CONSENT_TOKEN_CURRENT_KID` names which kid in `CONSENT_TOKEN_KEYS` MINTS; unset/empty
+  # resolves to the FIRST kid in the set (declared order), so the ordinary rotation is one
+  # variable's value and needs no edit here. It is NOT secret material — it is a
+  # `[A-Za-z0-9_-]{1,64}` name — so it takes the `fly-toml-env` route like
+  # `TORTOISE_OAUTH_ATTESTED_CLIENTS` above, and it is declared `fly-toml-env` in
+  # `.github/scripts/fly-managed-secrets.txt` (#13721 review, Issue 1: the key material's SET
+  # is staged from a GitHub secret, and this knob had no managing source at all).
+  # ⛔ The route matters: a Fly SECRET of this name SHADOWS `[env]`, and the provenance gate
+  # fails that as a shadow, so an operator can never quietly hand-set it out of band.
+  # ⛔ `""` IS THE DOCUMENTED VALUE, not an omission: empty means "first declared kid". It is
+  # written out so the declaration is TRUE — the gate refuses a `fly-toml-env` name that is not
+  # an assigned key in this table.
+  CONSENT_TOKEN_CURRENT_KID = ""
   # ── #8218 — the CONSENT SCREEN'S CLIENT-IDENTITY ALLOWLIST ────────────────
   # `{"<client_id>": "<canonical name>"}`, read per request by
   # `tortoise/client_identity.py`. It is the ONLY path by which a human-authored

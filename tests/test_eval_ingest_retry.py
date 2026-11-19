@@ -356,7 +356,10 @@ def test_fingerprint_membership_retry_knobs(tmp_path):
     fp = runner._build_fingerprint(**base)
     assert fp["ingest_write_retries"] == INGEST_WRITE_RETRIES == 2
     assert fp["ingest_question_retries"] == INGEST_QUESTION_RETRIES == 1
-    assert fp["resume_attempts_cap"] == RESUME_ATTEMPTS_CAP == 2
+    # #8486 F1: the cap is 3 because ``attempts`` now counts PIPELINE
+    # ATTEMPTS (initial = 1, in-run R2 = 2), not re-burns — the same recovery
+    # surface as the old (cap=2, re-burns) pair: initial + R2 + one resume.
+    assert fp["resume_attempts_cap"] == RESUME_ATTEMPTS_CAP == 3
     assert "retry_failed" not in fp  # recorded resume-mode, never a key
     assert "retrieval_budget_ms" not in fp  # conditional presence
 
@@ -958,7 +961,8 @@ def test_whole_question_retry_exhaustion_entry_shape(tmp_path, monkeypatch):
     """Task 1 test (e) sentinel contract: a persistent write stall through
     the write-stage retries AND the R2 re-ingest produces ONE failure entry
     with retryable=True / error_class=ingest:retries_exhausted /
-    attempts=1 / error=<INNER repr> (network:TimeoutError), and the R2
+    attempts=2 (the initial attempt + the in-run R2, #8486 F1) /
+    error=<INNER repr> (network:TimeoutError), and the R2
     counter never exceeds 1 (no second R2 — P2-1 disarm)."""
     instances = _mini()[:1]
     outcomes, report, _state, creations, cp = _run_with_r2_fault(
@@ -970,7 +974,7 @@ def test_whole_question_retry_exhaustion_entry_shape(tmp_path, monkeypatch):
     entry = saved["failures"][0]
     assert entry["error_class"] == "ingest:retries_exhausted"
     assert entry["retryable"] is True
-    assert entry["attempts"] == 1  # the in-run R2 counted
+    assert entry["attempts"] == 2  # initial attempt + the in-run R2
     assert "TimeoutError" in entry["error"]
     assert entry["in_progress"] is None
     # exactly one R2 launched (initial + one R2 re-ingest; no second R2)
@@ -980,13 +984,14 @@ def test_whole_question_retry_exhaustion_entry_shape(tmp_path, monkeypatch):
 def test_r2_second_exhaustion_never_refires(tmp_path, monkeypatch):
     """Task 1 test (l) R2-second-exhaustion variant: after R2 fires, a second
     write-stage exhaustion inside R2's own re-ingest does NOT fire a second
-    R2 — the counter stays 1 and only one failure entry (attempts=1) exists."""
+    R2 — the counter stays 2 (initial + R2) and only one failure entry
+    exists."""
     instances = _mini()[:1]
     _outcomes, _report, _state, creations, cp = _run_with_r2_fault(
         instances, tmp_path, monkeypatch, persistent=True)
     saved = json.loads(cp.read_text(encoding="utf-8"))
     assert len(saved["failures"]) == 1
-    assert saved["failures"][0]["attempts"] == 1
+    assert saved["failures"][0]["attempts"] == 2
     # initial + one R2; a disarm bug would have created sdk #3
     assert creations["n"] == 2
 
@@ -995,7 +1000,7 @@ def test_r2_failure_at_reader_keeps_ingest_class(tmp_path, monkeypatch):
     """Task 1 Step 4 P2-1 tier identity: R2's re-ingest fails at the READER
     stage → the R2-first-failure entry grades ingest:retries_exhausted from
     the RETAINED original write-stage exception (never reader:...) with
-    retryable=True / attempts=1 — the --retry-failed gate still admits it."""
+    retryable=True / attempts=2 — the --retry-failed gate still admits it."""
     instances = _mini()[:1]
     outcomes, _report, _state, _creations, cp = _run_with_r2_fault(
         instances, tmp_path, monkeypatch, persistent=False,
@@ -1006,7 +1011,7 @@ def test_r2_failure_at_reader_keeps_ingest_class(tmp_path, monkeypatch):
     entry = saved["failures"][0]
     assert entry["error_class"] == "ingest:retries_exhausted"
     assert entry["retryable"] is True
-    assert entry["attempts"] == 1
+    assert entry["attempts"] == 2  # initial attempt + the in-run R2
 
 
 def test_provider_transient_no_write_retry_no_r2(tmp_path, monkeypatch):
@@ -1014,8 +1019,12 @@ def test_provider_transient_no_write_retry_no_r2(tmp_path, monkeypatch):
     Timeout from the EXTRACTOR — surfaces under ``_stage="ingest"``, outside
     the write-stage loop) → NO write-stage retry consumed, NO sentinel
     raised, NO R2 fires — the handler appends the entry DIRECTLY from the
-    raw exception with retryable=True / attempts=0 (no whole-question
-    re-attempt consumed) → --retry-failed eligible."""
+    raw exception with retryable=True / attempts=1 (the initial attempt; no
+    whole-question re-attempt consumed) → --retry-failed eligible.
+
+    #8486 F1: ``attempts`` counts attempts MADE, so this entry reads 1 — not
+    the pre-fix 0, which let a record whose class says "the retry budget
+    burned" also say nothing had been tried."""
     import requests
 
     def _provider_timeout(model, conversation, **kw):
@@ -1047,7 +1056,7 @@ def test_provider_transient_no_write_retry_no_r2(tmp_path, monkeypatch):
     saved = json.loads(cp.read_text(encoding="utf-8"))
     entry = saved["failures"][0]
     assert entry["retryable"] is True
-    assert entry["attempts"] == 0  # no whole-question re-attempt consumed
+    assert entry["attempts"] == 1  # the initial attempt (no R2 consumed)
     assert entry["error_class"] == "ingest:retries_exhausted"
     # exactly one pipeline pass — no R2 (the marker is only armed by the
     # write-stage loop, which this transient never entered)

@@ -173,12 +173,27 @@ both bypassable, which is worth recording because each looked complete:
   gating the fill alone re-opened the hole through the mint.
 
 The delivered rule is that **the flow belongs to a browser, not to whoever knows the `state`**:
-the attempt key is 32 random bytes, minted by the **AS on the `GET /oauth/authorize` bounce leg**
-(`consent_bounce_url`) and **ADOPTED** by `/api/consent/start` on the insert. Adoption is the normal
-path, not a guarantee: **the entry leg still mints one when it is handed none** — a request presented
-STRAIGHT to `/api/consent/start`, bypassing the AS (`start.ts::presentedKey || newAttemptKey()`;
-tracked OPEN on #10884/#10865) — so the AS can only ever ADOPT a key it handed out
-on the bounce, never constrain what a direct caller invents. The row stores **only the key's SHA-256**, and the raw key rides the `selfPath` **return
+the attempt key is 32 random bytes **plus a MAC over them under the current consent key, with its
+`kid` carried in the value** (#10794), minted by the **AS on the `GET /oauth/authorize` bounce leg**
+(`consent_bounce_url`, and by `/api/consent/start` when it is handed none) and **ADOPTED** by
+`/api/consent/start` on the insert **only when that MAC verifies** (`start.ts::verifyAttemptKey`).
+
+**Why the MAC is the rule and not a shape check.** RFC 9126 §2 requires a flow reference to be
+unpredictable, single-use, expiring and **not client-chosen**; RFC 9700 asks an AS to detect
+CONSTANT or REUSED values, not well-formed ones. A well-formed 43-character value a caller chose
+passes every shape test and is still the caller's key — measured, adopted, before this change. So an
+unverifiable presented key is treated as **ABSENT, never as fatal**: the caller with nothing still
+gets a flow, and the value it is given is MINTED (`mintedAttemptKey`), which is what makes the
+mid-flow return leg accept it. ⛔ The residual this does NOT close is the **first-mover** dead end —
+a caller can still begin a flow holding a key only it has, and the victim is then refused; that root
+is #10865, and it is unchanged here.
+
+Adoption is the normal path, not a guarantee: **the entry leg still mints one when it is handed none**
+— a request presented STRAIGHT to `/api/consent/start`, bypassing the AS (`start.ts` →
+`mintedAttemptKey`; tracked OPEN on #10884/#10865) — so the AS can only ever ADOPT a key it handed
+out on the bounce (or one this deployment signed), never constrain what a direct caller invents.
+⚠️ A rotation now also has to keep the two halves on the same key set for the length of this
+window — see the rotation cost in §2.3. The row stores **only the key's SHA-256**, and the raw key rides the `selfPath` **return
 target**; the owner fill and the mint both require it. The key is INSERT-ONLY — written only when the
 row is created, never on a re-entry, so a later caller can never rotate it, because rotation *is* the
 takeover. A row that predates the column (its hash is `NULL`) is therefore **dead, never adoptable**:
@@ -292,11 +307,80 @@ declared in `config/required-bindings.yml` so the deploy preflight fails closed 
 **not** be the service-role key (key reuse across purposes) and must **not** be the anon key — public by
 construct, independently of this page (before §9 step 4 the consent page embedded it in HTML; the page
 now embeds nothing, so the reason is the key's own distribution, not a surface we later remove).
-Rotation is `kid`-scoped; two `kid`s are accepted during a
-rotation window. ⚠️ **That window is NOT BUILT yet** — it is the goal this paragraph states, and §9 step 1
-records the accepted-`kid` allowlist as deliberately unbuilt (one key is configured, so an allowlist of one
-is vacuous). Until it lands, a rotation is a VALUE SWAP that must land on both halves together and kills
-in-flight assertions for their ≤120 s TTL.
+
+**A `kid`-keyed SET is what makes rotation non-silent (#10794), and it is BUILT.** `CONSENT_TOKEN_KEYS`
+holds `<kid>=<secret>,<kid>=<secret>` and `CONSENT_TOKEN_CURRENT_KID` names the one that **mints**;
+every kid in the set **verifies**. With `CONSENT_TOKEN_KEYS` absent the deployment is the single-secret
+shape it was before — one key, kid `consent-1` — so a deploy of this change needs no config change and
+the tokens a running deployment already holds keep verifying.
+
+> **OVERRIDES:** the common "one signing secret, rotation is a value swap" default — a set of
+> `kid`-identified keys, because the two halves are provisioned by different mechanisms (Fly's copy is
+> CI-staged, Pages' is typed into a dashboard) and a coordinated swap is what split them once already
+> (#10488). Publish-new / accept-both / retire-old is the procedure below.
+
+**The rotation window is publish-new, accept-both, retire-old** — and each step is one variable:
+
+1. **Publish.** Add the new kid beside the old in `CONSENT_TOKEN_KEYS` on both halves, and point
+   `CONSENT_TOKEN_CURRENT_KID` at it. From then on the new key mints and the **old one still verifies** —
+   nothing in flight is killed. ⚠️ "Both halves" is the END state, not one edit: `kid` is load-bearing,
+   so a set must reach them in the order in the box below (Fly first, with `consent-1` named), and only
+   once every half is on a set may `consent-1` be retired.
+2. **Wait out the longest in-flight lifetime:** **≤120 s** for a consent assertion (`exp`) and
+   **≤15 min** for an attempt key (`CONSENT_ATTEMPT_TTL_S`). ⚠️ The attempt key is the NEW half of this
+   window (#10794): the AS signs the flow reference and the app half verifies its MAC, so a rotation
+   that lands between the two halves breaks mid-flow adoption for up to 15 minutes. It fails *closed and
+   quiet* — the app half treats an unverifiable key as absent, mints its own, and the visitor meets
+   `403 flow_not_yours` after sign-in (the #10487 shape). That is why the window is stated in minutes
+   here rather than in seconds.
+3. **Retire.** Remove the old kid from `CONSENT_TOKEN_KEYS` on both halves. A value it signed is now
+   refused as an **unknown kid** — not silently accepted, which is the property the pre-set verifier
+   never had.
+
+Throughout, keep `CONSENT_TOKEN_SECRET` holding the value of the kid the **least-migrated** half
+stamps — on any half that is not yet on a key set that is `consent-1`, so **not** the new kid's value.
+Once every half is on the set the variable is inert (the set is authoritative and never merged with it,
+so "still in the environment" never means "still accepted"), but it must stay non-empty because the
+Pages binding is `required`.
+
+> ⛔ **A half-migrated deployment works ONLY if the set NAMES the kid the un-migrated half stamps.**
+> This is the part of §2.3 that is easy to get backwards, and the cost of getting it backwards is a
+> total, silent 401 on every redemption. `kid` is load-bearing (the AS *selects* the key by it), so:
+>
+> - a half with **no** `CONSENT_TOKEN_KEYS` accepts exactly one kid, `consent-1`, with the bytes in its
+>   `CONSENT_TOKEN_SECRET`, and stamps `consent-1` no matter what its key is;
+> - a half **with** `CONSENT_TOKEN_KEYS` accepts **only** the kids in it, and refuses anything else as
+>   an unknown kid.
+>
+> So the migration order is fixed, and step 1 is not the first step:
+>
+> 0. **Ship the code, not the config.** Deploy this change to both halves with `CONSENT_TOKEN_KEYS`
+>    **unset**. That deploy is byte-identical to the pre-set behaviour, so it cannot break anything —
+>    and it is what makes the halves able to understand a set at all. A set published to a half that
+>    does not understand it is a value nothing reads.
+> 1. **Fly (the AS) first, with the legacy kid spelled out:** `CONSENT_TOKEN_KEYS` on the AS must
+>    contain **`consent-1=<old bytes>`** alongside the new kid for as long as Pages may still be
+>    stamping `consent-1`. Omit it and every token the un-migrated Pages half mints is
+>    `401 invalid_token: kid is not in the configured key set`. (This is the reverse of what this
+>    section said before the #10794 review: a set that does NOT name `consent-1` is only correct once
+>    every half is on the set.)
+> 2. **Then Pages**, with the same set string. From here both halves mint the new kid and the legacy
+>    entry is dead weight — retire it (step 3 of the list above).
+>
+> ⚠️ **The key-drift fingerprint (§2.5) does NOT see a `kid` split, and must not be read as a
+> migration monitor.** It compares `sha256(key)[:12]` of the **current kid's key bytes only** —
+> `kid` is deliberately not in the comparison (`consent_token.py::CONSENT_KEY_FINGERPRINT_HEX_CHARS`
+> and `consent-bridge.ts::consentKeyFingerprint` both say so). A half whose set omits `consent-1` while
+> its `CONSENT_TOKEN_SECRET` still holds those same bytes reports the SAME fingerprint as the AS: it
+> reads **AGREE** in front of a bridge on which nothing can complete. Read the verdict as what it is —
+> one comparison of *bytes*:
+>
+> - `MISMATCH` ⇒ the halves sign with different bytes (a genuine split; investigate).
+> - `AGREE` ⇒ **the current key bytes agree.** It is not a statement that the halves can complete a
+>   flow: it does not check the kid, and it cannot see a kid the set does not hold.
+>
+> The kid half of the question is answered by construction (the ordering above) and by an end-to-end
+> reading — a real mint plus a redemption — not by the fingerprint.
 
 ### 2.4 Consent fixation — the attack this contract **adds**, and which half defeats it
 
@@ -358,6 +442,14 @@ whether they agree:
 |---|---|---|
 | AS | `GET {api}/health` → the `consent_token_key` block | `{key_fingerprint, configured, reason}` |
 | Pages | `GET {app}/api/consent/key` — **a new route** | the same three keys, as the whole body |
+
+⛔ **What the comparison cannot see — stated here because it is the whole scope of the signal.**
+`kid` is deliberately **not** in it: the fingerprints are of the **current kid's key bytes only**, and
+neither health payload publishes a kid. So `AGREE` means "the two halves' current keys are the same
+bytes", never "the two halves can complete a flow" — a deployment whose key set does not NAME the kid
+the other half stamps reads `AGREE` and refuses every redemption with `401 invalid_token: kid is not in
+the configured key set`. That failure belongs to the migration procedure (§2.3 step 0-2), which `kid`
+being load-bearing is what makes order-sensitive; do not read this field as its monitor.
 
 The AS side is an **added block on an existing endpoint** (the convention the `build` block established,
 §"Which build is serving"), and it is deliberately **not** folded into `/health`'s `status`: a split must not
@@ -457,6 +549,18 @@ deleted file takes the whole monitor with it. The same verb is documented for `a
 value was corrected, the **already-deployed** Function kept signing with the **old** key until a new
 deployment existed — Pages bakes env at deploy time. So:
 
+⚠️ **With `CONSENT_TOKEN_KEYS` set (§2.3, #10794) a rotation is NO LONGER a coordinated value swap** —
+that is the whole point of the set. The three steps below are still how a value reaches both halves;
+the `kid` set is what makes step 2 survivable, because the old key stays ACCEPTED while the new one is
+being published. ⛔ **The fingerprint does NOT track that window, and this paragraph used to say it did.**
+It compares the CURRENT kid's key **bytes** on each half, and `kid` is deliberately NOT in the comparison
+(`consent_token.py`, `consent-bridge.ts`), so a half-migrated deployment **CAN read `AGREE` while the
+accepted kid sets differ and nothing can complete** — §2.3's box states the fixed migration order that
+keeps such a split harmless, and the fingerprint is not the monitor for it. Read `MISMATCH` as "the
+current key bytes differ" and `AGREE` as "the current key bytes agree", nothing more. While
+`CONSENT_TOKEN_KEYS` is unset the old single-secret rule applies unchanged: the swap
+must land on both halves together and kills in-flight assertions for their ≤120 s TTL.
+
 1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET` (prompts; or `--body "$NEW"`) — then land (or
    `workflow_dispatch`) the `deploy-hosted` run so Fly picks it up.
    ⛔ **The repo secret is the source of truth, and `fly secrets set` ALONE IS NOT A ROTATION.**
@@ -475,9 +579,12 @@ Then run `uv run python tools/consent_key_check.py` and require `AGREE`. Both fi
 the reading can be reconciled against a dashboard by eye — and against the operator's own copy with the
 one-liner in §8.
 
-⛔ **BETWEEN STEP 1 AND STEP 3 THE CHECK READS `MISMATCH`, AND THAT IS THE ROTATION, NOT A REGRESSION.** The
-monitor will fire during that window: its issue body says so explicitly, so the two cannot be read as
-different stories. Finish step 3 rather than rotating again; the window ends when the redeploy lands.
+⛔ **ON THE SINGLE-SECRET PATH, BETWEEN STEP 1 AND STEP 3 THE CHECK READS `MISMATCH`, AND THAT IS THE
+ROTATION, NOT A REGRESSION.** The monitor will fire during that window: its issue body says so explicitly,
+so the two cannot be read as different stories. Finish step 3 rather than rotating again; the window ends
+when the redeploy lands. (Under a key set the verdict is `MISMATCH` only while the two halves' CURRENT
+kid's key **bytes** differ; a kid-only split reads `AGREE` — see §2.3, and do not read that `AGREE` as
+"the bridge works".)
 
 **What is still invisible after this lands (stated, not implied):**
 
@@ -707,10 +814,11 @@ is **DELIVERED** by this diff (`functions/api/consent/start.ts`, `functions/api/
 
 | Remaining step | Why it is its own unit |
 |---|---|
-| 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261030000001_oauth_consent_tickets.sql`; the accepted-`kid` allowlist is deliberately NOT BUILT (ONE `CONSENT_TOKEN_SECRET` is configured, so an allowlist of one is vacuous and §2.3’s two-`kid` rotation window does not exist yet — a key rotation is a VALUE SWAP that invalidates in-flight tokens, and the verifier accepts any non-empty `kid` for presence only, so treat that promise in §2.3/`§5` as IMPLEMENTATION WORK, not as a property)) | infrastructure; the mechanism choice is §2.3 |
+| 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261030000001_oauth_consent_tickets.sql`) | infrastructure; the mechanism choice is §2.3 |
+| 1b. ~~The accepted-`kid` allowlist — §2.3's two-`kid` rotation window~~ — **DELIVERED** (#10794): `CONSENT_TOKEN_KEYS` + `CONSENT_TOKEN_CURRENT_KID`, unknown kid REFUSED, current kid mints. A rotation is no longer a VALUE SWAP that invalidates in-flight tokens — see the procedure in §2.3 | it needed a key SET to be worth anything (an allowlist of one is vacuous), and it is the foundation the signed attempt key below rests on |
 | 2. ~~`POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params)~~ — **DELIVERED**, see the paragraph after this table | the AS half; testable in Python (`tests/test_oauth_*`), and it had to land **before** any page change so the bearer path stays live meanwhile |
 | 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED** (evidence: `tests/test_oauth_consent_bff_routes.py`, incl. the TS→Python token round trip, the per-attempt key that closes the ownerless window, and the startup pin `tests/test_oauth_consent_bridge.py::test_startup_installs_the_SHARED_register`) | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
-| 4. ~~The page rewrite~~ — **DELIVERED** (#3524 §9 step 4). The page authenticates nobody: no provider buttons, no password form, no cookie write, no inline client, no bearer. It reads the per-attempt key from its own URL, mints the bound assertion from the session origin, and redeems it at `POST /oauth/consent`. Unauthenticated `GET /oauth/authorize` now 302s to `{app}/auth?next=/api/consent/start?{query}`. Evidence: `tests/test_oauth_consent_page_step4.py` (65 cases / 47 test functions: the bounce, the REAL `signup.html` return-to allowlist executed over the emitted URL, the page's inline script run under node, byte-exact `state`, a bound token redeeming to a live code, and the org chooser — sole-team, multi-team with the pick posted, and an unresolvable preview leaving Authorize inert) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
+| 4. ~~The page rewrite~~ — **DELIVERED** (#3524 §9 step 4). The page authenticates nobody: no provider buttons, no password form, no cookie write, no inline client, no bearer. It reads the per-attempt key from its own URL, mints the bound assertion from the session origin, and redeems it at `POST /oauth/consent`. Unauthenticated `GET /oauth/authorize` now 302s to `{app}/auth?next=/api/consent/start?{query}`. Evidence: `tests/test_oauth_consent_page_step4.py` (66 cases / 48 test functions: the bounce, the REAL `signup.html` return-to allowlist executed over the emitted URL, the page's inline script run under node, byte-exact `state`, a bound token redeeming to a live code, the org chooser — sole-team, multi-team with the pick posted, and an unresolvable preview leaving Authorize inert — and the unprovisioned bounce mint's log write being bounded to one WARNING per process rather than one per unauthenticated request) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
 | 5. ~~`SCOPE.md` §9 class 4(i) — attested client identity~~ — **DELIVERED** by [#8218](https://github.com/daniel-ospina/tortoise/issues/8218) (step 4's rehome left it out of #3524's body, so it was tracked — and closed — on its own ticket). Decision + rejected alternatives: the module docstring of `tortoise/client_identity.py`. Evidence: `tests/test_oauth_consent_client_identity_8218.py` | the page asserts no client name unless an allowlist entry or a CIMD origin backs it; an unattested client is labelled unverified and handled by `client_id` |
 
 **What the "together" rule binds, and what it does not.** Steps 2→4 were scoped to land together because
