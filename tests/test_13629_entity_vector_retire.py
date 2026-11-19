@@ -2210,6 +2210,15 @@ def test_the_census_gate_takes_its_record_leg_from_the_flag_not_the_ambient_env(
     assert "the record holds 1 vector(s) for object, the graph serves 1" in reason, (
         "the census's gate did not receive this run's --record-dsn, so the record leg "
         f"came from an absent ambient and nothing was measured ({reason})")
+    # ⛔ AND ITS OWN CARRIER HOP (review round 9): `census main` passes the pair into
+    # `_write_gate`, and transposing them THERE left 149 passed — the matrix stopped at
+    # `_write_gate`→`probe`, so the CLI's own declaration was outside it.
+    asked = ASKED_SCOPE.get("scope")
+    assert asked is not None, (
+        f"the census CLI took its record count with NO scope: {ASKED_SCOPE!r}")
+    assert (asked.org_id, asked.graph_id) == ("o", "g"), (
+        "the census CLI passed the tenant's halves INTERCHANGED, so the count came from a "
+        f"different tenant: {asked!r}")
     assert "not proved" not in reason, reason
 
 
@@ -2290,9 +2299,11 @@ def test_the_destructive_arm_hands_the_gate_the_runs_own_denominator(
     graph.add("Object", "obj-2")
     record.holds("object", "obj-1")
     _fresh_record_leg(monkeypatch, record_vectors=1)
-    # ⛔ THE AMBIENT LEG IS DELETED, so the `--record-dsn` flag is the ONLY source the
-    # destructive hop can draw from (`_fresh_record_leg` otherwise sets it to the same
-    # string the plan declares, and a dropped argument then looks identical).
+    # ⛔ THE AMBIENT LEG IS DELETED — NOT for the assertion below, which reads the captured
+    # kwargs and is therefore independent of it (measured in review round 9: the mutant reds
+    # with and without this line, because `strip.execute` is stubbed and nothing resolves a
+    # DSN). It is removed so that a future un-stubbing of `execute` cannot silently mask a
+    # dropped argument behind `_fresh_record_leg`'s ambient value.
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
     _cli_harness(monkeypatch, graph)
 
@@ -2564,11 +2575,16 @@ def test_the_tenant_pair_reaches_the_record_query_in_the_DECLARED_ORDER_on_every
     "invisible but currently harmless" is one schema change away from a wrong-tenant
     verdict.
 
-    ⛔ ASSERTING AT THE QUERY COVERS THE WHOLE CHAIN TRANSITIVELY. The two internal
-    pass-throughs (`label_write_gate` → `write_gate`, `readiness_probe` →
-    `label_write_gate`) are exercised by every path below, so a transposition there moves
-    the scope the count stub OBSERVES. The three entry hops are driven with `org` and
-    `graph` DISTINCT strings, because equal halves cannot reveal a transposition.
+    ⛔ ASSERTING AT THE QUERY COVERS THE CHAIN FOR ONE TRANSPOSITION, AND ONLY ONE. The two
+    internal pass-throughs (`label_write_gate` → `write_gate`, `readiness_probe` →
+    `label_write_gate`) are exercised by every path below, so a SINGLE transposition there
+    moves the scope the count stub OBSERVES (measured: each reds this test). ⚠️ TWO
+    transpositions at consecutive hops CANCEL and are invisible at a single observation
+    point — measured: H2+H3 together leave 149 passed. That is a property of measuring at
+    one place, not a second falsifier to add: the structural fix is to carry the pair as
+    ONE parameter so a transposition is unrepresentable, which is #13821's territory.
+    The entry hops are driven with `org` and `graph` DISTINCT strings, because equal
+    halves cannot reveal a transposition.
 
     The recorder is CLEARED per hop on purpose: `ASKED_SCOPE` is module-level state, and a
     stale value from an earlier hop would make the assertion vacuous.
@@ -2624,7 +2640,19 @@ def test_the_tenant_pair_reaches_the_record_query_in_the_DECLARED_ORDER_on_every
              graph_population=strip.graph_vector_population(_Projection(graph)))
     _assert_query_order("destructive (`execute`)")
 
-    # ── hop 3: the census CLI's `_write_gate` (the TOP-LEVEL module it resolves).
+    # ── hop 3: the CLI's OWN declaration (`main` → `build_plan`). Review round 9 found
+    # this carrier unpinned: `main` passes `args.org_id`/`args.graph_id` into `build_plan`,
+    # and transposing them there left 149 passed, because the hops above call `build_plan`
+    # directly and the CLI test asserts the counts in the reason (which the stub answers
+    # whatever the scope). A whole-but-wrong tenant is equally invisible without it.
+    _fresh_hop()
+    _cli_harness(monkeypatch, graph)
+    assert strip.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                       "--record-dsn", "postgresql://localhost/record",
+                       "--org-id", ORG, "--graph-id", GRAPH, "--label", "Object"]) == 0
+    _assert_query_order("CLI (`main` → `build_plan`)")
+
+    # ── hop 4: the census CLI's `_write_gate` (the TOP-LEVEL module it resolves).
     _fresh_hop()
     probe = parity._write_gate(_Projection(graph), org_id=ORG, graph_id=GRAPH,
                               record_dsn="postgresql://localhost/record")
