@@ -1184,13 +1184,18 @@ opposite decisions. `load_in_progress_s` is the in-flight attempt's elapsed seco
 is running, `null` after a FINISHED load too — the start timestamp outlives its attempt, so the
 running thread is the authority).
 - **`load_in_progress_s` PAST `load_timeout_s` means the attempt was ABANDONED** — the caller already
-returned `None` at the bound and the loader is still importing. The guard then refuses to start a
-second attempt for as long as that thread lives, so the block reads `state: "cooldown"`,
-`failure_kind: "load_timeout"`, `load_in_progress: true` with an elapsed time past the bound, and the
-leg stays keyword-only. This resolves BY ITSELF when the thread exits (the guard clears, and the next
-`get()` retries once the 60 s cooldown has passed); a reading that stays past the bound for minutes
-means the import is STUCK, and that does not resolve without `fly machine restart` — read the boot
-log for the bound it hit, then check the image layer/page-cache path, not the app.
+returned `None` at the bound and the loader is still importing. The guard then refuses every retry
+while that thread lives, so the leg stays keyword-only. ⛔ **Do not key this off `state`:** `state`
+reads `cooldown` only for the 60 s after the last refusal and `unavailable` thereafter (nothing
+refreshes `_last_failed_at` on an idle process, and `get()` is the only refresher) — which is also the
+shape of a live FIRST attempt, i.e. the opposite diagnosis. The discriminator is `load_in_progress_s`
+EXCEEDING the bound. The reading resolves by itself when the thread exits (the guard clears, and the
+next `get()` retries once the cooldown has passed). ⛔ This block cannot tell PROGRESS from a WEDGE:
+the elapsed time is wall-clock since the attempt started, so a starved loader may legitimately run
+past its bound (this PR's own bound exists because the same import measured 156.5 s under load).
+Before restarting a machine on this reading, look for other evidence — no further `embedder:` line, a
+stack dump — because a restart throws away an import that may be about to finish and re-pays the whole
+cold cost.
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
 `failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
 `load_failed` (the common one: an import/construct failure in an installed dependency chain),
