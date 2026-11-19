@@ -406,9 +406,9 @@ def test_the_door_serves_the_write_the_record_holds(journal_sdk):
     record holds, on exactly the over-cap path this issue exists to open.
 
     ⛔ AND THE RECORD IS MEASURED, not assumed: the SDK is built with the journal
-    wired, so the ``PointAdded`` line is read back here. A journal-less SDK would
-    satisfy every assertion below for the WRONG reason (nothing would hold the
-    write at all), which is what
+    wired, so the ``PointAdded`` line is read back here. Without it the write's
+    only home would be the cache this test asserts is EMPTY — and the
+    journal-less shape is refused outright, which is what
     ``test_a_journal_less_door_keeps_the_refusal`` pins from the other side.
 
     Mutants this reddens on:
