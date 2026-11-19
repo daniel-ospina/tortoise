@@ -6508,6 +6508,30 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("27618", ("def",
                        "def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:")),
         ), "sdk"),
+        # ⛔ THE CONTENT-REVIEW FILTER AND THE `_list_dedup_candidates` SIGNATURE — D5 states both in
+        # present tense on ONE markdown line. ⛔ NOT "neither had a reader" (#13589 review, P3-1):
+        # the FILTER's number ALREADY had one, and an earlier cut of this comment claimed otherwise.
+        # `_D5_CURRENT_CLAIMS` — inherited from `main`, not added here — carries
+        # `the file's ONLY `dedup_reviewed IS NULL`, at `:(?P<n>\d+)` at THIS head` bound to the
+        # `n.dedup_reviewed IS NULL` needle, so moving that number already reds
+        # `test_the_D5_current_head_anchors_are_the_lines_they_name`. What is NEW here is (a) the
+        # SIGNATURE PAIR, neither half of which had any reader, and (b) a WHOLE-SENTENCE binding of
+        # the filter clause (the `assert _d5.count(_dedup_clause) == 1` arm below), which
+        # `_D5_CURRENT_CLAIMS` does not give: D5 is one markdown
+        # line and a `_pin_row_failures` row scoped to it is satisfied by ANY `:N` on that line, so
+        # it cannot tell the clause's own number from a sibling's. The filter is the file's ONLY
+        # `dedup_reviewed IS NULL`, which is what makes the anchor discriminating, and the signature
+        # pair is held at BOTH halves because the paragraph's whole point is that the comment line
+        # above it is NOT the signature. Re-derived by content at the head this row lands on
+        # (`grep -nF 'dedup_reviewed IS NULL' tortoise/sdk.py`), never nudged.
+        ("05-verify.md", "the content-review queue filter that cite named", (
+            ("28067", "dedup_reviewed IS NULL"),
+        ), "sdk"),
+        ("05-verify.md", "under `def _list_dedup_candidates(`", (
+            ("28030", ("def",
+                       'def _list_dedup_candidates(self, candidate_type: str = "content",')),
+            ("28031", "limit: int = 50) -> list[dict]:"),
+        ), "sdk"),
         # ⚠️ BOTH RANGE ENDS ARE NOW HELD: `:4208` by the `("4201", …)` row above (that line
         # carries text) and `:4230` by the exact-closer form above. A range whose END a
         # bare-string anchor cannot discriminate is pinned by comparing the STRIPPED line,
@@ -6701,7 +6725,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-tense one is re-pointed wrongly (measured: 413 passed). `:10353`/`:10406`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
-        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` on `main`'s numbering) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which resolve at NO head this row names: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
+        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` at `d741bd4a5a`, changing the `register_source(..., raw_state=...)` rename that sits at `:9683` at this head) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which are `94b237fccf`'s pair (measured: `git show 94b237fccf:tortoise/sdk.py \\| grep -n 'subject_binding_available'` -> 10271, 10324) and NOT the MERGE head's: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
         "(the same pair at the branch head `2584a86ec1`, `:10353`/`:10406` at the MERGE head)",
     ):
         assert _d5.count(_spelling) == 1, (
@@ -6738,6 +6762,41 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             f"`tortoise/sdk.py:{_honours_line}`. ALL FOUR statements of it must move together: "
             "they are the set the pin row cannot read, because its scoping phrase carries the "
             "number")
+
+    # ⛔ THE SAME TREATMENT FOR THE CONTENT-REVIEW FILTER (#13589 review, P3). The pin row
+    # added for this clause scopes to the phrase `the content-review queue filter that cite
+    # named`, which is DISCRIMINATING (`:28067` is the file's only `dedup_reviewed IS NULL`),
+    # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
+    # scoped line — and D5 IS ONE LINE carrying `:28067` four times, so a row satisfied by any
+    # of them cannot tell the clause being re-pointed from another occurrence staying put.
+    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28067`" left the
+    # row GREEN. The sentence is therefore read WHOLE, with its number DERIVED from the
+    # source, so both halves are graded: a source move the document did not follow reds, and
+    # a document re-point the source did not make reds.
+    _dedup_filter_lines = [
+        _n for _n, _ln in enumerate(sources["sdk"], 1)
+        if "dedup_reviewed IS NULL" in _ln]
+    # ⛔ NOT `next(...)`: a bare `next` raises `StopIteration` with no message the moment the
+    # anchor is gone, which pre-empts the pin rows' own reporting and makes the mutant
+    # UNATTRIBUTABLE (agent-infra#3442 rule 2 — MEASURED: with the token removed the whole case
+    # died on `E StopIteration` and printed no row at all). And the pin row's discrimination
+    # rests on this being the file's ONLY occurrence, so that is asserted here rather than
+    # only claimed in the comment above it.
+    assert len(_dedup_filter_lines) == 1, (
+        "tortoise/sdk.py must carry `dedup_reviewed IS NULL` EXACTLY once — the pin row scoped "
+        "to `the content-review queue filter that cite named` is only discriminating because "
+        f"this is the file's ONLY occurrence; this tree has {len(_dedup_filter_lines)} "
+        f"occurrence(s), at line(s) {_dedup_filter_lines}")
+    _dedup_filter_line = _dedup_filter_lines[0]
+    _dedup_clause = (
+        "the content-review queue filter that cite named, `dedup_reviewed IS NULL`, sits at "
+        f"`sdk.py:{_dedup_filter_line}` at this head")
+    assert _d5.count(_dedup_clause) == 1, (
+        f"05-verify.md states the content-review filter clause and this spelling now occurs "
+        f"{_d5.count(_dedup_clause)} time(s): {_dedup_clause!r} — the source definition is at "
+        f"`tortoise/sdk.py:{_dedup_filter_line}`. The pin row scoped to the clause's phrase "
+        "cannot grade this half on its own: D5 is one markdown line and every `:N` on it "
+        "satisfies a row scoped to the line, so this sentence is asserted whole.")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
     # `hosted_api.py:15225-15302`, and the END of that range is a BLANK line — so the row
