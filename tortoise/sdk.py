@@ -17958,7 +17958,7 @@ class TortoiseSDK:
         # (`explicit_id` above) and the statement it issues is a plain `CREATE`,
         # so a colliding id mints a SECOND `:Point` and the journal's
         # `PointAdded` is folded back onto the ORIGINAL node by replay's
-        # `_upsert_point_props` MERGE (`projection/entities.py:3128`) — the
+        # `_upsert_point_props` MERGE (`projection/entities.py`) — the
         # defect class this repo already recorded for the entity fold
         # (`_update_entity`'s #9649/#10192 note: "the fold behind it MERGEs, so
         # an ON-MATCH re-create reaches an EXISTING node too — a guard on
