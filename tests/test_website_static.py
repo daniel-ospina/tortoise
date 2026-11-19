@@ -9173,25 +9173,81 @@ class TestProductTeamsIdentity:
         # `_served`, not the raw document, and that is load-bearing: the page's
         # own inline JS states the convention in a COMMENT
         # (`utm_campaign=tortoise-for-product-teams + utm_source + utm_medium`),
-        # so a raw read is satisfied by prose while all four tagged links lose
-        # their tag — leaving the experiment with no denominator, which is the
-        # owner's recorded reason for the tag (#13696 round 7).
+        # so a raw substring read is satisfied by that prose alone
+        # (#13696 round 7).
+        #
+        # ⛔ AND IT IS READ PER LINK, not once anywhere: a single `in html`
+        # still passes when THREE OF THE FOUR tagged links lose their tag
+        # (measured, #13696 round 8) — one entry path's attribution disappears
+        # silently, which is the owner's stated reason for tagging at all
+        # ("without that the experiment has no denominator").
         html = _served(_product_teams_html())
-        assert "utm_campaign=tortoise-for-product-teams" in html, (
-            "the links this page controls carry no utm_campaign, so its traffic "
-            "is not separable from /tortoise's in the same PostHog project — "
-            "the experiment would have no denominator")
-        for utm in ("utm_source=", "utm_medium="):
-            assert utm in html, f"the campaign links carry no {utm.rstrip('=')}"
+        tagged, untagged = [], []
+        for tag in re.findall(r"<a\b[^>]*>", html, re.I):
+            if "data-cta=" not in tag:
+                continue
+            m = re.search(r'href="([^"]+)"', tag)
+            if not m:
+                untagged.append(f"{tag} (no href)")
+                continue
+            href = m.group(1)
+            if href in self.OFF_SITE_CTAS:
+                # Exempt BY NAME, not by "anything off-site is exempt": that
+                # weaker rule also excuses a campaign CTA retargeted off our
+                # funnel, which is the defect one step further along.
+                continue
+            if all(p in href for p in self.CAMPAIGN_PARAMS):
+                tagged.append(href)
+            else:
+                untagged.append(href)
+        assert not untagged, (
+            "these CTAs do not carry the full campaign tag set "
+            f"({', '.join(self.CAMPAIGN_PARAMS)}) in their OWN href: {untagged!r}. "
+            "Each is an entry path whose traffic then cannot be separated from "
+            "/tortoise's in the same PostHog project — the experiment would "
+            "count that path with no denominator (#13645).")
+        assert tagged, (
+            "no `data-cta` link carries the campaign tags — this row's subject "
+            "moved (the hero CTAs are found by `data-cta`, so zero of them "
+            "means the markup changed and this gate now asserts nothing)")
+
+    #: The page's ONE off-site CTA: the repo link. GitHub takes no campaign
+    #: tags, so it is exempt by name — see the row above for why ``any off-site
+    #: link`` is NOT the rule.
+    OFF_SITE_CTAS = ("https://github.com/daniel-ospina/tortoise",)
+
+    #: The three parameters the owner's decision requires on every link we
+    #: control; each one answers a different question in the dashboard.
+    CAMPAIGN_PARAMS = (
+        "utm_campaign=tortoise-for-product-teams",
+        "utm_source=tortoise-for-product-teams",
+        "utm_medium=",
+    )
 
     def test_the_page_links_to_the_canonical_product_page(self):
         """The owner's rule: this page does not re-tell /tortoise's story."""
         html = _without_html_comments(_product_teams_html())
-        hrefs = [h.split("?", 1)[0] for h in re.findall(r'href="([^"]+)"', html)]
+        raw_hrefs = re.findall(r'href="([^"]+)"', html)
+        hrefs = [h.split("?", 1)[0] for h in raw_hrefs]
         assert "/tortoise" in hrefs, (
             "the niche page never links to /tortoise, whose full product story "
             "it does not duplicate. The owner's decision requires the canonical "
             "page to stay reachable from here (footer → Product).")
+        # …and the ONE that IS the campaign entry point into the canonical page
+        # must carry the tags. The other `/tortoise/<sub>` links are internal
+        # navigation and are deliberately untagged, so this binds the route, not
+        # a substring: retargeting the footer link, or dropping its tags, reds.
+        home = [h for h in raw_hrefs if h.split("?", 1)[0] == "/tortoise"]
+        assert home, (
+            "no footer link to the clean `/tortoise` route — only sub-page "
+            "navigation remains, so the canonical product page is one hop "
+            "further than the owner's decision allows")
+        assert all(
+            "utm_campaign=tortoise-for-product-teams" in h for h in home
+        ), ("the footer's link to `/tortoise` carries no utm_campaign, so the "
+            "traffic this page sends to the canonical page is counted as if it "
+            "had arrived from anywhere — the experiment's two arms stop being "
+            "separable (#13645)")
 
     def test_the_three_step_story_replaced_the_fourth_beat(self):
         """`#beat-automate` is ABSENT here and PRESENT on `/tortoise`.
