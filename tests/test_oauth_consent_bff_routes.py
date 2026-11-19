@@ -2330,14 +2330,22 @@ def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSI
 # One row per shape the pattern must RED, run through the SAME shipped decision the corpus guard
 # calls (`_false_absolute_in` → `_absolute_violations`). There is no exemption left to test, so this
 # table's job is the opposite one: it pins that no PHRASING gets a sentence with the false noun past
-# the guard — including the historical forms four earlier exemptions were written to allow.
+# the guard — including the historical forms the deleted exemptions were written to allow.
 #
-# ⛔ FOUR EXEMPTIONS WERE TRIED AND ALL ARE RECORDED HERE AS RED ROWS, because each one is the
-# argument for deleting the mechanism rather than tuning it: a bare word list (`bf5202ce79`), a retro
-# marker accepted anywhere in the sentence (`4ab3033e32`), a `used to` read from an unbounded tail,
-# a clause-scoped `\w+ed` whose verdict turned on a comma (F6), and an anchored historical shape that
-# did not fail open but made the guard VACUOUS against `origin/main`. Every RED row below was GREEN
-# under one of those; the comment names which.
+# ⛔ FOUR EXEMPTIONS WERE TRIED, AND THE ROWS BELOW ARE THE SHAPES WHOSE VERDICT THEY CHANGED —
+# because each exemption is the argument for deleting the mechanism rather than tuning it: a bare
+# word list (`bf5202ce79`), a retro marker accepted anywhere in the sentence (`4ab3033e32`), a `used
+# to` read from an unbounded tail, a clause-scoped `\w+ed` whose verdict turned on a comma (F6), and
+# an anchored historical shape that did not fail open but made the guard VACUOUS against `origin/main`.
+#
+# ⛔ NOT EVERY ROW BELOW IS ONE OF THOSE, and saying it was would be the class of over-claim this PR
+# exists to remove (review of #13712, F15 — measured: the bare denial "Every hard failure is a page,
+# not a JSON blob." carries no survivor, no retro marker, no `-ed` and no anchor, so it was RED under
+# ALL FIVE schemes and GREEN under none of them). The rows that pin the phrase and its SPELLING
+# tolerance — the bare denial, the wrap, the `**hard**`, the `hard-failure`, the tab — are here for a
+# different reason: they hold the PATTERN, not an exemption. Where a row's own comment names an old
+# revision, that row is one of the exemptions' casualties; where it names none, it is not, and this
+# comment must not be read as claiming otherwise.
 _SUMMARY_ABSOLUTE_ROWS: list[str] = [
     # the denial itself, however it is dressed
     ("Every hard failure is a page, not a JSON blob."),
