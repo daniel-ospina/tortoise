@@ -882,9 +882,10 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
     ⛔ "IT CHANGES NO DECISION" IS PINNED HERE, NOT ONLY ASSERTED IN PROSE. An
     empty `rows` cannot carry that claim on its own: `run_vector_query` returns
     ``[]`` from the SERVED path (`mechanism=pgvector`, `reason=empty_results`,
-    `degraded=False` — `search_engine.py:4176-4178`) AND from a DECLINE whose
-    fallback leg failed (`search_engine.py:4153-4155`: `mechanism=pgvector`,
-    `reason=query_failed`, `degraded=True`, `return []`). A mutant that raises
+    `degraded=False` — `search_engine.py:4176-4178`) AND from a DECLINE that has NO
+    fallback leg to announce (`search_engine.py:4153-4155`: `mechanism=pgvector`,
+    `reason=query_failed`, `degraded=True`, `return []` — the post-contract arm where
+    the graph is not a fallback and is never asked). A mutant that raises
     `RecordVectorDeclined` *after* the marker's debug line therefore keeps
     `rows == []` and both caplog assertions green — the half of #13798's mandate
     that says the marker must not turn a serve into a refusal was asserted in prose
