@@ -2350,7 +2350,8 @@ def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSI
 #
 # ⛔ THE TABLE IS NOT "EVERY ROW BELOW WAS GREEN UNDER ONE OF THOSE", and two earlier wordings of this
 # comment said exactly that and were falsified by the table itself (review of #13712, F15/F16 —
-# measured: 8 of the 35 rows are RED under ALL FIVE schemes, GREEN under none). A row whose own
+# measured: 8 of the rows are RED under ALL FIVE schemes, GREEN under none — 35 rows when that was
+# measured; the table has 36 because this very comment block added the F6 row). A row whose own
 # comment names a revision is a casualty of that scheme; the rest are here for their own reason — the
 # bare denial, and the spelling rows (wrap, `**hard**`, `hard-failure`, tab) that hold the PATTERN
 # rather than an exemption. Both kinds belong in the table; what must never be written is that a row
@@ -2416,11 +2417,14 @@ _SUMMARY_ABSOLUTE_ROWS: list[str] = [
      "still do."),
     # ⛔ F6, the other half: an `-ed` word is not a tense. ⛔ THE NEXT TWO ROWS ARE NOT ITS CASUALTIES,
     # and an earlier comment credited them with a discrimination they do not perform (review of
-    # #13712, F17 — measured at `ceb8ab564f`, the only revision that shipped the clause-scoped `\w+ed`
-    # rule: both rows were RED there, because that rule ALSO required a retro frame and neither
-    # carries one; they are casualties of the bare word list at `bf5202ce79`). The row BELOW them is
-    # the one that rule actually flipped — it carries the retro frame AND `documented`, and it was
-    # GREEN at `ceb8ab564f`.
+    # #13712, F17 — measured at `094c824817` AND `ceb8ab564f`, the TWO revisions that shipped the
+    # clause-scoped `\w+ed` rule — an earlier wording of this line said "only", and `094c824817` is an
+    # ancestor, so that superlative was itself a provenance claim a re-measuring reader falsifies,
+    # review F18). Both rows are RED at BOTH revisions, and both go GREEN the moment a retro frame is
+    # added, because that rule ALSO required one and neither row carries it; here they are casualties
+    # of the bare word list at `bf5202ce79`. The row BELOW them is the one that rule EXEMPTS: it
+    # carries the retro frame AND `documented`, it is GREEN at `ceb8ab564f`, and it REDs the moment
+    # `documented` is removed — that measured dependence is the discrimination it is here to pin.
     ("Two arms remain, and every hard failure is a page as documented."),
     ("Two arms were converted and every hard failure is a page now."),
     ("Before #13671, every hard failure is a page as documented; two arms still do."),
