@@ -20394,10 +20394,11 @@ class FalkorProjection(
           budget when the read has one. That is what the paragraph above requires.
         * ``tools/strip_graph_entity_vectors.py::graph_vector_population`` — the operator
           stripper — binds this method and lets :func:`record_vector._safe_population` call
-          it with NO argument, i.e. ``timeout_ms=None``, which leaves the door's own bound.
-          That is the correct choice there and not an oversight: the tool takes one
-          aggregate per label for a whole run, so a short budget would not protect a hot
-          path — it would only convert a slow count into ``None``, and ``None`` is
+          it with the LABEL and no timeout (``graph_population(entity_type)``, so
+          ``timeout_ms=None``), which leaves the door's own bound. That is the correct
+          choice there and not an oversight: the tool takes one aggregate per label for a
+          whole run, so a short budget would not protect a hot path — it would only convert
+          a slow count into ``None``, and ``None`` is
           UNVERIFIED, which makes the strip gate refuse a label whose record may well
           cover it. A tool that refuses on its own measurement's latency is useless; an
           operator tool waiting for one honest count is not.
