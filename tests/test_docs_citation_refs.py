@@ -811,8 +811,9 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     _absent = _base_ref_absent_detail()
     # ⛔ NOT A `pytest.skip` (#13802 review, P1 — THE INERT-ENFORCER SHAPE). Every job
     # that runs a suite checks out at `actions/checkout@v4`'s DEFAULT `fetch-depth: 1`
-    # (`python-ci.yml:968` and `post-merge-validation.yml:96`/`:222` carry no `with:`),
-    # so `origin/main` never resolves on the rail and a skip here means this arm
+    # (`python-ci.yml:968` is bare inside the `test` job; `post-merge-validation.yml`
+    # declares no `fetch-depth` at all — `grep -c fetch-depth` -> 0 — and its `:96`
+    # passes a `ref:` only, while `:222` is bare), so `origin/main` never resolves on the rail and a skip here means this arm
     # asserts NOTHING in the only place the rail reads it. MEASURED on a real depth-1
     # clone of this branch with the document's attribution flipped back to "and THAT
     # shift is this repair's, not `main`'s": `11 passed, 2 skipped` — green, defect
@@ -865,12 +866,19 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
 _TYPED_INDEX_NUMSTAT = re.compile(
     r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
     r"\s*(?:->|prints)\s*`\d+\s+\d+`"
-    # ⛔ THE SHORT FORM TOO (#13802 review, P2). The document's most-used spelling of
-    # this clause is "…and its `--numstat` form both print NOTHING", typed FIVE times,
-    # and a regex that knows only the long form walks straight past the figure that
-    # replaces `NOTHING` there — measured on a depth-1 clone: `both print `1 1`` left
-    # both arms green. The same command's short name is the same head-bound figure.
-    r"|`--numstat`\s+form[^`]{0,60}?(?:->|prints?|both\s+print)\s*`\d+\s+\d+`")
+    # ⛔ THE SHORT FORM TOO (#13802 review, P2). The document's own spelling of this
+    # clause is "…and its `--numstat` form both print NOTHING", and a regex that knows
+    # only the long form walks straight past the figure that replaces `NOTHING` there —
+    # measured: `both print `1 1`` left both arms green.
+    r"|`--numstat`\s+form\s*(?:both\s+print|->|prints?)\s*`\d+\s+\d+`"
+    # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
+    # document's `both print NOTHING` clauses state the CURRENT reading without repeating
+    # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
+    # THIS head both print NOTHING"), so keying the short form on the command's name
+    # missed them: rewriting THAT clause to `both print `1 1`` came back green. A `both
+    # print` followed by a typed pair is this class by construction; the HISTORICAL form
+    # ("printing `1 1` at a head of its own") is the participle, not this verb.
+    r"|\bboth print\s*`\d+\s+\d+`")
 
 
 def test_the_document_types_no_numstat_figure_for_the_index_residual():
