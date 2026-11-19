@@ -94,8 +94,8 @@ _RESOURCE = "cursor://tools.internal/v1"
 # The OTHER destination the origin assertion cannot see, and the reason `resource` is NOT the only
 # parameter that can name one: `redirect_uri` accepts this exact shape — `consent-bridge.ts:64`
 # `NATIVE_REDIRECT_SCHEMES = ["cursor"]`, accepted at `:244-248` — because the beta's only native
-# harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED value
-# in `_CROSS_HALF_URIS` at `:1473`, the accepted row at `:1483`). `cursor://…` carries no
+# harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED row of
+# `_CROSS_HALF_URIS`). `cursor://…` carries no
 # `http(s)://`, so it is invisible to the origin assertion AND absent from the scheme-less
 # `client.example/cb` tail row: a page that rendered it passed every assertion in
 # `_assert_refusal_page` GREEN (review of #13712, F1).
@@ -2157,18 +2157,71 @@ _FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure", re.IGNORECASE)
 # do" — and a phrase-only match failed it while reporting that the file "claims EVERY HARD FAILURE
 # is a page", the opposite of what that sentence says (review of #13712, F3).
 #
-# ⛔ AND THE EXEMPTION IS TWO CONDITIONS, NOT A WORD LIST. An earlier revision exempted any sentence
-# containing `still`, `survives` or `remains` — ordinary English, tied to nothing — so the absolute
-# went GREEN on sentences this repo actually writes: "every hard failure of this route is a page,
-# and the status is still unchanged", "…the no-store header survives", "…the CSP remains strict"
-# (review of #13712, F4; measured through these very patterns, not by inspection). A guard one
-# adverb defeats is not a guard. A sentence is exempt only when it BOTH states the universal in the
-# PAST — so it is a claim about what used to be true — AND names a COUNTED survivor, so the reader
-# is told what still answers JSON. Neither condition alone exempts anything.
+# ⛔ AND THE EXEMPTION IS STRUCTURAL — THREE CONDITIONS, EACH TIED TO THE PHRASE. It has shipped
+# wrong **twice** as a word list, so it is spelled out here rather than left to the reader:
+#
+#   1. a COUNTED survivor is named in the sentence — "two arms still do", not "the status is still
+#      unchanged". An earlier revision exempted on `still` / `survives` / `remains` alone, ordinary
+#      English tied to nothing, so "every hard failure of this route is a page, and the status is
+#      still unchanged" went GREEN (review of #13712, F4).
+#   2. the past reference SCOPES the universal: it must PRECEDE the phrase in the same sentence, so
+#      a later "before the redirect" cannot reach back and exempt a present-tense absolute. The
+#      revision that accepted `used to|previously|before` ANYWHERE in the sentence was defeated by
+#      exactly that shape — "every hard failure is a page; two arms capture the state before the
+#      redirect" measured GREEN at `4ab3033e32` (re-measured in this commit, review of #13712, F5).
+#   3. the universal ITSELF is in the past: a past-tense verb inside the phrase's own clause, so the
+#      tense cannot be borrowed from a neighbouring clause.
+#
+# ⛔ A FALSE BLOCK is the cheap direction and a FALSE PASS is not (AGENTS.md, Product Over Process):
+# a sentence an author legitimately wants exempt costs one edit, and the assertion message says how
+# to write it; a false absolute that ships GREEN invites the next lane to convert a `json(...)` arm
+# that #10865's owner comment ruled out. So all three conditions are REQUIRED, and the guard reds on
+# the wording this PR retired instead of trying to recognise every tense English can spell.
 _SURVIVORS_NAMED_RE = re.compile(
     r"\b(?:two|both|\d+)\b[^.\n]{0,40}\b(?:arms?|returns?|places?|browsers?)\b",
     re.IGNORECASE)
-_PAST_UNIVERSAL_RE = re.compile(r"\b(?:used to|previously|before)\b", re.IGNORECASE)
+# A past reference may scope the universal: a discourse marker, or a `before` that names an ABSOLUTE
+# point ("before #13671", "before this change") rather than a point in the flow.
+_PAST_REFERENCE_RE = re.compile(
+    r"\b(?:used to|previously|formerly|prior to)\b"
+    r"|\bbefore\s+(?:#\d+|this\b|that\b|the\b[^.\n;,]{0,24}?"
+    r"\b(?:change|fold|fix|pr|merge|rewrite|branch)\b)",
+    re.IGNORECASE)
+# ⛔ PAST TENSE, spellable without a parser: any `-ed` form (`answered`, `returned`, `replied`) or an
+# irregular the exempt shape actually uses; `was`/`were` also cover the passive.
+_PAST_TENSE_RE = re.compile(
+    r"\b(?:\w+ed|was|were|had|did|wrote|began|took|kept|gave|said)\b|['’]d\b", re.IGNORECASE)
+# A clause boundary inside a sentence: semicolon, comma, full stop, newline, or em dash.
+_CLAUSE_BREAK_RE = re.compile(r"[;,]|\.\s|\n|—")
+
+
+def _clause_containing(sentence: str, start: int, end: int) -> str:
+    """The clause of `sentence` that CONTAINS `sentence[start:end]`, bounded by punctuation — so a
+    past-tense verb in a neighbouring clause cannot make a present-tense universal read as past.
+    """
+    left = 0
+    for m in _CLAUSE_BREAK_RE.finditer(sentence, 0, start):
+        left = m.end()
+    right = _CLAUSE_BREAK_RE.search(sentence, end)
+    return sentence[left:right.start() if right else len(sentence)]
+
+
+def _summary_absolute_is_excused(sentence: str, phrase: str) -> bool:
+    """True only for a statement of the universal about the PAST that NAMES a counted survivor.
+
+    The three conditions are the ones described above; every other shape returns False, i.e. the
+    sentence REDS. Taking the phrase rather than a span keeps the check anchored to the sentence the
+    phrase actually sits in, which is what makes condition 2 (scoping) meaningful.
+    """
+    start = sentence.find(phrase)
+    if start < 0:  # pragma: no cover - the caller derives `phrase` from this same sentence
+        return False
+    end = start + len(phrase)
+    return (
+        bool(_SURVIVORS_NAMED_RE.search(sentence))
+        and bool(_PAST_REFERENCE_RE.search(sentence[:start]))
+        and bool(_PAST_TENSE_RE.search(_clause_containing(sentence, start, end)))
+    )
 
 
 def _sentence_around(text: str, start: int, end: int) -> str:
@@ -2215,12 +2268,13 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     author to write — the universal stated about the PAST, with the survivors named ("before
     #13671, every hard failure … answered raw JSON; two arms still do"). A phrase-only match failed
     that sentence and reported that the file "claims EVERY HARD FAILURE is a page", the opposite of
-    what it says (review of #13712, F3). So a match is exempt only when its OWN sentence does BOTH
-    things — states the universal about the PAST and names a COUNTED survivor (`_PAST_UNIVERSAL_RE`
-    and `_SURVIVORS_NAMED_RE`, both required; review of #13712, F4 measured a one-word list being
-    the whole exemption and defeatable by "…is a page, and the status is still unchanged") — and the
-    message QUOTES the span it matched, so a red can no longer be read as a claim about a sentence
-    nobody wrote.
+    what it says (review of #13712, F3). So a match is exempt only when its OWN sentence satisfies
+    `_summary_absolute_is_excused` — a COUNTED survivor named, a past reference that SCOPES the
+    phrase, and a past tense inside the phrase's own clause — and that exemption is measured row by
+    row by `test_the_summary_guard_EXCUSES_only_a_past_scoped_survivor`. Both earlier revisions of
+    it (a bare word list at `bf5202ce79`, an unscoped `before` at `4ab3033e32`) exempted a
+    present-tense false absolute, which is why it is structural now. The message QUOTES the span it
+    matched, so a red can no longer be read as a claim about a sentence nobody wrote.
 
     Non-vacuous, and where the red actually lands: `origin/main`'s
     `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
@@ -2241,10 +2295,9 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     for name, text in corpus.items():
         for m in _FALSE_ABSOLUTE_RE.finditer(text):
             sentence = _sentence_around(text, m.start(), m.end())
-            # BOTH, never either: without the past marker this is a present-tense absolute that
-            # merely mentions an adverb; without the counted survivor the reader is not told what
-            # still answers JSON (review of #13712, F4).
-            if _PAST_UNIVERSAL_RE.search(sentence) and _SURVIVORS_NAMED_RE.search(sentence):
+            # ALL THREE, never any one: a counted survivor, a past reference that scopes the
+            # phrase, and the past tense in the phrase's own clause (review of #13712, F4 + F5).
+            if _summary_absolute_is_excused(sentence, m.group(0)):
                 continue
             # The message QUOTES the span it matched, out of the ORIGINAL text, so a reader can
             # tell which sentence earned the red instead of being told what it supposedly claims.
@@ -2256,6 +2309,51 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
                 "every REFUSAL, or name the "
                 "survivors: the terminal `200` is #10865's recorded decision, and a summary that "
                 "denies it invites converting it.")
+
+
+# One row per shape the EXEMPTION has to adjudicate, because the exemption is the part that has
+# shipped wrong twice: a bare word list at `bf5202ce79`, and a past reference that did not scope the
+# phrase at `4ab3033e32`. Every row runs through the SAME predicate the corpus guard calls.
+_SUMMARY_ABSOLUTE_ROWS: list[tuple[str, str]] = [
+    # ⛔ must RED — the false absolute, however it is dressed
+    ("Every hard failure is a page, not a JSON blob.", "RED"),
+    ("Every hard failure is a page; the consent cookie is still set before the flow starts.", "RED"),
+    ("Every hard failure of the route is a page, and the store remains the source of truth.", "RED"),
+    # …and the shapes the `4ab3033e32` exemption let through: `before` as a mere preposition, plus a
+    # counted survivor somewhere in the same sentence.
+    ("Every hard failure is a page; two arms capture the state before the redirect.", "RED"),
+    ("Every hard failure is a page, and both return paths record the attempt before the session "
+     "read.", "RED"),
+    ("Before the redirect, every hard failure is a page; two arms write the state.", "RED"),
+    # a present-tense universal cannot borrow the past tense of its own survivor
+    ("Before #13671, every hard failure is a page; two arms still write JSON.", "RED"),
+    # a survivor in a LATER sentence does not reach back
+    ("Every hard failure is a page. Two arms still answer JSON.", "RED"),
+    # ⛔ must stay EXEMPT — the sentence an author is asked to write
+    ("Before #13671, every hard failure of that route answered raw JSON; two arms still do.",
+     "EXEMPT"),
+    ("Previously every hard failure answered JSON; both arms return one.", "EXEMPT"),
+    ("This route previously answered every hard failure with JSON; two arms still do.", "EXEMPT"),
+]
+
+
+@pytest.mark.parametrize("sentence,expected", _SUMMARY_ABSOLUTE_ROWS)
+def test_the_summary_guard_EXCUSES_only_a_past_scoped_survivor(
+        sentence: str, expected: str) -> None:
+    """The exemption, measured on its own rather than only through the three corpus files.
+
+    Why a direct test: the corpus scan is GREEN on all three files today, so a wrong exemption is
+    INVISIBLE there — both of this test's predecessors (the word list at `bf5202ce79`, the unscoped
+    `before` at `4ab3033e32`) passed the corpus scan while exempting a present-tense false absolute.
+    Every RED row above is a sentence that measured GREEN under one of those revisions, so the row
+    set is the record of both holes rather than an illustration of one.
+    """
+    m = _FALSE_ABSOLUTE_RE.search(sentence)
+    assert m, "every row must contain the phrase the corpus guard matches"
+    found = _summary_absolute_is_excused(
+        _sentence_around(sentence, m.start(), m.end()), m.group(0))
+    assert found is (expected == "EXEMPT"), (
+        f"expected {expected}, adjudicated {'EXEMPT' if found else 'RED'}: {sentence!r}")
 
 
 def _key_from(location: str | None) -> str:
