@@ -16488,22 +16488,37 @@ def test_the_D5_row_is_still_one_table_row():
 #: as the claim coming BACK. That is deliberately symmetric across all three entries —
 #: binding one entry to an "asserting frame" while the others stay bare is what made two
 #: of them red on a correct, quoted retraction (#13809 review, P2; reproduced).
-#: ⛔ STATED LIMITS, two, both MEASURED at `3719864ec9` (#13809 review, P2):
+#: ⛔ STATED LIMITS, four, each MEASURED at the head it names (#13809 review):
 #: (a) an assertion written INSIDE double quotation marks is not caught — that is what the
 #:     strip is FOR; and (b) the strip recognises DOUBLE quotes only, so a retraction marked
 #:     with single quotes or with typography that the word match still sees REDS this pin on a
 #:     CORRECT repair (measured: `'AND THE BOX IS NO LONGER SHALLOW' … DELETED` -> `1 failed`).
 #:     The convention is therefore stated rather than assumed: **mark a retraction by
-#:     double-quoting the wording you delete**, which is what this row's own repair does. An
-#:     earlier cut of this comment called that trade "never redding a repair", and that was
-#:     FALSE — the single-quote spelling is a correct edit and it reds — so the honest claim
-#:     is that the offending convention is the row's own, and the assertion text now says so
-#:     at the point of failure, where the author who hits it needs it.
+#:     double-quoting the wording you delete**, which is what this row's own repair does, and
+#:     the assertion text says so at the point of failure, where the author who hits it needs
+#:     it. An earlier cut of this comment called that trade "never redding a repair", and that
+#:     was FALSE — the single-quote spelling is a correct edit and it reds.
+#: (c) the pin fires on the WORDING and not on grammatical mood — a conditional "after the
+#:     unshallow, the box is no longer shallow" is refused, so say it about the CLONE (cycle
+#:     4); and (d) the two SUBJECT-BOUND entries pin a reading WITH its subject, so a
+#:     restatement that drops the number is a different claim and is out of scope (cycle 4).
+#: ⛔ And the row must be BALANCED: an odd number of `"` fails the pin rather than being
+#: mis-parsed, because the strip pairs quotes POSITIONALLY and one unpaired quote swallowed
+#: 3,943 characters of the row in a MEASURED false pass — the claim came back unquoted and
+#: the suite stayed green (cycle 4).
 #: ⛔ No literal `hosted_api.py:<n>` token is spelled here: the census greps every tracked
 #: file, so one would join the population it measures.
-_D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
+_D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
     (
-        "is a bare `#` comment marker",
+        # ⛔ An entry is a TUPLE of fragments and fires only when EVERY one is present, so
+        # a reading can be bound to its SUBJECT without binding it to a frame. This entry
+        # and the next need that: their predicate ("is a bare # comment marker", "a
+        # DIFFERENT call site") is true of OTHER lines too, so the predicate alone refused
+        # correct prose — measured: `:12221` is a DIFFERENT call site from the import at
+        # `:12168` is TRUE and was RED, which is the false red this pin's STATED LIMIT
+        # says it never takes (#13809 review, cycle 4, P2). No glyph, case or spacing is
+        # part of a fragment: `_d5_words` reduces each side to a word sequence.
+        ("14471", "is a bare `#` comment marker"),
         "measured at `origin/main`: `:14471` is a docstring line in "
         "`tortoise/hosted_api.py` and a code line in `tortoise/sdk.py` — neither is a "
         "comment marker (#13794 review, P2). Keep the half that IS true, and keep it "
@@ -16515,14 +16530,14 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
         "tracked file, so one would join the population it measures",
     ),
     (
-        # ⛔ No frame and no typography: the CONNECTIVE is not part of the reading, which
-        # is the rule entry 3 states below, applied here after it was measured to be
-        # missing (#13809 review, cycle 2, P2 — MEASURED: with ``, a `` welded to this
-        # literal, the `is`, `—` and `,` spellings of the SAME refuted claim all read
-        # GREEN, i.e. the pin only caught the one head it was written at). The predicate
-        # alone is specific here: the corrected row says `a name in a DIFFERENT import
-        # list — ⛔ **not a call site**`, which does not contain it.
-        "a DIFFERENT call site",
+        # ⛔ No frame and no typography, but subject-BOUND (see entry 1): the CONNECTIVE
+        # is not part of the reading, which is the rule entry 3 applies below — measured
+        # in cycle 2, when ``, a `` welded to this literal meant the `is`, `—` and `,`
+        # spellings of the SAME refuted claim all read GREEN (#13809 review, P2) — while
+        # the NUMBER is part of it, because without the number the predicate reds a true
+        # sentence about another call site (cycle 4, P2 — MEASURED). Residual: a
+        # restatement that drops the number is out of scope, which is a different claim.
+        ("45728", "a DIFFERENT call site"),
         "measured at this head: `:45728` is a NAME in an import list "
         "(`subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,`), not a call. The "
         "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
@@ -16537,8 +16552,8 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
         # keeping one was a FALSE PASS (#13809 review, P2 — MEASURED: with `, so` still
         # on this literal, an unquoted `AND THE BOX IS NO LONGER SHALLOW.` and its
         # lowercase form both read GREEN, i.e. the refuted claim could come back in prose
-        # and the pin would not fire).
-        "the box is no longer shallow",
+        # and the pin would not fire). One fragment, because its subject IS the wording.
+        ("the box is no longer shallow",),
         "measured on the clone this row was repaired on: "
         "`git rev-parse --is-shallow-repository` -> `true` and "
         "`git merge-base 2584a86ec1 origin/main` -> rc=1, so the unshallow is a REPAIR a "
@@ -16579,9 +16594,11 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
     `git merge-base 2584a86ec1 origin/main` -> rc=1). No guard in the tree read any of
     the three, which is how they survived nine heads while the suite was green.
 
-    A reword is free here, and so is any marked retraction: the assertion is that the
-    refuted READING is not stated again UNQUOTED, not that any particular sentence
-    survives and not that a repair may not quote the wording it deletes. See the tuple's
+    A reword is free here, and so is a retraction marked by a DOUBLE-quoted span (the
+    convention this row uses for the wording it deletes); the assertion is that the
+    refuted READING is not stated again UNQUOTED. ⛔ A single- or curly-quoted retraction
+    is NOT exempt — mark it with `"` — and the pin refuses a row whose `"` do not pair,
+    rather than mis-parsing it (#13809 review, cycle 4, P2 — MEASURED). See the tuple's
     STATED LIMIT for the one thing this cannot catch.
     """
     d5 = [
@@ -16590,9 +16607,22 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
         if line.lstrip().startswith("| **D5** |")
     ]
     assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    # ⛔ FAIL CLOSED on an unbalanced row (#13809 review, cycle 4, P2 — MEASURED: one
+    # extra `"` made 89, the positional pairing below then swallowed 3,943 characters
+    # from the rest of the line, and an unquoted restatement of all three readings
+    # stayed GREEN). A retraction-marker strip that pairs quotes POSITIONALLY cannot
+    # tell an unpaired quote from a long span, so the row is required to be balanced
+    # rather than silently mis-parsed.
+    assert d5[0].count('"') % 2 == 0, (
+        f"the D5 row carries an ODD number of dquotes ({d5[0].count(chr(34))}) — a "
+        "retraction is marked by a DOUBLE-quoted span and the strip below pairs quotes "
+        "positionally, so one unpaired quote would swallow the rest of the line and "
+        "silently disarm this pin. Balance the quotes (or mark the retraction with a "
+        "dquote-quoted span)."
+    )
     asserted = _d5_words(_D5_QUOTED_SPAN.sub("", d5[0]))
-    restated = [f"  {claim!r} — {why}" for claim, why in _D5_REFUTED_READINGS
-                if _d5_words(claim) in asserted]
+    restated = [f"  {parts!r} — {why}" for parts, why in _D5_REFUTED_READINGS
+                if all(_d5_words(part) in asserted for part in parts)]
     assert not restated, (
         "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated)
         + "\n⛔ If you are DELETING this wording rather than asserting it, mark it with "
