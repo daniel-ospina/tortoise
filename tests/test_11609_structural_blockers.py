@@ -277,6 +277,14 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     instantiation of a SUBCLASS, and a `from … import *` (lint-blocked in this tree: `F403`
     is not ignored). A regex cannot see those either, and at least the AST cannot be fooled
     by prose.
+
+    ⛔ AND one hole in the MODEL itself, not just in what it can see: a `for` / `async for` /
+    `with` / `async with` target is recorded as a BINDING (`_note_binding`) but its VALUE is
+    never replayed, so the block owns the name and holds no value for it. `A = object` then
+    `for A in [FastAPIRouterAdapter]: pass` then `A(app)` reads `[]`, while the loop really does
+    rebind `A` to the adapter before the call — a false PASS, identical on `main`, filed as
+    **#13656** rather than left silent. (`except … as A` cannot occur for this alias: the adapter
+    is not an exception class, so no live shape exists for it.)
     """
     tree = ast.parse(source)
 
@@ -611,6 +619,20 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         elif isinstance(node, ast.ExceptHandler):
             if node.name:
                 _note_binding(node.name, chain)
+        elif isinstance(node, ast.Delete):
+            # ⛔ `del` MAKES A NAME LOCAL (`#13639` review round 2, Execution model §4.2.1: "If a
+            # name is bound in a block, it is a local variable of that block"). CPython counts a
+            # deleted-anywhere name as local to its block, so it is a BINDING for scope purposes
+            # even though it yields no value — and `binds` is exactly what `_env_key`'s
+            # `nonlocal` arm asks to find the OWNER of a name. Without this arm, `nonlocal tr` in
+            # an inner function reached PAST a `mid` that `del`s `tr` and filed the value in
+            # `outer`, reporting a call that at runtime raises `AttributeError` — a false BLOCK
+            # (a re-read, not a lost wiring) and a regression the `binds`-based owner search
+            # introduced. No value is recorded because a delete has none: the name stays
+            # `{SHADOWED}` in its block, which is what a delete leaves behind.
+            for target in node.targets:
+                for name in _target_names(target):
+                    _note_binding(name, chain)
         elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             for generator in node.generators:
                 # ⛔ the target belongs to the COMPREHENSION's block, not the enclosing one
@@ -1985,6 +2007,42 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A(app)\n"
     ), ("the `if`-STATEMENT control for the rows above — the `=` spelling of the same conditional "
         "rebinding must report the site too, or the pair is two absences, not a discrimination")
+    # ⛔ `del` MAKES A NAME LOCAL AND HAS NO VALUE (`#13639` review round 2). The `nonlocal` owner
+    # search asks `binds`, and `binds` did not know `del` — so `nonlocal tr` in `inner` reached
+    # PAST a `mid` that deletes `tr` and filed the value in `outer`, reporting a call that at
+    # runtime raises `AttributeError`. `origin/main` answers `[]`. Direction: false BLOCK
+    # (over-block — a re-read), and a regression the `binds`-based owner search introduced.
+    # Measured: `[]` here, `[11]` without the `ast.Delete` arm.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "def outer():\n"
+        "    tr = None\n"
+        "    def mid():\n"
+        "        def inner():\n"
+        "            nonlocal tr\n"
+        "            tr = tool_registry\n"
+        "        inner()\n"
+        "        del tr\n"
+        "    mid()\n"
+        "    return tr.FastAPIRouterAdapter(1)\n"
+    ) == [], ("a `del` in an intermediate function did not make the name LOCAL to it, so "
+              "`nonlocal` reached past it and `outer` was reported as wired — at runtime the "
+              "call raises `AttributeError` and `main` reports nothing")
+    # …and the POSITIVE control: the same depth-3 shape WITHOUT the `del` must still report, so the
+    # row above is a discrimination and not a blanket silence on `nonlocal` at depth.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "def outer():\n"
+        "    tr = None\n"
+        "    def mid():\n"
+        "        def inner():\n"
+        "            nonlocal tr\n"
+        "            tr = tool_registry\n"
+        "        inner()\n"
+        "    mid()\n"
+        "    return tr.FastAPIRouterAdapter(1)\n"
+    ), ("the CONTROL for the `del` row: the same depth-3 `nonlocal` without a `del` must still "
+        "resolve to the owner and report the site")
     # ⛔ THE UNREADABLE-DESTRUCTURING BRANCH IS PINNED BY A TARGET IT CAN ACTUALLY SEE
     # (`#13585 review 94361b8f` P3#2). The existing row for it uses `b, c = build_pair()`, whose
     # NAMES are `b` and `c` — so reverting the branch to a blanket `SHADOWED` claim reded nothing
