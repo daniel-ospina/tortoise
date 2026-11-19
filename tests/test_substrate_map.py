@@ -1822,10 +1822,12 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch, tmp_pa
         ]
         assert not leaked, (
             f"the widening leaks outside `_label_hits`'s frame ({leaked}), so any "
-            "caller deriving its own view of the population sees the stale as "
-            "tracked — this arm's own `_population_drift` included, whose "
-            "`drifted ==` assertion then can never be satisfied, so the arm stops "
-            "discriminating instead of failing"
+            "caller deriving its own view of the population would see the stale as "
+            "tracked. ⛔ THIS ASSERTION IS THE ONLY CATCHER: `_population_drift` runs "
+            "AFTER this patch window closes, so the leak cannot reach it and the "
+            "`drifted ==` assertion below is satisfied under the leak — measured: "
+            "delete the frame scoping AND this assertion and the file is 48 passed "
+            "with the widening unconditional"
         )
         read = _label_hits_reads(monkeypatch)
 
