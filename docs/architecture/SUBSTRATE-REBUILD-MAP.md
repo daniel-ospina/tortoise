@@ -307,7 +307,7 @@ one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:
 retirement prose in `tortoise/mcp_server.py:4430`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
 `tortoise/sdk.py:37143` and `_file_human_approval`'s `:37185`, one line each in a file this population already
-reached (⛔ **the `:4382` and `:36723,36718` addresses this sentence carried are
+reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
 DELETED, re-measured at this head: `mcp_server.py:4382` is a BLANK line and the
 `:Document` retirement prose is at `:4430`; `sdk.py:36723` is a
 ``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:36754`
