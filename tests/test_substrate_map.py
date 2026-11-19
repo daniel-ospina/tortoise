@@ -272,25 +272,29 @@ _REAL_READ_TEXT = Path.read_text
 #: false-RED class #13699 is. The name is still what `everything` reports, because a
 #: failure message a reader can follow matters more there than the identity does.
 #:
-#: ⛔ THREE SPELLINGS ONE REFACTOR APART ARE PINNED, and the imposter arm next door
-#: carries all of them from ONE fixture: `co_name` (`test_a_same_thread_ambient_read_
-#: is_not_attributed_to_label_hits` reds on it), `co_filename` (both exclusion arms
-#: red on it), and `co_qualname` — the imposter rewrites the qualname TOO, so
-#: `caller.co_qualname == _LABEL_HITS_CODE.co_qualname` (a qualname carries no module,
-#: so a same-named function in another module shares it) takes the imposter's read and
-#: reds there. The qualname item needed no new fixture, which is why it is pinned
-#: rather than merely declared: `__code__.replace` sets both attributes in one call.
+#: ⛔ THREE SPELLINGS ONE REFACTOR APART ARE PINNED, and the arm next door carries
+#: them: `co_name` and `co_qualname` from ONE fixture — the imposter rewrites BOTH in a
+#: single `__code__.replace` call, and `caller.co_qualname == _LABEL_HITS_CODE.co_qualname`
+#: (a qualname carries no module, so a same-named function in another module shares it)
+#: takes the imposter's read and reds there; `co_filename` from BOTH exclusion arms,
+#: because that spelling matches every frame this module defines (the imposter's and the
+#: sibling arm's `_probe`), so it reds twice. `test_a_same_thread_ambient_read_is_not_
+#: attributed_to_label_hits` is the arm both first two red in. The qualname item needed no
+#: new fixture, which is why it is pinned rather than merely declared.
 #:
 #: ⛔ THE LAST SUPERSET — `caller is _LABEL_HITS_CODE or self.suffix == ".py"`, a
 #: widening that re-admits EVERY ambient `.py` read — IS PINNED TOO, and by a path this
-#: file already stages: that same arm reads the in-checkout stale (`inside_checkout`, a
-#: real `.py` OUTSIDE the population) from an AMBIENT frame, which the shipped rule
-#: refuses and the widening takes — measured: that mutant reds there (1 failed, 47
-#: passed), and it passed 48/48 before the ambient read was added. ⛔ THE TWO HALVES ARE
-#: A FIXTURE PAIR, not interchangeable: `_label_hits` reads that same path in the drift
-#: arm, and THAT read is taken by every rule (it is `_label_hits`'s own frame), so a
-#: suffix disjunct is invisible there — which is why the drift arm could not pin it and
-#: the AMBIENT read had to be added.
+#: file already stages: `test_a_same_thread_ambient_read_is_not_attributed_to_label_
+#: hits` reads `tests/test_substrate_map.py` — a real `.py` OUTSIDE the population — from
+#: an AMBIENT frame, which the shipped rule refuses and the widening takes. ⛔ NAMED BY
+#: PATH AND NOT BY A LOCAL, deliberately: that path is bound as a different name in each
+#: arm (`in_checkout_stale` in the ambient arm, `inside_checkout` in the drift arm), and
+#: naming the wrong one would send the reader to the arm that CANNOT pin this clause.
+#: ⛔ THE TWO HALVES ARE A FIXTURE PAIR, not interchangeable: the drift arm reads the
+#: SAME PATH through `_label_hits`'s own frame, where every rule takes it already, so a
+#: suffix disjunct is invisible there — which is why that arm could not pin the widening
+#: and the AMBIENT read had to be added (measured: the widening reds the ambient arm, and
+#: was GREEN before that read existed).
 #:
 #: ⛔ THE ONE BOUND THIS FILE CANNOT PIN, stated so the pins above are not read as total:
 #: the recorder sees a read only when it goes THROUGH `Path.read_text`. A helper that
