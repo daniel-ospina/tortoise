@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -286,14 +287,21 @@ def test_a_binding_that_is_not_the_measured_call_never_renders_as_measured():
         "sdk.tortoise_fts_query = MCP tortoise_search / REST GET /v1/search")
 
 
-def test_run_refuses_a_binding_that_is_not_the_users_door(monkeypatch):
-    """`run()` must not write an artifact it cannot back with the binding."""
+def test_run_refuses_a_binding_that_is_not_the_users_door(monkeypatch, capsys):
+    """`run()` must not write an artifact it cannot back with the binding.
+
+    ⛔ The REASON is asserted, not only the exit code. The pre-fix code returns 3
+    too — from the `TORTOISE_DB_URI` guard a few lines further down — so an
+    exit-code-only assertion is satisfied by the very mutant it exists to catch
+    (measured: with the door guard deleted, this test still passed).
+    """
     import argparse
     monkeypatch.setattr(cap, "_user_door_binding",
                         lambda: {"tool": "tortoise_search", "present": False})
     args = argparse.Namespace(pin=str(PIN), graph="cap-test", namespace=None,
                               out=None)
     assert cap.run(args) == 3
+    assert "does not resolve to the call the arms make" in capsys.readouterr().err
 
 
 def test_the_artifact_declares_the_graph_residue(artifact):
@@ -419,6 +427,16 @@ def _number(cell: str) -> float:
     clean = (cell.replace("*", "").replace("`", "").replace(",", "")
              .replace("\u2212", "-").replace("\u00a0", " ").strip())
     return float(clean)
+
+
+def _plain(cell: str) -> str:
+    """A header/cell with its markdown emphasis removed, for exact comparison."""
+    return re.sub(r"[*`]", "", cell).strip()
+
+
+def _count(cell: str) -> int:
+    """A table cell as a WHOLE number — the record groups thousands (`1 452`)."""
+    return int(_number(cell.replace(" ", "").replace("\u00a0", "")))
 
 
 def _one_row(rows: list[list[str]], markers: tuple[str, ...], what: str) -> list[str]:
@@ -552,22 +570,71 @@ def test_the_readme_quotes_the_paired_deltas_the_artifact_holds(artifact):
             assert float(p) == pytest.approx(cell["p"])
 
 
-def test_the_readme_quotes_the_duplicate_rates_the_artifact_holds(artifact):
-    text = README.read_text()
-    for k in cap.KS:
-        rate = artifact["arms"]["user_search"][
-            "duplicate_rate_in_window"][str(k)]["rate"]
-        assert f"{rate:.4f}" in text, f"README does not quote the dup rate at k={k}"
+def test_the_readme_quotes_the_duplicate_table_the_artifact_holds(artifact):
+    """§3a's table, CELL BY CELL — only the `rate` column was pinned.
+
+    `875` (the table's own denominator, the row §3a's "~2.3 %" is derived from)
+    could be republished as `785`, and `duplicate pairs` / `queries affected` with
+    it, while nothing reddened (measured). A table is a row of figures, not one
+    figure plus prose.
+    """
+    header, rows = _tables(README.read_text(), "rows handed out")
+    assert [_plain(h) for h in header[1:]] == [
+        "rows handed out", "near-duplicate rows", "rate", "duplicate pairs",
+        "queries affected"], header
+    dup = artifact["arms"]["user_search"]["duplicate_rate_in_window"]
+    assert len(rows) == len(cap.KS), (len(rows), list(cap.KS))
+    for row, k in zip(rows, cap.KS):
+        cell = dup[str(k)]
+        assert _count(row[0]) == k, ("row order", row)
+        assert _count(row[1]) == cell["rows"], (k, "rows", row[1])
+        assert _count(row[2]) == cell["duplicate_rows"], (k, "dup rows", row[2])
+        assert _number(row[3]) == pytest.approx(cell["rate"]), (k, "rate", row[3])
+        assert _count(row[4]) == cell["pairs"], (k, "pairs", row[4])
+        affected, of = (part for part in row[5].split("/"))
+        assert _count(affected) == cell["queries_with_any"], (k, "affected", row[5])
+        assert _count(of) == cell["queries"], (k, "of", row[5])
 
 
-def test_the_readme_quotes_the_mint_rates_the_artifact_holds(artifact):
-    text = README.read_text()
+def test_the_readme_quotes_the_mint_totals_the_artifact_holds(artifact):
+    """§3b's two-row totals table, cell by cell — not just the two rates."""
+    header, rows = _tables(README.read_text(), "canonical in window")
+    assert [_plain(h) for h in header[1:]] == [
+        "pairs", "canonical in window", "attached", "mint rate"], header
     mint = artifact["arms"]["mint_rate"]
-    for cell in (mint["shipped"]["rate"], mint["norm_only"]["rate"]):
-        assert f"{cell:.4f}" in text, f"README does not quote mint rate {cell}"
-    for cls, row in mint["by_class"].items():
-        assert f"{row['shipped_mint_rate']:.4f}" in text, (
-            f"README does not quote the {cls} mint rate")
+    markers = {"norm_only": ("frozen pre-`#12295`",),
+               "shipped": ("shipped matcher",)}
+    _assert_rows_cover(rows, markers)
+    for side, marks in markers.items():
+        row = _one_row(rows, marks, side)
+        assert _count(row[1]) == mint["pairs"], (side, "pairs", row[1])
+        assert _count(row[2]) == mint["retrieval_in_window"], (side, "window", row[2])
+        assert _count(row[3]) == mint[side]["attached"], (side, "attached", row[3])
+        assert _number(row[4]) == pytest.approx(mint[side]["rate"]), (side, "rate", row[4])
+
+
+def test_the_readme_quotes_the_variant_mint_table_the_artifact_holds(artifact):
+    """§3b's five variant classes, CELL BY CELL.
+
+    Only the rate was pinned, and by whole-document substring — so
+    `basename-only` could be republished with `space-to-hyphen`'s value (`0.0000`
+    is what it printed; the two rows collide) and stay GREEN, and `in window` /
+    `shipped attaches` were pinned by nothing at all (measured: `175` → `145`
+    reddened nothing).
+    """
+    header, rows = _tables(README.read_text(), "variant class")
+    assert [_plain(h) for h in header[1:]] == [
+        "pairs", "in window", "shipped attaches", "mint rate"], header
+    by_class = artifact["arms"]["mint_rate"]["by_class"]
+    _assert_rows_cover(rows, {cls: (cls,) for cls in by_class})
+    for cls in by_class:
+        row = _one_row(rows, (cls,), cls)
+        cell = by_class[cls]
+        assert _count(row[1]) == cell["pairs"], (cls, "pairs", row[1])
+        assert _count(row[2]) == cell["retrieval_in_window"], (cls, "window", row[2])
+        assert _count(row[3]) == cell["shipped_attached"], (cls, "attached", row[3])
+        assert _number(row[4]) == pytest.approx(cell["shipped_mint_rate"]), (
+            cls, "rate", row[4])
 
 
 def test_the_readme_refuses_the_cross_corpus_comparison_too(artifact):
