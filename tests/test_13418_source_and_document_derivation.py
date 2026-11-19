@@ -289,7 +289,7 @@ def test_a_session_source_KEYED_BY_ID_is_still_a_session_source(encoder):
     `is_episodic_source_node` reads `props["url"]` (the cache side's vocabulary),
     while a `:Source` key is `url OR id` on both other layers —
     `record_projection._key_value` ("`add_document` emits `id` and no `url` at
-    all") and `projection/entities.py:7081` (`raw_key = url or sid`). A payload
+    all") and `projection/entities.py:7173` (`raw_key = url or sid`). A payload
     that carries the identity in `id` therefore reached the predicate with no `url`
     and was classified as a PLAIN source: `public.source.embedding` would then hold
     the topic LEXICON, which is the one text §9.4 forbids for a session `:Source`.
@@ -308,7 +308,7 @@ def test_a_session_source_KEYED_BY_ID_is_still_a_session_source(encoder):
 def test_a_carried_source_vector_is_HONOURED_and_not_recomputed(encoder):
     """`_upsert_source` computes none, so a carried vector is the node's own.
 
-    `_SOURCE_EXTRA_PROPS` (`projection/entities.py:2111`) declares `embedding` a
+    `_SOURCE_EXTRA_PROPS` (`projection/entities.py:2142`) declares `embedding` a
     caller passthrough, so a caller-supplied vector lands on the node. Deriving
     over it in the record would give the two stores different vectors for the
     same source; the `EventRecorded` precedent is the same shape.
@@ -535,7 +535,7 @@ def test_the_event_rule_is_the_graph_folds_own_composition():
     The owner's 2026-11-18 ruling puts `:Event` and `:Source` on the same
     treatment as `:Object`/`:Subject`. For `:Event` that was already true: the
     graph composes `" ".join(filter(None, [subject, eventKind, object]))`
-    (`projection/entities.py:5803-5807`) and the record's rule names exactly
+    (`projection/entities.py:5891-5895`) and the record's rule names exactly
     those three keys in that order. This reads the GRAPH's own source rather than
     restating the literal, so a change on either side reds.
     """

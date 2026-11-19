@@ -493,8 +493,8 @@ capstone"*). ⛔ All three are re-derived by CONTENT at this head, never by an o
 used to cite `:322` for the ❌ row (that has been the `tests/test_substrate_map.py` re-derivation
 sentence since before it was written; the ❌ row was `:383` on `main`, `:385` here) and `:375` for
 D6, which is a blank line at `main` and here (the D6 row is `grep -n '^| \*\*D6\*\*'` -> `:438`).
-That was true when
-it was cut (`4f68a2aa7`); **#11084 now exists and this is its artifact.** Recorded here rather than
+**That the map states the opposite was true when this artifact was cut (`4f68a2aa7`)**;
+**#11084 now exists and this is its artifact.** Recorded here rather than
 edited into a dated, test-guarded cut — a lane reading the substrate map should follow the pointer, not
 find a second, competing status cell. The capstone half of the claim **remains true** (`#11089` is
 filed but not yet an artifact).
