@@ -530,22 +530,26 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     `claims_empty` says which DIRECTION the answer asserts, read from the ANSWER's own
     content rather than from the verb: an emptiness word (`nothing`, `empty`, `no path`,
     `no `tortoise/``, `none`, `zero`, `blank`) makes it an EMPTINESS claim; a member
-    (`tortoise/…`, `comment-only`, `exactly`, a `path`/`paths` or `module`/`modules` noun,
-    or a numeral `one`…`ten`/`both`/`single`) makes it a MEMBERSHIP claim. A negation or
-    qualifier (`is NOT empty`, `never empty`, `a non-empty set`) is a MEMBERSHIP claim even
-    though it contains the word `empty` — that test runs FIRST, because an unanchored
-    `empty` would otherwise read `non-empty` as an emptiness claim and invert the
-    direction (#13795 review, finding 3) — and a window that carries no answer token at all
-    (`is the command that answers it`) is not an answer and is skipped: refusing the
-    document's own pointer to the command would be the same class of defect in the other
-    direction.
+    (`tortoise/…`, `comment-only`, `exactly`, `a path`, or a numeral
+    `one`…`ten`/`both`/`single`) makes it a MEMBERSHIP claim. Every NEGATION runs FIRST,
+    whether it is spelled out or contracted, with or without a separator: `is NOT empty`,
+    `never empty`, `isn't empty`, `a non-empty set`, `is nonempty`, `nothing but the two
+    modules`, `none other than …` are ALL membership claims even though they carry an
+    emptiness word — and a bare `empty` would otherwise match inside `non-empty`/`nonempty`
+    and invert the direction (#13795 review, findings 3 and 4) — while a window that
+    carries no answer token at all (`is the command that answers it`, `is the command that
+    prints the paths`) is not an answer and is skipped: refusing the document's own pointer
+    to the command would be the same class of defect in the other direction. Note the
+    consequence, stated so the class is not over-read: a bare `path`/`paths`/`module` NOUN is
+    deliberately NOT a member token, precisely so a pointer sentence stays skipped; the
+    numerals are what carry the membership claim.
 
     ⛔ THE MEMBERSHIP WORD LIST IS THE PART THAT WENT STALE (#13795 review, finding 3). It
     read `two`/`three`/`four`/`seven`/`both` — no `one` — so changing this document's own
     `prints NO path at all` to `prints one path at all`, a ONE-WORD edit onto a verb already
     in the list, restored the refuted membership claim and the guard stayed GREEN. The
-    numerals `one`…`ten` and the `path`/`module` nouns are therefore IN the class, and the
-    `one`-word mutation is pinned as a witness below.
+    numerals `one`…`ten` and `single` are therefore IN the class, and the `one`-word
+    mutation is pinned as a witness below.
     """
     answers: list[tuple[str, bool]] = []
     for match in re.finditer(
@@ -558,18 +562,22 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         low = window.lower()
         if not rest:
             continue
-        # ⛔ NEGATED / QUALIFIED EMPTINESS FIRST (#13795 review, finding 3): `non-empty`
-        # carries `empty`, so an unanchored match on the bare word would classify it as an
-        # EMPTINESS claim — inverting the direction, which passes a false membership claim
-        # at an empty head and would REFUSE the true sentence at a non-empty one.
-        if re.search(r"\b(?:not|never)\b|\bnon[- ]empty\b", low):
+        # ⛔ EVERY NEGATION / QUALIFIER FIRST (#13795 review, findings 3 and 4): spelled out
+        # or contracted, with or without a separator, and `nothing but` phrasing — all of
+        # them carry an emptiness WORD while asserting MEMBERSHIP. A bare `empty` would
+        # otherwise match inside `non-empty`/`nonempty` and invert the direction, which
+        # passes a false membership claim at an empty head and REFUSES the true sentence at
+        # a non-empty one.
+        if re.search(
+                r"\b(?:not|never)\b|n['’]t\b|\bnon[- ]?empty\b"
+                r"|\bnothing but\b|\bnone other than\b", low):
             claims_empty = False
         elif re.search(
                 r"\b(?:empty|nothing|none|zero|blank)\b"
                 r"|\bno\b\s+`?(?:path|paths|tortoise/)", low):
             claims_empty = True
         elif re.search(
-                r"tortoise/|comment-only|exactly|\ba path\b|\bpaths?\b|\bmodules?\b"
+                r"tortoise/|comment-only|exactly|\ba path\b"
                 r"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|both|single)\b",
                 low):
             claims_empty = False
@@ -838,6 +846,35 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "the shape detector reads `returns a non-empty set` as an EMPTINESS claim because "
         "the word `empty` sits inside `non-empty`; it is a MEMBERSHIP claim, so the "
         "direction is inverted (#13795 review, finding 3)")
+    # ⛔ AND ITS THREE SIBLINGS (#13795 review, finding 4): a CONTRACTION, the HYPHENLESS
+    # spelling, and an emptiness word doing membership duty behind `but`. Each carried the
+    # inversion or the skip past the fix above, so each is pinned.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` isn't empty", _tortoise_cmd
+    ) == [("is n't empty", False)], (
+        "the shape detector does not read the CONTRACTION `isn't empty` as a MEMBERSHIP "
+        "claim, so the inversion survives the next spelling (#13795 review, finding 4)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` is nonempty", _tortoise_cmd
+    ) == [("is nonempty", False)], (
+        "the shape detector does not see `is nonempty` at all — no `not` to find and no "
+        "`empty` word boundary inside `nonempty` — so the sentence is skipped and a "
+        "membership claim passes green (#13795 review, finding 4)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints nothing but the two comment-only modules", _tortoise_cmd
+    ) == [("prints nothing but the two comment-only modules", False)], (
+        "the shape detector reads `prints nothing but the two comment-only modules` as an "
+        "EMPTINESS claim; `nothing but` asserts MEMBERSHIP, so a false membership claim "
+        "passes green at an empty head (#13795 review, finding 4)")
+    # ⛔ AND THE POINTER MUST STILL BE SKIPPED (#13795 review, note 5): a bare
+    # `path`/`paths` NOUN is deliberately not a member token, so this sentence is not
+    # refused. Losing this would over-block the document's own pointer to the command.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` is the command that prints the paths", _tortoise_cmd
+    ) == [], (
+        "the shape detector treats the POINTER `is the command that prints the paths` as a "
+        "typed membership answer, which would refuse the document's own pointer to the "
+        "command — the same class of defect in the other direction (#13795 review, note 5)")
 
     # (c) THE MEASUREMENT — taken, or UNKNOWN. Never a silent "empty".
     try:
