@@ -6211,6 +6211,33 @@ def test_a_leading_zero_sizing_unit_cannot_skip_the_memory_headroom_refusal(tmp_
     assert "memory headroom" in r.stderr, f"the refusal must name memory, not something else: {r.stderr}"
 
 
+def test_an_unreadable_memory_reading_is_refused_rather_than_sized_against(tmp_path: Path):
+    """⛔ THIS LEG'S REFUSAL HAD NO ARM AT ALL, while TWO artifacts said it did.
+
+    The installer's own comment says the `CI_RUNNER_MEM_AVAILABLE_GB` seam exists "for the same reason
+    `CI_RUNNER_NCPU` is one: a live reading cannot be exercised from a test without it, and a reading
+    that is not exercised is how this leg's refusal went untested while the other three each had an
+    arm" — and the plan said "two arms pin it". Measured at the head this arm was written for: the
+    seam was set to a NUMERIC value in every arm (`1024` file-wide, plus one leading-zero headroom
+    case), so deleting the `''|*[!0-9]*` arm below redded NOTHING. A guard this change adds, described
+    as the reason the seam exists, could be removed in silence — the "claim that reads as verified"
+    class this whole PR is about.
+
+    The refusal is a GUARD refusal (exit 2, `die`'s default), and it must name the reading rather than
+    the headroom, so a caller can tell "this box cannot be measured" from "this box is too small".
+    """
+    env = _dropin_env(tmp_path, unit_present=False, CI_RUNNER_MEM_AVAILABLE_GB="banana")
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 2, (
+        "an unreadable memory reading must be a GUARD refusal (exit 2), never sized against — "
+        f"$(( )) would coerce it to 0 and approve an unbounded install — got {r.returncode}: {r.stderr}"
+    )
+    assert "cannot read available memory" in r.stderr, (
+        "the refusal must name the UNREAD BOUND, not the headroom it never computed: "
+        f"{r.stderr}"
+    )
+
+
 def test_an_overflowing_bound_is_refused_rather_than_silently_dropped(tmp_path: Path):
     """A product that wraps negative would omit `MemoryMax=` and report success. The file's own rule is
     that a bound nobody can read is REFUSED (exit 1), never coerced into a number.

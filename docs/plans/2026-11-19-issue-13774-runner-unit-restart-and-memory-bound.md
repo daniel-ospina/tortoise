@@ -55,7 +55,7 @@ aggregate. Stated here, in R4 and in the runbook step.
 - Too-tight bound applied to a live unit at install → jobs killed by US → default above the recorded worst case +
   R9's sentinel guard + the value validator (R11).
 - Runner wrapper exits **0** for listener codes 0/1/5 and unknown codes
-  (`/opt/gh-runner-x64/run-helper.sh.template:74-81`) → `on-failure` does not retry, and that is correct (code 5
+  (`/opt/gh-runner-x64/run-helper.sh.template:38-46` for codes 0 and 1, `:75-80` for code 5 and unknown) → `on-failure` does not retry, and that is correct (code 5
   is the engine's own "no retry needed"); the unit goes `inactive` → **accepted residual**, documented in the
   runbook + R10, not claimed as covered.
 
@@ -168,4 +168,7 @@ installed by any path other than this installer; the `exit 0` death class's own 
   the contract promises a guard refusal), not a hidden pass. The validated sizing knobs are now
   rebuilt in base 10 ONCE, after the digits/length checks — one place, every consumer — instead of
   hardening four `$(( ))` sites one review at a time. `CI_RUNNER_MEM_AVAILABLE_GB` was added as a seam
-  so the refusal can be observed at all, and two arms pin it.
+  so the refusal can be observed at all, and `test_an_unreadable_memory_reading_is_refused_rather_than_sized_against`
+  pins it. ⛔ IT PINNED NOTHING UNTIL THE REVIEW FOUND IT: the seam was set only to a NUMERIC value
+  (`1024` file-wide, plus one leading-zero headroom case), so the `''|*[!0-9]*` arm could be deleted
+  with no red while this sentence and the installer's comment both claimed an arm existed.
