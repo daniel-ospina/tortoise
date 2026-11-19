@@ -557,7 +557,9 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             # the one #13489 was after: a verdict must travel with the head it belongs
             # to. NON-VACUITY, MEASURED: on the pre-fix row (the green with no sha in
             # it) this leg reds; it is green once the row names the re-taking commit.
-            assert re.search(r"\b[0-9a-f]{7,40}\b", _row), (
+            _heads = [h for h in re.findall(r"\b[0-9a-f]{7,40}\b", _row)
+                      if any(c.isdigit() for c in h) and any(c.isalpha() for c in h)]
+            assert _heads, (
                 f"05-verify.md states a census verdict ({green!r}) in a row that names no "
                 "head. `tools/hosted_api_cite_census.py --check` is RED on `origin/main` "
                 "(`STALE  census DEFAULT_PIVOT: states [25193], the tree measures [25422]`)"
@@ -603,17 +605,46 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "of the merge and contribute no path here), so the sentence is refuted by the "
             "very command it quotes — and it satisfied the presence-only leg above while "
             "contradicting the empty claims beside it (#13489 review, P1)")
-    assert any(f"{_tortoise_cmd}` {_word}" in doc
-               for _word in ("is empty", "-> empty", "is EMPTY")) and (
-               "at THIS head it prints two (`activation_scorecard.py`, `hosted_api.py`" in doc), (
-        "05-verify.md must state which way the `tortoise/` measurement went, BOTH ways "
-        "(#13489 review, P1; #13550 review, P1 — MEASURED). The single `is empty` "
-        "assertion this leg used to be was a claim about ONE head: at the merge heads "
-        "this section was written for the list was empty (the `#12943` modules had "
-        "landed on `main`), and at a head that re-takes the census notes it holds two "
-        "modules — so a single-direction assertion forces the document to be false at "
-        "whichever head it is not describing. NON-VACUITY, MEASURED: reds on the "
-        "pre-fix document, which asserted only the empty direction.")
+    # ⛔ …AND THE DIRECTION IS READ, NEVER TYPED (#13550 review, P1 — MEASURED at
+    # `618b1ec0e4`). The leg this replaces demanded that the document say the `tortoise/`
+    # set was EMPTY. That is a claim about ONE head, and it is FALSE at this one:
+    # `git diff --name-only origin/main...HEAD -- tortoise/` prints two modules here (the
+    # census notes `5db18e9a77` re-took), so a single-direction demand forces the document
+    # to contradict its own command. ⛔ Pinning the OTHER direction is no better — a count
+    # and a file list are the self-locator the round-8/round-9 repairs REMOVED, and they go
+    # stale with the next commit that adds a path. So the property asserted is the one the
+    # row itself prescribes: send the reader to the COMMAND, read at the head being merged.
+    assert re.search(re.escape(_tortoise_cmd) + r"`\s+at the head you merge", doc), (
+        "05-verify.md no longer tells the reader to read the `tortoise/` set at the head "
+        "being merged. `git diff --name-only origin/main...HEAD -- tortoise/` prints a "
+        "different set at every head that touches a `tortoise/` path, so a document typing "
+        "a direction (empty, or two modules) is false at whichever head it is not "
+        "describing — read it at the head you merge "
+        "(#13489 review, P1; #13550 review, P1)")
+    # ⛔ AND THE MEASURED-FALSE SPELLINGS MAY NOT RETURN. Each was typed as a CURRENT
+    # fact about this head and each was refuted by the document's own command: the `empty`
+    # claims by `git diff --name-only origin/main...HEAD -- tortoise/` printing two paths,
+    # and the merge-head `printed NOTHING` claim by that same set at the merge head
+    # (`git diff e61694255a...2584a86ec1 -- tortoise/` prints five). They are refused by
+    # name in the idiom this file already uses for retracted sentences.
+    # NON-VACUITY, MEASURED: every string below was present in the document at
+    # `618b1ec0e4` before this repair, beside the command that refutes it.
+    for _stale_direction in (
+        "at THIS head the PR's own diff carries NO `tortoise/` module",
+        f"`{_tortoise_cmd}` is empty, so both modules are identical",
+        "at THIS head the command this clause prescribes returns NOTHING AT ALL",
+        f"and THIS head's diff carries no `tortoise/` path at all (`{_tortoise_cmd}` is empty)",
+        "at THIS head it prints two (`activation_scorecard.py`",
+        "at the merge heads this section was written for it printed NOTHING",
+    ):
+        assert _stale_direction not in doc, (
+            f"05-verify.md states {_stale_direction!r} — a direction about the `tortoise/` "
+            "set typed as a CURRENT fact. Measured at `618b1ec0e4`: "
+            f"`{_tortoise_cmd}` prints two modules there, not none, and the merge-head "
+            "`NOTHING` spelling is refuted by the module paragraph's own "
+            "`git diff e61694255a...2584a86ec1 -- tortoise/`, which prints five paths. "
+            "State the COMMAND and the head it must be read at, never a direction "
+            "(#13489 review, P1; #13550 review, P1)")
     # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
     # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
     # head they were measured at". The first cut of the repair said "at the head that still
