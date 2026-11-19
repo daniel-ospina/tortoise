@@ -1148,6 +1148,60 @@ On `serve_health`'s `/metrics` the series is
 `tortoise_wait_bound_starved_total{surface="mcp"|"rest"}`, both children declared
 at import for the same absent-vs-zero reason.
 
+### 4.1.1d The embedder's load state — `embedder` (#13674)
+
+**Symptom this exists for.** Hybrid (keyword + vector) retrieval is OFF in production and every
+published surface says `"status": "ok"`. The dense leg contributes nothing, reads silently fall back
+to keyword-only, and the only evidence was a `fly logs` line — `embedder warm-up FAILED
+(load_timeout)` — that nobody was watching for. Measured 2026-11-19: the boot load needs **156.5 s of
+imports alone** on the production box against a **90 s** bound, and each abandoned attempt was never
+reclaimed, which is what reached **3.66 GB** and got the process OOM-killed (the model is 432 MB —
+not the cause).
+
+The body carries
+
+```json
+"embedder": {"model": "BAAI/bge-small-en-v1.5", "available": true, "state": "ready",
+             "last_error": null, "failure_kind": null, "cooldown_remaining_s": 0.0,
+             "threads": {"threads": 1, "source": "default", "previous": null,
+                         "applied": true, "env_vars": ["OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                                                     "OPENBLAS_NUM_THREADS"]},
+             "load_timeout_s": 300.0, "load_elapsed_s": 39.3,
+             "load_in_progress": false, "load_in_progress_s": null}
+```
+
+⛔ **It is REPORTED, never folded into `status`** — the same rule as `wait_bound_breaches` and
+`capture`. An embedder that is loading or on cooldown means **keyword-only reads**, which is a state
+the product is designed to survive and which #2952 already requires each read to DECLARE
+(`declared_retrieval_kind`). Folding it in would pin a deployment degraded for the life of the
+process after one failed load (#10185) and put a restart loop's worth of `503`s on the deploy gate.
+
+Four properties, because each is a different misread:
+
+- **`load_in_progress_s` is the field to read DURING a slow start.** `load_in_progress` is a bool, so
+a 4 s attempt and a 290 s attempt of the same 300 s bound render identically — and they call for
+opposite decisions. `load_in_progress_s` is the in-flight attempt's elapsed seconds (`null` when none
+is running, `null` after a FINISHED load too — the start timestamp outlives its attempt, so the
+running thread is the authority).
+- **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
+`failure_kind` naming `load_timeout`, `oom`, `not_installed` or `no_embedder`. `unavailable` with
+`failure_kind: null` means no attempt has run in THIS process yet (a fresh boot before the pre-warm
+landed) — not a failure.
+- **`load_timeout_s` is the bound the PROCESS applies**, and it must read `300.0` on this image. A
+`90.0` here is a pre-#13674 binary still deployed, which is the whole outage.
+- **`threads` is the intra-op pin** (#10296), published for the same "why is this host slow" question;
+`null` before any load attempt.
+
+```bash
+curl -sS https://api.premiselabs.co/health \
+  | jq '.embedder | {available, state, failure_kind, load_timeout_s, load_in_progress_s}'
+```
+
+The boot half of the same question is a log line, not this block: `entrypoint.sh`'s
+`_prewarm_embedder` prints `embedder boot pre-warm OK` with a staged breakdown (`torch_import_s` /
+`st_import_s` / `construct_s` / `encode_s`), or a WARNING naming the bound it hit. `fly logs` is the
+only reader for THAT — the block above is what answers "is the leg up NOW".
+
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
 **Symptom.** A customer pays for a higher tier and is enforced at a lower one.

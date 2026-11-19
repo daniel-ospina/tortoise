@@ -854,3 +854,152 @@ class TestTheBootPrewarm:
             "tests lift and execute that block, so they would run a REAL "
             "embedder load (196 s) on every gate test"
         )
+
+
+#: Every key `/health`'s `embedder` block must carry, on the healthy AND the
+#: degraded arm. Written here (not imported from the app) so a rename in
+#: `hosted_api` reds a test instead of silently moving the operator's key.
+_EXPECTED_EMBEDDER_HEALTH_KEYS = {
+    "model", "available", "state", "last_error", "failure_kind",
+    "cooldown_remaining_s", "threads", "load_timeout_s", "load_elapsed_s",
+    "load_in_progress", "load_in_progress_s",
+}
+
+
+def _health_body(monkeypatch) -> dict:
+    """`GET /health`'s payload, with everything it reads besides the embedder
+    neutralised (the `test_9548_record_arming_health.py` pattern): the DB verdict
+    is a snapshot from a background refresher, so a cold probe would answer for
+    the wrong reason and say nothing about this change.
+    """
+    import asyncio
+
+    import tortoise.hosted_api as hosted_api
+
+    verdict = {"ok": True, "latency_ms": 0.1, "error": None}
+    health_probe = getattr(hosted_api, "_HEALTH_PROBE", None)
+    if health_probe is not None:
+        monkeypatch.setattr(health_probe, "snapshot", lambda: dict(verdict),
+                            raising=False)
+    monkeypatch.setattr(hosted_api, "_WATCHER", None, raising=False)
+    monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None, raising=False)
+    monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False, raising=False)
+    return asyncio.run(hosted_api.health())
+
+
+class TestTheBoundIsReadableFromTheProduct:
+    """#13674 (B): an instrument with no reader is not an observable bound.
+
+    `status()` was the whole of the "make the bound OBSERVABLE" requirement, and
+    nothing in `tortoise/` read it — the product could be 290 s into a 300 s
+    bound, or permanently on `cooldown`, with every published surface saying
+    "ok" and no datum saying otherwise. These rows pin the READ, so a revert that
+    drops the `/health` block fails here rather than in the next outage.
+    """
+
+    def test_status_publishes_how_far_into_the_bound_the_attempt_is(
+            self, monkeypatch, clean_embedder):
+        """`load_in_progress` is a BOOL; the operator's question is "how far in".
+
+        A 4 s attempt and a 290 s attempt of the same 300 s bound render
+        identically under a bool, and they call for opposite decisions.
+        """
+        frame = _Frame()
+        _patch_loader(monkeypatch, frame, mb=0, hold_s=0.8)
+
+        assert EmbeddingModel.get(load_timeout=0.05) is None
+        assert EmbeddingModel.status()["load_in_progress"] is True
+
+        first = EmbeddingModel.status()["load_in_progress_s"]
+        assert first is not None, (
+            "an attempt IS in flight but `load_in_progress_s` is None — the "
+            "bound is not observable WHILE it runs (#13674)"
+        )
+        assert 0.0 <= first < EmbeddingModel._LOAD_TIMEOUT_S
+        time.sleep(0.2)
+        second = EmbeddingModel.status()["load_in_progress_s"]
+        assert second > first, (
+            f"the in-flight elapsed time did not advance ({first} -> {second}): "
+            "it is reading a frozen timestamp, not the running attempt"
+        )
+
+    def test_a_finished_attempt_publishes_no_in_progress_time(
+            self, monkeypatch, clean_embedder):
+        """`_load_started_at` OUTLIVES the attempt — so it must not be trusted.
+
+        Reading the timestamp alone would report a "load in progress" that grows
+        forever after a successful load, which is the mirror defect: a surface
+        that is always alarming is as unreadable as one that is always green.
+        """
+        frame = _Frame()
+        _patch_loader(monkeypatch, frame, mb=0)
+
+        assert EmbeddingModel.get() is not None
+        status = EmbeddingModel.status()
+        assert status["load_in_progress"] is False
+        assert status["load_in_progress_s"] is None, (
+            "a FINISHED load still reports an in-progress elapsed time"
+        )
+
+    def test_health_carries_the_embedder_block_with_the_declared_bound(
+            self, monkeypatch, clean_embedder):
+        """The block must be on the SURFACE, not only on the class.
+
+        This is the row that would have caught the actual state of main: a
+        complete, tested `status()` dict that no route published.
+        """
+        frame = _Frame()
+        _patch_loader(monkeypatch, frame, mb=0)
+        assert EmbeddingModel.get() is not None
+
+        body = _health_body(monkeypatch)
+        assert "embedder" in body, (
+            "/health carries no `embedder` block — the load bound this P1 "
+            f"raised is unreadable from outside the process: {sorted(body)}"
+        )
+        block = body["embedder"]
+        assert set(block) == _EXPECTED_EMBEDDER_HEALTH_KEYS
+        assert block["load_timeout_s"] == EmbeddingModel._LOAD_TIMEOUT_S
+        assert block["available"] is True
+        assert block["state"] == "ready"
+        assert block["model"] == embeddings_mod.EMBEDDING_MODEL
+        # Reported, NEVER folded into `status` — a keyword-only deployment is a
+        # declared degraded READ (#2952), not a dying process.
+        assert body["status"] in {"ok", "degraded"}
+
+    def test_an_unavailable_embedder_is_reported_and_does_not_5xx_health(
+            self, monkeypatch, clean_embedder):
+        """The state that mattered in production: the dense leg is OFF.
+
+        Before this block, "hybrid retrieval is off" was invisible from every
+        surface the product publishes; `state: "unavailable"` plus a
+        `failure_kind` is the operator's cue, and it must arrive WITHOUT
+        /health failing (a 500 here fails the deploy gate over a degraded read).
+        """
+        monkeypatch.setattr(EmbeddingModel, "_last_failed_at", time.monotonic())
+        monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_timeout")
+
+        body = _health_body(monkeypatch)
+        block = body["embedder"]
+        assert block["available"] is False
+        assert block["state"] == "cooldown"
+        assert block["failure_kind"] == "load_timeout"
+        assert block["cooldown_remaining_s"] > 0.0
+        assert block["load_timeout_s"] == EmbeddingModel._LOAD_TIMEOUT_S
+
+    def test_the_degraded_arm_publishes_the_same_keys(self, monkeypatch):
+        """An unreadable `status()` must not shorten the block (#12992/#12482).
+
+        A dashboard doing `jq .embedder.load_timeout_s` on the arm an operator
+        reaches during an incident is the exact path a short dict 500s.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        def _boom():
+            raise RuntimeError("embeddings module half-written")
+
+        monkeypatch.setattr(EmbeddingModel, "status", classmethod(lambda cls: _boom()))
+        block = hosted_api._embedder_health()
+        assert set(block) == _EXPECTED_EMBEDDER_HEALTH_KEYS | {"error"}
+        assert "half-written" in block["error"]
+        assert block["available"] is None

@@ -1105,17 +1105,44 @@ class EmbeddingModel:
         return thread is not None and thread.is_alive()
 
     @classmethod
+    def load_attempt_elapsed_s(cls) -> float | None:
+        """Seconds the IN-FLIGHT load attempt has been running, else ``None``.
+
+        #13674's other half: ``load_in_progress`` says an attempt EXISTS, but a
+        bool cannot answer the question an operator actually has — *how far into
+        its bound is it?* An attempt at 4 s of 300 is early in a 156.5 s cold
+        import and worth waiting for; one at 290 s is about to be abandoned.
+        Without this the bound is only observable AFTER it fires, which is the
+        #1349 failure class.
+
+        ``_load_started_at`` is deliberately not read on its own: it survives the
+        attempt that wrote it, so a finished load would otherwise report a
+        growing "in-progress" time forever. The THREAD is the authority here,
+        exactly as it is for the reclaim guard (``load_attempt_in_flight``).
+        """
+        if not cls.load_attempt_in_flight():
+            return None
+        started = cls._load_started_at
+        if started is None:
+            return None
+        return max(0.0, time.monotonic() - started)
+
+    @classmethod
     def _describe_load_attempt(cls) -> str:
         """One line naming the in-flight attempt, for the reclaim refusal.
 
         The elapsed time is the whole diagnosis: an attempt at 4 s is early in
         its 156.5 s import and worth waiting for; one at 290 s of a 300 s bound
         is about to be abandoned. Read-only.
+
+        It reads the elapsed time through ``load_attempt_elapsed_s`` so this
+        warning and the value ``status()`` publishes cannot state two different
+        numbers for one attempt.
         """
-        started = cls._load_started_at
-        if started is None:
+        elapsed = cls.load_attempt_elapsed_s()
+        if elapsed is None:
             return "elapsed unknown"
-        return (f"elapsed {time.monotonic() - started:.1f}s of its "
+        return (f"elapsed {elapsed:.1f}s of its "
                 f"{cls._LOAD_TIMEOUT_S:.0f}s bound")
 
     @classmethod
@@ -1671,6 +1698,12 @@ class EmbeddingModel:
         attempt) and ``load_in_progress`` (a loader thread is alive — including
         an ABANDONED one, the state the reclaim guard refuses a second attempt
         in).
+
+        ``load_in_progress_s`` is the field that makes the bound observable
+        WHILE it is still a bound: the seconds the in-flight attempt has been
+        running, ``None`` when none is. ``load_in_progress`` alone cannot
+        distinguish 4 s from 290 s of a 300 s budget, which is the one reading an
+        operator needs BEFORE the timeout decides for them.
         """
         instance = cls._instance
         model = instance._model if instance is not None else None
@@ -1703,6 +1736,10 @@ class EmbeddingModel:
             "load_elapsed_s": (None if cls._load_elapsed_s is None
                                else round(cls._load_elapsed_s, 3)),
             "load_in_progress": cls.load_attempt_in_flight(),
+            # #13674: HOW FAR IN, not merely WHETHER. See this docstring.
+            "load_in_progress_s": (
+                None if (elapsed := cls.load_attempt_elapsed_s()) is None
+                else round(elapsed, 3)),
         }
 
     @classmethod
