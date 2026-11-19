@@ -110,34 +110,40 @@ _SCOPE_SENTINEL = "scope-sentinel-mcp"
 
 # The params that carry what a `_PARAMS` arm cannot. `_PARAMS` stays the set EVERY arm presents
 # (widening it would change what every other arm proves), so the values that need to be distinctive —
-# both non-http destinations and the `scope` sentinel — ride on a copy of these instead.
+# both non-http destinations and the `scope` sentinel — ride on a copy of these instead. That copy is
+# a SUPERSET of `_PARAMS`, so an arm presenting it proves at least what a `_PARAMS` arm proves.
 #
-# ⛔ ONE arm is enough, and that is a MEASURED property of the guard rather than an assumption: the
-# echoed-value tuple in `_assert_refusal_page` is checked against every arm's BODY, not against the
-# params that arm presented. So both refusal copies are covered — `FLOW_NOT_YOURS` by the ordinary
-# `_PARAMS` `403` arm — and a mutant that renders `cursor://sentinel.example/cb` into the `403` copy
-# REDS on that existing arm (`1 failed, 6 passed` on the pre-fix tree, measured 2026-11-19).
-# Review of #13712 F1 read the sentinel as body-scoped and asked for a second, `403`-shaped sentinel
-# arm; measured, it is not body-scoped and the hole did not exist, so this file adds no such arm —
-# it would be an arm whose coverage the tuple already had.
+# ⛔ WHY BOTH REFUSAL COPIES NEED ONE OF THESE ARMS — and the revision of this comment that argued
+# otherwise had it backwards. The echoed-value tuple is checked against every arm's BODY, which makes
+# it copy-scoped but NOT parameter-scoped: a row can only red on a value the arm under test actually
+# PRESENTS. An ordinary `_PARAMS` `403` arm has no `resource` key at all, so a `FLOW_NOT_YOURS` copy
+# that interpolated it rendered empty there and the `_RESOURCE` row passed VACUOUSLY — F1's class (a
+# page carrying a destination the origin assertion cannot see) surviving in the very copy F1 named.
+# The `403` arm therefore presents the sentinel params too (superset, so no `_PARAMS` row is lost and
+# the arm count stays 7), giving each refusal copy an arm that can red for what that copy could
+# interpolate. Measured, not assumed: hardcoding `cursor://tools.internal/v1` into `FLOW_NOT_YOURS`
+# reds exactly that arm (`1 failed, 6 passed`, opts6) and nothing else (review of #13712, F1b).
 _SENTINEL_PARAMS = dict(
     _PARAMS, resource=_RESOURCE, redirect_uri=_NATIVE_REDIRECT, scope=_SCOPE_SENTINEL)
 
-# Every way an element can be talked into a destination, matched as a PATTERN rather than as a bare
-# token. HTML permits ASCII whitespace on BOTH sides of `=` in an attribute (whatwg HTML: attribute
-# name state → before attribute value state), so `<img src = "//evil.example/x">` and
-# `<link rel=stylesheet href = "/x.css">` are well-formed documents that match none of the flat
-# tokens (`"src="`, `"href="`).
+# The WAYS AN ELEMENT, OR THE PAGE'S OWN CSS, CAN BE TALKED INTO A DESTINATION — each matched as a
+# PATTERN rather than as a bare token. HTML permits ASCII whitespace on BOTH sides of `=` in an
+# attribute (whatwg HTML: attribute name state → before attribute value state), so
+# `<img src = "//evil.example/x">` and `<link rel=stylesheet href = "/x.css">` are well-formed
+# documents that match none of the flat tokens (`"src="`, `"href="`).
 #
-# ⛔ `href=`/`src=` is NOT the set of attributes that fetch a subresource, and an earlier revision of
-# this guard claimed "every way" while enforcing three. `<img srcset='//cdn/x 1x'>`,
-# `<video poster=…>`, `<button formaction=…>`, `<a ping=…>` and `<object data=…>` each carry a
-# destination with no scheme and no `<a`/`href` — a `srcset` mutant stayed GREEN under the narrower
-# pattern (review of #13712, F2) — so all five are matched. The classes stay narrow enough that the
-# page's legitimate `<meta charset>` / `<meta name=viewport>` match nothing here, which the suite's
-# unmutated negative control re-measures on every run.
+# ⛔ THIS IS A LIST OF THE CHANNELS THAT EXIST, NOT A PROOF THAT NO OTHER ONE CAN. A universal is
+# what the previous revisions kept claiming and kept being falsified by — first `<img srcset>`, then
+# `<body background=…>` and the page's OWN `<style>` block, where `url(...)` and `@import` are
+# equally well-formed destinations carrying no scheme (review of #13712, F2 and F2b: each mutant
+# stayed GREEN under the narrower pattern before it was added). So the comment names what the pattern
+# enforces; a newly-found channel is APPENDED here rather than the sentence being widened to cover
+# it. The classes stay narrow enough that the page's legitimate `<meta charset>` / `<meta
+# name=viewport>` match nothing here, which the suite's unmutated negative control re-measures on
+# every run.
 _AFFORDANCE_RE = re.compile(
-    r"<\s*a[\s>]|(?:href|srcset|poster|formaction|ping|data|src)\s*=|(?:<\s*form)|http-equiv")
+    r"<\s*a[\s>]|(?:href|srcset|poster|formaction|ping|data|src|background)\s*="
+    r"|(?:<\s*form)|http-equiv|url\(|@import")
 
 _HOOKS_MJS = """
 export async function resolve(specifier, context, next) {
@@ -2012,12 +2018,13 @@ _FOREIGN_OWNED_ROW = [{
     # the set EVERY arm presents, so widening it would change what every other arm proves.
     ("start_signed_in", {"storeThrows": True, "params": _SENTINEL_PARAMS},
      "consent_store_unavailable", 503),
-    # #10865 arm B — the `403`. ONE arm suffices for both refusal copies: the echoed-value tuple is
-    # checked against the body this arm rendered, so the sentinel values above — which only the
-    # `503` sentinel arm PRESENTS — are still caught here if this copy ever interpolates them
-    # (measured: rendering `cursor://sentinel.example/cb` into `FLOW_NOT_YOURS` reds this arm).
+    # #10865 arm B — the `403`. It presents the SENTINEL params (a superset of `_PARAMS`, so the
+    # `_PARAMS` rows still apply to this copy), because a row can only red on a value the arm
+    # PRESENTS: an ordinary `_PARAMS` arm has no `resource`, so a `FLOW_NOT_YOURS` copy interpolating
+    # it rendered empty and the `_RESOURCE` row passed vacuously — F1's class alive in the copy F1
+    # named. See the `_SENTINEL_PARAMS` comment above (review of #13712, F1b).
     ("start_signed_in", {"seededAttempts": _FOREIGN_OWNED_ROW, "sessionUserId": "user-2",
-                         "params": dict(_PARAMS, attempt_key="b-attempt-key")},
+                         "params": dict(_SENTINEL_PARAMS, attempt_key="b-attempt-key")},
      "flow_not_yours", 403),
 ])
 def test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status(
@@ -2171,18 +2178,28 @@ _SURVIVORS_NAMED_RE = re.compile(
 _PAST_UNIVERSAL_RE = re.compile(r"\b(?:used to|previously|before)\b", re.IGNORECASE)
 
 
+# A sentence ends at a `.` that whitespace follows (never at `start.ts` or `json({error, reason})`,
+# which carry no such pair), AND at a PARAGRAPH BREAK in either direction. The paragraph arm is not
+# decoration: a JSDoc blank line is ` *\n *\n`, never `\n\n`, so a `\n\n`-only head cut was dead in
+# every TS header it scans, and the tail had no paragraph arm at all — measured, a survivor named in
+# the NEXT PARAGRAPH of `consent-refusal.ts` exempted an absolute whose own sentence carried no
+# period (review of #13712, F3c). The head keeps its 240-character cap so a run-on paragraph cannot
+# hide the match behind a distant terminator; the tail gets the same cap rather than running on.
+_SENTENCE_BREAK_RE = re.compile(r"\.\s|\n\s*\n|\n[ \t]*\*[ \t]*\n")
+
+
 def _sentence_around(text: str, start: int, end: int) -> str:
     """The sentence around `text[start:end]`, BOUNDED at both ends so a survivor named in a
-    different sentence cannot exempt this one. A `.` ends a sentence only when whitespace follows,
-    so `start.ts` and `json({error, reason})` do not truncate the window; the head is additionally
-    capped at 240 characters so a run-on paragraph cannot hide the match behind a distant terminator.
+    different sentence — or a different PARAGRAPH — cannot exempt this one. Both directions use the
+    same breaks (`_SENTENCE_BREAK_RE`): a period that whitespace follows, a blank line, or a ` *`
+    line that is blank inside a JSDoc block. An unterminated span on either side stops at 240
+    characters rather than reaching across the document.
     """
     head = text[:start]
-    cut = max(head.rfind(". "), head.rfind(".\n"), head.rfind("\n\n"))
-    begin = cut + 1 if cut >= 0 else 0
-    tail = text[end:]
-    stop = re.search(r"\.\s", tail)
-    finish = end + (stop.start() + 1 if stop else min(len(tail), 240))
+    breaks = list(_SENTENCE_BREAK_RE.finditer(head))
+    begin = breaks[-1].end() if breaks else 0
+    stop = _SENTENCE_BREAK_RE.search(text, end)
+    finish = stop.end() if stop else min(len(text), end + 240)
     return text[max(begin, start - 240):finish]
 
 
