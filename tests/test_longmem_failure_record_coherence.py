@@ -157,8 +157,13 @@ def test_initial_attempt_counts_as_one():
 def test_r2_counts_a_second_pipeline_attempt():
     entry = _entry(SMOKE_EXC, r2_attempted=1)
     assert entry["attempts"] == 2
-    # R2 already spent the whole budget: the entry is retained, not re-attempted
-    reason = runner._retry_failed_skip_reason(entry)
+    # the documented budget is preserved: initial + R2 = 2 attempts still leaves
+    # the ONE resume the R3 tier exists for (cap 3), and the gate admits it.
+    assert runner._retry_failed_skip_reason(entry) is None
+    # ...and the entry the resume leaves behind is the one that is retained.
+    spent = _entry(SMOKE_EXC, prior={"attempts": 2}, resume_reattempt=True)
+    assert spent["attempts"] == 3
+    reason = runner._retry_failed_skip_reason(spent)
     assert reason is not None and "attempt budget exhausted" in reason
 
 
