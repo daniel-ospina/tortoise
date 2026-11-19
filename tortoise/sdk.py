@@ -18541,6 +18541,31 @@ class TortoiseSDK:
         # deleted here, the cache simply stops growing.
         from .allowance_gate import cache_fold_denial
         _cache_denial = cache_fold_denial()
+        # ⛔ #13829 — THE SKIP NEEDS PROOF, NOT JUST A VERDICT.
+        # `truth_carried=True` is the DOOR's declaration; `_record_committed` is
+        # the ANSWER, and it is `None` on a journal-less deployment: `_emit_event`
+        # returns before the record projection runs (`_write_record_projection`
+        # is inside the append's own `live_write.write`), so neither the journal
+        # nor the record holds the write. There the CACHE is its ONLY durable
+        # home and skipping it would destroy the write while reporting success —
+        # the one shape #13829 forbids ("fail-closed by construction: an unproven
+        # path keeps the refusal"). So the refusal the gate would have raised on
+        # an unproven door is raised here, reconstructed from the figures the gate
+        # COMPARED so `quota_refusal_payload`'s shape and the prose are the same
+        # ones the protective arm produces (`_safe` -> `ERR_QUOTA`).
+        if _cache_denial is not None and _record_committed is not True:
+            from .quota import QuotaExceededError, with_limit_contact
+            raise QuotaExceededError(
+                with_limit_contact(_cache_denial.detail),
+                resource=_cache_denial.dimension,
+                used=(int(_cache_denial.used)
+                      if float(_cache_denial.used).is_integer()
+                      else _cache_denial.used),
+                limit=(int(_cache_denial.limit)
+                       if float(_cache_denial.limit).is_integer()
+                       else _cache_denial.limit),
+                estimated=True if _cache_denial.estimated else None,
+            )
         if _cache_denial is not None:
             _logger.warning(
                 "create_point: the DERIVED cache DECLINED %s (#13829) — %s. "
@@ -18665,7 +18690,23 @@ class TortoiseSDK:
         # TRUTH holds a record the cache has not materialised — a replay heals
         # it (the ordering contract's replay-healable window) — so this raise
         # must NEVER be read as "the write is gone": the record stands.
-        _snapshot = self.get_point(pid)
+        # ⛔ #13829 — EXCEPT ON THE DECLINED ARM, which has no cache row to read
+        # back at all. There the write-landed proof is the committed RECORD
+        # (`_record_committed` above — this line is only reachable past its gate):
+        # the door declared `truth_carried=True`, the `PointAdded` append is the
+        # commit point, and the skipped cache write is projection lag that
+        # `derived = replay(journal)` heals. A cache read-back on that arm would
+        # report a write the record HOLDS as lost — `WriteNotLandedError` out of
+        # `tortoise_create_point`, i.e. an ERROR to the MCP caller on exactly the
+        # over-cap path this change exists to open (review P1, PR #13835).
+        # The snapshot we serve on that arm is the record's OWN — `_intended`,
+        # the same payload the journal carries, built from the write intent
+        # through `_stored_prop_value`. It deliberately omits the DERIVED
+        # `search_keys` alias, which only ever reaches the CACHE (#8933): a
+        # replay re-derives it from `content`, and the cache row this arm would
+        # have read does not exist to hold it either.
+        _snapshot = (dict(_intended) if _cache_denial is not None
+                     else self.get_point(pid))
         if not _snapshot:
             from .exceptions import WriteNotLandedError
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None),

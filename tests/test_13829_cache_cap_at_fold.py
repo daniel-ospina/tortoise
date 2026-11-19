@@ -355,6 +355,114 @@ def test_create_point_appends_before_it_writes_the_cache():
         '_live_write_scope("create_point")')
 
 
+@pytest.fixture
+def journal_sdk(tmp_path):
+    """An embedded SDK with the JSONL journal WIRED — the shape #7951's proof needs.
+
+    `sdk_factory` builds a journal-less SDK, where `_emit_event` returns ``None``
+    before the record projection runs: a test on that SDK cannot tell "the write
+    is durable" from "nothing holds it", which is the difference the door's
+    opt-in rests on. Yields ``(sdk, events_path)``.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "fold.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        yield sdk, events / "events.jsonl"
+    finally:
+        sdk.close()
+
+
+def _journal(path) -> list[dict]:
+    import json
+
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def test_the_door_serves_the_write_the_record_holds(journal_sdk):
+    """The opt-in's BEHAVIOURAL half: the declined write comes BACK, durably.
+
+    ``test_create_point_asks_the_fold_before_it_touches_the_cache`` pins the
+    source ORDER, which cannot see what runs after the guarded block — and what
+    ran was a FAILING write: the door returned the point from a CACHE-ONLY
+    read-back (``get_point``, ``MATCH (n:Point {id:$id})`` over the derived
+    graph) whose row the denial had just skipped, so the read-back missed and
+    ``WriteNotLandedError(record_committed=True)`` was raised out of
+    ``tortoise_create_point`` — an ERROR to the MCP caller for a write the
+    record holds, on exactly the over-cap path this issue exists to open.
+
+    ⛔ AND THE RECORD IS MEASURED, not assumed: the SDK is built with the journal
+    wired, so the ``PointAdded`` line is read back here. A journal-less SDK would
+    satisfy every assertion below for the WRONG reason (nothing would hold the
+    write at all), which is what
+    ``test_a_journal_less_door_keeps_the_refusal`` pins from the other side.
+
+    Mutants this reddens on:
+
+    * **drop the denial arm** (the cache ``CREATE`` unconditional) → the write
+      lands in the cache and the ``get_point`` assertion below goes red;
+    * **read the point back from the cache on the denied arm** (today's bug) →
+      ``create_point`` raises and this test errors rather than returning.
+    """
+    sdk, events = journal_sdk
+    armed = _limits(max_graph_storage_mb=77)
+    enforce_allowances(armed, resource="points", meters=OVER_CAP,
+                       truth_carried=True)
+
+    reply = sdk.create_point("statement", "the cache declined this write (#13829)")
+
+    # SERVED, not failed: the RECORD holds the write, so the door returns it.
+    assert reply["id"]
+    assert reply["content"] == "the cache declined this write (#13829)"
+    # … AND the record really is the home the door points the caller at.
+    added = [e for e in _journal(events) if e.get("type") == "PointAdded"]
+    assert [e.get("id") or (e.get("point") or {}).get("id")
+            for e in added] == [reply["id"]], (
+        "the served write has no committed PointAdded record: the door served a "
+        f"write nothing durable holds ({added!r})")
+    # … and the CACHE really declined it — otherwise the assertions above would be
+    # satisfied by a fold that ran and a denial nobody consumed.
+    assert sdk.get_point(reply["id"]) == {}
+
+
+def test_a_journal_less_door_keeps_the_refusal(tmp_path):
+    """⛔ THE PROTECTIVE CASE, at the DOOR (#13829 scope 2, review P1).
+
+    `truth_carried=True` is the door's DECLARATION; on a journal-less deployment
+    it is false in fact — ``_emit_event`` returns ``None`` before the record
+    projection, so the cache is the write's ONLY home. Skipping the cache there
+    would destroy the write while reporting success. The unproven path must keep
+    the refusal, which is the same `QuotaExceededError` the gate raises for a
+    door that never claimed the choke point.
+
+    Mutant: skip on the verdict alone (no proof of durability) → the call RETURNS
+    and ``pytest.raises`` fails.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(str(tmp_path / "nojournal.db"))
+    try:
+        assert sdk._get_event_log() is None, (
+            "this test needs a JOURNAL-LESS SDK — the arm it pins does not exist "
+            "when a journal is configured")
+        armed = _limits(max_graph_storage_mb=77)
+        enforce_allowances(armed, resource="points", meters=OVER_CAP,
+                           truth_carried=True)
+
+        with pytest.raises(QuotaExceededError):
+            sdk.create_point("statement", "nothing durable can hold this (#13829)")
+
+        # The refusal CONSUMED the verdict — it is not left to deny a later fold.
+        assert cache_fold_denial() is None
+    finally:
+        sdk.close()
+
+
 def test_the_mcp_gate_defaults_to_the_protective_arm():
     """`_quota_gated` must default to ``truth_carried=False``, never the inverse.
 
