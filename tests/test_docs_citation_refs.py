@@ -193,6 +193,7 @@ STATED LIMITS — deliberate, and measured rather than guessed:
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -503,18 +504,6 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
-def _census_verdict_row_heads(row: str) -> list[str]:
-    """The head-shaped tokens a census-verdict row names, or `[]` when it names none.
-
-    A census verdict (`--check` exits 0 / reports `== measured`) is only readable beside
-    the head it was minted at, so a row that states one and names no head is a false PASS
-    the moment the checker's state moves. Factored out so the leg that reads it can be
-    driven with synthetic rows — a guard whose discrimination is asserted, not described.
-    """
-    return [h for h in re.findall(r"\b[0-9a-f]{7,40}\b", row)
-            if any(c.isdigit() for c in h) and any(c.isalpha() for c in h)]
-
-
 def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     """⛔ A document reported a checker's EXIT CODE as green while the checker was RED.
 
@@ -603,7 +592,17 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "`tortoise/` modules the verdict is about; the empty-list reading that stood "
             "here before was FALSE at this head (#13750 review, cycle 1)")
 
-    # (c) RETIRED SPELLINGS — each was measured FALSE against the tree at this head.
+    # (c) RETIRED SPELLINGS — measured FALSE against the tree, so the arm READS the tree
+    # instead of freezing which direction the answer points.
+    # ⛔ MEASURED (#13746 review, finding 7): this list was five literals assuming a NON-EMPTY
+    # `-- tortoise/` set. `main`'s own `#13790`/`#13786` then re-took the same census figures,
+    # so at this head the command prints NOTHING and every one of those five spellings became
+    # the TRUE statement — the same class of error as the frozen sign this arm replaced
+    # (a guard that pins a MEASUREMENT has to READ it). The prohibition is therefore applied
+    # only where the measurement supports it.
+    _tortoise_set = subprocess.run(
+        ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
+        cwd=REPO, capture_output=True, text=True, check=False).stdout.split()
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is NOT empty",
@@ -611,12 +610,14 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         f"{_tortoise_cmd}` -> empty",
         f"{_tortoise_cmd}` prints NOTHING",
     ):
+        if not _tortoise_set:
+            # The empty claim is the measured one here; asserting it is not a defect.
+            continue
         assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints the two "
-            "comment-only modules this branch's `--refresh` re-took, so the sentence is "
-            "refuted by the very command it quotes (#13489 review, P1; #13750 review, "
-            "cycle 1 — the empty claim was true of an earlier head and is not true of "
-            "this one)")
+            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints "
+            f"{' '.join(_tortoise_set)!r}, so the sentence is refuted by the very command "
+            "it quotes (#13489 review, P1; #13750 review, cycle 1 — the empty claim was "
+            "true of an earlier head and is not true of this one)")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a

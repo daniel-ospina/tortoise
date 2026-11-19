@@ -95,11 +95,11 @@ a head that has since grown. So the drift is **119 of the 211 comparable, plus t
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 **The drift is 122 of those 214.** ⚠️ **These counts are a parsing decision, and this header states which
-one it took**: the 215 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
+one it took**: the 214 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
 written as ONE token. The document also writes one pair as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above); it is resolved but not counted,
 and counting that form gives **215 pairs and 123 drifters**. So the basis must travel with the figure —
-123 and 124 are one measurement under two counting decisions, not two findings. ⚠️ **An earlier form of
+122 and 123 are one measurement under two counting decisions, not two findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
 sentence read "…to 211 — 103 … collisions —" around a full paragraph; its alternative basis then quoted a
 numerator that could not move. Text inserted without re-reading the line it lands in is the same defect

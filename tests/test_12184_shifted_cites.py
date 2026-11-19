@@ -1102,7 +1102,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     FALSE CORRECTION this file's own docstring is built around, one head over.
 
     NON-VACUOUS on the pre-fix document (`git show 26a68370b327:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md`):
-    the header carries `:6989` after the fragment and `:6869` nowhere, so this assertion reds there. The
+    the header carries `:6938` after the fragment and `:6869` nowhere, so this assertion reds there. The
     measurement that settles which number belongs to the announced head is
     `git show ae54df166d:tortoise/projection/__init__.py | sed -n '6869p;6938p'` ->
     `("Object", ["name"]),` and then `# background RDB/AOF child in the fork slot, and a hung un-reaped`.
@@ -1123,7 +1123,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     # ⛔ THE WHOLE ENUMERATION, not one entry (review cycle 3, F1). `#13466` re-pointed FOUR of its
     # entries to working-tree values and NOTHING red, because this arm asserted only the Object entry.
     # ⚠️ This comment said "three" while the failure message below said "FOUR" (review cycle 5): the
-    # measured set is `:7025-7028`, `:7031-7044`, `:3070` and `:2877`->`:2914` — `git diff b64290529b^
+    # measured set is `:7025-7028`, `:7031-7044`, `:3070` and `:2877`->`:2882` — `git diff b64290529b^
     # b64290529b -- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` prints exactly those four moves.
     # ⚠️ `:2876` is that entry's address at `ae54df166d` (the value the loop below pins), NOT the value
     # that commit moved: the header already read `:2877` at `b64290529b^`, one line stale before it was
