@@ -1083,10 +1083,10 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     — ⚠️ **so they do NOT open at the pin above** — and each is named here by the cite it became"*. Every
     number in that sentence is therefore an address AT `ae54df166d`, not at this tree.
 
-    `#13489`'s first cut re-pointed the Object entry from `:6869` to `:6989` — this tree's value, correct
-    for §2.5's row — the Object declaration there is `:6989`, which is `:6869` + 120 IN
-    `projection/__init__.py` (an address delta, not a document distance) — and WRONG under a sentence
-    that announces the other head. A
+    `#13489`'s first cut re-pointed the Object entry from `:6869` to `:6938` — the value THAT cut's own
+    head carries, `:6869` + 69 IN `projection/__init__.py` (an address delta, not a document distance);
+    this tree's value for §2.5's row has since moved on from it, and re-pointing the header to the
+    current one is WRONG under a sentence that announces the other head. A
     `⚠️ CORRECTED` marker records that the text changed, never that the change was right: the
     FALSE CORRECTION this file's own docstring is built around, one head over.
 
