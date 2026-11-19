@@ -1382,11 +1382,11 @@ def _phrase_re(phrase: str) -> str:
     correct sentence (measured): `too small to  call a win` — one extra space,
     identical rendering — redded as though the verdict had vanished, and so would a
     reflow that left a DOUBLED SPACE at the line break (the abstract is pre-joined with
-    single spaces, `:1793`, so a PLAIN mid-line wrap was never a red — measured at
-    `dc8b08bd^`. This sentence first claimed the plain wrap too, which the guard never
-    covered; corrected here because an unmeasured claim inside a pin is exactly what
-    this file exists to catch). A false red is as bad as a false
-    pass, so both sides are now derived from this one function.
+    single spaces before any clause is read, so a PLAIN mid-line wrap was never a red —
+    measured at `dc8b08bd^`. This sentence first claimed the plain wrap too, which the
+    guard never covered; corrected here because an unmeasured claim inside a pin is
+    exactly what this file exists to catch). A false red is as bad as a false pass, so
+    both sides are now derived from this one function.
     """
     return r"\s+".join(re.escape(word) for word in phrase.split())
 
@@ -1400,15 +1400,16 @@ def _phrase_re(phrase: str) -> str:
 #: codepoint that looks like an apostrophe (U+2019, U+FF07, U+02BC …), and a negator the
 #: pattern cannot see is a negator it fails to guard — measured GREEN through a literal
 #: `n't` for `isn’t too small to call a win`, on the one clause with no adjacency second
-#: net. This is not a new rule: `tortoise/extractor_v2.py:7665` states the same shape
+#: net. This is not a new rule: `tortoise/extractor_v2.py`'s `_CLITIC_RE` states the same
+#: shape
 #: (`_CLITIC_RE = r"n[^\w\s]{1,2}t$"`) with the same rationale, and
-#: `tests/test_never_across_fold_5080.py:410-428` pins 25 apostrophe codepoints for it
-#: (26 parametrized cases — U+02BC is listed twice).
+#: `tests/test_never_across_fold_5080.py::test_a_clitic_in_any_apostrophe_spelling_negates`
+#: pins 25 apostrophe codepoints for it (26 parametrized cases — U+02BC is listed twice).
 #: ⛔ The separator class is `[^\sa-z0-9]` — not `[^\w\s]` — and the difference is
 #: measured, not stylistic: Unicode classifies 12 of the apostrophe codepoints this repo
 #: enumerates (U+02B9, U+02BB, U+02BD–U+02C1, U+02C8, U+02CA–U+02CC, U+02D0) as
 #: MODIFIER LETTERS, i.e. as `\w`, plus U+02BC and U+A78C as letters — so a
-#: `[^\w\s]` class silently missed 14 of the 25. `extractor_v2:7665` reaches them only
+#: `[^\w\s]` class silently missed 14 of the 25. `_CLITIC_RE` reaches them only
 #: because its translate table canonicalises every one to `'` BEFORE `_CLITIC_RE` runs; a
 #: prose pin has no such pre-pass. Excluding only ASCII alphanumerics and whitespace
 #: covers ALL 25 codepoints in that inventory (verified), and still refuses the innocent
