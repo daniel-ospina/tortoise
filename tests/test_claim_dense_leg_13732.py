@@ -1392,11 +1392,17 @@ class _FakeGraph:
     # in the artifact published `0` ("the graph holds no vectors") for a graph
     # that could not be read, with 99 tests green (`#13745` review round 11).
     unreadable: ClassVar[bool] = False
+    # A graph that is DOWN answers NEITHER shape — the realistic case. `unreadable`
+    # alone models only a failing id-scoped read, which is what the round-11 test
+    # drove; a dead store also fails the PREFIX count, the coverage denominator.
+    down: ClassVar[bool] = False
 
     def __init__(self, rows: int):
         self._rows = rows
 
     def query(self, _cypher, params=None):
+        if self.down:
+            raise RuntimeError("no route to the graph")
         if params is not None and "ids" in params:
             if self.unreadable:
                 raise RuntimeError("no route to the graph")
@@ -1463,7 +1469,9 @@ class TestTheDocumentedRunPath:
         seeded: int | None = None,
         record_ok: bool = False,
         graph_unreadable: bool = False,
+        graph_down: bool = False,
     ):
+        self.coverage_kwargs = {}
         corpus = tmp_path / "corpus"
         corpus.mkdir(exist_ok=True)
         rows = [
@@ -1488,12 +1496,18 @@ class TestTheDocumentedRunPath:
             # `run_measurement` imports `record_vector` INSIDE the function, so the
             # seam is the module on `tortoise`, not an attribute of the tool.
             monkeypatch.setattr("tortoise.record_vector._resolve_scope", lambda: self.SCOPE)
-            monkeypatch.setattr(
-                "tortoise.record_vector.coverage",
-                lambda *_a, **_k: types.SimpleNamespace(
+
+            # ⛔ AND WHAT IT WAS ASKED WITH IS CAPTURED: `graph_vectors` is the
+            # coverage DENOMINATOR, so `graph_vectors=0` silently turns the gate
+            # into `record_vectors >= 0` — always verified — while the artifact
+            # still publishes `verified: true` (`#13745` review round 12).
+            def _coverage(*_a, **_k):
+                self.coverage_kwargs.update(_k)
+                return types.SimpleNamespace(
                     verified=True, reason="ok", record_vectors=3, graph_vectors=3
-                ),
-            )
+                )
+
+            monkeypatch.setattr("tortoise.record_vector.coverage", _coverage)
             monkeypatch.setattr("tortoise.record_vector.reset_coverage_cache", lambda: None)
             monkeypatch.setattr(tool_mod, "record_population_vectors", lambda _ids, _scope, _dsn: 3)
         monkeypatch.setattr(tool_mod, "_git_head", lambda: "deadbeef")
@@ -1510,6 +1524,7 @@ class TestTheDocumentedRunPath:
         # `query` raise for that shape, which is the only way to drive the
         # None-vs-0 contract through the RUN instead of the pure function.
         _FakeGraph.unreadable = graph_unreadable
+        _FakeGraph.down = graph_down
 
         def _seed(_proj, pop):
             keep = len(pop) if seeded is None else seeded
@@ -1583,7 +1598,11 @@ class TestTheDocumentedRunPath:
         # (`"graph_vectors": graph_population`) survives every assertion below.
         # 5 vs 3 makes it visible (`#13745` review round 2, finding 1).
         monkeypatch.setattr(_FakeSDK, "prefix_rows", 5)
-        self._drive(tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N)
+        # a HEALTHY record, so the coverage gate is actually CONSULTED (it is the
+        # consumer of the denominator this test pins)
+        self._drive(
+            tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N, record_ok=True
+        )
         artifact = json.loads(target.read_text())
         pop = artifact["population"]
         assert pop["graph_vectors"] == 5, pop  # the PREFIX-wide count (_FakeGraph)
@@ -1591,6 +1610,12 @@ class TestTheDocumentedRunPath:
         # ⛔ and each field must carry ITS OWN measurement, not one count under two
         # names — `"graph_population_vectors": graph_vectors` satisfies every
         # assertion above while telling the reader nothing.
+        # ⛔ THE DENOMINATOR ITSELF, not just its presence: `graph_vectors=0`
+        # makes `record_vectors >= graph_vectors` always true.
+        assert self.coverage_kwargs.get("graph_vectors") == 5, (
+            "the coverage gate must be asked with the PREFIX count as its "
+            f"denominator, got {self.coverage_kwargs!r}"
+        )
         src = TOOL.read_text()
         assert '"graph_population_vectors": graph_population' in src, (
             "the artifact's id-and-text count must be `graph_population`, the value "
@@ -1778,6 +1803,28 @@ class TestTheDocumentedRunPath:
             tool_mod._seed_graph(
                 _Proj(), population, encode_many=lambda texts: [[0.1, 0.2] for _ in texts]
             )
+
+    def test_a_DOWN_graph_is_a_named_refusal_not_a_traceback(self, tool_mod, monkeypatch, tmp_path):
+        """⛔ THE PREFIX COUNT IS A READ TOO (`#13745` review round 12).
+
+        The id-scoped read was made unmeasurable-but-handled; the PREFIX-wide
+        coverage count three lines above it was not, and `main()` catches only
+        `Refused` — so a store that answered neither shape gave the operator exit
+        1, a traceback and NO artifact, bypassing every named refusal this file
+        promises. A dead graph is the realistic "unreadable" case.
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            self._drive(
+                tool_mod,
+                monkeypatch,
+                tmp_path,
+                out=str(tmp_path / "down.json"),
+                preregistered_n=M2_N,
+                record_ok=True,
+                graph_down=True,
+            )
+        assert ei.value.code == "graph_unreadable"
+        assert not (tmp_path / "down.json").exists(), "a refused run publishes nothing"
 
     def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
         """⛔ The single-`blocked` slot made the LAST cause win; this pins both.

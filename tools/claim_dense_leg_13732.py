@@ -1300,15 +1300,30 @@ def run_measurement(args: argparse.Namespace) -> int:
     proj = sdk._get_proj()
     written = _seed_graph(proj, population)
 
-    graph_vectors = len(
-        [
-            1
-            for r in proj.g.query(
-                f"MATCH (n:Point) WHERE n.id STARTS WITH '{point_prefix}' "
-                "AND n.embedding IS NOT NULL RETURN n.id"
-            ).result_set
-        ]
-    )
+    # ⛔ THE PREFIX COUNT IS A READ TOO, AND AN UNREADABLE GRAPH MUST BE A NAMED
+    # REFUSAL, NOT A TRACEBACK (`#13745` review round 12). This count is the
+    # coverage DENOMINATOR: without it there is no gate to consult, so nothing
+    # downstream can be measured — `main()` catches only `Refused`, so an
+    # exception here gave the operator exit 1, a traceback and NO artifact,
+    # bypassing every named refusal the file promises. Refuse by name instead.
+    try:
+        graph_vectors = len(
+            [
+                1
+                for r in proj.g.query(
+                    f"MATCH (n:Point) WHERE n.id STARTS WITH '{point_prefix}' "
+                    "AND n.embedding IS NOT NULL RETURN n.id"
+                ).result_set
+            ]
+        )
+    except Exception as exc:
+        raise Refused(
+            "graph_unreadable",
+            f"the graph could not be read for the coverage denominator ({exc.__class__.__name__}: "
+            f"{exc}) — nothing downstream can be measured against a store that will "
+            f"not answer, so this run publishes no artifact rather than a result "
+            f"about the wrong store",
+        ) from exc
 
     # ⛔ THE ID-SCOPED HALF (see the docstring): `coverage` is a LABEL-WIDE count
     # by design, so it verifies a tenant whose record holds SOME embedded points
