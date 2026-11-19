@@ -7591,9 +7591,9 @@ class TestProductTeamsCopy:
     This is the pin the page most needs: the copy is the owner's prose, the
     build was instructed to reproduce it unchanged, and nothing else in this
     repo reads it (the product page's guard deliberately stopped pinning copy in
-    #9652). Two known copy DEFECTS are pinned as-written on purpose, with the
-    reason beside them — a builder "fixing" them is the failure this class
-    exists to catch.
+    #9652). The compute claim's paragraph is the ONE section not pinned here:
+    the test that held it existed only to keep its PDF typo as-written, so it
+    went with the typo (owner ruling on #13645: both readings are accidental).
     """
 
     #: page 1 — hero. The h1's second half is wrapped in a <span> for the accent
@@ -7611,12 +7611,7 @@ class TestProductTeamsCopy:
         "your team, and agents have the whole context, current and logical."
     )
 
-    #: page 2 — the compute claim + the six ↑/↓ labels, in the PDF's ROW order.
-    COMPUTE = (
-        "Tortoise then computes over this context, analysing hundreds or even "
-        "millions of variables so you and your agents make decision with "
-        "superintelligence."
-    )
+    #: page 2 — the six ↑/↓ labels, in the PDF's ROW order.
     OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
     OUTCOMES_DOWN = ("Constant Supervision", "Drift & Regressions", "Slack Noise & Meetings")
 
@@ -7632,7 +7627,7 @@ class TestProductTeamsCopy:
          "superseding. This logical model enables your agents to not just retrieve "
          "facts but understand your logic, eliminating drift and regressions."),
         ("beat-reason", "03 · Reason",
-         "Improve decision-making with super intelligence, grounded in your "
+         "Improve decision-making with superintelligence, grounded in your "
          "company\u2019s knowledge and fully auditable. Thanks to an algorithm "
          "inspired by interconnected prediction markets, Tortoise can compute "
          "hundreds or even millions of data points."),
@@ -7665,24 +7660,6 @@ class TestProductTeamsCopy:
             f"the intro block reads {paragraphs!r}; the owner's page 1 reads "
             f"{self.INTRO!r}")
 
-    def test_the_compute_claim_is_verbatim_including_its_defect(self):
-        """⛔ "make decision with superintelligence" is NOT a typo to fix.
-
-        The PDF reads "so you and your agents make decision with
-        superintelligence." (singular `decision`). It is a defect a copy editor
-        would flag, and the scoping recommended normalising it — but the owner
-        did not rule, and this lane's instruction is verbatim. So it ships as
-        written, and this pin is what keeps the next reader from "correcting"
-        it silently: if the owner rules, change the copy AND this pin together.
-        """
-        compute = _element_by_id(_product_teams_html(), "beat-compute")
-        first = re.search(r"<p[^>]*>(.*?)</p>", compute, re.S)
-        assert first, "#beat-compute has no paragraph"
-        assert _beat_text(first.group(1)) == self.COMPUTE, (
-            f"the compute claim reads {_beat_text(first.group(1))!r}; the "
-            f"owner's page 2 reads {self.COMPUTE!r}. ⛔ `make decision` "
-            "(singular) is the owner's text, not a builder typo.")
-
     def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
         compute = _element_by_id(_product_teams_html(), "beat-compute")
         up = re.findall(r'<ul class="up">(.*?)</ul>', compute, re.S)
@@ -7714,8 +7691,7 @@ class TestProductTeamsCopy:
             body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
             assert body == [paragraph], (
                 f"#{section_id}'s paragraph reads {body!r}; the PDF reads "
-                f"[{paragraph!r}]. ⛔ `super intelligence` (two words) in step 03 "
-                "is the owner's spelling.")
+                f"[{paragraph!r}]")
 
     def test_the_onboarding_beat_is_verbatim(self):
         beat = _element_by_id(_product_teams_html(), "beat-onboard")
