@@ -228,6 +228,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #13036 row V2 (PR #13886) capstone payload contract — the same shape and the
+    # same reason as #9664 above, which this row deliberately mirrors: the `seeded`
+    # fixture drives the REAL HTTP app (`create_http_app`) + tenancy resolver +
+    # `POST /mcp` transport against a local embedded store (`TORTOISE_DB_PATH` to a
+    # `tmp_path`), so the URI is UNSET on purpose — an ambient-URI redirect would
+    # point `_get_org_sdk` at a shared server graph and the seeded claim, operator
+    # and decision chain this suite asserts out of every payload would not be there,
+    # i.e. it would fail for a reason unrelated to the code under test. The `delenv`
+    # IS the measurement (DELIBERATE_EMBEDDED_LANE), exactly as in the module above.
+    "test_13036_capstone_v2.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #12521: `test_10015_organisation_account.py` landed URI-unsets with no
     # register row (`monkeypatch.delenv("TORTOISE_DB_URI", raising=False)`, at `:49`
     # and `:257`), which reds this gate on `main` — the same "module landed without

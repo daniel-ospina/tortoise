@@ -10339,6 +10339,17 @@ ROWED_BY_THIS_FOLD = (
     # The row is here for the same reason as the one above: the ENTRY-RULE pin iterates this
     # EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
     "test_capstone_12186_recall.py",
+    # #13036 row V2 (PR #13886) - the capstone payload contract for the live MCP
+    # surface, a file this fold ADDED. Dual-registered `api` + `core`: the `core`
+    # row is the SELECTION half (a diff whose only python change is this file takes
+    # the `core` fallback, and a fallback selects the core MEMBER list, which this
+    # file was absent from - measured pre-fix: 921 files, file not among them), the
+    # `api` row is the tenant-door half (`tortoise/mcp_auth.py` is an EXACT `api`
+    # SOURCE_PATTERNS match that REPLACES the core fallback - measured pre-fix:
+    # `surfaces: ['api']`, file absent). Listed here for the reason every row above
+    # states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
+    # listed has no `durations:` row and deleting the row this PR adds reds nothing.
+    "test_13036_capstone_v2.py",
 )
 
 
