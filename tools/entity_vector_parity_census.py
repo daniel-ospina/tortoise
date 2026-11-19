@@ -684,8 +684,11 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
     about to write to, rather than a second connection it hopes addresses the same
     one); ``strip_readiness`` is a ``label -> (ready, reason)`` callable, and it has NO
     default — omitting it is recorded as "not evaluated", which sets ``ready`` **False**.
-    An explicit ``None`` says the same thing in words. Both CLIs pass the stripper's own
-    ``strip_readiness``, so the two tools cannot disagree about why a label is blocked.
+    An explicit ``None`` says the same thing in words. Both CLIs pass a
+    ``strip_mod.readiness_probe(...)`` built from the projection, tenant and record leg of
+    the run (`#13796`), which is what makes the two tools' answers identical rather than
+    merely similar. ⛔ NOT ``strip_readiness``: that is the stripper's UNMEASURED arity-1
+    version-skew fallback, and a third caller that wired it would restore #13796 here.
 
     ⛔ AN UNEVALUATED WRITE GATE IS NOT A PASS. ``ready`` means "parity holds AND no
     writer will re-add what we remove"; a caller that skipped the second half has not

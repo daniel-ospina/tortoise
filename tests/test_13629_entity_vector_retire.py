@@ -41,6 +41,8 @@ that fails OPEN the day someone deletes a branch.
 | `test_the_destructive_arm_hands_the_gate_the_runs_own_denominator` | **#13796**'s reachability on the `--execute` arm — the second of `main`'s two hops | the destructive path drops the population while the preview keeps it, so `execute` re-checks an unsatisfiable gate (measured: 107 passed under that mutant) |
 | `test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_stripper` | `_write_gate`'s version-skew arm answers with the FAIL-CLOSED twin, never with a measurement it could not take | an old stripper is answered by a probe that reports `ready` with no counts behind it (measured: the mutant survived at 112 passed until the writers and the tenant door were both held open) |
 | `test_execute_rechecks_the_gate_with_the_runs_own_measurement_context` | **#13796**'s THIRD hop — `execute`'s OWN re-check probe, built seconds before the first delete | the destructive re-check loses the denominator and refuses `REFUSE_WRITE_STILL_EMITS` on a covered graph (measured: 112 passed under that mutant before this test) |
+| `test_an_uncountable_projection_yields_NO_supplier_rather_than_a_zero` | `graph_vector_population` answers `None`, never `0`, when the projection cannot count | a "supply a default" `0` VERIFIES coverage on a measurement never taken — the fail-OPEN direction (measured: 143 passed under that mutant) |
+| `test_a_HALF_tenant_declaration_is_refused_not_downgraded_to_the_ambient_one` | a half declared tenant is REFUSED by `_declared_scope`, not collapsed to the ambient tenant | a `("org-A", "")` declaration is answered from the ambient tenant's record, certifying one tenant's strip from another's measurement |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -2063,11 +2065,18 @@ def test_the_stripper_cli_hands_the_gate_its_own_projection_and_tenant(
 
     Mutation (measured): delete `graph_population=population` from `main`'s `build_plan`
     call and this test reds on the absent sentence while the rest of the file stays green.
+
+    ⛔ TWO vector-bearing nodes on purpose: with one, a constant `lambda _label: 1` produced
+    the same sentence and this assertion passed on an ASSERTED denominator (#13796's
+    forbidden shape — measured, 2 passed). The graph's own count must be the only thing
+    that can print it.
     """
     graph, record = stores
     graph.add("Object", "obj-1")
+    graph.add("Object", "obj-2")
     record.holds("object", "obj-1")
-    _fresh_record_leg(monkeypatch, record_vectors=1)
+    record.holds("object", "obj-2")
+    _fresh_record_leg(monkeypatch, record_vectors=2)
     _cli_harness(monkeypatch, graph)
 
     assert strip.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
@@ -2075,7 +2084,7 @@ def test_the_stripper_cli_hands_the_gate_its_own_projection_and_tenant(
                        "--org-id", "o", "--graph-id", "g",
                        "--label", "Object"]) == 0
     out = capsys.readouterr().out
-    assert "the record holds 1 vector(s) for object, the graph serves 1" in out, (
+    assert "the record holds 2 vector(s) for object, the graph serves 2" in out, (
         "the preview plan did not carry the measurement — `main` stopped handing the gate "
         f"its own projection/tenant, and #13796 is back ({out})")
     assert "has not proved" not in out, out
@@ -2101,9 +2110,13 @@ def test_the_census_cli_hands_the_gate_its_own_projection_and_tenant(
     does — the census resolves the stripper by its top-level name.)
     """
     graph, record = stores
+    # ⛔ TWO nodes, for the same reason as the preview sibling: one node lets a CONSTANT
+    # denominator print the same sentence, which is the asserted gate #13796 forbids.
     graph.add("Object", "obj-1")
+    graph.add("Object", "obj-2")
     record.holds("object", "obj-1")
-    _fresh_record_leg(monkeypatch, record_vectors=1)
+    record.holds("object", "obj-2")
+    _fresh_record_leg(monkeypatch, record_vectors=2)
     _cli_harness(monkeypatch, graph)
 
     captured: dict = {}
@@ -2121,7 +2134,7 @@ def test_the_census_cli_hands_the_gate_its_own_projection_and_tenant(
                         "--label", "Object"]) == 0
     probe = captured["strip_readiness"]
     _ready, reason = probe("Object")
-    assert "the record holds 1 vector(s) for object, the graph serves 1" in reason, (
+    assert "the record holds 2 vector(s) for object, the graph serves 2" in reason, (
         "the census's gate was not given the run's projection/tenant, so it answers "
         f"\"not proved\" for a covered label (#13796's symptom): {reason}")
     assert "has not proved" not in reason, reason
@@ -2238,13 +2251,18 @@ def test_the_destructive_arm_hands_the_gate_the_runs_own_denominator(
 
     ⚠️ THE ASSERTION IS A REAL MEASUREMENT, NOT AN IDENTITY. The supplier is the
     projection's own count, so it is asked here for `object` and must answer the number of
-    nodes THIS graph carries an `embedding` on (one). A wiring that passed a constant, an
-    empty callable, or the unmeasured `None` would satisfy no such reading — and the
-    supplier is exactly what `record_vector.coverage` binds, so this is the value the gate
-    compares rather than a proxy for it.
+    nodes THIS graph carries an `embedding` on. ⛔ THAT NUMBER IS **TWO**, deliberately: with
+    a single vector-bearing node a constant `lambda _label: 1` satisfied every assertion in
+    this file — measured, 2 passed — and a constant on a larger graph is precisely the
+    asserted gate #13796 forbids. Two nodes make the count distinguishable from a constant,
+    and the supplier is exactly what `record_vector.coverage` binds, so this is the value
+    the gate compares rather than a proxy for it.
     """
     graph, record = stores
     graph.add("Object", "obj-1")
+    # …a SECOND vector-bearing node. `execute` is stubbed below, so the plan still covers
+    # `obj-1` alone; the point of `obj-2` is only that the denominator is not 1.
+    graph.add("Object", "obj-2")
     record.holds("object", "obj-1")
     _fresh_record_leg(monkeypatch, record_vectors=1)
     _cli_harness(monkeypatch, graph)
@@ -2276,7 +2294,7 @@ def test_the_destructive_arm_hands_the_gate_the_runs_own_denominator(
     assert callable(supply), (
         "the destructive arm ran without the denominator this run holds, so `execute` "
         f"re-checks the gate #13796 made unsatisfiable: {supply!r}")
-    assert supply("object") == 1, (
+    assert supply("object") == 2, (
         "the destructive arm carried a supplier that is not this graph's own count — the "
         f"gate would compare against the wrong population: {supply('object')!r}")
 
@@ -2397,6 +2415,84 @@ def test_execute_rechecks_the_gate_with_the_runs_own_measurement_context(
         f"the destructive re-check lost the run's declared record leg: {captured!r}")
     assert strip.result_exit_code(result) == 0, result
     assert graph.vector_keys("Object") == set(), "the strip did not run"
+
+
+def test_an_uncountable_projection_yields_NO_supplier_rather_than_a_zero(stores,
+                                                                       monkeypatch):
+    """⛔ `None` IS UNVERIFIED, NEVER `0` — and this is the FAIL-OPEN direction.
+
+    `graph_vector_population` returns ``None`` when the projection cannot count, because
+    `_safe_population` reads an absent supplier, a raise and a non-integer the same way and
+    an absence read as ``0`` would VERIFY coverage on a failed measurement. Measured on the
+    head before this test: swapping the ``else None`` for the ordinary "supply a default"
+    idiom ``else (lambda _label: 0)`` left both suites at **143 passed**, and the gate then
+    answered `still_emits = False` — *"the record holds 5 vector(s) for object, the graph
+    serves 0"* — on a projection that holds the handle but cannot count. That is a strip
+    licence manufactured from a measurement that never happened, which is exactly what
+    #13796 forbids (*"measured, not asserted"*).
+
+    Not reachable from either CLI today (`FalkorProjection` always carries
+    `_label_vector_count`), so this is defence in depth — but it is the direction every
+    other gap in this file was NOT, and it had no falsifier at all.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=5)
+
+    class _Uncountable:
+        """A projection that holds the HANDLE but exposes no count method."""
+
+        g = graph
+
+    assert strip.graph_vector_population(_Uncountable()) is None, (
+        "an uncountable projection produced a supplier — and a default of 0 there VERIFIES "
+        "coverage on a measurement that was never taken")
+    # …and the refusal that produces is the fail-closed one, not a licence.
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    emits, reason = strip.write_gate(
+        "object", graph_population=strip.graph_vector_population(_Uncountable()),
+        org_id="org", graph_id="graph", record_dsn="postgresql://localhost/record")
+    assert emits is True, f"an unmeasurable denominator licensed a delete: {reason}"
+    assert "has not proved" in reason or "cannot be asked" in reason, reason
+
+
+def test_a_HALF_tenant_declaration_is_refused_not_downgraded_to_the_ambient_one(
+        stores, monkeypatch):
+    """⛔ A HALF DECLARED TENANT MUST NOT FALL BACK TO THE AMBIENT ONE (fail-open).
+
+    `write_gate` used to build `scope=(org_id, graph_id) if (org_id and graph_id) else None`.
+    That looks like the same guard and is not: `("org-A", "")` collapses to `None`, which
+    `_declared_scope` reads as *nobody declared one* and answers with the AMBIENT tenant —
+    so a mis-declared run measured a DIFFERENT tenant's record and certified a strip from
+    it (measured: with an ambient `("org-B", "graph-B")` installed, the gate answered
+    `still_emits = False` for declared `org-A`/`""`). `_declared_scope` is the ONE resolver
+    both doors use precisely because it REFUSES a half pair, and pre-coercing the tuple
+    here took that refusal away. Neither CLI can reach it (both refuse a partial tenant at
+    exit 3), so this is the same defence-in-depth class as the `None`/`0` arm above.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    from tortoise.record_writer import use_record_tenant
+
+    # An AMBIENT tenant that is NOT the one this run declared, so a downgrade is visible.
+    with use_record_tenant("org-B", "graph-B"):
+        emits, reason = strip.write_gate(
+            "object",
+            graph_population=strip.graph_vector_population(_Projection(graph)),
+            org_id="org-A", graph_id="",
+            record_dsn="postgresql://localhost/record")
+
+    assert emits is True, (
+        "a half tenant declaration was answered from the AMBIENT tenant's record — one "
+        f"tenant's strip certified from another tenant's measurement: {reason}")
+    assert "no tenant" in reason, (
+        f"the refusal did not name the missing tenant half: {reason}")
 
 
 # ── preview is the default and writes nothing ───────────────────────────────

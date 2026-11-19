@@ -2170,7 +2170,18 @@ def write_gate(entity_type: str, *,
         try:
             needed, account = verdict(
                 entity_type,
-                scope=(org_id, graph_id) if (org_id and graph_id) else None,
+                # ⛔ A HALF DECLARATION IS PASSED THROUGH, NEVER DOWNGRADED (`#13796`).
+                # `(org_id, graph_id) if (org_id and graph_id) else None` looked like the
+                # same guard and is not: it turns `("org-A", "")` into `None`, which
+                # `_declared_scope` reads as "nobody declared one" and answers with the
+                # AMBIENT tenant — so a mis-declared run measured a DIFFERENT tenant's
+                # record and could certify a strip from it (measured with an ambient
+                # `("org-B", "graph-B")` installed: the gate answered False).
+                # `_declared_scope` is the ONE resolver both doors use and it REFUSES a
+                # half tuple, which is the answer this arm wants.
+                scope=(
+                    (org_id, graph_id)
+                    if (org_id or graph_id) else None),
                 record_dsn=record_dsn,
                 graph_population=graph_population)
         except Exception as exc:  # a raising gate is not a permission
@@ -3420,7 +3431,8 @@ def main(argv: list[str] | None = None) -> int:
                 g=proj.g, record_dsn=record_dsn, org_id=args.org_id,
                 graph_id=args.graph_id, graph_name=graph_name,
                 graph_uri=args.uri or args.db_path or "", labels=args.label,
-                batch=args.batch or DEFAULT_BATCH, graph_population=population)
+                batch=args.batch or DEFAULT_BATCH,
+                graph_population=population)
         except CensusError as exc:
             sys.stderr.write(
                 f"strip_graph_entity_vectors: REFUSED — {exc}. A census that cannot be "
