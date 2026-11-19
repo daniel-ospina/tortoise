@@ -16488,7 +16488,7 @@ def test_the_D5_row_is_still_one_table_row():
 #: as the claim coming BACK. That is deliberately symmetric across all three entries —
 #: binding one entry to an "asserting frame" while the others stay bare is what made two
 #: of them red on a correct, quoted retraction (#13809 review, P2; reproduced).
-#: ⛔ STATED LIMITS, four, each MEASURED at the head it names (#13809 review):
+#: ⛔ STATED LIMITS, four, each MEASURED at `3719864ec9` (#13809 review):
 #: (a) an assertion written INSIDE double quotation marks is not caught — that is what the
 #:     strip is FOR; and (b) the strip recognises DOUBLE quotes only, so a retraction marked
 #:     with single quotes or with typography that the word match still sees REDS this pin on a
@@ -16515,8 +16515,8 @@ _D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
         # and the next need that: their predicate ("is a bare # comment marker", "a
         # DIFFERENT call site") is true of OTHER lines too, so the predicate alone refused
         # correct prose — measured: `:12221` is a DIFFERENT call site from the import at
-        # `:12168` is TRUE and was RED, which is the false red this pin's STATED LIMIT
-        # says it never takes (#13809 review, cycle 4, P2). No glyph, case or spacing is
+        # `:12168` is TRUE and was RED — the false red this entry took until cycle 4 bound
+        # it to its SUBJECT (#13809 review, cycle 4, P2). No glyph, case or spacing is
         # part of a fragment: `_d5_words` reduces each side to a word sequence.
         ("14471", "is a bare `#` comment marker"),
         "measured at `origin/main`: `:14471` is a docstring line in "
@@ -16599,7 +16599,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
     refuted READING is not stated again UNQUOTED. ⛔ A single- or curly-quoted retraction
     is NOT exempt — mark it with `"` — and the pin refuses a row whose `"` do not pair,
     rather than mis-parsing it (#13809 review, cycle 4, P2 — MEASURED). See the tuple's
-    STATED LIMIT for the one thing this cannot catch.
+    STATED LIMITS block for what this pin cannot catch and what it refuses.
     """
     d5 = [
         line for line in
@@ -16626,8 +16626,8 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
     assert not restated, (
         "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated)
         + "\n⛔ If you are DELETING this wording rather than asserting it, mark it with "
-        "DOUBLE quotes — a retraction written with single quotes reds this pin, which is "
-        "its one stated false-red surface.")
+        "DOUBLE quotes — a retraction written with single quotes reds this pin: that is "
+        "limit (b) of its stated false-red surfaces.")
 
 
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
