@@ -293,6 +293,17 @@ _REAL_READ_TEXT = Path.read_text
 #: frame-identity fixture cannot see a suffix disjunct. Pinning it needs a `.py` file
 #: OUTSIDE the population read by an AMBIENT frame — a fixture this file does not have
 #: yet. Named here so the next reader does not read this pin as total.
+#:
+#: ⛔ EVERY UNION THAT RE-ADMITS A TRACKED READ BY ANOTHER FRAME IS PINNED TOO, in
+#: `test_a_same_thread_ambient_read_is_not_attributed_to_label_hits`. Two such rules
+#: measured GREEN at an earlier head —
+#: `caller is _LABEL_HITS_CODE or self in set(_tracked_files_under(_TRACKED_DIR))` and
+#: `… or str(self).startswith(str(REPO / _TRACKED_DIR))` — because membership cannot
+#: distinguish a second attribution from `_label_hits`'s own read of the same tracked
+#: file, so neither the exclusion arms (their stales are untracked) nor the population
+#: control's IDENTITY assertion can see them. That arm therefore stages a read of a
+#: TRACKED file from the helper frame and asserts the COUNT: the shipped rule records
+#: it once, a union rule twice. Both now red (1 failed, 47 passed).
 _LABEL_HITS_CODE = _label_hits.__code__
 
 
@@ -1567,6 +1578,22 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "the staged read is inside the checkout, so it cannot stand in for an "
         "ambient reader that `_label_hits` provably never performs"
     )
+    #: A TRACKED file, read by the same helper frame. The untracked `ambient` above
+    #: pins the `/proc` class; this one pins a different wrong rule — any union of the
+    #: form `caller is _LABEL_HITS_CODE or <path is in the population>`, which re-admits
+    #: a tracked file read by ANY frame and so re-opens the false-RED class #13699 is.
+    #: ⛔ Membership cannot pin it: `_label_hits` reads this file itself, so the path is
+    #: in `read` either way, and the population control's IDENTITY assertion is blind by
+    #: construction (a tracked file is on both sides of `set(read) == set(tracked)`).
+    #: The COUNT is what discriminates — the shipped rule records it exactly once, from
+    #: `_label_hits`'s own pass; a union rule appends the helper's read as a second
+    #: entry. Measured: with `caller is _LABEL_HITS_CODE or self in
+    #: set(_tracked_files_under(_TRACKED_DIR))` and no count assertion, 48 passed.
+    tracked_ambient = REPO / "tortoise" / "onboarding" / "SKILL.md"
+    assert tracked_ambient in _tracked_files_under(_TRACKED_DIR), (
+        "the staged tracked read is not in the population, so the rule it exists to "
+        "catch could not attribute it and this arm would pin nothing"
+    )
     #: The read a NAME-based rule would wrongly take. `_imposter` is a DIFFERENT code
     #: object that merely shares `_label_hits`'s `co_name` AND `co_qualname`, so
     #: `f_code.co_name` or `f_code.co_qualname` — the two natural spellings this rule is
@@ -1609,6 +1636,7 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
 
     def _an_ambient_read() -> None:
         ambient.read_text(encoding="utf-8")
+        tracked_ambient.read_text(encoding="utf-8")
         imposter(imposter_file)
 
     everything: list = []
@@ -1617,6 +1645,10 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "the recorder did not see the same-thread read, so the contamination "
         "this test guards against was not reproduced — the exclusion assertion "
         "below would then be vacuous"
+    )
+    assert tracked_ambient in [p for p, _ in everything], (
+        "the recorder did not see the tracked ambient read, so the union arm below "
+        "would be vacuous"
     )
     assert imposter_file in [p for p, _ in everything], (
         "the recorder did not see the IMPOSTER's read, so the code-object arm below "
@@ -1655,6 +1687,15 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "CODE NAME was attributed to `_label_hits` — the rule compared "
         "`f_code.co_name`, a string, instead of the code object, so any same-named "
         "function anywhere in the process re-opens the false-RED class #13699 is"
+    )
+    assert read.count(tracked_ambient) == 1, (
+        f"a read of a TRACKED file made by ANOTHER FRAME was attributed to "
+        f"`_label_hits` as well — it is recorded {read.count(tracked_ambient)} times, "
+        "and the shipped rule records it once, from `_label_hits`'s own pass. A rule "
+        "of the shape `caller is _LABEL_HITS_CODE or <path is in the population>` "
+        "re-admits the whole #13699 class, and the population control's identity "
+        "assertion cannot see it because a tracked file is on both sides of that "
+        "comparison"
     )
     assert not _population_drift(read), (
         "the recorded population drifted off the tracked set under tortoise/: "
@@ -1729,6 +1770,22 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch, tmp_pa
     #: (correctly) refuses it and this control pins nothing.
     with monkeypatch.context() as inside:
         inside.setattr(sys.modules[__name__], "_tracked_files_under", _widened)
+        #: ⛔ THE SCOPING IS LOAD-BEARING AND PINNED HERE. If `_widened` widened
+        #: unconditionally, a recorder that derives its own view of the population
+        #: would see the stales as tracked, record them, and this arm's `drifted ==`
+        #: assertion would pass for a recorder that drops nothing — mutant (d)
+        #: survives. Measured: with the scoping deleted the file was 48 passed AND (d)
+        #: also passed. Called from THIS frame (not `_label_hits`'s), the population
+        #: must be the REAL one.
+        assert inside_checkout not in _tracked_files_under(_TRACKED_DIR), (
+            "the widening is visible from a frame that is not `_label_hits`'s, so a "
+            "recorder deriving its own population sees the stale as tracked and this "
+            "arm can no longer discriminate — the population-filter mutant survives"
+        )
+        assert outside_checkout not in _tracked_files_under(_TRACKED_DIR), (
+            "the out-of-checkout widening leaks outside `_label_hits`'s frame for the "
+            "same reason, and the containment mutant survives with it"
+        )
         read = _label_hits_reads(monkeypatch)
 
     drifted = _population_drift(read)
