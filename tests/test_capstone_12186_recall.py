@@ -2246,12 +2246,21 @@ LEVER_COLUMNS: dict[str, tuple[str, str]] = {
 LEVER_DECLARATION_ROWS = ("verdict", "m3")
 
 #: ⛔ §4's FOURTH COLUMN, which no assertion read (round 25, F2). Each row cites the
-#: artifact block that carries its figure, and a citation is a claim a reader acts on:
-#: following it must land on a block that holds the row's number. Measured at this head,
-#: all three measured rows could cite a DIFFERENT block — `#12368` pointed at the
-#: capture-prior pair (whose delta is the OTHER one, +15.69) under a row stating +15.47,
-#: and the fold/rerank rows pointed anywhere — with the suite GREEN at 55 passed. So each
-#: citation is pinned, flattened and `_mentions`-bounded like every other cell.
+#: artifact block that carries its figure, and a citation is a claim a reader acts on.
+#: At that head all three measured rows could cite a DIFFERENT block — `#12368` pointed
+#: at the capture-prior pair (whose delta is the OTHER one, +15.69) under a row stating
+#: +15.47 — with the suite GREEN at 55 passed. So each citation is pinned, flattened and
+#: `_mentions`-bounded like every other cell.
+#:
+#: ⛔ AND PINNING THE STRING IS ONLY HALF OF IT (round 26). A string pin catches a row
+#: that cites the WRONG block; it cannot catch a citation that no longer EXISTS. If the
+#: artifact renames `paired`'s key or drops `arms.user_search_rerank`, the README and
+#: this dict still spell the dead path in agreement, every pin stays green, and a reader
+#: who follows the citation lands on nothing. So every citation not declared as PROSE
+#: below is RESOLVED against the committed artifact (`_cited_block`; a dead path is a
+#: KeyError, i.e. a red), and for each MEASURED row at least one cited block must hold
+#: that row's OWN figures — `rerank` cites the arm and the derived block, and only the
+#: latter carries +1.13, so the requirement is "at least one", never "every".
 LEVER_EVIDENCE: dict[str, tuple[str, ...]] = {
     "underscore": ('paired["user_search_pre_lever -> user_search"]',),
     "fold": ("arms.mint_rate",),
@@ -2259,6 +2268,30 @@ LEVER_EVIDENCE: dict[str, tuple[str, ...]] = {
     "verdict": ("declared", "§5"),
     "m3": ("#12349",),
 }
+
+#: The §4 citations that are NOT artifact paths, enumerated so the resolver is
+#: fail-closed: a NEW prose citation has to be declared here, or it is looked up in the
+#: artifact and reds as a dead path instead of silently skipping the resolution check.
+#: `declared, §5` is the verdict row's pointer to §5's prose (the verdict is a
+#: declaration, the record does not hold it) and `#12349` is a closed issue.
+LEVER_PROSE_CITATIONS = frozenset({"declared", "§5", "#12349"})
+
+
+def _cited_block(artifact: dict, cite: str):
+    """The artifact block an §4 `evidence` citation names.
+
+    `paired["<key>"]` is the only subscripted form the document uses; everything else
+    is a dotted path (`arms.mint_rate`, `merged_lever_visibility`). A citation that
+    names a block the committed artifact no longer holds raises — which is the point:
+    a citation is only evidence while the block behind it still exists.
+    """
+    paired = re.fullmatch(r'paired\["([^"]+)"\]', cite)
+    if paired:
+        return artifact["paired"][paired.group(1)]
+    node = artifact
+    for part in cite.split("."):
+        node = node[part]
+    return node
 
 
 def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
@@ -2290,6 +2323,20 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
         "underscore": visibility["underscore_terms_shipped_default"],
         "rerank": visibility["fused_rerank_shipped_default"],
     }
+    #: The artifact blocks each MEASURED row's figure is compared against below, plus the
+    #: tokens those blocks must hold for the citation to be evidence rather than a name.
+    #: The tokens are spelled as JSON (`"gains": 41`, not `41`) so the match cannot be
+    #: satisfied by an unrelated number in the same block.
+    underscore = visibility["underscore_terms_visible_on_user_door"]
+    mint = artifact["arms"]["mint_rate"]
+    rerank = visibility["fused_rerank_effect_on_user_door_if_armed"]
+    cited_figures: dict[str, tuple[str, ...]] = {
+        "underscore": (f'"delta_pts_clean": {json.dumps(underscore["delta_pts_clean"])}',
+                       f'"gains": {underscore["gains"]}'),
+        "fold": (f'"rate": {json.dumps(mint["norm_only"]["rate"])}',
+                 f'"rate": {json.dumps(mint["shipped"]["rate"])}'),
+        "rerank": (f'"delta_pts_clean": {json.dumps(rerank["delta_pts_clean"])}',),
+    }
     #: ⛔ A derived prefix that is empty makes `startswith` vacuously true. Assert the
     #: artifact still records a real ON/OFF word before it is used as one (measured:
     #: an empty value let `**ON**` -> `**OFF**` through).
@@ -2307,12 +2354,25 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
         want_shipped, want_verdict = LEVER_COLUMNS[key]
         want_shipped = derived_shipped.get(key, want_shipped)
         assert want_shipped, f"§4 `{key}` has no shipped-state expectation"
-        #: ⛔ THE CITED BLOCK (round 25, F2) — checked before the phrase pins, because a
-        #: row whose citation does not hold its own figure is the more damaging half.
+        #: ⛔ THE CITED BLOCK (round 25, F2; RESOLVED in round 26) — checked before the
+        #: phrase pins, because a row whose citation does not hold its own figure is the
+        #: more damaging half. The string pin below refuses the wrong block; the
+        #: resolution and the figure check refuse a citation that leads nowhere.
+        blocks = []
         for cite in LEVER_EVIDENCE[key]:
             assert _mentions(evidence, _flat(cite)), (
                 f"§4 `{key}` cites a block that is not {cite!r}, where its figure "
                 f"lives: {row[3]!r}")
+            if cite in LEVER_PROSE_CITATIONS:
+                continue
+            blocks.append(_cited_block(artifact, cite))
+        if key in cited_figures:
+            hay = " ".join(json.dumps(block, sort_keys=True) for block in blocks)
+            missing = [tok for tok in cited_figures[key] if not _mentions(hay, tok)]
+            assert not missing, (
+                f"§4 `{key}` cites {LEVER_EVIDENCE[key]}, but none of those blocks holds "
+                f"the row's own figure(s) {missing} — a citation a reader follows must "
+                f"land on the block that carries the number the row states")
         assert shipped.startswith(want_shipped), (
             f"§4 `{key}` shipped state {row[1]!r} does not start with "
             f"{want_shipped!r}")
@@ -2375,20 +2435,17 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
         f"pinned WHOLE because the artifact derives all of it, so ANY inserted "
         f"qualification is a changed claim, not a rewording")
 
-    underscore = visibility["underscore_terms_visible_on_user_door"]
     row = _flat(_one_row(rows, LEVER_ROW_MARKERS["underscore"], "#12368")[2])
     _assert_mentions(row, (f"+{underscore['delta_pts_clean']:.2f}pts",
                            f"{underscore['gains']}gains",
                            f"{underscore['losses']}losses",
                            f"p{underscore['p_display']}"), "§4 `#12368` row")
 
-    mint = artifact["arms"]["mint_rate"]
     row = _flat(_one_row(rows, LEVER_ROW_MARKERS["fold"], "#12304")[2])
     _assert_mentions(row, (f"{mint['norm_only']['rate']:.4f}",
                            f"{mint['shipped']['rate']:.4f}"),
                      "§4 `#12304` row")
 
-    rerank = visibility["fused_rerank_effect_on_user_door_if_armed"]
     row = _flat(_one_row(rows, LEVER_ROW_MARKERS["rerank"], "#12343")[2])
     _assert_mentions(row, (f"+{rerank['delta_pts_clean']:.2f}pts",
                            f"p={rerank['p_display']}"), "§4 `#12343` row")
