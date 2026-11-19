@@ -1479,6 +1479,7 @@ class TestTheDocumentedRunPath:
         graph_unreadable: bool = False,
         graph_down: bool = False,
         prefix_unreadable: bool = False,
+        seed_refused: str | None = None,
     ):
         self.coverage_kwargs = {}
         corpus = tmp_path / "corpus"
@@ -1537,6 +1538,15 @@ class TestTheDocumentedRunPath:
         _FakeGraph.prefix_unreadable = prefix_unreadable
 
         def _seed(_proj, pop):
+            if seed_refused is not None:
+                # ⛔ A `Refused` FROM INSIDE THE SEED MUST SURVIVE THE WRITE
+                # GUARD. It is a `RuntimeError`, so the guard's broad
+                # `except Exception` would swallow it and re-label a row the
+                # EMBEDDER could not embed as `graph_unwritable` — sending the
+                # operator to FalkorDB for a refusal that fires BEFORE any write
+                # (`#13745` review round 15). `except Refused: raise` looks
+                # redundant next to the clause below it, and is not.
+                raise tool_mod.Refused(seed_refused, "the embedder answered no vector")
             if graph_down:
                 # a store that will not accept the write either: the realistic
                 # dead-graph case, and the one the READ guard cannot see
@@ -1880,6 +1890,27 @@ class TestTheDocumentedRunPath:
         assert "summary" in artifact["arms"]["lexical"]
         assert artifact["comparisons"]["record_dense_vs_lexical"]["label"] != "UNMEASURED"
         assert rc == 3
+
+    def test_a_Refused_from_the_SEED_keeps_its_own_name(self, tool_mod, monkeypatch, tmp_path):
+        """⛔ THE PASSTHROUGH IS LOAD-BEARING: `Refused` ⊂ `RuntimeError`.
+
+        Delete `except Refused: raise` and the broad handler below it swallows a
+        seed refusal and re-labels `seed_vectors_missing` as `graph_unwritable` —
+        under prose about a store that "will not hold the cohort", when both
+        `seed_vectors_missing` refusals fire BEFORE any write at all, so the store
+        was never asked (`#13745` review round 15).
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            self._drive(
+                tool_mod,
+                monkeypatch,
+                tmp_path,
+                out=str(tmp_path / "seed.json"),
+                preregistered_n=M2_N,
+                record_ok=True,
+                seed_refused="seed_vectors_missing",
+            )
+        assert ei.value.code == "seed_vectors_missing", ei.value.code
 
     def test_a_failing_PREFIX_SCAN_is_a_named_refusal_not_a_traceback(
         self, tool_mod, monkeypatch, tmp_path
