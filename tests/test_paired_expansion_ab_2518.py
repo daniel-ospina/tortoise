@@ -717,8 +717,10 @@ _DOCS = (Path(__file__).resolve().parent.parent
 #:   · a branch editing ONLY the probe             -> ARMED, 11 of the 12 paths
 #:     `extra` => RED — a FALSE BLOCK on the lane that repairs the probe;
 #:   · a branch editing ONLY the brief             -> ARMED, all 12 => RED, same;
-#:   · THIS commit's own head, once committed      -> ARMED, 11 extra / 20 missing,
-#:     because it edits the brief for the pin.
+#:   · THIS commit's own head, once committed      -> ARMED, 11 extra / 14 missing
+#:     (re-measured at the head that added this constant: three-dot, 16 paths, 2 covered).
+#:     An earlier cut of this line printed 20 — the TWO-DOT reading, a diff the removed
+#:     guard never computed, since it ran `{base}...HEAD` — because it edits the brief.
 #: So it was not "a pin that could only skip": it skipped where the cell could not
 #: have gone stale, and FALSE-REDDED exactly the branches that own the record — the
 #: worst of both. The reference is frozen here so the comparison is unconditional
