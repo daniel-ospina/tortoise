@@ -1674,114 +1674,64 @@ class TestTheDocumentedRunPath:
         assert "summary" in artifact["arms"]["record_dense"], artifact["arms"]["record_dense"]
         assert rc == 3, rc
 
-    def test_the_seed_cannot_leave_a_row_unwritten(self, tool_mod):
-        """The cause list's COMPLETENESS is a property of the SEED — pin it there.
+    def test_the_seed_writes_a_row_for_EVERY_entry(self, tool_mod):
+        """BEHAVIOURAL — and complete where an AST pin provably cannot be.
 
-        ⛔ `require_graph_population`'s message names only the two VECTOR-side
-        causes because a missing ROW cannot occur after this run's seed: every
-        population row is upserted through the fold with an explicit `embedding`,
-        and no handler SWALLOWS a failed write, so a failure ends the run before the
-        guard is asked. Two rounds tried to pin that on the message's wording and
-        failed in both directions — a synonym passed, and an accurate edit that
-        mentioned a row false-reddened (`#13745` reviews rounds 6-7). This asserts
-        the fact the wording rests on, and nothing about the wording.
+        Three rounds tried to pin "the seed leaves no row unwritten" by inspecting
+        `_seed_graph`'s syntax, and every attempt was BOTH false-blocking (a
+        conditional `raise`, a re-raising `try`, a validation pre-pass all reddened)
+        AND blind (a `contextlib.suppress`, a ternary write, a truncated iterable
+        all passed) — `#13745` reviews rounds 7-9. Count the WRITES instead: every
+        syntactic way of skipping a row shows up at the fold call, so this one
+        assertion covers them all and forbids nothing legitimate.
         """
-        tree = ast.parse(TOOL.read_text())
-        seed = next(
-            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_seed_graph"
-        )
-        # ⛔ A `try` is FINE when its handler re-raises (`except Exception as exc:
-        # raise Refused(...) from exc` is this file's house style); what would
-        # break the claim is a handler that SWALLOWS the failure. Pin the effect,
-        # not the syntax — a blanket ban false-reds a correct edit (`#13745`
-        # review round 7, finding 2).
-        swallowers = [
-            ast.unparse(handler)[:140]
-            for node in ast.walk(seed)
-            if isinstance(node, ast.Try)
-            for handler in node.handlers
-            if not any(isinstance(inner, ast.Raise) for inner in ast.walk(handler))
-        ]
-        assert not swallowers, (
-            "a handler that does not re-raise would swallow a failed write and "
-            f"leave a row uncreated: {swallowers}"
-        )
-        payloads = [
-            node
-            for node in ast.walk(seed)
-            if isinstance(node, ast.Dict)
-            and any(isinstance(k, ast.Constant) and k.value == "embedding" for k in node.keys)
-        ]
-        assert payloads, (
-            "the seed payload must always carry an explicit `embedding` — without "
-            "it the fold reaches its encode derive and a new cause appears"
-        )
-        write_loops = [
-            node
-            for node in ast.walk(seed)
-            if isinstance(node, ast.For)
-            and isinstance(node.iter, ast.Call)
-            and isinstance(node.iter.func, ast.Name)
-            and node.iter.func.id == "zip"
-        ]
-        assert write_loops, (
-            "the seed must write one row per population entry (a `for row, vec in "
-            "zip(population, vectors, strict=True)` loop)"
-        )
-        # ⛔ AND THE WRITE MUST BE *IN* THAT LOOP, UNCONDITIONALLY. "A zip loop
-        # exists" is not "every row is written": a `continue` for a skipped row,
-        # or the fold call hoisted out of the loop, both leave rows uncreated while
-        # `written` still reports `len(population)` (`#13745` review round 7,
-        # finding 1 — both mutants were green against the shape-only assertion).
-        # ⛔ THE LOOP IS THE ONE THAT CONTAINS THE FOLD CALL, not `write_loops[0]`:
-        # a legitimate validation pre-pass is also `for … in zip(…)`, and pointing
-        # the assertions at it reports the fold as "outside the write loop" when it
-        # is inside (`#13745` review round 8, finding 2).
-        fold_loops = [
-            candidate
-            for candidate in write_loops
-            if any(
-                isinstance(node, ast.Call) and "_upsert_point_props" in ast.unparse(node.func)
-                for node in ast.walk(candidate)
+        written: list[str] = []
+
+        class _Proj:
+            def _upsert_point_props(self, props):
+                written.append(props["id"])
+                return (True, True, frozenset())
+
+        population = [{"id": f"pt-{i:06d}", "content": f"claim {i}"} for i in range(3)]
+        try:
+            count = tool_mod._seed_graph(
+                _Proj(), population, encode_many=lambda texts: [[0.1, 0.2] for _ in texts]
             )
-        ]
-        assert fold_loops, "the fold must be CALLED inside the write loop, not once outside it"
-        loop = fold_loops[0]
-        # ⛔ UNCONDITIONAL = the fold call is not nested under an `if`. A conditional
-        # RAISE is fine — it ends the run, so no row goes quietly missing — which is
-        # why this walks the fold call's ancestors for `If` only and does not ban
-        # `if` outright (that false-red an edit the tool itself prescribes:
-        # capturing `_upsert_point_props`'s return and refusing at the bad row,
-        # `#13745` review round 8, finding 1). A `try` stays allowed when its
-        # handler re-raises, checked above.
-        parents: dict[ast.AST, ast.AST] = {}
-        for node in ast.walk(loop):
-            for child in ast.iter_child_nodes(node):
-                parents[child] = node
-        write_call = next(
-            node
-            for node in ast.walk(loop)
-            if isinstance(node, ast.Call) and "_upsert_point_props" in ast.unparse(node.func)
+        except tool_mod.Refused:
+            # A named refusal ABORTS the run before any arm is scored, so a row the
+            # seed cannot write never becomes a partly scored population — the other
+            # correct outcome. Anything else (a skip, a conditional write, a
+            # swallowed failure) leaves rows uncreated and falls through to the
+            # assertion below.
+            return
+        assert written == [row["id"] for row in population], (
+            "the seed must write one row per population entry — a skipped or "
+            f"conditional write leaves a hole: {written}"
         )
-        guarded = []
-        node = write_call
-        while node is not loop and node in parents:
-            node = parents[node]
-            if isinstance(node, ast.If):
-                guarded.append(ast.unparse(node)[:120])
-        assert not guarded, (
-            "the fold call must be UNCONDITIONAL within the write loop — a "
-            f"conditional write lets a row go unwritten: {guarded}"
-        )
-        skips = [
-            ast.unparse(node)[:140]
-            for node in ast.walk(loop)
-            if isinstance(node, (ast.Continue, ast.Break, ast.Return))
-        ]
-        assert not skips, (
-            "the write loop must not skip a row — a continue/break/return there "
-            f"leaves rows uncreated while `written` still counts them: {skips}"
-        )
+        assert count == len(population), count
+
+    def test_a_failed_seed_write_PROPAGATES(self, tool_mod):
+        """The other half: a failed upsert must end the run, not be swallowed.
+
+        `graph_population_absent` names only the VECTOR-side causes because a row
+        this run failed to write cannot survive to the guard — the failure leaves
+        `_seed_graph` as an exception. Wrapping the write in
+        `contextlib.suppress(Exception)` (this module's cleanup idiom) would make it
+        a nameable cause again, which is why this is asserted as behaviour rather
+        than as "no `Try` node exists" (`#13745` reviews rounds 7-9).
+        """
+
+        class _Proj:
+            def _upsert_point_props(self, props):
+                if props["id"].endswith("000001"):
+                    raise RuntimeError("the fold refused this row")
+                return (True, True, frozenset())
+
+        population = [{"id": f"pt-{i:06d}", "content": f"claim {i}"} for i in range(3)]
+        with pytest.raises(RuntimeError):
+            tool_mod._seed_graph(
+                _Proj(), population, encode_many=lambda texts: [[0.1, 0.2] for _ in texts]
+            )
 
     def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
         """⛔ The single-`blocked` slot made the LAST cause win; this pins both.
