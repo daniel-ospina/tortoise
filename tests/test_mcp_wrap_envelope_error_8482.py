@@ -624,11 +624,18 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # number because its job is NON-VACUITY: with 1 union the `_SAFE_FAILURE`-admitted
     # branch above still runs, and the moment that door went the branch would be skipped
     # silently if this were 0.
-    assert typed >= 10 and unions >= 1, (
-        f"sweep found {typed} typed + {unions} union envelopes; measured at "
-        "10 + 2 after #11609 batch 1 archived `tortoise_packs_list` (11 + 2 when "
-        "this guard was written). Shrinkage is what this floor guards, so it "
-        "follows a deliberate removal; growth is covered by the loop itself.")
+    # The floors are NAMED and interpolated so the failure text cannot drift away
+    # from them. Restating them as literals in the message is a second copy of the
+    # floor, and the copy is what goes stale — this message still claimed "10 + 2"
+    # long after P6 took `unions` to 1, which steered the next operator to a
+    # population that no longer existed (review finding, #13648).
+    floor_typed, floor_unions = 10, 1
+    assert typed >= floor_typed and unions >= floor_unions, (
+        f"sweep found {typed} typed + {unions} union envelopes; the floors are "
+        f"{floor_typed} + {floor_unions}, each sitting ON its measured value "
+        "(#11609 P6 retired the second `anyOf` door, so `unions` moved 2 -> 1). "
+        "Shrinkage is what this floor guards, so it follows a deliberate "
+        "removal; growth is covered by the loop itself.")
 
 
 @pytest.mark.asyncio
