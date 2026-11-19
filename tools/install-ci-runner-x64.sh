@@ -63,7 +63,7 @@
 #   silently skipped. `_preserve_labels` drops both but reads NO flag.
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
-#   `resolve_os_label` (`:450`), reached from `resolve_labels` — i.e. from install, repair and
+#   `resolve_os_label` (`:459`), reached from `resolve_labels` — i.e. from install, repair and
 #   `--print-labels` — and called by `--status` to READ the intent (it registers nothing) — so
 #   a runner this script registers under `on|auto` carries `ubuntu-24.04`; the autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
 #   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
@@ -278,6 +278,15 @@ for _size in CORES_PER_RUNNER CORES_RESERVED_FOR_AGENT_LANES DISK_PER_RUNNER_GB 
   # the derived-bound guard checks.
   _size_val="${!_size}"
   [ "${#_size_val}" -le 9 ] || die "$_size must be at most 9 digits (got '$_size_val')" 1
+  # ⛔ AND REBUILT IN BASE 10 HERE, ONCE, FOR EVERY CONSUMER. "All digits" is NOT "safe in $(( ))":
+  # bash reads a leading zero as OCTAL, so `08`/`09` are an ARITHMETIC ERROR — and its consequence is
+  # not a bad number, it is `count * 08` aborting the REST OF THE ENCLOSING `if` BLOCK, i.e. every
+  # headroom gate after that line silently SKIPPED while the run still exits 0. Measured on
+  # `MEM_PER_RUNNER_GB=08`: the fork/disk gates printed, the memory refusal never ran at all
+  # (fail-open, and the gate the comment below calls "deliberate fail-closed"). Normalising the
+  # validated value in ONE place closes the whole class — forks, disk, cpu, memory and the derived
+  # bound all read these variables — instead of hardening the four `$(( ))` sites one review at a time.
+  printf -v "$_size" '%d' "$(( 10#$_size_val ))"
 done
 # ⛔ THE TWO UNIT VALUES THAT ARE NOT INTEGERS GET THEIR OWN VALIDATION, because the digits-only loop
 # above would refuse them outright (a systemd timespan such as `1h` is not a number). An UNVALIDATED
@@ -1467,7 +1476,13 @@ if [ "$MODE" = install ]; then
   # cpu capacity bound it CAN refuse on a loaded box (measured 2026-10-22: 6G available refused
   # `--count 2`, which needs 8G). That is deliberate fail-closed — two runners starting into 6G
   # would OOM-kill the agent lanes' FalkorDB — but it must not be described as a capacity bound.
-  mem_free_gb=$(awk '/MemAvailable/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)
+  # `CI_RUNNER_MEM_AVAILABLE_GB` is a seam for the same reason `CI_RUNNER_NCPU` is one: a live
+  # reading cannot be exercised from a test without it, and a reading that is not exercised is how
+  # this leg's refusal went untested while the other three each had an arm.
+  mem_free_gb="${CI_RUNNER_MEM_AVAILABLE_GB:-$(awk '/MemAvailable/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)}"
+  case "$mem_free_gb" in
+    ''|*[!0-9]*) die "cannot read available memory (/proc/meminfo has no MemAvailable and CI_RUNNER_MEM_AVAILABLE_GB is '${CI_RUNNER_MEM_AVAILABLE_GB:-}') — refusing to size against an unread bound" ;;
+  esac
   mem_need_gb=$(( COUNT * MEM_PER_RUNNER_GB + MEM_RESERVE_GB ))
   [ "${mem_free_gb:-0}" -ge "$mem_need_gb" ] || die "memory headroom: ${mem_free_gb:-0}G available against ${mem_need_gb}G needed for $COUNT runners (+${MEM_RESERVE_GB}G reserve)"
   say "headroom: cpu ok (${COUNT}x${CORES_PER_RUNNER} + ${CORES_RESERVED_FOR_AGENT_LANES} reserved = ${cpu_need} of ${ncpu} cores; ${mem_free_gb:-0}G mem free, ${mem_need_gb}G needed)"

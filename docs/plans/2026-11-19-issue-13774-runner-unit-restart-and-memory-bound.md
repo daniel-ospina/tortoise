@@ -155,7 +155,14 @@ installed by any path other than this installer; the `exit 0` death class's own 
 - **`MEM_MAX_GB` is computed once with `10#`** (a leading zero turned `$(( 08 * 4 ))` into an octal
   error that silently dropped the bound), and a positive sizing unit that yields a non-positive product
   is REFUSED.
-- **Not fixed here, filed instead:** the pre-existing memory headroom gate
-  (`install-ci-runner-x64.sh` `mem_need_gb=$(( COUNT * MEM_PER_RUNNER_GB + MEM_RESERVE_GB ))`) still
-  coerces without `10#`, so a leading zero aborts the headroom block and the live `MemAvailable`
-  refusal is silently skipped. Same class, different site, outside this plan's declared surface.
+- **The headroom coercion is fixed here, at the root, rather than deferred.** This was recorded as
+  "not fixed here, filed instead": the pre-existing headroom gates
+  (`mem_need_gb=$(( COUNT * MEM_PER_RUNNER_GB + MEM_RESERVE_GB ))` and its fork/disk siblings) coerced
+  without `10#`, so a leading zero made `$(( ))` ERROR — and bash's reaction is to abandon the rest of
+  the enclosing `if`, so every later headroom refusal (the live `MemAvailable` one included) was
+  silently SKIPPED while the run exited 0. That is a fail-open in a gate this file calls "deliberate
+  fail-closed", and the PR's own `08` arm was certifying a run in which it had vanished, so deferring
+  it would have shipped the arm that hides it. The validated sizing knobs are now rebuilt in base 10
+  ONCE, after the digits/length checks — one place, every consumer — instead of hardening four
+  `$(( ))` sites one review at a time. `CI_RUNNER_MEM_AVAILABLE_GB` was added as a seam so the refusal
+  can be observed at all, and two arms pin it.

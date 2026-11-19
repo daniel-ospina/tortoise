@@ -172,6 +172,12 @@ _NEUTRAL_HEADROOM = {
     # `CI_RUNNER_OS_LABEL=on|auto` exported reded the label tests for a reason unrelated to the code
     # under test. The default arm is pinned here; each arm then sets what it means.
     "CI_RUNNER_OS_LABEL": "off",
+    # ⛔ AND THE MEMORY LEG, which is the ONE headroom gate that reads the live box rather than a
+    # knob: `MemAvailable` from `/proc/meminfo`. Left unpinned, every arm in this file was only green
+    # on a box with >= the needed memory — a loaded 8G cell would red arms about the drop-in for a
+    # reason unrelated to the drop-in, on the ARM64 fallback pool this repo documents as live
+    # (`ci_runner_gate.sh` re-attaches `ubuntu-latest` to it). The seam exists for exactly this.
+    "CI_RUNNER_MEM_AVAILABLE_GB": "1024",
 }
 
 
@@ -2982,6 +2988,42 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
             assert hi <= len(installer), (
                 f"the runbook cites {rm.group(0)}, past the installer's EOF ({len(installer)} lines)"
             )
+            # ⛔ THE END MUST BE THE CLOSER OF THE BLOCK THE START OPENS — not merely "a line in the
+            # file", and not merely "runs forwards". Measured: a re-measurement bumped six STARTS and
+            # left the ENDS stale; three of the ends were then INSIDE a different (nested) block and
+            # the rest were closing comments, while `start <= end` and `end <= EOF` both stayed true.
+            # The file's style is what makes this decidable: mode blocks and functions start and end
+            # at column 0, so the FIRST column-0 closer of the same kind at or after `lo` IS that
+            # construct's end. A stale end cannot satisfy it.
+            end_line = installer[hi - 1]
+            stripped_end = end_line.strip()
+            if stripped_end in ("}", "fi", "esac"):
+                # (a) AN INDENTED CLOSER ENDS A NESTED BLOCK, so the range must START inside one. This
+                # is the shape that shipped: `:1476-1577` and `:1193-1374` both ended on an INDENTED
+                # `fi` belonging to a sub-branch, with a column-0 block header as the start — a range
+                # no reader can follow, and the first form of this assertion could not see it because
+                # both numbers were individually plausible lines.
+                if end_line != stripped_end:
+                    assert installer[lo - 1] != installer[lo - 1].lstrip(), (
+                        f"the runbook cites {rm.group(0)} as one block, but its end :{hi} is an "
+                        f"INDENTED {stripped_end!r} (a nested branch) while its start :{lo} is at "
+                        "column 0 — the end belongs to an inner construct, so re-derive it"
+                    )
+                else:
+                    # (b) A COLUMN-0 CLOSER MUST BE THE END OF A CONSTRUCT THAT STARTS AT/OR AFTER THE
+                    # RANGE'S START. `:386`-class drift — an end that closes a function 96 lines
+                    # BEFORE the construct the sentence names — is invisible to a number-keyed table.
+                    opener = {"}": r"^[A-Za-z_][A-Za-z0-9_]*\(\) \{",
+                              "fi": r"^if ",
+                              "esac": r"^case "}[stripped_end]
+                    owner = next(
+                        (i + 1 for i in range(hi - 2, -1, -1) if re.search(opener, installer[i])), None
+                    )
+                    assert owner is not None and owner >= lo, (
+                        f"the runbook cites {rm.group(0)} as one block, but the {stripped_end!r} on "
+                        f":{hi} closes the construct that starts at :{owner} — before this range — "
+                        "so that end is not this block's"
+                    )
     cited = {int(m.group(1)) for line in runbook[start:end] for m in ref.finditer(line)}
     assert cited, (
         "the runbook's installer section cites no installer line — re-anchor this pin rather than "
@@ -2992,39 +3034,44 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     anchors: dict[int, str] = {
         111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
         256: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
-        414: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        418: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        422: r"^fallback_engaged\(\) \{",
-        445: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
-        450: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
-        482: r"^resolve_labels\(\) \{",
-        521: r"label algebra: the UNION",  # "the union's label algebra at"
-        545: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        573: r"── status ──",  # the `--status` block
-        596: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        936: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        944: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        953: r"found NO runs-on label to check",  # zero labels -> exit 4
-        386: r"^\}$",  # "whose body ends at its `}` on"
-        1171: r"exit 5",  # the uncovered verdict
-        1193: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        1218: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1365: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1397: r'MODE" = labels',  # "`--print-labels`"
-        1424: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1429: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1432: r"FORK HEADROOM FIRST",  # "forks"
-        1452: r"DISK NEXT",  # "disk"
-        1459: r"CPU LAST",  # "cpu/memory"
-        1476: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1477: r'MODE" = uninstall',  # "`uninstall`"
-        1606: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1609: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1617: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1620: r"registration-token",  # "token"
-        1625: r"^    set -- --unattended",  # "one argv"
-        1627: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1637: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        423: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        427: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        431: r"^fallback_engaged\(\) \{",
+        454: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
+        459: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
+        491: r"^resolve_labels\(\) \{",
+        530: r"label algebra: the UNION",  # "the union's label algebra at"
+        554: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        582: r"── status ──",  # the `--status` block
+        605: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        945: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        953: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        962: r"found NO runs-on label to check",  # zero labels -> exit 4
+        # ⛔ A BARE `}` CANNOT ANCHOR A CLAIM ABOUT A SPECIFIC CONSTRUCT: it matches any of the file's
+        # function ends, which is how `:386` (the DROP-IN writer's brace) stayed green for one review
+        # round while the sentence promised `resolve_labels`. The number is kept here so the two-way
+        # table stays complete, and the claim is re-checked against the CONSTRUCT below.
+        528: r"^\}$",  # "whose body ends at its `}` on"
+        1180: r"exit 5",  # the uncovered verdict
+        1202: r'MODE" = repair',  # "--repair-labels UNIONS" / the repair block
+        1209: r'^  if \[ "\$FALLBACK" = off \]; then',  # "--fallback off is REFUSED"
+        1227: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1374: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1406: r'MODE" = labels',  # "`--print-labels`"
+        1433: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1438: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1441: r"FORK HEADROOM FIRST",  # "forks"
+        1461: r"DISK NEXT",  # "disk"
+        1468: r"CPU LAST",  # "cpu/memory"
+        1491: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1492: r'MODE" = uninstall',  # "`uninstall`"
+        1621: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1624: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1632: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1635: r"registration-token",  # "token"
+        1640: r"^    set -- --unattended",  # "one argv"
+        1642: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1652: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -3082,6 +3129,37 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
             f"the runbook says the refusal 'dies at :{n}', but that line is "
             f"{installer[n - 1].strip()!r} — a comment, not the refusal"
         )
+
+    # ⛔ "`resolve_labels` `:NNN`, whose body ends at its `}` on `:NNNNN`" — THE CLAIM A NUMBER-KEYED
+    # TABLE CANNOT CHECK. `:NNN` of a bare `}` matches ANY of this file's function ends, so the pin was
+    # green while the sentence promised `resolve_labels`'s brace and pointed at `write_unit_dropin`'s
+    # (96 lines before `resolve_labels` even begins — a body cannot end before its header). The claim
+    # is therefore re-checked against the CONSTRUCT it names: the cited end must be a `}` whose owning
+    # `name() {` header is the cited header.
+    m = re.search(r"`resolve_labels` `:(\d+)`, whose body ends at its `\}` on `:(\d+)`",
+                  " ".join(region_text.split()))
+    assert m is not None, (
+        "the runbook no longer states where `resolve_labels`'s body ends — re-anchor this pin rather "
+        "than deleting it (an unpinned end is how it drifted onto another function's brace)"
+    )
+    head, tail = int(m.group(1)), int(m.group(2))
+    assert re.search(r"^resolve_labels\(\) \{", installer[head - 1]), (
+        f"the runbook cites :{head} as the `resolve_labels` header, but that line is "
+        f"{installer[head - 1].strip()!r}"
+    )
+    assert installer[tail - 1] == "}", (
+        f"the runbook says `resolve_labels`'s body ends on :{tail}, but that line is "
+        f"{installer[tail - 1].strip()!r} — not a closing brace"
+    )
+    owner = next(
+        (i + 1 for i in range(tail - 1, -1, -1)
+         if re.search(r"^[A-Za-z_][A-Za-z0-9_]*\(\) \{", installer[i])),
+        None,
+    )
+    assert owner == head, (
+        f"the runbook says the body ending on :{tail} is `resolve_labels`'s, but that brace closes "
+        f"the function whose header is :{owner} — the end belongs to a DIFFERENT construct"
+    )
 
 
 # ── 8b. the citations the runbook's map does NOT cover ──────────────────────────────────────
@@ -5567,6 +5645,16 @@ def _dropin_env(tmp_path: Path, *, unit_present: bool, **extra: str) -> dict[str
     PATH for the same reason: the sudo stub would otherwise exec the REAL `systemctl daemon-reload`
     against this host's units.
 
+    `unit_present` CREATES the unit file (the already-installed branch every live box takes); without
+    it the installer takes its fresh-install path and runs `svc.sh install`. It used to be a dead
+    parameter — declared, passed by all nine call sites and never read — so the flag advertised a
+    distinction the fixture did not make and no mutant of it could red anything.
+
+    ⛔ THIS FIXTURE MUST NOT DEPEND ON THE HOST, and the file's header requires it. `_env` pins the
+    sizing knobs, `_NEUTRAL_HEADROOM` pins the three HEADROOM readings this fixture used to inherit
+    (arch via `uname -m`, the core count via `nproc`, and `MemAvailable`), so the eight install-mode
+    arms cannot red on an `aarch64` or <4-core host — which is what the ARM64 fallback pool is.
+
     ⛔ `CI_RUNNER_MEM_PER_RUNNER_GB` IS PINNED TO A NON-ZERO VALUE HERE, and that is not cosmetic:
     the file-wide `_NEUTRAL_HEADROOM` sets it to `0`, which the installer must read as "no memory
     sizing" and therefore OMIT `MemoryMax=` (systemd 255 reads `0G` as UNSET, so an omission and a
@@ -5581,6 +5669,8 @@ def _dropin_env(tmp_path: Path, *, unit_present: bool, **extra: str) -> dict[str
     _stub_tool(bin_dir, "gh", 'echo "tok"')
     unit_dir = tmp_path / "systemd"
     unit_dir.mkdir(exist_ok=True)
+    if unit_present:
+        (unit_dir / _unit_for()).write_text("[Unit]\nDescription=x\n")
     base = tmp_path / "base"
     base.mkdir(exist_ok=True)
     (base / ".runner").write_text("{}\n")          # configured already: no download, no token
@@ -5590,6 +5680,8 @@ def _dropin_env(tmp_path: Path, *, unit_present: bool, **extra: str) -> dict[str
         base,
         PATH=f"{bin_dir}:{os.environ['PATH']}",
         CI_RUNNER_UNIT_DIR=str(unit_dir),
+        CI_RUNNER_ARCH="x86_64",
+        CI_RUNNER_NCPU="16",
         **kwargs,
     )
 
@@ -5676,7 +5768,11 @@ def test_the_dropin_is_written_for_an_already_installed_unit_and_before_start(tm
     env = _dropin_env(tmp_path, unit_present=True)
     unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
     unit = _unit_for()
-    (unit_dir / unit).write_text("[Unit]\nDescription=already installed\n")
+    # ⛔ THE UNIT FILE IS THE FIXTURE'S, NOT THIS TEST'S: `unit_present=True` creates it, so the flag is
+    # load-bearing here rather than a second copy of a line the caller writes. If that ever stops
+    # happening the installer takes its fresh path, `svc.sh install` appears in the log below, and this
+    # arm reds — which is the mutation row the parameter previously could not produce.
+    assert (unit_dir / unit).is_file(), "unit_present=True must have created the installed unit"
     _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
 
     r = _run("--count", "1", "--fallback", "off", env=env)
@@ -5843,17 +5939,52 @@ def test_a_leading_zero_sizing_unit_still_derives_the_bound(tmp_path: Path):
     the product silently came out EMPTY and the bound was dropped while the run reported success — a
     guard that reads as present and is not, which is this change's whole subject. `10#` forces base 10;
     this arm pins the arithmetic, not the string.
+
+    ⛔ AND IT PINS THAT THE HEADROOM GATE **RAN**. The first version of this arm was green for a wrong
+    reason: bash aborts the rest of the enclosing `if` block on the arithmetic error, so the memory
+    refusal at the END of that block was SKIPPED and the run exited 0 — the arm certified a run in
+    which a safety gate had vanished (measured; the review found it). `headroom: cpu ok` is emitted
+    only AFTER the memory gate has decided, so asserting it is what makes this arm's `rc == 0` a
+    statement about the arithmetic instead of about a skipped guard. The sibling arm below pins the
+    refusal that the skip was hiding.
     """
     env = _dropin_env(tmp_path, unit_present=True, CI_RUNNER_MEM_PER_RUNNER_GB="08")
     unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
     unit = _unit_for()
-    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
     _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
 
     r = _run("--count", "1", "--fallback", "off", env=env)
     assert r.returncode == 0, r.stderr
+    assert "headroom: cpu ok" in r.stderr, (
+        "the run exited 0 without reaching the end of the headroom block — a gate inside it was "
+        f"skipped, so this arm proves nothing about the `10#` arithmetic: {r.stderr}"
+    )
     text = (unit_dir / f"{unit}.d" / "10-restart-and-memory.conf").read_text()
     assert "MemoryMax=32G" in text, f"08 x 4 must derive 32G, not vanish:\n{text}"
+
+
+def test_a_leading_zero_sizing_unit_cannot_skip_the_memory_headroom_refusal(tmp_path: Path):
+    """⛔ THE FAIL-OPEN THE `08` ARM USED TO CERTIFY. `$(( 1 * 08 + 0 ))` is an arithmetic ERROR, and
+    bash's reaction is to abandon the REST OF THE ENCLOSING `if` BLOCK — so on a box with too little
+    memory the refusal never ran, the install continued and the run exited 0: the one gate the code
+    calls "deliberate fail-closed" silently vanished because of a leading zero in a DIFFERENT knob.
+    The validated knobs are therefore rebuilt in base 10 once, before any consumer, and this arm pins
+    the observation that used to be impossible without the `CI_RUNNER_MEM_AVAILABLE_GB` seam.
+
+    Non-vacuity (measured): against the pre-fix installer this exits 0 and the arm reds.
+    """
+    env = _dropin_env(
+        tmp_path,
+        unit_present=False,
+        CI_RUNNER_MEM_PER_RUNNER_GB="08",
+        CI_RUNNER_MEM_AVAILABLE_GB="4",
+    )
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 2, (
+        "a leading-zero sizing unit must not skip the memory refusal — 8G needed against 4G available "
+        f"is a GUARD refusal (exit 2), got {r.returncode}: {r.stderr}"
+    )
+    assert "memory headroom" in r.stderr, f"the refusal must name memory, not something else: {r.stderr}"
 
 
 def test_an_overflowing_bound_is_refused_rather_than_silently_dropped(tmp_path: Path):
