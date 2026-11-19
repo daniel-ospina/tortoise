@@ -6811,6 +6811,31 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "cannot grade this half on its own: D5 is one markdown line and every `:N` on it "
         "satisfies a row scoped to the line, so this sentence is asserted whole.")
 
+    # ⛔ THE INDEX-ROW CORRECTION IS STATED ONCE IN THE PARAGRAPH THAT CARRIES IT (#13750
+    # review, F1). That paragraph is ONE markdown line, and the same \u26d4 block had been applied
+    # to it FOUR times — twice byte-identically — because an append-per-match edit re-applies
+    # its clause once per match. The claim itself was true; the duplication is what this arm
+    # forbids, and it is the same defect class the paragraph's own sibling rule names
+    # (`RECONCILE-A1-A2-A5.md:770`: "Two statements of one hit, one reader, is how 'one
+    # document asserts two numbers' comes back"). MEASURED on the pre-fix tree: this count was
+    # `4`. The paragraph is found by its OPENING PHRASE, never by a line number — a line
+    # number is the head-bound figure this whole bundle exists to stop trusting.
+    _absorbed = next(
+        (ln for ln in _d5.splitlines()
+         if ln.startswith("**Absorbed by the forward merges *and* re-derived here")), None)
+    assert _absorbed is not None, (
+        "05-verify.md no longer carries the \"Absorbed by the forward merges\" paragraph — this "
+        "arm reads it by its opening phrase, so if the paragraph was renamed, re-scope this "
+        "arm rather than deleting it")
+    _index_correction = "FALSE AT THE HEAD `#13750` MERGES"
+    assert _absorbed.count(_index_correction) == 1, (
+        f"that paragraph states the index-row correction "
+        f"{_absorbed.count(_index_correction)} time(s), not once — it is ONE claim (the "
+        "`docs/00_index.md` row IS in this head's diff, numstat `2 2`) and a reader cannot "
+        "audit the same correction stated several times in diverging wordings. Keep ONE "
+        "statement carrying the evidence and let each other site state the TRUE current "
+        "tense, instead of appending another correction block")
+
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
     # `hosted_api.py:15261-15338`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
