@@ -1386,12 +1386,20 @@ class _FakeGraph:
     # unobservable — a run that swallowed the refusal kept the whole suite green
     # (`#13745` review round 1, finding 1).
     contents: ClassVar[dict[str, str]] = {}
+    # ⛔ AN UNREADABLE GRAPH, driven through `run_measurement`. The unit-level
+    # `_GraphStub(boom=…)` test proves the FUNCTION answers None, but nothing
+    # drove the RUN with a graph it could not read — so `graph_population or 0`
+    # in the artifact published `0` ("the graph holds no vectors") for a graph
+    # that could not be read, with 99 tests green (`#13745` review round 11).
+    unreadable: ClassVar[bool] = False
 
     def __init__(self, rows: int):
         self._rows = rows
 
     def query(self, _cypher, params=None):
         if params is not None and "ids" in params:
+            if self.unreadable:
+                raise RuntimeError("no route to the graph")
             return types.SimpleNamespace(
                 result_set=[[i, self.contents.get(i)] for i in params["ids"]]
             )
@@ -1454,6 +1462,7 @@ class TestTheDocumentedRunPath:
         preregistered_n: int,
         seeded: int | None = None,
         record_ok: bool = False,
+        graph_unreadable: bool = False,
     ):
         corpus = tmp_path / "corpus"
         corpus.mkdir(exist_ok=True)
@@ -1497,6 +1506,10 @@ class TestTheDocumentedRunPath:
         # `seeded` is how many of this run's rows the seed lands; the rest keep no
         # vector (or an earlier text's).
         _FakeGraph.contents = {}  # nothing is in the graph until the seed writes it
+        # …and whether the id-scoped read can be TAKEN at all. `unreadable` makes
+        # `query` raise for that shape, which is the only way to drive the
+        # None-vs-0 contract through the RUN instead of the pure function.
+        _FakeGraph.unreadable = graph_unreadable
 
         def _seed(_proj, pop):
             keep = len(pop) if seeded is None else seeded
@@ -1806,6 +1819,41 @@ class TestTheDocumentedRunPath:
         assert by_code["graph_population_absent"].startswith("the `graph_dense` arm"), by_code
         assert by_code["no_record_dsn"].startswith("the `record_dense` arm"), by_code
         assert rc == 3
+
+    def test_an_UNREADABLE_graph_publishes_None_not_zero(
+        self, tool_mod, monkeypatch, tmp_path, capsys
+    ):
+        """⛔ "UNMEASURED IS NEVER ZERO", ASSERTED THROUGH THE ARTIFACT.
+
+        A graph that cannot be read must publish `None` and block the arm by name.
+        Publishing `0` says "this graph holds no vectors" — a measurement — when
+        the truth is "we could not look", which is the false-PASS class the
+        function's own `None`-vs-`0` contract exists to prevent. Nothing drove the
+        RUN with an unreadable graph, so `graph_population or 0` survived the whole
+        suite (`#13745` review round 11).
+        """
+        target = tmp_path / "unreadable.json"
+        rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            record_ok=True,
+            graph_unreadable=True,
+        )
+        artifact = json.loads(target.read_text())
+        assert artifact["population"]["graph_population_vectors"] is None, (
+            "an unreadable graph must publish None — `or 0` states a measurement "
+            "('no vectors') about a graph nobody could read"
+        )
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_unmeasurable"
+        assert "summary" not in artifact["arms"]["graph_dense"]
+        # the arms that do not read graph vectors still measure, and the run is INCOMPLETE
+        assert "summary" in artifact["arms"]["lexical"]
+        assert "summary" in artifact["arms"]["record_dense"]
+        assert rc == 3
+        assert any("BLOCKED[graph_population_unmeasurable]" in n for n in artifact["not_measured"])
 
     def test_the_artifact_names_the_arms_OWN_reason_not_a_cohort_story(
         self, tool_mod, monkeypatch, tmp_path
