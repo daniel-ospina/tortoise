@@ -13,8 +13,8 @@ Honors `# noqa: redis-guard` inline annotations and built-in allowlists
 redislite). Used by .pre-commit-config.yaml and CI (must BLOCK merge).
 
 Usage:
-    python scripts/redis-guard.py            # scan repo, exit 1 on violations
-    python scripts/redis-guard.py <files...> # scan specific files
+    python tools/redis-guard.py              # scan repo, exit 1 on violations
+    python tools/redis-guard.py <files...>   # scan specific files
 """
 from __future__ import annotations
 

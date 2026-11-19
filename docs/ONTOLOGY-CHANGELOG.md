@@ -58,8 +58,17 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > **What did NOT change:** every other §3 statement, the §4 metadata rows (which already described
 > `confidence` as the posterior mean — they were right, this sentence disagreed with them), and every
 > stored value. Whether entity declared priors should exist at all is tracked by **no open issue** —
-> the code cites #9063, which closed COMPLETED on 2026-10-20 and is about the calibration gate, not
-> about entity declared priors. Recorded here so silence is not read as a decision.
+> the code cites #9063 (`sdk.py:646-647`), which *raised* this question, reserved it to the owner, and closed
+> COMPLETED on 2026-10-20 **without deciding it**. Recorded here so silence is not read as a decision.
+>
+> **⚠️ CORRECTION APPENDED 2026-11-18 — #9063 did not close without this question; it closed without DECIDING it.**
+> As merged (#13634), the paragraph above read *"the code cites #9063, which closed COMPLETED on 2026-10-20 and is
+> about the calibration gate, not about entity declared priors."* That is false at the issue it cites: #9063's own
+> section *"The decision this needs (owner-reserved, belief model)"* states the two answers to *which node kinds
+> must carry a prior?*, and `sdk.py:646-647` says in the present tense that both are *"the SAME open question — which
+> node kinds must carry a prior? — which #9063 reserves to the owner (belief model)"*. **What survives, and is the
+> load-bearing half:** the question is tracked by **no open issue** — #9063 raised it, reserved it to the owner, and
+> closed COMPLETED undecided — which is why silence must not be read as a decision.
 >
 > **Residue, named not absorbed:** the audit also measured that an ended node still **votes** when it is an
 > operator *input* (`ep.py:2258` reads `status` + the `outdated` flag only, while the predicate it mirrors
