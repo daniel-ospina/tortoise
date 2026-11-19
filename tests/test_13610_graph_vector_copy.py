@@ -157,9 +157,13 @@ def _stub_record(monkeypatch, *, count: int, rows: list[tuple]) -> _Cursor:
     cur = _Cursor(count=count, rows=rows)
     monkeypatch.setattr(rs, "open_record", lambda *a, **k: _Conn(), raising=True)
     monkeypatch.setattr(rp, "scope_connection", lambda c, org: cur, raising=True)
+    # `len(cur._rows)`, not `len(rows)`: the two are equal at setup, but a case that
+    # changes what the arm serves AFTER the stub is installed (`_Cursor.serve`) must
+    # not leave the fold counting the cohort the arm no longer returns — a fixture
+    # that disagrees with itself is a trap for the next assertion, not a guard.
     monkeypatch.setattr(
         record_vector, "_folded_terminal_keys",
-        lambda conn, cur_, scope, entity_type, excluded: ([], len(rows)),
+        lambda conn, cur_, scope, entity_type, excluded: ([], len(cur_._rows)),
         raising=True)
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
     monkeypatch.delenv("TORTOISE_RECORD_JOURNAL", raising=False)
@@ -950,6 +954,14 @@ def test_a_CACHED_trivial_verdict_does_not_claim_this_read_is_empty(
     assert [row[0] for row in rows2] == ["obj-written-later"], (
         "the write that landed after the trivial verdict was not served — the "
         f"cached verdict decides the GATE, never the rows: {rows2}")
+    # ⛔ AND THE SECOND READ WAS REALLY CACHED — not a silent re-measurement. The
+    # case is named CACHED, and without this the cache could stop retaining a trivial
+    # verdict and the case would still pass: it would re-measure `0/0` and emit the
+    # same line. The COUNT is the discriminator — one aggregate for TWO reads.
+    aggregates = [sql for sql, _p in cursor.statements if "count(" in sql.lower()]
+    assert len(aggregates) == 1, (
+        "the second read re-measured the coverage count instead of taking the "
+        f"sticky verdict from the cache: {len(aggregates)} aggregate(s) — {aggregates}")
     # The record answered, healthily: this is the caught-up case, not a decline.
     assert trace2[-1]["reason"] == "ok", trace2
     assert trace2[-1]["degraded"] is False, trace2
