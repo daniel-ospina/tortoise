@@ -3198,9 +3198,9 @@ _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS = (
 _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS = (
     "> _Owner approval of the exact changes_ — given in-session, no comment cited.")
 # ⛔ TWO RECORDS IN ONE BLOCK: the arm checks EVERY labelled paragraph, not only the
-# first. Nothing landed has two (the two v3.33 entries are separate blocks sharing a
-# version header), so the direction is pinned by fixture — measured, `records[:1]` left
-# the uncited second record GREEN.
+# first. Nothing landed has two (the two v3.33 entries are separate blocks whose separate
+# headers both read v3.33), so the direction is pinned by fixture — measured, `records[:1]`
+# left the uncited second record GREEN.
 _TWO_RECORDS_ONE_UNCITED = (
     "> **Owner approval of the exact changes:** comment `6993778525`.\n"
     ">\n"
@@ -3236,6 +3236,11 @@ _APPROVAL_RECORD_BEHIND_A_TASK_LIST_CHECKBOX = (
 # and was ACCEPTED by a start pattern that covered `owners` but not `owners'`.
 _APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE = (
     "> **Owners' approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ THE SINGULAR POSSESSIVE (review round 4): `**Owner's approval …**` renders as the
+# label and nothing drove it — measured, narrowing `owners?'?s?` to `owners?'?` left the
+# suite GREEN while this shape was ACCEPTED.
+_APPROVAL_RECORD_WITH_A_SINGULAR_POSSESSIVE = (
+    "> **Owner's approval of the exact changes** — given in-session, no comment cited.")
 
 
 def _quoted_paragraphs(block: str) -> list[str]:
@@ -3377,21 +3382,29 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     and a decision label but at no words a reader can check). Both are FALSE BLOCKS on
     true prose, stated rather than glossed: the test reads the NEWEST block alone, which
     passes, and a lane sweeping the corpus should expect these two.
-    ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT, all fail-CLOSED and all named here so
-    the next lane meets them as known rather than as a bug:
-      - an UNBOLDED, or MID-PARAGRAPH, record is OUT OF SCOPE: ``Owner approval: comment
-        `NNN`.`` in plain prose, and ``The change landed. **Owner approval …**``, are not
-        read as records — emphasis is the corpus's only structural signal for a label,
-        the phrase detector is what #13669 measured vacuous, and reading a mid-paragraph
-        bold run is what makes the bolded-denial control above a false block;
+    ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT, all named here so the next lane meets
+    them as known rather than as a bug — and **two are fail-OPEN**, which is the direction
+    that matters: an unread record and an id borrowed from a contrastive parenthetical
+    both PASS, so this arm reduces the vacuity #13669 measured rather than ending it:
+      - an UNBOLDED, or MID-PARAGRAPH, record is OUT OF SCOPE and therefore **PASSES**:
+        ``Owner approval: comment `NNN`.`` in plain prose, and ``The change landed.
+        **Owner approval …**``, are not read as records — emphasis is the corpus's only
+        structural signal for a label, the phrase detector is what #13669 measured
+        vacuous, and reading a mid-paragraph bold run is what makes the bolded-denial
+        control above a false block;
       - a BOLDED DENIAL that OPENS a paragraph (``**Owner approval was not required.**``)
-        is read as a record and refused — the cost of excluding negations structurally;
+        is read as a record and refused — the cost of excluding negations structurally
+        (fail-closed);
       - a quotation of an older approval inside a nested ``> > `` run is read as a second
         record and its citation is demanded (fail-closed);
-      - an id anywhere in the label's SENTENCE still satisfies it, so a contrastive
-        parenthetical naming another id (v3.37's shape) is accepted, and telling WHICH of
-        two ids records the approval needs the comment's own text — the reviewer step
-        recorded in #12068.
+      - an HTML ``<b>`` / ``<strong>`` label (``<b>Owner approval …</b>``) is not an
+        emphasis RUN to this reader and is therefore **not read as a record** (fail-open,
+        out of scope: the corpus writes ``**`` exclusively — no ``<b>`` or ``<strong>``
+        appears in the file);
+      - an id anywhere in the label's SENTENCE still satisfies it and therefore **PASSES**,
+        so a contrastive parenthetical naming another id (v3.37's shape) is accepted, and
+        telling WHICH of two ids records the approval needs the comment's own text — the
+        reviewer step recorded in #12068.
     """
     # ⛔ THE RECORD IS READ FROM THE PARAGRAPH'S OPENING EMPHASIS RUN, on the rendered
     # text (review @ e4927f5f, @ 95a8df2f, then #13669): `**Owner approval` as a literal
@@ -3412,9 +3425,9 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     # ⛔ EVERY record is checked, and the multiplicity assert the shipped cut carried is
     # GONE (#13669). That assert refused any block carrying two labelled paragraphs on a
     # message about a second copy shadowing the first. Measured: NO landed block carries
-    # two today — the two v3.33 entries are separate blocks that share a version header,
-    # one label each — so the assert was not a live false block, and removing it is
-    # pinned by the `_TWO_RECORDS_*` fixtures below rather than by a corpus count.
+    # two today — the two v3.33 entries are separate blocks whose separate headers both
+    # read v3.33, one label each — so the assert was not a live false block, and removing
+    # it is pinned by the `_TWO_RECORDS_*` fixtures below rather than by a corpus count.
     for record in records:
         # ⛔ THE LABEL'S SENTENCE IS THE PARAGRAPH'S FIRST, not a `next(...)` search
         # (#13669 finding 3). Given OPENING-only detection the two are the same sentence,
@@ -3535,8 +3548,9 @@ def _assert_refused_by(raised: pytest.ExceptionInfo[AssertionError], arm: str) -
     ⛔ THE DISCIPLINE THIS FILE ALREADY STATES AT ``:2840-2870``: a bare
     ``pytest.raises(AssertionError)`` reported success there while the swept arm had
     refused NOTHING — 60 passed, a surviving mutant — because the pin's own downstream
-    assertion raised instead. This arm has three raise sites, so a fixture that stops
-    carrying the shape it names moves the catch and the pin goes on reporting green.
+    assertion raised instead. Each arm now has ONE raise site (this cut removed the
+    approval arm's second, the multiplicity assert), so a fixture that stops carrying the
+    shape it names moves the catch and the pin goes on reporting green.
     The frame name is read from the traceback, so no arm's message WORDING is involved
     and a legitimate reword cannot red this test; the directions stay distinguishable
     because each fixture is shaped so that only its own assert can fire — one approval
@@ -3676,7 +3690,8 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                             _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS,
                             _APPROVAL_RECORD_BEHIND_A_HEADING,
                             _APPROVAL_RECORD_BEHIND_A_TASK_LIST_CHECKBOX,
-                            _APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE):
+                            _APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE,
+                            _APPROVAL_RECORD_WITH_A_SINGULAR_POSSESSIVE):
         with pytest.raises(AssertionError) as marked_up:
             _refuse_an_approval_record_with_no_resolvable_home(marked_up_label)
         _assert_refused_by(
