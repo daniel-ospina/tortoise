@@ -73,7 +73,9 @@ PRODUCTION_DIR = ROOT / "tortoise"
 #: (`tests/test_x.py` — the `.py` lands in the symbol group, filtered by
 #: `_NOT_A_SYMBOL`), a data file (`tests/x.json`), an ellipsis
 #: (`tests/...boundary.py`) and a node id (`tests/test_x.py::node`) are out of
-#: scope, so this guard needs no per-token escape hatch.
+#: scope, so this guard needs no per-token escape hatch. A token whose `tests/…`
+#: target EXISTS as a file is a file pointer too, and that arm is a RULE and not
+#: a list — see `_pointer_at` (#13731).
 _POINTER = re.compile(
     r"`(?:tests\.(?P<dotted>[A-Za-z0-9_]+)\.(?P<dsym>[A-Za-z0-9_]+)"
     r"|tests/(?P<path>[A-Za-z0-9_/]+?)(?:\.py)?\.(?P<psym>[A-Za-z0-9_]+))`"
@@ -150,18 +152,46 @@ CONSUMER_FIXTURES: dict[str, tuple[str, ...]] = {
 CONSUMERS = tuple(CONSUMER_FIXTURES)
 
 
+def _pointer_at(match: re.Match[str]) -> tuple[str, str] | None:
+    """(module, symbol) for a token this guard RESOLVES, else `None`.
+
+    Two shapes are excluded. The first is the trailing-extension list
+    (`_NOT_A_SYMBOL`). The second is a RULE rather than a list, and it exists
+    because the list redded `test (d)` on a correct production line for every
+    PR in the fleet: a token whose `tests/…` half plus its trailing segment IS
+    A FILE on disk names a file, not a symbol. `tortoise/hosted_api.py` records
+    the harness that asserts the #3472 behaviour as
+    `` `tests/test_middleware_host_consolidation.mjs` ``, and resolving that as
+    `tests.<module>.<symbol>` asked the importer for
+    `tests.test_middleware_host_consolidation` — a module that cannot exist, so
+    the arm below held the file red on a line that is CORRECT.
+
+    An extension LIST cannot close that class: the next `.ts`/`.jsx`/`.mjs`
+    pointer reds identically, and each addition is a hand-maintained guess about
+    which suffixes appear in prose. The filesystem cannot drift from itself, so
+    "the file it names exists" is the test.
+    """
+    dotted = match.group("dotted")
+    module = dotted if dotted else match.group("path").replace("/", ".")
+    symbol = match.group("dsym") or match.group("psym")
+    if symbol in _NOT_A_SYMBOL:
+        return None
+    if dotted is None and (TESTS_DIR / f"{match.group('path')}.{symbol}").is_file():
+        return None
+    return f"tests.{module}", symbol
+
+
 def _production_pointers() -> list[tuple[Path, str, str, str]]:
     """Every (file, token, module, symbol) dotted pointer in production source."""
     found: list[tuple[Path, str, str, str]] = []
     for path in sorted(PRODUCTION_DIR.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         for match in _POINTER.finditer(text):
-            dotted = match.group("dotted")
-            module = dotted if dotted else match.group("path").replace("/", ".")
-            symbol = match.group("dsym") or match.group("psym")
-            if symbol in _NOT_A_SYMBOL:
+            resolved = _pointer_at(match)
+            if resolved is None:
                 continue
-            found.append((path, match.group(0), f"tests.{module}", symbol))
+            module, symbol = resolved
+            found.append((path, match.group(0), module, symbol))
     return found
 
 
@@ -187,6 +217,41 @@ def test_production_pointers_into_the_test_tree_resolve():
         "production source names test symbols that do not resolve:\n  "
         + "\n  ".join(broken)
     )
+
+
+def test_a_token_naming_a_real_file_is_not_a_symbol_pointer():
+    """The scope rule, exercised on the token that redded `test (d)` fleet-wide.
+
+    `tortoise/hosted_api.py` names `` `tests/test_middleware_host_consolidation.mjs` ``
+    as the harness that asserts the #3472 purge overlap — a FILE pointer, which
+    this guard's own docstring puts out of scope. Resolved as
+    `tests.<module>.<symbol>` it asked for a module that cannot exist, so
+    `test_production_pointers_into_the_test_tree_resolve` was red on a line that
+    is correct, in every PR, with nothing in the diff to blame.
+
+    NON-VACUITY, and it is asserted here rather than claimed: the SECOND token in
+    the same text is a genuinely broken `tests.<module>.<symbol>` pointer and
+    MUST still be emitted. A narrowing that swallowed it would make the resolve
+    arm above pass on a tree it never looked at — so this row reds if the
+    exclusion ever grows past "is a file".
+    """
+    file_pointer = "`tests/test_middleware_host_consolidation.mjs`"
+    broken = "`tests.test_8920_harness_pointer.definitely_not_a_symbol`"
+    matches = list(_POINTER.finditer(f"see {file_pointer} and {broken}"))
+    assert len(matches) == 2, f"the scan itself broke on {file_pointer}: {matches}"
+    assert (TESTS_DIR / "test_middleware_host_consolidation.mjs").is_file(), (
+        "the file-pointer arm needs a REAL file to test against; if this one was "
+        "renamed, point the arm at another non-`.py` test artefact rather than "
+        "deleting it — the rule is 'the file exists', not 'the suffix is .mjs'"
+    )
+    assert _pointer_at(matches[0]) is None, (
+        f"{file_pointer} names a real file, so it is out of scope — it was "
+        f"resolved to {_pointer_at(matches[0])}"
+    )
+    assert _pointer_at(matches[1]) == (
+        "tests.test_8920_harness_pointer",
+        "definitely_not_a_symbol",
+    ), f"the file-pointer narrowing also swallowed a real pointer: {_pointer_at(matches[1])}"
 
 
 def test_no_source_still_names_the_pre_move_symbols():
