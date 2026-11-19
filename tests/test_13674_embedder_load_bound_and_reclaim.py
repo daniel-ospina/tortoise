@@ -37,9 +37,13 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import logging
 import os
+import subprocess
+import threading
 import time
 import weakref
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -234,17 +238,29 @@ class TestReclaimBeforeRetry:
     @pytest.mark.skipif(not os.path.exists("/proc/self/status"),
                         reason="needs /proc for the RSS measurement")
     def test_an_abandoned_attempt_releases_its_model(self, monkeypatch,
-                                                     clean_embedder):
-        """A model built by an ABANDONED attempt is released, not retained.
+                                                     clean_embedder, caplog):
+        """The abandon-release BRANCH runs, and the model it built is not retained.
 
-        Proved twice over, because either alone is arguable: the weakref to the
-        built object is DEAD after the abandoned thread exits (nothing retains
-        it), and process RSS returns to its pre-attempt level while it peaked
-        above it during the attempt (the allocation was real, and it is gone).
+        ⛔ WHAT THIS TEST PROVES, STATED EXACTLY (#13674 review F3). The
+        post-join facts it used to lean on — the weakref is dead, RSS settles —
+        are true of the MUTANT as well: `result` is captured by the `_load`
+        closure, that closure is the Thread's `_target`, and CPython's
+        `_bootstrap_inner` calls `Thread._delete()` (setting `_target = None`)
+        when the body returns. So post-join, nothing holds the sentinel in
+        EITHER version, and those assertions cannot attribute anything to the
+        release branch.
+
+        What IS attributable is that the branch RAN: only the abandoned path
+        logs "released rather than retained", so deleting the block at
+        `embeddings.py`'s abort-release (or making it always publish) leaves that
+        line unlogged and reds this test. The memory assertions are kept for the
+        OTHER claim they do carry — the peak was real (the allocation happened
+        and is resident) and RSS returns to baseline — not as proof of the drop.
         """
         payload_mb = 120
         frame = _Frame()
         _patch_loader(monkeypatch, frame, mb=payload_mb, hold_s=1.0)
+        caplog.set_level(logging.INFO, logger="tortoise.embeddings")
 
         baseline_mb = _rss_mb()
         # A bound far below the simulated construct: the join abandons the
@@ -258,10 +274,9 @@ class TestReclaimBeforeRetry:
         peak_mb = _rss_mb()
         assert peak_mb > baseline_mb + payload_mb * 0.6, (
             f"the simulated model was not resident during the attempt "
-            f"({baseline_mb:.0f} MB -> {peak_mb:.0f} MB): the reclaim assertion "
-            "below would pass vacuously"
+            f"({baseline_mb:.0f} MB -> {peak_mb:.0f} MB): the allocation this "
+            "test reasons about never happened"
         )
-        assert frame.ref is not None, "the fake factory never built anything"
 
         thread = EmbeddingModel._load_attempt_thread
         assert thread is not None
@@ -269,14 +284,23 @@ class TestReclaimBeforeRetry:
         assert not thread.is_alive(), "the fake loader never finished"
 
         gc.collect()
-        assert frame.ref() is None, (
-            "the abandoned attempt RETAINED the model it built — that retained "
-            "copy is what turns a missed bound into an OOM (#13674)"
+        # ── THE ATTRIBUTABLE ROW ──────────────────────────────────────────
+        releases = [r for r in caplog.records
+                    if "released rather than retained" in r.getMessage()]
+        assert releases, (
+            "an abandoned attempt finished WITHOUT taking the release branch — "
+            "it published the model it built into a result dict nobody will "
+            "read instead of dropping it (#13674). This is the only assertion "
+            "here that the pre-fix/mutant code cannot satisfy."
         )
+        assert any("OVERRUN" in r.getMessage() for r in releases)
+        # ── The allocation was real and is gone (true either way; kept for
+        # the memory claim, not as proof of the branch above).
+        assert frame.ref() is None, "the abandoned attempt retained the model"
         settled_mb = _rss_mb()
         assert settled_mb < baseline_mb + payload_mb * 0.6, (
             f"RSS stayed at {settled_mb:.0f} MB after an abandoned attempt "
-            f"(baseline {baseline_mb:.0f} MB): the dead model was not reclaimed"
+            f"(baseline {baseline_mb:.0f} MB): the model was not reclaimed"
         )
         assert EmbeddingModel.load_attempt_in_flight() is False
 
@@ -460,3 +484,270 @@ class TestTheDeclarationReachesTheQueryPath:
             )
         finally:
             sdk.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (D) #13674 review F5 — the reclaim guard must not leak across `_reset()`
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTheReclaimGuardDoesNotLeakAcrossResets:
+    """`_reset()` must drop a FINISHED attempt's reference, and keep a live one.
+
+    The guard reads `_load_attempt_thread`. Leaving a finished thread recorded
+    is what F5 caught: `tests/test_cross_lens.py::test_failed_load_cooldown`
+    abandons a loader and resets, and every later `get()` in that worker is then
+    refused — `_require_model()` reads that `None` as "model unavailable" and
+    SKIPS, so the three real-embedder tests below it silently stopped running.
+    """
+
+    def test_a_finished_attempt_does_not_survive_a_reset(self):
+        EmbeddingModel._reset()
+        finished = threading.Thread(target=lambda: None)
+        finished.start()
+        finished.join(30)
+        assert not finished.is_alive()
+
+        EmbeddingModel._load_attempt_thread = finished
+        EmbeddingModel._reset()
+
+        assert EmbeddingModel._load_attempt_thread is None, (
+            "a FINISHED attempt's thread outlived `_reset()` — the reclaim guard "
+            "reads that attribute, so the stale reference makes the next get() "
+            "read as 'a previous attempt is still running' (#13674 F5)"
+        )
+        assert EmbeddingModel.load_attempt_in_flight() is False
+
+    def test_a_live_attempt_survives_a_reset(self):
+        """The mirror of the assertion above: a live importer is not reset away.
+
+        Clearing a LIVE thread's reference would hide an abandoned importer from
+        the guard that refuses a second attempt — the exact allocation the fix
+        exists to prevent.
+        """
+        release = threading.Event()
+        live = threading.Thread(target=release.wait, daemon=True)
+        live.start()
+        try:
+            deadline = time.monotonic() + 15.0
+            while not live.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert live.is_alive(), "the stub thread never started"
+
+            EmbeddingModel._reset()
+            EmbeddingModel._load_attempt_thread = live
+            EmbeddingModel._reset()
+
+            assert EmbeddingModel._load_attempt_thread is live, (
+                "`_reset()` dropped a LIVE attempt — an abandoned importer would "
+                "then be invisible to the guard, and a retry would allocate a "
+                "second copy (#13674)"
+            )
+            assert EmbeddingModel.load_attempt_in_flight() is True
+        finally:
+            release.set()
+            live.join(30)
+            EmbeddingModel._load_attempt_thread = None
+            EmbeddingModel._reset()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (E) #13674 review F4 — the BOOT pre-warm (`entrypoint.sh::_prewarm_embedder`)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 155 added lines, the PR's biggest behavioural change, and before this class
+# NOTHING in the suite referenced `_prewarm_embedder` at all. The shell is
+# EXECUTED (lifted by brace matching, the way `test_boot_regressions.py` does it)
+# with `timeout` and `python` stubbed, so these are hermetic and never import
+# torch.
+
+ENTRYPOINT = Path(__file__).resolve().parent.parent / "entrypoint.sh"
+
+#: Stand-in for GNU `timeout`. Records the duration it was handed (which is what
+#: the bound VALIDATION produces) and then runs the command unbounded. Argument
+#: shape: `--signal=TERM --kill-after=15 <duration> <cmd ...>`.
+_FAKE_TIMEOUT = """#!/bin/bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --signal=*|--kill-after=*) shift ;;
+    *) break ;;
+  esac
+done
+printf '%s' "$1" > "$FAKE_BOUND_FILE"
+shift
+exec "$@"
+"""
+
+#: Stand-in for the heredoc child: consume stdin (as `python -` would read the
+#: heredoc), emit the line a real run prints, then exit with the configured rc.
+_FAKE_PYTHON = """#!/bin/bash
+cat > /dev/null
+printf 'PREWARM {"model": "fake", "total_s": 0.0}\\n'
+exit "${FAKE_PY_RC:-0}"
+"""
+
+
+def _prewarm_body() -> str:
+    from tests.test_boot_regressions import _extract_shell_function
+
+    return _extract_shell_function("_prewarm_embedder", ENTRYPOINT.read_text())
+
+
+def _run_prewarm(tmp_path, env: dict | None = None, *, py_rc: str = "0"):
+    """Execute the SHIPPED `_prewarm_embedder` under `set -euo pipefail`.
+
+    Returns `(CompletedProcess, bound_or_None)` where `bound` is the duration the
+    function actually handed `timeout` — i.e. the OUTPUT of its validation, not
+    the env value it was given. `bound is None` means `timeout` was never
+    invoked (the skip path).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    for name, body in (("timeout", _FAKE_TIMEOUT), ("python", _FAKE_PYTHON)):
+        path = bin_dir / name
+        path.write_text(body)
+        path.chmod(0o755)
+
+    bound_file = tmp_path / "bound.txt"
+    script = ("set -euo pipefail\n"
+              + _prewarm_body()
+              + '\n_prewarm_embedder\necho "RC=$?"\n')
+
+    full_env = {
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+        "FAKE_BOUND_FILE": str(bound_file),
+        "FAKE_PY_RC": py_rc,
+    }
+    full_env.update(env or {})
+
+    proc = subprocess.run(["bash", "-c", script], env=full_env,
+                          capture_output=True, text=True, timeout=180)
+    bound = bound_file.read_text() if bound_file.exists() else None
+    return proc, bound
+
+
+class TestTheBootPrewarm:
+    """The boot pre-warm's switch, its bound validation, and its non-fatal contract."""
+
+    @pytest.mark.parametrize("value", ["0", "off", "FALSE", "  No  "])
+    def test_the_switch_disables_it_without_touching_the_bound(
+            self, tmp_path, value):
+        """`TORTOISE_EMBEDDER_WARMUP` honours `env_flag`'s falsy set.
+
+        This is the switch production actually ran on while the embedder could
+        not load, and the shell re-implements `env_flag`'s {0,false,no,off}
+        comparison by hand — so it is pinned against the spellings an operator
+        really types, including case and surrounding whitespace.
+        """
+        proc, bound = _run_prewarm(tmp_path,
+                                   {"TORTOISE_EMBEDDER_WARMUP": value})
+        assert proc.returncode == 0, proc.stderr
+        assert "RC=0" in proc.stdout
+        assert "SKIPPED" in proc.stdout, (
+            f"TORTOISE_EMBEDDER_WARMUP={value!r} did not skip the pre-warm: "
+            f"{proc.stdout!r}{proc.stderr!r}"
+        )
+        assert bound is None, (
+            f"the pre-warm invoked timeout with {bound!r}s despite being "
+            "disabled — it would have paid the cold import anyway"
+        )
+
+    @pytest.mark.parametrize("value,expected", [
+        (None, "300"),   # unset -> the documented default
+        ("45", "45"),    # a usable value passes through unchanged
+        ("300", "300"),
+    ])
+    def test_the_bound_defaults_and_parses(self, tmp_path, value, expected):
+        env = ({} if value is None
+               else {"TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S": value})
+        proc, bound = _run_prewarm(tmp_path, env)
+        assert proc.returncode == 0, proc.stderr
+        assert bound == expected, (
+            f"TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S={value!r} produced a bound "
+            f"of {bound!r}s, not {expected!r}s"
+        )
+
+    @pytest.mark.parametrize("value", ["0", "00", "000"])
+    def test_zero_is_rejected_because_timeout_reads_it_as_no_bound(
+            self, tmp_path, value):
+        """#13674 review F6 — `timeout 0` means NO TIMEOUT, not "no bound".
+
+        Measured on GNU coreutils: `timeout --kill-after=15 0 sleep 2` returns 0
+        after the full 2 s. So the one value an operator types to mean "no
+        bound" would DELETE the boot bound, and an unbounded boot overruns
+        `grace_period` — the restart loop the function's own comment forbids.
+        """
+        proc, bound = _run_prewarm(
+            tmp_path, {"TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S": value})
+        assert proc.returncode == 0, proc.stderr
+        assert bound == "300", (
+            f"TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S={value!r} reached "
+            f"timeout(1) as {bound!r} — timeout reads that as NO BOUND, so the "
+            "boot became unbounded and would overrun grace_period (#13674 F6)"
+        )
+        assert "NO TIMEOUT" in proc.stderr, (
+            "a 'no bound' value must be reported, not silently replaced: "
+            f"{proc.stderr!r}"
+        )
+
+    @pytest.mark.parametrize("value", ["abc", "12.5", "-5", "9000"])
+    def test_an_unusable_bound_falls_back_to_the_default(self, tmp_path, value):
+        """Non-numeric AND over-ceiling values are replaced by 300, loudly."""
+        proc, bound = _run_prewarm(
+            tmp_path, {"TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S": value})
+        assert proc.returncode == 0, proc.stderr
+        assert bound == "300", (
+            f"TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S={value!r} produced "
+            f"{bound!r}s — an unusable value must fall back to 300"
+        )
+        assert proc.stderr.strip(), (
+            f"the fallback for {value!r} was silent"
+        )
+
+    @pytest.mark.parametrize("py_rc,needle", [
+        ("0", "pre-warm OK"),
+        ("124", "hit its"),
+        ("137", "hit its"),
+        ("127", "could not run"),
+        ("1", "FAILED"),
+    ])
+    def test_the_prewarm_never_kills_the_boot(self, tmp_path, py_rc, needle):
+        """Every child outcome maps to a message and rc 0 (#545's contract).
+
+        The failure #545 records was a pre-warm that exited 1 on a cold box, so
+        `entrypoint.sh` died and uvicorn never started. This asserts the shipped
+        function cannot do that under `set -euo pipefail`, for each arm of its
+        `case`.
+        """
+        proc, bound = _run_prewarm(tmp_path, {}, py_rc=py_rc)
+        assert bound == "300", "the pre-warm never ran"
+        assert proc.returncode == 0, (
+            f"the pre-warm's rc {py_rc} killed the entrypoint (shell rc "
+            f"{proc.returncode}) — a pre-warm failure must never be fatal"
+        )
+        assert "RC=0" in proc.stdout, (
+            f"`_prewarm_embedder` did not return 0 for rc {py_rc}: "
+            f"{proc.stdout!r}{proc.stderr!r}"
+        )
+        combined = proc.stdout + proc.stderr
+        assert needle in combined, (
+            f"the rc={py_rc} arm did not report {needle!r}: {combined!r}"
+        )
+
+    def test_the_call_sits_before_the_topology_sentinel(self):
+        """The call must precede `#1677`'s block, or gate tests run a real load.
+
+        `tests/test_worker_topology.py` LIFTS AND EXECUTES everything between
+        that sentinel and `exec "$@"`, so a call inside that slice would run a
+        real embedder load in every gate test.
+        """
+        from tests.test_worker_topology import _BLOCK_SENTINEL
+
+        source = ENTRYPOINT.read_text()
+        call_site = source.index("\n    _prewarm_embedder\n")
+        sentinel = source.index(_BLOCK_SENTINEL)
+        assert call_site < sentinel, (
+            "the pre-warm call moved BELOW the #1677 sentinel — the worker-gate "
+            "tests lift and execute that block, so they would run a REAL "
+            "embedder load (196 s) on every gate test"
+        )

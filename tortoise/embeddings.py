@@ -1344,7 +1344,8 @@ class EmbeddingModel:
         (#2952) while this path logged WARNING.
 
         ⛔ THE DEFECT THIS EXISTS TO REMOVE. ``get()`` blocks its caller for up
-        to ``_LOAD_TIMEOUT_S`` (90 s) while the model loads, and during a warm
+        to ``_LOAD_TIMEOUT_S`` (300 s since #13674; 90 s when this was written)
+        while the model loads, and during a warm
         window it blocks on ``cls._lock`` for the WHOLE load — the caller's own
         ``load_timeout`` cannot bound it, because the time is spent waiting for
         a lock another thread holds, not in its own join. The hosted lifespan
@@ -1722,12 +1723,21 @@ class EmbeddingModel:
         cls._one_time_setup_owner = None
         cls._one_time_setup_in_progress.clear()
         # #13674: the reclaim state belongs to an attempt, so a reset must drop
-        # it too. `_load_attempt_thread` is left in place deliberately: a live
-        # thread cannot be "reset" away, and clearing the reference would hide
-        # an abandoned importer from the guard that refuses a second attempt
-        # (test isolation clears it by joining its own stub thread).
-        cls._load_attempt_abandoned = None
-        cls._load_started_at = None
+        # it too — but only what is STALE. A live loader thread cannot be
+        # "reset" away, and clearing its reference would hide an abandoned
+        # importer from the guard that refuses a second attempt.
+        #
+        # ⛔ A thread that is NO LONGER ALIVE is a different case, and leaving
+        # its reference behind is the leak the review caught (F5): the guard
+        # reads the thread, so a finished attempt left recorded makes the next
+        # `get()` (or the next reset+attempt in a fresh test) see "still
+        # running" forever. Clear the whole attempt on a dead thread; keep it
+        # while it is alive.
+        attempt = cls._load_attempt_thread
+        if attempt is None or not attempt.is_alive():
+            cls._load_attempt_thread = None
+            cls._load_attempt_abandoned = None
+            cls._load_started_at = None
         cls._load_elapsed_s = None
         # #13224: re-arm the cold-write latch, so a test that resets the
         # embedder to observe a cold window gets its own line rather than

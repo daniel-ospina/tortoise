@@ -440,10 +440,35 @@ _prewarm_embedder() {
     esac
 
     local _bound="${TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S:-300}"
+    #: A bound this large cannot help: fly.toml's grace_period is 420 s, and a
+    #: bound approaching it leaves no time for the app to bind and pass a check
+    #: before the platform starts failing them. Chosen to keep >=60 s of the
+    #: grace period for the bind + the app's own startup.
+    local _ceiling=360
     case "$_bound" in
         ''|*[!0-9]*)
             echo "tortoise: TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S='${_bound}' is not a whole number of seconds — using 300" >&2
             _bound=300
+            ;;
+        0*)
+            # ⛔ #13674 review F6: `0` is a whole number, so it used to pass the
+            # check above and reach `timeout --kill-after=15 0 python …` — and
+            # GNU coreutils reads a duration of 0 as NO TIMEOUT (measured: `timeout
+            # 0 sleep 2` returns 0 after the full 2 s). The one value an operator
+            # naturally types to mean "no bound" would therefore REMOVE the bound
+            # entirely: an unbounded boot overruns grace_period and produces the
+            # restart loop this function's own comment forbids. `0*` catches 0,
+            # 00, 000 — every spelling timeout(1) reads as "no bound".
+            echo "tortoise: TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S='${_bound}' means NO TIMEOUT to timeout(1), not 'unbounded is safe' — using 300 (an unbounded boot overruns grace_period and restart-loops)" >&2
+            _bound=300
+            ;;
+        *)
+            # `0*` above intercepts every leading-zero spelling, so `$_bound` is
+            # a plain decimal here and `-gt` cannot read it as octal.
+            if [ "$_bound" -gt "$_ceiling" ]; then
+                echo "tortoise: TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S='${_bound}'s exceeds this image's ${_ceiling}s ceiling (fly.toml grace_period is 420s, so the platform would fail checks before the bound fired) — using 300" >&2
+                _bound=300
+            fi
             ;;
     esac
 

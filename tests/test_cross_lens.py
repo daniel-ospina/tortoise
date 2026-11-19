@@ -279,27 +279,55 @@ def test_search_points_tfidf_legacy_fit_semantics():
 
 def test_failed_load_cooldown():
     """A failed load must not stall every request: get() returns None during
-    the cooldown window WITHOUT re-attempting the load (code-review P2, #399)."""
+    the cooldown window WITHOUT re-attempting the load (code-review P2, #399).
+
+    ⛔ #13674 review F5: the retry half used to start a REAL loader thread
+    (`import_sentence_transformer` + `pin_embed_threads`, measured 24.1 s +
+    132.4 s cold) and abandon it after 1 ms. Pre-#13674 that was harmless —
+    the next `get()` simply started its own load. Post-#13674 the abandoned
+    thread is exactly what the reclaim guard refuses, so the leak was that the
+    guard stayed armed for the rest of the worker: `_require_model()` reads
+    `get() is None` as "model unavailable" and SKIPS, so the three real-embedder
+    tests below it silently stopped running.
+
+    Two fixes, both here or in the shared seam: the loader is PATCHED (this test
+    is about the cooldown clock, never about whether torch imports), and the
+    attempted thread is JOINED in `finally` so it cannot outlive the test.
+    """
     from unittest.mock import patch
 
+    from tortoise import embeddings as embeddings_mod
     from tortoise.embeddings import EmbeddingModel
 
     EmbeddingModel._reset()
     try:
-        with patch("tortoise.embeddings.time.monotonic", return_value=1000.0):
-            EmbeddingModel._last_failed_at = 950.0  # load failed 50s ago
-            assert EmbeddingModel.get() is None, "cooldown must return None"
-            assert EmbeddingModel._instance is None, "cooldown must not create an instance"
-        with patch("tortoise.embeddings.time.monotonic", return_value=2000.0):
-            # 1050s elapsed — past the 60s cooldown → retry path runs (the tiny
-            # load_timeout makes the worker-thread load fail again, so get()
-            # re-arms the failure timestamp instead of returning early).
-            EmbeddingModel.get(load_timeout=0.001)
-            assert EmbeddingModel._last_failed_at == 2000.0, \
-                "past cooldown must retry the load (re-arm failure timestamp)"
+        with patch.object(embeddings_mod, "pin_embed_threads", lambda: None), \
+                patch.object(embeddings_mod, "import_sentence_transformer",
+                             lambda: (lambda *a, **k: object())):
+            with patch("tortoise.embeddings.time.monotonic", return_value=1000.0):
+                EmbeddingModel._last_failed_at = 950.0  # load failed 50s ago
+                assert EmbeddingModel.get() is None, "cooldown must return None"
+                assert EmbeddingModel._instance is None, "cooldown must not create an instance"
+            with patch("tortoise.embeddings.time.monotonic", return_value=2000.0):
+                # 1050s elapsed — past the 60s cooldown → retry path runs (the tiny
+                # load_timeout makes the worker-thread load time out, so get()
+                # re-arms the failure timestamp instead of returning early).
+                EmbeddingModel.get(load_timeout=0.001)
+                assert EmbeddingModel._last_failed_at == 2000.0, \
+                    "past cooldown must retry the load (re-arm failure timestamp)"
     finally:
+        # Do not leave the attempt thread behind: while it is alive the reclaim
+        # guard refuses the next attempt, which is what F5 caught.
+        attempt = EmbeddingModel._load_attempt_thread
+        if attempt is not None:
+            attempt.join(timeout=30)
         EmbeddingModel._reset()
     assert EmbeddingModel._last_failed_at is None, "reset clears the cooldown"
+    assert EmbeddingModel._load_attempt_thread is None, (
+        "this test must not leave a load attempt behind — a live one makes the "
+        "reclaim guard refuse every later get() in this worker, which turns the "
+        "real-embedder tests below into silent skips (#13674 F5)"
+    )
     print("PASS test_failed_load_cooldown")
 
 

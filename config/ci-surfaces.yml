@@ -700,6 +700,14 @@ surfaces:
   # when nothing else matched — so a PR that reintroduced the bug in that file
   # alone would otherwise never run the guard.
   - test_boot_regressions.py
+  # #13674: the `api` arm of the quad registration (its `core` row states the
+  # whole reason). The subject this row is load-bearing for is
+  # `tortoise/hosted_api.py` — an EXACT `api` SOURCE_PATTERN, and a named-surface
+  # match REPLACES the `core` fallback, so the hosted lifespan pre-warm's own
+  # bound pin would otherwise never run on a hosted_api.py-only diff. It also
+  # pins the raised `grace_period` on BOTH fly.toml check blocks, which is a
+  # deploy-configuration subject with no named surface of its own.
+  - test_13674_embedder_load_bound_and_reclaim.py
   # #1677: the multi-worker ADMISSION gate. DUAL-REGISTERED with `core` for the
   # same reason as the row above: one of the two surfaces it pins is
   # `tortoise/hosted_api.py` — an EXACT `api` SOURCE_PATTERNS match that REPLACES
@@ -6432,6 +6440,19 @@ surfaces:
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
   - test_embeddings_filters.py
+  # #13674: the load bound (derived from the measured 156.5 s cold import), the
+  # reclaim-before-retry guard, and the `status()` observability keys all live in
+  # `tortoise/embeddings.py`, which this surface owns. QUAD-REGISTERED with
+  # `api` (its `hosted_api.py` pre-warm call site and the fly.toml grace pin),
+  # `eval` (it also owns `tortoise/embeddings.py`) and `sdk` (the
+  # `search_engine`/`sdk` `declared_retrieval_kind` + `read_status` seam): each
+  # of those is a NAMED-surface match that REPLACES the `core` fallback
+  # (#2938/#7951 idiom), so a diff to one of them reaches this file only through
+  # its own row. The same file also carries the `entrypoint.sh` pre-warm pins;
+  # that script is unknown to every SOURCE_PATTERN, so an `entrypoint.sh`-only
+  # diff already selects ALL tests fail-closed — these rows exist for the four
+  # CLASSIFIED subjects, not for the shell script.
+  - test_13674_embedder_load_bound_and_reclaim.py
   # #2725: a `packs/` diff selects `core`, but the enforcement drift pin that
   # enumerates index-reachable retry kinds lives in this file. Without dual
   # registration a pack that declares a new per-kind retry would pass its own
@@ -9844,6 +9865,14 @@ surfaces:
   # exit 1); selection already covers `tortoise/tool_registry.py` / `tortoise/sdk.py` diffs
   # via `SHARED_MODULES`, for the reason stated in the row below.
   - test_11609_create_arms.py
+  # #13674: the `sdk` arm of the quad registration (its `core` row states the whole
+  # reason). The load-bearing subjects here are `tortoise/search_engine.py`
+  # (`declared_retrieval_kind`) and `tortoise/sdk.py` (the `read_status_out["retrieval"]`
+  # sink write) — the pair that makes a keyword-only read DECLARE itself instead of being
+  # presented as hybrid (#2952). Both are `SHARED_MODULES`, so selection already reaches
+  # this file on their diffs; the row is what `--integrity` requires and keeps the
+  # declaration pins beside the surface that owns them.
+  - test_13674_embedder_load_bound_and_reclaim.py
   - test_11609_door_retirement.py  # #11609 lane E: the seven doors retired FORWARD —
   # every pointer resolves in ONE hop to a LIVE `TOOL_REGISTRY` name (GitHub's own
   # `DeprecatedToolAliases` states aliases are not transitive, and a pointer at another
@@ -10779,6 +10808,11 @@ surfaces:
   # #4488: triple-registered (api/core/eval) — this surface owns
   # tortoise/embeddings.py, where the encode hook lives.
   - test_embed_metering.py
+  # #13674: the `eval` arm of the quad registration — `tortoise/embeddings.py`
+  # selects `eval`, and that named match REPLACES the `core` fallback, so the
+  # load-bound derivation pin and the reclaim guard are only reached on an
+  # `embeddings.py`-only diff through this row.
+  - test_13674_embedder_load_bound_and_reclaim.py
   # #2517 (C4): the source-session re-injection rules + E2E — dual-registered
   # because a change to tools/longmem_eval/ selects `eval`, and the arm is
   # wired there (the hermetic rules leg also passes in the eval lane).
