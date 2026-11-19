@@ -239,6 +239,11 @@ def test_the_embedded_arm_raises_the_redislite_start_budget(monkeypatch):
 
     monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
     monkeypatch.setattr(rc.Redis, "start_timeout", 10, raising=False)
+    # ⛔ The embedded arm is reached only with NO uri AT ALL: an exported
+    # TORTOISE_DB_URI takes the server path, exactly as ``run_main`` does (and
+    # the smoke lane exports it — ``tools/test_lane.py``). Without this the
+    # test silently exercises the server arm in CI and reds on the floor assert.
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
 
     _, cleanup = prof._sdk(db_uri=None, namespace="profile-test")
     assert rc.Redis.start_timeout == 60, (
