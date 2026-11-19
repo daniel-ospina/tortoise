@@ -744,7 +744,17 @@ def test_a_real_verification_never_carries_the_trivial_marker(monkeypatch):
     scope = record_vector._Scope(*_SCOPE)
 
     for record_vectors, graph_vectors, expected in (
-            (3, 3, True), (5, 3, True), (1, 1, True), (2, 3, False)):
+            (3, 3, True), (5, 3, True), (1, 1, True), (2, 3, False),
+            # ⛔ record > 0 WITH AN EMPTY GRAPH — the ONE shape that distinguishes
+            # the marker's `record_vectors == 0` clause from a `graph_vectors == 0`
+            # one (#13798 review B). Both sides zero is not the only way to have a
+            # zero in the comparison, and a mutant written as
+            # `trivial = verified and graph_vectors == 0` would label this
+            # SUBSTANTIVE verification TRIVIAL — a record that holds vectors against
+            # a graph that serves none (a cleared or restored-empty graph), which is
+            # exactly the catch-up the marker exists to let you tell apart. It is
+            # also reachable, so it is a case and not a hypothetical.
+            (5, 0, True)):
         record_vector.reset_coverage_cache()
         monkeypatch.setattr(record_vector, "_record_vector_count",
                             lambda *a, _n=record_vectors, **k: _n, raising=True)
@@ -848,6 +858,42 @@ def test_a_trivial_verdict_is_still_a_verified_verdict_for_the_shipped_paths(
     assert record_vector.Coverage(
         label="object", verified=True, record_vectors=4, graph_vectors=4,
         reason="").trivial is False
+
+
+def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
+        monkeypatch, caplog):
+    """⛔ THE MARKER REACHES A TRACE, not only the object (#13798 review C).
+
+    `trivial` on the verdict, `as_dict()["trivial"]` and the reason string are real
+    data — but every SHIPPED consumer branches on `verdict.verified` alone, and the
+    serve gate logged its `reason` only in the DECLINE branch, which a verified
+    verdict never reaches. So on the tree before this case, a label holding nothing
+    in either store served an EMPTY cohort as `mechanism=pgvector, reason=ok` and
+    nothing in any trace told it apart from a backfilled label answering the same
+    read — the state #13798 exists to make tellable was tellable only to a reader
+    who already had the object in hand.
+
+    ⛔ REDS if the marker is dropped (always-False `trivial` -> the line is never
+    emitted), i.e. the same mutant as the zero-zero case, measured on the
+    OBSERVABILITY surface rather than on the object. And it changes NO decision: the
+    read still proceeds and still answers, because with both sides empty the two
+    stores answer identically.
+    """
+    import logging
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    _stub_record(monkeypatch, count=0, rows=[])
+
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows, _graph, _trace = _run(_searcher(0), entity_type="object")
+
+    assert rows == [], rows
+    assert "TRIVIALLY" in caplog.text, (
+        "a trivially-verified label served an empty cohort with nothing in the trace "
+        "saying why — `mechanism=pgvector, reason=ok` is then indistinguishable from "
+        f"a catch-up: {caplog.text!r}")
+    assert "BOTH SIDES ARE EMPTY" in caplog.text, (
+        f"the trace names the state but not its evidence: {caplog.text!r}")
 
 
 # ── 4b. the cost model: the counts are taken on a MISS, and only then ─────

@@ -606,8 +606,11 @@ class Coverage:
     The invariant is **``trivial`` ⇒ ``verified``** — three reachable states, not
     four: SUBSTANTIVE (verified, not trivial), TRIVIAL (verified, trivial) and
     UNVERIFIED (not verified, never trivial, because one side being unmeasurable is
-    ``None`` and never ``0``). The unmeasurable arms are pinned NOT to be swallowed
-    by the marker.
+    ``None`` and never ``0``). It is enforced at this module's ONE construction site
+    (:func:`coverage`) and the dataclass does not police a hand-built verdict — a
+    direct ``Coverage(verified=False, trivial=True)`` is nonsense this type does not
+    raise on, and no in-tree site builds one. The unmeasurable arms are pinned NOT
+    to be swallowed by the marker.
     """
 
     label: str
@@ -2257,6 +2260,21 @@ def searcher(
                 raise RecordVectorDeclined(
                     f"the record's `{entity_type}` vector coverage is not proven "
                     f"({verdict.reason}) — the graph branch answers")
+            if verdict.trivial:
+                # ⛔ THE VACUOUS PASS IS REPORTED ON THE PATH THAT SERVES IT (#13798).
+                # The branch above logs its `reason` only when it DECLINES, which a
+                # verified verdict never reaches — so a label holding nothing in
+                # either store served an EMPTY cohort as `mechanism=pgvector,
+                # reason=ok`, indistinguishable in the trace from a backfilled label
+                # answering the same read. This line is the difference, and it
+                # DECIDES NOTHING: the read proceeds exactly as before, because with
+                # both sides empty the two stores answer identically (which is why
+                # the two-zero case is marked rather than refused).
+                logging.getLogger(LOG_NAME).debug(
+                    "record dense leg: `%s` coverage is verified TRIVIALLY (%s) — "
+                    "the record holds no vector for this label and neither did the "
+                    "graph, so this read is empty because the POPULATION is",
+                    entity_type, verdict.reason)
             # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
             # whose fold actually stops writing has a graph worth refusing.
             contracted = entity_type in MIRROR_RETIRED_LABELS
