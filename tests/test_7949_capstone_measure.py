@@ -6396,7 +6396,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The hardened form occurs exactly once in the file, so a re-point onto a
         # sibling arm now reds.
         ("03-test-design.md", "the A-corpus capture", (
-            ("20311", "if count + est > max_points:"),
+            ("20329", "if count + est > max_points:"),
             ("20336", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
@@ -6407,7 +6407,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-head number is pinned: the `:18205` beside it is a STAMP read at
         # `a577d0e25c` and does NOT resolve here, so pinning it would red a true record.
         ("03-test-design.md", "`:82`'s `hosted_api.py:", (
-            ("20311", "if count + est > max_points:"),
+            ("20329", "if count + est > max_points:"),
         ), "hosted_api"),
         # ⛔ `05-verify.md` D5's own "Measured at" sentence (#12462 review). The row whose
         # SUBJECT is that line numbers rot carried NINE this-head cites and no reader at
@@ -6416,7 +6416,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # residual by mutating the rest — the rest of the file GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `9d790287af`", (
             ("20204", "``body.harness`` only ever introduces a harness on a session the server"),
-            ("20311", "if count + est > max_points:"),
+            ("20329", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("12141", "_registry_cache = PackRegistry(packs_dir)"),
@@ -16656,12 +16656,14 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: ⛔ SCOPE, stated because an over-claim here was CAUGHT BY REVIEW (#13602, cycle 2): the
 #: `_honours` clauses are NOT repeated here. D5 states that symbol FOUR times, in four
 #: currency spellings, and ALL FOUR already have readers — the derived-literal arm at
-#: `:6729`-`:6733` asserts each of the four against `_honours_line`, and the `05-verify.md`
+#: `:6779`-`:6782` asserts each of the four against `_honours_line`, and the `05-verify.md`
 #: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
-#: that clause ever had a reader. Only the `dedup_reviewed IS NULL` clause below, and the
-#: three-anchor sentence in `_D5_TRIPLE_RE` (whose distinct failure mode is a number
-#: swapped onto ANOTHER anchor's slot, which no per-line row can see), are new coverage.
+#: that clause ever had a reader. THREE things here are new coverage: the
+#: `dedup_reviewed IS NULL` clause below, the three-anchor sentence in `_D5_TRIPLE_RE`
+#: (whose distinct failure mode is a number swapped onto ANOTHER anchor's slot, which no
+#: per-line row can see), and the quota-guard row added for #13845, whose failure mode is
+#: a number that IS on D5's line but belongs to a clause about a different file.
 _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     (
         "the file's ONLY `dedup_reviewed IS NULL`",
@@ -16671,7 +16673,10 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries ~50 numbers — so `:20311` was "read" from an unrelated clause denotating a
+    # carries 262 cite-shaped `:N` tokens (measured at this head with
+    # `len(re.findall(r":\\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
+    # say was an order of magnitude low, which is the same rot one layer up) — so `:20329`
+    # was "read" from an unrelated clause denoting a
     # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
     # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
     # regex binds the number to the sentence that gives the number its meaning, so a future
