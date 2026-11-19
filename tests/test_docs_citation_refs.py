@@ -717,5 +717,76 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
             "name the content the sentence says it names (#13746 review round 3, P2)")
 
 
+def _added_cite_tokens(diff_text: str) -> set[str]:
+    """The `sdk.py:<n>` tokens a `--word-diff=plain` patch ADDS to `docs/00_index.md`.
+
+    Derived from the patch, never typed: `{+…+}` is word-diff's added span, so the set
+    is empty exactly when the patch re-points no cite.
+    """
+    added = "".join(re.findall(r"\{\+(.*?)\+\}", diff_text, re.S))
+    return set(re.findall(r"sdk\.py:(\d+)", added))
+
+
+#: Spellings that assert THIS diff re-points a cite in `docs/00_index.md`. Each was
+#: measured FALSE at the head the arm below was written for: the file's one changed
+#: line is the `#12296` row's DESCRIPTION of its own `:27861` clause (#13746 review,
+#: round 3, finding 4).
+_INDEX_REPOINT_SPELLINGS = (
+    "this diff carries ONE `docs/00_index.md` change — the capstone row's",
+    "it IS in the set, for ONE cite",
+    "for exactly ONE cite",
+    "THIS repair re-points it once more, to",
+    "this repair re-pointed that cite once more",
+)
+
+
+def test_an_index_re_point_claim_names_a_cite_the_live_diff_actually_adds():
+    """⛔ The doc named the capstone row's `:21679` → `:21715` as this diff's change.
+
+    It is not: `origin/main` already reads `:21715` (`grep -c 'sdk.py:21679'
+    docs/00_index.md` -> `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both),
+    and the one line `git diff --numstat origin/main...HEAD -- docs/00_index.md`
+    reports as `1 1` is the `#12296` row's DESCRIPTION of its own `:27861` clause —
+    no `sdk.py:<n>` token moves in either direction.
+
+    The sibling arm above compares the two files' cite SETS, which is the right
+    measurement for "does the file read differently" but not for "did this diff move
+    THIS cite": a patch that moves one cite and moves another back leaves the sets
+    equal. This arm reads the PATCH (`{+…+}` is word-diff's added span), so a claim
+    is accepted only when the number it names is one the diff actually adds — the
+    claim and the command printed beside it are graded against the same object.
+
+    NON-VACUITY, MEASURED: `_added_cite_tokens` is exercised on a CRAFTED patch that
+    does move a cite first, so an empty reading of the real patch is a fact about the
+    patch and not an inert extractor; on the pre-fix document three of the spellings
+    are present with no added token, so the loop reds on the first one.
+    """
+    assert _added_cite_tokens("a [-sdk.py:21679-]{+sdk.py:21715+} b") == {"21715"}, (
+        "_added_cite_tokens cannot read a word-diff patch that DOES move a cite, so the "
+        "arm below would pass on an empty set for the wrong reason")
+
+    proc = subprocess.run(
+        ["git", "diff", "-U0", "--word-diff=plain", "origin/main...HEAD", "--",
+         "docs/00_index.md"],
+        cwd=REPO, capture_output=True, text=True, check=False)
+    moved = _added_cite_tokens(proc.stdout) if proc.returncode == 0 else set()
+
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    for claim in _INDEX_REPOINT_SPELLINGS:
+        if claim not in doc:
+            continue
+        window = doc[doc.index(claim):doc.index(claim) + 500]
+        named = set(re.findall(r"`?:(\d+)`?", window))
+        assert named & moved, (
+            "05-verify.md claims this diff re-points a `docs/00_index.md` cite "
+            f"({claim!r}) and names {sorted(named)}, but the live three-dot patch adds "
+            f"no such `sdk.py:<n>` token (added: {sorted(moved) or 'none'}). The claim "
+            "is refuted by the command the document prints beside it: read the set from "
+            "`git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` at "
+            "the head being merged, and state the command rather than a head-bound pair "
+            "(#13746 review, round 3, finding 4)")
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-q"])
