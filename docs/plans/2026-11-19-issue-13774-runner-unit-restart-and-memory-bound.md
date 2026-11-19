@@ -82,7 +82,7 @@ aggregate. Stated here, in R4 and in the runbook step.
    `restart.conf`) SURVIVES **[R2-fix: P1 — `rm -rf .d/` would delete the hand drop-in keeping four runners
    restarting]**; plus the **orphan-unit branch** remedy names our file **[R2-fix: P2]**.
 8. **Test** — sentinel: `CI_RUNNER_MEM_PER_RUNNER_GB=0` → the `MemoryMax=` key is **absent** (0 means "no sizing",
-   never "no memory") **[R2-fix: P1 — `MemoryMax=0G` on reload kills every runner]**.
+   never "no memory") **[R2-fix: P1 — `MemoryMax=0G` is a value that ONLY LOOKS like a bound]**.
 9. **Test** — validator: a non-integer `CI_RUNNER_MEM_MAX_FACTOR` and a malformed `CI_RUNNER_START_LIMIT_INTERVAL`
    each refuse with exit 1 **[R2-fix: P2]**.
 10. **Implement** — knobs next to the sizing knobs, each with its rationale comment; add the three INTEGER knobs to
@@ -129,7 +129,7 @@ aggregate. Stated here, in R4 and in the runbook step.
 - R8 a hand-written drop-in sorts after ours and wins for shared keys → documented ordering rule + step 7's
   foreign-file-survives assertion proves we do not "clean" it away.
 - R9 `MEM_PER_RUNNER_GB=0` is a REAL seam (the test harness exports it) and would compute `MemoryMax=0G`, which
-  on reload kills every runner → the key is OMITTED for 0 → step 8.
+  is a value that only LOOKS like a bound → the key is OMITTED for 0 → step 8.
 - R10 the wrapper's `exit 0` deaths (codes 0/1/5, unknown) are not retried by `on-failure` → accepted, documented
   residual; `always` would restart session-conflict in a loop.
 - R11 the new knobs are unvalidated by the existing digits-only validator, and one is a systemd TIMESPAN → the
@@ -140,3 +140,22 @@ the runner's job-loss reporting latency (#10591); Docker/FalkorDB sidecar memory
 installed by any path other than this installer; the `exit 0` death class's own fix.
 
 **Acceptance:** every `R<n>` has its named evidence, and no open item remains on the declared surface.
+
+## Corrections recorded after the build (so a later lane does not inherit a refuted claim)
+
+- ⛔ **`MemoryMax=0G` does NOT "admit nothing" and does NOT kill a runner.** MEASURED on systemd 255: a
+  throwaway unit with `MemoryMax=0G` + `daemon-reload` reads back `MemoryMax: infinity` and cgroup
+  `memory.max` = `max`. The decision to OMIT the key for a zero sizing unit stands, and its reason is
+  narrower and true: a written `0G` reads as a bound to every later reader while the omission says
+  plainly that none is set. (The code, the runbook and the test docstrings were corrected in the review
+  round; this note is the same correction in the plan.)
+- **The timespan validator is a split magnitude/suffix, not a glob.** The first version's `[0-9]*s`
+  admitted `30sm`/`30secs`, which systemd DROPS — so `RestartSec` fell back to 100 ms and the burst
+  burned out in seconds. A glob is not a validation.
+- **`MEM_MAX_GB` is computed once with `10#`** (a leading zero turned `$(( 08 * 4 ))` into an octal
+  error that silently dropped the bound), and a positive sizing unit that yields a non-positive product
+  is REFUSED.
+- **Not fixed here, filed instead:** the pre-existing memory headroom gate
+  (`install-ci-runner-x64.sh` `mem_need_gb=$(( COUNT * MEM_PER_RUNNER_GB + MEM_RESERVE_GB ))`) still
+  coerces without `10#`, so a leading zero aborts the headroom block and the live `MemAvailable`
+  refusal is silently skipped. Same class, different site, outside this plan's declared surface.

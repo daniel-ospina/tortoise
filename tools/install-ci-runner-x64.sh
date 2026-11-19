@@ -63,7 +63,7 @@
 #   silently skipped. `_preserve_labels` drops both but reads NO flag.
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
-#   `resolve_os_label` (`:411`), reached from `resolve_labels` — i.e. from install, repair and
+#   `resolve_os_label` (`:438`), reached from `resolve_labels` — i.e. from install, repair and
 #   `--print-labels` — and called by `--status` to READ the intent (it registers nothing) — so
 #   a runner this script registers under `on|auto` carries `ubuntu-24.04`; the autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
 #   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
@@ -278,17 +278,38 @@ done
 # key it cannot parse, so a typo in either would quietly restore the 10 s restart window (interval)
 # or the 100 ms restart delay (`RestartSec=`), i.e. a guard that looks present and is not.
 for _unit_val in RESTART_SEC START_LIMIT_INTERVAL; do
-  case "${!_unit_val}" in
-    ''|*[!0-9a-z]*) die "$_unit_val must be a systemd timespan such as 30s or 1h (got '${!_unit_val}')" 1 ;;
+  _ts_val="${!_unit_val}"
+  case "$_ts_val" in
+    ''|*[!0-9a-z]*) die "$_unit_val must be a systemd timespan such as 30s or 1h (got '$_ts_val')" 1 ;;
   esac
-  # `[0-9]*` is deliberate: `[0-9]*s` matches `30s` AND `30min` never reaches it — each branch below
-  # names a suffix systemd actually parses, so `banana` (which systemd would silently DROP) is refused
-  # here rather than becoming a vanished key.
-  case "${!_unit_val}" in
-    [0-9]*ms|[0-9]*s|[0-9]*sec|[0-9]*second|[0-9]*min|[0-9]*m|[0-9]*hr|[0-9]*h|[0-9]*d) : ;;
-    *) die "$_unit_val must be a systemd timespan with a real suffix (ms/s/sec/min/m/hr/h/d), got '${!_unit_val}'" 1 ;;
+  # ⛔ A GLOB LIKE `[0-9]*s` IS NOT A VALIDATION, and this shipped that way for one review round: the
+  # `*` matches ANY trailing run, so `30sm`, `30secs` and `30mss` all passed — and systemd then
+  # DROPPED the value ("Failed to parse sec value, ignoring: 30sm"), leaving `RestartSec` at its
+  # 100 ms default and burning `StartLimitBurst` in ~2 s, which is the exact state this drop-in
+  # exists to prevent. Split into an ALL-DIGITS magnitude and an EXACT suffix, both checked.
+  _ts_body="${_ts_val%%[a-z]*}"
+  _ts_suffix="${_ts_val#"$_ts_body"}"
+  case "$_ts_body" in
+    ''|*[!0-9]*) die "$_unit_val must start with a whole number (got '$_ts_val')" 1 ;;
+  esac
+  case "$_ts_suffix" in
+    ms|s|sec|min|m|hr|h|d) : ;;
+    *) die "$_unit_val has a suffix systemd would DROP (use ms/s/sec/min/m/hr/h/d, got '$_ts_val')" 1 ;;
   esac
 done
+
+# ⛔ THE DERIVED BOUND IS COMPUTED ONCE, HERE, AND BOTH READERS USE IT (the dry-run plan and the
+# drop-in writer). Computing it lazily in two places is how they drifted: the dry-run's own
+# `$(( MEM_PER_RUNNER_GB * MEM_MAX_FACTOR ))` read `08` as OCTAL (an ERROR that silently emptied the
+# value and dropped the bound while reporting success). `10#` forces base 10, and a positive sizing
+# unit that produces a non-positive GIGABYTE product (an absurd knob wrapping negative) is REFUSED —
+# the whole point of this file's validator is that a bound nobody can read never quietly becomes no
+# bound at all.
+MEM_MAX_GB=$(( 10#$MEM_PER_RUNNER_GB * 10#$MEM_MAX_FACTOR ))
+if [ "$(( 10#$MEM_PER_RUNNER_GB ))" -gt 0 ] && [ "$MEM_MAX_GB" -le 0 ]; then
+  MEM_MAX_GB=       # make the invalidity unmissable to any later read
+  die "MemoryMax would not be a positive number of GB from MEM_PER_RUNNER_GB=$MEM_PER_RUNNER_GB x MEM_MAX_FACTOR=$MEM_MAX_FACTOR — refusing to write a bound that is not one" 1
+fi
 
 runner_dir() { # $1 = instance number: instance 1 keeps the base dir, the rest get -<n>
   if [ "$1" = 1 ]; then printf '%s' "$BASE"; else printf '%s-%s' "$BASE" "$1"; fi
@@ -305,7 +326,12 @@ unit_for() { printf 'actions.runner.%s.%s.service' "$(printf '%s' "$REPO" | tr '
 # (measured on systemd 255: a live unit's runtime `memory.max` flips on reload, MainPID unchanged).
 # That is why this is safe to run against a serving runner — nothing is restarted — AND why
 # `MemoryMax=` must never be computed as a value that kills a working job: see the `0` sentinel
-# below, where the key is OMITTED rather than written as `0G` (cgroup `memory.max=0` admits nothing).
+# below, where the key is OMITTED rather than written as `0G`. ⚠️ MEASURED, and it corrects the first
+# version of this comment: systemd 255 reads `MemoryMax=0G` as UNSET, not as "no memory at all" (a
+# throwaway unit with `MemoryMax=0G` + reload showed `MemoryMax: infinity` and cgroup `memory.max` =
+# `max`). So omitting the key and writing `0G` are the SAME runtime state — the reason to omit is that
+# a written `0G` LOOKS like a bound to every later reader (and to a grep), while the omission states
+# plainly that none is set.
 #
 # ⛔ THE `[Unit]`-vs-`[Service]` TRAP: `StartLimitIntervalSec`/`StartLimitBurst` are `[Unit]` keys
 # since systemd v229. Under `[Service]` the burst still applies and the INTERVAL is silently
@@ -316,7 +342,7 @@ write_unit_dropin() { # $1 = instance name, e.g. pi-runner-x64-1
   local name="$1" unit dir tmp mem_max_gb
   unit="$(unit_for "$name")"
   dir="$UNIT_DIR/$unit.d"
-  mem_max_gb=$(( MEM_PER_RUNNER_GB * MEM_MAX_FACTOR ))
+  mem_max_gb="$MEM_MAX_GB"   # validated and base-10-normalised once, at startup
   tmp="$(mktemp)" || die "cannot create a temp file for the unit drop-in" 3
   {
     printf '# written by tools/install-ci-runner-x64.sh — see docs/ops/ci-runner-x64.md\n'
@@ -330,9 +356,10 @@ write_unit_dropin() { # $1 = instance name, e.g. pi-runner-x64-1
     printf 'OOMPolicy=stop\n'
     # ⛔ THE `0` SENTINEL MEANS "NO SIZING", NEVER "NO MEMORY". `MEM_PER_RUNNER_GB=0` is a real
     # value (the capacity gate reads it as "do not size from memory", and the test harness pins it),
-    # and `MemoryMax=0G` would be applied to the RUNNING unit by the reload above — killing every
-    # runner it touches. Omit the key: the unit keeps systemd's default (`infinity`), i.e. exactly
-    # today's behaviour, and no claim is made that a bound exists.
+    # so the computed bound is 0 and this key is OMITTED. ⚠️ MEASURED: `MemoryMax=0G` is read by
+    # systemd 255 as UNSET (`infinity`), so the two are the same RUNTIME state — the omission is
+    # chosen because a written `0G` reads as a bound to every later reader while the omission says
+    # plainly that none is set.
     if [ "$mem_max_gb" -gt 0 ]; then printf 'MemoryMax=%sG\n' "$mem_max_gb"; fi
   } >"$tmp" || { rm -f "$tmp"; die "cannot write the unit drop-in for $name" 3; }
   if [ -f "$dir/10-restart-and-memory.conf" ] && cmp -s "$tmp" "$dir/10-restart-and-memory.conf"; then
@@ -1567,7 +1594,7 @@ done
 for i in $(seq 1 "$COUNT"); do
   d="$(runner_dir "$i")"; name="$NAME_PREFIX-$i"
   say "── runner $i: name=$name dir=$d labels=$LABELS"
-  if [ "$DRY" = 1 ]; then say "dry-run: would download $url, verify sha256, then run config.sh --unattended --url https://github.com/$REPO --token <minted> --name $name --labels $LABELS --work _work --replace, then svc.sh install, then write $UNIT_DIR/$(unit_for "$name").d/10-restart-and-memory.conf (Restart=on-failure, RestartSec=$RESTART_SEC, StartLimitIntervalSec=$START_LIMIT_INTERVAL, StartLimitBurst=$START_LIMIT_BURST, OOMPolicy=stop$( [ $(( MEM_PER_RUNNER_GB * MEM_MAX_FACTOR )) -gt 0 ] && printf ', MemoryMax=%sG' "$(( MEM_PER_RUNNER_GB * MEM_MAX_FACTOR ))" )), then svc.sh start"; continue; fi
+  if [ "$DRY" = 1 ]; then say "dry-run: would download $url, verify sha256, then run config.sh --unattended --url https://github.com/$REPO --token <minted> --name $name --labels $LABELS --work _work --replace, then svc.sh install, then write $UNIT_DIR/$(unit_for "$name").d/10-restart-and-memory.conf (Restart=on-failure, RestartSec=$RESTART_SEC, StartLimitIntervalSec=$START_LIMIT_INTERVAL, StartLimitBurst=$START_LIMIT_BURST, OOMPolicy=stop$( [ "$MEM_MAX_GB" -gt 0 ] && printf ', MemoryMax=%sG' "$MEM_MAX_GB" )), then svc.sh start"; continue; fi
   need gh; need curl; need tar; need sha256sum
 
   if [ ! -f "$d/.runner" ]; then

@@ -2973,39 +2973,39 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     anchors: dict[int, str] = {
         111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
         256: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
-        375: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        379: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        383: r"^fallback_engaged\(\) \{",
-        406: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
-        411: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
-        443: r"^resolve_labels\(\) \{",
-        482: r"label algebra: the UNION",  # "the union's label algebra at"
-        506: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        534: r"── status ──",  # the `--status` block
-        557: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        897: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        905: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        914: r"found NO runs-on label to check",  # zero labels -> exit 4
-        377: r"^\}$",  # "whose body ends at its `}` on"
-        1132: r"exit 5",  # the uncovered verdict
-        1154: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
-        1179: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1326: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1358: r'MODE" = labels',  # "`--print-labels`"
-        1385: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1390: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1393: r"FORK HEADROOM FIRST",  # "forks"
-        1413: r"DISK NEXT",  # "disk"
-        1420: r"CPU LAST",  # "cpu/memory"
-        1437: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1438: r'MODE" = uninstall',  # "`uninstall`"
-        1567: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1570: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1578: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1581: r"registration-token",  # "token"
-        1586: r"^    set -- --unattended",  # "one argv"
-        1588: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1598: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        402: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        406: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        410: r"^fallback_engaged\(\) \{",
+        433: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
+        438: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
+        470: r"^resolve_labels\(\) \{",
+        509: r"label algebra: the UNION",  # "the union's label algebra at"
+        533: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        561: r"── status ──",  # the `--status` block
+        584: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        924: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        932: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        941: r"found NO runs-on label to check",  # zero labels -> exit 4
+        374: r"^\}$",  # "whose body ends at its `}` on"
+        1159: r"exit 5",  # the uncovered verdict
+        1181: r'MODE" = repair',  # "--repair-labels UNIONS" / "--fallback off is REFUSED"
+        1206: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1353: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1385: r'MODE" = labels',  # "`--print-labels`"
+        1412: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1417: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1420: r"FORK HEADROOM FIRST",  # "forks"
+        1440: r"DISK NEXT",  # "disk"
+        1447: r"CPU LAST",  # "cpu/memory"
+        1464: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1465: r'MODE" = uninstall',  # "`uninstall`"
+        1594: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1597: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1605: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1608: r"registration-token",  # "token"
+        1613: r"^    set -- --unattended",  # "one argv"
+        1615: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1625: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -5550,8 +5550,9 @@ def _dropin_env(tmp_path: Path, *, unit_present: bool, **extra: str) -> dict[str
 
     ⛔ `CI_RUNNER_MEM_PER_RUNNER_GB` IS PINNED TO A NON-ZERO VALUE HERE, and that is not cosmetic:
     the file-wide `_NEUTRAL_HEADROOM` sets it to `0`, which the installer must read as "no memory
-    sizing" and therefore OMIT `MemoryMax=` (cgroup `memory.max=0` admits nothing, and
-    `daemon-reload` applies it to a RUNNING unit). Leaving the headroom value in place would make the
+    sizing" and therefore OMIT `MemoryMax=` (systemd 255 reads `0G` as UNSET, so an omission and a
+    written `0G` are the same runtime state — the omission just does not claim a bound). Leaving the
+    headroom value in place would make the
     "six keys" assertions unpassable by construction, and the tempting repair — relaxing them to five
     — would delete the only evidence that a bound is written at all. The sentinel has its own arm.
     """
@@ -5724,9 +5725,10 @@ def test_a_failing_dropin_write_exits_3_and_leaves_the_install_and_registration_
 def test_a_zero_sizing_unit_omits_memorymax_instead_of_writing_zero(tmp_path: Path):
     """⛔ `MEM_PER_RUNNER_GB=0` IS A REAL VALUE — the capacity gate reads it as "do not size from
     memory", and this file's own headroom dict pins it. `0 × factor = 0` must NOT become
-    `MemoryMax=0G`: cgroup `memory.max=0` admits no memory at all, and `daemon-reload` applies it to a
-    RUNNING unit, so that write would kill every runner it touches. The key is OMITTED instead, which
-    leaves systemd's default (`infinity`) — today's behaviour, with no claim that a bound exists.
+    `MemoryMax=0G`, which LOOKS like a bound and is not: measured on systemd 255, `MemoryMax=0G` reads
+    as UNSET (`MemoryMax: infinity`, cgroup `memory.max` = `max`). The runtime state would be the same
+    either way; what differs is that a written `0G` tells every later reader (and every grep) that a
+    bound was set. The key is OMITTED instead, so the file states plainly that none is.
     """
     env = _dropin_env(tmp_path, unit_present=True, CI_RUNNER_MEM_PER_RUNNER_GB="0")
     unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
@@ -5792,3 +5794,54 @@ def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_pat
 
     r = _run("--uninstall", "--count", "1", env=env)
     assert r.returncode == 0, f"no `.d` dir is not a failure: rc={r.returncode}: {r.stderr}"
+
+
+def test_the_timespan_validator_refuses_trailing_junk_after_a_valid_suffix(tmp_path: Path):
+    """⛔ A GLOB IS NOT A VALIDATION, and the first version of this validator proved it: `[0-9]*s` has an
+    unanchored `*`, so `30sm`, `30secs` and `30mss` were all ADMITTED. systemd then drops the value
+    ("Failed to parse sec value, ignoring: 30sm"), `RestartSec` falls back to its 100 ms default and
+    `StartLimitBurst=20` burns out in ~2 seconds — parking the unit `failed` for the rest of
+    `StartLimitIntervalSec`, which is the exact state the drop-in exists to prevent.
+
+    Non-vacuity: restore the `[0-9]*s`-style glob list and every arm below becomes green on the buggy
+    pattern while `systemd-analyze verify` still ignores the value.
+    """
+    env = _dropin_env(tmp_path, unit_present=False)
+    for bad in ("30sm", "30secs", "30mss", "30ss", "s30", "30"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": bad})
+        assert r.returncode == 1, f"{bad!r} must be refused (exit 1), got {r.returncode}: {r.stderr}"
+    for bad in ("30sm", "banana"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_START_LIMIT_INTERVAL": bad})
+        assert r.returncode == 1, f"interval {bad!r} must be refused, got {r.returncode}: {r.stderr}"
+    # and the real suffixes still pass
+    for good in ("30s", "1h", "5min", "500ms", "2d"):
+        r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": good})
+        assert r.returncode == 0, f"{good!r} must be accepted, got {r.returncode}: {r.stderr}"
+
+
+def test_a_leading_zero_sizing_unit_still_derives_the_bound(tmp_path: Path):
+    """⛔ `$(( 08 * 4 ))` IS AN OCTAL ERROR in bash: the digits-only validator accepts a leading zero, so
+    the product silently came out EMPTY and the bound was dropped while the run reported success — a
+    guard that reads as present and is not, which is this change's whole subject. `10#` forces base 10;
+    this arm pins the arithmetic, not the string.
+    """
+    env = _dropin_env(tmp_path, unit_present=True, CI_RUNNER_MEM_PER_RUNNER_GB="08")
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    _svc_stub(Path(env["CI_RUNNER_BASE"]), unit_dir, unit, log=tmp_path / "sudo.log")
+
+    r = _run("--count", "1", "--fallback", "off", env=env)
+    assert r.returncode == 0, r.stderr
+    text = (unit_dir / f"{unit}.d" / "10-restart-and-memory.conf").read_text()
+    assert "MemoryMax=32G" in text, f"08 x 4 must derive 32G, not vanish:\n{text}"
+
+
+def test_an_overflowing_bound_is_refused_rather_than_silently_dropped(tmp_path: Path):
+    """A product that wraps negative would omit `MemoryMax=` and report success. The file's own rule is
+    that a bound nobody can read is REFUSED (exit 1), never coerced into a number.
+    """
+    env = _dropin_env(tmp_path, unit_present=True)
+    r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_MEM_PER_RUNNER_GB": "9223372036854775807"})
+    assert r.returncode == 1, f"an overflowing bound must be refused, got {r.returncode}: {r.stderr}"
+    assert "MemoryMax" in r.stderr, r.stderr

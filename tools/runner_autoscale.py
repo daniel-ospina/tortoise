@@ -947,7 +947,7 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
     fallback is engaged right now, and the OS fact whenever the operator opted into it.
 
     This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels`
-    (`tools/install-ci-runner-x64.sh:443`, in this tree since #9639) instead of inventing a
+    (`tools/install-ci-runner-x64.sh:470`, in this tree since #9639) instead of inventing a
     second rule, and it is `auto`: the gate's state is the source of truth, so a runner never
     acquires a permanent claim on the pool. The reader CAN open it, which is why this file
     re-derives NOTHING it cannot check: the arch marker is this box's own `uname -m`, and the
