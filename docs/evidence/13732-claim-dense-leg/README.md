@@ -136,6 +136,22 @@ unmeasured is never zero). `coverage` itself is unchanged: widening it would rev
 decision and change every other label's reader, and the id-set half belongs in the instrument, which
 is the only place the population is known.
 
+⛔ **THE GRAPH HALF NEEDS THE SAME ID-SCOPED QUESTION, AND IT IS ASKED AT RUN LEVEL** (`#13734`
+review, round 5). The gate beside the seed is **prefix-wide** —
+`MATCH (n:Point) WHERE n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL` — so it answers
+*"does this graph hold ANY embedded claim?"*, which stays above zero while the population is only
+**partly** seeded. Two mechanisms, both real: the apply-fold leaves `n.embedding` unset for a row it
+cannot vectorise (an operator point — every embed branch in `projection/entities.py` is gated on
+`not op`; an identifier-only text the EMBED gate refuses, `#5008`; or an `encode_for_row` failure
+swallowed by `except Exception: pass`), and `--graph` names a graph a previous run already seeded.
+`graph_population_vectors` asks the id-scoped question and `require_graph_population` refuses
+`graph_population_absent` (or `graph_population_unmeasurable`) — **run-level, unlike the record's
+guard**, because the graph cohort is what this run has ALREADY written, so the refusal is satisfiable
+by construction; and a partly seeded graph degrades all three arms, since every arm reads the same
+nodes' full-text index. The artifact carries both counts — `graph_vectors` (prefix-wide) and
+`graph_population_vectors` (id-scoped) — because the first alone cannot tell a full seed from a
+partial one.
+
 So the truth about this instrument, stated plainly: **it embeds and writes the population to the
 GRAPH, and it REQUIRES — never writes — the record's matching cohort.** `#13210` is the backfill's
 tool, and the record is a journal fold with no side door; a second writer for its population is the
