@@ -1966,7 +1966,7 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
                 # that is a SUPERSET is not one that is a REPLACEMENT, and narrowing
                 # acceptance is the one direction this file forbids.
                 _pairs_operand_stores_the_vector(generator.iter, alias_keys=alias_keys)
-                or _unpacked_element_stores_the_vector(generator.iter, alias_keys=alias_keys)
+                or _unpacked_element_stores_the_vector(generator.iter)
                 or _comprehension_source_pairs_the_property_with_a_value(
                     generator.iter, alias_keys=alias_keys)
                 # ⛔ AND THIS FOURTH, ADDITIVE LEG FOLLOWS THE WRAPPERS THE RESOLVER DOES NOT:
@@ -1975,7 +1975,7 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
                 # [(…, 1)].copy()}` and the `if`-spelling CERTIFIED while every other wrapper
                 # was refused — the resolver reads a SOURCE it recognises, and these are
                 # sources it does not. Additive, never instead of the legs above.
-                or _source_holds_the_store_anywhere(generator.iter, alias_keys=alias_keys)
+                or _source_holds_the_store_anywhere(generator.iter)
                 for generator in node.generators)
         # ⛔ AND THE VECTOR CAN BE THE PRODUCED **VALUE**, with the key the property by a
         # literal BINDING (`#13788`, measured by the review of this branch). Every arm above
@@ -2004,7 +2004,7 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
             # one with the other narrowed acceptance (`[("embedding", vec)].copy()` went from
             # REFUSED to CERTIFIED in this lane's own first draft — measured).
             and (_pairs_operand_stores_the_vector(generator.iter, alias_keys=alias_keys)
-                 or _unpacked_element_stores_the_vector(generator.iter, alias_keys=alias_keys)
+                 or _unpacked_element_stores_the_vector(generator.iter)
                  or _comprehension_source_pairs_the_property_with_a_value(
                      generator.iter, alias_keys=alias_keys))
             for generator in node.generators)
@@ -2151,7 +2151,7 @@ def _constant_index(node) -> int | None:
     return None
 
 
-def _source_holds_the_store_anywhere(node, alias_keys: frozenset[str] = frozenset()) -> bool:
+def _source_holds_the_store_anywhere(node) -> bool:
     """Does this iterable hold a store, in either pair shape, through its wrappers?
 
     ⛔ ADDITIVE TO THE SHARED RESOLVER, NOT A REPLACEMENT for it (the same reason that one's
@@ -2166,36 +2166,36 @@ def _source_holds_the_store_anywhere(node, alias_keys: frozenset[str] = frozense
     import ast
 
     if isinstance(node, ast.List | ast.Tuple | ast.Set):
-        return (_pairs_store_the_vector(node, alias_keys=alias_keys)
-                or _unpacked_element_stores_the_vector(node, alias_keys=alias_keys)
-                or any(_source_holds_the_store_anywhere(element, alias_keys=alias_keys)
+        return (_pairs_store_the_vector(node)
+                or _unpacked_element_stores_the_vector(node)
+                or any(_source_holds_the_store_anywhere(element)
                        for element in node.elts if isinstance(element, ast.Starred)))
     if isinstance(node, ast.Starred):
-        return _source_holds_the_store_anywhere(node.value, alias_keys=alias_keys)
+        return _source_holds_the_store_anywhere(node.value)
     if isinstance(node, ast.Call):
         name = _callee_name(node)
         if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
-            return _source_holds_the_store_anywhere(node.args[0], alias_keys=alias_keys)
+            return _source_holds_the_store_anywhere(node.args[0])
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "copy"
                 and not node.args and not node.keywords):
-            return _source_holds_the_store_anywhere(node.func.value, alias_keys=alias_keys)
+            return _source_holds_the_store_anywhere(node.func.value)
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "items"
                 and not node.args and not node.keywords):
             # ⛔ A MAPPING'S `.items()` VIEW *IS* A PAIRS SEQUENCE.
-            return _mapping_literal_stores_the_vector(node.func.value, alias_keys=alias_keys)
+            return _mapping_literal_stores_the_vector(node.func.value)
         return False              # `zip(…)`, `map(…)`: the stated residual
     if isinstance(node, ast.Subscript) and _is_full_slice(node.slice):
         return _source_holds_the_store_anywhere(node.value)
     if isinstance(node, ast.IfExp):
-        return (_source_holds_the_store_anywhere(node.body, alias_keys=alias_keys)
-                or _source_holds_the_store_anywhere(node.orelse, alias_keys=alias_keys))
+        return (_source_holds_the_store_anywhere(node.body)
+                or _source_holds_the_store_anywhere(node.orelse))
     if isinstance(node, ast.BinOp):
-        return (_source_holds_the_store_anywhere(node.left, alias_keys=alias_keys)
-                or _source_holds_the_store_anywhere(node.right, alias_keys=alias_keys))
+        return (_source_holds_the_store_anywhere(node.left)
+                or _source_holds_the_store_anywhere(node.right))
     if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
-        return (any(_source_holds_the_store_anywhere(generator.iter, alias_keys=alias_keys)
+        return (any(_source_holds_the_store_anywhere(generator.iter)
                     for generator in node.generators)
-                or _source_holds_the_store_anywhere(node.elt, alias_keys=alias_keys))
+                or _source_holds_the_store_anywhere(node.elt))
     return False
 
 
@@ -2486,10 +2486,12 @@ def _comprehension_source_pairs_the_property_with_a_value(
 
     for item in _comprehension_source_yields(source) or ():
         # ⛔ THE PAIR'S KEY IS THE SAME KEY, ALIAS INCLUDED (`#13788` F11 seam, measured at
-        # `86d6c74a5`): this leg is reached for a clause of THREE OR MORE elements
-        # (`{k: v for k, v, _z in [(key, vec, 1)]}`), and it is the only leg that answers
-        # that shape — so the alias key was CERTIFIED here after the two-element spellings
-        # were refused. It asks the one key rule.
+        # `86d6c74a5`). ⚠️ THIS LEG IS **NOT** THE ONLY ONE THAT ANSWERS A THREE-ELEMENT
+        # CLAUSE — `_unpacked_element_stores_the_vector` answers the bare shape too, and a
+        # first version of this comment claimed otherwise; measured by the review of
+        # `10796bf7f`, reverting THIS leg alone leaves `{k: v for k, v, _z in [(key, vec, 1)]}`
+        # refused. What this leg uniquely answers is the WRAPPED source (`.copy()`, `+ []`,
+        # `set(...)`, `.items()`), which is why it carries the alias set.
         if (len(item) >= 2 and _names_property_key(item[0], alias_keys)
                 and not isinstance(item[1], ast.Constant)):
             return True
@@ -2553,7 +2555,7 @@ def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
     return False
 
 
-def _unpacked_element_stores_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
+def _unpacked_element_stores_the_vector(node) -> bool:
     """Does this iterable literal hold an element whose FIRST TWO items are the store?
 
     The pair-with-extras shape — `[("embedding", vec, 1)]`, read by
@@ -2574,9 +2576,14 @@ def _unpacked_element_stores_the_vector(node, alias_keys: frozenset[str] = froze
         if not isinstance(element, ast.Tuple | ast.List) or len(element.elts) < 2:
             continue
         first, second = element.elts[0], element.elts[1]
-        # ⛔ AND ITS KEY IS THE SAME KEY (`#13788` F11 seam): `[(key, vec, 1)]` beside
-        # `[("embedding", vec, 1)]`.
-        if (_names_property_key(first, alias_keys)
+        # ⛔ CONSTANT KEY ONLY, and the ALIAS spelling of this shape is answered by the leg
+        # beside it, not here (`#13788`): threading `alias_keys` in was measured REDUNDANT —
+        # reverting it alone flipped no verdict on 129 spellings, because
+        # `_comprehension_source_pairs_the_property_with_a_value` already answers
+        # `{k: v for k, v, _z in [(key, vec, 1)]}`, `.copy()` included. An arm no fixture can
+        # redden is the defect this file's doctrine removes, so it is not kept looking
+        # load-bearing.
+        if (isinstance(first, ast.Constant) and first.value == EMBEDDING_PROPERTY
                 and not isinstance(second, ast.Constant)):
             return True
     return False
@@ -3073,6 +3080,18 @@ def _mutator_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -
        who trusted it concluded computed keys were uniformly residual, which is exactly the
        excuse the mapping-literal hole needed.
 
+    5. **A KEY EXPRESSION THAT FOLDS TO THE PROPERTY** — `("embedding" if _f() else "y")`,
+       `("embedding" or "y")`, `(w := "embedding")` — in every channel, literal, alias or
+       keyword (measured at `10796bf7f`: all CERTIFIED, each runtime-checked to leave
+       `props["embedding"]`). ⛔ DISCLOSED RATHER THAN HALF-FIXED: the key rule is asked from
+       BOTH arms and `_dict_stores_the_vector`'s direct test carries no polarity, so resolving
+       the folding wrappers there flipped NINE mirror-arm spellings REFUSED -> GATED (measured
+       by the VGATE on the round-3 draft). Closing it needs a stop-arm polarity threaded
+       through every rule that can reach a key; that is a change of its own, and the mirror-arm
+       widening is the one outcome this file forbids. A NAME bound to the property (directly or
+       through another name) IS answered — that is the alias arm, and `alias_keys` is empty on
+       the mirror arm, which is what makes it safe.
+
     ⛔ WHAT IS *NOT* A RESIDUAL ANY MORE: a store reached through a HELPER ARGUMENT
     (`_set(props, "embedding", vec)`) used to be listed here as "indistinguishable from
     `_read(props, "embedding")`". That was false — the two differ in ARITY and in the
@@ -3256,14 +3275,45 @@ def _property_alias_names(scope) -> frozenset[str]:
         return frozenset()
     nodes = ([leaf for statement in getattr(scope, "body", ()) for leaf in _own_walk(statement)]
              if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef) else list(_own_walk(scope)))
-    return frozenset(
+    # ⛔ AND THE ALIAS SET IS CLOSED OVER ITS OWN NAMES (`#13788` F19, measured at
+    # `10796bf7f`): collecting only `x = <Constant>` missed the SECOND hop, so with
+    # `key = "embedding"` and `also = key` in the writer, every channel answered about `also`
+    # CERTIFIED while the same spellings through `key` were refused — the binding is still
+    # static, still a local assigned IN THIS SCOPE, so nothing about the precision argument
+    # changes. Measured 7/7 channels (`update`/`|=`/`=`/`**`/subscript/dict-comp/pairs) plus
+    # `annassign`, tuple-unpack (`a, b = key, 1`) and a 2-hop chain.
+    alias_names: set[str] = {
         target.id
         for sub in nodes
         if isinstance(sub, ast.Assign | ast.AnnAssign)
         and isinstance(sub.value, ast.Constant) and sub.value.value == EMBEDDING_PROPERTY
         for target in (sub.targets if isinstance(sub, ast.Assign) else [sub.target])
         if isinstance(target, ast.Name)
-    )
+    }
+    # …and every name ASSIGNED one of them (fixpoint, so `a = b = key` lands too). A tuple
+    # unpack whose value is the name is NOT followed — `a, b = key, 1` binds the CONSTANT to
+    # the first target, which is a different (and still static) read; it is answered below.
+    changed = True
+    while changed:
+        changed = False
+        for sub in nodes:
+            if not isinstance(sub, ast.Assign | ast.AnnAssign):
+                continue
+            targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+            targets = [target for target in targets if isinstance(target, ast.Name)]
+            if not targets:
+                continue
+            value = sub.value
+            binds_alias = (
+                (isinstance(value, ast.Name) and value.id in alias_names)
+                or (isinstance(sub, ast.Assign) and isinstance(value, ast.Tuple | ast.List)
+                    and any(isinstance(element, ast.Name) and element.id in alias_names
+                            for element in value.elts)))
+            for target in targets:
+                if binds_alias and target.id not in alias_names:
+                    alias_names.add(target.id)
+                    changed = True
+    return frozenset(alias_names)
 
 
 def _dict_comp_keyed_by_alias(node, alias_keys: frozenset[str]) -> bool:
@@ -3280,7 +3330,9 @@ def _dict_comp_keyed_by_alias(node, alias_keys: frozenset[str]) -> bool:
 
     if not isinstance(node, ast.DictComp) or not alias_keys:
         return False
-    return (isinstance(node.key, ast.Name) and node.key.id in alias_keys
+    # ⛔ AND THE COMPREHENSION'S KEY IS THE ONE KEY RULE (`#13788`, alias arm only — the same
+    # withdrawal as `_names_property_key` documents).
+    return (_names_property_key(node.key, alias_keys)
             and not isinstance(node.value, ast.Constant))
 
 
@@ -3288,9 +3340,12 @@ def _keyed_by_alias(target, alias_keys: frozenset[str]) -> bool:
     """Is this assignment target a SUBSCRIPT keyed by a name bound to the property string?"""
     import ast
 
+    # ⛔ THE SUBSCRIPT'S KEY ASKS THE ONE KEY RULE (`#13788`): a NAME bound to the property.
+    # A literal subscript is answered by `_names_embedding` beside this arm. A key EXPRESSION
+    # that FOLDS to the property is NOT answered here — see `_names_property_key` on why the
+    # folding arm was withdrawn rather than half-fixed (it widened the mirror arm).
     return (isinstance(target, ast.Subscript)
-            and isinstance(target.slice, ast.Name)
-            and target.slice.id in alias_keys)
+            and _names_property_key(target.slice, alias_keys))
 
 
 def _mapping_argument_stores_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
@@ -3363,6 +3418,17 @@ def _names_property_key(node, alias_keys: frozenset[str]) -> bool:
     """
     import ast
 
+    # ⛔ A KEY EXPRESSION THAT FOLDS TO THE PROPERTY IS **NOT** ANSWERED HERE, AND THAT IS A
+    # MEASURED DECISION, not an omission (`#13788`). Resolving the folding wrappers
+    # (`("embedding" if _f() else "y")`, `("embedding" or "y")`, `(w := "embedding")`) was
+    # written, and the VGATE measured it WIDENING the destructive gate: this rule is asked from
+    # BOTH arms, and `_dict_stores_the_vector`'s direct key test is deliberately asked without a
+    # polarity (a literal in an arm is a store either way), so the recognition flipped NINE
+    # mirror-arm spellings REFUSED -> GATED — the one direction this file forbids. Gating it
+    # needs a stop-arm polarity threaded through every rule that can reach a key, which is a
+    # change of its own; until then the gap is DISCLOSED (residual #5 of
+    # `_mutator_stores_the_vector`) instead of half-fixed. The alias arm below is safe because
+    # `alias_keys` is EMPTY on the mirror arm — the polarity is already in the argument.
     return ((isinstance(node, ast.Constant) and node.value == EMBEDDING_PROPERTY)
             or (isinstance(node, ast.Name) and node.id in alias_keys))
 

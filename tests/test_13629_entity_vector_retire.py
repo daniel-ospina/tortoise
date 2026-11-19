@@ -6432,6 +6432,44 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE ALIAS SET IS CLOSED OVER ITS OWN NAMES (`#13788` F19, measured at
+        # `10796bf7f`): collecting only `x = <Constant>` answered about the SECOND hop — with
+        # `key = "embedding"` and `also = key` bound in the writer, every channel below
+        # CERTIFIED while the same spellings through `key` were refused (each runtime-checked
+        # to leave `props["embedding"]`). The binding is still a static local of THIS scope.
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    also = key
+    if not _derived_mirror_required("object"):
+        props.update({also: _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    also = key
+    if not _derived_mirror_required("object"):
+        props[also] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    a = b = key
+    if not _derived_mirror_required("object"):
+        props |= {a: v for k, v in [("x", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        # ⚠️ A KEY EXPRESSION THAT FOLDS TO THE PROPERTY (`("embedding" if _f() else "y")`,
+        # `("embedding" or "y")`, `(w := "embedding")`) is a MEASURED, DISCLOSED false PASS —
+        # residual #5 of `_mutator_stores_the_vector` — not a row here. Resolving it in the key
+        # rule flipped NINE mirror-arm spellings REFUSED -> GATED (VGATE, round 3): the rule is
+        # asked from both arms and the direct dict test carries no polarity. A row for it would
+        # be a row only the stop arm refuses, which is what made the widening invisible.
 
         # ⛔ AND THE SPLICE MUST KEEP THE ARGUMENT POSITION (`#13788`, measured at `fbcbf152`).
         # `_spliced_sequence_elements` unions every option, which is right for "is there a store
