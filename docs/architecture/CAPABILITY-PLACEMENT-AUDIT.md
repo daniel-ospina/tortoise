@@ -126,8 +126,10 @@ above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
 `cache_projection.py` `:2485`, `:2542`, `:2714`, `:2714-2715`, `:2724-2726`, `:2776`, `:3841` and
 `projection/entities.py` `:5666` — **eight addresses that open at `main` and not at the pin** ⚠️ **and
-they are listed at the head the PINS read — this branch's integration head `2c1065a52e`, which is also
-the working tree — NOT at `ae54df166d`.** `#13494` re-derived them ON the tree so that each one's
+they are listed at the head the PINS read — this branch's integration head `2c1065a52e` — NOT at
+`ae54df166d`, and ⛔ NOT at "the working tree": the working tree moves with every commit on top
+(this one did), which is the head-bound-locator class this row's own thesis forbids — re-read the
+list at the head being merged** `#13494` re-derived them ON the tree so that each one's
 `content` could be pinned there; the `#13124` review had measured them at `ae54df166d`, which is why
 the `ae54df166d` values this paragraph goes on to quote (`:2720` / `:2715`, `:3837` / `:3834`) are not
 the addresses in this list. (measured,
@@ -137,8 +139,9 @@ pin's `:3732` — and that pair reads `:3837` / `:3834` at `main`, where the `ca
 pin's `:3633`); the pin's `:2715` is `if k not in tail_denied})` — the `tail_denied = forbidden | {` this
 document quotes is the pin's `:2710` — and `main` holds those two at `:2720` / `:2715`; and
 `projection/entities.py` `:5666` is a comment at the pin AND at `main` (the
-`s.summary=coalesce($summary, s.summary, '')` write sits at `:5598` there and `:5646` at `main`) and is
-the write on this tree — ⛔ every number in this clause was taken with `grep -n` on the tree that names
+`s.summary=coalesce($summary, s.summary, '')` write sits at `:5598` there and `:5646` at `main`); on
+the head being merged that write is at `:5722` — re-derived here by content
+(`grep -n 's.summary=coalesce' tortoise/projection/entities.py`), never carried from this sentence — ⛔ every number in this clause was taken with `grep -n` on the tree that names
 it, never by applying a delta: the two states are DIFFERENT files at DIFFERENT offsets, so a single shift
 cannot describe the pair, and one applied here is what turns a pin-side description into a false one).
 Five of the eight are already asserted at `main` by `_PINS` in `tests/test_12184_shifted_cites.py`, and the
