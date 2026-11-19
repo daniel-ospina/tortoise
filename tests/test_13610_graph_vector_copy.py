@@ -703,7 +703,8 @@ def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
     fully backfilled one, so *"the record caught up"* was a finding the count never
     established. `tools/claim_dense_leg_13732.py` met it first — an unseeded
     population PASSES this gate and is then served as `mechanism=pgvector,
-    reason=ok`.
+    reason=empty_results` — the SAME token a backfilled label answering the same
+    empty read records, which is why the instrument could not tell the two apart.
 
     ⛔ `verified` STAYS TRUE, deliberately: with nothing in either store the two
     stores answer identically, so refusing would change deployment behaviour for a
@@ -882,16 +883,50 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
     data — but every SHIPPED consumer branches on `verdict.verified` alone, and the
     serve gate logged its `reason` only in the DECLINE branch, which a verified
     verdict never reaches. So on the tree before this case, a label holding nothing
-    in either store served an EMPTY cohort as `mechanism=pgvector, reason=ok` and
-    nothing in any trace told it apart from a backfilled label answering the same
-    read — the state #13798 exists to make tellable was tellable only to a reader
-    who already had the object in hand.
+    in either store served an EMPTY cohort as `mechanism=pgvector,
+    reason=empty_results` — the SAME token a backfilled label answering the same
+    read records, so nothing in any trace told the two apart. The sealed-empty arm
+    already recorded `empty_results`/`degraded=False` (`search_engine.py:4176-4178`),
+    so the indistinguishability was never a different token: one token covers both
+    states, and no line said WHICH. The state #13798 exists to make tellable was
+    tellable only to a reader who already had the object in hand.
 
     ⛔ REDS if the marker is dropped (always-False `trivial` -> the line is never
     emitted), i.e. the same mutant as the zero-zero case, measured on the
     OBSERVABILITY surface rather than on the object. And it changes NO decision: the
     read still proceeds and still answers, because with both sides empty the two
     stores answer identically.
+
+    ⛔ "IT CHANGES NO DECISION" IS PINNED HERE, NOT ONLY ASSERTED IN PROSE. An
+    empty `rows` cannot carry that claim on its own: `run_vector_query` returns
+    ``[]`` from the SERVED path (`mechanism=pgvector`, `reason=empty_results`,
+    `degraded=False` — `search_engine.py:4176-4178`) AND from a DECLINE that has NO
+    fallback leg to announce (`search_engine.py:4153-4155`: `mechanism=pgvector`,
+    `reason=query_failed`, `degraded=True`, `return []` — the post-contract arm where
+    the graph is not a fallback and is never asked). A mutant that raises
+    `RecordVectorDeclined` *after* the marker's debug line therefore keeps
+    `rows == []` and both caplog assertions green — the half of #13798's mandate
+    that says the marker must not turn a serve into a refusal was asserted in prose
+    and pinned by nothing. The trace is the evidence that separates them, and this
+    file already reads it that way for the non-trivial case
+    (`test_a_contracted_empty_answer_is_the_answer`, `:445-449`).
+
+    ⛔ WHAT EACH ASSERTION ACTUALLY HOLDS — measured BOTH ways, because the
+    intuitive reading of this pin is wrong and whoever reproduces the mutation will
+    otherwise infer grip it does not have. Two decline shapes were injected after the
+    marker's debug line, each run once with the graph assertion suppressed and once
+    with the trace trio suppressed:
+
+      * `graph.queries == []` catches ONLY the ESCAPING decline — a raise that
+        leaves the leg, so the graph IS asked (`mechanism=scan_fallback`,
+        `degraded=True`, `reason=no_embeddings`). It stays GREEN over an in-leg
+        decline, which never asks the graph at all.
+      * the trace trio catches BOTH shapes: the escaped one above, and the in-leg one
+        (`mechanism=pgvector`, `degraded=True`, `reason=query_failed`).
+
+    So the trio is the load-bearing set, and `graph.queries == []` is still not
+    redundant with it: it pins a property the trace cannot report at all — that no
+    work was spent on the graph for a cohort known empty on both sides.
     """
     import logging
 
@@ -899,13 +934,23 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
     _stub_record(monkeypatch, count=0, rows=[])
 
     with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
-        rows, _graph, _trace = _run(_searcher(0), entity_type="object")
+        rows, graph, trace = _run(_searcher(0), entity_type="object")
 
     assert rows == [], rows
+    assert graph.queries == [], (
+        "a trivially-verified read asked the graph — with both sides empty the two "
+        f"stores answer identically, so nothing may be spent on the graph: {graph.queries}")
+    assert trace[-1]["mechanism"] == "pgvector", trace
+    assert trace[-1]["degraded"] is False, (
+        "the trivial marker turned a SERVE into a DEGRADED/declined read — that is "
+        f"the one behaviour #13798 forbids changing: {trace}")
+    assert trace[-1]["reason"] == "empty_results", (
+        "the read did not take the record's healthy empty answer, so `rows == []` "
+        f"is not evidence that anything was served: {trace}")
     assert "TRIVIALLY" in caplog.text, (
         "a trivially-verified label served an empty cohort with nothing in the trace "
-        "saying why — `mechanism=pgvector, reason=ok` is then indistinguishable from "
-        f"a catch-up: {caplog.text!r}")
+        "saying why — `mechanism=pgvector, reason=empty_results` is then "
+        f"indistinguishable from a catch-up: {caplog.text!r}")
     assert "BOTH SIDES ARE EMPTY" in caplog.text, (
         f"the trace names the state but not its evidence: {caplog.text!r}")
 
