@@ -2270,11 +2270,36 @@ def searcher(
                 # DECIDES NOTHING: the read proceeds exactly as before, because with
                 # both sides empty the two stores answer identically (which is why
                 # the two-zero case is marked rather than refused).
+                #
+                # ⛔ IT REPORTS THE MEASUREMENT, NOT THE READ (#13798 review). The
+                # zeros are the ones the verdict was TAKEN with, so the sentence
+                # must not claim what this read sees, and it is emitted BEFORE
+                # `vector_search` below. A trivial verdict is cached stickily
+                # (`_cached_coverage` never expires a verified one) while
+                # `mirror_required` gates only the GRAPH copy — the RECORD keeps
+                # writing its vector (`record_writer.derived_embedding_columns`,
+                # #13220) — so a label verified trivially and then populated has a
+                # stale `trivial=True` over a record that now HOLDS a vector, and
+                # the next dense read legitimately returns that row. A line saying
+                # `this read is empty because the POPULATION is empty` would then
+                # report the opposite of what the read did, in the one place the
+                # marker exists to be legible.
+                #
+                # ⛔ AND IT RENDERS THE COUNTS FROM THE FIELDS, NOT FROM
+                # `verdict.reason` (second review cycle). `reason` is authored at
+                # MEASUREMENT time and is PRESENT tense — "the record holds 0
+                # vector(s)" — so interpolating it here re-introduces exactly the
+                # stale claim this line exists to avoid, one clause earlier and
+                # ahead of any qualifier. `reason` is also shared with the decline
+                # branch and `as_dict()`, so the fix is to stop re-using it, not to
+                # re-tense it: the counts are on the verdict, in past tense.
                 logging.getLogger(LOG_NAME).debug(
-                    "record dense leg: `%s` coverage is verified TRIVIALLY (%s) — "
-                    "the record holds no vector for this label and neither did the "
-                    "graph, so this read is empty because the POPULATION is empty",
-                    entity_type, verdict.reason)
+                    "record dense leg: `%s` coverage is verified TRIVIALLY — as "
+                    "measured then, the record held %s vector(s) for this label "
+                    "and the graph served %s, so the pass is VACUOUS; a verified "
+                    "verdict is cached and never re-measured, so it says nothing "
+                    "about the population THIS read sees",
+                    entity_type, verdict.record_vectors, verdict.graph_vectors)
             # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
             # whose fold actually stops writing has a graph worth refusing.
             contracted = entity_type in MIRROR_RETIRED_LABELS
