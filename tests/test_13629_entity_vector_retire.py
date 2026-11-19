@@ -2763,6 +2763,13 @@ def test_a_swallowed_exit_does_not_certify_the_arm(tmp_path, monkeypatch):
     Mutation: put the exit arm back on `_unconditional_walk` (i.e. delete the swallowable
     filter) and the first two cases below go `True`, reddening this test; the accepted
     cases at the end are what keeps the fix from being an inert enforcer.
+
+    ⛔ AND THE SWALLOWING CONSTRUCT NEED NOT BE *INSIDE* THE GUARD. The exit arm starts its
+    descent at a statement of the guard's own body, so a `try`/`with` that ENCLOSES the
+    guard was invisible to it — the same fail-OPEN one level up, measured GATED at
+    `97e1b9e2` and closed by `_swallowed_from_outside`. Mutation: delete the
+    `swallowable=_swallowed_from_outside(...)` seed and the two ancestor cases below go
+    `True`.
     """
     refused = (
         WRITER_SWALLOWED_EXIT,
@@ -2792,6 +2799,27 @@ def _upsert_object(ev):
     props["embedding"] = _encode(ev)
     return _write(ev)
 """,
+        # ⛔ AND THE SWALLOW CAN ENCLOSE THE GUARD — a `try` above it (the shape a
+        # function-level wrapper takes, e.g. `hosted_backup::restore_graph`) or a `with`.
+        # The exit arm never sees these: it starts inside the guard body.
+        """
+def _upsert_object(ev):
+    try:
+        if not _derived_mirror_required("object"):
+            raise _Skip()
+    except Exception:
+        _log(ev)
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+""",
+        """
+def _upsert_object(ev):
+    with suppress(Exception):
+        if not _derived_mirror_required("object"):
+            raise _Skip()
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+""",
     )
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -2799,8 +2827,9 @@ def _upsert_object(ev):
         assert gated is False, f"a SWALLOWED exit certified the arm: {source!r} ({why})"
 
     # ⛔ AND A `return` IS NEVER SWALLOWED, nor is a raise nothing can catch: `try/finally`
-    # has no handlers, and its `finally` cannot cancel the propagation. Those must still
-    # certify, or the gate would be permanently shut.
+    # has no handlers, and its `finally` cannot cancel the propagation — while an enclosing
+    # `try` cannot catch a raise placed in its OWN handler. Those must still certify, or the
+    # gate would be permanently shut.
     accepted = (
         """
 def _upsert_object(ev):
@@ -2809,6 +2838,28 @@ def _upsert_object(ev):
             raise _Skip()
         finally:
             _note(ev)
+    return _write(ev)
+""",
+        # ⛔ AN ENCLOSING `try/finally` CANNOT CATCH, and an enclosing `try`'s HANDLER is
+        # the one position in that `try` its own handlers never see — both are genuine
+        # exits, so refusing them would be the inert-enforcer direction of the same fix.
+        """
+def _upsert_object(ev):
+    try:
+        if not _derived_mirror_required("object"):
+            raise _Skip()
+    finally:
+        _note(ev)
+    return _write(ev)
+""",
+        """
+def _upsert_object(ev):
+    try:
+        _prep(ev)
+    except Exception:
+        if not _derived_mirror_required("object"):
+            raise _Skip()
+    props["embedding"] = _encode(ev)
     return _write(ev)
 """,
         """

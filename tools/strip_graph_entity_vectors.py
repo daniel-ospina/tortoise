@@ -413,17 +413,23 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
        runtime-false condition this check cannot evaluate is likewise not counted; an
        arm's STORE/REMOVE is counted only where it is UNCONDITIONALLY reached
        (`_unconditional_walk`); and an EXIT is counted only where it is unconditionally
-       reached AND can actually leave the function (`_unconditional_exits`), so
-       `if not gate(l): if DEBUG: raise` and a `raise` a `try` handler or a context
-       manager can swallow are unproven rather than certified. The REACHABLE `else` of a
-       constant-tested `if` is kept. A condition this check cannot decide is answered
-       "unproven", which leaves the destructive strip refused.
-    4. **Two shapes are refused rather than resolved, deliberately** — a store reached
+       reached AND a raise there can actually LEAVE the function — a raise a `try`
+       handler or a context manager can swallow is unproven, whether that `try`/`with`
+       sits INSIDE the guard body (`_unconditional_exits`) or ENCLOSES the guard
+       (`_swallowed_from_outside`). So `if not gate(l): if DEBUG: raise`,
+       `try: raise … except Exception: pass` around it, and `with suppress(…): raise` are
+       unproven rather than certified. The REACHABLE `else` of a constant-tested `if` is
+       kept. A condition this check cannot decide is answered "unproven", which leaves
+       the destructive strip refused.
+    4. **Three shapes are refused rather than resolved, deliberately** — a store reached
        through a helper ARGUMENT (`_set(e, embedding)`, indistinguishable from
-       `print(embedding)` at this level) and a store behind a LOCAL ALIAS
-       (`gate = mirror_required; if gate(...)`). Both fail closed: refusing them costs a
-       refactor (`embedding = …`, or call the gate directly), and failing open costs the
-       data.
+       `print(embedding)` at this level), a store behind a LOCAL ALIAS
+       (`gate = mirror_required; if gate(...)`), and a stop raise inside a `with` whose
+       manager would in fact PROPAGATE (`with _TRACE.span("skip"): raise _Skip()`): a
+       manager's ``__exit__`` cannot be told apart from one that suppresses, so it is an
+       unproven exit and the writer is refused. All three fail closed: refusing them costs
+       a refactor (`embedding = …`, spell the gate out, `return` instead of `raise`), and
+       failing open costs the data.
 
     ⛔ A RETURNED VALUE IS NOT ACCEPTED, even when it is the gate's own answer.
     ``self._write(ev); return mirror_required("object")``, ``return (self._write(ev),
@@ -445,6 +451,13 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     rather than a strip.
     """
     wanted = set(entity_types)
+    import ast
+
+    # ⛔ A GUARD'S ANCESTRY IS PART OF THE QUESTION, and `_reachable_ifs` yields the guard
+    # without it: a `try`/`with` ABOVE the guard can swallow the raise the guard body
+    # relies on (see `_swallowed_from_outside`). Parent links are built once, not per `if`.
+    parents = {child: parent for parent in ast.walk(node)
+               for child in ast.iter_child_nodes(parent)}
     for sub in _reachable_ifs(node):
         if _statically_falsy(sub.test):
             continue                          # `if False:` / `if not True:` — dead
@@ -485,7 +498,10 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # that stored unconditionally (round-9 F1, measured at `1cc61230`: GATED).
         if polarity < 0 and any(_is_write_stop_exit(statement)
                                 for statement in sub.body
-                                for statement in _unconditional_exits(statement)):
+                                for statement in _unconditional_exits(
+                                    statement,
+                                    swallowable=_swallowed_from_outside(
+                                        node, sub, parents))):
             return True
         # ⛔ THE POLARITY DECIDES WHICH BODY IS A WRITE-STOP, and getting this wrong in
         # either direction is a defect that was measured:
@@ -596,7 +612,48 @@ def _unconditional_walk(node):
         yield sub
 
 
-def _unconditional_exits(node):
+def _swallowed_from_outside(function, guard, parents) -> bool:
+    """Does a `try`-with-handlers or a `with` ENCLOSE this guard?
+
+    ⛔ THE SAME QUESTION ONE LEVEL UP, and the walk below cannot answer it: the exit arm
+    starts its descent at a statement of the guard's OWN body, so every construct ABOVE the
+    guard is invisible to it. An enclosing wrapper swallows a raise exactly as a nested one
+    does:
+
+        try:
+            if not _derived_mirror_required("object"):
+                raise _Skip()            # caught by the handler below → does NOT exit
+        except Exception:
+            _log(ev)
+        props["embedding"] = _encode(ev) # runs unconditionally
+
+    and its `with suppress(...)` mirror. Both were certified GATED at `97e1b9e2` (measured),
+    i.e. round-9 F1 survived one level up from the fix that closed it below.
+
+    Only two positions can catch a raise PROPAGATING OUT of the guard: a `try`'s BODY (its
+    `orelse`, `finally` and `handlers` cannot catch their own try's raise) and a
+    `with`/`async with` BODY (its ``__exit__`` sees everything propagating out of it).
+    Everything else on the path — `if`, `for`, `while`, `match`, a `finally` — is
+    transparent, so the walk continues upward; a nested scope ends it.
+    """
+    import ast
+
+    child = guard
+    parent = parents.get(child)
+    while parent is not None and parent is not function:
+        if isinstance(parent, ast.Try | getattr(ast, "TryStar", ast.Try)):
+            if parent.handlers and child in parent.body:
+                return True
+        elif isinstance(parent, ast.With | ast.AsyncWith) and child in parent.body:
+            return True
+        elif isinstance(parent, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+                        | ast.ClassDef):
+            return False                      # a nested scope: the raise never reaches here
+        child, parent = parent, parents.get(parent)
+    return False
+
+
+def _unconditional_exits(node, *, swallowable: bool = False):
     """`_unconditional_walk`, minus the `raise`s that are only *maybe* an exit.
 
     ⛔ A `raise` IS NOT AN EXIT IF SOMETHING CATCHES IT, and `_is_write_stop_exit` answers
@@ -625,16 +682,19 @@ def _unconditional_exits(node):
     `try`/`finally` (no handlers) or in the `finally` body still propagates, so it still
     certifies. Both directions are pinned by
     `test_a_swallowed_exit_does_not_certify_the_arm`.
+
+    ``swallowable`` seeds the walk for the one case it cannot see from inside: a `try`/`with`
+    that ENCLOSES the guard (`_swallowed_from_outside`).
     """
     import ast
 
-    for sub, swallowable in _unconditional_nodes(node):
-        if swallowable and isinstance(sub, ast.Raise):
+    for sub, flag in _unconditional_nodes(node, swallowable=swallowable):
+        if flag and isinstance(sub, ast.Raise):
             continue
         yield sub
 
 
-def _unconditional_nodes(node):
+def _unconditional_nodes(node, *, swallowable: bool = False):
     """`_own_walk`, but a NESTED CONDITIONAL is not evidence — only what always runs is.
 
     Yields ``(node, swallowable)``: ``swallowable`` is True where an exception raised at
@@ -680,7 +740,7 @@ def _unconditional_nodes(node):
     """
     import ast
 
-    stack: list[tuple] = [(node, False)]
+    stack: list[tuple] = [(node, swallowable)]
     while stack:
         current, swallowable = stack.pop()
         yield current, swallowable
