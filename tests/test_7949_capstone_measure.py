@@ -6586,7 +6586,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # START is again confirmed by structure rather than by a bumped number:
         # ⛔ RE-DERIVED ONCE MORE at the rebase onto `origin/main` `09f5c99afd` (`#13824`):
         # `main`'s `c3309ec656` (`#13674`/`#13819`, the embedder's `/health` block) inserts 67 lines
-        # above `org_info` and removes 1 (`:8379`), so the span moves by a uniform +66 and is
+        # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
+        # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
+        # further down), so the span moves by a uniform +66 and is
         # `:15328-15405` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15328`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15405`, with the call at `:15406`).
@@ -16746,16 +16748,19 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
 
     # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while that file is NOT in this diff at all
-    # (`git diff --name-only origin/main...HEAD -- …/04-plan.md` is EMPTY, measured at this
-    # head — and so is its `--numstat`, so NO pair here is this diff's) and the document's own row reads
-    # `sdk.py:28718`. A phrase-only assertion was green over that,
+    # re-point — `sdk.py:28559` → `:28592`", while at THAT head the file was not in the diff at
+    # all (`git diff --name-only origin/main...HEAD -- …/04-plan.md` was EMPTY there, and so was
+    # its `--numstat`) and the document's own row reads `sdk.py:28718`. ⛔ THAT MEMBERSHIP IS NOT
+    # TYPED AS CURRENT, on purpose: `main`'s `#13819` later moved `hosted_api.py` by +66 and this
+    # branch re-derived the I7 range, which puts the file IN the diff — `git diff --numstat
+    # origin/main...HEAD -- …/04-plan.md` at the head you merge is the command, never this line.
+    # A phrase-only assertion was green over the old claim,
     # re-landed, and was green again: that is the class this pin exists to close. No count
     # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
     # ⛔ NO COUNT IS ASSERTED, IN EITHER DIRECTION (#13750 review, cycle 3 — MEASURED).
     # This arm used to forbid the phrases "carries TWO numeric re-points" / "carries ONE
     # numeric re-point" while its own message asserted FOUR, and both were wrong at the
-    # next head: that file is not in the diff at all (`--numstat` EMPTY, measured), and of
+    # next head: that file was not in the diff THERE (`--numstat` EMPTY at that head), and of
     # the four pairs the message listed only one had ever been this diff's
     # (two already read that way on `origin/main`, one named `:28607` where the base reads
     # `:28682`, and the range's TARGET was typed as the base's own value). A count in
@@ -16769,8 +16774,9 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "figure and this arm has already been wrong in both directions; name the "
             "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
             "`:15262-15339` -> `:15328-15405`), which the document CARRIES at this head — "
-            "and note the file itself is NOT in this diff (`--numstat` empty), so no pair "
-            "here is this diff's (#13750 review, cycle 3; #13746 review round 2, finding 6)")
+            "and whether that file sits in the diff is `git diff --numstat"
+            " origin/main...HEAD` at the head you merge, never a claim typed here "
+            "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
     for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15328-15405`"):
         assert _pair in text, (
             f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
