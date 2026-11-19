@@ -28,7 +28,22 @@ those are what this file measures:
          `_create_entity` call it lands on. That is the only seam that can catch an arm
          routing `type="subject"` to an OBJECT write, or one that drops the
          `props`-carried kind the pointer advertises — a check against the
-         `_ENTITY_ITEM_LABELS` constant alone leaves both green (#13052 review F3).
+         `_ENTITY_ITEM_LABELS` constant alone leaves both green (#13052 review F3);
+       · the four doors lane P6 retired are TWO shapes, and neither is either of those.
+         The `rest_spec` pair (`issue_insight`, `session_context`) is substituted at
+         their container's own METHOD (`issue_insight` / `session_context`), reached
+         through the kept door's keyword discriminator —
+         `tortoise_search_knowledge(mode="issue_insight")` /
+         `tortoise_check_confidence(session=True)`; the DELETE pair is a different seam
+         again — `tortoise_delete` is ONE kept entry whose LABEL dispatch must route a
+         Point to `delete_point` and anything else to `delete_entity`, so the recorder
+         sits on the per-label METHOD, and the pointer's `dry_run=True` is the
+         preview-then-confirm SELECTOR (a bare `tortoise_delete(id)` is a PREVIEW, not a
+         delete) — measuring the entry alone would read green for a routing that deletes
+         the wrong kind.
+
+     THREE + SIX + FOUR = THIRTEEN, and each group is a different seam: the counts above
+     are the table's, not a second tally kept in prose.
 
 ⛔ AND THE HALF THAT IS A RECORDED DECISION, NOT A CHOICE THIS FILE MAKES
 -----------------------------------------------------------------------
@@ -305,6 +320,24 @@ _POINTER_TARGET = re.compile(r"^([A-Za-z0-9_]+)")
 
 
 class TestTheWaveIsRetiredForward:
+    def test_the_table_holds_the_thirteen_doors_the_prose_names(self):
+        """The count this file's own prose states is PINNED, so it cannot rot silently.
+
+        ⛔ WHY A COUNT PIN AND NOT JUST THE PROSE (#13651 review F2). Every other
+        assertion in this file is parametrized OVER the table, so the table's SIZE was
+        read by nothing: the module docstring says "ALL THIRTEEN" and
+        `TestProtectedDoorsStayLive` subtracts four pairs from 25, and either sentence
+        would have stayed green through a door being added or dropped. That is the same
+        defect class as a count chain naming the wrong set — the prose reads verified
+        while nothing checks it. The shapes in the docstring are 3 + 6 + 4, so a door
+        joining or leaving the wave moves this pin in the change that does it.
+        """
+        assert len(RETIRED_THIS_WAVE) == 13, (
+            f"RETIRED_THIS_WAVE holds {len(RETIRED_THIS_WAVE)} doors, not the THIRTEEN "
+            "this wave's prose enumerates (3 read + 6 on `create_entity` + 4 in lane "
+            "P6) — a door added or dropped moves the count AND its shapes paragraph in "
+            "the same change, not silently")
+
     @pytest.mark.parametrize("name", sorted(RETIRED_THIS_WAVE))
     def test_the_door_left_the_advertised_surface(self, name):
         live = _live()
@@ -733,10 +766,12 @@ class TestProtectedDoorsStayLive:
     ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
     named 25 live doors off the 27-target; TWO of them (`create_point`, `diary_write`) were
     retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO more
+    (`compute_confidence`, `recall`) by #11609 lane P2 (#13550) in the change that gave
+    `check_confidence` its `recompute=True` / `recall=True` arms, TWO more
     (`issue_insight`, `session_context`) by lane P6 in the change that acted on P4's
-    measurement that their `rest_spec` reason was false, and TWO more (`delete_point`,
+    measurement that their `rest_spec` reason was false, and the last TWO (`delete_point`,
     `delete_entity`) by that same lane on the #9660 ruling that KEEPS `tortoise_delete`
-    and widens it, so the population is 17 and TEN
+    and widens it: 25 − 2 − 2 − 2 − 2 = 17, so the population is 17 and TEN
     of them carry a retaining PROPERTY, and EVERY ONE is read back from the code below —
     none is a name that only appears in the `PROTECTED` dict,
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052
