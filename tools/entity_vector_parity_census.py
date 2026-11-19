@@ -270,15 +270,21 @@ class LabelCensus:
     def at_parity(self) -> bool:
         """Graph ⊆ record: every vector the graph holds is readable in the record.
 
-        ⛔ THREE CLAUSES, and the third is the one a set-difference cannot give you.
+        ⛔ FOUR CONDITIONS, and the last two are the ones a set-difference cannot give you.
         `graph_only` is computed as `set(graph_text) - set(record_readable)`, so it
         answers *"is every DISTINCT rendering answered"* — not *"is every NODE
         answered"*. With `:Object {id:123}` and `:Object {id:"123"}` the graph holds
         TWO vectors that render to one string, while the record's text-keyed column can
-        hold ONE readable row for it; the set difference is empty and the population is
-        not covered. `graph_vectors <= record_vectors` is the count-based statement of
-        the same invariant, kept alongside the collision bucket so neither can be
-        deleted without the other one reddening a falsifier.
+        hold ONE readable row for it: the set difference is empty and the population is
+        not covered. `render_collision` names that population and
+        `graph_vectors <= record_vectors` states the same invariant as a count, so
+        neither the bucket nor the count can be deleted without reddening a falsifier.
+
+        ⛔ AND THE COUNT CLAUSE IS NOT REDUNDANT WITH THE BUCKET FOR A DIRECTLY
+        CONSTRUCTED ROW. `census()` counts the collision into `graph_only` as well, so on
+        its own rows the two agree — but this class is also built by hand (and by a
+        future caller), and an invariant that only holds because one producer happens to
+        maintain another field is a coincidence, not a rule.
         """
         return (self.graph_only == 0 and self.unkeyed_graph_nodes == 0
                 and self.render_collision == 0
