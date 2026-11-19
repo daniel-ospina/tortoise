@@ -22,7 +22,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_execute_refuses_a_stale_plan_naming_the_delta` | the exact-set precondition | a population that moved between plan and execute is stripped anyway |
 | `test_execute_refuses_a_graph_only_node_and_removes_nothing` | the parity refusal is BEFORE the first write | the only copy of a fingerprint is removed, or removed before the refusal |
 | `test_execute_refuses_while_the_write_path_still_emits_vectors` | the write gate | a strip runs into a live writer and is silently undone |
-| `test_write_gate_is_fail_closed_when_the_symbol_is_absent` / `…raises` / `…cannot_be_imported` | fail-closed in every unknown | an unreadable gate reads as permission |
+| `test_write_gate_is_fail_closed_when_the_symbol_is_absent` / `…raises` / `…cannot_be_imported` | fail-closed in every unknown **of the gate read** (`record_vector.mirror_required`); the two unguarded reads below it — `tortoise.security`'s label map and `parity.affected_entity_types` — RAISE, and `parity.census` is what catches them | an unreadable gate reads as permission |
 | `test_write_gate_refuses_an_entity_type_with_no_declared_graph_label` | the `entity_type`→label mapping is the last refusal that can fire without a label | INVERT it and the arm itself certifies the unmapped type; DELETE it and certification comes from the steps below once those are forced (unforced they refuse one step further down, so only the forced half pins the arm) |
 | `test_label_write_gate_requires_every_entity_type_addressing_the_label` | `:Source` serves TWO types | a strip lands on the document half while `source` still writes |
 | `test_execute_strips_the_planned_set_and_reports_the_count` | the batched `REMOVE` | a partial strip reports a complete one |
@@ -511,7 +511,17 @@ def test_write_gate_is_fail_closed_when_the_gate_raises(monkeypatch):
 
 
 def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monkeypatch):
-    """⛔ THE THIRD UNKNOWN, and the one with no falsifier at all.
+    """⛔ THE THIRD UNKNOWN OF THE GATE READ, and the one with no falsifier at all.
+
+    ⛔ AND "EVERY UNKNOWN" MEANS EVERY UNKNOWN OF THE GATE READ, not of `write_gate`: two
+    reads BELOW it are unguarded and RAISE rather than answering `(True, …)` —
+    `from tortoise.security import ENTITY_TYPE_LABELS` (:1620) and
+    `parity.affected_entity_types(label)` via `_fold_consults_gate` (:1537) (measured: a
+    failed `tortoise.security` import raises `ModuleNotFoundError` out of `write_gate`).
+    That is still fail-closed for the retirement — a raise aborts the census and mints no
+    delete licence — but the net is the CALLER's, `tools/entity_vector_parity_census.py`
+    ("never let an unreadable gate pass"), and a falsifier for those two reads is a
+    follow-up, not this test.
 
     `write_gate` imports the MODULE inside its own `try` (so a failed import becomes a
     fail-closed answer instead of an `ImportError`) and resolves the SYMBOL by name outside
