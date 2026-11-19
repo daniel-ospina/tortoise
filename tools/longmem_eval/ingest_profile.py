@@ -66,6 +66,12 @@ from typing import Any
 from tortoise.sdk import TortoiseSDK
 
 from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
+from .stall_guard import (
+    DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S,
+    DEFAULT_EVAL_SOCKET_TIMEOUT_S,
+    ENV_SOCKET_CONNECT_TIMEOUT,
+    ENV_SOCKET_TIMEOUT,
+)
 
 #: Points per question on the real 500-Q S split (``haystack_overlap``'s
 #: census: 371,095 encode units / 500 questions) — the calibration target the
@@ -132,12 +138,34 @@ def _sdk(*, db_uri: str | None, namespace: str) -> tuple[TortoiseSDK, Any]:
         # That is the likeliest state on a smoke lane — tools/test_lane.py
         # exports exactly this variable.
         os.environ["TORTOISE_DB_URI"] = db_uri
+        # Socket-bound parity (review round 6). ``run_main`` wraps EVERY
+        # ``--db`` run in ``_temporary_env_var(ENV_SOCKET_TIMEOUT, ... or
+        # DEFAULT_EVAL_SOCKET_TIMEOUT_S)`` with the connect timeout beside it,
+        # and the multi-tenant read bound is otherwise the product default.
+        # On a smoke lane that exports only ``TORTOISE_DB_URI``
+        # (``tools/test_lane.py`` exports exactly that), omitting these leaves
+        # the profiler on a 12x tighter read bound than the run it claims to
+        # describe: one query past it raises ``redis TimeoutError`` and aborts
+        # a rung the real run tolerates — on precisely the contended host this
+        # module exists to measure. Same rule as the URI above: the lane's
+        # value wins if it set one, else the run's own default.
+        borrowed = {
+            "TORTOISE_DB_URI": prev,
+            ENV_SOCKET_TIMEOUT: os.environ.get(ENV_SOCKET_TIMEOUT),
+            ENV_SOCKET_CONNECT_TIMEOUT: os.environ.get(ENV_SOCKET_CONNECT_TIMEOUT),
+        }
+        os.environ[ENV_SOCKET_TIMEOUT] = (
+            borrowed[ENV_SOCKET_TIMEOUT] or str(DEFAULT_EVAL_SOCKET_TIMEOUT_S))
+        os.environ[ENV_SOCKET_CONNECT_TIMEOUT] = (
+            borrowed[ENV_SOCKET_CONNECT_TIMEOUT]
+            or str(DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S))
 
         def _cleanup():
-            if prev is None:
-                os.environ.pop("TORTOISE_DB_URI", None)
-            else:
-                os.environ["TORTOISE_DB_URI"] = prev
+            for name, val in borrowed.items():
+                if val is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = val
 
         return TortoiseSDK(namespace=namespace), _cleanup
     td = tempfile.TemporaryDirectory(prefix="lme-profile-")

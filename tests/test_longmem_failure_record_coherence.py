@@ -400,7 +400,14 @@ def test_error_detail_distinguishes_a_refused_query_from_a_dropped_graph():
 def test_error_detail_is_scrubbed_of_credentials():
     """The record is persisted and republished (``report.py`` passes
     ``failures`` through verbatim), so the detail goes through the product's
-    credential redactor: no password may survive."""
+    credential redactor.
+
+    What this pins is the SHAPES that redactor recognises — a connection-URL
+    password and an ``sk-`` key — not a blanket "no secret survives": it is
+    shape-based, so ``password=hunter2`` and an ``Authorization: Basic`` header
+    pass through untouched (measured). Please do not widen this claim without
+    widening the redactor first.
+    """
     exc = redis_exc.ResponseError(
         "connect failed for redis://user:s3cr3t-pw@db.internal:6379/0 and "
         f"key sk-{'a' * 40} rejected")

@@ -85,6 +85,62 @@ def test_the_named_db_wins_over_an_ambient_uri(monkeypatch):
         "cleanup must restore the ambient value it borrowed the variable from")
 
 
+def test_the_named_db_also_borrows_the_runs_socket_bound(monkeypatch):
+    """``--db`` must inherit the socket bound ``run_main`` gives a real run.
+
+    Review round 6: the profiler set only ``TORTOISE_DB_URI``, so on a lane
+    that exports that variable alone (``tools/test_lane.py``) it inherited the
+    PRODUCT read bound instead of the eval's, and a single query past it raised
+    ``redis TimeoutError`` and killed a rung — on the contended host this
+    module exists to measure. The parity is the whole justification for the
+    module, so it is pinned here rather than described.
+
+    Non-vacuity: drop the two ``os.environ`` assignments in ``_sdk``'s ``--db``
+    arm and the first two assertions red; stop restoring them in ``_cleanup``
+    and the last one reds.
+    """
+    from tools.longmem_eval.stall_guard import (
+        DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S,
+        DEFAULT_EVAL_SOCKET_TIMEOUT_S,
+        ENV_SOCKET_CONNECT_TIMEOUT,
+        ENV_SOCKET_TIMEOUT,
+    )
+
+    class _StubSDK:
+        def __init__(self, *_a, **_kw):
+            pass
+
+    monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
+    monkeypatch.delenv(ENV_SOCKET_TIMEOUT, raising=False)
+    monkeypatch.delenv(ENV_SOCKET_CONNECT_TIMEOUT, raising=False)
+
+    _, cleanup = prof._sdk(db_uri="docker://:pw@named:6379/want",
+                           namespace="profile-test")
+    assert os.environ[ENV_SOCKET_TIMEOUT] == str(DEFAULT_EVAL_SOCKET_TIMEOUT_S)
+    assert os.environ[ENV_SOCKET_CONNECT_TIMEOUT] == str(
+        DEFAULT_EVAL_SOCKET_CONNECT_TIMEOUT_S)
+    cleanup()
+    assert ENV_SOCKET_TIMEOUT not in os.environ
+    assert ENV_SOCKET_CONNECT_TIMEOUT not in os.environ
+
+
+def test_an_explicit_socket_bound_is_respected(monkeypatch):
+    """A lane that DID set the bound keeps it — parity is not an override."""
+    from tools.longmem_eval.stall_guard import ENV_SOCKET_TIMEOUT
+
+    class _StubSDK:
+        def __init__(self, *_a, **_kw):
+            pass
+
+    monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
+    monkeypatch.setenv(ENV_SOCKET_TIMEOUT, "45")
+    _, cleanup = prof._sdk(db_uri="docker://:pw@named:6379/want",
+                           namespace="profile-test")
+    assert os.environ[ENV_SOCKET_TIMEOUT] == "45"
+    cleanup()
+    assert os.environ[ENV_SOCKET_TIMEOUT] == "45"
+
+
 def test_the_evidence_turn_is_marked_once_per_question():
     """Turn/evidence denominators the ingest reports must be derivable from
     the fixture, so a shape change cannot quietly alter what it measures."""

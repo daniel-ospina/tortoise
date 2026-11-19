@@ -1406,17 +1406,32 @@ def _retry_failed_gate_ok(entry: dict) -> bool:
     return _retry_failed_skip_reason(entry) is None
 
 
+#: How much of a raw message is handed to the redactor. Truncating BEFORE the
+#: scrub keeps the cost bounded (measured: an 8 MB repr cost ~6.7 s inside
+#: ``flock_exclusive``, blocking every other worker's checkpoint write), and it
+#: cannot leak: the redactor only ever SHORTENS a span, so any credential fully
+#: visible in the stored ``ERROR_REPR_CAP``/``ERROR_DETAIL_CAP`` prefix also sits
+#: entirely inside this window — and a span straddling the cut is dropped whole
+#: by those same caps. Same order, one bound.
+SCRUB_INPUT_CAP = 64_000
+
+
 def _scrub(text: str) -> str:
     """The PRODUCT's credential redactor, applied to anything persisted.
 
     ``tortoise.security.redact_secrets`` replaces credential-shaped spans
     (connection-URL passwords, bearer/AWS/GitHub/``sk-`` keys) with
-    ``[REDACTED:<kind>]`` and leaves everything else byte-identical, so a
-    failure record can never be the thing that leaks a key.
+    ``[REDACTED:<kind>]`` and leaves everything else byte-identical. ⚠️ It is
+    SHAPE-based, so it is not a guarantee that no secret survives — measured:
+    ``password=hunter2``, ``token=abc123…`` and an ``Authorization: Basic …``
+    header all pass through untouched. What it buys is that the shapes this repo
+    actually emits (a connection URL, an API key) cannot reach a record that is
+    both persisted and republished; a caller with a wider secret surface still
+    owns that.
     """
     from tortoise.security import redact_secrets
 
-    scrubbed, _counts = redact_secrets(text)
+    scrubbed, _counts = redact_secrets(text[:SCRUB_INPUT_CAP])
     return scrubbed
 
 
