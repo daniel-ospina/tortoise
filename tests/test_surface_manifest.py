@@ -3073,8 +3073,11 @@ def test_the_provenance_record_lives_in_the_header_a_cut_re_emits():
 
     The block this pins was a per-row comment above the `tortoise_query` row. `yaml.safe_dump`
     carries no comments and `cut` re-emits only the header, so #13626's re-cut deleted all 53 of
-    its lines — including the file's ONLY copy of the `OVERRIDES:` departure from the
-    generated-artifact practice — and NOTHING reded, because no gate parses a comment. The
+    its lines — including the file's copy of the generated-artifact `OVERRIDES:` departure, ONE
+    OF THE FOUR the merge base `0d5bb6506` carried (that cut left three) — and NOTHING reded,
+    because no gate parses a comment. ⛔ It was NOT "the file's only copy" (#13687 review, cycle
+    2): a correction that overstates the loss is the same defect as the loss, one review later,
+    so the count is stated and the record beside the rows says the same thing. The
     header/committed equality test above cannot see that: it is green for any header, including a
     header that has lost the record.
 
