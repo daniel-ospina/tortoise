@@ -96,7 +96,7 @@ aggregate. Stated here, in R4 and in the runbook step.
     "$UNIT_DIR/$unit.d/10-restart-and-memory.conf"; sudo rmdir --ignore-fail-on-non-empty "$UNIT_DIR/$unit.d";
     [ -e "$UNIT_DIR/$unit.d/10-restart-and-memory.conf" ] && { say "WARNING: could not remove the drop-in for
     $unit — remove it by hand"; rc=3; }; }` — the `[ -d ]` guard is NOT what makes rc=3 unreachable, and
-    an earlier draft of this plan said otherwise: every path through the function ends in `return 0`
+    an earlier draft of this plan said otherwise: every path through the missing-`.d` case ends in `return 0`
     (measured — delete the guard and the uninstall still reports 0; delete the guard AND the
     `2>/dev/null || true` and it STILL reports 0), so the guard only saves a `sudo` on a target with
     nothing of ours, while `2>/dev/null || true` swallows `rmdir`'s ENOENT for a `.d/` that is already gone; and the verify step is

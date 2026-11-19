@@ -1244,8 +1244,8 @@ MemoryMax=8G
   burst still applies and the INTERVAL is silently ignored, leaving the 10 s default window — a guard that
   reads as configured and is not. Verify with `systemctl show -p StartLimitIntervalUSec`, never by reading
   the file back.
-- **`MemoryMax` bounds ONE unit and nothing else.** `MEM_PER_RUNNER_GB` is the box SIZING unit (`:1510`)
-  **and this bound's operand** (`:342`), so lowering it for headroom lowers a live cap too; `× CI_RUNNER_MEM_MAX_FACTOR` (default 4) is a per-unit cap, so a
+- **`MemoryMax` bounds ONE unit and nothing else.** `MEM_PER_RUNNER_GB` is the box SIZING unit (the
+  `mem_need_gb=` headroom arithmetic) **and this bound's operand** (the `MEM_MAX_GB=` assignment), so lowering it for headroom lowers a live cap too; `× CI_RUNNER_MEM_MAX_FACTOR` (default 4) is a per-unit cap, so a
   single runaway job dies inside its own cgroup instead of the kernel picking among co-tenants. Docker
   containers run in `docker-*.scope` — a SIBLING of the unit's cgroup — so they are **not** bounded by this
   key and the box-level arbiter still chooses. `CI_RUNNER_MEM_PER_RUNNER_GB=0` means "do not size from

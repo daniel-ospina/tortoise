@@ -420,11 +420,11 @@ write_unit_dropin() { # $1 = instance name, e.g. pi-runner-x64-1
 
 # Remove OUR drop-in only. ⛔ NEVER `rm -rf` the `.d` directory: other drop-ins may live there and
 # removing one is not this installer's decision (pi-cell-4 carries a hand-written `restart.conf` in
-# exactly that directory, which sorts AFTER `10-` and wins every shared key). ⚠️ NOTHING HERE MAKES
-# rc=3 REACHABLE — the terminal `return 0` below is what makes a clean uninstall report 0, and it
-# does so with or without the `[ -d ]` guard or `rmdir`'s `|| true` (measured: delete the guard and
-# this still returns 0; delete the guard AND the `|| true` and it STILL returns 0). The guard's real
-# benefit is narrower: a target with nothing of ours gets no `sudo` at all.
+# exactly that directory, which sorts AFTER `10-` and wins every shared key). ⚠️ NOTHING ON THE
+# MISSING-`.d` PATH MAKES rc=3 REACHABLE — the terminal `return 0` below is what reports a clean
+# uninstall as 0, with or without the `[ -d ]` guard or `rmdir`'s `|| true` (measured: delete the
+# guard and this still returns 0; delete the guard AND the `|| true` and it STILL returns 0). But the
+# two `return 3` arms below are LIVE failed-removal paths, and the guard only spares a `sudo`.
 remove_unit_dropin() { # $1 = unit name (NOT the instance name)
   local unit="$1" dropin
   dropin="$UNIT_DIR/$unit.d/10-restart-and-memory.conf"
