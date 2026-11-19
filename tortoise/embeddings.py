@@ -1931,24 +1931,23 @@ class EmbeddingModel:
         # class BEFORE ``t.start()`` so the guard can never see a window where a
         # running thread is not yet recorded.
         #
-        # ⛔ THE CLOCK GOES FIRST, AND THAT ORDER IS LOAD-BEARING (#13841
-        # review). ``load_attempt_snapshot()`` is a LOCK-FREE reader — it may
-        # not take ``cls._lock``, because ``get()`` holds that lock for the whole
-        # load and ``/health`` would then block up to the bound — and it reads
-        # ``_load_attempt_thread`` BEFORE ``_load_started_at``. So the writer
-        # must publish in the REVERSE order: once a reader can see this attempt's
-        # thread, its start time is already visible too. Written the other way
-        # round, a reader preempted between its two reads could pair a LIVE
-        # thread with the PREVIOUS attempt's start (a huge elapsed) or with
-        # ``None`` — publishing ``load_in_progress: true`` beside
-        # ``load_in_progress_s: null``, the pair the snapshot exists to make
-        # impossible. Do not reorder these two lines without also reordering the
-        # reader; `test_the_attempts_clock_is_published_before_its_thread` reds.
+        # ⛔ THE WRITE ORDER IS A FULL REVERSE OF THE READER'S, AND IT IS
+        # LOAD-BEARING (#13841 review). ``load_attempt_snapshot()`` is a
+        # LOCK-FREE reader — it may not take ``cls._lock``, because ``get()``
+        # holds that lock for the whole load and ``/health`` would then block up
+        # to the bound — and it reads ``_load_attempt_thread``, then
+        # ``_load_started_at``, then ``_load_attempt_timeout_s``. So the writer
+        # must publish bound → clock → thread: once a reader can see this
+        # attempt's thread, its own start time AND its own bound are already
+        # visible. Written the other way round, a reader preempted between its
+        # reads could pair a LIVE thread with the PREVIOUS attempt's start (a
+        # huge elapsed) or with ``None`` — publishing ``load_in_progress: true``
+        # beside ``load_in_progress_s: null`` — or with the previous attempt's
+        # bound (or ``None``, the 300 s default), the #13819 F3 misdirection. Do
+        # not reorder these lines without also reordering the reader;
+        # `test_the_attempts_clock_is_published_before_its_thread` reds.
         # #13819 review F3: the bound THIS attempt runs under, so the reclaim
-        # warning quotes it rather than the class default. ⛔ Written FIRST —
-        # `load_attempt_snapshot()` reads thread → clock → bound with no lock, so
-        # the writer has to be a full reverse of that or a lock-free reader can
-        # pair a live NEW thread with the PREVIOUS attempt's bound (#13841).
+        # warning quotes it rather than the class default.
         type(self)._load_attempt_timeout_s = timeout
         type(self)._load_started_at = _attempt_started_at
         type(self)._load_attempt_thread = t
