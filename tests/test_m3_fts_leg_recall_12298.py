@@ -1388,19 +1388,19 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
      "`:3100-3109`"),
     ("tortoise/search_engine.py", 2730, "def recency_tie_clause(",
      "`search_engine.py:2730`"),
-    ("tortoise/search_engine.py", 4921,
+    ("tortoise/search_engine.py", 5007,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:4921`"),
+     "`tortoise/search_engine.py:5007`"),
     # The three `projection/__init__.py` rows were stale on `main` too (both the
     # brief and this pin still named the pre-#13290 lines), and this branch's own
     # seam work moves them a further +23. Re-derived against the live file, so
     # the pin and §1 of the brief name the same lines as the code.
-    ("tortoise/projection/__init__.py", 20845, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20845`"),
-    ("tortoise/projection/__init__.py", 21288, "def _create_fulltext_index(",
-     "`:21288`"),
-    ("tortoise/projection/__init__.py", 21738,
-     "self._create_fulltext_index(label, fields)", "`:21738`"),
+    ("tortoise/projection/__init__.py", 20970, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20970`"),
+    ("tortoise/projection/__init__.py", 21413, "def _create_fulltext_index(",
+     "`:21413`"),
+    ("tortoise/projection/__init__.py", 21863,
+     "self._create_fulltext_index(label, fields)", "`:21863`"),
 )
 
 
