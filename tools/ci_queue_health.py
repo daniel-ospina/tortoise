@@ -1742,7 +1742,7 @@ def classify_queue(
     # consequence is a residue this reading MUST be able to explain: after the queued
     # zombies are excluded an operator still sees a 14-day `oldest`, and without this
     # they cannot tell whether the fix failed or a pending-leg run is now the witness.
-    # Measured 2026-11-26: queued PR runs 157 -> 90 with 121 proved dead, `oldest`
+    # Measured 2026-11-19: queued PR runs 157 -> 90 with 121 proved dead, `oldest`
     # unchanged at 1 218 214s, and that witness was ONE `pending` run of `Python CI`.
     # Named from the SAME tuple the max is taken over: a second max over a different
     # list is how two answers to one question get minted.

@@ -1289,7 +1289,7 @@ def test_pending_pr_runs_are_part_of_the_WAIT_POPULATION():
     # never-dispatched exclusion is QUEUED-leg only — on the pending leg zero job
     # records is not a proof — so after the exclusion an operator still meets a
     # 14-day `oldest` and cannot tell "the fix did not work" from "a pending run is
-    # now the witness". Measured 2026-11-26: queued PR runs 157 -> 90, `oldest`
+    # now the witness". Measured 2026-11-19: queued PR runs 157 -> 90, `oldest`
     # unchanged at 1 218 214s, witness = ONE pending `Python CI` run.
     joined = "\n".join(with_leg.reasons)
     assert "the witness is a 'pending' leg run" in joined, joined

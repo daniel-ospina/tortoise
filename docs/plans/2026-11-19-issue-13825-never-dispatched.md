@@ -490,7 +490,7 @@ worst case `2 × (8×15 + 90) = 420 s of 600 s`. Second consumer (`ci_check_repa
 | job-creation latency and the 90-minute floor | `docs/ops/ci-wall-clock.md` §1 (in-tree, re-read, not re-measured) | — |
 | `ZERO_JOB_MIN_AGE_S = 5400` | `tools/ci_check_repair.py:246` | — |
 
-## 10.11 Live verification (2026-11-26) — and the residue it exposed
+## 10.11 Live verification (2026-11-19) — and the residue it exposed
 
 Run read-only against the live repo (`--json`, no `--apply`), proof store in `/tmp`:
 
