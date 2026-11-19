@@ -385,7 +385,8 @@ Rules:
   document; `/404.html` is a 308 to it) and for the static assets BOTH hosts share. `/index` and
   `/index.html` are 301'd on the retired host (they are the company homepage's raw duplicates).
   **`/contact` is no longer one of these (#13636).** It is a company page at the company ROOT and
-  now 301s there like `/privacy`: it was the LAST document served from two hosts, because the
+  now 301s there like `/privacy`: it was the LAST **marketing** document served from two hosts
+  (the 200 still served for `/404` above is not a page), because the
   company-root rows above hold the legal three and the `/contact` rules lived only in
   `website/_redirects` — which is **host-agnostic**: `/contact.html` and `/contact/` there collapse
   SPELLINGS of one page, they never move a page between hosts — so with no branch in the
