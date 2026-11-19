@@ -2997,6 +2997,19 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
 _PREFIX_APPROVAL_RECORD = (
     "> **Owner approval of the exact change:** 2026-11-18, given in-session, after the audit\n"
     "> measured the behaviour. The artifact is the text itself.")
+# ⛔ THE SAME RECORD IN THE TWO SHAPES A COPY-EDIT PRODUCES, each measured FAIL-OPEN
+# (review @ e4927f5f): a doubled space after `Owner`, and markdown emphasis on
+# `approval` — or the whole label in `__…__` — all RENDER as the same label, and each
+# escaped a literal `\*\*Owner approval` search, so a record with NO home passed.
+_PREFIX_APPROVAL_RECORD_WITH_A_DOUBLED_SPACE = (
+    "> **Owner  approval of the exact change:** 2026-11-18, given in-session, after the\n"
+    "> audit measured the behaviour. The artifact is the text itself.")
+_PREFIX_APPROVAL_RECORD_WITH_EMPHASIS_IN_THE_LABEL = (
+    "> **Owner *approval* of the exact change:** 2026-11-18, given in-session, after the\n"
+    "> audit measured the behaviour. The artifact is the text itself.")
+_PREFIX_APPROVAL_RECORD_IN_UNDERSCORE_EMPHASIS = (
+    "> __Owner approval of the exact change:__ 2026-11-18, given in-session, after the\n"
+    "> audit measured the behaviour. The artifact is the text itself.")
 _PREFIX_UNRESOLVED_POINTER = (
     "> reads four conditions). That is a code defect with its own issue; it is not a "
     "sentence to rewrite.")
@@ -3146,21 +3159,33 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     (comment `6965147045`)``), which is precisely the state this arm exists to refuse.
     An id in a LATER sentence belongs to whatever that sentence says.
     ⛔ THE SCOPE IS THE SENTENCE, NOT THE ATTRIBUTED-QUOTATION FORM, and the two were
-    measured against the landed text before choosing. Demanding ``comment <id>: "…"``
-    here would close this too (the form is what `_refuse_a_bare_or_disclaimed_citation`
-    requires of a §4.3 block), but **5 of the 7** landed approval records cite a BARE
-    id (v3.37, v3.34, v3.33, v3.32 — and v3.35 cites none at all), so that demand would
-    refuse the file's own dominant practice: the same measured false-block this arm's
-    first cut was already caught making. The sentence scope accepts all five and still
-    refuses the borrow.
+    measured against the landed text before choosing. At this head **7** blocks record an
+    owner approval: **6** of them carry an id in the label sentence, and **none** carries
+    the attributed ``comment <id>: "…"`` form the §4.3 pin demands — so that demand would
+    refuse ALL SEVEN, the file's own whole practice, the same measured false-block this
+    arm's first cut was already caught making. The sentence scope accepts those 6 and
+    still refuses the borrow.
+    ⛔ AND IT REFUSES ONE LANDED BLOCK, stated rather than glossed: the **v3.35** entry
+    (2026-11-13) records an approval and cites nothing at all, so this arm refuses it —
+    a sweep over all 43 blocks reds TODAY. The test reads the NEWEST block alone, which
+    is why the suite is green; the sentence scope does not promise that every landed
+    block passes, and a lane sweeping the corpus should expect v3.35.
     ⛔ THE RESIDUAL IS STATED, NOT PAPERED OVER: within ONE sentence a contrastive
     parenthetical that also names an id (v3.37's shape, ``… as comment `6970713492`,
     … — the form the owner rejected for v3.36 (comment `6965147045`)``) is still
     accepted. Telling WHICH of two ids records the approval needs the comment's own
     text — the reviewer step this arm's docstring records in #12068.
     """
+    # ⛔ THE RECORD IS DETECTED ON WHAT THE DOCUMENT RENDERS, not on its bytes (review @
+    # e4927f5f): `**Owner approval` as a literal missed `**Owner  approval` (a doubled
+    # space) and `**Owner *approval*` / `__Owner approval …__` (markup that renders as
+    # the same label), and each of those left a record with NO resolvable home passing —
+    # the one artifact this arm exists to refuse. `_reader_text` drops the markup and
+    # collapses the spacing, so `\bOwner approval\b` reads the rendered label; the
+    # CITATION below is still read from the RAW sentence, so markup can neither hide nor
+    # manufacture an id.
     records = [paragraph for paragraph in _quoted_paragraphs(block)
-               if re.search(r"\*\*Owner approval\b", paragraph)]
+               if re.search(r"\bOwner approval\b", _reader_text(paragraph))]
     if not records:
         # ⛔ RETURN, DO NOT ASSERT (review F1). This release records no owner approval,
         # so it owes no citation: the unconditional demand was measured to false-block
@@ -3172,7 +3197,7 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         "reads exactly ONE, so a second copy would shadow the one checked")
     record = records[0]
     label = next(sentence for sentence in _sentences(record)
-                 if re.search(r"\*\*Owner approval\b", sentence))
+                 if re.search(r"\bOwner approval\b", _reader_text(sentence)))
     assert _CITATION_RE.search(label), (
         "the newest changelog block records an owner approval but names no comment id "
         "in the SENTENCE that records it, so the approval has no home a reader can "
@@ -3272,6 +3297,14 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     which this release does not, so they return before reading a word of it. An arm
     scoped by CONTENT cannot guard an entry whose content is something else.
 
+    ⛔ WHAT THIS ARM DOES NOT DECIDE, TWO SHAPES STATED RATHER THAN IMPLIED (both
+    measured absent from the landed corpus at this head, both fail-CLOSED if a future
+    entry introduces them): a block that QUOTES an older approval inside a nested
+    ``> > `` run is detected as a second record and the multiplicity assert refuses it,
+    and a paragraph that says *no* owner approval was recorded, with the label in
+    markup, is read as a record and demands a citation it cannot have. Neither reds
+    today; both are named here so a future reader meets them as known, not as a bug.
+
     ⛔ WHAT THIS ARM DOES NOT DECIDE, stated rather than implied: it cannot verify
     that the CITED approval is real (that is the reviewer step
     ``gh api repos/.../issues/comments/<id>`` performs, recorded in #12068), and it
@@ -3299,6 +3332,17 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     with pytest.raises(AssertionError) as refused:
         _refuse_an_approval_record_with_no_resolvable_home(_PREFIX_APPROVAL_RECORD)
     _assert_refused_by(refused, "_refuse_an_approval_record_with_no_resolvable_home")
+    # …and the same SHIPPED record in the three shapes a copy-edit produces — a doubled
+    # space, emphasis on the label's last word, and the label in `__…__`. Each RENDERS as
+    # the label and each was measured GREEN while the arm matched the literal bytes, so a
+    # record with no home passed in all three (review @ e4927f5f).
+    for copy_edit in (_PREFIX_APPROVAL_RECORD_WITH_A_DOUBLED_SPACE,
+                      _PREFIX_APPROVAL_RECORD_WITH_EMPHASIS_IN_THE_LABEL,
+                      _PREFIX_APPROVAL_RECORD_IN_UNDERSCORE_EMPHASIS):
+        with pytest.raises(AssertionError) as rendered:
+            _refuse_an_approval_record_with_no_resolvable_home(copy_edit)
+        _assert_refused_by(
+            rendered, "_refuse_an_approval_record_with_no_resolvable_home")
     # NON-VACUITY, the F2 direction: an id that is NOT the approval's — the landed
     # record with its own relay deleted, only the incidental reference left. Pre-fix
     # this was GREEN (a paragraph-wide search found the borrowed id), so the arm could
