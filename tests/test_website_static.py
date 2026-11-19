@@ -7332,6 +7332,46 @@ def _same_origin_script_bodies(name: str, html: str) -> list[tuple[str, str]]:
     return out
 
 
+class TestCommentStrippingKeepsCode:
+    """The strip may lose a COMMENT, never a byte of the code beneath it.
+
+    This helper is the scanning instrument behind every channel row below
+    (inline `<script>`, `<style>`, same-origin asset) and behind the two-page
+    render compare, so anything it drops without reding a row is a channel with
+    no gate — which is how a `$25/mo` literal survived a leading `/* note */`
+    and left BOTH rows green (#13696 round 6, the fail-OPEN the span-cutting fix
+    closed). The rows below reproduce that channel through the real pages; this
+    class pins the instrument itself, so the fail-open cannot come back by a
+    quiet rewrite of the helper.
+    """
+
+    def test_a_wholly_commented_line_is_dropped(self):
+        assert _strip_comment_lines("// Pro is $25/mo\nrun();") == "run();"
+        assert _strip_comment_lines("/* Pro is $25/mo */\nrun();") == "run();"
+
+    def test_a_multiline_block_comment_is_dropped(self):
+        assert _strip_comment_lines(
+            "/* first\n still prose $25\n third */\nrun();") == "run();"
+
+    def test_code_after_a_one_line_block_comment_is_kept(self):
+        # The fail-open: dropping the line wholesale left `run('$25')` in no
+        # channel, so no row could refuse it.
+        assert _strip_comment_lines("/* why */ run('$25');") == "run('$25');"
+        assert PRICE_FIGURE_RE.search(_strip_comment_lines(
+            "/* why */ run('$25');"))
+
+    def test_code_after_a_multiline_block_comment_closes_on_its_own_line(self):
+        assert _strip_comment_lines(
+            "/* why\n * prose $25\n */ run('$25');") == "run('$25');"
+
+    def test_a_trailing_line_comment_is_kept_and_fails_closed(self):
+        # Deliberate asymmetry, documented on the channel row: a trailing `//`
+        # note is SCANNED, so a figure there reds and the fix is to move the
+        # sentence onto its own line, never to widen the row.
+        assert PRICE_FIGURE_RE.search(_strip_comment_lines(
+            "run(); // pinned at $25"))
+
+
 class TestPricingSourceIsShared:
     """#13645: `/tortoise` and `/tortoise-for-product-teams` cannot disagree.
 
