@@ -254,8 +254,15 @@ def test_the_record_states_the_near_duplicate_rule_the_tool_ran(artifact):
         rf"(?<![0-9A-Za-z]){re.escape(cap.NEARDUP_RULE)}(?![0-9A-Za-z])")
     #: …and EVERY spelling of the shape in the document is the rule, so a third copy
     #: added elsewhere cannot carry a different version either.
-    spelled = set(re.findall(r"(?<![0-9A-Za-z])neardup-v[0-9A-Za-z]+", raw))
-    assert spelled == {cap.NEARDUP_RULE}, (
+    #: ⛔ CASE-INSENSITIVELY (round 30, F3). `neardup-v[0-9A-Za-z]+` never saw an
+    #: uppercase spelling, so a third copy reading `Neardup-v9` carried a version the
+    #: tool does not have with the suite GREEN at 58 passed — the same "keyed to one
+    #: CASE" defect already repaired for the `git show` guard in this file. The scan is
+    #: folded and the folded set compared, so no spelling escapes it.
+    spelled = {tok.lower() for tok in
+               re.findall(r"(?<![0-9A-Za-z])neardup-v[0-9A-Za-z]+", raw,
+                          re.IGNORECASE)}
+    assert spelled == {cap.NEARDUP_RULE.lower()}, (
         f"the record spells the near-duplicate rule {sorted(spelled)}, but the tool's "
         f"rule is {cap.NEARDUP_RULE!r} — a name the tool does not carry is a rule "
         f"nobody can re-derive §3a under")
@@ -1611,9 +1618,13 @@ def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
     (`tools/capstone_12186_recall.py`, `round(rank_sum / in_window, 3)`) — was read
     by NO assertion (`grep -c mean_rank tests/` was 0), so it could be set to 99.9
     on every arm and every k with the suite GREEN. The loop below reconciles it too,
-    which is what makes the universal sentence true; the rank-entry count is corrected
+    AND `arms[*].by_class` — which carries a `cls` and a `rank` per `per_query` row and
+    was likewise reconciled by nothing (round 30, F1: `by_class.path["3"]` 0.9333 ->
+    0.9667 with the matching README cell stayed GREEN at 58 passed, refuting the epic's
+    own `ident`/`path` mechanism figure against the committed ranks). With both in the
+    loop the universal sentence is true; the rank-entry count is corrected
     to the artifact's own total (5 arms x 300; `mint_rate` is a write-path block and
-    carries `per_query: null`, so 1 800 was one arm too many).
+    carries NO `per_query` key at all, so 1 800 was one arm too many).
 
     The `neardup_rule` pair below is the same family and is ALSO owned by its own
     dedicated pin (`test_the_artifact_carries_the_near_duplicate_rule_it_was_measured_
@@ -1643,6 +1654,28 @@ def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
         if per_query is None:  # `mint_rate` is a write-path block, not an arm
             continue
         assert arm["n"] == len(per_query), (name, arm["n"], len(per_query))
+        #: ⛔ `by_class` IS THE SAME SUMMARISATION (round 30, F1). Each `per_query` row
+        #: carries a `cls` and a `rank`, so `by_class[cls][k]` is exactly
+        #: `hits(cls) / count(cls)` and was reconciled by NOTHING — which made the
+        #: docstring's universal sentence FALSE even after `mean_rank` was added.
+        #: MEASURED: `by_class.path["3"]` 0.9333 -> 0.9667 TOGETHER WITH the matching
+        #: README cell stayed GREEN at 58 passed, while the committed ranks still said
+        #: 28/30 = 0.9333 — the epic's own mechanism figure refuted by its own evidence.
+        #: The class counts come from the rows too, so a class total that disagrees with
+        #: the population reds as well.
+        for cls in arm["by_class"]:
+            cls_rows = [row for row in per_query.values() if row.get("cls") == cls]
+            assert arm["by_class"][cls]["n"] == len(cls_rows), (
+                f"`arms[{name}].by_class[{cls}].n` is {arm['by_class'][cls]['n']} "
+                f"but `per_query` holds {len(cls_rows)} rows of that class")
+            for k in cap.KS:
+                hits = sum(1 for row in cls_rows
+                           if row.get("rank") is not None and row["rank"] <= k)
+                want = (round(hits / len(cls_rows), 4) if cls_rows else None)
+                assert arm["by_class"][cls][str(k)] == want, (
+                    f"`arms[{name}].by_class[{cls}][{k}]` is "
+                    f"{arm['by_class'][cls][str(k)]!r} but the committed "
+                    f"`per_query` ranks give {want!r} ({hits}/{len(cls_rows)})")
         for k in cap.KS:
             ranks = [row["rank"] for row in per_query.values()
                      if row.get("rank") is not None and row["rank"] <= k]
@@ -2573,6 +2606,24 @@ def test_the_readme_quotes_the_mint_rates_by_variant_class(artifact):
             f"{held['retrieval_in_window']} in window minus "
             f"{held['shipped_attached']} attached is not "
             f"{held['in_window_not_attached']}")
+        #: ⛔ THE NORM-ONLY RATE IS A FUNCTION OF ITS OWN TWO COUNTS (round 30, F2).
+        #: The tool writes `norm_only_mint_rate = (pairs - norm_only_attached) / pairs`;
+        #: nothing read that relation, so `norm_only_attached` 0 -> 7 beside an
+        #: untouched `norm_only_mint_rate: 1.0` and `pairs: 180` stayed GREEN at 58
+        #: passed — a class publishing a rate its own counts cannot produce.
+        assert held["norm_only_mint_rate"] == pytest.approx(
+            round((held["pairs"] - held["norm_only_attached"]) / held["pairs"], 4),
+            abs=5e-5), (
+            f"variant class {cls!r}'s norm-only rate {held['norm_only_mint_rate']} "
+            f"is not what its own counts give: ({held['pairs']} - "
+            f"{held['norm_only_attached']}) / {held['pairs']}")
+        #: …and the shipped rate, the same way.
+        assert held["shipped_mint_rate"] == pytest.approx(
+            round((held["pairs"] - held["shipped_attached"]) / held["pairs"], 4),
+            abs=5e-5), (
+            f"variant class {cls!r}'s shipped rate {held['shipped_mint_rate']} is "
+            f"not what its own counts give: ({held['pairs']} - "
+            f"{held['shipped_attached']}) / {held['pairs']}")
         matched = [r for r in rows if f"`{cls}`" in r[0]]
         assert len(matched) == 1, (
             f"expected exactly one README row for variant class {cls!r}, got "
