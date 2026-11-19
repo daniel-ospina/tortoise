@@ -884,7 +884,7 @@ def _live() -> dict:
     return {t.name: t for t in TOOL_REGISTRY}
 
 
-def _any_entry(name: str) -> "object | None":
+def _any_entry(name: str) -> object | None:
     """The entry for `name` from EITHER registry — live first, then retired.
 
     ⛔ The route pins below read this, not `_live()`, and that is the point of the
