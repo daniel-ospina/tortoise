@@ -87,6 +87,7 @@ __all__ = [
     "cutover_armed",
     "journal_ready",
     "mirror_required",
+    "mirror_verdict",
     "reset_coverage_cache",
     "searcher",
 ]
@@ -900,23 +901,159 @@ def arm_is_explicit() -> bool:
         return False
 
 
-def coverage_verified(label: str, scope: _Scope | None = None,
+def coverage_verified(label: str, scope: _Scope | tuple[str, str] | None = None,
                       record_dsn: str | None = None) -> bool:
-    """Is this label's coverage VERIFIED for ``scope``? Read-only, cached.
+    """Is this label's coverage VERIFIED for ``scope``? Read-only, CACHE-ONLY.
 
-    The one predicate the WRITE side asks, and the reason the two sides cannot
-    disagree: :func:`mirror_required` is its negation, so the graph write is
-    retained exactly while the graph branch is the answering leg.
+    ⛔ **IT IS A VIEW, NOT A DECISION — do not decide anything from it.** It answers only
+    "was a verified verdict already taken for this (dsn, tenant, label)", and it knows
+    nothing about the four conservative gates :func:`mirror_verdict` applies
+    (`COVERAGE_GATED_LABELS`, :func:`cutover_armed`, a resolvable record leg, a resolvable
+    tenant). A caller that reads it as *the* predicate would, for instance, treat a
+    verified verdict as actionable on a deployment whose arm has since been rolled back.
+    That is why the WRITE path asks :func:`mirror_required` — which is
+    :func:`mirror_verdict`'s boolean — and why it is `mirror_verdict`'s cache-only arm that
+    repeats this function's two-line body rather than calling it: the arm needs the
+    verdict's ``reason`` too, and a second read of the cache to fetch it would be a second
+    chance to disagree (`#13796`).
+
+    ⛔ IT NEVER MEASURES, so it answers ``False`` for a process that has taken no verdict
+    yet — correct for a WRITE (the mirror stays) and wrong for an operator tool that holds
+    the handle and its own tenant. That caller must ask :func:`mirror_verdict` and pass a
+    ``graph_population`` supplier (`#13796`).
+
+    ``scope`` may be declared by a caller that holds its own tenant: no scope given means
+    "resolve the ambient one", and :func:`_declared_scope` is the ONE resolver both doors
+    use, so a declared tenant and a request's tenant cannot be read two ways.
     """
-    if scope is None:
-        scope = _resolve_scope()
-    if scope is None:
+    resolved = _declared_scope(scope)
+    if resolved is None:
         return False
-    cached = _cached_coverage(label, scope, record_dsn)
+    cached = _cached_coverage(label, resolved, record_dsn)
     return bool(cached is not None and cached.verified)
 
 
-def mirror_required(entity_type: str) -> bool:
+def _declared_scope(scope: _Scope | tuple[str, str] | None) -> _Scope | None:
+    """The scope a caller DECLARED, else the ambient one this process carries.
+
+    ``None`` is "nobody declared one, so resolve it the way the request lanes do",
+    never "no tenant": a caller that wants the ambient resolution omits the
+    argument, and a caller that holds its own tenant passes it. That distinction is
+    the whole reason this function exists — :func:`mirror_required`'s scope question
+    is *"which tenant's record is this process talking about?"*, and an operator
+    tool that declared its tenant on the command line must not be answered with the
+    ambient `None` (see :func:`mirror_verdict`).
+
+    A malformed declaration (a one-element tuple, a non-string, an empty string) is
+    answered ``None`` — the same "half a tenant is refused" rule
+    :func:`_resolve_scope` applies, because a mis-scoped read returns ZERO rows under
+    RLS with no error (#10024).
+    """
+    if scope is None:
+        return _resolve_scope()
+    if isinstance(scope, _Scope):
+        return scope
+    if isinstance(scope, tuple) and len(scope) == 2:
+        org_id, graph_id = scope
+        if isinstance(org_id, str) and org_id and isinstance(graph_id, str) and graph_id:
+            return _Scope(org_id=org_id, graph_id=graph_id)
+    return None
+
+
+def mirror_verdict(entity_type: str, *,
+                   scope: _Scope | tuple[str, str] | None = None,
+                   record_dsn: str | None = None,
+                   graph_population: Callable[[str], int | None] | None = None,
+                   graph_vectors: int | None = None) -> tuple[bool, str]:
+    """``(mirror_required, reason)`` — the predicate AND the account behind it.
+
+    :func:`mirror_required` is this function's first element; this is the one place
+    the answer is decided, so the write path and an operator tool cannot hold two
+    readings of one verdict.
+
+    ⛔ WHY THE ACCOUNT IS PART OF THE ANSWER (#13796). The question *"may the graph copy
+    be stripped?"* has an answer AND a reason, and they were only separable by
+    re-deriving the gate's own internals — which is how a second predicate is born. A
+    caller that must PRINT why (the stripper's plan, and its refusal when the record is
+    short) reads the reason here instead, and the measured arm below names both counts.
+
+    ⛔ THE TWO OPTIONAL DOORS, and why each is needed rather than convenient:
+
+    * ``scope`` — a NON-REQUEST caller has no ambient tenant. The write folds run inside
+      an SDK request that installs one (``use_record_tenant`` / ``_record_tenant``), but
+      ``tools/strip_graph_entity_vectors.py`` is a fresh operator process: it declares
+      ``--org-id``/``--graph-id`` on its command line and holds no ContextVar, so the
+      ambient resolution answers *"no tenant"* forever and ``mirror_required`` answers
+      ``True`` (keep the mirror) for EVERY label. That is #13796's second half: the gate
+      was unsatisfiable from the only tool that runs it. A declared scope is the caller's
+      own tenant, exactly as the SDK's carried tenant is the request's.
+    * ``graph_population`` / ``graph_vectors`` — the denominator lives ON THE GRAPH and
+      only a caller holding a handle can count it (#13610). Without one, the verdict is
+      taken CACHE-ONLY (:func:`coverage_verified`), which is correct for a write fold —
+      re-counting on every write would put a full-label aggregate behind each one — and
+      wrong for an operator tool that runs once and holds the handle it is about to
+      strip. Supplying one makes the verdict MEASURED on a cache miss and, because
+      :func:`coverage` caches what it took, still free on a hit. ⛔ IT IS NEVER A
+      PERMISSION: the supplier is asked for a COUNT, and the comparison it feeds is the
+      same ``record_vectors >= graph_vectors`` the read path uses. A hard-coded override
+      or an operator's "yes I backfilled" boolean would be the asserted gate this whole
+      design exists to avoid.
+
+    ``record_dsn`` is the record leg the caller means, when it did not come from the
+    ambient ``TORTOISE_RECORD_DSN`` (the stripper's ``--record-dsn``); it is resolved by
+    the same :func:`tortoise.record_writer.record_dsn` the cache key uses, so the verdict
+    taken here is the verdict a later cache-only ask in the same process reads.
+
+    Every conservative answer the predicate has — a label nobody gates, a rolled-back
+    arm, no record leg, no tenant, an unmeasurable graph — is preserved verbatim, and
+    each says so in the reason rather than answering a bare ``True``.
+    """
+    if entity_type not in COVERAGE_GATED_LABELS:
+        return True, (
+            f"{entity_type!r} is not a coverage-gated label, so the record has never "
+            "been asked to cover it — the graph copy is the only copy")
+    if not cutover_armed():
+        return True, (
+            f"the record dense leg is ROLLED BACK ({ARMING_ENV} is explicitly falsy), so "
+            "every graph write is retained whatever the record holds")
+    try:
+        from .record_writer import record_dsn as _resolve
+
+        dsn = _resolve(record_dsn)
+    except Exception as exc:  # noqa: BLE001, RUF100 — unarmed, so the mirror stays
+        return True, (
+            f"the record leg could not be resolved ({type(exc).__name__}: {exc}), so "
+            "the graph copy is kept")
+    if not dsn:
+        return True, (
+            "no record leg is configured, so nothing can prove coverage and the graph "
+            "copy is kept")
+    resolved = _declared_scope(scope)
+    if resolved is None:
+        return True, (
+            "no tenant is installed on this process and none was declared, so the "
+            "record cannot be asked about a label")
+    if graph_population is None and graph_vectors is None:
+        # The WRITE path's door: cache only. See `coverage_verified` on why an operator
+        # that holds a handle should supply a population instead.
+        cached = _cached_coverage(entity_type, resolved, record_dsn)
+        if cached is not None and cached.verified:
+            return False, cached.reason
+        if cached is not None:
+            return True, cached.reason
+        return True, (
+            f"the record has not proved it holds this label's vectors in this process "
+            f"(no coverage verdict was taken for {entity_type!r} since boot)")
+    verdict = coverage(entity_type, resolved, graph_population=graph_population,
+                       graph_vectors=graph_vectors, record_dsn=record_dsn)
+    return (not verdict.verified), verdict.reason
+
+
+def mirror_required(entity_type: str, *,
+                    scope: _Scope | tuple[str, str] | None = None,
+                    record_dsn: str | None = None,
+                    graph_population: Callable[[str], int | None] | None = None,
+                    graph_vectors: int | None = None) -> bool:
     """Must the GRAPH still store this label's derived vector? (#13610, option 2)
 
     ``True`` — write it, because the graph is (or may be) this label's answering
@@ -956,21 +1093,18 @@ def mirror_required(entity_type: str) -> bool:
     is deliberate — re-taking the count on the write path would put a full-label
     aggregate on every write — and it is bounded by the first dense read for the
     label.
-    """
-    if entity_type not in COVERAGE_GATED_LABELS:
-        return True
-    if not cutover_armed():
-        return True
-    try:
-        from .record_writer import record_dsn as _resolve
 
-        if not _resolve():
-            return True
-    except Exception:  # noqa: BLE001, RUF100 — unarmed, so the mirror stays
-        return True
-    if _resolve_scope() is None:
-        return True
-    return not coverage_verified(entity_type)
+    ⛔ THE CACHE-ONLY RULE IS THE WRITE PATH'S, NOT THE PREDICATE'S (#13796). A caller
+    that is NOT a request — an operator tool holding the graph handle and its own tenant
+    — passes ``scope`` and a ``graph_population`` supplier and gets a MEASURED verdict,
+    because "this process has served no dense read" is not a fact about the record. See
+    :func:`mirror_verdict`, which is where the decision lives; this function is its
+    boolean, and both doors are spelled the same way so no caller needs a second
+    predicate to ask a second question.
+    """
+    return mirror_verdict(
+        entity_type, scope=scope, record_dsn=record_dsn,
+        graph_population=graph_population, graph_vectors=graph_vectors)[0]
 
 
 @dataclass(frozen=True)

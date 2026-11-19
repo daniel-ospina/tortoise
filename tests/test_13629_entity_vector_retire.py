@@ -34,6 +34,10 @@ that fails OPEN the day someone deletes a branch.
 | `test_the_stop_arm_must_not_store_the_vector` | the stop arm stops — it does not place the vector first | a stop arm that STORES (then exits, or pops-then-stores) certifies the writer as write-stopped |
 | `test_the_stop_arm_of_a_POSITIVE_ask_must_not_store_either` | the `else` of `if gate(l):` is the STOP arm, and it is read | a store on that arm (`orelse` never examined) certifies the writer as write-stopped |
 | `test_upsert_source_IS_a_Source_writer_through_the_PASSTHROUGH` | `_upsert_source` persists a caller `embedding` via `SET n += $extra` | the name is dropped from `:Source`'s population on a static-clause count, letting a strip run into a live writer |
+| `test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_supplied` | **#13796** — the gate is MEASURABLE from a fresh process | the stripper asks without its own denominator/tenant, so every label answers *unproved* while parity holds |
+| `test_a_short_record_refuses_the_label_with_BOTH_counts_in_the_reason` | "proved short" is a DIFFERENT answer from "not proved" | a measured deficit is reported as an unmeasured one, sending the operator back to a census already run |
+| `test_the_plan_is_STRIP_READY_from_a_fresh_process_when_the_record_covers` | coverage clears a plan in a fresh process, and the READY reason is the measurement | `strip_ready: True` without the two counts beside it — an assertion nobody can check |
+| `test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason` | **#13796** acceptance (b)+(c) — the refusal is the MEASUREMENT | a short record certifies a strip, or refuses with "not proved" when the counts were taken |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -213,7 +217,8 @@ def _row(report, label):
 
 def _ready(monkeypatch):
     """Close the write gate — the state #13617 + the event/source write-stop reach."""
-    monkeypatch.setattr(strip, "write_gate", lambda entity_type: (False, "write-stopped"))
+    monkeypatch.setattr(strip, "write_gate",
+                        lambda entity_type, **_: (False, "write-stopped"))
 
 
 def _plan(graph, *, labels=None, batch=strip.DEFAULT_BATCH):
@@ -501,15 +506,38 @@ def test_write_gate_is_fail_closed_when_the_symbol_is_absent(monkeypatch):
 
 
 def test_write_gate_is_fail_closed_when_the_gate_raises(monkeypatch):
+    """⛔ THE MEASURED FORM IS THE ONE THE STRIPPER READS, so it is the one that must fail
+    closed here (`#13796`). `mirror_verdict` is preferred when the tree carries it; the
+    boolean-only fallback is pinned separately by
+    `test_write_gate_falls_back_to_the_boolean_on_a_tree_without_the_measured_form`.
+    """
     from tortoise import record_vector
 
-    def boom(_entity_type):
+    def boom(_entity_type, **_kwargs):
         raise RuntimeError("coverage cache unreadable")
 
-    monkeypatch.setattr(record_vector, "mirror_required", boom, raising=False)
+    monkeypatch.setattr(record_vector, "mirror_verdict", boom, raising=False)
     emits, reason = strip.write_gate("object")
     assert emits is True
     assert "not a permission" in reason
+
+
+def test_write_gate_falls_back_to_the_boolean_on_a_tree_without_the_measured_form(
+        monkeypatch):
+    """A tree holding `mirror_required` but not `mirror_verdict` is one this change has not
+    reached, and the read must degrade to it rather than raise (`#13796`).
+
+    ⛔ THE FALLBACK IS STILL FAIL-CLOSED: the answer is the same boolean, and the reason
+    says coverage was the predicate's own claim — no counts, because none were taken.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.delattr(record_vector, "mirror_verdict", raising=False)
+    monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: True,
+                        raising=False)
+    emits, reason = strip.write_gate("object")
+    assert emits is True
+    assert "no counts were taken" in reason, reason
 
 
 def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monkeypatch):
@@ -628,8 +656,9 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     """
     from tortoise import record_vector
 
-    monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
-                        raising=False)
+    monkeypatch.setattr(
+        record_vector, "mirror_verdict",
+        lambda entity_type, **_: (False, "the record reports coverage"), raising=False)
 
     # ⛔ POLARITY FIRST, so the DELETION of the arm reds on the VERDICT and not merely on the
     # message text: every step below the arm is forced to certify, leaving it the only refusal.
@@ -646,8 +675,9 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     # fires with nothing below it forced; it is NOT evidence about the fold, which this path
     # never reaches (`if label is None:` returns above it — measured: 0 invocations).
     monkeypatch.undo()
-    monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
-                        raising=False)
+    monkeypatch.setattr(
+        record_vector, "mirror_verdict",
+        lambda entity_type, **_: (False, "the record reports coverage"), raising=False)
     emits, reason = strip.write_gate("no_such_entity_type_13647")
     assert emits is True, f"an unmapped entity_type licensed a delete ({reason})"
     assert "no declared graph label" in reason
@@ -667,8 +697,10 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
     """
     from tortoise import record_vector
 
-    monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+    monkeypatch.setattr(record_vector, "mirror_verdict",
+                        lambda entity_type, **_: (
+                            False, "the record holds 3 vector(s) for object, the graph "
+                                   "serves 3"), raising=False)
     # The recorded predicate says "not required" for every label; that is a READ fact and
     # the gate must still answer "emits" while a writer exists that nobody stopped.
     emits, reason = strip.write_gate("object")
@@ -1460,8 +1492,10 @@ def test_the_record_still_requiring_the_copy_keeps_the_gate_SHUT(monkeypatch, tm
     """
     from tortoise import record_vector
 
-    monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: True, raising=False)
+    monkeypatch.setattr(record_vector, "mirror_verdict",
+                        lambda entity_type, **_: (
+                            True, "the record has not proved it holds this label's "
+                                  "vectors in this process"), raising=False)
     gated = _fake_writer_module(tmp_path, monkeypatch, """
 def _only_writer(ev):
     if not _derived_mirror_required("object"):
@@ -1520,8 +1554,10 @@ def test_the_gate_OPENS_when_every_declared_writer_asks(monkeypatch, tmp_path):
     """
     from tortoise import record_vector
 
-    monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+    monkeypatch.setattr(record_vector, "mirror_verdict",
+                        lambda entity_type, **_: (
+                            False, "the record holds 2 vector(s) for object, the graph "
+                                   "serves 2"), raising=False)
     gated = _fake_writer_module(tmp_path, monkeypatch, """
 def _only_writer(ev):
     if not _derived_mirror_required("object"):
@@ -1534,6 +1570,10 @@ def _only_writer(ev):
     emits, reason = strip.write_gate("object")
     assert emits is False, reason
     assert "calls the gate" in reason
+    # ⛔ AND THE CERTIFIED REASON NAMES THE MEASUREMENT (`#13796`): a `strip_ready: True`
+    # rests on it, so the counts the verdict compared must survive into the sentence the
+    # operator reads.
+    assert "2 vector(s)" in reason and "serves 2" in reason
     # …and a single un-gated writer closes it again, so the positive arm is not a bypass.
     monkeypatch.setattr(strip, "_writers_for", lambda label: (
         (f"{gated}::_only_writer", f"{gated}::_missing"), None))
@@ -1721,13 +1761,212 @@ def test_label_write_gate_requires_every_entity_type_addressing_the_label(monkey
     """`:Source` serves `source` AND `document`; one stopped writer is not enough."""
     monkeypatch.setattr(
         strip, "write_gate",
-        lambda entity_type: (entity_type == "document", f"{entity_type} emits"))
+        lambda entity_type, **_: (entity_type == "document", f"{entity_type} emits"))
     emits, reason = strip.label_write_gate("Source")
     assert emits is True
     assert "document" in reason
-    # …and when BOTH stop, the label stops.
-    monkeypatch.setattr(strip, "write_gate", lambda entity_type: (False, "stopped"))
-    assert strip.label_write_gate("Source")[0] is False
+    # …and when BOTH stop, the label stops — and its reason carries the coverage account of
+    # every type it cleared (`#13796`: a `strip_ready: True` must rest on a checkable
+    # sentence, not on the bare word "stopped").
+    monkeypatch.setattr(strip, "write_gate",
+                        lambda entity_type, **_: (False, f"record covers {entity_type}"))
+    stopped, why = strip.label_write_gate("Source")
+    assert stopped is False
+    assert "record covers source" in why and "record covers document" in why
+
+
+# ── #13796: the gate is MEASURABLE from a fresh operator process ────────────
+
+
+class _Projection:
+    """The projection's own graph-side vector count, as the real one answers it.
+
+    `tortoise.projection._label_vector_count` is the ONE aggregate `#13610` added for
+    this denominator, and it is a full-label count of nodes carrying an `embedding`.
+    Reproducing it against `FakeGraph` (rather than returning a constant) keeps the
+    test on the statement shape the supplier really issues, so a supplier that asked
+    the wrong question would red here instead of passing on a stub.
+    """
+
+    def __init__(self, graph) -> None:
+        self._graph = graph
+
+    def _label_vector_count(self, entity_type, *, timeout_ms=None):
+        from tortoise.security import entity_label
+
+        rows = self._graph.ro_query(
+            f"MATCH (n:{entity_label(entity_type)}) WHERE n.embedding IS NOT NULL "
+            "RETURN count(n)").result_set
+        return int(rows[0][0])
+
+
+def _fresh_record_leg(monkeypatch, *, record_vectors: int,
+                     graph_vectors: int | None = None):
+    """An EMPTY coverage cache, an armed leg, and the record's aggregate stubbed.
+
+    ⛔ THE EMPTY CACHE IS THE POINT. `#13796`'s defect needs no fault: a process that has
+    served no gated dense read holds no verdict, and before this change that was the
+    permanent state of every operator run. `reset_coverage_cache()` is what makes this
+    test the fresh process the issue describes.
+
+    The returned supplier is only for the `write_gate` tests; a test that measures through
+    `_Projection` passes `graph_vectors` nothing and lets the GRAPH answer the denominator,
+    because a constant there would hide a supplier that asked the wrong question.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    record_vector.reset_coverage_cache()
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: record_vectors, raising=True)
+    return lambda _entity_type: graph_vectors
+
+
+def test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_supplied(
+        monkeypatch):
+    """⛔ #13796, THE DEFECT ITSELF: the gate was unsatisfiable from this process.
+
+    Two halves, and the FIRST is the falsifier: asked with no supplier and no declared
+    tenant — the state every operator run starts in — the gate reports NO MEASUREMENT.
+    ⛔ The observed run could not even say WHICH precondition was missing: `write_gate`
+    used to print one fixed sentence ("the record has not proved it holds this label's
+    vectors") whatever the predicate's real arm was, so a missing tenant and a missing
+    denominator were indistinguishable in the artifact an operator pastes into the issue.
+    Now each arm names itself, and this half pins that neither claims a count.
+
+    The second half supplies what a caller holding the graph handle always could — the
+    denominator — plus the tenant this run declared on its command line, and the answer
+    becomes the MEASUREMENT: the coverage half clears and the gate reaches `answers False`.
+    ⚠️ What refuses after that is a DIFFERENT question, `#13647`'s writer check, and on
+    this tree it refuses every label because the writers are not gated (`#13806`). This
+    test pins the coverage half being measured and its counts reported; it does not claim
+    the label is strippable.
+    """
+    supply = _fresh_record_leg(monkeypatch, record_vectors=9200, graph_vectors=9200)
+
+    emits, unmeasured = strip.write_gate("object")
+    assert emits is True
+    assert "9200" not in unmeasured, (
+        "a fresh process with no denominator reported a MEASUREMENT it never took: "
+        f"{unmeasured}")
+    assert ("has not proved" in unmeasured) or ("no tenant" in unmeasured), unmeasured
+
+    emits, reason = strip.write_gate(
+        "object", graph_population=supply, org_id="org", graph_id="graph",
+        record_dsn="postgresql://localhost/record")
+    assert "answers False" in reason, reason
+    assert "has not proved" not in reason, reason
+    assert "the record holds 9200 vector(s) for object, the graph serves 9200" in reason, (
+        f"the measured arm did not report the two counts it compared: {reason}")
+
+
+def test_a_short_record_refuses_the_label_with_BOTH_counts_in_the_reason(monkeypatch):
+    """The other direction: short coverage is a refusal that NAMES THE DEFICIT.
+
+    ⛔ "NOT PROVED" AND "PROVED SHORT" ARE DIFFERENT ANSWERS, and only the second tells
+    an operator what to do (backfill 9188 rows). A stripper that reported the first for a
+    measured deficit would send them to re-run the census they had already run.
+    """
+    supply = _fresh_record_leg(monkeypatch, record_vectors=12, graph_vectors=9200)
+    emits, reason = strip.write_gate(
+        "object", graph_population=supply, org_id="org", graph_id="graph",
+        record_dsn="postgresql://localhost/record")
+    assert emits is True
+    assert "answers True" in reason, reason
+    # ⛔ THE SENTENCE, NOT THE DIGITS. `"12" in reason` is satisfied by any two digits
+    # anywhere in a reason that also embeds the fold's line numbers, so a deficit reported
+    # with the wrong counts would still pass it (found in review of this change).
+    assert "the record holds 12 vector(s) for object, the graph serves 9200" in reason, (
+        f"a short record did not report the deficit it measured: {reason}")
+
+
+def test_the_plan_is_STRIP_READY_from_a_fresh_process_when_the_record_covers(
+        stores, monkeypatch):
+    """`strip_ready: True` and a reason an operator can check — acceptance #13796 (a).
+
+    ⛔ IT IS MET WITH THE WRITER HALF HELD CLOSED, AND END-TO-END ON ZERO LABELS ON THIS
+    TREE. The two halves ask different questions: coverage asks *"does the record hold this
+    label's vectors?"* (`#13796`, fixed here) and the writer check asks *"will a writer
+    re-add them?"* (`#13647`). On this tree the second still refuses every label, because
+    `hosted_backup::restore_graph` and `sdk::_update_entity` (and, for `:Event`/`:Source`,
+    several more) store an `embedding` without asking the gate — measured, and owned by
+    `#13806`, which needs a write-semantics decision rather than a test change.
+
+    So the writer check is DRIVEN CLOSED here on purpose, and what this test pins is the
+    half this issue is about: with writers certified, a covering record makes the plan ready
+    IN A FRESH PROCESS and the reason beside `strip_ready` is the measurement, not the bare
+    word "ready".
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1, graph_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id="org",
+        graph_id="graph", graph_name="g", graph_uri="docker://x/g",
+        labels=["Object"], batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+
+    row = plan["labels"][0]
+    assert row["strip_ready"] is True, row["blocked_reason"]
+    assert plan["ready"] is True
+    # ⛔ THE REASON NAMES BOTH COUNTS, on the READY arm — that is what makes
+    # `strip_ready: True` checkable instead of asserted.
+    assert "the record holds 1 vector(s)" in row["readiness_reason"]
+    assert "the graph serves 1" in row["readiness_reason"], row["readiness_reason"]
+    # …and the operator reading the PLAN sees them, not the bare word "ready".
+    rendered = strip.render_plan(plan)
+    assert "the record holds 1 vector(s)" in rendered
+    assert "the graph serves 1" in rendered
+
+
+def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeypatch):
+    """⛔ ACCEPTANCE #13796 (b) AND (c) IN ONE FALSIFIER: the block is the MEASUREMENT.
+
+    "The plan for a short-record label must refuse, and must refuse for the *measured*
+    reason (not "not proved" when the counts were never taken)." Both halves are
+    asserted, because they fail in opposite directions: a stripper that refused with
+    "not proved" would be unable to distinguish an unbackfilled deployment from a
+    tested one, and a stripper that did not refuse would strip a label whose only copy is
+    the graph's.
+
+    ⛔ AND THE REFUSAL MUST BE THE COVERAGE ARM'S, so the OTHER two arms are held open:
+    every graph key is READABLE IN THE RECORD (parity passes, otherwise the parity block
+    would be the reason and a coverage gate that wrongly certified would still look
+    refused) and every writer is driven closed. The record's own aggregate stays short, so
+    the coverage comparison is the ONLY thing left that can refuse — which is what makes
+    this a falsifier rather than a test that passes for an unrelated reason (both halves
+    caught in review of this change; the earlier cut proved nothing).
+    """
+    graph, record = stores
+    for key in ("obj-1", "obj-2", "obj-3"):
+        graph.add("Object", key)
+        # parity holds: the record can answer with EVERY graph vector it measured.
+        record.holds("object", key)
+    # …but the record's own aggregate holds ONE vector, against a graph that serves three.
+    # The two legs are separate reads (row-level for parity, one aggregate for coverage),
+    # and only the second is short: that difference is the whole point.
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id="org",
+        graph_id="graph", graph_name="g", graph_uri="docker://x/g",
+        labels=["Object"], batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+
+    row = plan["labels"][0]
+    assert row["strip_ready"] is False, (
+        "a short record certified a strip — the graph holds vectors the record cannot "
+        f"answer with ({row})")
+    blocked = row["blocked_reason"]
+    assert "the record holds 1 vector(s) for object, the graph serves 3" in blocked, blocked
+    assert "has not proved" not in blocked, blocked
 
 
 # ── preview is the default and writes nothing ───────────────────────────────
@@ -2561,7 +2800,8 @@ def test_parity_and_ready_are_two_different_answers(stores, monkeypatch):
     assert report["parity"] is True
     assert report["ready"] is False          # no write-stop on this tree
     assert "WRITE GATE" in parity.render(report, "g")
-    monkeypatch.setattr(strip, "write_gate", lambda entity_type: (False, "stopped"))
+    monkeypatch.setattr(strip, "write_gate",
+                        lambda entity_type, **_: (False, "stopped"))
     report = strip.parity.census(
         g=graph, record_dsn="postgresql://x", org_id="org", graph_id="graph",
         labels=["Object"], strip_readiness=strip.strip_readiness)
@@ -3150,7 +3390,7 @@ def _stub_census_main(monkeypatch, report):
     """Point `parity.main` at a canned report and a graph that never opens."""
     monkeypatch.setattr(parity, "census", lambda **kwargs: dict(report))
     monkeypatch.setattr(parity, "render", lambda *a, **k: "")
-    monkeypatch.setattr(parity, "_write_gate", lambda: None)
+    monkeypatch.setattr(parity, "_write_gate", lambda *a, **k: None)
 
     class _Proj:
         g = None
