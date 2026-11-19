@@ -16501,9 +16501,10 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
     ),
     (
         # ⛔ The ASSERTING frame, not the bare phrase: a retraction legitimately QUOTES
-        # this claim (the peer lane's fix writes `the claim, "AND THE BOX IS NO LONGER
-        # SHALLOW", is DELETED`), so a bare-substring pin would red on the REPAIR itself.
-        # The `, so` continuation is what makes it an assertion about this box.
+        # this claim (the repair writes `the sentence an earlier cut carried here,
+        # "AND THE BOX IS NO LONGER SHALLOW", is DELETED`), so a bare-substring pin would
+        # red on the REPAIR itself. The `, so` continuation is what makes it an assertion
+        # about this box.
         "AND THE BOX IS NO LONGER SHALLOW, so",
         "measured on the clone this row was repaired on: "
         "`git rev-parse --is-shallow-repository` -> `true` and "
