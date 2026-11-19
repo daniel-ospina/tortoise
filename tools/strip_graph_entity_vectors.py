@@ -1455,13 +1455,12 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     if isinstance(node, ast.List | ast.Tuple):
         return (_pairs_store_the_vector(node)
                 or any(_mapping_operand_stores_the_vector(element) for element in node.elts))
-    # ⛔ NOT A `dict(...)` CONSTRUCTOR OPERAND HERE. One was written and it was PROVABLY
-    # INERT: `_stores_embedding`'s call arm asks `_rebuild_stores_the_vector` about every
-    # operand of every call statement, and that helper already delegates the constructor
-    # spelling to `_mapping_argument_stores_the_vector` — so removing this branch changed no
-    # verdict on any of the 140 fixtures (measured). Left out rather than kept looking
-    # load-bearing.
-    return False
+    # ⛔ AND THE PAIRS LITERAL ONE WRAPPER IN IS THE SAME OPERAND. This helper is what
+    # `update(...)` asks; `_pairs_operand_stores_the_vector` is what the `|=` arm asks — and
+    # keeping the two apart meant `props.update([("embedding", vec)])` was refused while
+    # `props.update([("embedding", vec)].copy())` was CERTIFIED (measured by the review of
+    # this branch). One rule, both callers.
+    return _pairs_operand_stores_the_vector(node)
 
 
 def _pairs_operand_stores_the_vector(node) -> bool:
@@ -1486,7 +1485,23 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     if isinstance(node, ast.Starred):
         return _pairs_operand_stores_the_vector(node.value)
     if isinstance(node, ast.List | ast.Tuple):
-        return _pairs_store_the_vector(node)
+        return (_pairs_store_the_vector(node)
+                # …and a `Starred` ELEMENT splices another sequence in (`(*[pairs],)`).
+                or any(_pairs_operand_stores_the_vector(element)
+                       for element in node.elts if isinstance(element, ast.Starred)))
+    if isinstance(node, ast.BinOp):
+        # ⛔ CONCATENATION AND REPETITION ARE THE SAME SEQUENCE: `[("embedding", vec)] + []`
+        # and `[("embedding", vec)] * 1` place the vector exactly as the bare literal does,
+        # and one `+ []` re-opened the hole `.copy()` was fixed for (measured).
+        return (_pairs_operand_stores_the_vector(node.left)
+                or _pairs_operand_stores_the_vector(node.right))
+    if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
+        # `[x for x in [("embedding", vec)]]` — a comprehension over a pairs literal still
+        # yields the pair. Static here because the SOURCE is a literal this check can read;
+        # the elt is followed too, for the spelling that puts the literal in the element.
+        return (_pairs_operand_stores_the_vector(node.elt)
+                or any(_pairs_operand_stores_the_vector(generator.iter)
+                       for generator in node.generators))
     if isinstance(node, ast.Call):
         name = _callee_name(node)
         if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
@@ -1494,6 +1509,13 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         if (name == "copy" and isinstance(node.func, ast.Attribute)
                 and not node.args and not node.keywords):
             return _pairs_operand_stores_the_vector(node.func.value)
+        # ⛔ A MAPPING CONSTRUCTOR IS A MAPPING: `props |= OrderedDict([("embedding", vec)])`
+        # merges through `dict.__ior__` because `OrderedDict` IS a dict subclass, and the
+        # constructor spelling was CERTIFIED while the bare literal was refused (measured).
+        # Narrow by construction: the name must END in `Dict` (the `collections` family), and
+        # only the single positional operand is followed.
+        if name.endswith("Dict") and len(node.args) == 1 and not node.keywords:
+            return _pairs_operand_stores_the_vector(node.args[0])
         return False                  # `zip(…)`, `map(…)`, a builder: residual, stated above
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
         return _pairs_operand_stores_the_vector(node.value)
