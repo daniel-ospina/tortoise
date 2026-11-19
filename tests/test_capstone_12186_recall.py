@@ -1537,12 +1537,22 @@ def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
     """Every SUMMARY figure must be re-derivable from the raw evidence beside it.
 
     ⛔ MEASURED GAP (round 27). `per_query` is the only place the underlying data
-    lives (1 800 rank entries), and the suite read it solely for its KEY SET — so
+    lives (1 500 rank entries), and the suite read it solely for its KEY SET — so
     `recall` and every `paired` block could be contradicted by the committed raw
     data with the suite GREEN. Measured: setting all five arms' `per_query[*].rank`
     to `null` produced 0 reds across the 43 artifact-reading pins, and negating one
     listed gain id's rank to 999 — a "gain" that is not a hit at k=3 — was likewise
     0 reds.
+
+    ⛔ AND THE CLAIM IS NOW NO WIDER THAN THE GUARD (round 29). The sentence above
+    said "EVERY SUMMARY figure", but `arms[*].mean_rank` — the same arm object,
+    computed by the tool from the same `per_query` ranks
+    (`tools/capstone_12186_recall.py`, `round(rank_sum / in_window, 3)`) — was read
+    by NO assertion (`grep -c mean_rank tests/` was 0), so it could be set to 99.9
+    on every arm and every k with the suite GREEN. The loop below reconciles it too,
+    which is what makes the universal sentence true; the rank-entry count is corrected
+    to the artifact's own total (5 arms x 300; `mint_rate` is a write-path block and
+    carries `per_query: null`, so 1 800 was one arm too many).
 
     The `neardup_rule` pair below is the same family and is ALSO owned by its own
     dedicated pin (`test_the_artifact_carries_the_near_duplicate_rule_it_was_measured_
@@ -1573,13 +1583,24 @@ def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
             continue
         assert arm["n"] == len(per_query), (name, arm["n"], len(per_query))
         for k in cap.KS:
-            in_window = sum(1 for row in per_query.values()
-                            if row.get("rank") is not None and row["rank"] <= k)
+            ranks = [row["rank"] for row in per_query.values()
+                     if row.get("rank") is not None and row["rank"] <= k]
+            in_window = len(ranks)
             expected = round(in_window / arm["n"], 4)
             assert arm["recall"][str(k)] == expected, (
                 f"`arms[{name}].recall[{k}]` is {arm['recall'][str(k)]!r} but the "
                 f"committed `per_query` ranks give {expected!r} "
                 f"({in_window}/{arm['n']})")
+            #: ⛔ THE OTHER SUMMARY DERIVED FROM THE SAME RANKS (round 29). `mean_rank`
+            #: sits beside `recall` in the same arm object and is computed from the
+            #: same `per_query` rows, so leaving it unread made the docstring's
+            #: "EVERY SUMMARY figure" false: measured, setting it to 99.9 on every
+            #: arm and every k stayed GREEN.
+            want_mean = (round(sum(ranks) / in_window, 3) if in_window else None)
+            assert arm["mean_rank"][str(k)] == want_mean, (
+                f"`arms[{name}].mean_rank[{k}]` is {arm['mean_rank'][str(k)]!r} but "
+                f"the committed `per_query` ranks give {want_mean!r} "
+                f"(sum {sum(ranks)} over {in_window} in-window rows)")
 
     rule = artifact["neardup_rule"]
     assert rule["jaccard_threshold"] == cap.NEARDUP_JACCARD, (rule, cap.NEARDUP_JACCARD)
