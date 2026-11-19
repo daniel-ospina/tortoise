@@ -2112,9 +2112,11 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
 # The block cites `embeddings.py` BY LINE, so a merge that grows that module
 # silently turns a cite into a pointer at unrelated code while every sentence
 # around it still reads as true. Measured: the origin/main integration that
-# brought #13819 added 113 lines to `tortoise/embeddings.py`, and `:1296` /
-# `:1401` / `:1527` — the three gate lines — all moved. No other check in CI
-# reads a line number, and a reviewer who follows one lands nowhere.
+# brought #13819 inserted 102 lines into and deleted 11 from
+# `tortoise/embeddings.py` (`git show --numstat c3309ec656 --
+# tortoise/embeddings.py` -> `102  11`; 2695 -> 2786 lines, net +91), and the
+# three gate cites all moved by +65. No other check in CI reads a line number,
+# and a reviewer who follows one lands nowhere.
 
 _READER_CITE_RE = re.compile(r"`(?::|(?:tortoise/)?[a-z_]+\.(?:py|sh):)(\d+)(?:-(\d+))?`")
 #: What a cited line has to contain to be the thing the block says it is. The
@@ -2156,12 +2158,16 @@ def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]
     cites: list[tuple[str, int, int, str | None]] = []
     current = "embeddings.py"
     symbol: str | None = None
+    #: cite start -> the reader the numbered list names for it, so the two RANGE
+    #: cites in the prose below are bound to the same reader their start number
+    #: belongs to instead of being left unbound.
+    by_number: dict[int, str] = {}
     for ln in lines[start:end]:
         # A numbered reader entry starts a new claim: its symbol is its own.
         if re.match(r"\s*#\s+\d+\.\s", ln):
             symbol = None
-        # The list ends here; the prose below names no function, so nothing in it
-        # may inherit reader 5's symbol.
+        # The list ends here. The prose below names no reader, so it must not
+        # inherit reader 5's symbol — its cites are bound by NUMBER instead.
         if "The FUNCTION NAMES above are the invariant" in ln:
             symbol = None
         for token in ("hosted_api.py", "entrypoint.sh", "embeddings.py"):
@@ -2175,8 +2181,14 @@ def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]
             symbol = named.group(1)
         for m in _READER_CITE_RE.finditer(ln):
             lo = int(m.group(1))
+            if symbol is not None:
+                by_number.setdefault(lo, symbol)
             cites.append((current, lo, int(m.group(2) or lo), symbol))
-    return cites
+    # The prose repeats two of those numbers as ranges; bind them to the reader
+    # their start number names. The resolver cite (`:40-50`) names no reader, so
+    # it stays unbound and is covered by the needle check alone.
+    return [(f, lo, hi, sym if sym is not None else by_number.get(lo))
+            for f, lo, hi, sym in cites]
 
 
 def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
@@ -2234,9 +2246,10 @@ def _enclosing_definition(body: list[str], line_no: int, symbol: str) -> str | N
         if py:
             defs.append((len(py.group(1)), py.group(2)))
             continue
-        sh = re.match(r"([A-Za-z_]\w*)\(\)\s*\{", raw)
-        if sh:
-            defs.append((0, sh.group(1)))
+        sh = re.match(r"(\s*)(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{?", raw)
+        if sh and not raw.lstrip().startswith("#"):
+            defs.append((len(sh.group(1)), sh.group(2)))
+            continue
     target = next((d for d in reversed(defs) if d[1] == symbol), None)
     if target is None:
         return None
