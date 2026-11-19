@@ -953,15 +953,25 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # ⛔ THOSE TWO COUNTS ARE HISTORY, NOT THIS HEAD'S (round 6 review, P3 — MEASURED): the
     # regex has since been widened to the detector's whole VERB class, so `reports exactly
     # two paths`, `lists one path`, `shows`/`names`/`includes`/`contains`/`has`/`=`/`:` and
-    # `outputs`/`→` all match it here. Its ANSWER class now covers every emptiness and count
-    # answer the detector reads — the `config/ci-surfaces.yml` row for this file states the
-    # measured split (ZERO detector-only forms; `no files` and `no diff` are BAN-only) — so
-    # the detector is still asked separately for its direction LOGIC, never for an answer
-    # this ban misses. ⛔ THIS SENTENCE HAS NOW BEEN WRONG TWICE, in opposite directions
-    # (#13802 review, P2): it first claimed EQUALITY of the two classes, which the config
-    # row in the same diff contradicted, and the correction then claimed a strict SUBSET on
-    # the strength of `returns none` — an example this regex's own `none` alternative
-    # refutes (grep -n 'none|None|zero|ZERO' → the answer class on the ban below).
+    # `outputs`/`→` all match it here. ⛔ ITS ANSWER CLASS IS NOT A STRICT SUBSET, and the
+    # earlier cut of this comment said it was: the example it gave is read by THIS regex too
+    # (`none` is one of its alternatives, measured), and the `config/ci-surfaces.yml` row for
+    # this file says the opposite of "subset" — **ZERO** detector-only tokens left. What holds
+    # is that the ban reads every emptiness / count / bare-verb answer the sibling detector
+    # does, `blank` included, so the detector is still asked separately for its DIRECTION
+    # LOGIC and its SUBJECT anchoring, never for a wider answer list
+    # (#13802 review round 10, P2: the correction re-made the very class it was correcting,
+    # against the row it named).
+    # ⛔ AND "ZERO" WAS AN ASSERTION UNTIL CYCLE 6 MEASURED IT FALSE (#13802 review, cycle 6,
+    # P1): three of the detector's OWN answer forms were read by it and by nothing here —
+    # `non empty` (the detector's class is `non[- ]?empty`, a SPACE spelling this pattern did
+    # not carry), a bare count word with no noun (`prints one`, `prints both`), and a bare
+    # `prints tortoise/`. On the `set`/deictic anchors, where this ban is the ONLY layer,
+    # each was a refuted claim no arm refused in ANY checkout — measured `ban=False` against a
+    # non-empty detector verdict, and the injected sentence stayed green. All three are read
+    # here now (witnesses below pin them), so the residue is a MEASUREMENT — `[]` over the
+    # detector's `_member`/`_empty` alphabet — rather than the claim it used to be.
+    # measured split (ZERO detector-only forms; `no files` and `no diff` are BAN-only).
     # the sibling arm SKIPS once the base is unreadable (which is every job that gates a
     # merge), and this regex did not match the verb. Measured on the depth-1 topology with
     # `` `…-- tortoise/` reports exactly two paths `` injected: GREEN over a refuted
@@ -1984,7 +1994,13 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
     r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entries|diffs?|hits?)"
-    r"|empty|EMPTY|non-empty|nonempty|not empty"
+    # ⛔ AND THE SPACE SPELLING OF `non-empty` (#13802 review, cycle 6, P1 — MEASURED):
+    # the detector's own class is `non[- ]?empty`, so it reads `is non empty`; this
+    # pattern listed only the hyphen and closed spellings, so
+    # ``the `tortoise/` set is non empty`` was read by NO arm in ANY checkout — measured
+    # `ban=False det=[('prints non empty', False)]`. A token the detector reads and this
+    # bridge does not is the same hole the verb class was.
+    r"|empty|EMPTY|non[- ]?empty|not[- ]empty"
     r"|exactly those two|exactly (?:one|two)"
     r"|ONE module|TWO modules|one module|two modules|both modules"
     r"|ONE path|TWO paths|one path|two paths|no module"
@@ -2005,6 +2021,14 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # this ban is the ONLY layer, because the detector anchors on a command token)
     r"|(?:an?\s+)?(?:empty|blank|EMPTY)\s+(?:list|set|array|result|output)"
     r"|(?:an?\s+)?single|SINGLE|\b\d+\b"
+    # ⛔ AND A COUNT WORD WITH NO NOUN AT ALL, AND A BARE `tortoise/` ANSWER
+    # (#13802 review, cycle 6, P1 — MEASURED, carried across the round-11 merge):
+    # the detector's `_member` reads a bare `one`/`two`/…/`ten`/`both` and a bare
+    # `tortoise/`, so those answers walked through green here on the `set` and
+    # deictic anchors, where this ban is the only layer.
+    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten|both)"
+    r"(?=[\s.,;:!?)]|$)"
+    r"|`?tortoise/`?(?=[\s.,;:!?)]|$)"
     r"|(?:exactly\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|a|an|the)\s+"
     r"(?:[\w-]+\s+)?(?:files?|paths?|modules?|edits?|entry|entries|diffs?|hits?|"
     r"records?|items?|rows?|lines?|changes?)"
@@ -2156,6 +2180,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "the `tortoise/` set holds a single record",
         "the `tortoise/` set prints a single item",
         "the `tortoise/` set prints a single row",
+        # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
+        # cycle 6, P1 — each MEASURED `ban=False` in-process against the detector's own
+        # `_member`/`_empty` classes; on the `set`/deictic anchors this ban is the only
+        # layer, so each was a refuted claim that no arm refused).
+        "the `tortoise/` set is non empty at this head",
+        "the `tortoise/` set prints one",
+        "the `tortoise/` set holds both",
+        "`-- tortoise/` prints `tortoise/`",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
@@ -2250,17 +2282,14 @@ def test_the_document_types_no_numstat_figure_for_the_index_residual():
     NON-VACUITY, MEASURED — and ⛔ the census is NOT typed per line here, because this
     comment is subject to the very rule it describes. An earlier cut of it said "FIVE
     times across FOUR clauses (:108, :134 … :114, :134 again, :143)" and NO revision in
-    this branch's range produces that census — re-measured with the CURRENT pattern at
-    **`6238dde72a`**, the head that cut was true at: **SIX matches across FIVE lines**
-    (`:102`, `:108` twice, `:114`, `:134`, `:143`; three the `--numstat` form and three the
-    ``docs/00_index.md`` + pair form). ⛔ THAT FIGURE IS BOUND TO `6238dde72a` AND TO NO
-    FLOATING REF: an earlier cut typed it against `origin/main`, which is not a head —
-    re-measured with this same pattern, `main`'s `#13807` has since de-typed those clauses
-    and it matches **ZERO** lines on `origin/main` (`28ca66878d`) and at this head, so the
-    figure is history at a named sha, not a claim about the tree you are reading. Re-run
-    the pattern at the head you are reviewing and read the map from that, rather than
-    trusting a figure written here — which is the arm's whole thesis applied to its own
-    docstring.
+    this branch's range produces that census, and ⛔ **NO figure is typed here either**:
+    measured with the CURRENT pattern against `origin/main` (`28ca66878d`) it matches
+    **zero** lines, because `main`'s own `#13807` de-typed those clauses — the paragraph's
+    own thesis turned on its own docstring (round 10 review, P2: the cut that stood here
+    typed a six-match / five-line census "at `origin/main`", and re-measuring it is what
+    refutes it; a floating ref is not a head). Re-run the pattern at the head you
+    are reviewing and read the map from that, rather than trusting a figure written here
+    — which is the arm's whole thesis applied to its own docstring.
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
