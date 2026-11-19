@@ -428,8 +428,9 @@ class TestEveryPointerResolvesInOneHop:
         (#11609 P1: `create_entity`'s `point`/`diary`; P2: `check_confidence`'s
         `recompute=True` / `recall=True`), so the count can only fall and no container is
         added. The waves are independent subtractions on the same base surface —
-        48 minus 2 minus 2, then 42 minus 2 minus 2 — because each merged on its own; the
-        pin is the SUM, which is what the merged registry actually advertises.
+        48 minus 2 minus 2 = 44, then 44 minus 2 minus 2 = 40 — because each merged on
+        its own; the pin is the SUM, which is what the merged registry actually
+        advertises.
         """
         assert len(TOOL_REGISTRY) == 40, (
             f"live surface is {len(TOOL_REGISTRY)}, not 40 — these waves remove doors only "
