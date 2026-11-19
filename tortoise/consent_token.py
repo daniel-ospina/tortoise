@@ -69,9 +69,11 @@ REFUSALS (all typed, all fail-closed)
 ``OAuthError`` so the endpoint renders one RFC 6749 §5.2 body:
   * ``401 invalid_token`` — the assertion was not accepted (structure, `alg`, signature, `aud`,
     `iss`, `exp`/`iat`, `sub`, `jti`, `bind` shape, `bind` mismatch, or a replayed `jti`).
-  * ``503 temporarily_unavailable`` — the arm cannot be used at all: `CONSENT_TOKEN_SECRET` is
-    unset, or the `jti` register is at capacity. Never a 500, and never a silent fall-through to
-    the bearer path (which would answer "missing session token" to a request that never had one).
+  * ``503 temporarily_unavailable`` — the arm cannot be used at all: no usable key (`CONSENT_TOKEN_SECRET`
+    unset, or a `CONSENT_TOKEN_KEYS` set that is empty/malformed or names a `CONSENT_TOKEN_CURRENT_KID`
+    it does not hold), or the `jti` register is at capacity. Never a 500, and never a silent
+    fall-through to the bearer path (which would answer "missing session token" to a request that
+    never had one).
 
 OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on the hosted API:
   * ``CONSENT_TOKEN_SECRET`` — a dedicated secret, HMAC-SHA256 signing key, **at least 32 UTF-8
