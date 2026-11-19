@@ -299,8 +299,12 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     adapter really IS constructed — a false PASS, identical on `main`, filed as **#13670** rather
     than left silent. The `del` spelling of the same class is the one instance FIXED here: the
     `ast.Delete` arm skips a class block, because noting the binding made the body own the name
-    for its whole text and DROPPED a real site (`#13639` review round 3 F1 — a regression against
-    `main`, measured). That skip is minimal and correct; it does not make class bodies positional.
+    for its whole text and DROPPED a real site (`#13639` review round 3 F1). ⛔ NOT "a regression
+    against `main`": `origin/main` = `9d25456544` — the squash that landed this PR's pre-fix arm —
+    answers `[]` for all three class shapes too (measured), so the skip ADDS a site main has never
+    reported. It was a regression against the `main` of `4531e7e236` (the base the round-3 review
+    graded, which had no `ast.Delete` arm at all), and the squash then made it main's own defect.
+    That skip is minimal and correct; it does not make class bodies positional.
     """
     tree = ast.parse(source)
 
@@ -341,7 +345,9 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                 # the `A = object` spelling of the same unconditional rebinding reports `[]` and
                 # the runtime is `TypeError` (0 constructions) — a FALSE BLOCK, i.e. a re-read.
                 # That is the sanctioned direction and NOT a regression (`main` answers `[3]` on
-                # all four), and the choice is pinned by
+                # the three short-circuit spellings and `[]` on the `=` control — measured) — and
+                # that `[]` is exactly the discrimination this pair exists for. The choice is
+                # pinned by
                 # `test_the_adapter_reading_is_not_spelling_blind`'s declared-over-read row. The
                 # exact alternative is to mark only `IfExp.body`/`.orelse` and
                 # `BoolOp.values[1:]`, so the always-evaluated part REPLACEs — a behaviour change
@@ -705,21 +711,26 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
             # looked up in the global namespace"). A class body has no local-DECLARATION rule, so
             # `del A` there is a sequential namespace operation, not a claim on the whole body:
             # `class K: z = A(app)` / `del A` really instantiates the adapter from the GLOBALS
-            # (measured with a recording stub: `constructed=1`, then `NameError`) and
-            # `origin/main` reports `[3]`. Noting the binding anyway made the class body own `A`
-            # for its whole text and dropped that site — a false PASS, a REGRESSION against
-            # `main`, and the one direction this reader must never get wrong. So the class block
-            # is skipped here and its read resolves as it does today; making class bodies
-            # POSITIONAL (which would also hold the `del`-then-read order) is a separate,
-            # measured hole — **#13670**.
+            # (measured with a recording stub: `constructed=1`, then `NameError`). Noting the
+            # binding anyway made the class body own `A` for its whole text and dropped that site
+            # — a false PASS, the one direction this reader must never get wrong. ⛔ Not "a
+            # regression against `main`" any more: `origin/main` = `9d25456544` is the squash that
+            # landed THIS arm and answers `[]` for all three class shapes (measured), so this skip
+            # ADDS a site main has never reported. It WAS a regression against `4531e7e236` (the
+            # base the round-3 review graded, which had no `ast.Delete` arm); main moved onto the
+            # defect while this lane ran. So the class block is skipped here and its read resolves
+            # as it does today; making class bodies POSITIONAL (which would also hold the
+            # `del`-then-read order) is a separate, measured hole — **#13670**.
             #
             # ⛔ NO VALUE IS RECORDED, because a delete has none (`#13639` review round 3 F2:
             # the sentence that stood here claimed the name "stays `{SHADOWED}` in its block",
             # which the code has never done — this arm touches `binds` and nothing else). An
             # earlier value in `envs` therefore stays in force, and a `del` AFTER a binding still
-            # reports: `B = FastAPIRouterAdapter` / `del B` / `B(app)` answers `[5]` here and on
-            # `main` while the runtime is `UnboundLocalError` — an over-read (a re-read), the
-            # sanctioned direction.
+            # reports. Measured, and the block KIND picks the numbers: `B = FastAPIRouterAdapter` /
+            # `del B` / `B(app)` at MODULE scope answers `[4]` with runtime `NameError`, and inside
+            # a `def` the same three lines answer `[5]` with runtime `UnboundLocalError` (0
+            # constructions in both). Either way the arm over-reads — a re-read, the sanctioned
+            # direction.
             innermost = chain[-1] if chain else None
             if not isinstance(innermost, ast.ClassDef):
                 for target in node.targets:
@@ -2127,9 +2138,10 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # spellings of one unconditional rebinding therefore disagree with each other: the `=` control
     # above answers `[]` and this row reports. Measured: runtime is `TypeError` (0 constructions)
     # for `(A := object) and True`, `(A := object) or True` and `1 if (A := object) else 2`, and
-    # `main` answers `[3]` on all four — so this is a FALSE BLOCK (a re-read), the sanctioned
-    # direction, and NOT a regression. The row asserts the over-read ON PURPOSE: making it exact is
-    # the `conditional`-on-`values[1:]`/`IfExp.body` change the `branches` comment declines.
+    # `main` answers `[3]` on those three while it answers `[]` on the `=` control (measured) — so
+    # this is a FALSE BLOCK (a re-read), the sanctioned direction, and NOT a regression. The row
+    # asserts the over-read ON PURPOSE: making it exact is the
+    # `conditional`-on-`values[1:]`/`IfExp.body` change the `branches` comment declines.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "(A := object) and True\n"
@@ -2181,10 +2193,12 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # in it makes the name local, so every read there is `UnboundLocalError`) and was still right
     # for the depth-3 case — but a class body has no local-declaration rule (§4.2.2: unbound
     # locals are looked up in the GLOBALS), so `del A` there does not shadow the body's earlier
-    # read. Measured with a recording stub: the adapter IS constructed, then `NameError`, and
-    # `origin/main` reports `[3]`; noting the binding made this head answer `[]` — a false PASS and
-    # a REGRESSION against `main`, the direction that must never ship. This row is the site itself
-    # (not `== []`), so it reds if the class skip is removed.
+    # read. Measured with a recording stub: the adapter IS constructed, then `NameError`; noting
+    # the binding made this head answer `[]` — a false PASS, the direction that must never ship.
+    # ⛔ Not "a REGRESSION against `main`" at THIS base: `origin/main` = `9d25456544` carries the
+    # un-skipped arm and answers `[]` for all three class shapes too (measured), so the skip ADDS
+    # a site main has never reported. This row is the site itself (not `== []`), so it reds if the
+    # class skip is removed.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "class K:\n"
@@ -2192,8 +2206,8 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "    del A\n"
     ), ("a `del` in a CLASS body shadowed the whole body — §4.2.2: a class block has no "
         "locality rule and unbound locals are looked up in the GLOBALS, so the read BEFORE the "
-        "delete instantiates the adapter (`origin/main` `[3]`; a recording stub counts 1 "
-        "construction before the `NameError`)")
+        "delete instantiates the adapter (a recording stub counts 1 construction before the "
+        "`NameError`); `origin/main` `9d25456544` answers `[]` here")
     # …the `if`-spelled instance of the same defect: the Delete arm notes the binding
     # UNCONDITIONALLY (`conditional` is never consulted), so a branch-nested class-body `del`
     # dropped the site exactly as the unconditional one did.
@@ -2206,16 +2220,17 @@ def test_the_adapter_reading_is_not_spelling_blind():
     ), ("a BRANCH-NESTED `del` in a class body dropped the earlier read too — the class body "
         "owns no such name, and the arm must not note it conditionally or otherwise")
     # ⛔ THE CONTROL: it pins the OVER-READ this fix ACCEPTS, not `== []`. `class K: del A` /
-    # `z = A(app)` raises `NameError` at runtime (0 constructions), so `main`'s `[4]` over-reads.
-    # Skipping the class note reverts this head to exactly `main`'s answer, and the assertion is
-    # deliberately TRUTHY so a future "fix" of #13670 cannot silently turn it into a false PASS.
+    # `z = A(app)` raises `NameError` at runtime (0 constructions), so reporting `[4]` over-reads.
+    # The assertion is deliberately TRUTHY so a future "fix" of #13670 cannot silently turn it into
+    # a false PASS. (`origin/main` answers `[]` here: it carries the un-skipped arm, which is the
+    # false PASS this fix trades an over-read for.)
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "class K:\n"
         "    del A\n"
         "    z = A(app)\n"
     ), ("the CONTROL for the two class rows above — runtime is `NameError`, and the declared "
-        "over-read (`main` `[4]`) reports it anyway because a class body is resolved "
+        "over-read (`[4]`) reports it anyway because a class body is resolved "
         "order-blind; #13670 is where that becomes exact")
     # ⛔ THE UNREADABLE-DESTRUCTURING BRANCH IS PINNED BY A TARGET IT CAN ACTUALLY SEE
     # (`#13585 review 94361b8f` P3#2). The existing row for it uses `b, c = build_pair()`, whose
