@@ -531,14 +531,14 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:1629` (the scale loop) · the two mode blocks the
+- `--count N` → `tools/install-ci-runner-x64.sh:1638` (the scale loop) · the two mode blocks the
   paragraphs below cite: `install` `:1441` (arch refusal dies at `:1446`) and `uninstall` `:1500` ·
   guards at `:1441-1497` (forks `:1449`, disk `:1469`, cpu/memory `:1476`) · sha256 pin +
-  registration at `:1640-1650` (verify `:1640`, token `:1643`, one argv `:1648`, `config.sh`
-  `:1650`; the run at `:1632` is the dry-run echo) · systemd install/start at `:1660-1669` · label
+  registration at `:1649-1650` (verify `:1649`, token `:1652`, one argv `:1657`, `config.sh`
+  `:1659`; the run at `:1641` is the dry-run echo) · systemd install/start at `:1669-1678` · label
   resolution at `:435-489` (`fallback_engaged` `:439`, `resolve_os_label` `:467`, `resolve_labels`
   `:499`, whose body ends at its `}` on `:536`) · the union's label algebra at `:538-553` and the
-  repair that uses it, `repair` `:1210` · the label-coverage block `:613-1166` (its header `say` at
+  repair that uses it, `repair` `:1210` · the label-coverage block `:613-1188` (its header `say` at
   `:613`, its three no-verdict arms at `:953`, `:961` and `:970`, the uncovered verdict at `:1188`)
   and the `--status` block that contains it `:590-1190` · `--print-labels` `:1414`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:256`): a `--count 0
@@ -546,7 +546,7 @@ falls back.
   nothing. `CI_RUNNER_OS_LABEL` is validated in the same place (:462-465), so a typo is refused in
   `--status` and `--uninstall` too — not only in the three modes that resolve labels.
 - **`--repair-labels` UNIONS — it can ADD a label, and the ONLY labels it removes are the two named
-  carve-outs below; never `ubuntu-latest` or a custom label a workflow targets** (:1210-1395). The
+  carve-outs below; never `ubuntu-latest` or a custom label a workflow targets** (:1210-1403). The
   absolute form of that sentence was wrong one bullet later — `test-slow` and `workflow-lint` name
   the version pin, and the version-pin carve-out removes it — so the carve-outs are named here as the
   removals they are. It reads the runner's CURRENT labels and PUTs `current ∪ computed`, because the old
@@ -654,7 +654,7 @@ falls back.
   `⚠️ PARTIAL`, and its remedy is class-correct: only the bare pin is re-applied by this script.
   Exit **5** when the pool IS asked for a required label and answers with none (:1188).
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:1499-1612`; the proof is `is_runner_install` at `:431`, which accepts `.runner` or  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
+  gone** (`:1499-1621`; the proof is `is_runner_install` at `:431`, which accepts `.runner` or  `bin/Runner.Listener` — a lone `config.sh` is NOT proof): one of those must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
   operator input, so "a directory exists at this path" is not evidence of a runner — the earlier

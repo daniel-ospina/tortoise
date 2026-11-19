@@ -3065,13 +3065,13 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
         1476: r"CPU LAST",  # "cpu/memory"
         1499: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
         1500: r'MODE" = uninstall',  # "`uninstall`"
-        1629: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1632: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1640: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1643: r"registration-token",  # "token"
-        1648: r"^    set -- --unattended",  # "one argv"
-        1650: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1660: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        1638: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1641: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1649: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1652: r"registration-token",  # "token"
+        1657: r"^    set -- --unattended",  # "one argv"
+        1659: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1669: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -5893,6 +5893,30 @@ def test_uninstall_removes_only_our_dropin_and_never_another_operators(tmp_path:
     assert r.returncode == 0, f"a clean uninstall must exit 0, got {r.returncode}: {r.stderr}"
     assert not ours.exists(), "our drop-in must be removed with the unit"
     assert foreign.exists(), "another operator's drop-in must SURVIVE our uninstall"
+
+
+def test_uninstall_without_svc_sh_still_removes_our_dropin(tmp_path: Path):
+    """⛔ THE THIRD `--uninstall` PATH. A runner dir carrying `.runner` + `config.sh` but NO `svc.sh`
+    cannot be deregistered from here, so that arm bails out with rc=3 — but it used to leave OUR
+    drop-in on disk, and once the operator removed the unit file by hand the NEXT run deleted the
+    runner dir and exited 0 with `10-restart-and-memory.conf` still governing that unit name. The
+    orphan arm already removes it; this one did not, and no arm covered the arm.
+    """
+    env = _uninstall_env(tmp_path)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    (runner / "config.sh").write_text("#!/bin/sh\nexit 0\n")  # no svc.sh on purpose
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    ours = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("[Service]\nRestart=on-failure\n")
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 3, f"this arm cannot deregister, so it must report 3, got {r.returncode}"
+    assert not ours.exists(), "our drop-in must be removed even on the arm that cannot use svc.sh"
+    assert runner.exists(), "the runner dir must survive: it holds the only state a retry can use"
+    assert "10-restart-and-memory.conf" in r.stdout + r.stderr, "the hand-removal hint must NAME our drop-in"
 
 
 def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_path: Path):

@@ -1578,7 +1578,16 @@ if [ "$MODE" = uninstall ]; then
       # deleting the whole `.d` directory would take another operator's drop-in with it.
       remove_unit_dropin "$unit" || rc=3
     elif [ -e "$UNIT_DIR/$unit" ]; then
-      say "WARNING: $unit is installed but $d has no svc.sh, so it cannot be uninstalled from here — LEFT the directory and its registration intact. Remove the unit by hand, then re-run"; rc=3; continue
+      # ⛔ THIS IS A THIRD `--uninstall` PATH AND IT USED TO REPORT CLEAN WITH OUR DROP-IN STILL ON DISK:
+      # a runner dir with `.runner` + `config.sh` but no `svc.sh` cannot be uninstalled by `svc.sh`, so
+      # this arm bails out — and then, once the operator has removed the unit file by hand, the NEXT run
+      # deletes the runner dir and exits 0 while `10-restart-and-memory.conf` survives in the `.d/`. The
+      # orphan arm above already removes it (and appends `&& sudo rm -f …` to its remedy); this one did
+      # neither, so the drop-in outlived the runner it was written for.
+      remove_unit_dropin "$unit" || rc=3
+      # ⛔ AND NO BACKTICKS IN THIS `say`: the string is double-quoted, so a backticked command would
+      # be SUBSTITUTED — a hand-removal hint that strips the unit file before the operator reads it.
+      say "WARNING: $unit is installed but $d has no svc.sh, so it cannot be uninstalled from here — LEFT the directory and its registration intact. Remove the unit by hand (sudo rm -f $UNIT_DIR/$unit) and our drop-in with it (sudo rm -f $UNIT_DIR/$unit.d/10-restart-and-memory.conf), then re-run"; rc=3; continue
     fi
     tok="${uninstall_tokens[$i]}"
     # ⛔ A FAILED DEREGISTRATION IS AN OPERATION FAILURE, AND IT STOPS THE DELETE FOR THIS TARGET —
