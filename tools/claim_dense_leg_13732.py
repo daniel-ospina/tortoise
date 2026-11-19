@@ -870,6 +870,112 @@ def record_population_vectors(ids: list[str], scope, record_dsn: str | None) -> 
             conn.close()
 
 
+def graph_population_vectors(proj, population: list[dict]) -> int | None:
+    """How many of THIS population's rows does the GRAPH hold THIS run's vector for?
+
+    The graph half of the same question :func:`record_population_vectors` asks
+    the record, and it exists because the run-level gate beside the seed asks a
+    PREFIX-wide question: ``MATCH (n:Point) WHERE n.id STARTS WITH … AND
+    n.embedding IS NOT NULL`` counts whatever the prefix happens to hold, not
+    what this run wrote. Two ways that count is above zero while the population
+    is only partly seeded, both of them real:
+
+    * the apply-fold leaves ``n.embedding`` UNSET for a row it cannot vectorise —
+      an operator point (every embed branch in ``projection/entities.py`` is
+      gated on ``not op``), an identifier-only text refused by the EMBED gate
+      (``#5008``), an ``encode_for_row`` failure swallowed by ``except
+      Exception: pass``, or an embedding-WIDTH mismatch, where the fold warns
+      and leaves the node's vector alone rather than write a vector the index
+      cannot hold (``#5004``);
+    * ``--graph`` names an EXISTING graph.
+
+    ⛔ AND THE ID IS NOT THE WHOLE PAIR — THE TEXT IS. ``n.embedding IS NOT NULL``
+    alone cannot tell THIS run's vector from an EARLIER one under the same id,
+    and on a reused graph every id collides (they are minted deterministically,
+    ``f"{ID_PREFIX['point']}{index:06d}"``). The fold rewrites ``n.content``
+    UNCONDITIONALLY but KEEPS ``n.embedding`` when the payload's vector was
+    refused — so a width mismatch on a reused graph leaves the OLD text's vector
+    on the node, an id-only count passes, and ``graph_dense`` ranks by a vector
+    this run did not write. The returned rows are therefore paired against the
+    text this run asked for, one ``IN $ids`` round trip, not a per-id loop.
+
+    Residual, stated rather than papered over: the pairing compares TEXT, so the
+    same id holding the SAME text with a vector from a DIFFERENT embedder (same
+    width, no index mismatch) is still indistinguishable. Detecting that needs a
+    model identity on the node (``_record_embedding_identity``, ``#5004``), which
+    the seed payload does not carry.
+
+    A ``graph_dense`` arm over a partially seeded population ranks only the
+    seeded part, so its delta against ``record_dense`` is a figure about the
+    seed step wearing the leg's name — the same false PASS the record-side guard
+    closes, one store over.
+
+    ``None`` for an UNREADABLE graph, never ``0``; an empty result is a real
+    measurement (``0``, an empty graph) and the guard refuses it by name.
+    """
+    if not population:
+        return None
+    expected = {row["id"]: row.get("content") for row in population}
+    try:
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.embedding IS NOT NULL RETURN n.id, n.content",
+            params={"ids": list(expected)},
+        ).result_set
+        # ⛔ THE WHOLE PAIRING IS INSIDE THE GUARD: a row shape this code does not
+        # expect must answer `None` (unmeasurable) like every other failure, not
+        # raise out of `run_measurement` as a traceback where the artifact
+        # promises `REFUSED[...]` — the record twin converts inside its own
+        # `try` for the same reason. AND a short row must not be read as "no
+        # nodes": a 1-column answer to a 2-column query is a client shape this
+        # code does not understand, and calling that an EMPTY graph would refuse
+        # the run with the wrong reason.
+        paired = set()
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                raise ValueError(f"unexpected graph row shape: {row!r}")
+            if expected.get(str(row[0])) == row[1]:
+                paired.add(str(row[0]))
+        return len(paired)
+    except Exception:  # noqa: BLE001, RUF100 — unmeasurable, not zero
+        return None
+
+
+def require_graph_population(matched: int | None, population_n: int) -> None:
+    """The GRAPH must hold a VECTOR for every id this run would score.
+
+    Run-level, unlike :func:`require_population_in_record` — and the asymmetry is
+    the point, not an oversight. The record's cohort is a PRECONDITION this
+    instrument cannot seed (``#13210`` is the backfill's tool), so refusing the
+    run on it was unsatisfiable and blocked the two arms that need no record at
+    all. The GRAPH's cohort is what this run has *already written* by the time the
+    guard asks, so a run-level refusal here is satisfiable by construction, and
+    it is the only scope in which it is useful: a partly seeded graph degrades
+    every arm, including ``lexical`` (which reads the same nodes' full-text
+    index).
+    """
+    if matched is None:
+        raise Refused(
+            "graph_population_unmeasurable",
+            "how many of this population's ids the graph holds an embedding for "
+            "could not be measured — unmeasured is not zero, and it is not a "
+            "verdict",
+        )
+    if matched < population_n:
+        raise Refused(
+            "graph_population_absent",
+            f"the graph holds an embedding for {matched} of the {population_n} "
+            f"population row(s) this run would score — the apply-fold leaves "
+            f"`n.embedding` unset for a row it cannot vectorise (an operator "
+            f"point, a text refused by the EMBED gate, an embedding-WIDTH "
+            f"mismatch left unset rather than written, or a swallowed encode "
+            f"failure), and on `--graph` a node can keep an EARLIER text's "
+            f"vector under the same deterministic id, which the text pairing "
+            f"above refuses. A `graph_dense` arm over that population ranks only "
+            f"the seeded part, so its delta against `record_dense` is a figure "
+            f"about the seed step and not about the leg",
+        )
+
+
 def require_population_in_record(matched: int | None, population_n: int) -> None:
     """The record must hold a VECTOR for every id this run would score.
 
@@ -1170,22 +1276,29 @@ def run_measurement(args: argparse.Namespace) -> int:
     # carries the refusal BY NAME against the one arm it blocks (exit 3) rather
     # than skipping it silently.
     population_ids = [row["id"] for row in population]
+    # ⛔ THE GRAPH HALF IS GUARDED BY THE ID-SCOPED QUESTION, AND IT IS RUN-LEVEL.
+    # The count above is PREFIX-wide, so it asks *"does this graph hold any
+    # embedded claim?"* — not *"did THIS run seed THIS population?"*. It passes
+    # over a partly seeded population (an operator point, an EMBED-gate refusal,
+    # a swallowed encode failure, a width mismatch) and over a `--graph` served
+    # from a previous run. ``graph_population_vectors`` asks the id-and-text
+    # scoped question and runs BEFORE any arm: the graph is what this run has
+    # already written, so the refusal is satisfiable here — unlike the record's
+    # cohort, which this instrument cannot seed and which therefore gates
+    # `record_dense` alone.
+    #
+    # ⛔ AND IT SUBSUMES THE `graph_vectors <= 0` BRANCH THAT USED TO SIT HERE.
+    # The population's ids are minted from the SAME ``ID_PREFIX["point"]`` the
+    # prefix count matches, and ``population_n >= min_population >= 1``, so an
+    # id-scoped pass implies a prefix-wide count of at least one: that branch
+    # could no longer fire, and its comment claimed the width-mismatch case it
+    # would now refuse first, under a different name (`graph_population_absent`).
+    # An `if` that can never fire but reads as a gate is worse than none, so the
+    # width-mismatch mechanism is named in that refusal's message instead.
+    graph_population = graph_population_vectors(proj, population)
+    require_graph_population(graph_population, len(population_ids))
     coverage: dict = {}
     population_vectors: int | None = None
-    # ⛔ THE GRAPH HALF STAYS RUN-LEVEL. `graph_vectors <= 0` is a fact about the
-    # population THIS TOOL just seeded, not about the record — every arm would be
-    # measuring the lexical leg, so it refuses the run by name (the case
-    # `projection/entities.py` produces by warning and leaving `n.embedding`
-    # unset on an embedding-width mismatch, after `_seed_graph` looked fine).
-    # Caught into `record_blocked` it would have recorded a GRAPH fact as a
-    # record block and stopped refusing the one case it was written for.
-    if graph_vectors <= 0:
-        raise Refused(
-            "graph_unseeded",
-            f"the graph holds {graph_vectors} vector-bearing claim(s) — the "
-            f"population was written without embeddings, so no dense leg can "
-            f"find anything and every arm would measure the lexical leg",
-        )
     if record_blocked is None:
         try:
             coverage = require_coverage(
@@ -1296,7 +1409,17 @@ def run_measurement(args: argparse.Namespace) -> int:
             ),
         },
         "corpus": {"files": len(files), "stats": corpus_stats, "point_build": funnel},
-        "population": {"built": len(population), "written": written},
+        "population": {
+            "built": len(population),
+            "written": written,
+            # ⛔ BOTH COUNTS, because they answer different questions and the
+            # prefix-wide one passes over a partly seeded population. A reader
+            # who sees only `graph_vectors` cannot tell a full seed from a
+            # partial one; `graph_population_vectors` is the id-scoped count
+            # `require_graph_population` refused on.
+            "graph_vectors": graph_vectors,
+            "graph_population_vectors": graph_population,
+        },
         "coverage": coverage,
         "preregistered": preregistration(preregistered_n),
         "population_mismatch": (
