@@ -310,7 +310,7 @@ is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
 reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
 DELETED, re-measured at this head: `mcp_server.py:4382` is a BLANK line and the
 `:Document` retirement prose is at `:4430`; `sdk.py:36745` is a
-``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:36754`
+``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:36776`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
 `:Document` docstring lines are `:37166` in `record_decision` (opening `:37146`;
 `:37165` is the `:Source` line immediately above it, which is what a re-measure by that
