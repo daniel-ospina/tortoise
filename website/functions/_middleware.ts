@@ -270,6 +270,23 @@ export const onRequest: PagesFunction = async (context) => {
   // and belongs to `_redirects` — the product host's block adds it explicitly.
   const PRODUCT_ROOT = new Set(["/product", "/product.html"]);
 
+  // ⛔ THE ONE ROOT-LEVEL PAGE ON THIS SIDE OF THE MAP (#13645). The niche
+  // product page is served at the company ROOT —
+  // `premiselabs.co/tortoise-for-product-teams` — so it is NOT a `PRODUCT_PAGES`
+  // member (that set 301s its members UNDER the prefix, which would send this
+  // very URL to `/tortoise/tortoise-for-product-teams`, a 404) and NOT a
+  // `PRODUCT_ROOT` asset (that maps onto `/tortoise`). This set exists for the
+  // OTHER direction: the shared Pages project serves every static asset on both
+  // hosts, so without this row the retired product host answers a second 200
+  // copy of the same document at `tortoise.premiselabs.co/tortoise-for-
+  // product-teams` — the duplicate-address condition #11762 removed for every
+  // other page — and it would do so through the asset router's silent
+  // fallthrough, with nothing in this map saying so.
+  const ROOT_PAGE = new Set([
+    "/tortoise-for-product-teams",
+    "/tortoise-for-product-teams.html",
+  ]);
+
   // ── ONE definition of a product URL's canonical form ──────────────────
   // No leading/trailing slashes, no `.html`. Both hosts derive from THIS, because
   // the product host hands the request to the company host while the company host
@@ -560,6 +577,9 @@ export const onRequest: PagesFunction = async (context) => {
     // chaining through the company host's own `_redirects` row (two hops).
     if (path === "/sitemap_index.xml") return toCompany("/sitemap.xml");
     if (CRAWLER_SURFACE.has(path)) return toCompany(path);
+    // The root-level niche product page (#13645): ONE address per document, so
+    // this host's copy consolidates onto the company host in ONE hop.
+    if (ROOT_PAGE.has(path)) return toCompany(path.replace(/\.html$/, ""));
     // The root IS the product page on this host today, so it maps to the one
     // canonical product URL; the raw duplicates map there too (`/index.html` is
     // a duplicate of the PRODUCT root on THIS host — it is the company page's
