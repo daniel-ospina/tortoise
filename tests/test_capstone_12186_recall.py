@@ -1198,6 +1198,22 @@ def test_the_readme_quotes_the_provenance_the_artifact_records(artifact):
                      + [f"{counts[c]}{c}" for c in ("definite", "ident", "path")],
                      "§1 population row")
 
+    #: ⛔ The `rules` row — the one that justifies the pinned query set at all
+    #: (round 11, F3). `_assert_rows_cover` only proves the row EXISTS; its cell was
+    #: never read, so `imported, not re-implemented` -> `re-implemented here` and a
+    #: dropped `/ `_interleave`` both stayed GREEN (measured) while the docstring
+    #: claims §1's provenance is "recomputed from the committed artifact". The value
+    #: IS in the pin file, so it is derived: the harness module name plus every
+    #: imported symbol, and the refusal that says they were not rewritten.
+    rules_pin = json.loads(PIN.read_text())["rules"]
+    rules = _flat(_one_row(rows, PROVENANCE_ROW_MARKERS["rules"], "rules")[1])
+    _assert_mentions(
+        rules,
+        [rules_pin["harness"].rsplit("/", 1)[-1].removesuffix(".py")]
+        + list(rules_pin["imported"])
+        + ["imported", "notre-implemented"],
+        "§1 rules row")
+
     queries = _flat(_one_row(rows, PROVENANCE_ROW_MARKERS["queries"], "queries")[1])
     shares = "/".join(str(pin["shares"][c]) for c in ("definite", "ident", "path"))
     _assert_mentions(queries, (f"{pin['queries']}-name", shares), "§1 queries row")
@@ -1210,6 +1226,23 @@ def test_the_readme_quotes_the_provenance_the_artifact_records(artifact):
     #: correct row (observed).
     _assert_mentions(digest, (pin["digest"], pin["query_digest"],
                               f"sha256{pin['sha256'][:8]}…"), "§1 digest row")
+
+    #: ⛔ THE MASTHEAD, which is a SECOND quotation of two artifact values (round 11,
+    #: F4). It sat in neither the PINNED list nor the NOT-PINNED enumeration, so a
+    #: reader applying that enumeration concluded it was covered, and the document
+    #: could publish two different digests for the same file — the exact
+    #: second-quotation-masks-the-first failure this file already fixed for the mint
+    #: rate. Both figures are in the artifact; both are pinned against the masthead
+    #: region specifically, so §1's copy cannot stand in for a drifted one here.
+    #: Lower-cased because the masthead capitalises the `Code head:` label while the
+    #: token is the artifact value; `_flat` preserves case, so the surface is folded
+    #: rather than the token spelled two ways.
+    masthead = _paragraph(README.read_text(), "**Instrument:**").lower()
+    _assert_mentions(
+        masthead,
+        (f"sha256{pin['sha256'][:8]}…",
+         f"codehead:{artifact['code_head'][:10]}"),
+        "the README masthead")
 
 
 #: §1's provenance rows, by the `field` label each carries.
@@ -1425,7 +1458,16 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
          #: abstract's conclusion was invertible: `not visible to a user, because it
          #: is off by default` -> `visible … on by default` stayed green (measured).
          f"{visibility['fused_rerank_shipped_default'].lower()}bydefault",
-         "notvisibletoauser"),
+         "notvisibletoauser",
+         #: ⛔ THE SIGNIFICANCE VERDICT, derived from the artifact's own `p` rather
+         #: than typed here (round 11, F2). Every FIGURE in this clause was pinned
+         #: and the judgement built on them was not: `too small to call a win at
+         #: p = 0.25` -> `a decisive win at p = 0.25` stayed GREEN (measured), which
+         #: is the one claim the record makes about a p = 0.25 result — inverted
+         #: with the numbers untouched. Two NON-OVERLAPPING tokens on purpose:
+         #: `awin` would be satisfied by `toosmalltocallawin`'s own tail, so the
+         #: sub-threshold branch names a phrase that cannot appear in the other.
+         "toosmalltocallawin" if rerank["p"] >= 0.05 else "adecisivewin"),
         "the abstract's rerank clause")
 
     #: The three-lever summary sentence. Its counts are DECLARED here and tied to the
@@ -1458,7 +1500,16 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
     _assert_mentions(
         _clause(paragraph, "#12304"),
         (f"{mint['norm_only']['rate'] * 100:.0f}%",
-         f"{mint['shipped']['rate'] * 100:.1f}%"),
+         f"{mint['shipped']['rate'] * 100:.1f}%",
+         #: ⛔ THE SURFACE, not only the two rates (round 11, F1). The rates alone
+         #: leave the clause's claim free: `is visible on the **write path**` ->
+         #: `is visible to a **user**` kept both rates and stayed GREEN (measured),
+         #: shipping a false user-capability claim for the one lever the record says
+         #: is write-path ONLY — contradicting §4's WHOLE-pinned `ON (write path)`
+         #: row and the same paragraph's own `one is only visible on the write path`.
+         #: This is the token the sibling clauses already carry (`notvisibletoauser`,
+         #: `offbydefault`); its absence here was the gap, not its form.
+         "visibleonthewritepath"),
         "the abstract's `#12304` clause")
 
 
