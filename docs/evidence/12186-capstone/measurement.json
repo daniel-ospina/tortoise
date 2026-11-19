@@ -8170,7 +8170,10 @@
    "losses": 0,
    "p": 0.25,
    "p_display": "0.25",
-   "queries_compared": 266
+   "queries_compared": 266,
+   "ids_truncated_at": 20,
+   "gain_ids_truncated": false,
+   "loss_ids_truncated": false
   },
   "fused_rerank_ran_in_user_search": false,
   "fused_rerank_shipped_default": "OFF",
@@ -8208,7 +8211,10 @@
    "losses": 0,
    "p": 9.094947017729282e-13,
    "p_display": "<1e-12",
-   "queries_compared": 265
+   "queries_compared": 265,
+   "ids_truncated_at": 20,
+   "gain_ids_truncated": true,
+   "loss_ids_truncated": false
   },
   "user_door_measured": "sdk.tortoise_fts_query = MCP tortoise_search / REST GET /v1/search",
   "user_search_retrieval_mode": "MIXED"
@@ -8391,7 +8397,13 @@
    "declared": "2026-11-19",
    "field": "paired",
    "run_head": "31bce52ddbb3b3f0bc93093e2988b42c0e5536ba",
-   "why": "each paired block gained three DECLARATION fields after the run \u2014 `ids_truncated_at` (=20, the tool's `IDS_LIMIT`), `gain_ids_truncated` and `loss_ids_truncated` \u2014 because `gain_ids`/`loss_ids` were capped at 20 while `gains`/`losses` were not, so a block publishing `gains: 43` beside 20 ids let a reader re-derive 20 as the count. No id list was changed and no FIGURE was changed: the three fields state a property of the code (`gains`/`losses` already carried the true totals) and are recomputable from the block itself."
+   "why": "every paired-shaped block gained three DECLARATION fields \u2014 `ids_truncated_at` (=20, the tool's `IDS_LIMIT`), `gain_ids_truncated` and `loss_ids_truncated` \u2014 because `gain_ids`/`loss_ids` were capped at 20 while `gains`/`losses` were not, so a block publishing `gains: 43` beside 20 ids let a reader re-derive 20 as the count. The TOOL emits them from one dict, so a re-run writes them in BOTH serialisations (`paired[...]` and `merged_lever_visibility`); the committed record predates that, so the two `merged_lever_visibility` copies were patched by hand as well. No id list was changed and no FIGURE was changed: the three fields state a property of the code, and `gains`/`losses` already carried the true totals."
+  },
+  {
+   "declared": "2026-11-19",
+   "field": "code_head_note",
+   "run_head": "31bce52ddbb3b3f0bc93093e2988b42c0e5536ba",
+   "why": "the field was added by hand after the run, and it is now BUILDABLE: `_code_head_note(run_head)` emits exactly this string, so a later run writes it and records `post_run_edits: []`. It exists because the branch's rebase onto `origin/main` rewrote `code_head` into a sha no published ref reaches, so the record must say that `code_head` is a LABEL and where a reproduction should actually run. Declared rather than left implicit: an edit no builder emits is an edit the ledger cannot see, which is the whole reason this list exists."
   }
  ],
  "timings": {
@@ -8409,5 +8421,5 @@
   "sdk_method": "tortoise_fts_query",
   "tool": "tortoise_search"
  },
- "code_head_note": "`code_head` is the RUN head and stays truthful: this measurement really did run at 31bce52ddbb3. But it predates the rebase onto `origin/main`, so the rebase REWROTE it \u2014 it is reachable from no ref on this published branch, and every `git show 31bce52ddbb3:...` command in this record and in README \u00a76 fails for a reader without this box's local lane-rescue ref. The content is verifiable, only the sha is not: this record's two INPUTS are byte-identical at 318950c6e0, which IS an ancestor of this branch \u2014 `git show 318950c6e0:tools/capstone_12186_recall.py` and `git show 318950c6e0:docs/evidence/12186-capstone/queries.json` reproduce the same blobs the run used (and `| grep -c cleanup` still yields the documented 0). Follow `code_head` for WHICH RUN this is; follow 318950c6e0 to RUN the commands. The measurement figures do not depend on the difference: the tool's only changes after 318950c6e0 are comments and new builder functions, not the query/recall computation."
+ "code_head_note": "`code_head` 31bce52ddbb3 is the RUN head and is a LABEL, not a reproduction anchor. It predates this branch's rebase onto `origin/main`, which REWROTE it, so it is an ancestor of no published ref and `git show 31bce52ddbb3:...` fails for a reader without the pre-rebase object. The CONTENT is verifiable even where the sha is not: reproduce at the branch's own head \u2014 the two INPUTS this record names (`tools/capstone_12186_recall.py`'s query/recall code and `docs/evidence/12186-capstone/queries.json`, whose sha256 the `pin` block pins) are what a reproduction needs, and the tool's later changes are comments and new builder functions, never the recall computation. Read `code_head` for WHICH RUN this is; run the commands against `HEAD`. In a shallow clone, `git fetch --unshallow` first."
 }

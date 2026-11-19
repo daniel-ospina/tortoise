@@ -23,16 +23,22 @@ closes both:
    repeat a tabulated figure (`+53.3 points`, the `0.8` Jaccard, `192 of 411`).
 
    NOT PINNED, and the list is deliberate: narrative prose elsewhere in §1-§4 —
-   `~2.3 %`, `+1.7 and +6.7 points`, `0 gains, 0 losses across 272`, `282/300`,
-   `34 of 300` — plus §5's declared limits and §6's run metadata. A reader who needs a
-   figure guarded must check it is in a pinned table; do NOT read this module as "the
-   document is enforced".
+   `~2.3 %` is now PINNED (see below), so the remaining unpinned set is
+   `+1.7 and +6.7 points`, `0 gains, 0 losses across 272`, `282/300`, `34 of 300` —
+   plus §5's declared LIMITS (items 1-4: not-a-census, phase 2 unmeasured, the
+   load confound, the dense-leg note) and §6's run metadata. ⛔ §5's DOOR paragraph is
+   NOT in that exclusion: it is asserted at `test_the_user_door_note_states_the_
+   arguments_the_doors_do_not_default_to`. A reader who needs a figure guarded must
+   check it is in a pinned table; do NOT read this module as "the document is
+   enforced".
 
-   ⛔ TWO figures LEFT this list because leaving them unpinned was measured
-   exploitable: §2a's `14 … / 8` prose (the previous round's own P2 — corrected, then
-   revertible to `18/6` with a green suite) and §5's `53.3 %` mint rate (a THIRD
-   restatement of a tabulated rate, absent from this enumeration entirely). Both are
-   now derived and asserted by
+   ⛔ THREE figures LEFT this list because leaving them unpinned was measured
+   exploitable: §2a's `14 … / 8` prose (the prior round's own P2 — corrected, then
+   revertible to `18/6` with a green suite), §5's `53.3 %` mint rate (a THIRD
+   restatement of a tabulated rate, absent from this enumeration entirely), and §3a's
+   `~2.3 %` / `1.4 %` pair (which also had to be RELABELLED — 2.3 % is the k=3 cell,
+   but 3 is the capture prior's window, not the user door's, which is 10). All three
+   are derived and asserted by
    `test_the_two_restated_prose_figures_are_pinned_and_not_only_the_tables`.
 
    Every earlier cut of this paragraph claimed more than it enforced, and each gap was
@@ -377,6 +383,33 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
         "the REST `/v1/search` route no longer calls `sdk.tortoise_fts_query`, so it is "
         "no longer the door this record measured through")
 
+    # ⛔ AND resolve what the REST route INHERITS. `"entity_type" not in
+    # rest_sig.parameters` only proves the route declares no override — it says nothing
+    # about the default it gets from the SDK, which is the value the note attributes to
+    # the REST door. Measured: changing `TortoiseSDK.tortoise_fts_query`'s
+    # `entity_type: str = "point"` -> `"object"` made the REST door default to
+    # `'object'` while the note and §5 both said `'point'`, and the suite stayed GREEN.
+    from tortoise.sdk import TortoiseSDK
+
+    sdk_entity = inspect.signature(
+        TortoiseSDK.tortoise_fts_query).parameters["entity_type"].default
+    assert sdk_entity == door_entity, (
+        f"the REST door inherits `entity_type` from the SDK ({sdk_entity!r}), which no "
+        f"longer matches the MCP door ({door_entity!r}) — the note's \"both doors "
+        f"default to {door_entity!r}\" is now false for REST")
+
+    # ⛔ AND the instrument's OWN docstring must not restate the falsehood the note
+    # dropped. Measured: the module docstring still said `user_search` runs "at that
+    # tool's own defaults" forty lines above the note that calls that phrasing false —
+    # so a reader who opened the tool got the pre-fix claim.
+    module_doc = cap.__doc__ or ""
+    assert "own defaults" not in module_doc, (
+        "the tool's module docstring still says the arms run at the tool's \"own "
+        "defaults\" — the exact claim `DOOR_NOTES` and README §5 declare false")
+    assert "entity_type='object'" in module_doc, (
+        "the module docstring must state the arguments the arms actually pass, in the "
+        "same verb/arguments terms as `DOOR_NOTES`")
+
     note = cap.DOOR_NOTES["user_search"]
 
     # The divergence is REAL, and this is the control: if a future change made
@@ -536,8 +569,8 @@ def test_the_arms_pass_the_arguments_the_door_notes_say_they_do():
                 f"kept `limit=15` published after the arms moved to another window")
 
 
-def test_the_artifact_names_a_reachable_head_to_run_its_commands_against(artifact):
-    """`code_head` is truthful but UNREACHABLE, so the record must name a stand-in.
+def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifact):
+    """`code_head` survives a rebase as a LABEL, so the record must not run it.
 
     ⛔ MEASURED DEFECT this pins. `code_head` is the run head `31bce52ddb`, which
     predates the rebase onto `origin/main`; the rebase REWROTE that sha, so it is an
@@ -548,85 +581,62 @@ def test_the_artifact_names_a_reachable_head_to_run_its_commands_against(artifac
         $ git show 31bce52ddb:tools/capstone_12186_recall.py
         fatal: invalid object name '31bce52ddb'.
 
-    README §6 and this module both present that `git show` as the evidence for the
-    `cleanup` hand-edit, so the record's reproduction anchor resolved only on the
-    machine that held the pre-rebase lane ref. Re-anchoring `code_head` itself would
-    be a lie about which run this is; naming a reachable commit whose INPUTS are the
-    same blobs is the fix that needs no re-run.
+    README §6 presented that `git show` as the evidence for the `cleanup` hand-edit,
+    so the record's reproduction anchor resolved only on the machine that held the
+    pre-rebase object.
+
+    ⛔ AND A FIRST ATTEMPT AT THIS PIN WAS WORSE THAN THE DEFECT (round 3, P1). It
+    hard-coded `318950c6e0` and asserted that sha resolved, was an ancestor, and had
+    blob-identical inputs — then `pytest.skip`ped when the repo was shallow. That made
+    it RED on any fresh clone (partial history, not flagged shallow) and INERT in CI
+    (`python-ci.yml`'s test job checks out at the default depth 1, so every one of
+    those assertions was skipped). A gate that runs only where it cannot answer is a
+    no-op gate — the ruling this repo already recorded for #11057's provenance arm.
+
+    So the shape here matches that ruling: **fail closed, and assert the thing that is
+    true in EVERY checkout.** What is true everywhere is that the record must tell a
+    reader to run against `HEAD` (always present) rather than against the label, and
+    must say how to obtain history if the clone is shallow. Existence of the OLD label
+    is deliberately NOT asserted — it is unknowable in a shallow clone by
+    construction, and the record no longer asks anyone to resolve it.
     """
     note = artifact["code_head_note"]
-    assert note and isinstance(note, str), (
-        "`code_head_note` must be present: `code_head` alone is a dead anchor after "
-        "a rebase rewrites it")
-    assert artifact["code_head"][:12] in note, (
-        "the note must name the run head it is explaining")
-    # An alternative commit a reader can actually resolve, distinct from the run head.
-    # 10 hex, not 12: a short sha is what a reader is handed (`318950c6e0`), and a
-    # `\b`-bounded 10-run will not match inside a longer sha.
-    import re
+    assert note == cap._code_head_note(artifact["code_head"]), (
+        "`code_head_note` must be what `_code_head_note` BUILDS from `code_head`: a "
+        "hand-typed reconciliation string is the free-text note that "
+        "`post_run_edits` exists to replace")
 
-    shas = set(re.findall(r"\b[0-9a-f]{10}\b", note))
-    alternatives = {s for s in shas
-                    if not artifact["code_head"].startswith(s)}
-    assert alternatives, (
-        f"the note names no reachable alternative commit, so it still leaves the "
-        f"reader with a sha they cannot resolve: {note!r}")
-    # The README must carry the same alternative: a corrected artifact beside a
-    # README still handing out the dead sha is the claim/evidence split again.
+    label = artifact["code_head"][:12]
+    assert label in note, "the note must name the run head it is explaining"
+    # The point of the note: `code_head` is a LABEL, and reproduction runs at HEAD.
+    assert "LABEL" in note, (
+        "the note must say `code_head` is a label, not a runnable anchor")
+    assert "HEAD" in note, (
+        "the note must name the ref a reader should actually run commands against")
+    assert "--unshallow" in note, (
+        "the note must tell a shallow-clone reader how to obtain history "
+        "(`git fetch --unshallow`) — otherwise the instruction silently fails for them")
+
     readme = README.read_text()
-    assert any(s in readme for s in alternatives), (
-        f"README carries none of the alternative commits {sorted(alternatives)!r} "
-        f"that `code_head_note` offers, so the prose still yields an unresolvable "
-        f"`git show`")
-    # And the reproduction command the record documents must be the reachable form.
-    assert any(f"{s}:tools/capstone_12186_recall.py" in readme for s in alternatives), (
-        "README §6's reproduction command must run against the reachable commit, "
-        "not the rebased-away run head")
+    flat = " ".join(readme.split())
+    # §6 must hand out the runnable form, never the label, and must carry the remedy.
+    assert "--unshallow" in flat, (
+        "README §6 must carry the shallow-clone remedy, matching `code_head_note`")
+    assert "git show HEAD:tools/capstone_12186_recall.py" in flat, (
+        "README §6's reproduction command must be written against `HEAD`, which "
+        "resolves in every checkout — a command written against the pre-rebase label "
+        "fails with `fatal: invalid object name`")
+    # ⛔ The regression itself: §6 must not present the label as the thing to run.
+    for bad in (f"git show {label}:", f"git show {artifact['code_head']}:"):
+        assert bad not in flat, (
+            f"README §6 still hands out an unresolvable command ({bad!r}) — that is "
+            f"exactly the defect this record was corrected for")
 
-    # ⛔ RESOLVE IT — the three assertions above are satisfied by a sha that does not
-    # EXIST. Measured: patching `318950c6e0` -> `deadbeef00` in BOTH the note and
-    # README §6 stayed GREEN, so this pin could not detect the very defect it exists
-    # for (a reader running `git show <sha>:...` and getting `fatal: invalid object
-    # name`). A token-shaped string is not a commit; ask git.
-    #
-    # A SHALLOW clone genuinely cannot answer (the repo carries the #10356
-    # shallow-channel trap elsewhere), and skipping there is honest — but it must be
-    # decided by the narrow question "is this a shallow repo", never by "did the
-    # lookup fail", because a made-up sha fails the lookup too.
-    import subprocess
-
-    def _git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", *args], cwd=str(README.parent),
-                              capture_output=True, text=True)
-
-    shallow = _git("rev-parse", "--is-shallow-repository").stdout.strip() == "true"
-    for alt in sorted(alternatives):
-        resolved = _git("rev-parse", "--verify", "--quiet", f"{alt}^{{commit}}")
-        if resolved.returncode != 0 and shallow:
-            pytest.skip(f"shallow clone cannot resolve {alt} — not verifiable here")
-        assert resolved.returncode == 0, (
-            f"`code_head_note` offers {alt!r} as the commit a reader should run the "
-            f"commands against, but `git rev-parse {alt}^{{commit}}` fails — the "
-            f"anchor is still dead")
-        alt_sha = resolved.stdout.strip()
-        assert _git("merge-base", "--is-ancestor", alt_sha, "HEAD").returncode == 0, (
-            f"{alt!r} resolves but is NOT an ancestor of this branch, so a reader "
-            f"checking out the PR still cannot reach it")
-        # …and the note's actual claim: the run's two INPUTS are the same blobs there.
-        for path in ("tools/capstone_12186_recall.py",
-                     "docs/evidence/12186-capstone/queries.json"):
-            at_alt = _git("rev-parse", f"{alt_sha}:{path}")
-            at_run = _git("rev-parse", f"{artifact['code_head']}:{path}")
-            if at_run.returncode != 0 and shallow:
-                pytest.skip(f"shallow clone cannot resolve the run head — {path}")
-            assert at_alt.returncode == 0, (
-                f"{path} does not exist at {alt!r} — the note claims it is identical "
-                f"to the run's blob")
-            assert at_run.returncode == 0, (
-                f"{path} does not exist at `code_head` {artifact['code_head'][:12]}")
-            assert at_alt.stdout.strip() == at_run.stdout.strip(), (
-                f"`{path}` is NOT byte-identical between {alt!r} and the run head — "
-                f"the note's whole justification for the re-anchor is that it is")
+    # The note is a DECLARED edit, not free text the ledger cannot see (round-3 P1).
+    declared = {e["field"] for e in artifact["post_run_edits"]}
+    assert "code_head_note" in declared, (
+        f"`code_head_note` is a hand-written field, so it must be declared in "
+        f"`post_run_edits`; declared: {sorted(declared)}")
 
 
 def test_a_binding_that_is_not_the_measured_call_never_renders_as_measured():
@@ -792,11 +802,22 @@ def test_the_paired_comparison_excludes_a_window_degraded_on_either_side():
 
 
 def test_the_paired_block_in_the_artifact_accounts_for_every_query(artifact):
-    for name, block in artifact["paired"].items():
-        cell = block["paired"]
+    # ⛔ BOTH serialisations. `paired[...]` and `merged_lever_visibility[...]` are the
+    # SAME dict in the tool, but the committed record's merged copies were written by a
+    # tool that predates the truncation declaration — so the defect this pin exists for
+    # (`gains: 41` beside 20 ids, no marker) survived in the block §4 and the abstract
+    # cite, while the `paired` copy was repaired. Iterate every paired-shaped block,
+    # wherever it lives.
+    cells = [("paired", name, blk["paired"])
+             for name, blk in artifact["paired"].items()]
+    cells += [("merged_lever_visibility", name, blk)
+              for name, blk in artifact["merged_lever_visibility"].items()
+              if isinstance(blk, dict) and "gain_ids" in blk]
+    assert len(cells) >= 6, f"expected both serialisations of every block: {len(cells)}"
+    for where, name, cell in cells:
         assert cell["queries_compared"] + cell[
-            "excluded_degraded_on_either_side"] == artifact["pin"]["queries"], name
-        assert cell["gains"] + cell["losses"] <= cell["queries_compared"], name
+            "excluded_degraded_on_either_side"] == artifact["pin"]["queries"], (where, name)
+        assert cell["gains"] + cell["losses"] <= cell["queries_compared"], (where, name)
 
         # ⛔ A capped id list beside an uncapped COUNT is a silent subset. Measured:
         # `capture_prior_pre_lever -> capture_prior` publishes `gains: 43` beside 20
@@ -805,23 +826,24 @@ def test_the_paired_block_in_the_artifact_accounts_for_every_query(artifact):
         # carry the totals; these assert the cap is PUBLISHED and that the published
         # flag actually matches whether it bit.
         assert cell["ids_truncated_at"] == cap.IDS_LIMIT, (
-            f"{name}: `ids_truncated_at` must publish the cap ({cap.IDS_LIMIT})")
+            f"{where}[{name}]: `ids_truncated_at` must publish the cap "
+            f"({cap.IDS_LIMIT})")
         assert len(cell["gain_ids"]) == min(cell["gains"], cap.IDS_LIMIT), (
-            f"{name}: `gain_ids` has {len(cell['gain_ids'])} entries for "
+            f"{where}[{name}]: `gain_ids` has {len(cell['gain_ids'])} entries for "
             f"{cell['gains']} gains — the list is neither full nor capped at "
             f"{cap.IDS_LIMIT}")
         assert len(cell["loss_ids"]) == min(cell["losses"], cap.IDS_LIMIT), (
-            f"{name}: `loss_ids` has {len(cell['loss_ids'])} entries for "
+            f"{where}[{name}]: `loss_ids` has {len(cell['loss_ids'])} entries for "
             f"{cell['losses']} losses")
-        assert cell["gain_ids_truncated"] == (cell["gains"] > cap.IDS_LIMIT), name
-        assert cell["loss_ids_truncated"] == (cell["losses"] > cap.IDS_LIMIT), name
+        assert cell["gain_ids_truncated"] == (cell["gains"] > cap.IDS_LIMIT), (where, name)
+        assert cell["loss_ids_truncated"] == (cell["losses"] > cap.IDS_LIMIT), (where, name)
         # …and every listed id is a real query, so a padded list cannot satisfy the
         # length check above.
         known = set(artifact["arms"]["user_search"]["per_query"])
-        assert set(cell["gain_ids"]) <= known, (name, "unknown gain id")
-        assert set(cell["loss_ids"]) <= known, (name, "unknown loss id")
-        assert len(set(cell["gain_ids"])) == len(cell["gain_ids"]), (name, "dup gain id")
-        assert len(set(cell["loss_ids"])) == len(cell["loss_ids"]), (name, "dup loss id")
+        assert set(cell["gain_ids"]) <= known, (where, name, "unknown gain id")
+        assert set(cell["loss_ids"]) <= known, (where, name, "unknown loss id")
+        assert len(set(cell["gain_ids"])) == len(cell["gain_ids"]), (where, name, "dup gain id")
+        assert len(set(cell["loss_ids"])) == len(cell["loss_ids"]), (where, name, "dup loss id")
 
 
 # ── the README, against the artifact ─────────────────────────────────────────
@@ -1056,15 +1078,17 @@ def test_every_declared_post_run_edit_is_named_in_the_readme(artifact):
             f"`post_run_edits` declares a hand edit to {edit['field']!r}, but README §6 "
             f"never names it — the ledger says {len(edits)} edit(s) "
             f"({[e['field'] for e in edits]}), and the document must not under-report it")
-    # The count, stated in prose, must not contradict the ledger either. "three" is
+    # The count, stated in prose, must not contradict the ledger either. "four" is
     # written out in §6's lead sentence; a rewording that drops it is fine as long as
-    # no OTHER number is claimed, so only the digit-word for a WRONG count is refused.
-    words = {1: "one", 2: "two", 3: "three"}
+    # no OTHER number is claimed, so only the digit-word for a WRONG count is refused
+    # — CASE-INSENSITIVELY, because `**Four**` reds nothing otherwise (measured).
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
     n = len(edits)
+    low = flat.lower()
     for wrong_n, word in words.items():
         if wrong_n == n:
             continue
-        assert f"**{word}** things were done by hand" not in flat, (
+        assert f"**{word}** things were done by hand" not in low, (
             f"README §6 claims **{word}** hand edits; the artifact declares {n} "
             f"({[e['field'] for e in edits]})")
 

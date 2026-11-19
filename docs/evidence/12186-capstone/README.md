@@ -251,35 +251,39 @@ uv run python tools/test_lane.py run -- tests/test_capstone_12186_recall.py -q
 over 5 arms × 300 queries, 145 s for the 411 variant reads.
 
 ⛔ **The committed [`measurement.json`](./measurement.json) is not byte-identical to a run at its
-`code_head`** — **three** things were done by hand afterwards, and the record declares every one of
+`code_head`** — **four** things were done by hand afterwards, and the record declares every one of
 them in `post_run_edits`:
 
 1. **`cleanup`** — the block was added by hand, because the tool at `code_head` has no `cleanup`
-   builder at all (`git show 318950c6e0:tools/capstone_12186_recall.py | grep -c cleanup` → `0`).
+   builder at all (`git show HEAD:tools/capstone_12186_recall.py | grep -c 'def _cleanup'`;
+   the builder arrived AFTER the run, so a reproduction at the run head has no such block).
 2. **`arms`** — the three `user_search*` arms' `door_note` **prose** was restated. The note as run
    read *"at the MCP tool `tortoise_search`'s own defaults"*, which is false about two default
    values: the doors default to `entity_type='point'` / `limit=10`, while the arms call
    `entity_type='object'` (the population IS `:Object` names) at `limit=15`. See §5. **A
-   reproduction at `code_head` therefore carries the OLD, false note on those three arms** even
+   reproduction at the run head therefore carries the OLD, false note on those three arms** even
    though every figure it prints is correct.
-3. **`paired`** — each paired block gained `ids_truncated_at` / `gain_ids_truncated` /
+3. **`paired`** — every paired-shaped block gained `ids_truncated_at` / `gain_ids_truncated` /
    `loss_ids_truncated`. `gain_ids`/`loss_ids` are capped at 20 while `gains`/`losses` are not, so
    a block publishing `gains: 43` beside 20 ids let a reader re-derive 20 as the count. The cap is
    now published; no id list and no figure changed.
+4. **`code_head_note`** — added by hand, and now **buildable**: `_code_head_note(run_head)` emits
+   exactly the committed string, so a later run writes it. It exists because a rebase rewrites
+   `code_head` (see below).
 
-**Every figure in the record is run output**, and none of the three touches one. A reproduction at
-`code_head` yields the same numbers, with the `cleanup` block absent, the false `door_note` on three
-arms, and the `paired` cap unmarked. Any later run writes all three itself and records
-`post_run_edits: []`.
+**Every figure in the record is run output**, and none of the four touches one. A reproduction at
+the run head yields the same numbers, with the `cleanup` block absent, the false `door_note` on
+three arms, the `paired` cap unmarked, and no `code_head_note`. Any later run writes all four itself
+and records `post_run_edits: []`.
 
-⛔ **`code_head` `31bce52ddb` is the RUN head and is not reachable from this branch.** It predates
-the rebase onto `origin/main`, which rewrote it, so `git show 31bce52ddb:…` fails (`fatal: invalid
-object name`) for anyone without the pre-rebase lane ref — including the `cleanup` command above,
-which is therefore written against **`318950c6e0`**: a commit on this branch whose
-`tools/capstone_12186_recall.py` and `docs/evidence/12186-capstone/queries.json` blobs are
-**byte-identical** to the ones the run used. Read `31bce52ddb` for *which run this is*; run the
-commands against `318950c6e0`. The difference cannot move a figure: the tool's only changes after
-`318950c6e0` are comments and new builder functions, not the query/recall computation. The record
-carries the same mapping as `code_head_note`.
+⛔ **`code_head` `31bce52ddb` is the RUN head and is a LABEL, not a runnable anchor.** It predates
+the rebase onto `origin/main`, which REWROTE it: it is an ancestor of no published ref, so
+`git show 31bce52ddb:…` fails with `fatal: invalid object name` for anyone without the pre-rebase
+object. **Reproduce at the branch's own head instead** — `git show HEAD:tools/capstone_12186_recall.py`
+resolves everywhere, and the two INPUTS a reproduction needs are `queries.json` (whose sha256 the
+`pin` block pins) and the tool's query/recall code, which the run head and `HEAD` share: the tool's
+later changes are comments and new builder functions, never the recall computation. **In a shallow
+clone, run `git fetch --unshallow` first.** Read `code_head` for *which run this is*. The record
+carries the same statement as `code_head_note`.
 
 Refs `#11901` (harness) · `#12368` (composite terms) · `#12304` (fold + multi-key) · `#12343`/`#12297` (rerank) · `#12348` (verdict) · `#12349` (M3, closed) · `docs/architecture/SEARCH-ARCHITECTURE.md`

@@ -66,10 +66,16 @@ THE ARMS, AND WHICH DOOR EACH ONE IS
                        about the write path (a duplicate minted there is permanent).
 ``user_search``        ``sdk.tortoise_fts_query`` — the method the MCP tool
                        ``tortoise_search`` is registered to and REST
-                       ``GET /v1/search`` uses, at that tool's own defaults. This
-                       is the door a user hits. The binding is re-read at run time
-                       from ``tortoise.tool_registry`` and recorded, so "we
-                       measured the user surface" is a checked fact, not prose.
+                       ``GET /v1/search`` uses. That VERB is what makes this the
+                       door a user hits; the ARGUMENTS are this fixture's, NOT the
+                       doors' defaults — the arms pass ``entity_type='object'``
+                       (the population IS ``:Object`` names) at ``limit=KMAX``,
+                       while both doors default to ``'point'`` and ``10``
+                       (``tortoise/mcp_server.py::tortoise_search`` and
+                       ``tortoise/selfhost_api.py::search``). See ``DOOR_NOTES``.
+                       The binding is re-read at run time from
+                       ``tortoise.tool_registry`` and recorded, so "we measured
+                       the user surface" is a checked fact, not prose.
 
 Each arm queries every name ONCE at ``KMAX``; recall@k for k <= KMAX is a prefix
 of the same ranking, so no k is a separate read path.
@@ -797,6 +803,39 @@ def _git_head() -> str | None:
         return None
 
 
+def _code_head_note(run_head: str | None) -> str:
+    """The record's statement that ``code_head`` is a LABEL, not a runnable anchor.
+
+    ⛔ A REBASE REWRITES THE RUN HEAD. This measurement runs on a branch, and the
+    branch is rebased onto ``main`` before it lands — so the sha the run recorded is
+    an ancestor of no published ref afterwards, and every ``git show <code_head>:``
+    command in the record fails with ``fatal: invalid object name`` for a reader who
+    does not happen to hold the pre-rebase object. That is a real property of the
+    record, not a defect to paper over: ``code_head`` answers *which run this is*,
+    which is what it was named for.
+
+    It is BUILT here rather than hand-written, for the reason the ``post_run_edits``
+    mechanism itself exists: an edit nobody's builder emits is an edit the ledger
+    cannot see, and a free-text reconciliation field is exactly what that mechanism
+    replaced. A run therefore writes this note, and a hand-written one is declared in
+    ``post_run_edits`` like every other.
+    """
+    label = (run_head or "<unknown>")[:12]
+    return (
+        f"`code_head` {label} is the RUN head and is a LABEL, not a reproduction "
+        f"anchor. It predates this branch's rebase onto `origin/main`, which REWROTE "
+        f"it, so it is an ancestor of no published ref and `git show {label}:...` "
+        f"fails for a reader without the pre-rebase object. The CONTENT is verifiable "
+        f"even where the sha is not: reproduce at the branch's own head — the two "
+        f"INPUTS this record names (`tools/capstone_12186_recall.py`'s query/recall "
+        f"code and `docs/evidence/12186-capstone/queries.json`, whose sha256 the `pin` "
+        f"block pins) are what a reproduction needs, and the tool's later changes are "
+        f"comments and new builder functions, never the recall computation. Read "
+        f"`code_head` for WHICH RUN this is; run the commands against `HEAD`. In a "
+        f"shallow clone, `git fetch --unshallow` first."
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     from tools.underscore_or_terms_12360 import wait_indexed
     from tortoise.embeddings import EmbeddingModel
@@ -963,6 +1002,10 @@ def run(args: argparse.Namespace) -> int:
             "capstone": True,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "code_head": _git_head(),
+            #: The record's own statement that `code_head` is a LABEL (a rebase rewrites
+            #: it) and where a reproduction should actually run. BUILT, not typed — see
+            #: `_code_head_note`.
+            "code_head_note": _code_head_note(_git_head()),
             #: The edits made to THIS record AFTER the run — `[]` when the record
             #: is exactly what the run wrote. It exists because `code_head` is the
             #: record's reproduction anchor: a block inserted by hand (`§4`'s
