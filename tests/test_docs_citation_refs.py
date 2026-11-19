@@ -578,9 +578,10 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     #     $ git diff --name-only origin/main...HEAD -- tortoise/
     #     tortoise/activation_scorecard.py
     #     tortoise/hosted_api.py
+    #     tortoise/indexer/github_indexer.py
     #     tortoise/projection/__init__.py
     #
-    # — three paths, one of them (`projection/__init__.py`) THIS PR's own runtime change. The
+    # — four paths at this head, one of them (`projection/__init__.py`) THIS PR's own runtime change. The
     # leg therefore demanded that the document assert a falsehood, and the lane that corrected
     # the document to the measured set (and to the command, which is this document's own rule
     # for a head-bound figure) red this arm instead of passing it. A verdict is stale the moment
@@ -592,12 +593,17 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # NON-VACUITY, MEASURED — per member, because the collective claim was FALSE
     # (#13728 delta review, P2). On the pre-fix document (`16ace39823`) THREE of the five
     # spellings below fire (`neither is` -> 1, `is empty` -> 2, `-> empty` -> 1, counted with
-    # `grep -c -F --`). The other two are REFUSALS WITHOUT A MEASURED PRE-FIX CASE and are
-    # labelled so rather than counted as exercised: `is EMPTY` matched only a DIFFERENT
-    # subject in that document ("the same command with `-- tortoise/` is EMPTY"), and
-    # `returns exactly those two` occurs there only inside the quoted retraction the
-    # pattern deliberately excludes. An earlier wording said "every one of these
-    # spellings was present" and cited one member as evidence for five.
+    # `grep -c -F --`). One of the other two IS a measured real case rather than a refusal
+    # without one: `is EMPTY` matches the document's own "the same command with `-- tortoise/`
+    # is EMPTY", which names THIS command and THIS subject — an earlier cut called it a
+    # DIFFERENT subject, and that was wrong in a way that mattered, because the sentence was
+    # FALSE at this head (four `tortoise/` paths) and the leg, keyed on the full command
+    # string, could not see that spelling. That sentence is DELETED from the document, so the
+    # blind spot is closed by removing its only inhabitant rather than by widening the
+    # pattern; if such a paraphrase ever returns, widen the pattern with it. `returns exactly
+    # those two` is the remaining refusal without a measured pre-fix case: it occurs there
+    # only inside the quoted retraction the pattern deliberately excludes. An earlier wording
+    # said "every one of these spellings was present" and cited one member as evidence for five.
     #
     # ⛔ AND THE DIRECTION IS MEASURED — BUT ONLY AN EMPTY MEASUREMENT MAY RELAX THE LEG, which
     # is the asymmetry that keeps this arm ENFORCING in the lane that runs it (#13728 delta
@@ -655,7 +661,7 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # statements stayed exactly as uncheckable as before and this arm stayed green over
     # them: `activation_scorecard.py` being the only `tortoise/` module `#12943` did not
     # touch is true of `2584a86ec1` and false of THIS head (that file IS in the diff here,
-    # beside two others), so without a head the sentence reads as this head's.
+    # beside three others), so without a head the sentence reads as this head's.
     #
     # NON-VACUITY, MEASURED: reds on that cut (no SHA in the paragraph); green once the
     # MERGE head is named beside the statements.
