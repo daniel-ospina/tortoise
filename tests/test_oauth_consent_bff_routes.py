@@ -836,11 +836,14 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     # guard at all. The sibling page this one is modelled on DOES carry one (`<a href="/contact">`
     # in `website/functions/_middleware.ts`), which makes a copy-paste from the precedent the exact
     # edit that would ship it green.
-    # `http-equiv`/`src=` close the two ways to carry a destination with none of the three forms
-    # above: `<meta http-equiv="refresh" content="0;url=/contact">` is a redirect the page's CSP
+    # `http-equiv`/`src=` add two MORE channels the forms above cannot express — *not* "the two
+    # ways", which would be the same false exhaustiveness this guard exists to stop:
+    # `<meta http-equiv="refresh" content="0;url=/contact">` is a redirect the page's CSP
     # (`default-src 'none'`, no `navigate-to`) does not block, and a protocol-relative `<img src>`
-    # or `<iframe src>` is a subresource with no scheme. `<meta charset>`/`<meta name=viewport>`
-    # stay legal, which is what the page actually needs.
+    # or `<iframe src>` is a subresource with no scheme. The enforced set is the pattern below, and
+    # it also carries `srcset`, `poster`, `formaction`, `ping`, `data`, `background` and CSS
+    # `url(`/`@import`; `<meta charset>`/`<meta name=viewport>` stay legal, which is what the page
+    # actually needs.
     # ⛔ Matched as PATTERNS (`_AFFORDANCE_RE`), not as flat tokens: a whitespace-bearing attribute
     # (`<img src = "//evil.example/x">`) is well-formed HTML and matched none of the bare strings a
     # token loop carried — a hole in the very guard this change adds (review of #13712, note 1).
@@ -857,10 +860,14 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     # every assertion above — a new arm that presents a different key is pinned by adding it here
     # rather than by remembering to.
     #
-    # ⛔ The tuple is checked against THIS arm's body, whatever params the arm presented — so every
-    # arm covers the copy it renders, and the page's TWO copies (`STORE_FAULT` / `FLOW_NOT_YOURS`,
-    # `consent-refusal.ts:108-130`) are both covered by the arms that render them. A value only one
-    # arm presents (a sentinel) is therefore still caught in the OTHER copy: no second arm is owed.
+    # ⛔ The tuple is checked against THIS arm's body, whatever params the arm presented — so an arm
+    # covers the copy it renders, and only that: a row can red only on a value the arm under test
+    # actually PRESENTS, so a value only one arm presents is rendered EMPTY in the other copy's arms
+    # and passes VACUOUSLY there. That is why each of the page's TWO copies (`STORE_FAULT` /
+    # `FLOW_NOT_YOURS`, `consent-refusal.ts:108-130`) has an arm PRESENTING the sentinel params,
+    # rather than one sentinel arm being assumed to cover both — the earlier revision of this
+    # paragraph claimed exactly that and was wrong (review of #13712, F1b — measured: hardcoding a
+    # sentinel into `FLOW_NOT_YOURS` reds the `403` arm, opts6, and nothing else).
     #
     # ⛔ `redirect_uri` appears TWICE, and the split is load-bearing. The `_PARAMS` literal is pinned
     # only as its SCHEME-LESS tail (`client.example/cb`): the full `https://client.example/cb` is
@@ -2210,8 +2217,13 @@ _USED_TO_AFTER_RE = re.compile(r"\bused\s+to\b", re.IGNORECASE)
 # counts as a marker — only this clause-scoped evidence does, and only alongside an anchored frame.
 _PAST_TENSE_RE = re.compile(
     r"\b(?:\w+ed|was|were|had|did|wrote|began|took|kept|gave)\b|['’]d\b", re.IGNORECASE)
-# A clause boundary inside a sentence: semicolon, comma, full stop, newline, or em dash.
-_CLAUSE_BREAK_RE = re.compile(r"[;,]|\.\s|\n|—")
+# A clause boundary inside a sentence: semicolon, comma, full stop, newline, or em dash. ⛔ A
+# newline is a boundary only when it ENDS a line — a JSDoc continuation (`\n * `) is layout, so
+# wrapped prose stays ONE clause. Reading the wrap as a boundary measured as a FALSE BLOCK at
+# `f87db3fb9d`: "Before #13671, every hard failure of that route" / " * answered raw JSON; two arms
+# still do" — the documented CORRECT form, red, because the past tense sat on the next line of the
+# same clause (review of #13712, the wrap tolerance `_FALSE_ABSOLUTE_RE` already promises).
+_CLAUSE_BREAK_RE = re.compile(r"[;,]|\.\s|\n(?!\s*\*)|—")
 # How far after the phrase the universal's own verb may sit to read as a past statement.
 _PAST_VERB_SPAN = 80
 
@@ -2315,7 +2327,7 @@ def _false_absolute_in(text: str) -> str | None:
     return violations[0][0] if violations else None
 
 
-def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
+def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSIFY() -> None:
     """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
     claim the route FALSIFIES — and pinning the DENIAL, not a wording, is what keeps it corrected.
 
@@ -2434,6 +2446,26 @@ _SUMMARY_ABSOLUTE_ROWS: list[tuple[str, str]] = [
     ("Every hard failure used to answer raw JSON; two arms still do.", "EXEMPT"),
     ("Before this change, every hard failure returned raw JSON; both returns remain.", "EXEMPT"),
     ("This route previously answered every hard failure with JSON; two arms still do.", "EXEMPT"),
+    # ⛔ A RETRO FRAME EARLIER IN THE SENTENCE CANNOT SCOPE A UNIVERSAL THAT FOLLOWS ANOTHER ONE.
+    # Each of these STATES the denial in its second universal — the retro frame and the survivor
+    # count both belong to the clause the sentence retracts. All four were GREEN at `d39ec4f3c5`
+    # (measured through `_false_absolute_in`), and the review of #13712 recorded this residual at
+    # `e13ae506e7`; the clause-scoped tail is what reds them, and these rows are what keeps it red.
+    ("Before #13671, every hard failure answered raw JSON; two arms converted, so now every hard "
+     "failure is a page.", "RED"),
+    ("Before #13671, every hard failure of that route answered raw JSON; we have since converted "
+     "two places, so every hard failure is a page.", "RED"),
+    ("Before #13671 every hard failure was JSON; two arms of the route still answer JSON, and "
+     "every hard failure is a page.", "RED"),
+    ("Every hard failure is a page, and before #13671 every hard failure was JSON; two arms "
+     "still do.", "RED"),
+    # …and the two shapes that keep that rule from FALSE-BLOCKING legitimate prose: a second
+    # universal that is also past, and the same sentence WRAPPED in a JSDoc block — a ` * ` line is
+    # layout, not a clause boundary, and reading it as one reds the documented correct form.
+    ("Before #13671, every hard failure answered raw JSON, and every hard failure of the bridge "
+     "returned one too; two arms still do.", "EXEMPT"),
+    ("Before #13671, every hard failure of that route\n * answered raw JSON; two arms still do.",
+     "EXEMPT"),
 ]
 
 
@@ -2458,7 +2490,10 @@ def test_the_summary_guard_exempts_ONLY_a_past_universal_with_a_COUNTED_survivor
     ⛔ `origin/main`'s own header form — "Every hard failure of that route used to answer
     `json({error, reason})`" with NO survivors named — is deliberately NOT a CORRECT row: it is the
     pre-fix text the corpus guard must RED on, so the survivors are what this table counts, not the
-    retro framing alone. A red on any EXEMPT row would be the false block F3 found.
+    retro framing alone. A red on any EXEMPT row would be the false block F3 found — and the WRAPPED
+    EXEMPT row is exactly that in the other direction: `_CLAUSE_BREAK_RE` must not read a JSDoc
+    continuation as a clause boundary, or the documented correct form reds the moment it wraps at
+    100 columns, which is how every header in the corpus is written (measured at `f87db3fb9d`).
     """
     span = _false_absolute_in(sentence)
     if expected == "EXEMPT":
