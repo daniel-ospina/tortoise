@@ -3870,7 +3870,11 @@ def _upsert_object(props, ev):
 """,
         # ⛔ …and `operator.or_`, the NON-IN-PLACE functional `|`: the same store as
         # `props = props | {"embedding": vec}`, through the one synonym the include list did
-        # not name — measured CERTIFIED GATED by the first review of this commit.
+        # not name — measured CERTIFIED GATED by the first review of this commit. This row is
+        # the DISCRIMINATING one (delete `"or_"` and it alone reddens); the `dict(…)` operand
+        # beside it is refused by the constructor arm either way, so it is a spelling control,
+        # not a second pin — stated because the earlier comment claimed two pins and only one
+        # was, measured by the review of this branch.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -3882,6 +3886,39 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props = operator.or_(props, dict(embedding=_encode(ev)))
+        return None
+    _write(props)
+""",
+        # ⛔ …and the DUNDER ALIAS of the same function (`operator.__or__ is operator.or_`),
+        # in all three spellings the review of this branch measured CERTIFIED: the functional,
+        # the METHOD form on the mapping, and the unbound `dict.__or__(props, …)`. A tuple that
+        # names `__ior__` beside `ior` and only `or_` for the non-in-place operator is half a
+        # vocabulary, and half a vocabulary is a false PASS.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = operator.__or__(props, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = props.__or__({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = dict.__or__(props, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = operator.__or__(props, {**{"embedding": _encode(ev)}})
         return None
     _write(props)
 """,

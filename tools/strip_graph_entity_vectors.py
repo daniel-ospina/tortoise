@@ -1605,7 +1605,7 @@ def _mutator_stores_the_vector(call) -> bool:
     import ast
 
     name = _callee_name(call)
-    if name in ("update", "dict", "__ior__", "ior", "or_"):
+    if name in ("update", "dict", "__ior__", "ior", "or_", "__or__"):
         # `props.update(embedding=…)` / `props.update(**{…})` / `props |= dict(embedding=…)`
         # / `props.__ior__([("embedding", vec)])` / `operator.ior(props, {…})` — one mapping,
         # three spellings. `ior` is the FUNCTOR form of `|=`; `setitem` was recognised one
@@ -1613,8 +1613,13 @@ def _mutator_stores_the_vector(call) -> bool:
         # ⛔ AND `operator.or_` IS THE NON-IN-PLACE FUNCTIONAL `|`, which the review of this
         # commit measured CERTIFIED GATED (`props = operator.or_(props, {"embedding": vec})`)
         # — the same store as `props | {…}`, through the one spelling the include list did not
-        # name. Both are here now because the list is the vocabulary: a spelling absent from it
-        # is a false PASS, not a missing nicety.
+        # name. The list is the vocabulary: a spelling absent from it is a false PASS, not a
+        # missing nicety.
+        # ⛔ AND ITS DUNDER ALIAS IS THE SAME FUNCTION: `operator.__or__ is operator.or__`, so
+        # `operator.__or__(props, {…})`, the METHOD form `props.__or__({…})` and
+        # `dict.__or__(props, {…})` all place the vector — and all three were measured CERTIFIED
+        # by the review of THIS branch, while the tuple one line up already carried `__ior__`
+        # beside `ior`. The dunder/non-dunder pair is now named as a pair, in both places.
         return _mapping_stores_the_vector(call)
     if name in ("pop", "popitem"):
         # ⛔ A REMOVAL IS NOT A STORE, and the caller-vocabulary rule below would otherwise
