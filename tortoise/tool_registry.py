@@ -2662,12 +2662,15 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # their containers TODAY (the handler answers through the container) and retire in the
     # batch that gives the container a declared envelope. Pinned in
     # `tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`.
-    # ⛔ `tortoise_issue_insight` and `tortoise_session_context` are NOT retired here, and
-    # the reason is a SURFACE fact rather than a tier one: each carries a `rest_spec`
-    # (`GET /v1/issue-insight`, `GET /v1/context`), and retiring the registry entry
-    # deletes its REST route with it. That is a public API removal, and it is not this
-    # batch's mandate — the container ADDS the approved name, so the member can stay live
-    # as a thin door and retire in the batch that re-homes its REST twin.
+    # ⛔ `tortoise_issue_insight` and `tortoise_session_context` USED to sit above, held by
+    # "retiring the registry entry deletes its REST route with it". That reason was
+    # MEASURED FALSE (#11609 lane P4, `docs/architecture/11609-STRUCTURAL-BLOCKERS.md`
+    # §1.5): the only thing that would derive a route from a `rest_spec`
+    # (`FastAPIRouterAdapter.register_all`) is instantiated in NO product module, and the
+    # two served routes are hand-written decorators in `hosted_api.py` / `selfhost_api.py`
+    # that call the SDK directly — so the row going changes nothing on the wire. Both
+    # retire FORWARD here, in the batch that makes the reason false, into the container
+    # arms that already carry their capability (see the P6 block near the end of this map).
     "tortoise_list_topics": 'tortoise_list_knowledge(kind="topic", entity_id=...)',
     # `include_provenance` is named because it is what makes the two answers equal:
     # the confidence read alone is not the chain.
@@ -2680,6 +2683,48 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # recorded for `tortoise_check_structure`).
     "tortoise_get_confidence": 'tortoise_check_confidence(claim_id=...)',
     "tortoise_belief_timeline": 'tortoise_check_confidence(topic=...)',
+    # ── #11609 lane P6 — the `rest_spec` pair retires on P4's measured finding ──
+    # Each pointer names the CONTAINER ARM that dispatches to the very method the door
+    # called, so a migrating caller keeps the whole call and cannot land on a different
+    # operation by omission:
+    #   · `search_knowledge(mode="issue_insight")` dispatches to `TortoiseSDK.issue_insight`
+    #     — the same body the door runs — and the arm REQUIRES `title=` (or `query=`),
+    #     which is why `mode` is named in the pointer: the container's default `hybrid`
+    #     arm is a different read, not a smaller one.
+    #   · `check_confidence(session=True)` dispatches to `TortoiseSDK.session_context`.
+    #     The door took NO arguments, so the pointer shows none: naming `limit=` here would
+    #     advertise an argument the `session` arm DROPS (the #8447 shape — a familiar name,
+    #     a narrower answer, no way to tell).
+    # The `rest_spec` stays ON both entries because the route does: this retires the
+    # registry ROW from the advertised surface, not the hand-written `GET
+    # /v1/issue-insight` / `GET /v1/context` decorators that serve it. Pinned by
+    # `tests/test_11609_structural_blockers.py`'s route pins, which read a retired entry
+    # too.
+    "tortoise_issue_insight":
+        'tortoise_search_knowledge(title=..., body=..., repo=..., '
+        'mode="issue_insight")',
+    "tortoise_session_context": 'tortoise_check_confidence(session=True)',
+    # ── #11609 lane P6 — the two DELETE doors retire into the KEPT single entry ──
+    # These two sat in `NO_CONTAINER_YET` as "`delete_knowledge` not live". That reason is
+    # FALSE on a ruling the owner already recorded: the canonical row 18 is **executed by
+    # keeping the single `tortoise_delete` entry and widening what it deletes** (#9660,
+    # owner ruling 2026-10-25 — *"the absorbed names stay retired-forward entries, not new
+    # siblings"*). `TortoiseSDK.delete` dispatches by LABEL (Point -> `delete_point`, every
+    # other entity -> `delete_entity`), so the kept entry carries both doors' whole
+    # capability, and it adds the preview-then-confirm protocol (#9660) neither door had.
+    #
+    # ⛔ The pointer names `dry_run`/`confirmation` because the container's DEFAULT is a
+    # PREVIEW, not a smaller delete: a migrating caller pointed at `tortoise_delete(id)`
+    # alone would file a token-less call, read the receipt, and believe it had deleted
+    # something. The retired name keeps serving its OLD handler through the #3883 shim, so
+    # an existing caller's immediate-delete behaviour is unchanged — only a caller who
+    # FOLLOWS the pointer meets the confirmation step, which is the point of it.
+    "tortoise_delete_point":
+        'tortoise_delete(id, dry_run=True) for the preview, then '
+        'tortoise_delete(id, confirmation=<token>)',
+    "tortoise_delete_entity":
+        'tortoise_delete(id, dry_run=True) for the preview, then '
+        'tortoise_delete(id, confirmation=<token>)',
     # ── #11609 Phase 2 — the two arms `tortoise_check_confidence` now carries ──
     # These two doors were held live by a reason with an ABSENCE behind it: the
     # container "does not recompute" and "has no recall arm". Both arms LAND here,

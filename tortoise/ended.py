@@ -37,11 +37,11 @@ THE "PLANNED AND NEVER HAPPENED" SHAPE
 --------------------------------------
 A plan is an Object with a pipeline (design §4), so it ends on the **position**
 axis: a stage in the `terminal` slot, whose `outcome` says how. Whether it
-*happened* is a separate fact — the occurrence is an Event linked `aboutObject` —
-so the row carries ``linkedEvents``. A plan whose ``stage.slot == "terminal"``
-and whose ``linkedEvents`` is empty was **planned and never happened**; one that
-has an occurrence event did happen, and a live plan is not in this population at
-all (it has not ended).
+*happened* is a separate fact, and this row carries only HALF of it:
+``linkedEvents`` is the Events linked to the record of ANY kind — an occurrence
+*and* a mention (a note, an email summary). Empty is a strong signal, non-empty
+is not "it happened": the kind test is
+``planned_occurrence.OCCURRENCE_EVENT_KINDS`` (#13128).
 
 ⛔ Nothing here reads a stage NAME. The slot decides (§4.1), so a kind may call
 its terminal stage ``cancelled``, ``missed``, ``written-off`` or ``signed`` and
@@ -277,9 +277,10 @@ def _ended_row(raw: tuple, entity_type: str) -> dict:
         "endedAt": ended_at,
         **raw_times,
         # ── planned vs happened ───────────────────────────────────────────
-        # The events that record something about this record. Empty is the
-        # "no occurrence was ever recorded" state, which is half of the
-        # plan-never-happened answer (the other half is the terminal stage).
+        # The events that record something about this record, ANY kind — a
+        # mention as well as an occurrence. The occurrence/mention split is
+        # `planned_occurrence.OCCURRENCE_EVENT_KINDS` (#13128); this read does not
+        # repeat it, and an empty list is not the whole "never happened" answer.
         "linkedEvents": sorted(
             {i for i in (linked_events or []) if isinstance(i, str) and i}),
     }

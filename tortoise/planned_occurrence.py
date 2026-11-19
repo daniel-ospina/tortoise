@@ -53,20 +53,24 @@ Event's kind, and never a ``status`` property:
 (§3.2 ``schema:about``): a note, a reminder, an email summary about the offsite
 is an ``:Event`` wired to the plan and is no evidence whatsoever that the offsite
 happened. So the edge alone is not the proof, and the read tells the two apart
-by the linked Event's OWN kind — :data:`OCCURRENCE_EVENT_KIND`, the core
-``occurrence`` kind, whose only writer is :func:`record_occurrence` (it refuses
-any other kind rather than mint a link its own reader must discount). A mention
-is counted and served (``mentions`` on each row), never silently dropped and
-never read as the occurrence.
+by the linked Event's OWN kind — :data:`OCCURRENCE_EVENT_KINDS`, the core
+``occurrence`` kind, which :func:`record_occurrence` writes and which that door
+accepts to the exclusion of every other kind. A mention is counted and served
+(``mentions`` on each row), never silently dropped and never read as the
+occurrence.
 
-⚠️ **STATED RESIDUAL, kept small and named rather than hidden:** the writer half
-is a refusal, not a role on the edge — a caller with its own finer classification
-for the occurrence Event cannot carry it on ``event_kind`` (the issue's options 1
-and 2, a new predicate or an edge role, each need a surface decision or a
-journal/replay carrier this slice does not have; see
-:data:`OCCURRENCE_EVENT_KIND`). And a mention written with
-``eventKind='occurrence'`` reads as the occurrence: that is a caller lying about
-its own Event's kind, which no reader can detect.
+⚠️ **STATED RESIDUALS, kept small and named rather than hidden** (the full
+argument, and why no better marker was available to this slice, is in
+:data:`OCCURRENCE_EVENT_KINDS`):
+
+* the kind is **evidence, not proof** — ``occurrence`` is ONTOLOGY §5's generic
+  extracted kind and the repo's declared fallback for an unclassifiable
+  ``eventKind``, so a mention written under it still reads as the occurrence;
+* the read **fails closed** on everything else — a plan-linked Event of another
+  kind reads as a mention, so a plan that DID happen can be reported as
+  never-happened where its occurrence Event carries another kind (a pre-change
+  ``record_occurrence(..., event_kind=…)``, or an Event linked by another
+  writer). The refusal closes that going forward; there is no backfill.
 
 ## Why the pipeline key is namespaced
 
@@ -119,7 +123,7 @@ PLAN_PIPELINE_DECL: dict[str, Any] = {
 #: shipped Event -> Object link (§3.2 `schema:about`), not a new edge: an Event
 #: "describes" the plan it realized, the same way it describes any Object it is
 #: about.
-#: ⛔ THE PREDICATE ALONE IS NOT THE PROOF — see :data:`OCCURRENCE_EVENT_KIND`.
+#: ⛔ THE PREDICATE ALONE IS NOT THE PROOF — see :data:`OCCURRENCE_EVENT_KINDS`.
 OCCURRENCE_REL = "aboutObject"
 
 #: The Event kind a bare :func:`record_occurrence` call mints when the caller
@@ -127,7 +131,14 @@ OCCURRENCE_REL = "aboutObject"
 #: so nothing new is coined.
 DEFAULT_OCCURRENCE_KIND = "occurrence"
 
-#: **The one place the occurrence is told apart from a mention** (#13128).
+#: The bare spelling of the occurrence kind. See
+#: :data:`OCCURRENCE_EVENT_KINDS` for the ONE home of the argument: why the linked
+#: Event's kind is where a mention is told from an occurrence, what it does NOT
+#: prove, every legal spelling of it, and the residuals that remain.
+OCCURRENCE_EVENT_KIND = DEFAULT_OCCURRENCE_KIND
+
+#: **Where the occurrence is told apart from a mention** (#13128) — the ONE home
+#: of that argument, and every spelling that names the kind.
 #:
 #: ``aboutObject`` is BOTH the predicate an occurrence Event is wired to its plan
 #: with AND the §3.2 ``schema:about`` predicate any Event uses to *mention* an
@@ -136,32 +147,63 @@ DEFAULT_OCCURRENCE_KIND = "occurrence"
 #: with a note about it as *"it happened"*.
 #:
 #: So the distinguishing fact is the linked Event's OWN kind, and the answer is
-#: the core ``occurrence`` kind: an Event of that kind IS the dated fact that the
-#: plan happened, and :func:`record_occurrence` is its only writer — it refuses
-#: any other kind rather than letting its own link lie about itself. Every other
-#: linked Event is a MENTION, which is a true statement about the plan and no
-#: evidence at all that it occurred (``planned_without_occurrence`` counts them
-#: separately and serves the count).
+#: the core ``occurrence`` kind, which is what :func:`record_occurrence` writes.
+#: Every other linked Event is a MENTION, which is a true statement about the
+#: plan and no evidence at all that it occurred (``planned_without_occurrence``
+#: counts them separately and serves the count).
 #:
-#: Why the kind and not a role on the edge (the issue's own option 2), not a new
-#: predicate (option 1), and not only a documented caveat (option 3):
+#: **Two spellings, ONE kind.** ``core:X`` and ``X`` are one kind in this model —
+#: ``pack_registry`` declares the equivalence over ``CORE_ALIASED_KINDS`` (which
+#: covers ``CANONICAL_EVENT_KINDS``), and its own rule is that a read must not
+#: depend on the normalised spelling: ``migrate_kinds`` is an opt-in normaliser,
+#: never a precondition for a read. The write door STORES WHAT IT IS GIVEN —
+#: measured: ``create_entity('event', …, eventKind='core:occurrence')`` keeps the
+#: ``core:`` form — so a bare-string comparison would report a plan that happened
+#: as never-happened, and would refuse ``record_occurrence(event_kind=
+#: 'core:occurrence')`` although it names the same kind. This module's own
+#: ``PLAN_KINDS`` already carries both spellings for the same reason.
 #:
-#: * a **new predicate** (``realizes``/``fulfills``) is a surface change with its
-#:   own approval (ONTOLOGY §3 + the surface gate) and is not this lane's to make;
-#: * a **role prop on the link** needs a journal/replay carrier for it — the edge
-#:   is rebuilt from ``EventRecorded.aboutLinks`` (``replay_about_links``), which
-#:   carries no edge props — so its marker would be lost by ``rebuild_all``
-#:   unless three surfaces grew it at once;
-#: * the **kind** is already journaled and folded with the Event, already the
-#:   writer's own declaration of what the Event is, and already a closed ONTOLOGY
-#:   §5 vocabulary that contains ``occurrence``.
+#: ⛔ **THE KIND IS EVIDENCE, NOT PROOF, and the difference is stated rather
+#: than glossed.** ``occurrence`` is ONTOLOGY §5's *generic extracted
+#: occurrence* and the repo's declared fallback for an ``eventKind`` a writer
+#: cannot classify — BOTH spellings: ``pack_state._KIND_GENERAL_FALLBACKS
+#: ["eventKind"]`` (bare, and `unapproved_kind_refusal` PRESCRIBES it in its
+#: remedy text) and ``extractor_v2._EVENT_FALLBACK["kind"] = "core:occurrence"``
+#: (namespaced — the spelling this change newly counts). So not every
+#: Event of this kind is an occurrence, and a mention written under it still
+#: reads as the occurrence. What the kind buys is the whole ORDINARY mention set
+#: (``email`` / ``meeting`` / ``note`` / ``turn`` / ``decision`` …) plus a writer
+#: guard on the one door this module owns — not exclusivity over the vocabulary.
+#: Getting exclusivity needs a dedicated predicate or an edge role (the issue's
+#: options 1 and 2): a new predicate is a surface change with its own approval
+#: (ONTOLOGY §3 + the surface gate), and a role prop needs a journal/replay
+#: carrier — the edge is rebuilt from ``EventRecorded.aboutLinks``
+#: (``replay_about_links``), which carries no edge props, so the marker would be
+#: lost by ``rebuild_all`` unless three surfaces grew it at once. Neither is this
+#: slice's to make, so the honest answer is the issue's option 3 done
+#: mechanically: a discriminator that separates the ordinary case, a writer-side
+#: guard, and the residual written down.
 #:
-#: ⚠️ STATED RESIDUAL: a caller that wants its own finer classification on the
-#: occurrence Event cannot have it here — ``record_occurrence`` refuses a
-#: non-occurrence ``event_kind`` and names the mention route instead. A mention
-#: written with ``eventKind='occurrence'`` would be counted as the occurrence,
-#: which is a caller lying about its own Event's kind, not a read defect.
-OCCURRENCE_EVENT_KIND = DEFAULT_OCCURRENCE_KIND
+#: ⚠️ STATED RESIDUALS, both directions:
+#:
+#: * **A mention can still read as the occurrence** — any Event of this kind, and
+#:   the kind is the declared fallback for an unclassifiable one. Also a caller
+#:   that LIES about its own Event (``eventKind='occurrence'`` on a note).
+#: * **The read now fails CLOSED on everything else** — a plan-linked Event of a
+#:   different kind reads as a mention, so a plan that DID happen can be reported
+#:   as never-happened when its occurrence Event was written with another kind.
+#:   The reachable populations: a pre-change ``record_occurrence(...,
+#:   event_kind=…)`` (the parameter was honoured before this guard, and no in-tree
+#:   caller passed it), and a non-occurrence-kind Event linked to a plan by
+#:   another writer. The guard closes this going forward only — there is no
+#:   backfill, and this module has no MCP/SDK/REST door yet
+#:   (``STORAGE-ARCHITECTURE.md`` row 44 classes it ``ops audit``).
+#: * ⛔ ``event_kind`` on :func:`record_occurrence` therefore stays in the
+#:   signature as a LOUD REFUSAL, not as a choice: it documents that the kind is
+#:   this helper's contract. Do not "restore" it as a feature without the two
+#:   residuals above being answered.
+OCCURRENCE_EVENT_KINDS: tuple[str, ...] = (
+    OCCURRENCE_EVENT_KIND, f"core:{OCCURRENCE_EVENT_KIND}")
 
 
 def plan_kinds() -> frozenset[str]:
@@ -632,16 +674,25 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     plan (``held`` / ``missed`` / ``cancelled``) is refused before anything is
     written: nothing is left behind by a refused call.
 
-    ⛔ ``event_kind`` is REFUSED unless it is :data:`OCCURRENCE_EVENT_KIND`, and
-    that is the writer half of #13128 (:data:`OCCURRENCE_EVENT_KIND` records why
-    the kind is the marker): this call's link IS the claim that the plan
-    happened, and the reader tells an occurrence from a *mention* by the linked
-    Event's kind. Accepting ``event_kind='meeting'`` here would mint a link that
-    the read honestly classifies as a mention — a plan that happened, recorded
-    as never having happened, with nothing failing. The refusal names the route
-    for a mention (write the ``:Event`` yourself with ``aboutObject=<plan>``),
-    which is exactly the shape `create_entity` already supports and
+    ⛔ ``event_kind`` is REFUSED unless it names :data:`OCCURRENCE_EVENT_KINDS`
+    (both legal spellings), and that is the writer half of #13128
+    (:data:`OCCURRENCE_EVENT_KINDS` records why the kind is the marker, and what
+    it does NOT prove): this call's link IS the claim that the plan happened, and
+    the reader tells an occurrence from a *mention* by the linked Event's kind.
+    Accepting ``event_kind='meeting'`` here would mint a link that the read
+    honestly classifies as a mention — a plan that happened, recorded as never
+    having happened, with nothing failing. The refusal names the route for a
+    mention (write the ``:Event`` yourself with ``aboutObject=<plan>``), which is
+    exactly the shape `create_entity` already supports and
     :func:`planned_without_occurrence` counts separately.
+
+    ⛔ The parameter is therefore retained as a LOUD REFUSAL, not as a choice:
+    it stays in the signature so that a caller reaching for it is told what the
+    kind means instead of silently losing its classification. Do not "restore"
+    it as a feature — that needs the two residuals in
+    :data:`OCCURRENCE_EVENT_KINDS` answered first (a mention can still read as
+    the occurrence; and a plan-linked Event of another kind now reads as a
+    mention, so the read fails closed on such a plan).
 
     Returns ``{"event": <node>, "eventId": <id>, "planId": <id>, "move":
     StageMove}``. ⚠️ Ordering, stated because it is observable: the Event is
@@ -673,17 +724,19 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
     # this refusal and reached `create_entity(eventKind=<object>)` — the same
     # inversion, one type-check away (#13586 review, finding 2). `is_plan_kind`
     # (:176) already fails CLOSED for a non-`str`; this guard follows the same
-    # rule, and `!=` on a value now known to be an exact `str` is honest.
-    if not isinstance(kind, str) or kind != OCCURRENCE_EVENT_KIND:
+    # rule, and the kind test below is over the RENDERING (`kind`), never over
+    # the caller's `__eq__`.
+    if not isinstance(kind, str) or kind not in OCCURRENCE_EVENT_KINDS:
         raise ValueError(
             f"Refused: `event_kind={kind!r}` cannot be the Event that "
             f"records an OCCURRENCE. This call's `{OCCURRENCE_REL}` link is the "
             f"claim that the plan happened, and an occurrence is told apart from "
             f"a MENTION of the plan by the linked Event's kind — so the Event "
             f"this helper writes is always {OCCURRENCE_EVENT_KIND!r} (ONTOLOGY "
-            f"§5). WHAT TO DO: call this with no `event_kind` to record that the "
-            f"plan happened; to record something merely ABOUT the plan (a note, "
-            f"an email summary, a reminder), write the Event directly — "
+            f"§5; the `core:` spelling names the same kind). WHAT TO DO: call "
+            f"this with no `event_kind` to record that the plan happened; to "
+            f"record something merely ABOUT the plan (a note, an email summary, "
+            f"a reminder), write the Event directly — "
             f"`create_entity('event', <name>, eventKind={kind!r}, "
             f"aboutObject=<plan id>)` — which is a mention and never reads as "
             f"the occurrence. Nothing has been written.")
@@ -732,9 +785,14 @@ def record_occurrence(sdk, plan_ref: str, *, name: str | None = None,
         raise ValueError(
             f"Refused: {', '.join(collided)} is set by `record_occurrence` "
             f"itself — the Event's kind and its link to the plan are this "
-            f"helper's contract, not caller props. WHAT TO DO: pass "
-            f"`event_kind=` / the plan reference instead, and drop "
-            f"{', '.join(collided)} from the props.")
+            f"helper's contract, not caller props, and since #13128 the kind is "
+            f"always {OCCURRENCE_EVENT_KIND!r} (`event_kind=` accepts no other "
+            f"value either). WHAT TO DO: pass the plan reference and drop "
+            f"{', '.join(collided)} from the props; to record something merely "
+            f"ABOUT the plan — a note, an email summary, a reminder — write the "
+            f"Event directly with "
+            f"`create_entity('event', <name>, eventKind=…, aboutObject=<plan "
+            f"id>)`, which is a MENTION and never reads as the occurrence.")
     event_name = name or cur.get("name") or plan_id
     created = sdk.create_entity(
         "event", event_name, eventKind=kind,
@@ -1031,6 +1089,19 @@ def planned_without_occurrence(graph) -> list[dict]:
     ``outcome`` is the stage's shipped outcome. An ended-but-occurrence-less plan
     is the ``missed`` / ``cancelled`` case: it never happened and never will.
 
+    ⛔ **A position is not a second determinant of "happened".** The LINK is the
+    proof, so a plan whose own position says it was ``held`` (outcome
+    ``completed``) but which has no occurrence-kind Event is reported here as
+    never-happened, with that stage and outcome served beside it — the row states
+    the contradiction rather than resolving it in either direction (reading
+    "happened" off the outcome word would be a second vocabulary; see
+    :data:`OCCURRENCE_EVENT_KINDS` for why the link is the one that decides). That
+    population is pre-existing and is widened, not created, by #13128: a
+    plan-linked Event of a non-occurrence kind used to suppress the row and now
+    counts as a mention, because the read fails CLOSED — a plan that DID happen
+    can therefore read as never-happened when its occurrence Event carries
+    another kind (see that constant's stated residuals).
+
     ``mentions`` is the second fact, counted rather than absorbed: how many
     linked Events are about the plan WITHOUT being its occurrence (a
     note, a reminder, an email summary). It is served so a caller can say
@@ -1048,16 +1119,16 @@ def planned_without_occurrence(graph) -> list[dict]:
         # ⛔ TWO counts, not one (#13128). ``aboutObject`` is ALSO the §3.2
         # ``schema:about`` MENTION predicate, so counting every linked Event made
         # a plan with a note about it read as "it happened" — the one inversion
-        # this read exists to prevent. `occurrences` counts only the Events that
-        # ARE the occurrence: an Event of the core ``occurrence`` kind (ONTOLOGY
-        # §5), which is exactly what ``record_occurrence`` writes and the only
-        # write door that can produce it (`event_kind` is pinned below);
-        # `mentions` counts every other linked Event.
+        # this read exists to prevent. `occurrences` counts the Events of the
+        # occurrence kind (ONTOLOGY §5 — ``OCCURRENCE_EVENT_KINDS`` carries both
+        # legal spellings, because the door stores what it is given and
+        # `core:X ≡ X`); `mentions` counts every other linked Event. The kind is
+        # EVIDENCE, not proof — see that constant for the residuals.
         #
         # ⛔ Both arms test `e IS NOT NULL`: an OPTIONAL MATCH that found nothing
-        # yields ONE row with `e` null, and a bare `e.eventKind <> 'occurrence'`
-        # is TRUE for it (`'' <> 'occurrence'`), which would report a plan with no
-        # linked Event at all as mentioned.
+        # yields ONE row with `e` null, and `NOT ('' IN $occurrence_kinds)` is
+        # TRUE for it, which would report a plan with no linked Event at all as
+        # mentioned.
         # ⛔ Not `collect(DISTINCT e.id)` and not a property count of `id`: an
         # `:Event` minted by the session/ingest writers carries `eventId` only,
         # so counting `id` reported a plan with a real linked occurrence as
@@ -1065,14 +1136,14 @@ def planned_without_occurrence(graph) -> list[dict]:
         # hole; the kind test is on the node for the same reason.
         "WITH p, "
         "     sum(CASE WHEN e IS NOT NULL AND coalesce(e.eventKind, '')"
-        " = $occurrence_kind THEN 1 ELSE 0 END) AS occurrences, "
-        "     sum(CASE WHEN e IS NOT NULL AND coalesce(e.eventKind, '')"
-        " <> $occurrence_kind THEN 1 ELSE 0 END) AS mentions "
+        " IN $occurrence_kinds THEN 1 ELSE 0 END) AS occurrences, "
+        "     sum(CASE WHEN e IS NOT NULL AND NOT (coalesce(e.eventKind, '')"
+        " IN $occurrence_kinds) THEN 1 ELSE 0 END) AS mentions "
         "RETURN p.id, p.name, p.pipelineStageId, "
         "       p.pipelineOutcome, coalesce(p.isClosed, false), "
         "       p.pipelineStageKey, occurrences, mentions",
         params={"kinds": sorted(PLAN_KINDS),
-                "occurrence_kind": OCCURRENCE_EVENT_KIND}).result_set
+                "occurrence_kinds": list(OCCURRENCE_EVENT_KINDS)}).result_set
     out: list[dict] = []
     for pid, name, stage, outcome, closed, key, occurrences, mentions in rows:
         # The occurrence link is the proof. A plan whose plan-side words say
