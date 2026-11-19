@@ -385,6 +385,17 @@
     #beat-intro p, #beat-compute > p, .outcomes {
       max-width: min(660px, 74ch);
     }
+    /* No last line may be one word. Widening the measure to 74ch moved the
+       break for these paragraphs, and at 41 of 106 sampled widths (640–1040px,
+       including 768/800/820/836/838/900) the second intro paragraph ended on
+       `business.` alone — 73.7px on a 3-line paragraph — and the compute
+       paragraph ended on `superintelligence.` alone (147.4px, 24.3% of its
+       width) at 768–900, where it had been `reliably advance your business.`
+       before. `pretty` is the prose variant (it only re-breaks the LAST line);
+       `balance` would re-ragged every line of the paragraph and is why the
+       lead and the hero subtitle use it instead. Unsupported browsers keep the
+       normal wrap, so this degrades to the previous behaviour. */
+    #beat-intro p, #beat-compute > p { text-wrap: pretty; }
     #beat-intro p + p { margin-top: 1.25rem; }
 
     /* The intro's first line is a LEAD, not body copy: it opens the section and
@@ -554,13 +565,16 @@
         row-gap: 0.3rem;
       }
       #beat-hero .hero-links a:not(:last-child)::after { content: none; }
-      /* The 5rem top padding is a DESKTOP offset (it clears the floating Login
-         button on a centred full-viewport panel). Carried into the narrow
-         single-column hero it shrinks the centring box to 732px for 762px of
-         content, so the stack bled past both paddings and sat 17px from the
-         bottom edge at 390x844. Symmetric 2rem padding + a slightly smaller
-         video give the stack its breathing room back. */
-      #beat-hero { padding-top: 2rem; }
+      /* ⛔ DO NOT touch `#beat-hero`'s padding-top here. The 5rem is the hero's
+         ONLY clearance from the fixed Login pill (`top:0; padding:18px 24px`,
+         so the button occupies y 18–54.4). Short viewports (≤820px tall) fire
+         the escape hatch two blocks down, which top-aligns the beat, so the
+         padding IS the clearance at every phone height — reducing it to 2rem
+         put the h1 at y=33 and painted the first line UNDER the button
+         (26.7x21.4px overlap at 375x812, and only +1.0px clearance at 390x844
+         against +25.0px before). The vertical room this beat needs is taken
+         from the video below instead, which is the block that makes the
+         single-column stack tall. */
       .video { width: 100%; max-width: 176px; margin: 0 auto; }
       .video figcaption { text-align: center; }
       /* Same measure as the paragraph above (no 3px inset), one column. The
