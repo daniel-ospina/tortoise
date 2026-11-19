@@ -5534,6 +5534,20 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     include_terminal=True for the complete supersede-structure view).
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
+    Two question shapes are answered from STATE instead of from the words, because
+    their answer is a population and not a match set (#13557/#13558):
+    a commitment question ("what are we committed to", "current commitments")
+    reads the live commitments by KIND + STAGE — so it returns a plan/goal/target
+    whose text never says "commitment" — and an ending question ("has anything
+    been withdrawn", "what ended") reads the ended records, each with how it
+    ended (its lifecycle word, the successor it names, or its terminal stage and
+    outcome). Neither needs a special argument from the caller. The route is only
+    taken for a plain question: pass any retrieval knob (`threshold`,
+    `min_confidence`, `order_by`, …) and this stays the relevance read it always
+    was. The commitment kinds are Object kinds, so a commitment question is
+    answered from `entity_type='object'` — a `point`-scoped one keeps the
+    relevance read.
+
     Point results annotated with EP breakdown. confidence_mean is THE point's
     confidence (belief mean α/(α+β): persisted posterior when EP has run,
     else persisted prior mean) — and ``null`` with ``ep.ep_state: "absent"``

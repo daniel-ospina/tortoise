@@ -45273,6 +45273,45 @@ class TortoiseSDK:
         instead of returning a bare `[]` that would claim "nothing of that
         family ever ended" (#13302 review round 2).
 
+        ── #13557 / #13558: a STATE QUESTION is routed to its population ────
+        Two questions the capstone (#13038) measured as UNREACHABLE are answered
+        from state rather than from words, and no call site has to change to
+        reach them: `search('current commitments', object)` answered **0 rows**
+        while the live launch plan sat in the same graph (#13557), and the
+        sentence "has anything we relied on been withdrawn" answered with two
+        rows that shared no word with it (#13558) while the ended records were
+        only reachable by calling this method with no text at all. So a `query`
+        is mapped to the state population it is about
+        (`tortoise/state_intent.py`; the cue table is question SHAPES, never a
+        noun-to-state assignment), and the population is then read from the
+        determinants the model already fixes: for a commitment question, the
+        commitment kinds of ONTOLOGY §5 (`strategy`/`plan`/`goal`/`target`, read
+        by kind + stage — `tortoise/commitments.py`), and for an ending question
+        the SAME `ended_scope` population described above (`tortoise/ended.py`),
+        served WITHOUT the caller passing the flag. The text is then the
+        SELECTOR of the population, not a term ranked against it.
+        ⛔ The route is taken only for a PLAIN question: a call that supplied a
+        retrieval knob (`threshold`, `min_confidence`, `order_by`, …) is asking a
+        relevance read and keeps it, un-routed and un-refused — the knob list is
+        the SAME closed list `ended_scope` refuses by. An explicit
+        `ended_scope=True` or `include_terminal=True` always wins over the
+        inference. The family contract holds: a commitment question selects the
+        OBJECT population (its kinds are Object kinds), so a `point`-scoped one
+        keeps the relevance read it had; an ending question selects the ended
+        population only for a family that HAS a lifecycle (an Event has none,
+        design §8). Both populations are bounded and degrade the same way
+        `ended_scope` does — a scan that could not answer marks the leg and the
+        truncation when a sink exists and raises when none does, never an
+        unmarked `[]` that would claim "nothing is committed" / "nothing ended".
+        ⚠️ The family boundary is stated rather than smoothed over: the commitment
+        kinds are OBJECT kinds, so a commitment question read with
+        `entity_type='point'` (this method's DEFAULT) keeps the relevance read —
+        on the capstone's Q1 that half already answered with the live claims — and
+        the kind+stage population is reached by asking for objects. Widening the
+        arm to answer a `point`-scoped question with Objects would hand a caller a
+        family it did not ask for, which is a different (and larger) surface
+        decision than making the question reach its answer.
+
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
         (the product's DEFAULT_POOL_SIZE = 120, #1947/G2). pool_size/floor
@@ -45553,8 +45592,17 @@ class TortoiseSDK:
         # read and stay served; the sink/plumbing keywords (``leg_trace``,
         # ``read_status_out``, ``_truncation_out``, ``_elevated_timeout_ms``) are
         # how the caller receives or times the answer, not what it contains.
-        if ended_scope:
-            _refused_ended = sorted(
+        def _retrieval_knobs() -> list[str]:
+            """The retrieval keywords THIS call supplied — the ONE closed list.
+
+            Two readers, one list (#13557/#13558): the ended-scope arm REFUSES
+            these beside a state enumeration, and the state-question router
+            serves a population only for a call that supplied NONE of them. A
+            second, hand-written list at the router would be the #2901 defect
+            (a call-site subset silently omitting a knob) one level up — a knob
+            added here is therefore classified for both readers at once.
+            """
+            return sorted(
                 name for name, _supplied in (
                     ("query", query is not None),
                     ("threshold", threshold not in (0.0, 0)),
@@ -45582,6 +45630,70 @@ class TortoiseSDK:
                     ("w4_enrich", w4_enrich is not True),
                 ) if _supplied
             )
+
+        # ── #13557 / #13558: A STATE QUESTION IS ROUTED TO ITS POPULATION ─────
+        # The capstone measured two questions whose answer is a STATE population
+        # and whose reach was a text match: `search('current commitments',
+        # object)` → 0 rows while the live plan sat in the graph (#13557), and
+        # `search(None, ended_scope=True)` → the ended records while the sentence
+        # "has anything we relied on been withdrawn" reached nothing (#13558).
+        # `current commitments` shares no word with the plan; the withdrawal
+        # question shares no word with the retracted claim. So the QUESTION is
+        # mapped to the population it is about (``tortoise/state_intent.py``),
+        # and the population is then read from the determinants the model already
+        # has — the commitment kinds + the shared currency predicate — never from
+        # the words (which is why `query` is then consumed as the SELECTOR rather
+        # than ranked).
+        #
+        # ⛔ ROUTED ONLY FOR A PLAIN QUESTION. Every retrieval knob changes WHICH
+        # rows a caller receives (shrink/expand/re-rank/re-weight/time-scope), and
+        # a state population cannot apply any of them — so a call that supplied
+        # one is asking a relevance read and keeps it, un-routed and un-refused.
+        # That is the same closed list the ended arm refuses by, read here as a
+        # guard rather than as an error: a caller who typed `threshold=0.3` did
+        # not ask for a population.
+        #
+        # ⛔ And an EXPLICIT scope always wins: `ended_scope=True` is the caller
+        # naming the population themselves, and `include_terminal=True` is the
+        # caller asking for the complete view — neither is overridden by a guess
+        # about their words.
+        _scope_from_question: str | None = None
+        _commitment_scope = False
+        if (query is not None and not ended_scope and not include_terminal
+                and not [k for k in _retrieval_knobs() if k != "query"]):
+            from .state_intent import COMMITMENTS, ENDED, detect_state_question
+
+            _state_q = detect_state_question(query)
+            if _state_q.population == ENDED:
+                # The ended population exists for the families with a lifecycle
+                # (an Event has none — design §8). For any other family the
+                # question keeps the relevance read rather than being answered
+                # with a population that does not exist for it.
+                from .ended import FAMILIES as _ENDED_FAMILIES
+
+                if entity_type in _ENDED_FAMILIES:
+                    ended_scope = True
+                    _scope_from_question = query
+            elif _state_q.population == COMMITMENTS:
+                # The commitment kinds are OBJECT kinds (ONTOLOGY §5), and the
+                # arm below intersects them with the caller's own `kind` — so a
+                # `point`-scoped commitment question keeps the text read that
+                # already answers it (the capstone's Q1 point half returns the
+                # live pricing/uptime claims), and never receives Objects it did
+                # not ask for.
+                if entity_type == "object":
+                    _commitment_scope = True
+                    _scope_from_question = query
+
+        if ended_scope:
+            _refused_ended = _retrieval_knobs()
+            # ⛔ A `query` is refused beside an EXPLICIT scope and NOT when this
+            # read derived the scope from it: in the second case the text was
+            # APPLIED (it selected the population), not dropped. The distinction
+            # is the whole of #13558 — a capability that must be invoked with the
+            # caller's special words is not a read surface.
+            if _scope_from_question is not None:
+                _refused_ended = [k for k in _refused_ended if k != "query"]
             if _refused_ended:
                 raise ValueError(
                     f"ended_scope is a STATE enumeration, not a relevance read, "
@@ -46055,6 +46167,61 @@ class TortoiseSDK:
             _trunc["candidates"] = len(_fatter)
             _trunc["exact"] = len(_fatter) <= limit
             return _with_read_status(_ended_rows)
+
+        # ── #13557: the COMMITMENTS question, answered by KIND + STAGE ────────
+        # The other half of the same routing decision above. The population is
+        # the live commitment-state family (``tortoise/commitments.py``), read by
+        # the kinds ONTOLOGY §5 declares and the position each record stands on —
+        # so "what are we committed to" reaches the launch plan without the word
+        # "commitment" occurring in its text.
+        #
+        # ⛔ The kinds are EXPANDED, never spelled here: each commitment kind goes
+        # through `_read_filter_kinds`, the same expansion every read filter uses,
+        # so `core:plan` (the graph's stored spelling) and `plan` (the ontology's)
+        # and a pack subclass are one kind to this arm (#11679/#13128's class of
+        # defect is a read that knows one spelling).
+        if _commitment_scope:
+            from . import commitments as _commitments
+
+            _commit_kinds: list[str] = []
+            for _ck in _commitments.COMMITMENT_OBJECT_KINDS:
+                for _spelling in self._read_filter_kinds(_ck):
+                    if ((expanded_kinds is None or _spelling in expanded_kinds)
+                            and _spelling not in _commit_kinds):
+                        _commit_kinds.append(_spelling)
+            # The caller narrowed to a kind that is NOT a commitment kind (or to a
+            # population this read does not enumerate): the question is not
+            # answerable by this population for THAT filter, so the call keeps the
+            # relevance read it asked for instead of being told nothing is
+            # committed. `query` is still intact — only the ended arm consumes it.
+            if _commit_kinds:
+                try:
+                    _fatter = _commitments.enumerate_live_commitments(
+                        graph, kinds=_commit_kinds, limit=limit + 1,
+                        # ONE row beyond the page for the same reason the ended
+                        # arm asks for one: a truncated page must be PROVEN, not
+                        # guessed. `None` keeps the module's own budget (the
+                        # read's `_elevated_timeout_ms` always wins when set), so
+                        # this arm binds no second fallback in this method.
+                        timeout_ms=_elevated_timeout_ms)
+                except Exception as e:  # noqa: BLE001, RUF100
+                    # The SAME carry-or-raise contract as the ended arm above, and
+                    # for the same reason: `[]` here is the factual claim "nothing
+                    # is currently committed", so it may only be served when a
+                    # sink exists to carry the marking that forbids reading it as
+                    # complete. With no sink the store's error rises.
+                    if status_trace is None:
+                        raise
+                    _logger.warning(
+                        "commitments enumeration could not answer (%s) — degraded", e)
+                    status_trace.append(_trace_entry(
+                        "commitments", ran=True, degraded=True,
+                        reason="query_failed", count=0))
+                    _trunc["incomplete"] = True
+                    return _with_read_status([])
+                _trunc["candidates"] = len(_fatter)
+                _trunc["exact"] = len(_fatter) <= limit
+                return _with_read_status(_fatter[:limit])
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the
