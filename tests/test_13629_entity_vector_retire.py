@@ -6533,6 +6533,33 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND EACH `ast.Tuple | ast.List` UNION IN THAT PAIRING NEEDS BOTH HALVES PINNED
+        # (`#13788`, measured by this lane at `079a2e69`). The union is ONE `isinstance` guard in
+        # `_property_alias_names`, and nothing exercised its LIST half: narrowing the TARGET guard
+        # to `ast.Tuple` red **0 of the 474 fixture rows** and CERTIFIED `[*_r, x] = 1, key`;
+        # narrowing the VALUE guard the same way red **0** and CERTIFIED `x, *_r = [key, 1]`.
+        # Both bind `x = key` and store `props["embedding"]`, so an inert mutation there is a
+        # false PASS — the same unpinned-direction shape as the two MIS-PAIR controls above, one
+        # spelling over. One row per half, each reddened by exactly its OWN mutant and by neither
+        # of the others.
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    [*_r, x] = 1, key
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    x, *_r = [key, 1]
+    if not _derived_mirror_required("object"):
+        props.update({x: _encode(ev)})
+        return None
+    _write(props)
+""",
         # ⚠️ A KEY EXPRESSION THAT FOLDS TO THE PROPERTY (`("embedding" if _f() else "y")`,
         # `("embedding" or "y")`, `(w := "embedding")`) is a MEASURED, DISCLOSED false PASS —
         # residual #5 of `_mutator_stores_the_vector` — not a row here. Resolving it in the key
