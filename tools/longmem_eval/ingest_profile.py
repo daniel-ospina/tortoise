@@ -139,11 +139,22 @@ def _sdk(*, db_uri: str | None, namespace: str) -> tuple[TortoiseSDK, Any]:
     module's parity claim cannot survive.
     """
     if db_uri is None:
-        db_uri = os.environ.get("TORTOISE_DB_URI")
+        # ⛔ Truthiness, not `is None`: the lane contract is **empty == unset**
+        # (CI exports `TORTOISE_DB_URI=""` — `tests/test_uri_env_mutations_declared.py`
+        # states it, `perf-lane.yml` sets it). `os.environ.get` returns `""`, not
+        # `None`, so promoting it verbatim both mis-reads the arm AND trips the
+        # shape check below on the one state the repo defines as "no URI" — the
+        # profiler would refuse to measure anything on the very lanes it exists
+        # to profile. `run_main` promotes only a TRUTHY ambient value
+        # (`run.py:8153`), and this mirrors it exactly.
+        db_uri = os.environ.get("TORTOISE_DB_URI") or None
     # Validate what was promoted, not just what was passed: ``run_main`` runs
     # this check on the PROMOTED value, so an ambient ``TORTOISE_DB_URI=notauri``
     # is a usage error there and would otherwise surface as a ``TortoiseSDK``
-    # failure here — naming the SDK, not the mistake.
+    # failure here — naming the SDK, not the mistake. ``main()`` refuses the same
+    # value FIRST, as a usage error (exit 2, ``run_main``'s own message); this
+    # raise is the guard for a direct caller of ``_sdk``, and it is deliberately
+    # AFTER the truthiness promotion so an empty value is never "a bad URI".
     if db_uri is not None and "://" not in db_uri:
         raise ValueError(
             f"--db (or TORTOISE_DB_URI) must be a FalkorDB URI "
@@ -291,23 +302,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-profile", action="store_true",
                    help="times only; skip the cProfile attribution (faster)")
     args = p.parse_args(argv)
-    # ``--db ""`` must not silently fall back to the embedded arm: it is the
-    # ordinary shape of an unset-variable mistake (``--db "$TORTOISE_DB_URI"``),
-    # and ``run_main`` refuses it rather than measuring something else. Same
-    # check, same message.
-    if args.db is not None and "://" not in args.db:
-        p.error(
-            f"--db must be a FalkorDB URI (docker://|redis://|rediss://|"
-            f"bolt://), got {args.db!r} — the per-question isolated graphs "
-            f"derive from the URI's server")
-
     # The arm actually SELECTED, not merely the flag that was passed: with an
     # ambient TORTOISE_DB_URI and no --db the profiler takes the server arm
     # (``_sdk`` promotes it, as ``run_main`` does), so reporting
     # ``bool(args.db)`` would print ``db: false`` about a server run — the
     # record disagreeing with the run, which is the defect class #8486 is about.
-    selected_db = args.db if args.db is not None else os.environ.get(
-        "TORTOISE_DB_URI")
+    # ⛔ `or None` on the ambient branch: the lane contract is empty == unset
+    # (CI exports `TORTOISE_DB_URI=""`), and `run_main` promotes only a truthy
+    # value. Without it a set-but-empty variable both reads as the embedded arm
+    # in `report["db"]` and trips the shape check below — "the artifact
+    # disagrees with the run" reintroduced on the worst input (review round 10).
+    selected_db = args.db if args.db is not None else (
+        os.environ.get("TORTOISE_DB_URI") or None)
+    # ``--db ""`` must not silently fall back to the embedded arm: it is the
+    # ordinary shape of an unset-variable mistake (``--db "$TORTOISE_DB_URI"``),
+    # and ``run_main`` refuses it rather than measuring something else. Same
+    # check, same message — run on the SELECTED value, so a non-URI ambient is
+    # refused here as a usage error (exit 2) instead of escaping later as a
+    # traceback out of ``_sdk``.
+    if selected_db is not None and "://" not in selected_db:
+        p.error(
+            f"--db must be a FalkorDB URI (docker://|redis://|rediss://|"
+            f"bolt://), got {selected_db!r} — the per-question isolated graphs "
+            f"derive from the URI's server")
+
     report: dict[str, Any] = {"db": bool(selected_db), "shapes": [],
                               "embedder": None, "encode": {}}
     # A PID-scoped tag: every measurement below writes a FRESH graph, and the

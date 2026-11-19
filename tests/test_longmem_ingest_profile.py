@@ -406,3 +406,74 @@ def test_sdk_refuses_an_ambient_uri_that_is_not_a_uri(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "notauri")
     with _pytest.raises(ValueError, match="must be a FalkorDB URI"):
         prof._sdk(db_uri=None, namespace="profile-test")
+
+
+def test_an_empty_ambient_uri_takes_the_embedded_arm(monkeypatch):
+    """A SET-BUT-EMPTY ``TORTOISE_DB_URI`` is "unset", not "a bad URI".
+
+    The lane contract is explicit — ``tests/test_uri_env_mutations_declared.py``
+    states it ("the lane contract is empty == unset (CI exports
+    `TORTOISE_DB_URI=""`)", #3094/#2589/#2930) and ``perf-lane.yml`` exports it
+    empty at job level — so promoting the raw ``os.environ.get`` result (which is
+    ``""``, not ``None``) read the empty state as a malformed URI and refused to
+    construct at all: the profiler died before measuring anything on exactly the
+    lanes it exists to profile (review round 10). ``run_main`` promotes only a
+    TRUTHY ambient value (``run.py:8153``); this is the same rule.
+
+    Non-vacuity: drop the ``or None`` in ``_sdk``'s promotion and this reds with
+    the ValueError instead of an embedded construction.
+    """
+    seen: dict[str, object] = {}
+
+    class _StubSDK:
+        def __init__(self, *args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+
+    monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+
+    _, cleanup = prof._sdk(db_uri=None, namespace="profile-test")
+    args = seen["args"]
+    assert len(args) == 1 and str(args[0]).endswith("lme.db"), (
+        "an empty ambient URI is UNSET, so the arm is the embedded tempdir — "
+        "the same arm run_main takes on this env")
+    assert seen["kwargs"] == {}
+    cleanup()
+
+
+def test_an_empty_ambient_uri_is_measured_as_the_embedded_arm(monkeypatch,
+                                                              capsys):
+    """The same input through ``main()``: it must REPORT the arm it then runs.
+
+    This is the pair the report half of the defect needs: the round-8 fix made
+    ``report["db"]`` name the selected arm, so the empty state was reported as
+    embedded (``bool("") is False``) and then refused to measure it — an
+    artifact that contradicts its own run, which is #8486's defect class.
+
+    Non-vacuity: revert ``main()``'s ``or None`` and the refusal raises out of
+    ``main`` instead of returning 0 with the embedded arm.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "")
+    report = _main_report(monkeypatch, capsys, [])
+    assert report["db"] is False, (
+        "an empty ambient URI is unset, so the reported arm is the embedded one")
+
+
+def test_a_non_uri_ambient_is_refused_at_entry(monkeypatch, capsys):
+    """A non-URI ambient must be a USAGE error, not a traceback out of `_sdk`.
+
+    ``run_main`` runs its shape check on the promoted value and reports it
+    through ``parser.error`` (exit 2, one message). When only ``_sdk`` validated
+    it, the same mistake surfaced as an uncaught ``ValueError`` — two entry
+    points, two failure shapes for one input. Pinned at ``main`` with the exit
+    code and the message, so the parity is the assertion.
+    """
+    import pytest as _pytest
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "notauri")
+    with _pytest.raises(SystemExit) as exit_info:
+        prof.main(["--json", "--no-profile"])
+    assert exit_info.value.code == 2, "argparse's own usage exit"
+    err = capsys.readouterr().err
+    assert "must be a FalkorDB URI" in err and "got 'notauri'" in err
