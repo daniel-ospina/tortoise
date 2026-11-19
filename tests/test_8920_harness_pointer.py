@@ -229,29 +229,59 @@ def test_a_token_naming_a_real_file_is_not_a_symbol_pointer():
     `test_production_pointers_into_the_test_tree_resolve` was red on a line that
     is correct, in every PR, with nothing in the diff to blame.
 
-    NON-VACUITY, and it is asserted here rather than claimed: the SECOND token in
-    the same text is a genuinely broken `tests.<module>.<symbol>` pointer and
-    MUST still be emitted. A narrowing that swallowed it would make the resolve
-    arm above pass on a tree it never looked at — so this row reds if the
-    exclusion ever grows past "is a file".
+    NON-VACUITY, and it is asserted here rather than claimed, on THREE tokens:
+
+    * Token 1 is the token that redded `test (d)` — it must be EXCLUDED. If
+      `is_file()` stops being consulted, this arm reds.
+    * Token 2 is a second file pointer whose suffix is NOT in `_NOT_A_SYMBOL`
+      (`.jsonl`), so it must be EXCLUDED too. This is the arm that shows the
+      rule is a RULE and not a list: an extension list that had merely been
+      taught `.mjs` resolves this one as a symbol and reds here.
+    * Token 3 is the CONTROL, and both halves of it matter. It uses the SAME
+      `tests/<path>.<symbol>` SPELLING as tokens 1-2 — a DOTTED control
+      (`tests.<module>.<symbol>`) would exercise nothing, because `_pointer_at`
+      only asks the filesystem on the `dotted is None` branch, so it stays green
+      under any slash-form exclusion. And its target must NOT exist as a file: if
+      someone later creates that exact path, the control silently turns INTO a
+      file pointer and this row would keep passing while testing nothing.
+
+    So the row reds if `is_file()` is ignored (token 1), if the exclusion grows
+    past "is a file" to swallow a slash pointer naming no file (token 3), and if
+    the rule is ever replaced by a hand-maintained suffix list (token 2).
     """
     file_pointer = "`tests/test_middleware_host_consolidation.mjs`"
-    broken = "`tests.test_8920_harness_pointer.definitely_not_a_symbol`"
-    matches = list(_POINTER.finditer(f"see {file_pointer} and {broken}"))
-    assert len(matches) == 2, f"the scan itself broke on {file_pointer}: {matches}"
+    list_pointer = "`tests/fixtures/labeled_pairs.jsonl`"
+    broken = "`tests/test_8920_harness_pointer.definitely_not_a_symbol`"
+    broken_target = TESTS_DIR / "test_8920_harness_pointer.definitely_not_a_symbol"
+    matches = list(_POINTER.finditer(f"see {file_pointer}, {list_pointer} and {broken}"))
+    assert len(matches) == 3, f"the scan itself broke on {file_pointer}: {matches}"
     assert (TESTS_DIR / "test_middleware_host_consolidation.mjs").is_file(), (
         "the file-pointer arm needs a REAL file to test against; if this one was "
         "renamed, point the arm at another non-`.py` test artefact rather than "
         "deleting it — the rule is 'the file exists', not 'the suffix is .mjs'"
     )
+    assert (TESTS_DIR / "fixtures" / "labeled_pairs.jsonl").is_file(), (
+        "the extension-list discriminator needs its OWN real file, with a suffix "
+        "`_NOT_A_SYMBOL` does not carry — that is the whole point of this token"
+    )
+    assert not broken_target.exists(), (
+        f"the control token only tests the rule while `{broken_target.name}` does "
+        "NOT exist — now that it does, this pointer IS a file pointer, so pick "
+        "another symbol name instead of deleting the control"
+    )
     assert _pointer_at(matches[0]) is None, (
         f"{file_pointer} names a real file, so it is out of scope — it was "
         f"resolved to {_pointer_at(matches[0])}"
     )
-    assert _pointer_at(matches[1]) == (
+    assert _pointer_at(matches[1]) is None, (
+        f"{list_pointer} names a real file too, and `.jsonl` is not in "
+        f"`_NOT_A_SYMBOL` — an extension list cannot close this class — it was "
+        f"resolved to {_pointer_at(matches[1])}"
+    )
+    assert _pointer_at(matches[2]) == (
         "tests.test_8920_harness_pointer",
         "definitely_not_a_symbol",
-    ), f"the file-pointer narrowing also swallowed a real pointer: {_pointer_at(matches[1])}"
+    ), f"the file-pointer narrowing also swallowed a real pointer: {_pointer_at(matches[2])}"
 
 
 def test_no_source_still_names_the_pre_move_symbols():
