@@ -612,12 +612,30 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing the false green must send the reader to the verb, not delete the "
         "pointer to it (#13489 review, P0)")
+    # ⛔ THIS MESSAGE MUST NOT TYPE A VERDICT OR A SET (#13746 review, P1 — MEASURED at
+    # `855049bd9c`). It used to read "the census red is INHERITED (`tortoise/` is not in
+    # this diff, so both graded modules are `origin/main`'s)", and BOTH halves are false at
+    # the head this PR merges: `uv run python tools/hosted_api_cite_census.py --check` exits
+    # **0** here (there is no red to attribute), and
+    # `git diff --name-only origin/main...HEAD -- tortoise/` prints **two** paths
+    # (`tortoise/activation_scorecard.py` 5/5, `tortoise/hosted_api.py` 1/1), every one of
+    # the six changed lines a comment — so the modules are this branch's, changed, and
+    # comment-only rather than absent. A failure MESSAGE is only read when the assertion
+    # fires, so no leg catches a stale one: it survived five review rounds while the
+    # anti-negation arm BELOW states the same measurement CORRECTLY ("prints two
+    # comment-only paths at this head"). ⛔ No line offset is named here — an offset is the
+    # self-locator this file's round-8/round-9 repairs removed, and it drifts on the next
+    # edit above it (#13746 review, P3). The verifiable claim is the POINTER's purpose,
+    # head-independent: the command is what lets a reader attribute the verdict of the
+    # moment. ⛔ Do not re-word this into a direction — that is the same defect with a
+    # current date on it.
     assert "git diff --name-only origin/main...HEAD -- tortoise/" in doc, (
-        "05-verify.md no longer states the command that shows the census red is "
-        "INHERITED (`tortoise/` is not in this diff, so both graded modules are "
-        "`origin/main`'s). Without it the next reader reads the red as this branch's, "
-        "or is asked to repair `main`'s drift inside a docs PR "
-        "(#13489 review, P0)")
+        "05-verify.md no longer states `git diff --name-only origin/main...HEAD -- "
+        "tortoise/`, the command that reads the census's graded module set at the head "
+        "being merged. Without it a reader cannot attribute the `--check` verdict of "
+        "that head to `main` or to this diff — so the next reader either reads it as "
+        "this branch's, or is asked to repair `main`'s drift inside a docs PR "
+        "(#13489 review, P0; verdict and set claims removed here — #13746 review, P1)")
     # ⛔ THE ANTI-NEGATION LEG (#13489 review, P1 — MEASURED). The leg just above only requires
     # the command to be PRESENT, and it occurs six times in this file. The split is MEASURED at
     # the pre-fix document (`16ace39823`) rather than asserted, because an earlier cut of this
