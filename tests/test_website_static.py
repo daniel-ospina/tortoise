@@ -7321,7 +7321,21 @@ class TestConsentSeam:
                 "consent has been applied, so announcing first is the "
                 "pre-consent beacon this seam exists to prevent — the page "
                 "would capture before the opt-in landed")
-            assert body.find("loadConsentedAnalytics()") < granted, (
+            # ⛔ THE PRESENCE HALF IS ASSERTED FIRST, because the ordering
+            # comparison below is VACUOUS without it: `str.find` answers -1 for
+            # a call that is absent, and -1 < granted is true — so deleting the
+            # loader call from a granted path would pass this row while GTM/Meta
+            # never get activated (measured: with only the comparison, deleting
+            # `loadConsentedAnalytics()` from `onAccept` left all three
+            # `TestConsentSeam` rows green).
+            loaders = body.find("loadConsentedAnalytics()")
+            assert loaders != -1, (
+                f"`{path}` grants consent but never calls "
+                "`loadConsentedAnalytics()`: the consent-gated GTM/Meta loaders "
+                "are never activated on the accept path, so a visitor who "
+                "explicitly opted in is measured by nothing downstream "
+                "(#13645)")
+            assert loaders < granted, (
                 f"`{path}` dispatches `{self.EVENT}` before activating the "
                 "consent-gated loaders (GTM/Meta), so a listener acts on a "
                 "decision the tags have not followed yet")
