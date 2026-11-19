@@ -3335,12 +3335,16 @@ surfaces:
   # green: §3a's count columns had no assertion, §4 held an unpinned SECOND quotation of the mint
   # rate, and §4's `OFF by default` / `NO` verdict WORDS were never read — all three measured).
   # ⛔ The claim stops at that boundary, and the boundary is broader than §5/§6: NARRATIVE
-  # PROSE elsewhere in §1-§4 is NOT pinned either (the per-arm degradation counts in §2a's
-  # commentary, `+1.7 and +6.7 points`, `0 gains, 0 losses across 272`, `282/300`,
-  # `34 of 300`) — the three §2/§3 narrative restatements that DO repeat a tabulated figure
-  # (`+53.3 points`, the `0.8` Jaccard, `192 of 411`) are pinned by a separate pin, which
-  # also pins the DIRECTION of the `192 of 411` restatement (the figure is the ATTACH bucket,
-  # so a one-word `attach` -> `mint` inversion reds). §5's items 5-7 ARE pinned (the
+  # PROSE elsewhere in §1-§4 is NOT pinned either (`+1.7 and +6.7 points`,
+  # `0 gains, 0 losses across 272`, `282/300`, `34 of 300` — each measured GREEN under
+  # mutation at this head) — the three §2/§3 narrative restatements that DO repeat a
+  # tabulated figure (`+53.3 points`, the `0.8` Jaccard, `192 of 411`) are pinned by a
+  # separate pin, which also pins the DIRECTION of the `192 of 411` restatement (the
+  # figure is the ATTACH bucket, so a one-word `attach` -> `mint` inversion reds).
+  # ⛔ §2a's per-arm degradation counts (`14 of its 300 windows` / `not the shipped arm's
+  # N/N`) ARE pinned and are NOT in the unpinned set above — an earlier version of this
+  # row named them as unpinned, which was false (measured: a mutation reds). §5's items
+  # 5-7 ARE pinned too (the
   # `30 % / 10 %` oversampling, `n = 300`, the `±0.33 pts` quantum, `35 of 300` excluded —
   # §5's DOOR paragraph was already pinned); what is NOT pinned is §5's items 1-4, item 5's
   # EXTERNAL production share (no artifact holds it), and §6's run metadata. `~2.3 %` /
