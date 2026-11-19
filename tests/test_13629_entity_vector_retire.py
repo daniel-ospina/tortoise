@@ -558,6 +558,38 @@ def test_write_gate_falls_back_to_the_boolean_on_a_tree_without_the_measured_for
     assert "no counts were taken" in reason, reason
 
 
+def test_write_gate_falls_back_fail_closed_when_the_old_gate_raises(monkeypatch):
+    """⛔ THE FALLBACK'S `except` ARM, which `ea10eb2d` left without a falsifier.
+
+    Re-pointing `test_write_gate_is_fail_closed_when_the_gate_raises` at
+    `mirror_verdict` (the measured form) took the only test that used to raise through
+    the OLD symbol with it, and the sibling above returns `True` without raising — so
+    deleting the fallback's `except Exception → return True, "… raised …"` left the suite
+    green (measured: **110 passed**).
+
+    Why it matters: a tree that carries `mirror_required` but not `mirror_verdict` is one
+    this change has not reached, and a bare `getattr` miss there must answer fail-closed.
+    A raise escaping instead is not a permission — but it is also not the refusal the tool
+    documents, and the file's own standard is one falsifier per load-bearing claim.
+
+    Mutation (measured): delete the `except` block in `write_gate`'s fallback arm (leaving
+    `needed = bool(gate(entity_type))`) and this test reds on the escaping exception while
+    the rest of the file stays green.
+    """
+    from tortoise import record_vector
+
+    def _boom(entity_type):
+        raise RuntimeError("the record leg is unreachable")
+
+    monkeypatch.delattr(record_vector, "mirror_verdict", raising=False)
+    monkeypatch.setattr(record_vector, "mirror_required", _boom, raising=False)
+
+    emits, reason = strip.write_gate("object")
+    assert emits is True, reason
+    assert "raised" in reason and "RuntimeError" in reason, reason
+    assert "an unreadable answer is not a permission" in reason, reason
+
+
 def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monkeypatch):
     """⛔ THE THIRD UNKNOWN OF THE GATE READ, and the one that had no falsifier before this
     test.
@@ -2094,7 +2126,101 @@ def test_the_census_cli_hands_the_gate_its_own_projection_and_tenant(
     assert "has not proved" not in reason, reason
 
 
+def test_the_census_gate_takes_its_record_leg_from_the_flag_not_the_ambient_env(
+        stores, monkeypatch):
+    """⛔ THE CENSUS SIDE OF THE `record_dsn` HOP — its own call site, its own falsifier.
+
+    `entity_vector_parity_census._write_gate` builds the probe at `:661` and hands it
+    `record_dsn=record_dsn`. Deleting that one keyword leaves the projection, tenant and
+    population wired, compiles and runs, and — because `_fresh_record_leg` SETS
+    `TORTOISE_RECORD_DSN` (`:1837`) — leaves every census test green on the ambient value
+    (measured: **110 passed**). The report an operator reads FIRST then carries
+    "not proved" for a label the record covers, with no counts anywhere.
+
+    Deleting the ambient is what makes the argument load-bearing; the `--record-dsn` flag
+    alone is an invocation `main` supports (`:904`).
+
+    Mutation (measured): drop `record_dsn=record_dsn` from `_write_gate`'s `readiness_probe`
+    call and this test reds on the absent counts while the rest of the file stays green.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+
+    from tortoise import record_vector
+
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    record_vector.reset_coverage_cache()
+    _cli_harness(monkeypatch, graph)
+
+    captured: dict = {}
+    real_census = parity.census
+
+    def _spy(**kwargs):
+        captured["strip_readiness"] = kwargs["strip_readiness"]
+        return real_census(**kwargs)
+
+    monkeypatch.setattr(parity, "census", _spy)
+
+    assert parity.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                        "--record-dsn", "postgresql://localhost/record",
+                        "--org-id", "o", "--graph-id", "g",
+                        "--label", "Object"]) == 0
+    _ready, reason = captured["strip_readiness"]("Object")
+    assert "the record holds 1 vector(s) for object, the graph serves 1" in reason, (
+        "the census's gate did not receive this run's --record-dsn, so the record leg "
+        f"came from an absent ambient and nothing was measured ({reason})")
+    assert "not proved" not in reason, reason
+
+
 # ── #13796: the two hops the CLI tests above do NOT pin ─────────────────────
+
+
+def test_the_plan_probe_takes_its_record_leg_from_the_flag_not_the_ambient_env(
+        stores, monkeypatch, capsys):
+    """⛔ `build_plan`'s `readiness_probe(record_dsn=…)` HOP, the one harness masks.
+
+    `main` declares `--record-dsn` on its command line, so an operator run need not export
+    `TORTOISE_RECORD_DSN`. `build_plan` must therefore hand the probe THIS run's DSN — but
+    `readiness_probe`'s `record_dsn` defaults to ``None``, so deleting
+    `record_dsn=record_dsn` there (leaving `graph_population`/`org_id`/`graph_id` intact)
+    compiles, runs, and leaves the whole file at **109 passed, measured**. The plan then
+    resolves the record leg from an ABSENT ambient instead, and the row reaches the
+    operator with `#13796`'s undiagnosable sentence — a ready-looking plan with no counts
+    behind it.
+
+    ⛔ WHY EVERY OTHER TEST MISSES IT: `_fresh_record_leg` SETS
+    `TORTOISE_RECORD_DSN` (`:1837`), so the ambient value stands in for the argument and a
+    dropped parameter is indistinguishable. Deleting the ambient is what makes the
+    argument load-bearing, and it is the only difference between this test and its
+    sibling above.
+
+    Mutation (measured): drop `record_dsn=record_dsn` from `build_plan`'s
+    `readiness_probe(...)` call and this test reds on the absent sentence while the rest
+    of the file stays green.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+
+    from tortoise import record_vector
+
+    # ⛔ NO AMBIENT RECORD DSN — the `--record-dsn`-only invocation `main` supports.
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    record_vector.reset_coverage_cache()
+    _cli_harness(monkeypatch, graph)
+
+    assert strip.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                       "--record-dsn", "postgresql://localhost/record",
+                       "--org-id", "o", "--graph-id", "g",
+                       "--label", "Object"]) == 0
+    out = capsys.readouterr().out
+    assert "the record holds 1 vector(s) for object, the graph serves 1" in out, (
+        "the plan did not carry the measurement — `build_plan` stopped handing the probe "
+        f"this run's --record-dsn, so the record leg came from an absent ambient ({out})")
+    assert "has not proved" not in out, out
 
 
 def test_the_destructive_arm_hands_the_gate_the_runs_own_denominator(
