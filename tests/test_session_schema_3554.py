@@ -3050,6 +3050,27 @@ _PREFIX_APPROVAL_RECORD_LANDED_SHAPE_NO_ID = (
 # refusal. Driven as an AssertionError from this arm's own frame.
 _APPROVAL_WITH_THE_ID_IN_A_LATER_SENTENCE = (
     "> **Owner approval of the exact changes.** Given in-session: comment `6993778525`.")
+# ⛔ AND THE LABEL RUN **CUT BY** THE SENTENCE END (review of #13679, finding 2). The
+# paragraph detector sees a run, but the splitter cuts the period INSIDE it, so neither
+# sentence carries a CLOSED run and the label lookup returns `None`. This is the only shape
+# that drives `assert label is not None`: with the phrase-only selector both sentences
+# matched, the citation assert fired instead, and the guard could not be reddened by any
+# mutant of this diff.
+_APPROVAL_LABEL_STRADDLING_A_SENTENCE_END = (
+    "> **Owner approval of the exact changes. The rest runs on** and names no id.")
+# ⛔ AND THE TWO DIRECTIONS THE SENTENCE SCOPE'S BOLD BOUNDARY DECIDES (review of #13679,
+# finding 1), both measured against the phrase-only selector. FIRST, the FALSE BLOCK it
+# introduced: an unbolded mention earlier in the paragraph was selected as "the sentence
+# that records the approval", so a record whose LABEL sentence carries the id was refused.
+_APPROVAL_LABEL_AFTER_AN_UNBOLDED_MENTION = (
+    "> Following the owner approval relayed earlier, the wording was corrected. **Owner\n"
+    "> approval of the exact changes:** the ruling is at comment `6993778525`.")
+# …and SECOND, the fail-open it left OPEN: `_PREFIX_APPROVAL_RECORD_LANDED_SHAPE_NO_ID` —
+# the landed shape with its id deleted — with one plausible neighbour sentence prepended.
+# The borrowed id satisfied a citation demand for a label sentence that names none.
+_PREFIX_APPROVAL_RECORD_WITH_AN_UNBOLDED_MENTION_CITING_AN_ID = (
+    "> The owner approval for v3.31 was relayed at comment `6912345`. **Owner approval\n"
+    "> of the exact changes** is on record. The artifact is the text itself.")
 # ⛔ THE VARIANT THIS ARM DECLARES OUT OF SCOPE (review @ 9d34e510, finding 1's third
 # shape), kept as a GREEN pin rather than as prose: v3.33 writes ``**Approval** is the
 # owner's decision …`` and cites an ISSUE and a decision label, not a comment id. Detect it
@@ -3287,6 +3308,12 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     demands. So that demand would accept 2 and refuse the other 5, i.e. most of the file's
     own practice — the measured false-block class this arm's first cut was already caught
     making. The sentence scope accepts those 6 and still refuses the borrow.
+    ⛔ AND THE BOLD CONTRACT IS THE SAME AT BOTH SCOPES (review of #13679, finding 1). The
+    paragraph is detected on a bolded label, so the SENTENCE the citation is read from is
+    selected by that same predicate — not by the bare phrase. Selecting on the phrase let an
+    UNBOLDED mention earlier in the paragraph decide the scope, which both refused a record
+    that does cite its home (a false block) and let the landed shape with its id deleted pass
+    once a neighbouring sentence carried an id (F1's fail-open, one sentence away).
     ⛔ WHAT COUNTS AS "RECORDS AN APPROVAL" IS A STRUCTURAL CONVENTION, NOT A PHRASING
     (review @ 9d34e510, findings 1 and 5). The file writes the label BOLDED — every one of
     the 7 landed records is ``**Owner approval …**`` — so the detector reads an emphasis
@@ -3343,14 +3370,27 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         f"the newest block carries {len(records)} owner-approval paragraphs; this arm "
         "reads exactly ONE, so a second copy would shadow the one checked")
     record = records[0]
+    # ⛔ THE SENTENCE SCOPE READS THE SAME PREDICATE AS THE PARAGRAPH (review of #13679,
+    # finding 1). It used to select the first sentence matching the bare PHRASE while the
+    # record was detected on the BOLDED label, so an UNBOLDED mention earlier in the same
+    # paragraph decided which sentence the citation was read from — BOLD was the boundary at
+    # one scope and any occurrence of the two words at the other. Both directions were
+    # measured: a record whose label sentence DOES cite its home was refused (the false
+    # block this arm spends a docstring paragraph avoiding), and F1's landed-shape-with-no-id
+    # passed again once a neighbouring sentence carrying an id was prepended (the fail-open
+    # F1 closed). `_bolded_approval_label` therefore scopes BOTH the record and its sentence.
     # ⛔ NO BARE `next(...)` (review @ 9d34e510, finding 3). With `**Owner approval of the
     # exact changes.** Given in-session: comment `6993778525`.` the label run is detected on
     # the paragraph but no SENTENCE carries it, and an un-defaulted `next` raised
     # `StopIteration` out of here — a frame `_assert_refused_by` cannot classify and a lane
     # reads as a traceback rather than a verdict. The default turns it into an assertion
-    # with a message; the citation check below then reports the real defect.
+    # with a message; the citation check below then reports the real defect. The bold-aware
+    # selector is what makes this branch REACHABLE and attributable: a label run cut by a
+    # sentence end has no CLOSED run in either sentence, so the lookup returns `None` there
+    # and the row below drives THIS assert rather than the citation one (review of #13679,
+    # finding 2).
     label = next((sentence for sentence in _sentences(record)
-                  if _OWNER_APPROVAL_LABEL_RE.search(_reader_text(sentence))), None)
+                  if _bolded_approval_label(sentence) is not None), None)
     assert label is not None, (
         "the block's approval paragraph is detected by its bolded label, but no SENTENCE "
         "of it carries that label — the sentence splitter and the detector disagree, so "
@@ -3589,6 +3629,37 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
             _APPROVAL_WITH_THE_ID_IN_A_LATER_SENTENCE)
     _assert_refused_by(
         later_sentence, "_refuse_an_approval_record_with_no_resolvable_home")
+    # ⛔ NON-VACUITY FOR THE `None` DEFAULT ITSELF (review of #13679, finding 2): the row
+    # above reddens under a mutant of the CITATION assert too, so it does not attribute the
+    # guard it names. This fixture cuts the bold RUN at the sentence end, so no sentence
+    # carries a closed run and the label lookup returns `None` — the only shape that drives
+    # `assert label is not None`. The message check is used HERE and not inside
+    # `_assert_refused_by` because both asserts live in the SAME frame: the frame name
+    # cannot tell them apart, and the alternative is a row that reports the guard green
+    # while a neighbour fired.
+    with pytest.raises(AssertionError) as straddling:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _APPROVAL_LABEL_STRADDLING_A_SENTENCE_END)
+    _assert_refused_by(
+        straddling, "_refuse_an_approval_record_with_no_resolvable_home")
+    assert "the sentence splitter and the detector disagree" in str(straddling.value), (
+        "the straddling fixture was refused, but not by the None-default guard — a "
+        f"neighbouring assertion fired instead: {straddling.value}")
+    # ⛔ AND THE SENTENCE SCOPE'S BOLD BOUNDARY, both directions (review of #13679,
+    # finding 1). A record that DOES cite stays green — the unbolded mention earlier in the
+    # paragraph must not decide which sentence the citation is read from…
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_LABEL_AFTER_AN_UNBOLDED_MENTION)
+    # …and the landed shape with no id stays REFUSED when a neighbouring sentence carries
+    # an id, so F1's fail-open cannot be re-opened by prepending a plausible sentence.
+    with pytest.raises(AssertionError) as earlier_mention:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _PREFIX_APPROVAL_RECORD_WITH_AN_UNBOLDED_MENTION_CITING_AN_ID)
+    _assert_refused_by(
+        earlier_mention, "_refuse_an_approval_record_with_no_resolvable_home")
+    assert "names no comment id" in str(earlier_mention.value), (
+        "the earlier-mention fixture was refused, but not for the borrowed citation — "
+        f"a neighbouring assertion fired instead: {earlier_mention.value}")
     # NON-VACUITY, the F2 direction: an id that is NOT the approval's — the landed
     # record with its own relay deleted, only the incidental reference left. Pre-fix
     # this was GREEN (a paragraph-wide search found the borrowed id), so the arm could
