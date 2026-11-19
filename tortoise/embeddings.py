@@ -1135,8 +1135,9 @@ class EmbeddingModel:
 
         Args:
             load_timeout: Override ``_LOAD_TIMEOUT_S``. The lifespan pre-warm
-                passes the same value explicitly (#13674 kept them equal: one
-                declared bound), and request paths use the default.
+                takes the default (it used to pass its own 300.0 literal beside
+                a 90.0 product default — two numbers for one load; #13674 left
+                ONE declared bound), and request paths use the default too.
 
         Raises:
             EmbedderUnavailableError: when ``TORTOISE_EMBEDDING_MODEL_REQUIRED``
