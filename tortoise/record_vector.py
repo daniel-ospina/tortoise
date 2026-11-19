@@ -2270,10 +2270,26 @@ def searcher(
                 # DECIDES NOTHING: the read proceeds exactly as before, because with
                 # both sides empty the two stores answer identically (which is why
                 # the two-zero case is marked rather than refused).
+                #
+                # ⛔ IT REPORTS THE MEASUREMENT, NOT THE READ (#13798 review). The
+                # zeros are the ones the verdict was TAKEN with, so the sentence
+                # must not claim what this read sees, and it is emitted BEFORE
+                # `vector_search` below. A trivial verdict is cached stickily
+                # (`_cached_coverage` never expires a verified one) while
+                # `mirror_required` gates only the GRAPH copy — the RECORD keeps
+                # writing its vector (`record_writer.derived_embedding_columns`,
+                # #13220) — so a label verified trivially and then populated has a
+                # stale `trivial=True` over a record that now HOLDS a vector, and
+                # the next dense read legitimately returns that row. A line saying
+                # `this read is empty because the POPULATION is empty` would then
+                # report the opposite of what the read did, in the one place the
+                # marker exists to be legible.
                 logging.getLogger(LOG_NAME).debug(
                     "record dense leg: `%s` coverage is verified TRIVIALLY (%s) — "
-                    "the record holds no vector for this label and neither did the "
-                    "graph, so this read is empty because the POPULATION is empty",
+                    "when this verdict was TAKEN both the record and the graph held "
+                    "zero vector-bearing rows for this label, so the pass is "
+                    "VACUOUS; a verified verdict is cached and never re-measured, so "
+                    "it says nothing about the population THIS read sees",
                     entity_type, verdict.reason)
             # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
             # whose fold actually stops writing has a graph worth refusing.

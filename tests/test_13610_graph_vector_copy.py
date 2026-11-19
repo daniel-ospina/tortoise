@@ -896,6 +896,59 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
         f"the trace names the state but not its evidence: {caplog.text!r}")
 
 
+def test_a_trivial_verdict_cached_over_a_now_populated_record_does_not_claim_the_read_is_empty(
+        monkeypatch, caplog):
+    """⛔ THE STALE-TRIVIAL STATE, which is REACHABLE — the trace must not narrate it (#13798 review).
+
+    A trivial verdict is VERIFIED, and `_cached_coverage` never expires a verified
+    verdict — while `mirror_required` gates only the GRAPH copy, so the RECORD keeps
+    writing its vector (`record_writer.derived_embedding_columns`, #13220). So a
+    label verified trivially and THEN populated carries a stale `trivial=True` over
+    a record that now HOLDS a vector, and the next dense read legitimately returns
+    that row.
+
+    On the tree before this case the trace line said *"this read is empty because
+    the POPULATION is empty"* — emitted **before** `vector_search` runs, so it
+    reported the opposite of what the read then did, in the one place the marker
+    exists to be legible. The line must report the MEASUREMENT (the zeros the
+    verdict was taken with), never the state of this read; the sticky residual is
+    why the distinction is load-bearing rather than pedantic.
+
+    ⛔ REDS if the line drifts back into asserting a live state — and it is the
+    returned ROW, not a mock count, that proves the read was not empty.
+    """
+    import logging
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    cur = _stub_record(monkeypatch, count=0, rows=[])
+
+    # 1. The verdict is TAKEN over two zeroes: trivial, verified, and CACHED.
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows, _graph, _trace = _run(_searcher(0), entity_type="object")
+    assert rows == [], rows
+    assert "TRIVIALLY" in caplog.text, caplog.text
+
+    # 2. The record gains a vector; the cached verdict does NOT move. No second
+    #    `_stub_record` call on purpose — it resets the coverage cache, which is
+    #    the very state this case is about: the stale verdict must survive.
+    cur._count = 1
+    cur._rows = [("obj-late", 0.10, None)]
+    caplog.clear()
+
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows, _graph, _trace = _run(_searcher(0), entity_type="object")
+
+    assert [row[0] for row in rows] == ["obj-late"], (
+        "the stub returned no row, so this case cannot show a trace contradicting "
+        f"the read — it would prove nothing: {rows}")
+    assert "TRIVIALLY" in caplog.text, (
+        "the cached trivial verdict stopped being reported, so the marker no longer "
+        f"reaches the trace: {caplog.text!r}")
+    assert "this read is empty because the POPULATION is empty" not in caplog.text, (
+        "the trace asserts a state this read CONTRADICTS — it returned a row from "
+        f"the record: {caplog.text!r}")
+
+
 # ── 4b. the cost model: the counts are taken on a MISS, and only then ─────
 
 
