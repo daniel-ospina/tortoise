@@ -1449,9 +1449,17 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         # ⛔ Ordering is decided HERE, not by `ORDER BY o.id`: the id-less row's
         # key is NULL, and a NULL's position under an ascending sort is the
         # backend's to choose — an assertion that leans on it passes on one
-        # engine and inverts on another.
-        assert edges.count(None) == 1, edges
-        assert survivor["id"] in edges, edges
+        # engine and inverts on another. `key=str` because `None` is not
+        # comparable with a str id, and the answer is a SET either way.
+        # ⛔ The comparison is EXHAUSTIVE on purpose: membership-style assertions
+        # (`x in edges`, `edges.count(None) == 1`) let an EXTRA `aboutObject`
+        # edge through, which is exactly the over-attachment class #12244 exists
+        # to remove. An exact set pins the whole answer, order-independently.
+        assert sorted(edges, key=str) == sorted([survivor["id"], None],
+                                               key=str), edges
+        # The carrier check is kept as well because its message NAMES the class
+        # that matters (the merged-away carrier took an edge), where the exact
+        # set would only report a mismatch.
         assert carrier["id"] not in edges, (
             "the merged-away carrier kept an edge "
             f"(carrier={carrier['id']}): {edges}")

@@ -736,6 +736,36 @@ class TestThe12120NameKeySpaceHelper:
             sdk.close()
 
 
+class TestThe12244AttachmentTargetLabelGuard:
+    """``attachment_target_ids`` validates its OWN label (agent-infra#3442).
+
+    The helper is PUBLIC and ``label`` lands in a Cypher label position inside
+    ``_collapse_resolved_holders``. Borrowing the hop's validation is not enough
+    once the hop is optional: an all-id-less holder set never calls it, so the
+    label would reach the id-less query unvalidated. Before this pin, deleting
+    the ``_require_identity_label(label)`` line at ``entity_identity.py:554``
+    left the whole suite green (every in-repo caller passes the literal
+    ``"Object"``), which is why the guard gets an assertion of its own.
+
+    Neither test touches a graph: validation is the helper's FIRST statement, so
+    ``None`` stands in for ``g`` and a non-empty holder list proves the guard
+    runs *before* any read rather than after one.
+    """
+
+    def test_an_injected_label_raises_before_any_read(self):
+        from tortoise.entity_identity import attachment_target_ids
+
+        with pytest.raises(RuntimeError, match="unsafe label"):
+            attachment_target_ids(None, "Object) DETACH DELETE o //", ["obj-1"])
+
+    def test_every_label_outside_the_identity_pair_raises(self):
+        from tortoise.entity_identity import attachment_target_ids
+
+        for bad in ("Point", "object", "Object ` MATCH (n) DETACH DELETE n `"):
+            with pytest.raises(RuntimeError, match="unsafe label"):
+                attachment_target_ids(None, bad, [])
+
+
 class TestNonFoldedRecord:
     """The refusal must be a STRUCTURED, assertable record — not merely a log
     line (decision record R8: "a refused fold is an assertion failure, not a log

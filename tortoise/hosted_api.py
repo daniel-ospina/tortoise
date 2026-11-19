@@ -23869,6 +23869,26 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # with the raw value beside the string ones (a raw int matches its
             # own node and the string form never does, so neither arm can pick
             # up the other's row).
+            #
+            # ⚠️ RESIDUAL: `follow_resolved_from` stringifies its argument on
+            # entry (`entity_resolver.py:673` `current = str(node_id)`), so a
+            # holder whose `id` is NON-STRING can never have its `resolved_from`
+            # followed — `hopped` stays False, this arm re-attaches that row
+            # as-is, including a carrier a merge retired (#12244 survives for
+            # that shape), and because no hop happened the presence filter at
+            # `entity_identity.py:455-465` is not reached either, so nothing
+            # corrects it here. Left as the pre-fix attachment deliberately: the
+            # alternative (normalise the id before the hop) changes the shared
+            # hop every writer uses, which is not this lane's blast radius.
+            #
+            # `_idless` is deliberately NARROWER than "not a string", and the
+            # narrowing has NO observable effect — it is defence-in-depth, not a
+            # behaviour change: the id-less arm's predicate (`o.id IS NULL OR
+            # o.id = ''`) cannot match a non-string id, and every row it CAN
+            # match is already a `None`/`''` element of `_holders`. So the two
+            # spellings of this flag are equivalent and no test can pin the
+            # difference; it is written this way because "id-less" is what the
+            # flag means (a non-string id is covered by the raw arm above).
             _idless = any(_h is None or _h == "" for _h in _holders)
             _raw_addressable = [_h for _h in _holders
                                 if _h is not None and _h != ""
