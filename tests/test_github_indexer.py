@@ -3261,13 +3261,15 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurs **once**.
     # A row recorded as "found by its pinned text" must name text that actually finds
     # it, or the record does not reproduce the address it explains.
-    # ⛔ #13767's own review pass narrowed the last two `sdk.py` rows, each of which
-    # was recorded with a locator that could NOT fail and so proved nothing:
+    # ⛔ #13767's own review pass then narrowed the last two `sdk.py` rows, each of
+    # which carried a locator that could not FAIL on the defect it exists to catch:
     # `55807`→`55918` stored the bare `SET n += $props` (occurs **40×** in `sdk.py`,
-    # 25 of them in comments) instead of the per-label write it was actually found
-    # by — which occurs **once**; and `22593-22768` recorded `None` for its end
-    # although the end is a number this change moved, so an insert INSIDE
-    # `update_knowledge` left the cited end naming nothing and both guards green.
+    # 25 of them in comments), so a uniform drift landed it on a comment; the
+    # per-label write it was actually found by occurs **once** and is what it now
+    # stores. And `22593-22768` recorded `None` for its end — its START text
+    # `def update_knowledge(` is unique and did red, but an end that is never read
+    # let an insert INSIDE the function leave the cited end naming nothing while
+    # both guards stayed green.
     # Both ADDRESSES were re-derived at `ef0abcb`; both LOCATORS were narrowed at
     # `c50a03a` (the commit carrying this note), by the texts pinned below.
     ("sdk.py", 55317, 55319): (
