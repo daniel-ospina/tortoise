@@ -7800,17 +7800,60 @@ def _upsert_object(props, ev):
         # keyword is the merge arm), and a dict COMPREHENSION is a mapping whose one pair is
         # its own key/value expression. The controls below keep the arm from refusing an
         # honest non-property key.
+        #
+        # ⛔ (`#13788` review round 8, P1) AND EVERY OPERAND FORM COMPOSES, on BOTH seams: a
+        # MIXED constructor (`dict({'embedding': 1}, x=2)` — the documented
+        # `dict(mapping, **kw)` shape), a pairs iterable whose ELEMENT is the mapping itself
+        # (`dict(*[{'embedding': 1}])`, a `Starred` this branch resolves everywhere else), the
+        # `|` UNION spelling of the merge (`({'embedding': 1} | d)`), and the KEYS twins of the
+        # pairs-iterable and comprehension forms. Each CERTIFIED while its sibling seam refused
+        # the same object — the exact asymmetry the commit above this one exists to close.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k, _v in dict({"embedding": 1}).items()}
+        props |= {k: _encode(ev) for k, _v in dict({"embedding": 1}, x=2).items()}
         return None
     _write(props)
 """,
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k, _v in OrderedDict({"embedding": 1}).items()}
+        props |= {k: _encode(ev) for k in dict({"embedding": 1}, x=2)}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(*[{"embedding": 1}]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in ({"embedding": 1} | d).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {**(({"embedding": 1}) | d)}.items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict([("embedding", 1)])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {"embedding": 1 for _x in _k()}}
         return None
     _write(props)
 """,
@@ -8956,13 +8999,6 @@ def _upsert_object(props, ev):
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
-        props |= {k: 1 for k, _v in dict({"embedding": 1}).items()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k, _v in dict.fromkeys(["embedding_model"]).items()}
         return None
     _write(props)
@@ -8971,6 +9007,24 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k in {**{"embedding_model": 1}, **d}}
+        return None
+    _write(props)
+""",
+        # ⛔ THE NEW OPERAND FORMS MUST NOT SWALLOW A NON-STORE EITHER (`#13788` review round 8):
+        # a MIXED constructor and a `|` UNION whose only property-looking key is absent are
+        # honest write-stops, so the collection loop and the union arm are pinned against the
+        # inert-enforcer direction too.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict({"embedding_model": 1}, x=2).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in ({"embedding_model": 1} | d).items()}
         return None
     _write(props)
 """,

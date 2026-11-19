@@ -2397,32 +2397,66 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
     #    only its KEY can carry the property; a dict COMPREHENSION's one pair is its own
     #    key/value expression. `defaultdict(int, {...})` — a TWO-argument constructor — is
     #    still unread on BOTH seams, and is left as the stated residual.
+    # ⛔ A `|` UNION IS THE MERGE'S OPERATOR SPELLING (`#13788` review round 8, P1, measured):
+    #    `({'embedding': 1} | d).items()` CERTIFIED while `{**{'embedding': 1}, **d}.items()` and
+    #    the keys source's own `|` arm were refused. Both spellings build the same mapping, whose
+    #    key set is a UNION — so the readable operand proves the key for every possible other,
+    #    and an unreadable one contributes nothing (the rule the merge arm beside this adopted).
+    if isinstance(mapping, ast.BinOp) and isinstance(mapping.op, ast.BitOr):
+        left = _mapping_items_pairs(mapping.left, _depth + 1)
+        right = _mapping_items_pairs(mapping.right, _depth + 1)
+        if left is None and right is None:
+            return None
+        return [*(left or ()), *(right or ())]
     if isinstance(mapping, ast.DictComp):
         return [(mapping.key, mapping.value)]
     if isinstance(mapping, ast.Call):
         name = _callee_name(mapping)
         if _is_mapping_constructor(name):
-            if len(mapping.args) == 1 and not mapping.keywords:
+            # ⛔ EVERY OPERAND FORM CONTRIBUTES, AND THEY COMPOSE (`#13788` review round 8, P1,
+            #    measured): `dict({'embedding': 1}, x=2)` is the POSITIONAL mapping AND a
+            #    keyword — `dict(mapping, **kw)` is the documented constructor shape — and this
+            #    arm answered only the pure forms, so the mixed one CERTIFIED while the operand
+            #    seam refused the same object. One collection loop, then whoever has pairs wins.
+            #    A TWO-POSITIONAL constructor (`defaultdict(int, {...})`) stays unread: its first
+            #    argument is a factory, not a mapping, so reading it as pairs would answer about
+            #    a different object — that is the stated residual, unchanged.
+            pairs: list = []
+            if len(mapping.args) == 1:
                 inner = _mapping_items_pairs(mapping.args[0], _depth + 1)
                 if inner is not None:
-                    return inner
-                options = _sequence_options(mapping.args[0], _depth + 1)
-                if options is None:
-                    return None
-                return [(tuple(element.elts)
-                         if isinstance(element, ast.Tuple | ast.List) else (element,))
-                        for option in options for element in option]
-            if not mapping.args and mapping.keywords:
-                pairs: list = []
-                for keyword in mapping.keywords:
-                    if keyword.arg is None:       # `dict(**X)`: a merge, read as one
-                        merged = _mapping_items_pairs(keyword.value, _depth + 1)
-                        if merged is not None:    # unreadable ⇒ contributes nothing
-                            pairs.extend(merged)
-                        continue
-                    pairs.append((ast.Constant(value=keyword.arg), keyword.value))
-                return pairs
-            return None
+                    pairs.extend(inner)
+                else:
+                    options = _sequence_options(mapping.args[0], _depth + 1)
+                    if options is None:
+                        return None
+                    for option in options:
+                        for element in option:
+                            # ⛔ AN ELEMENT THAT IS ITSELF A MAPPING IS THE MAPPING (`#13788`
+                            #    review round 8, P1, measured): `dict(({'embedding': 1},)[0])`
+                            #    and `dict(*[{'embedding': 1}])` are `dict(mapping)` through a
+                            #    const index / a `Starred`, and wrapping the mapping as a
+                            #    one-element "pair" made its key a `Dict`, so the key question
+                            #    could never name the property. The branch resolves every other
+                            #    wrapper to an element list, so the element is asked as a
+                            #    mapping first and only then read as a pair.
+                            nested = _mapping_items_pairs(element, _depth + 1)
+                            if nested is not None:
+                                pairs.extend(nested)
+                            elif isinstance(element, ast.Tuple | ast.List):
+                                pairs.append(tuple(element.elts))
+                            else:
+                                pairs.append((element,))
+            elif mapping.args:
+                return None
+            for keyword in mapping.keywords:
+                if keyword.arg is None:           # `dict(**X)`: a merge, read as one
+                    merged = _mapping_items_pairs(keyword.value, _depth + 1)
+                    if merged is not None:        # unreadable ⇒ contributes nothing
+                        pairs.extend(merged)
+                    continue
+                pairs.append((ast.Constant(value=keyword.arg), keyword.value))
+            return pairs or None
         if name == "fromkeys" and mapping.args and not mapping.keywords:
             keys = _sequence_options(mapping.args[0], _depth + 1)
             if keys is None:
@@ -2558,6 +2592,16 @@ def _comprehension_source_yields(source, _depth: int = 0):
             else:
                 yielded.append(_comprehension_yielded_item(key))
         return yielded
+    if isinstance(source, ast.DictComp):
+        # ⛔ A DICT COMPREHENSION'S KEYS ARE ITS OWN KEY EXPRESSION (`#13788` review round 8,
+        # P1, measured): `{k: _encode(ev) for k in {"embedding": 1 for _x in _k()}}` CERTIFIED
+        # while the `.items()` view of the same comprehension was refused. The receiver arm
+        # reads it as a mapping's one pair, so the keys seam reads the pair's KEY — ONE resolver,
+        # the same one `_mapping_items_pairs` is.
+        pairs = _mapping_items_pairs(source, _depth + 1)
+        if pairs is None:
+            return None
+        return [_comprehension_yielded_item(key) for key, _value in pairs]
     if isinstance(source, ast.BinOp):
         # ⛔ CONCATENATION AND REPETITION ARE THE SAME SEQUENCE — the pairs rule makes exactly
         # this call, so a `+ []` or `* 1` here must not answer differently.
@@ -2633,26 +2677,23 @@ def _comprehension_source_yields(source, _depth: int = 0):
         # operand is a key too (`dict(embedding=1)` iterates `"embedding"`), which is why that
         # spelling is answered beside the single-positional one.
         if _is_mapping_constructor(name):
-            if len(source.args) == 1 and not source.keywords:
-                return _comprehension_source_yields(source.args[0], _depth + 1)
-            if not source.args and source.keywords:
-                # ⛔ A `**` OPERAND IS A MERGE, THE SAME AS IN A LITERAL (`#13788` review
-                # round 7, P1): `dict(**{"embedding": 1})` iterates `"embedding"` exactly as
-                # `{**{"embedding": 1}}` does, and the receiver arm now answers it — leaving
-                # this twin open would move the asymmetry one seam over instead of closing it.
-                # An unreadable merge operand contributes nothing, because a merge's key set is
-                # a UNION: the readable operand alone proves the key for every possible other.
-                yielded: list = []
-                for keyword in source.keywords:
-                    if keyword.arg is None:
-                        merged = _comprehension_source_yields(keyword.value, _depth + 1)
-                        if merged is not None:
-                            yielded.extend(merged)
-                        continue
-                    yielded.append(
-                        _comprehension_yielded_item(ast.Constant(value=keyword.arg)))
-                return yielded
-            return None
+            # ⛔ THE CONSTRUCTOR ARM DELEGATES TO THE ONE PAIRS RESOLVER (`#13788` review round
+            # 8, P1, measured). Answering `source.args[0]` as a SEQUENCE source read
+            # `dict([("embedding", 1)])` as its PAIR ELEMENTS rather than as its KEYS, so the
+            # pairs-iterable form CERTIFIED here while the receiver refused it one seam over:
+            #
+            #     props |= {k: _encode(ev) for k, _v in dict([("embedding", 1)]).items()}  refused
+            #     props |= {k: _encode(ev) for k in      dict([("embedding", 1)])}          CERTIFIED
+            #
+            # A constructor's KEYS are the FIRST element of its pairs, and `_mapping_items_pairs`
+            # is the one place that knows what those pairs are — for the positional mapping form,
+            # the pairs-iterable form, the keyword and `**` forms, and a mixed one. Delegating
+            # also brings `dict(**X)` and the `fromkeys` view here for free, which is the point:
+            # a vocabulary typed per-resolver is this branch's recurring defect.
+            pairs = _mapping_items_pairs(source, _depth + 1)
+            if pairs is None:
+                return None
+            return [_comprehension_yielded_item(key) for key, _value in pairs]
         if name == "fromkeys" and source.args and not source.keywords:
             return _comprehension_source_yields(source.args[0], _depth + 1)
         if (isinstance(source.func, ast.Attribute) and not source.args
