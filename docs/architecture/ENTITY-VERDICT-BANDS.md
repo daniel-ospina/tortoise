@@ -41,7 +41,7 @@ names a file, not a blog.
 | the merge writes no `status` | `entity_resolver.apply_entity_merge` — the candidate's only props are `resolved_from`, `dedup_reviewed='merge'`, `reviewed` (~`:909-913`) | the retired carrier stays a live node |
 | the carrier keeps its `name` | `entity_resolver.apply_entity_merge` — the SURVIVOR gains `aliases[]` (~`:890-901`); nothing rewrites the carrier's `name` | both rows carry the same spelling |
 | the FTS index is `name`-only | `_FULLTEXT_INDEX_LABEL_FIELDS`'s `("Subject", ["name"])` / `("Object", ["name"])` | a name query matches both |
-| the retrieval filter is `status`-only | `search_engine.py:3081-3096` (`_STATUS_FILTERED_LABELS`, `:148`) — `resolved_from` count in `search_engine.py`, `ranking.py`, `session_link.py`, `assembly.py`: **0** | the carrier is search-visible and ranked |
+| the retrieval filter is `status`-only | `search_engine.py:3138-3153` (`_STATUS_FILTERED_LABELS`, `:148`) — `resolved_from` count in `search_engine.py`, `ranking.py`, `session_link.py`, `assembly.py`: **0** | the carrier is search-visible and ranked |
 | the capture path never consulted the resolver | `extractor_v2` S3 → `_fts_rows` → `sdk.tortoise_fts_query(..., include_terminal=True)` | and it opts *back into* the wider status view |
 | the tie rule | rows land in **id-keyed dicts**, order DISCARDED — `search_graph`'s id-keyed accumulator (`results[bucket[…]][rid] = row`; the comment in `_fts_rows` says the same) | carrier and survivor **tie** on the name-only index |
 
@@ -272,7 +272,7 @@ no-merge verdict — `dedup_reviewed='reject'` + `dedup_target_id` /
 `dedup_rejected_targets` — and it is **pair-scoped between two NODES**. A
 name-only mention has no node, so only the target-less form (`target_suppressed`)
 is evaluable here; the targeted form is honoured by the merge verb
-(`entity_resolver.apply_entity_merge`, called at `sdk.py:28431`). Line numbers here are a convenience and rot on every merge — the symbol is the citation. Stated rather than approximated.
+(`entity_resolver.apply_entity_merge`, called at `sdk.py:28542`). Line numbers here are a convenience and rot on every merge — the symbol is the citation. Stated rather than approximated.
 
 **Phase 1 applies `target_retired` only.** It binds on an exactly-equal folded
 name+kind *or* on a spelling the survivor's `aliases[]` already records
