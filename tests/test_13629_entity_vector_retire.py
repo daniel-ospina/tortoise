@@ -1177,6 +1177,56 @@ def _upsert_object(ev):
         module, "_upsert_object", ("object",))[0] is False
 
 
+def test_a_cypher_clause_is_a_store_only_where_a_statement_runner_gets_it(
+        tmp_path, monkeypatch):
+    """⛔ `.embedding =` IN A STRING IS TEXT UNTIL SOMETHING RUNS IT.
+
+    The clause spelling has to stay accepted — a writer may assemble its statement — but
+    accepting the ASSIGNMENT alone admitted round 6's "a mention is not a store" through
+    `ast.Constant`, one layer below the mention fix: measured at `6ee74268`, a guard whose
+    only store was `_clause = "SET n.embedding = $e"` (nothing runs it) certified a writer
+    that stored the vector unconditionally below, i.e. dead text lifted
+    `REFUSE_WRITE_STILL_EMITS`.
+
+    So the clause must REACH A STATEMENT RUNNER: passed straight to one
+    (`session.run("… SET n.embedding = $e")`) or bound to a name that one is given. A
+    LOGGER is not a runner — `_log(clause)` is the mention case again — which is why the
+    runner test is an include list of callee verbs rather than a list of loggers to skip.
+    """
+    # REFUSED: the clause is assigned and never run, or handed to a logger only.
+    for source in ("""
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        _clause = "SET n.embedding = $e"
+    props["embedding"] = _encode(props["name"])
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        clause = "SET n.embedding = $e"
+        _log(clause)
+    props["embedding"] = _encode(ev)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"clause TEXT nothing runs opened the gate: {source!r}"
+
+    # ACCEPTED: both real spellings — built then run, and passed straight to the runner.
+    for source in ("""
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        clause = "SET n.embedding = $vec"
+    return _write(ev, clause)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        _run("MATCH (n:Object {id: $i}) SET n.embedding = $vec", ev)
+    return None
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is True, f"a clause that DOES run was refused: {source!r} ({why})"
+
+
 def test_the_gate_check_is_fail_closed_on_an_unreadable_or_renamed_writer(
         tmp_path, monkeypatch):
     """An unparseable module, a missing function and a redefinition all refuse."""
@@ -1651,6 +1701,38 @@ def test_execute_refuses_an_empty_plan_unless_expect_empty(stores, monkeypatch):
     result = _execute(graph, plan, expect_empty=True)
     assert result["empty"] is True
     assert graph.writes == []
+
+
+def test_expect_empty_does_not_acknowledge_a_NARROWED_scope(stores, monkeypatch):
+    """⛔ `--expect-empty` answers "an empty population is intended".
+
+    It does NOT answer the OTHER question a narrowed plan raises — "the labels outside this
+    plan are deliberately untouched". Reading the first as the second published exit 0 on a
+    `--label Object` sweep of an empty graph while `Event`/`Source`/`Subject` still held
+    their vectors, because `execute` returned `{"empty": True}` BEFORE computing
+    `unmeasured_by_label` and `result_exit_code` short circuited on `empty` in front of its
+    own narrowed clause. `--expect-narrowed` is the flag that acknowledges the scope.
+    """
+    _ready(monkeypatch)
+    graph, _record = stores
+    narrowed = _plan(graph, labels=["Object"])
+    assert narrowed["total_nodes"] == 0
+    result = _execute(graph, narrowed, expect_empty=True)
+    assert result["empty"] is True
+    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert strip.result_exit_code(result) == 5, (
+        "an empty NARROWED plan published exit 0 over three unstripped labels")
+
+    # …and an operator who says the partial sweep was intended still gets 0, on the record.
+    acknowledged = _execute(graph, _plan(graph, labels=["Object"]),
+                            expect_empty=True, expect_narrowed=True)
+    assert acknowledged["expect_narrowed"] is True
+    assert strip.result_exit_code(acknowledged) == 0
+
+    # A plan over the WHOLE population is unaffected: nothing was left unmeasured.
+    whole = _execute(graph, _plan(graph), expect_empty=True)
+    assert whole["unmeasured_by_label"] == []
+    assert strip.result_exit_code(whole) == 0
 
 
 def test_execute_strips_the_planned_set_and_reports_the_count(stores, monkeypatch):
@@ -2464,22 +2546,8 @@ def test_narrowing_flags_are_REFUSED_on_execute_rather_than_silently_dropped(cap
         assert extra[0] in err
 
 
-def test_census_main_separates_parity_from_the_strip_precondition(monkeypatch,
-                                                                 capfd):
-    """⛔ F4.3 — `--require-parity` and `--require-ready` are two questions.
-
-    The previous code answered `--require-parity` from `report["ready"]`, so a run whose
-    PARITY held but whose write gate was open exited 4 under a flag named "parity" —
-    sending an operator to hunt a missing record copy that is present. Both flags and the
-    NARROWED arm are pinned here because no test called `parity.main` at all.
-    """
-    report = {
-        "at": "now", "labels": [], "keys_by_label": {},
-        "parity": True, "ready": False, "blocked_reason": "write gate open",
-        "population": ["Object", "Subject", "Event", "Source"],
-        "declared_population": ["Object", "Subject", "Event", "Source"],
-        "narrowed": False, "graph_page_size": 10,
-    }
+def _stub_census_main(monkeypatch, report):
+    """Point `parity.main` at a canned report and a graph that never opens."""
     monkeypatch.setattr(parity, "census", lambda **kwargs: dict(report))
     monkeypatch.setattr(parity, "render", lambda *a, **k: "")
     monkeypatch.setattr(parity, "_write_gate", lambda: None)
@@ -2498,6 +2566,58 @@ def test_census_main_separates_parity_from_the_strip_precondition(monkeypatch,
     monkeypatch.setattr(parity.census_mod, "_refuse_unless_graph_present",
                         lambda *a, **k: None)
     monkeypatch.setattr(parity.census_mod, "empty_graph_target_flag", lambda *a, **k: None)
+
+
+def test_the_census_json_never_carries_the_graph_password(monkeypatch, tmp_path, capfd):
+    """⛔ THE URI IS A CREDENTIAL, and `--json` writes it to a FILE.
+
+    The documented invocation is `--uri 'docker://:pw@host:6379/<graph>'`, and the report is
+    the artefact an operator pastes into an issue — so `report["graph_uri"] = args.uri` put
+    the graph password on disk. The stripper half of this pair already closes exactly this
+    with `uri_fingerprint` (and `test_the_plan_never_circulates_the_graph_password`); a
+    census that spells it its own way breaks the rule the pair establishes.
+    """
+    report = {
+        "at": "now", "labels": [], "keys_by_label": {},
+        "parity": True, "ready": True, "blocked_reason": "",
+        "population": ["Object", "Subject", "Event", "Source"],
+        "declared_population": ["Object", "Subject", "Event", "Source"],
+        "narrowed": False, "graph_page_size": 10,
+    }
+    _stub_census_main(monkeypatch, report)
+    out = tmp_path / "census.json"
+    rc = parity.main(["--uri", "docker://:s3cret@h:6379/g",
+                      "--record-dsn", "postgresql://x",
+                      "--org-id", "o", "--graph-id", "g",
+                      "--json", str(out)])
+    assert rc == 0
+    written = out.read_text()
+    assert "s3cret" not in written, "the census artifact carries the graph password"
+    import json as _json
+
+    assert _json.loads(written)["graph_uri"] == "docker://h:6379/g"
+    # …the helper is the STRIPPER's own fingerprint, not a second spelling of it.
+    assert parity._report_uri("docker://:pw@h:6379/g") == strip.uri_fingerprint(
+        "docker://:pw@h:6379/g")
+
+
+def test_census_main_separates_parity_from_the_strip_precondition(monkeypatch,
+                                                                 capfd):
+    """⛔ F4.3 — `--require-parity` and `--require-ready` are two questions.
+
+    The previous code answered `--require-parity` from `report["ready"]`, so a run whose
+    PARITY held but whose write gate was open exited 4 under a flag named "parity" —
+    sending an operator to hunt a missing record copy that is present. Both flags and the
+    NARROWED arm are pinned here because no test called `parity.main` at all.
+    """
+    report = {
+        "at": "now", "labels": [], "keys_by_label": {},
+        "parity": True, "ready": False, "blocked_reason": "write gate open",
+        "population": ["Object", "Subject", "Event", "Source"],
+        "declared_population": ["Object", "Subject", "Event", "Source"],
+        "narrowed": False, "graph_page_size": 10,
+    }
+    _stub_census_main(monkeypatch, report)
 
     base = ["--uri", "docker://h/g", "--record-dsn", "postgresql://x",
             "--org-id", "o", "--graph-id", "g"]

@@ -392,9 +392,11 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     a constant branch. The accepted form is an ``if`` whose test asks the gate about this
     label and whose body STORES ``embedding`` (or returns/raises) — so the guard sits on
     the write itself, which is what `#13617` does. "Stores" means an embedding-named
-    ASSIGNMENT of a non-constant value, or a Cypher clause that sets the property: a mention
-    (`print(embedding)`, a log line naming it) and a placeholder (`embedding = None`) are
-    both refused, because a `False` verdict must actually stop the vector being written.
+    ASSIGNMENT of a non-constant value, or a Cypher clause that sets the property **and
+    is given to a statement runner** (a clause string nothing runs is text, not a store): a
+    mention (`print(embedding)`, a log line naming it) and a placeholder
+    (`embedding = None`) are both refused, because a `False` verdict must actually stop the
+    vector being written.
 
     ⛔ AND ON THE STOP ARM (`if not gate(l): …`) A STORE REFUSES THE GUARD, WHATEVER ITS
     POSITION. The exit-shaped write-stop and the removal-shaped one are both accepted only
@@ -517,7 +519,7 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # the check cannot place is exactly the evidence that refuses the strip:
         # `anywhere=True` takes `_own_walk` (which descends live conditionals and `finally`)
         # rather than `_unconditional_walk`. This arm can only ever refuse MORE.
-        if polarity < 0 and any(_stores_embedding(statement, anywhere=True)
+        if polarity < 0 and any(_stores_embedding(statement, anywhere=True, scope=node)
                                 for statement in sub.body):
             continue
         # ⛔ AND THE EXIT MUST ACTUALLY LEAVE. `_unconditional_exits` withholds a `raise`
@@ -539,7 +541,8 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         #        STOP mirroring, so it must REMOVE the property. Counting a STORE here is
         #        the polarity inversion; refusing the removal shut the gate on the dict
         #        writer whose only write-stop IS this shape.
-        if polarity > 0 and any(_stores_embedding(statement) for statement in sub.body):
+        if polarity > 0 and any(_stores_embedding(statement, scope=node)
+                                for statement in sub.body):
             return True                      # the mirror arm: writing here is correct
         if polarity < 0 and any(_removes_embedding(statement) for statement in sub.body):
             return True
@@ -997,7 +1000,70 @@ def _asks_about(test, wanted: set[str]) -> bool:
     return False
 
 
-def _stores_embedding(node, *, anywhere: bool = False) -> bool:
+def _callee_name(call) -> str:
+    """The last name of a call's callee — `session.run` -> `run`, `_write` -> `_write`."""
+    callee = call.func
+    return getattr(callee, "id", None) or getattr(callee, "attr", None) or ""
+
+
+#: Callee-name suffixes that RUN the statement they are given. ⛔ AN INCLUDE LIST: the
+#: question is "does this call EXECUTE a statement", and naming the loggers to exclude
+#: instead would be the two-token blacklist this file already rejected once (round 8) —
+#: `_log`, `print`, `debug`, `warnings.warn` and the next spelling nobody thought of would
+#: each re-open the hole.
+_STATEMENT_RUNNERS = ("run", "query", "execute", "write")
+
+
+def _runs_statements(call) -> bool:
+    """Does this call hand its arguments to something that executes them?"""
+    return _callee_name(call).lower().endswith(_STATEMENT_RUNNERS)
+
+
+def _call_operands(call) -> list:
+    """Everything a call is GIVEN — positional and keyword values."""
+    return [*call.args, *(keyword.value for keyword in call.keywords)]
+
+
+def _clause_flow(scope) -> tuple[frozenset[str], frozenset[str]]:
+    """``(names assigned a clause string, of those the ones that reach a statement runner)``.
+
+    ⛔ TWO SETS, because the two arms ask different questions. A builder-then-run writer
+    (`q = "SET n.embedding = $e"; session.run(q)`) is a real store and has to stay
+    accepted. The ASSIGNMENT alone is text: measured at `6ee74268`,
+    `if gate("object"): _clause = "SET n.embedding = $e"` followed by an UNCONDITIONAL
+    store was certified GATED — dead text opened the gate, round 6's "a mention is not a
+    store" re-admitted through `ast.Constant`.
+    """
+    import ast
+
+    if scope is None:                     # no scope, no data flow: nothing is "run"
+        return frozenset(), frozenset()
+    # ⛔ NOT `_own_walk(scope)` — given a FunctionDef it YIELDS IT AND STOPS (a function is
+    # a scope boundary to that walk), so the body has to be walked statement by statement.
+    nodes = ([leaf for statement in getattr(scope, "body", ()) for leaf in _own_walk(statement)]
+             if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef) else list(_own_walk(scope)))
+    assigned = {
+        target.id
+        for sub in nodes
+        if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign)
+        and _sets_embedding_clause(sub.value)
+        for target in (sub.targets if isinstance(sub, ast.Assign) else [sub.target])
+        if isinstance(target, ast.Name)
+    }
+    if not assigned:
+        return frozenset(), frozenset()
+    run = {
+        leaf.id
+        for sub in nodes
+        if isinstance(sub, ast.Call) and _runs_statements(sub)
+        for operand in _call_operands(sub)
+        for leaf in _own_walk(operand)
+        if isinstance(leaf, ast.Name) and leaf.id in assigned
+    }
+    return frozenset(assigned), frozenset(run)
+
+
+def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
     """Does this statement STORE the vector — a real assignment, or a Cypher clause set?
 
     ⛔ TWO WALKS, ONE QUESTION, AND THE CHOICE IS THE CALLER'S because the safe answer is
@@ -1028,8 +1094,11 @@ def _stores_embedding(node, *, anywhere: bool = False) -> bool:
     the vector.
 
     The accepted shapes are three: `embedding = derived_embedding.encode(...)` (the `#13617`
-    form), `props["embedding"] = …`, `n.embedding = …`, and a Cypher clause **assigned as a
-    string** (`q = "SET n.embedding = $e"`). ⛔ NOT accepted: `set_embedding_clause(...)` in a
+    form), `props["embedding"] = …`, `n.embedding = …`, and a Cypher clause string **that
+    REACHES A STATEMENT RUNNER** — either passed directly to one
+    (`session.run("… SET n.embedding = $e …")`) or assigned to a local and then passed to
+    one (`q = "SET n.embedding = $e"; session.run(q)`). ⛔ A clause assigned and never run
+    places nothing, so it is text, not a store (`6ee74268`). ⛔ NOT accepted: `set_embedding_clause(...)` in a
     CALL position — it is a pure string BUILDER (`tortoise/vector_write.py`) that writes
     nothing, so it is evidence of a clause being assembled, not of a store; `clear_embedding`
     (clearing is what the strip does); `popitem()` (no argument names WHICH key went — that is
@@ -1037,29 +1106,46 @@ def _stores_embedding(node, *, anywhere: bool = False) -> bool:
     """
     import ast
 
+    clause_names, run_names = _clause_flow(scope)
     for sub in (_own_walk(node) if anywhere else _unconditional_walk(node)):
         if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign):
             value = sub.value
-            # A Cypher clause is a store whatever it is assigned to: the property is set
-            # by the statement that runs, and `.embedding =` is not something a log line
-            # says.
+            targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+            # ⛔ A CYPHER CLAUSE IS A STORE ONLY WHERE SOMETHING RUNS IT. `.embedding =` in
+            # a string is the statement a RUNNER repeats; the assignment on its own places
+            # nothing. So the value must be bound to a NAME that a statement runner is
+            # given somewhere in this scope — otherwise dead text opens the gate.
             if _sets_embedding_clause(value):
-                return True               # `q = "SET n.embedding = $e"`
+                if any(isinstance(target, ast.Name) and target.id in run_names
+                       for target in targets):
+                    return True           # `q = "SET n.embedding = $e"; session.run(q)`
+                continue                  # text nothing runs
             if isinstance(sub, ast.AugAssign) and isinstance(sub.value, ast.Dict) \
                     and _dict_stores_the_vector(sub.value):
                 # `props |= {"embedding": vec}` — a merge that places the vector.
                 return True
-            targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
             if not all(_names_embedding(target) for target in targets):
                 continue
             if value is None or isinstance(value, ast.Constant):
                 continue                  # `embedding = None` places nothing
             return True
         elif isinstance(sub, ast.Call):
+            name = _callee_name(sub)
+            # ⛔ THE CLAUSE PASSED STRAIGHT TO A RUNNER is the store that clause asserts:
+            # `session.run("MATCH … SET n.embedding = $e")`, or `session.run(q)` with `q`
+            # bound to one above. ⛔ ONLY a runner: `_log(clause)` and `print(clause)` are
+            # the mention case again, which is why the callee must name one (an include
+            # list, not a list of loggers to exclude).
+            if _runs_statements(sub):
+                operands = _call_operands(sub)
+                if any(_sets_embedding_clause(leaf)
+                       for operand in operands for leaf in _own_walk(operand)):
+                    return True
+                if any(isinstance(leaf, ast.Name) and leaf.id in clause_names
+                       for operand in operands for leaf in _own_walk(operand)):
+                    return True
             # ⛔ A DICT-STYLE STORE: `props.update(embedding=vec)`. The keyword must name the
             # property exactly and carry a non-constant value.
-            callee = sub.func
-            name = getattr(callee, "id", None) or getattr(callee, "attr", None) or ""
             if name == "update":
                 for keyword in sub.keywords:
                     if keyword.arg == EMBEDDING_PROPERTY \
@@ -1138,7 +1224,12 @@ def _names_embedding(node) -> bool:
 
 
 def _sets_embedding_clause(node) -> bool:
-    """Is this expression a Cypher fragment that assigns the property?"""
+    """Is this expression TEXT of a Cypher fragment that assigns the property?
+
+    ⛔ A FRAGMENT IS NOT A STORE — this only recognises the string. Whether it is a store
+    depends on a statement runner being given it, which is `_clause_flow`'s question and
+    `_stores_embedding`'s decision.
+    """
     import ast
 
     return (isinstance(node, ast.Constant) and isinstance(node.value, str)
@@ -1652,6 +1743,19 @@ def _live_entries(g: Any, labels: list[str]) -> list[tuple[str, str]]:
     return entries
 
 
+def _unmeasured_labels(live: dict, plan_labels: list[str]) -> list[str]:
+    """The served labels this plan does NOT cover — read from the LIVE census.
+
+    ⛔ ONE HELPER FOR BOTH EXITS OF `execute`, because the empty arm and the write arm ask
+    the same question and used to answer it differently: the empty arm returned BEFORE the
+    computation, so a narrowed plan executed with `--expect-empty` published no
+    `unmeasured_by_label` and `result_exit_code` read it as a completed retirement. Two
+    spellings of one invariant is how one of them goes missing.
+    """
+    served = set(live.get("declared_population") or ()) or {r[1] for r in parity.RETIRED}
+    return sorted(served - set(plan_labels))
+
+
 def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
             graph_name: str, graph_uri: str, confirmed: str, batch: int,
             expect_empty: bool, expect_narrowed: bool = False) -> dict:
@@ -1733,8 +1837,15 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
                 "the approved plan contains no node. Executing it would report a "
                 "completed retirement it never performed — pass --expect-empty only "
                 "when an empty population is the intended state. Nothing was removed.")
+        # ⛔ `--expect-empty` ACKNOWLEDGES AN EMPTY POPULATION, NOT A NARROW ONE. Returning
+        # `{"empty": True}` with no `unmeasured_by_label` let `--label Object` on an empty
+        # graph exit 0 while `Event`/`Source`/`Subject` still held their vectors — the same
+        # false PASS the write arm's exit 5 exists for, arriving through the short circuit.
         return {"at": datetime.now(UTC).isoformat(timespec="seconds"),
-                "graph": graph_name, "plan_digest": confirmed, "labels": [],
+                "graph": graph_name, "plan_digest": confirmed,
+                "labels": [row["label"] for row in (plan.get("labels") or ())],
+                "unmeasured_by_label": _unmeasured_labels(live, labels),
+                "expect_narrowed": bool(expect_narrowed),
                 "removed": 0, "expected": 0, "residual": 0, "empty": True}
 
     removed: dict[str, int] = {}
@@ -1831,8 +1942,7 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
     # `unmeasured_by_label = []` and exit 0 for a narrowed sweep. The fallback is now the
     # module's own `RETIRED` population — a constant that cannot be edited into a plan —
     # so an absent key refuses to claim the sweep covered everything.
-    served = set(live.get("declared_population") or ()) or {r[1] for r in parity.RETIRED}
-    unmeasured = sorted(served - {row["label"] for row in plan["labels"]})
+    unmeasured = _unmeasured_labels(live, [row["label"] for row in plan["labels"]])
     if unmeasured:
         sys.stderr.write(
             f"strip_graph_entity_vectors: NARROWED — this plan covers "
@@ -1864,7 +1974,7 @@ def result_exit_code(result: dict) -> int:
     could not verify is NOT zero — an unmeasurable residual summing to nothing is how a
     strip whose result nobody could read reports a clean retirement.
     """
-    if result.get("empty"):
+    if result.get("empty") and not result.get("unmeasured_by_label"):
         return 0
     residuals = list((result.get("residual_by_label") or {}).values())
     unmeasured = [v for v in residuals if not isinstance(v, int)]
@@ -1876,6 +1986,12 @@ def result_exit_code(result: dict) -> int:
     # `REFUSE_NOTHING_TO_STRIP` exists for ("a re-run reports a finished retirement it never
     # performed"). A script routing on exit 0 must not read a partial sweep as a finished
     # one; the stderr warning is for a human, and the exit code is for the caller.
+    #
+    # ⛔ AND `--expect-empty` DOES NOT ACKNOWLEDGE A NARROW SCOPE. It says "an empty
+    # population is intended"; `--expect-narrowed` says "the other labels are deliberately
+    # untouched". The empty short circuit above therefore does NOT return 0 over an
+    # unmeasured label — it falls through to this clause, which is why the empty arm of
+    # `execute` now carries `unmeasured_by_label` at all.
     if result.get("unmeasured_by_label") and not result.get("expect_narrowed"):
         return 5
     return 0

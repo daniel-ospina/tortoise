@@ -605,6 +605,30 @@ def _quote_record_table(table: str) -> str:
     return table
 
 
+def _report_uri(uri: str) -> str:
+    """The graph target as it may appear in the ARTIFACT — never the credential.
+
+    ⛔ THE URI IS A CREDENTIAL. The documented invocation is
+    `--uri 'docker://:pw@host:6379/<graph>'`, and `--json` writes this report to a FILE an
+    operator pastes into an issue, so the raw value puts the graph password in the
+    artifact. The stripper half of this pair (which imports this module) publishes
+    `uri_fingerprint` for exactly this; the census uses the SAME one rather than a second
+    spelling that could drift.
+
+    The import is lazy for the reason `_write_gate` states: the stripper imports this
+    module, so the import runs the other way only at call time. ⛔ IF IT FAILS the raw URI
+    is still NOT the fallback — an unimportable sibling is not a licence to write the
+    password to disk, and the field is informational (nothing gates on it), so a marker
+    naming the cause is both safe and diagnosable.
+    """
+    try:
+        import strip_graph_entity_vectors as strip_mod
+
+        return strip_mod.uri_fingerprint(uri)
+    except Exception as exc:              # pragma: no cover - defensive
+        return f"<unfingerprinted: strip_graph_entity_vectors not importable ({exc})>"
+
+
 def _write_gate() -> Any:
     """The stripper's own gate, imported lazily so the two tools share ONE answer.
 
@@ -894,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
             org_id=args.org_id, graph_id=args.graph_id, labels=args.label,
             strip_readiness=_write_gate())
         report["graph"] = graph_name
-        report["graph_uri"] = args.uri or args.db_path
+        report["graph_uri"] = _report_uri(args.uri or args.db_path or "")
     except CensusError as exc:
         sys.stderr.write(f"entity_vector_parity_census: REFUSED — {exc}\n")
         return 3
