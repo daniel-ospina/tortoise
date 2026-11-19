@@ -1947,7 +1947,8 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
         # mentioning it anywhere in the key means refusing. ⛔ The cost is an over-refusal of
         # a key that transforms it AWAY (`{k.upper(): v …}`), which the doctrine permits and
         # which is cheap beside certifying a stop arm that stores.
-        if (_comprehension_key_mentions_the_bound_property(node.key, node.generators)
+        if (_comprehension_key_mentions_the_bound_property(
+                node.key, node.generators, alias_keys=alias_keys)
                 and not isinstance(node.value, ast.Constant)):
             return True
         if not isinstance(node.key, ast.Name):
@@ -2498,7 +2499,8 @@ def _comprehension_source_pairs_the_property_with_a_value(
     return False
 
 
-def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
+def _comprehension_key_mentions_the_bound_property(
+        key, generators, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this comprehension's produced KEY reference a name bound to the property?
 
     The sibling `_generator_unpacks_the_pair_into_the_key` asks whether the clause binds the
@@ -2524,6 +2526,15 @@ def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
     The cost is the same over-refusal of a key that transforms the name AWAY
     (`k.upper()`) that the unreadable-key term beside it already pays, and the doctrine permits
     it. A source this check cannot read answers False, and the caller's other arms still run.
+
+    ⛔ AND THE PROPERTY NAME MAY BE A LOCAL ALIAS (`#13788`, measured at `32f836c1`). Every OTHER
+    channel on this branch resolves `key = "embedding"` through `_names_property_key` (that is
+    what F11 landed), but these two terms still demanded `ast.Constant`, so with the alias bound
+    INSIDE the writer `props |= {k: _encode(ev) for k in (key,)}` CERTIFIED while its literal twin
+    `… for k in ("embedding",)` was refused — the asymmetry F11's own docstring claims to have
+    closed, in the one path it did not reach. Both terms ask `_names_property_key` now, i.e. the
+    ONE key rule. The parameter defaults to empty, which leaves the mirror arm byte-identical (a
+    fix may add refusals, never acceptances).
     """
     import ast
 
@@ -2540,8 +2551,8 @@ def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
             # `for k in [("embedding", 1)]` binds the PAIR to `k`, which is not a store.
             if target.id not in referenced:
                 continue
-            if any(len(item) == 1 and isinstance(item[0], ast.Constant)
-                   and item[0].value == EMBEDDING_PROPERTY for item in yielded):
+            if any(len(item) == 1 and _names_property_key(item[0], alias_keys)
+                   for item in yielded):
                 return True
             continue
         if not isinstance(target, ast.Tuple | ast.List):
@@ -2549,8 +2560,8 @@ def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
         for position, bound in enumerate(target.elts):
             if not (isinstance(bound, ast.Name) and bound.id in referenced):
                 continue
-            if any(position < len(item) and isinstance(item[position], ast.Constant)
-                   and item[position].value == EMBEDDING_PROPERTY for item in yielded):
+            if any(position < len(item) and _names_property_key(item[position], alias_keys)
+                   for item in yielded):
                 return True
     return False
 

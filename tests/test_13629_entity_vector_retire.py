@@ -6521,6 +6521,45 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+
+        # ⛔ AND THE PROPERTY'S ALIAS IS THE PROPERTY IN THE COMPREHENSION SOURCE TOO (`#13788`,
+        # measured at `32f836c1`). Every other channel resolves `key = "embedding"` through
+        # `_names_property_key` (that is what F11 landed), but the two key-value terms of this
+        # resolver still demanded `ast.Constant` — so with the alias bound INSIDE the writer these
+        # CERTIFIED while their literal twins were refused, in every position. That is the
+        # asymmetry F11's own docstring claims to have closed, in the one path it did not reach.
+        """
+def _upsert_object(ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in (key,)}
+        return None
+    props["embedding"] = _encode(ev)
+""",
+        """
+def _upsert_object(ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.update({k: _encode(ev) for k in (key,)})
+        return None
+    props["embedding"] = _encode(ev)
+""",
+        """
+def _upsert_object(ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props = {k: _encode(ev) for k in (key,)}
+        return None
+    props["embedding"] = _encode(ev)
+""",
+        """
+def _upsert_object(ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= {v: _encode(ev) for _i, v in [("x", key)]}
+        return None
+    props["embedding"] = _encode(ev)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
