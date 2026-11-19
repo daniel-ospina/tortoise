@@ -41,7 +41,9 @@ closes both:
    visibility COUNTS are stated — unpinned, so `one of the merged levers is visible to a
    user, one is not,` could become `all of the merged levers are visible to a user,` with
    every pin green, and left §4's verdict check PREFIX-scoped while its message claimed a
-   whole-cell guarantee.
+   whole-cell guarantee — that claim is now narrowed to the bound `startswith` enforces,
+   and the ONE row whose wording the artifact derives whole (`#12304`, the write path) is
+   pinned whole, which is where a qualifier spliced into a live verdict reds.
    **A claim wider than its measurement is the defect this file exists to avoid**, so when
    adding a row here, mutate the cell first — and mutate a digit upward, which is the
    bump a substring check misses.
