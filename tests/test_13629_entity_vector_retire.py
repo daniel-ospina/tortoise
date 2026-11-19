@@ -29,6 +29,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_execute_refuses_target_drift` | a plan is an authority over ONE graph | it is applied to a different graph of the same shape |
 | `test_the_refusal_set_is_closed` | the token set is closed and published | a refusal is raised with an unpublished token |
 | `test_a_swallowed_exit_does_not_certify_the_arm` | an exit is a write-stop only if it actually LEAVES | a `raise` a `try` handler or a context manager can swallow certifies the writer as write-stopped |
+| `test_the_stop_arm_must_not_store_the_vector` | the stop arm stops — it does not place the vector first | a stop arm that STORES (then exits, or pops-then-stores) certifies the writer as write-stopped |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -2892,6 +2893,130 @@ def _upsert_object(ev):
     assert strip._writer_consults_gate(
         module, "_upsert_object", ("object",))[0] is True, (
         "a store inside a `try` body was refused as a swallowed exit")
+
+
+def test_the_stop_arm_must_not_store_the_vector(tmp_path, monkeypatch):
+    """⛔ A STOP ARM THAT STORES IS NOT A WRITE-STOP (`#13647`, measured at `622e9935`).
+
+    The exit arm ran BEFORE the polarity arms and asked only "is there a bare
+    `return`/`raise` here?" — never "does this same arm PLACE the vector?". So every shape
+    below certified the writer as write-stopped while the arm the gate said *stop* stored
+    the embedding, lifting `REFUSE_WRITE_STILL_EMITS` on the boolean that authorises
+    deleting the only readable copy of a fingerprint:
+
+        if not _derived_mirror_required("object"):
+            props["embedding"] = _encode(ev)     # the vector it was told to stop writing
+            return None
+
+    Measured at `622e9935` through `_writer_consults_gate`: all six refused shapes below
+    answered `True`. The same held for the `raise` spelling, for a dict writer's
+    `update(embedding=…)`, for a `pop("embedding")` followed by a store (the arm both
+    removes and re-places it), for a store in the arm's own `finally`, and for a store
+    behind a live condition — which is why the rule is "NO store ANYWHERE in the stop arm"
+    (`_own_walk`) rather than "no *unconditional* store" (`_unconditional_walk`, still the
+    right walk on the mirror arm, where an unconditional store is the evidence FOR).
+
+    Mutation: delete the `anywhere=True` guard in `_asks_the_gate` and every refused shape
+    here goes `True` again; the accepted controls below stay `True` either way, which is
+    what keeps the rule from becoming an inert enforcer (a writer with no stop arm at all
+    is refused by the polarity arms, not by this one).
+    """
+    refused = (
+        # the arm places the vector, THEN leaves
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        props["embedding"] = _encode(ev)
+        return None
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+""",
+        # …the local-name spelling of the same store, with a `raise` exit
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        embedding = _encode(ev)
+        raise _Skip()
+    props["embedding"] = embedding
+""",
+        # …a dict writer's keyword store, which the mirror arm already accepts as a store
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(embedding=_encode(ev))
+        return None
+    _write(props)
+""",
+        # …removes the property AND re-places it: the removal arm alone would certify
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.pop("embedding", None)
+        props["embedding"] = _encode(ev)
+        return None
+    _write(props)
+""",
+        # …places it in the arm's own `finally`, which the exit walk descends into
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        try:
+            return None
+        finally:
+            props["embedding"] = _encode(ev)
+    props["embedding"] = _encode(ev)
+""",
+        # …places it behind a condition, so no *unconditional* store is visible in the arm
+        """
+def _upsert_object(ev, flag):
+    if not _derived_mirror_required("object"):
+        if flag:
+            props["embedding"] = _encode(ev)
+        return None
+    props["embedding"] = _encode(ev)
+""",
+    )
+    for source in refused:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a STOP ARM THAT STORES certified the writer: {source!r} ({why})"
+
+    # ⛔ AND THE HONEST STOP ARMS MUST STILL CERTIFY, or the rule is an inert enforcer: a
+    # removal, a bare exit, and a non-store statement before the exit are all write-stops.
+    accepted = (
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        return None
+    props["embedding"] = _encode(ev)
+""",
+        """
+def _upsert_object(ev):
+    if not _derived_mirror_required("object"):
+        _log("skipping the graph copy", ev)
+        return None
+    props["embedding"] = _encode(ev)
+""",
+        # the real `#13617` shape: a POSITIVE ask whose arm stores (the mirror arm)
+        """
+def _upsert_object(ev):
+    embedding = None
+    if _derived_mirror_required("object"):
+        embedding = _encode(ev)
+    props["embedding"] = embedding
+""",
+    )
+    for source in accepted:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is True, f"an honest write-stop was refused: {source!r} ({why})"
 
 
 def test_the_digest_does_not_dedupe_two_typed_identities_by_VALUE():

@@ -396,6 +396,19 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     (`print(embedding)`, a log line naming it) and a placeholder (`embedding = None`) are
     both refused, because a `False` verdict must actually stop the vector being written.
 
+    ⛔ AND ON THE STOP ARM (`if not gate(l): …`) A STORE REFUSES THE GUARD, WHATEVER ITS
+    POSITION. The exit-shaped write-stop and the removal-shaped one are both accepted only
+    when the arm places NO vector at all: `if not gate("object"): props["embedding"] =
+    _encode(ev); return None` is a writer that stores exactly when told to stop, and an
+    earlier revision certified it GATED because the exit arm ran first and asked nothing
+    about the store. The same held for the `raise` spelling, for `props.update(embedding=…)`,
+    for `pop("embedding")` followed by a store, and for a store in the arm's own `finally`
+    (measured at `622e9935`). "No store" is judged ANYWHERE in the arm (`_own_walk`: live
+    conditionals and `finally` included), not just unconditionally — on this arm an
+    unplaceable store is evidence AGAINST the write-stop, so the fail-closed answer is to
+    refuse. What this still cannot see is residual 4's family: a store reached through a
+    helper ARGUMENT (`_set(props, embedding)`), which no arm-level walk can attribute.
+
     ⛔ STATED RESIDUALS, all three, because a completeness claim narrower than the code is
     how the next lane re-derives false confidence:
 
@@ -492,6 +505,21 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
 # write is the one that leaves; and a bare exit under a positive ask cleared the
 # gate on a body that wrote on the stop arm anyway. It is refused (fail-closed).
 # A `return` carrying a CALL is judged as a write, by the polarity rule below.
+        # ⛔ AND THE STOP ARM MUST NOT STORE THE VECTOR IT CLAIMS TO STOP. Measured
+        # fail-OPEN at `622e9935`: `if not gate("object"): props["embedding"] =
+        # _encode(ev); return None` was certified GATED, because the EXIT arm below ran
+        # first and never asked whether the SAME arm places the vector — so a writer that
+        # stores exactly when told to stop lifted `REFUSE_WRITE_STILL_EMITS`. The same held
+        # for the `raise` spelling, for `props.update(embedding=…)`, and for a
+        # `pop("embedding")` followed by a store (the arm both removes and places it), and
+        # for a store in the arm's own `finally`. That arm must therefore contain NO store
+        # ANYWHERE — not merely no *unconditional* one — because for THIS question a store
+        # the check cannot place is exactly the evidence that refuses the strip:
+        # `anywhere=True` takes `_own_walk` (which descends live conditionals and `finally`)
+        # rather than `_unconditional_walk`. This arm can only ever refuse MORE.
+        if polarity < 0 and any(_stores_embedding(statement, anywhere=True)
+                                for statement in sub.body):
+            continue
         # ⛔ AND THE EXIT MUST ACTUALLY LEAVE. `_unconditional_exits` withholds a `raise`
         # that a `try` handler or a context manager can swallow — a swallowed raise is
         # not a write-stop, and counting it lifted `REFUSE_WRITE_STILL_EMITS` for a writer
@@ -969,8 +997,15 @@ def _asks_about(test, wanted: set[str]) -> bool:
     return False
 
 
-def _stores_embedding(node) -> bool:
+def _stores_embedding(node, *, anywhere: bool = False) -> bool:
     """Does this statement STORE the vector — a real assignment, or a Cypher clause set?
+
+    ⛔ TWO WALKS, ONE QUESTION, AND THE CHOICE IS THE CALLER'S because the safe answer is
+    OPPOSITE in the two arms. On the MIRROR arm (`polarity > 0`) a store clears the writer,
+    so only an UNCONDITIONAL store is evidence — `_unconditional_walk`, the default. On the
+    STOP arm the same question is asked to REFUSE (`anywhere=True` → `_own_walk`): a store
+    the check cannot place (behind a live condition, in a `try`/`finally`) still places the
+    vector on the arm the gate said stop, and refusing it is the fail-closed direction.
 
     ⛔ DELIBERATELY NARROW, TWICE OVER. Two earlier versions were wrong in opposite
     directions, both silently:
@@ -1002,7 +1037,7 @@ def _stores_embedding(node) -> bool:
     """
     import ast
 
-    for sub in _unconditional_walk(node):
+    for sub in (_own_walk(node) if anywhere else _unconditional_walk(node)):
         if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign):
             value = sub.value
             # A Cypher clause is a store whatever it is assigned to: the property is set
