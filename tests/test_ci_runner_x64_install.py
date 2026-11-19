@@ -2954,7 +2954,7 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     Supply table entries that ACCEPT those lines and the two sentence checks still catch it on their
     own: the `MODE = install` claim reds when its ref lands on a comment instead of the
     `if [ "$MODE" = … ]` line, and the refusal claim reds when its ref lands on the comment instead of
-    the `die`. A number this pin already knows, swapped for another known one, reds only the check.
+    the `die`. A number this pin already knows, swapped for another known one, reds only the sentence check.
 
     ⛔ THE RANGE HALF IS PINNED BY CONTENT TOO, AND BY A RELATION, BECAUSE A NUMBER KEY CANNOT BE
     TRUSTED ALONE (review round 5). `range_ends` pins each span's TRAILING line(s) against a token
