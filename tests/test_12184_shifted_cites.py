@@ -306,10 +306,14 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3081-3096'): 1,
     # ⛔ `origin/main`'s two `sdk.py:28019` rows are DROPPED at this merge, not carried: `28019` is
     # `main`'s value for the content-review filter, and this branch re-derived that cite to `:28142`
-    # in BOTH documents. Measured at this head: `grep -rn 'sdk.py:28019' docs/00_index.md
-    # docs/architecture/ENTITY-VERDICT-BANDS.md` -> no match (the token survives only in
-    # `05-verify.md`'s sentence stating the re-point), so a row asserting 1 occurrence would be a
-    # false pin over a token the documents no longer carry.
+    # in BOTH documents. ⚠️ `:28142` is the value at THIS head, re-read with
+    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` (the file's ONLY occurrence); `:28067` — what
+    # this comment and the two pins above carried until the `#13728` fix — was one re-point BEHIND
+    # it, and it was applied to `docs/00_index.md` only, so the cross-document promise the row makes
+    # broke while the pin set stayed green on the stale token. Measured at this head: `grep -rn
+    # 'sdk.py:28019' docs/00_index.md docs/architecture/ENTITY-VERDICT-BANDS.md` -> no match (the
+    # token survives only in `05-verify.md`'s sentence stating the re-point), so a row asserting 1
+    # occurrence would be a false pin over a token the documents no longer carry.
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21756'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21798'): 2,
