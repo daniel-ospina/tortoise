@@ -236,9 +236,10 @@ RETIRED_HOST_ALLOWLIST = {
         "refused (#11762 keeps the hostname attached to the Pages project). "
         "⛔ Do NOT restate 'the host still serves website/404.html forever' here: "
         "that premise is FALSE — `/404.html` is a 308 to `/404`, every marketing "
-        "page is a one-hop 301, and `/contact` — the last MARKETING document that was "
-        "served from two hosts, until #13636 gave it a row here (`/404` still answers "
-        "there too, but it is the 404 document, not a page) — and hosted_api.py's own comment "
+        "page is a one-hop 301. `/contact` is one too since #13636 — it was the last "
+        "MARKETING document served from two hosts, and the row that handed it over lives in "
+        "`website/functions/_middleware.ts` (`CONTACT_AT_ROOT`), not in this map (`/404` "
+        "still answers on both, but it is the 404 document, not a page). hosted_api.py's own comment "
         "retracts it in terms. A sweep reading the false version could satisfy its "
         "own removal condition (c) from a premise that was never true, so keeping the "
         "false reason here would re-plant the trap the code had to dig out."),

@@ -223,23 +223,41 @@ function ctx(urlStr, method = "GET") {
         return new Response(`<html data-function="blog"></html>`, { status: 200 });
       }
       // ⛔ `/contact`'s form posts to `functions/contact/submit.ts`, which is a Pages
-      // FUNCTION and so resolves ABOVE the asset router. Its contract is TWO-branch
-      // (`submit.ts:392-399`): `OPTIONS` answers **204** with `Allow: POST, OPTIONS`
-      // (the CORS preflight), and every OTHER non-POST method is refused with **405**.
-      // Modelled faithfully on both — ⛔ "refuses every method but POST with 405"
-      // would be false for `OPTIONS`, the very method its own `Allow` names, and a mock
-      // that 405'd the preflight would let a later CORS arm here encode a behaviour the
-      // Function does not have (review finding, cycle 2).
+      // FUNCTION and so resolves ABOVE the asset router. Its contract is two-branch
+      // (`submit.ts:391-402`): `OPTIONS` answers **204** with `Allow: POST, OPTIONS`, and
+      // every other non-POST method is refused with **405**; a POST reaches `handlePost`.
+      //
+      // ⛔ The `OPTIONS` arm is a METHOD-CONTRACT branch, not a CORS grant — do not describe
+      // it as a preflight the form depends on. The form is SAME-ORIGIN
+      // (`website/contact.html:162` `action="/contact/submit"`, `:266`
+      // `fetch('/contact/submit', …)`), so no preflight is ever issued for it, and
+      // `submit.ts:129-130` records that this `OPTIONS` answer deliberately carries **no**
+      // `Access-Control-Allow-Origin` — it cannot grant anything to a cross-site caller
+      // (review finding, cycle 3).
+      //
+      // Modelled on BOTH branches because (review finding, cycle 2) "refuses every method
+      // but POST with 405" is false for `OPTIONS` — the one other method its own `Allow`
+      // names — and a mock that 405'd it would let a later arm here encode a behaviour the
+      // Function does not have.
       //
       // Modelled AT ALL because (review finding, cycle 1) without this branch
       // `/contact/submit` fell through to this router's bare 404 and the arm below only
       // asserted "not a 301/302" — i.e. it was green over an endpoint nothing served,
       // proving "un-redirected" while its comment claimed "reached".
+      //
+      // ⛔ A POST is NOT modelled and THROWS rather than answering: `submit.ts:401` sends it
+      // to `handlePost`, so a fabricated 404/405 here would be the same "model diverges from
+      // the Function" defect in the other direction, and `hit(url, "POST")` is reachable now
+      // that this mock takes a method (review finding, cycle 3).
       if (u.pathname === "/contact/submit") {
         const allow = { Allow: "POST, OPTIONS" };
-        return method === "OPTIONS"
-          ? new Response(null, { status: 204, headers: allow })
-          : new Response("method_not_allowed", { status: 405, headers: allow });
+        if (method === "OPTIONS") return new Response(null, { status: 204, headers: allow });
+        if (method === "POST") {
+          throw new Error(
+            "/contact/submit POST reaches handlePost in the real Function — not modelled here",
+          );
+        }
+        return new Response("method_not_allowed", { status: 405, headers: allow });
       }
       if (u.pathname === "/") {
         return new Response(`<html data-asset="/index.html"></html>`, { status: 200 });
@@ -406,19 +424,20 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
       `${from} must be REACHED — the Function answers a GET with 405 (POST only), so ` +
         `anything else means the request never arrived`,
     );
-    // ⛔ AND THE CORS PREFLIGHT MUST BE REACHED TOO, with the Function's OWN status —
-    // `OPTIONS` is the one method `Allow` names besides POST, and `submit.ts:392-396`
-    // answers it 204 rather than 405 (review finding, cycle 2). A redirect here breaks
-    // the preflight the form's cross-origin POST depends on just as surely as a 301 on
-    // the POST does.
+    // ⛔ AND THE `OPTIONS` BRANCH MUST BE REACHED TOO, with the Function's OWN status
+    // (`submit.ts:392-396` answers `OPTIONS` 204, not 405; review finding, cycle 2). This is
+    // a METHOD-CONTRACT assertion, not a CORS one: the form is same-origin, so no preflight
+    // is issued for it, and this 204 deliberately carries no `Access-Control-Allow-Origin`
+    // (`submit.ts:129-130`). A redirect here breaks the Function's OPTIONS contract just as
+    // surely as a 301 on the POST does.
     const preflight = await hit(`https://${PRODUCT}${from}`, "OPTIONS");
     assertEq(
       preflight.status,
       204,
-      `${from} preflight (OPTIONS) must be REACHED — the Function answers 204 ` +
+      `${from} OPTIONS must be REACHED — the Function answers 204 ` +
         `(\`Allow: POST, OPTIONS\`), so anything else means it was intercepted`,
     );
-    assertEq(preflight.location, null, `${from} preflight emits no Location`);
+    assertEq(preflight.location, null, `${from} OPTIONS emits no Location`);
   }
 
   // ⛔ THE CRAWLER SURFACE IS NOT A PAGE (#11766). `robots.txt` and the sitemaps are root
