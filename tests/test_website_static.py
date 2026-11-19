@@ -7326,6 +7326,79 @@ class TestConsentSeam:
                 "consent-gated loaders (GTM/Meta), so a listener acts on a "
                 "decision the tags have not followed yet")
 
+    @staticmethod
+    def _page_function(src: str, name: str) -> str:
+        """The body of the page's own `function <name>(…)`, by indentation.
+
+        The page's inline script declares its helpers at six-space indent and
+        closes each at the same indent, so the body runs from the declaration
+        to the matching close brace. Sliced by indentation rather than
+        brace-counting: the literals inside these functions are the one place a
+        naive counter would drift.
+        """
+        m = re.search(
+            rf"^( *)function {re.escape(name)}\(.*?\n\1\}}", src, re.S | re.M)
+        assert m, (
+            f"no `function {name}(` at the page's script indent — this gate's "
+            "subject moved, so it is no longer asserting the consent gate")
+        return m.group(0)
+
+    def test_the_page_gates_every_capture_on_the_consent_state(self):
+        """#13696 review finding 2: the page half of the seam is behavioural.
+
+        `track()` and `trackView()` are the page's ONLY path to a beacon
+        (`window.posthog.capture` is called nowhere else in the page's script),
+        and `trackView()` is reached from the consent event.
+
+        Two independent mutants survive every presence-only row:
+
+        * deleting `if (!consented()) return;` from `track()` ships an analytics
+          request from a visitor who never decided — the pre-consent beacon the
+          PR body itself calls a privacy defect;
+        * deleting `!consented()` from `trackView()` is the same defect one hop
+          earlier, and worse: the `viewed` latch would be set by the undecided
+          visit, so the later `granted` event would find `viewed === true` and
+          the page view would be lost for good.
+
+        `test_the_three_funnel_events_are_named_in_the_source` cannot see
+        either: it asserts the identifiers occur, and both mutants leave every
+        identifier in place.
+        """
+        track = self._page_function(_product_teams_html(), "track")
+        gate = track.find("!consented()")
+        assert gate != -1, (
+            "the page's `track()` has no `consented()` gate, so an undecided "
+            "visitor's click or page view reaches `posthog.capture` — the "
+            "pre-consent beacon this seam exists to prevent (#13645)")
+        capture = track.find("posthog.capture(")
+        assert capture != -1, (
+            "this gate's subject moved: `track()` no longer calls "
+            "`posthog.capture`, so it is no longer the beacon path it pins")
+        assert gate < capture, (
+            "`track()` calls `posthog.capture` BEFORE checking `consented()`: "
+            "the check is no longer a gate, it is a post-capture filter")
+
+        view = self._page_function(_product_teams_html(), "trackView")
+        vgate = view.find("!consented()")
+        assert vgate != -1, (
+            "the page's `trackView()` has no `consented()` gate — the "
+            "`tortoise:consent` listener would capture a page view on a "
+            "decision that was never granted (#13645)")
+        latch = view.find("viewed = true")
+        assert latch != -1, (
+            "this gate's subject moved: `trackView()` no longer sets the "
+            "`viewed` latch")
+        assert vgate < latch, (
+            "`trackView()` latches `viewed = true` BEFORE checking "
+            "`consented()`: an undecided visit consumes the latch, so the "
+            "visitor's later `granted` event finds `viewed === true` and the "
+            "page view is lost silently — the exact undercount this seam "
+            "exists to prevent (#13645)")
+        assert vgate < view.find("track(EVENTS.view"), (
+            "`trackView()` calls `track()` BEFORE checking `consented()`, so "
+            "the gate is no longer the only thing between an undecided "
+            "visitor and a beacon (#13645)")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 12. The niche product page's identity and its owner copy (#13645)
