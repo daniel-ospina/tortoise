@@ -1191,10 +1191,12 @@ returned `None` at the bound and the loader is still importing. The guard then r
 second attempt for as long as that thread lives, and the leg stays keyword-only. The tuple to match
 is `failure_kind: "load_timeout"` + `load_in_progress: true` + `load_in_progress_s` past the bound —
 **whichever of the two `state` words accompanies it**: `cooldown` while the 60 s negative-cache
-window is live (every refused `get()` re-stamps it), and `unavailable` once that window expires with
-no `get()` in between, which is the reading a quiet box shows because a `/health` poll never
-re-stamps it (`embeddings.py::status` derives `state` from `_FAIL_COOLDOWN_S` and
-`_last_failed_at`, and only `get()` writes the latter). ⛔ Do not read the in-flight bullet's
+window is live, and `unavailable` once it expires with no `get()` in between, which is the reading a
+quiet box shows because a `/health` poll never re-stamps it. ⛔ A `get()` **inside** the window is
+refused by the outer negative cache (`embeddings.py:1210-1215`) and does NOT touch the stamp, so
+traffic running inside the window does not hold it open: it is re-armed by the first `get()` AFTER
+expiry, i.e. the reclaim refusal (`:1245`) — which is what makes `cooldown` recur on a busy box.
+⛔ Do not read the in-flight bullet's
 “wait, it is RUNNING” mapping on this tuple: `load_in_progress_s` past the bound is the one case
 where the attempt is already dead to its caller. This resolves BY ITSELF when the thread exits (the
 guard clears, and the next `get()` retries once the cooldown has passed); a reading that stays past
