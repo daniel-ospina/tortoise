@@ -374,7 +374,7 @@ mechanical step:
 - the envelope half needs a `structuredContent` change on six live tools ⇒ approval;
 - the route half needs **no change at all** — the coupling it was written against does not
   exist (§1.5), which is a finding to report, not a change to make;
-- all nine `NO_CONTAINER_YET` destinations are still not MCP doors ⇒ nothing to unblock.
+- all seven `NO_CONTAINER_YET` destinations are still not MCP doors ⇒ nothing to unblock.
 
 What **is** implemented is the executable pin the plan rests on —
 `tests/test_11609_structural_blockers.py` — so that the blockers, the cost and the route
@@ -413,9 +413,11 @@ is the finding that removed three steps from the plan.
 | **S2** | retire those 9 in S1's batch; move them out of `PROTECTED` (12 → 3) in the same change | the 9 above | follows S1 |
 | **S3** | retire `tortoise_issue_insight` and `tortoise_session_context` — **no route work**, because the `rest_spec` reason is stale (§1.5) | `issue_insight`, `session_context` (**2**) | 27/40 ruling batch; update `PROTECTED` with the evidence |
 | **S4** | re-point `paginated_query` / `query_points_by_tag`, then retire `query` | `query` (**1**) | migration decision |
-| **S5** | land the six missing destinations (`delete_knowledge`, `link_entities`, `poll_events`, `write_knowledge_batch`, `create_memory_graph`, `list_memory_graphs`) | the 9 `NO_CONTAINER_YET` | out of scope here |
+| **S5** | land the six missing destinations (`delete_knowledge`, `link_entities`, `poll_events`, `write_knowledge_batch`, `create_memory_graph`, `list_memory_graphs`) | the 7 `NO_CONTAINER_YET` | out of scope here |
 
 Twelve structural doors: **9 in S1/S2** (8 envelope-only + `search`), **2 in S3** (stale
-reason, no work), **1 (`query`) in S4**. Nine `NO_CONTAINER_YET`: all in S5. Nothing is retired
+reason, no work), **1 (`query`) in S4**. Seven `NO_CONTAINER_YET` (nine when this plan was
+written; #11609 lane P6 retired `delete_point`/`delete_entity` forward on the #9660 ruling,
+§1.4): all in S5. Nothing is retired
 by this change, and no door is removed from `PROTECTED` — none of S1–S4 is implemented, so
 none of the twelve reasons has been *acted on* yet (one has been shown false, and is reported).
