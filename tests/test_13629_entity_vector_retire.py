@@ -6497,6 +6497,40 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND A `Starred` TARGET IS PAIRED BY PYTHON'S OWN RULE (`#13788`, review of
+        # `4748044f7d`). Dropping pairing for EVERY starred target — the fix for
+        # `*_r, x = 1, key, 2`, which binds `x = 2` and must CERTIFY — also dropped THREE
+        # CORRECT refusals the previous commit had, because each of these binds the property to
+        # a simple target. The rule used instead: elements BEFORE the star take the LEADING
+        # values, elements AFTER it take the TRAILING ones. The `*_r, x = 1, 2, key` row is the
+        # shape the earlier fix lost; `*_r, x = 1, key, 2` stays in the accepted tuple.
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    x, *_r = key, 1
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    x, *_r = key, 1, 2
+    if not _derived_mirror_required("object"):
+        props.update({x: _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    *_r, x = 1, 2, key
+    if not _derived_mirror_required("object"):
+        props |= {x: _encode(ev)}
+        return None
+    _write(props)
+""",
         # ⚠️ A KEY EXPRESSION THAT FOLDS TO THE PROPERTY (`("embedding" if _f() else "y")`,
         # `("embedding" or "y")`, `(w := "embedding")`) is a MEASURED, DISCLOSED false PASS —
         # residual #5 of `_mutator_stores_the_vector` — not a row here. Resolving it in the key
@@ -7234,10 +7268,14 @@ def _upsert_object(props, ev):
 """,
         # ⛔ AND A `fromkeys` THAT PLACES NOTHING STAYS CERTIFIED (`#13788`, measured at
         # `c54b8d4b`): the value operand is what places the vector, so its DEFAULT (`None`,
-        # the pre-guard reset), a `None` operand, a keys literal that names another property,
-        # and a keys operand this check cannot read (`_keys(ev)`) all stay honest write-stops.
-        # Without these the new arm is an inert-by-over-refusal rule that costs a writer its
-        # gate.
+        # the pre-guard reset), a `None` operand and a keys literal that names another
+        # property all stay honest write-stops. Without these the new arm is an
+        # inert-by-over-refusal rule that costs a writer its gate.
+        # ⛔ BUT THE `_keys(ev)` ROW BELOW IS A RESIDUAL, NOT AN HONEST WRITER (review of
+        # `4748044f7d`): a keys operand this check cannot read is DATA FLOW it does not do, and
+        # `_keys(ev)` returning `("embedding",)` PLACES the vector — so that row pins "we do not
+        # over-refuse a shape we cannot resolve", exactly like the `zip` residual further down.
+        # Calling it an honest write-stop was a false justification on a right row.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):

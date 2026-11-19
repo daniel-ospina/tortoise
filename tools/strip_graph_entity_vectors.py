@@ -1739,12 +1739,15 @@ def _constructor_stores_the_vector(call, alias_keys: frozenset[str] = frozenset(
             # `.copy()`/`if…else` mapping wrappers AND the pairs tail, so the separate pairs
             # leg this loop used to carry answers nothing it does not.
             or any(_mapping_operand_stores_the_vector(argument, alias_keys=alias_keys)
-                   # …and a CONSTRUCTOR OPERAND IS AN OPERAND ONE NESTING IN: the operand
-                   # of `OrderedDict` may itself be `OrderedDict({**{…}})`, and the operand
-                   # rules answer a `Call` with `False`. Recursion descends the AST, so it
-                   # terminates; STOP ARM ONLY, as this whole helper is.
-                   or (isinstance(argument, ast.Call)
-                       and _constructor_stores_the_vector(argument, alias_keys=alias_keys))
+                   # ⛔ AND A NESTED CONSTRUCTOR NEEDS NO LEG HERE, and that is MEASURED
+                   # (`#13788`, review of `4748044f7d`): a leg recursing into a constructor
+                   # operand was written, and REMOVING it changed no verdict on ANY of the 451
+                   # fixture rows nor on the reviewer's nested probes
+                   # (`OrderedDict(OrderedDict({**{…}}))`, `dict(dict(dict({**{…}})))`,
+                   # `OrderedDict(Counter({**{…}}))`) — `_stores_embedding`'s own operand scan
+                   # reaches the same nested call in every position. Removed rather than kept
+                   # looking load-bearing, which is this file's own rule for the `zip` leg
+                   # immediately below.
                    # ⛔ AND A `dict(zip(KEYS, VALUES))` OPERAND NEEDS NO ARM HERE, and that is
                    # MEASURED rather than assumed (`#13788`): the literal-column `zip` is
                    # answered by `_stores_embedding`'s operand scan, which reaches the SAME
@@ -1889,8 +1892,12 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
     the key sequence is a LITERAL (list, tuple or set) containing the EXACT property name. A
     COMPUTED key sequence remains a residual, and TWO fixtures pin the boundary — ONE TERM
     EACH, measured by the review of this branch: `props |= dict.fromkeys(_keys(ev), vec)` is
-    the honest write-stop that the LITERAL-CONTAINER term keeps certified (dropping it
-    refuses that row), and `props |= dict.fromkeys(["embedding_model"], _m())` is the
+    the DATA-FLOW RESIDUAL that the LITERAL-CONTAINER term keeps certified (dropping it
+    refuses that row) — `_keys(ev)` is a CALL this module does not read, and it PLACES THE
+    VECTOR when the call returns `("embedding",)`, so that row pins "we do not over-refuse a
+    shape we cannot resolve", NOT an honest writer (the review of `4748044f7d` measured the
+    runtime verdict; calling it honest was a false justification on a right row); and
+    `props |= dict.fromkeys(["embedding_model"], _m())` is the
     identity-triple row that the EXACT-NAME term keeps certified (dropping it refuses that
     row). Neither term reddens both rows, so neither is dead weight — and a claim that one
     term pins both would be a false record.
@@ -3128,18 +3135,25 @@ def _mutator_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -
        through another name) IS answered — that is the alias arm, and `alias_keys` is empty on
        the mirror arm, which is what makes it safe.
 
-    6. **A KEY BINDING THE ALIAS WALK DOES NOT FOLLOW** — measured at `e21a2fcb`, each a
-       stop-arm store that stays CERTIFIED: `*_r, x = 1, 2, key` (a `Starred` shifts the
-       positions), `(x, _z), _w = (key, 2), 3` (a nested target), `for x, _z in [(key, 1)]:`
-       (a LOOP target), `if (x := key):` (a walrus in a condition), and `x = key if True else
-       "y"` (a conditional VALUE). `_property_alias_names` follows a plain, same-length,
-       all-`ast.Name` tuple/list unpack and nothing else — deliberately: a positional pairing
-       that ignores `Starred` MIS-PAIRS (`*_r, x = 1, key, 2` binds `x = 2`, and index pairing
-       read `x = key`), so the walk under-approximates instead. That direction can only lose
-       refusals, never add an acceptance, which is why it is the safe one to stop at; closing
-       the family needs a real binding model (`_unpacked_target_stores_the_vector` already
-       unwraps `Tuple`/`List`/`Starred` for TARGETS, and a second implementation beside it is
-       the drift this file keeps paying for).
+    6. **A KEY BINDING THE ALIAS WALK DOES NOT FOLLOW** — measured at `e21a2fcb` and
+       re-measured by the review of `4748044f7d`, each a stop-arm store that stays CERTIFIED:
+       `(x, _z), _w = (key, 2), 3` (a nested target), `for x, _z in [(key, 1)]:` (a LOOP
+       target), `if (x := key):` (a walrus in a condition), and `x = key if True else "y"` (a
+       conditional VALUE). ⛔ A `Starred` TARGET IS **NOT** HERE ANY MORE: the walk now uses
+       PYTHON'S OWN rule — the elements BEFORE the star take the LEADING values, the elements
+       AFTER it take the TRAILING ones, and the starred name absorbs the middle — so
+       `x, *_r = key, 1` and `*_r, x = 1, 2, key` are REFUSED while `*_r, x = 1, key, 2`
+       (which binds `x = 2`) still CERTIFIES.
+       ⛔ AND NEITHER DIRECTION HERE IS "SAFE", which CORRECTS the wording this section
+       carried: it said under-approximating "can only lose refusals, never add an acceptance,
+       which is why it is the safe one to stop at". Losing a refusal IS the dangerous direction
+       on this arm — the alias set is the only source of these refusals, so a shape the walk
+       does not follow is CERTIFIED while it stores (the review of `4748044f7d` measured exactly
+       that for three `Starred` shapes a previous commit had refused). The narrower invariant
+       that DOES hold is that no ACCEPTANCE can widen, because `alias_keys` is empty on the
+       mirror arm. Closing the rest of the family needs a real binding model
+       (`_unpacked_target_stores_the_vector` already unwraps `Tuple`/`List`/`Starred` for
+       TARGETS, and a second implementation beside it is the drift this file keeps paying for).
 
     ⛔ WHAT IS *NOT* A RESIDUAL ANY MORE: a store reached through a HELPER ARGUMENT
     (`_set(props, "embedding", vec)`) used to be listed here as "indistinguishable from
@@ -3359,19 +3373,50 @@ def _property_alias_names(scope) -> frozenset[str]:
             #  - and a POSITIONAL `zip` over the elements MIS-PAIRS as soon as a `Starred` is in
             #    the target: `*_r, x = 1, key, 2` binds `x = 2`, but index pairing read
             #    `x = key` and refused an honest writer (measured by the review of `e21a2fcb`).
-            # So the pairing is taken ONLY when EVERY target element is a plain `ast.Name` and
-            # the value is a sequence of the SAME length. Anything else — a `Starred`, a nested
-            # target, a subscript, a length mismatch — binds nothing here: the shape is NOT
-            # followed, which is residual #6 of `_mutator_stores_the_vector` and is the answer
-            # the parent gives. Under-approximating the ALIAS SET can only lose refusals, so it
-            # cannot widen what the gate accepts; a mis-pair both loses one and invents another.
+            # ⛔ AND THEN THE CORRECTION OF THAT CORRECTION (`#13788`, review of `4748044f7d`):
+            #    dropping pairing for EVERY starred target also dropped THREE CORRECT refusals
+            #    — `x, *_r = key, 1`, `x, *_r = key, 1, 2` and `*_r, x = 1, 2, key` all bind the
+            #    property and WERE refused one commit earlier, then CERTIFIED. They are
+            #    parent-identical (the merge base and `origin/main` certify them too, measured),
+            #    so this was not a regression against main — but it WAS a false PASS this branch
+            #    had already removed once, which is the wrong way to fix a mis-pair. So the
+            #    pairing now uses PYTHON'S OWN rule: the elements BEFORE the `Starred` take the
+            #    LEADING values, the elements AFTER it take the TRAILING values, and the starred
+            #    name absorbs the middle. The middle is a LIST, never the property, so it binds
+            #    nothing here (`*mid` holding the property is not a store: `props[mid]` subscripts
+            #    the LIST, not the property).
+            # So the pairing is taken when every target element is an `ast.Name` or a single
+            # `ast.Starred` and the value is a sequence long enough to bind every non-starred
+            # target. Anything else — TWO stars, a nested target, a subscript, too few values —
+            # binds nothing, which is residual #6 of `_mutator_stores_the_vector`.
+            # ⛔ NEITHER DIRECTION IS "SAFE", and both costs are named because the previous
+            # wording called this the safe side: losing a refusal CERTIFIES a stop-arm writer
+            # that stores, while a mis-pair invents a refusal for an honest one. What cannot
+            # happen either way is a widened ACCEPTANCE — `alias_keys` is EMPTY on the mirror arm
+            # — and that is the invariant, not "under-approximation is harmless".
             if isinstance(sub, ast.Assign) and len(sub.targets) == 1 and isinstance(
                     sub.targets[0], ast.Tuple | ast.List):
                 target_elts = list(sub.targets[0].elts)
                 value_elts = (list(sub.value.elts)
                               if isinstance(sub.value, ast.Tuple | ast.List) else [])
-                if (all(isinstance(element, ast.Name) for element in target_elts)
-                        and len(target_elts) == len(value_elts)):
+                stars = [index for index, element in enumerate(target_elts)
+                         if isinstance(element, ast.Starred)]
+                if len(stars) > 1:
+                    pairs = []          # two stars is not a shape this walk resolves
+                elif any(not isinstance(element, ast.Name | ast.Starred)
+                         for element in target_elts):
+                    pairs = []          # a nested target, a subscript: residual #6
+                elif stars:
+                    head = target_elts[:stars[0]]
+                    tail = target_elts[stars[0] + 1:]
+                    if len(value_elts) < len(head) + len(tail):
+                        pairs = []      # Python raises on this at runtime
+                    else:
+                        pairs = list(zip(head, value_elts[:len(head)], strict=False))
+                        if tail:
+                            pairs += list(zip(tail, value_elts[len(value_elts) - len(tail):],
+                                              strict=False))
+                elif len(target_elts) == len(value_elts):
                     pairs = list(zip(target_elts, value_elts, strict=False))
                 else:
                     pairs = []
