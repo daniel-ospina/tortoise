@@ -1365,13 +1365,15 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the shape detector types {_not_nothing_but!r} as EMPTINESS — a negated "
             "`nothing but …` is still a MEMBERSHIP claim, so a refuted one passes green "
             "(#13831 review, P2)")
-    # ⛔ AND `not only X` / `not just X` IS THE IDIOM, WHICH ASSERTED X AND MORE — so the head's
-    # own direction survives the negation (#13831 review, round 5, P1). The generic inversion
-    # turned `not only two paths` (MEMBERSHIP: at least two) into EMPTINESS, which is a refuted
-    # membership claim passing GREEN at the empty head this guard runs at — the fail-open
-    # direction. `not only empty` is pinned too, because it must stay MEMBERSHIP ("more than
-    # empty") rather than flip the other way; `not two paths` is the control that keeps the
-    # ordinary inversion, so removing `_not_only` cannot be "fixed" by deleting the toggle.
+    # ⛔ AND `not only X` / `not just X` IS THE IDIOM, WHICH ASSERTS X AND MORE — so the answer
+    # is MEMBERSHIP WHICHEVER direction the head token alone would give (#13831 review, rounds
+    # 5-7, P1). NOT "the head's own direction survives": measured, the bare head types `prints
+    # empty` as EMPTINESS while `prints not only empty` is MEMBERSHIP, so the idiom OVERRIDES
+    # the head rather than preserving it, and the file says so in three places for that reason.
+    # The generic inversion turned `not only two paths` (MEMBERSHIP: at least two) into
+    # EMPTINESS, which is a refuted membership claim passing GREEN at the empty head this guard
+    # runs at — the fail-open direction. `not two paths` is the control that keeps the ordinary
+    # inversion, so removing `_not_only` cannot be "fixed" by deleting the toggle.
     for _not_only_spelling in (
             "prints not only two paths",
             "prints not just two paths",
