@@ -27135,7 +27135,7 @@ async def _count_active_free_memberships(user_id: str) -> int:
         await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
         return count
     reg = _make_sdk(namespace="registry")._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
         "WHERE m.org_id <> '' "
         "MATCH (t:Team {id:m.org_id}) "
@@ -27194,7 +27194,7 @@ async def _owned_free_org_ids(user_id: str, pool: str = "auth") -> list[str]:
     # IS NULL branch keeps a property-less legacy Org node counting as free
     # (fail-closed, parity with the #1877 twin), while an active/paid or
     # pending_payment subscription_status excludes it.
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (m:Membership {user_id:$uid, status:'active', role:'owner'}) "
         "WHERE m.org_id <> '' "
         "MATCH (t:Team {id:m.org_id}) "
@@ -27884,7 +27884,7 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     # Per-user org-creation rate limit (abuse posture) — not a tier block.
     # #743(b): the count was never checked, `since` was `now` (always 0), and
     # membership_create never wrote `created_at` — all three fixed here.
-    recent = reg._query(
+    recent = reg.query(
         "MATCH (m:Membership {user_id:$uid, role:'owner'}) "
         "WHERE m.created_at > $since RETURN count(m)",
         params={"uid": user["user_id"],
@@ -27905,7 +27905,7 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     # with the Supabase lane's explicit guards); every other duplicate
     # (different owner, non-owner or non-active membership, soft-deleted or
     # pending_payment org) 409s.
-    dup_rows = reg._query(
+    dup_rows = reg.query(
         "MATCH (t:Team {name:$name}) "
         "RETURN t.id, t.graph_name, t.tier, t.deleted_at, "
         "t.subscription_status",
@@ -27923,7 +27923,7 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
             # a never-deleted legacy Team still replays.
             _is_pending = _dup_sub is not None and _dup_sub == "pending_payment"
             if _dup_deleted is None and not _is_pending:
-                _is_owner = reg._query(
+                _is_owner = reg.query(
                     "MATCH (m:Membership {org_id:$oid, user_id:$uid}) "
                     "WHERE m.status = 'active' AND m.role = 'owner' "
                     "RETURN count(m) > 0",
@@ -31116,7 +31116,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
     # the lock is defense-in-depth: it guarantees correctness if any await
     # (async capacity read, to_thread offload) is introduced later.
     async with _invite_org_lock(org_id):
-        org_row = reg._query(
+        org_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
             params={"id": org_id},
         ).result_set
@@ -31135,12 +31135,12 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                                 detail=with_limit_contact("Invites require the Builder or Team tier — upgrade to invite members"))
         if tier == "pro":
             from datetime import datetime as _pdt
-            active = reg._query(
+            active = reg.query(
                 "MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)",
                 params={"tid": org_id},
             ).result_set[0][0]
             now = _pdt.now(UTC).isoformat()
-            pending = reg._query(
+            pending = reg.query(
                 "MATCH (i:Invitation {org_id:$tid}) "
                 "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
                 "AND (i.expires_at IS NULL OR i.expires_at > $now) RETURN count(i)",
@@ -31163,7 +31163,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         # the Builder capacity read and ``cleanup_expired_invitations`` already
         # treat it.
         now = datetime.now(UTC).isoformat()
-        dup = reg._query(
+        dup = reg.query(
             "MATCH (i:Invitation {org_id:$tid, email:$email}) "
             "WHERE i.accepted_at IS NULL AND "
             "(i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
@@ -31183,7 +31183,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         token_hash = _hash(token)
         iid = _short_id()
         expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat()
-        reg._query(
+        reg.query(
             "CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, role:$role, "
             "token_hash:$th, created_by:$cb, inviter_email:$ie, created_at:$now, "
             "expires_at:$exp, accepted_at:null, status:'pending'})",
@@ -31192,7 +31192,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
                     "now": now, "exp": expires_at},
         )
         # Also record the invitee row in org_memberships (status='invited') per plan §4.1
-        reg._query(
+        reg.query(
             "MERGE (m:Membership {org_id:$tid, user_id:$fake}) "
             "ON CREATE SET m.role=$role, m.status='invited', m.invited_email=$email, m.created_at=$now",
             params={"tid": org_id, "fake": f"invite-{iid}", "role": role, "email": email, "now": now},
@@ -31203,7 +31203,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
         send_invite_email(
             org_node.get("name") or "your team", email, role,
             token, iid,
-            on_sent=lambda mid: reg._query(
+            on_sent=lambda mid: reg.query(
                 "MATCH (i:Invitation {id:$id}) SET i.email_sent_at = $now",
                 params={"id": iid, "now": now},
             ),
@@ -31260,7 +31260,7 @@ async def invite_info(token: str):
         # The caller's post-match expiry check below stays as the authority
         # (defence in depth): the predicate only prunes, it never decides.
         now_iso = datetime.now(UTC).isoformat()
-        rows = reg._query(
+        rows = reg.query(
             "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
             "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
             "AND (i.expires_at IS NULL OR i.expires_at > $now) "
@@ -31370,7 +31370,7 @@ def _sweep_terminal_invite_placeholders(sdk, org_id: str, email: str) -> int:
     """
     reg = sdk._get_registry()
     now = datetime.now(UTC).isoformat()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation {org_id:$tid, email:$email}) "
         "WHERE i.accepted_at IS NOT NULL "
         "OR i.status IN ['accepted', 'revoked', 'expired'] "
@@ -31473,7 +31473,7 @@ async def accept_invite(body: dict, request: Request,
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
         "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
         "RETURN i.id, i.org_id, i.email, i.role, i.token_hash, i.expires_at",
@@ -31498,7 +31498,7 @@ async def accept_invite(body: dict, request: Request,
         raise HTTPException(status_code=403, detail="Invite email does not match this account")
 
     # Check not already a member
-    existing = reg._query(
+    existing = reg.query(
         "MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
         params={"tid": invite["org_id"], "uid": user["user_id"]},
     ).result_set[0][0]
@@ -31517,7 +31517,7 @@ async def accept_invite(body: dict, request: Request,
         # point too — a free-capped invitee must not join a free (or
         # downgraded-window) org via the email link. Non-consuming
         # (before the accepted_at write).
-        _org_row = reg._query(
+        _org_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
             params={"id": invite["org_id"]},
         ).result_set
@@ -31538,13 +31538,13 @@ async def accept_invite(body: dict, request: Request,
     # committed, so it sees the new active count. membership_create stays
     # as the backstop (tier changes / downgrade windows).
     async with _invite_org_lock(invite["org_id"]):
-        _cap_row = reg._query(
+        _cap_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
             params={"id": invite["org_id"]},
         ).result_set
         _cap_max = (_cap_row[0][0].get("max_users") if _cap_row else None)
         if _cap_max is not None:
-            _cap_active = reg._query(
+            _cap_active = reg.query(
                 "MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)",
                 params={"tid": invite["org_id"]},
             ).result_set[0][0]
@@ -31561,7 +31561,7 @@ async def accept_invite(body: dict, request: Request,
         # accepted_by clobber (pre-fix this write was unconditional — the
         # legacy loser overwrote the winner's accepted_by AND minted a dup).
         # The capacity 402 above stays NON-consuming (invite untouched).
-        claimed = reg._query(
+        claimed = reg.query(
             "MATCH (i:Invitation {id:$id}) "
             "WHERE i.accepted_at IS NULL "
             "AND (i.status IS NULL OR i.status = 'pending') "
@@ -31809,7 +31809,7 @@ def _registry_pending_invite_by_token(sdk, token: str) -> dict | None:
     raises the matching 400)."""
     from tortoise.auth import verify_api_key as _verify2
     reg = sdk._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
         "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
         "RETURN i.id, i.org_id, i.email, i.role, i.token_hash, i.expires_at",
@@ -31830,7 +31830,7 @@ def _registry_otp_issue(sdk, invite_id: str, *, code_hash: str,
     Returns False when the invitation is gone/consumed (concurrent accept
     won) — the caller 4xxs."""
     reg = sdk._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation {id:$id}) "
         "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
         "SET i.otp_hash = $hash, i.otp_expires_at = $exp, i.otp_attempts = 0, "
@@ -31855,7 +31855,7 @@ def _registry_otp_verify(sdk, invite_id: str, code: str, *,
     """
     from tortoise.auth import verify_api_key as _verify_otp
     reg = sdk._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation {id:$id}) "
         "RETURN i.otp_hash, i.otp_expires_at, i.otp_attempts, i.otp_verified_at, "
         "i.accepted_at, i.status",
@@ -31871,7 +31871,7 @@ def _registry_otp_verify(sdk, invite_id: str, code: str, *,
     if not otp_hash:
         return "no_otp"
     if otp_expires_at and otp_expires_at < now:
-        reg._query(
+        reg.query(
             "MATCH (i:Invitation {id:$id}) SET i.otp_hash = null, "
             "i.otp_expires_at = null, i.otp_attempts = 0",
             params={"id": invite_id},
@@ -31879,17 +31879,17 @@ def _registry_otp_verify(sdk, invite_id: str, code: str, *,
         return "expired"
     if not _verify_otp(code, otp_hash):
         # atomic-ish increment (single statement); >= budget clears the code.
-        reg._query(
+        reg.query(
             "MATCH (i:Invitation {id:$id}) "
             "SET i.otp_attempts = COALESCE(i.otp_attempts, 0) + 1",
             params={"id": invite_id},
         )
-        recheck = reg._query(
+        recheck = reg.query(
             "MATCH (i:Invitation {id:$id}) RETURN i.otp_attempts",
             params={"id": invite_id},
         ).result_set
         if recheck and int(recheck[0][0] or 0) >= _OTP_MAX_ATTEMPTS:
-            reg._query(
+            reg.query(
                 "MATCH (i:Invitation {id:$id}) SET i.otp_hash = null, "
                 "i.otp_expires_at = null, i.otp_attempts = 0",
                 params={"id": invite_id},
@@ -31897,7 +31897,7 @@ def _registry_otp_verify(sdk, invite_id: str, code: str, *,
         return "invalid"
     # Match → reset the budget, keep the code outstanding (consume happens
     # at the accept commit — never on a pre-commit 402).
-    reg._query(
+    reg.query(
         "MATCH (i:Invitation {id:$id}) SET i.otp_attempts = 0",
         params={"id": invite_id},
     )
@@ -31970,7 +31970,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
     if err:
         raise err
     # Check not already a member
-    existing = reg._query(
+    existing = reg.query(
         "MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
         params={"tid": org_id, "uid": user["user_id"]},
     ).result_set[0][0]
@@ -31978,7 +31978,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
         raise HTTPException(status_code=409, detail="Already a member of this team")
     _ensure_not_suspended(await _org_node(org_id))
     async with _org_create_lock(user["user_id"]):
-        _org_row = reg._query(
+        _org_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": org_id},
         ).result_set
         _org_tier = (_org_row[0][0].get("tier") if _org_row else None) or "free"
@@ -31987,13 +31987,13 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
                 status_code=402,
                 detail=with_limit_contact("You already have a free team — this team requires a paid plan" " to join"))
     async with _invite_org_lock(org_id):
-        _cap_row = reg._query(
+        _cap_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
             params={"id": org_id},
         ).result_set
         _cap_max = (_cap_row[0][0].get("max_users") if _cap_row else None)
         if _cap_max is not None:
-            _cap_active = reg._query(
+            _cap_active = reg.query(
                 "MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)",
                 params={"tid": org_id},
             ).result_set[0][0]
@@ -32014,7 +32014,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
         # ⟺ THIS request's SET transitioned pending→accepted.) The OTP is
         # consumed in the SAME statement (single-use at commit — a 402 above
         # never burns it).
-        claimed = reg._query(
+        claimed = reg.query(
             "MATCH (i:Invitation {id:$id}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
             "SET i.accepted_at = $now, i.accepted_by = $uid, i.accepted_via = $via, "
@@ -32275,7 +32275,7 @@ async def resend_invite(invitation_id: str, org_id: str, request: Request,
     # registry / selfhost lane
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation {id:$id}) RETURN i.org_id, i.email, i.role, "
         "i.accepted_at, i.status, i.expires_at",
         params={"id": invitation_id},
@@ -32306,7 +32306,7 @@ async def resend_invite(invitation_id: str, org_id: str, request: Request,
     # concurrent accept (read-then-write window above) commits first → this
     # conditional SET matches 0 rows → 409, never an emailed dead link
     # (mirrors the accept lanes' authoritative single-write posture).
-    rotated = reg._query(
+    rotated = reg.query(
         "MATCH (i:Invitation {id:$id}) "
         "WHERE i.accepted_at IS NULL "
         "AND (i.status IS NULL OR i.status = 'pending') "
@@ -32319,7 +32319,7 @@ async def resend_invite(invitation_id: str, org_id: str, request: Request,
     if not rotated or not rotated[0][0]:
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot resend")
-    _org_row = reg._query(
+    _org_row = reg.query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": org_id},
     ).result_set
     try:  # best-effort email
@@ -32358,7 +32358,7 @@ async def expire_invite(invitation_id: str, org_id: str,
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation {id:$id}) RETURN i.org_id, i.status, i.accepted_at",
         params={"id": invitation_id},
     ).result_set
@@ -32371,7 +32371,7 @@ async def expire_invite(invitation_id: str, org_id: str,
                             detail="Invitation already accepted — cannot expire")
     if _status in ("revoked", "expired"):
         return {"expired": True, "already": True, "invitation_id": invitation_id}
-    reg._query(
+    reg.query(
         "MATCH (i:Invitation {id:$id}) "
         "WHERE i.status IS NULL OR i.status = 'pending' "
         "SET i.status = 'expired', i.expires_at = $now, i.expired_by = $by",
@@ -32472,7 +32472,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     retryable. Also deletes the fake invite-{iid} membership row (#1880) on
     success and on the (except-path) 402 after the accepted_at write."""
     reg = sdk._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation {id:$id}) "
         "RETURN i.id, i.org_id, i.email, i.role, i.expires_at, i.status, i.accepted_at",
         params={"id": invitation_id},
@@ -32497,7 +32497,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     # the supabase twin).
     if not user_email or user_email != (invite_email or "").lower():
         raise HTTPException(status_code=404, detail="Invitation not found")
-    existing = reg._query(
+    existing = reg.query(
         "MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
         params={"tid": org_id, "uid": user["user_id"]},
     ).result_set[0][0]
@@ -32511,7 +32511,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     async with _org_create_lock(user["user_id"]):
         # #1877 free-cap (join side): free-tier target + free-capped invitee →
         # blocked BEFORE the accepted_at write (non-consuming).
-        org_row = reg._query(
+        org_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": org_id},
         ).result_set
         org_tier = (org_row[0][0].get("tier") if org_row else None) or "free"
@@ -32526,13 +32526,13 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     # memberships vs the Org node's max_users), so a losing concurrent
     # accept bails with a NON-consuming 402 (invite stays pending).
     async with _invite_org_lock(org_id):
-        _cap_row = reg._query(
+        _cap_row = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
             params={"id": org_id},
         ).result_set
         _cap_max = (_cap_row[0][0].get("max_users") if _cap_row else None)
         if _cap_max is not None:
-            _cap_active = reg._query(
+            _cap_active = reg.query(
                 "MATCH (m:Membership {org_id:$tid, status:'active'}) RETURN count(m)",
                 params={"tid": org_id},
             ).result_set[0][0]
@@ -32548,7 +32548,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
         # this write was unconditional — the loser overwrote the winner's
         # accepted_by and minted a dup). The capacity 402 above stays
         # NON-consuming.
-        claimed = reg._query(
+        claimed = reg.query(
             "MATCH (i:Invitation {id:$id}) "
             "WHERE i.accepted_at IS NULL "
             "AND (i.status IS NULL OR i.status = 'pending') "
@@ -32626,7 +32626,7 @@ async def decline_invite(invitation_id: str,
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    rows = reg._query(
+    rows = reg.query(
         "MATCH (i:Invitation {id:$id}) RETURN i.email, i.org_id, i.status, i.accepted_at",
         params={"id": invitation_id},
     ).result_set
@@ -32643,13 +32643,13 @@ async def decline_invite(invitation_id: str,
     if status == "revoked":
         return {"revoked": True, "already": True, "invitation_id": invitation_id}
     # Conditional write (still-pending guard): a concurrent accept must win.
-    reg._query(
+    reg.query(
         "MATCH (i:Invitation {id:$id}) "
         "WHERE i.status IS NULL OR i.status = 'pending' "
         "SET i.status = 'revoked'",
         params={"id": invitation_id},
     )
-    recheck = reg._query(
+    recheck = reg.query(
         "MATCH (i:Invitation {id:$id}) RETURN i.status, i.accepted_at",
         params={"id": invitation_id},
     ).result_set[0]
@@ -34289,23 +34289,23 @@ def _soft_delete_registry_org(org_id: str, now: str, grace_hours: float) -> None
     """
     sdk = _registry_anchor()
     reg = sdk._get_registry()
-    reg._query(
+    reg.query(
         "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
         "SET k.revoked_at=$now",
         params={"tid": org_id, "now": now},
     )
-    reg._query(
+    reg.query(
         "MATCH (m:Membership {org_id:$tid, status:'active'}) "
         "SET m.status='removed'",
         params={"tid": org_id},
     )
-    reg._query(
+    reg.query(
         "MATCH (i:Invitation {org_id:$tid}) "
         "WHERE (i.status IS NULL OR i.status = 'pending') "
         "SET i.status='revoked'",
         params={"tid": org_id},
     )
-    reg._query(
+    reg.query(
         "MATCH (t:Team {id:$id}) SET t.deleted_at=$now, t.grace_hours=$gh",
         params={"id": org_id, "now": now, "gh": grace_hours},
     )
@@ -35098,19 +35098,19 @@ def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None
     _drop_org_acl_users(org_id)
     graph_names = _org_graph_names(org_id, graph_name)
     reg = sdk._get_registry()
-    reg._query(
+    reg.query(
         "MATCH (m:Membership {org_id:$tid}) DETACH DELETE m",
         params={"tid": org_id},
     )
-    reg._query(
+    reg.query(
         "MATCH (k:APIKey {org_id:$tid}) DETACH DELETE k",
         params={"tid": org_id},
     )
-    reg._query(
+    reg.query(
         "MATCH (i:Invitation {org_id:$tid}) DETACH DELETE i",
         params={"tid": org_id},
     )
-    reg._query(
+    reg.query(
         "MATCH (t:Team {id:$id}) DETACH DELETE t",
         params={"id": org_id},
     )
@@ -35574,13 +35574,13 @@ async def reconcile(request: Request):
     reg = sdk._get_registry()
 
     # 2. Sweep expired bootstrap keys
-    expired = reg._query(
+    expired = reg.query(
         "MATCH (k:APIKey) WHERE k.created_via = 'bootstrap' AND k.revoked_at IS NULL "
         "AND k.expires_at IS NOT NULL AND k.expires_at < $now RETURN k.id",
         params={"now": now},
     ).result_set
     for (kid,) in expired:
-        reg._query("MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+        reg.query("MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
                   params={"id": kid, "now": now})
         result["expired_keys_swept"] += 1
 
@@ -35963,7 +35963,7 @@ async def agent_signup(request: Request):
     reg = sdk._get_registry()
     try:
         # Org node
-        reg._query(
+        reg.query(
             "CREATE (t:Team {id:$id, name:$name, tier:'free', created_at:$now, backup_enabled:false, "
             "max_users:$mu, max_graphs:$mg, max_api_keys:$mk, ops_allowance:$ops, graph_size_cap:$nodes})",
             params={"id": org_id, "name": org_name, "now": now,
@@ -35972,13 +35972,13 @@ async def agent_signup(request: Request):
         # APIKey node (#1709: created_via/expires_at prop parity with the
         # Supabase lane — the dashboard lists both; expires_at:null = never)
         kid = _short_id()
-        reg._query(
+        reg.query(
             "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp, "
             "created_by:$cb, created_via:'provisioned', created_at:$now, expires_at:null})",
             params={"id": kid, "tid": org_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
         )
         # Anonymous membership (owner)
-        reg._query(
+        reg.query(
             "CREATE (m:Membership {org_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
             params={"tid": org_id, "uid": identity, "now": now},
         )
@@ -35986,7 +35986,7 @@ async def agent_signup(request: Request):
         # the same hashed-lookup format as Invitation token_hash, so
         # _verify_hashed_lookup("SignupToken", "token_hash", ...) can verify
         # it at recovery time (sdk.py _verify_hashed_lookup pattern).
-        reg._query(
+        reg.query(
             "CREATE (s:SignupToken {token_hash:$th, lookup_key:$lk, "
             "org_id:$tid, created_at:$now})",
             params={"th": _hash(signup_token), "lk": _lookup_hash(signup_token),
@@ -36010,10 +36010,10 @@ async def agent_signup(request: Request):
         # DELETE Org + APIKey + Membership + SignupToken, drop the graph
         # namespace. The SignupToken node MUST ride the rollback (a failed
         # mint must not leave an orphan token pointing at a deleted org).
-        reg._query("MATCH (t:Team {id:$id}) DETACH DELETE t", params={"id": org_id})
-        reg._query("MATCH (k:APIKey {org_id:$id}) DETACH DELETE k", params={"id": org_id})
-        reg._query("MATCH (m:Membership {org_id:$id}) DETACH DELETE m", params={"id": org_id})
-        reg._query("MATCH (s:SignupToken {org_id:$id}) DETACH DELETE s", params={"id": org_id})
+        reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t", params={"id": org_id})
+        reg.query("MATCH (k:APIKey {org_id:$id}) DETACH DELETE k", params={"id": org_id})
+        reg.query("MATCH (m:Membership {org_id:$id}) DETACH DELETE m", params={"id": org_id})
+        reg.query("MATCH (s:SignupToken {org_id:$id}) DETACH DELETE s", params={"id": org_id})
         try:  # noqa: SIM105
             sdk._get_proj().db.select_graph(graph_name).delete()
         except Exception:
@@ -37437,7 +37437,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     reg = sdk._get_registry()
     user_id = user["user_id"]
 
-    memberships = reg._query(
+    memberships = reg.query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
         "WHERE m.org_id <> '' RETURN m.org_id, m.role",
         params={"uid": user_id},
@@ -37451,14 +37451,14 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     else:
         tid = memberships[0][0]
 
-    membership = reg._query(
+    membership = reg.query(
         "MATCH (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) RETURN m.role",
         params={"uid": user_id, "tid": tid},
     ).result_set
     if not membership:
         raise HTTPException(status_code=403, detail="No membership in team")
 
-    org_row = reg._query(
+    org_row = reg.query(
         "MATCH (t:Team {id:$id}) RETURN t.tier, t.suspended_at", params={"id": tid},
     ).result_set
     tier = org_row[0][0] if org_row else "free"
@@ -37499,7 +37499,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     async with _org_mint_lock_bounded(tid):
 
         if purpose == "bootstrap":
-            active_boot = reg._query(
+            active_boot = reg.query(
                 "MATCH (k:APIKey {org_id:$tid, created_via:'bootstrap', created_by:$uid}) "
                 "WHERE k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "RETURN count(k)",
@@ -37537,7 +37537,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
             # Mirrors the bootstrap cap query's expiry filter (bootstrap
             # precedent) and the supabase lane's active_api_keys helper
             # (which has always excluded expired rows).
-            active_keys = reg._query(
+            active_keys = reg.query(
                 "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                 "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
@@ -37552,7 +37552,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                 # rotation targets, because revoking an expired key (which no
                 # longer counts) would free no slot and the others branch does
                 # not re-check (cap+1 hazard).
-                oldest = reg._query(
+                oldest = reg.query(
                     "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                     "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                     "AND k.created_by <> $uid "
@@ -37569,7 +37569,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     # returned rows are what THIS call claimed; the
                     # compensation below is gated on it — a lost claim wrote
                     # nothing, so there is nothing to restore.
-                    claimed_revoke = bool(reg._query(
+                    claimed_revoke = bool(reg.query(
                         "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at IS NULL "
                         "SET k.revoked_at = $now RETURN k.id",
                         params={"id": oldest[0][0], "now": now},
@@ -37588,7 +37588,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     # a revoke that freed no counted slot must NOT mint.
                     # (A concurrent REVOKE is harmless here: it lowers the
                     # count this re-check then reads.)
-                    recheck_other = reg._query(
+                    recheck_other = reg.query(
                         "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                         "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                         "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
@@ -37613,7 +37613,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                         # deliberately revoked (`SET k.revoked_at = NULL` only
                         # WHERE k.revoked_at = $now).
                         if claimed_revoke:
-                            reg._query(
+                            reg.query(
                                 "MATCH (k:APIKey {id:$id}) WHERE k.revoked_at = $now "
                                 "SET k.revoked_at = NULL",
                                 params={"id": oldest[0][0], "now": now},
@@ -37652,7 +37652,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     # so a rotation that doesn't free a slot fails CLOSED (402)
                     # instead of minting cap+1 persistent keys (unbounded growth
                     # per login).
-                    legacy = reg._query(
+                    legacy = reg.query(
                         "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                         "AND k.created_by IS NULL "
                         "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
@@ -37660,7 +37660,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                         "ORDER BY k.created_at ASC LIMIT 1",
                         params={"tid": tid},
                     ).result_set
-                    own_recovery = reg._query(
+                    own_recovery = reg.query(
                         "MATCH (k:APIKey {org_id:$tid, created_via:'recovery', "
                         "created_by:$uid}) WHERE k.revoked_at IS NULL "
                         "RETURN k.id, k.key_prefix, k.last_used_at, k.created_at",
@@ -37675,7 +37675,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     # oldest-created behavior.
                     own_recovery.sort(
                         key=lambda r: (r[2] is not None, r[2] or "", r[3] or ""))
-                    own_boot = reg._query(
+                    own_boot = reg.query(
                         "MATCH (k:APIKey {org_id:$tid, created_via:'bootstrap', "
                         "created_by:$uid}) WHERE k.revoked_at IS NULL "
                         "RETURN k.id, k.key_prefix "
@@ -37688,7 +37688,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     if rotate:
                         rotate_id = rotate[0]
                         rotated_key_prefix = rotate[1]
-                        reg._query(
+                        reg.query(
                             "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
                             params={"id": rotate_id, "now": now},
                         )
@@ -37697,7 +37697,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                         # counted against max_api_keys). #2426: the recheck
                         # mirrors the cap count exactly (expiry filter included)
                         # so an expired-key rotation cannot 402 or overshoot.
-                        recheck = reg._query(
+                        recheck = reg.query(
                             "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                             "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                             "AND (k.expires_at IS NULL OR k.expires_at > $now) RETURN count(k)",
@@ -37711,7 +37711,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
             expires_at = None
             created_via = "recovery"
 
-        reg._query(
+        reg.query(
             "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, key_prefix:$kp, "
             "created_by:$cb, created_at:$now, revoked_at:null, expires_at:$exp, created_via:$cv})",
             params={"id": kid, "tid": tid, "kh": key_hash, "kp": api_key[:10],

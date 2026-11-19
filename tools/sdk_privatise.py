@@ -62,9 +62,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import re
 import subprocess
 import sys
+import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +82,25 @@ sys.path.insert(0, str(ROOT))
 
 SDK_SRC = ROOT / "tortoise" / "sdk.py"
 COLLISION_SUFFIX = "__svc"
+
+#: The commit the sweep was APPLIED against (#13899 F3). `--check` derives the rename map from
+#: THIS revision and not from a moving `merge-base`: once this branch merges, `merge-base HEAD
+#: origin/main` resolves to a commit whose class already holds the 39 approved names, so the map
+#: would be empty and `--check` would answer "0 references" over an unswept tree — a vacuous
+#: PASS, which is the one thing a verifier must never do. Pinned, so the question stays the same
+#: question forever; a future sweep re-pins it deliberately.
+SWEEP_BASE = "28ca66878d7c617a2f28a8025ddaa40352adfcb2"
+
+#: Non-vacuity of the map: `SWEEP_BASE` holds this many off-surface methods, and a check that
+#: derived a different number is answering about a different tree. A count that silently went to
+#: zero is the vacuous pass again, one level up.
+SWEEP_NAMES = 66
+
+#: The residue the sweep REFUSED to guess at, pinned as `(rows, digest)` over the sorted rows so
+#: that a NEW untyped shape — the ordinary-word receivers (`x.query`, `x.update`, `x.delete`) that
+#: cannot be typed from evidence — reds `--check` instead of being silently absorbed into a fresh
+#: count each review (#13899 F6). Re-pin deliberately with `--repin`, in a commit that says why.
+SWEEP_RESIDUE = (11776, "bfbf6195136edc2c")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
@@ -199,6 +220,12 @@ def py_files() -> list[Path]:
     return sorted(set(out))
 
 
+def residue_digest(rows: Counter) -> str:
+    """A stable digest of the residue SET (row -> count), for the `SWEEP_RESIDUE` pin."""
+    text = "\n".join(f"{row}\t{rows[row]}" for row in sorted(rows))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _call_name(node: ast.expr) -> str:
     if isinstance(node, ast.Call):
         fn = node.func
@@ -213,68 +240,165 @@ def _annotation_is_sdk(node: ast.expr | None) -> bool:
     return "TortoiseSDK" in text
 
 
-def sdk_bound_names(tree: ast.Module) -> set[str]:
-    """Local names this file binds from an SDK-like constructor, annotation or fixture.
+def _is_sdk_value(value: ast.expr | None) -> bool:
+    """Is this expression a value an SDK is built from? Evidence from THIS file only.
+
+    The arm is the CALL's own name — `TortoiseSDK(...)`, `_get_sdk()`, `_registry_sdk()`.
+    """
+    if not isinstance(value, ast.Call):
+        return False
+    return _SDKISH.search(_call_name(value)) is not None or _call_name(value) in {
+        "TortoiseSDK", "Tortoise",
+    }
+
+
+def _scope_body(node: ast.AST) -> list[ast.AST]:
+    """Every node belonging to THIS scope — nested scopes are excluded, they bind their own."""
+    out: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+    return out
+
+
+_SCOPE_NODES = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+@dataclass(frozen=True)
+class Scope:
+    """One lexical scope, and what ITS OWN bindings prove about the names it binds."""
+
+    lo: int
+    hi: int
+    typed: frozenset[str]
+    untyped: frozenset[str]
+
+
+def _scope_bindings(node: ast.AST) -> tuple[set[str], set[str]]:
+    """The (typed, untyped) names this scope's OWN statements bind.
 
     Every arm is evidence from THIS file, never a guess about what a name probably means:
       * `X = TortoiseSDK(...)` / `X = <a name that says sdk>(...)`;
       * `X: TortoiseSDK = ...`, and a parameter annotated `TortoiseSDK`;
-      * a `@pytest.fixture` whose RETURN or YIELD is such a call — the fixture's name is the
-        receiver its consumers use, so typing it here is what reaches them. ⛔ RETURN/YIELD
-        only: an earlier attempt typed a fixture from any mention of `TortoiseSDK(` in its
-        body, which typed a FastAPI `TestClient` fixture that merely built an SDK inside
-        itself and rewrote `client.delete(` into `client._delete(` — a false positive this
-        arm exists to make impossible.
+      * `with <sdk-ish>() as X:`.
     """
-    out: set[str] = set()
+    typed: set[str] = set()
+    untyped: set[str] = set()
 
-    def is_sdk_value(value: ast.expr | None) -> bool:
-        if not isinstance(value, ast.Call):
-            return False
-        return _SDKISH.search(_call_name(value)) is not None or _call_name(value) in {
-            "TortoiseSDK", "Tortoise",
-        }
+    def bind(name: str, is_typed: bool) -> None:
+        (typed if is_typed else untyped).add(name)
 
+    for n in _scope_body(node):
+        if isinstance(n, ast.Assign):
+            for target in n.targets:
+                if isinstance(target, ast.Name):
+                    bind(target.id, _is_sdk_value(n.value))
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            bind(n.target.id, _annotation_is_sdk(n.annotation) or _is_sdk_value(n.value))
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if isinstance(item.optional_vars, ast.Name):
+                    bind(item.optional_vars.id, _is_sdk_value(item.context_expr))
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = node.args
+        for arg in (*args.args, *args.kwonlyargs, *args.posonlyargs):
+            if _annotation_is_sdk(arg.annotation):
+                bind(arg.arg, True)
+    # A name bound BOTH ways in ONE scope is ambiguous and is NOT rewritten. This is the
+    # `#13899` F2 lesson, measured in `tortoise/hosted_api.py`: `reg` is a real SDK in one
+    # function (`reg = _registry_sdk()`) and a FalkorDB handle in the next
+    # (`reg = sdk._get_registry()`), and a FILE-WIDE set rewrote 80 graph calls into
+    # `reg._query(` — a dependency on a vendor private method. Scope, then ambiguity.
+    return typed - untyped, untyped
+
+
+class Typing:
+    """Scope-resolved SDK evidence for a module: which local names carry the surface, WHERE."""
+
+    def __init__(self, scopes: list[Scope]) -> None:
+        # Innermost FIRST: the smallest span containing the line decides.
+        self._scopes = sorted(scopes, key=lambda s: (s.hi - s.lo, s.lo))
+        typed: set[str] = set()
+        for s in scopes:
+            typed |= s.typed
+        self._any_typed = typed
+
+    def typed(self, name: str, line: int) -> bool:
+        """Does the NEAREST enclosing scope that binds `name` type it as SDK?"""
+        for s in self._scopes:
+            if not (s.lo <= line <= s.hi):
+                continue
+            if name in s.typed:
+                return True
+            if name in s.untyped:
+                return False
+        return name in self._any_typed
+
+    def typed_anywhere(self, name: str) -> bool:
+        """For a name reached through an ATTRIBUTE (`mod.fixture.method`): the receiver names
+        the module, not the scope, so the nearest-scope rule cannot decide it."""
+        return name in self._any_typed
+
+
+def sdk_typing(tree: ast.Module) -> Typing:
+    """The scope-resolved typing for one module, fixtures included.
+
+    A `@pytest.fixture` whose RETURN or YIELD is an SDK value types the FIXTURE'S NAME in the
+    scope the fixture is defined in — the name its consumers reach it by. ⛔ RETURN/YIELD
+    only: an earlier attempt typed a fixture from any mention of `TortoiseSDK(` in its body,
+    which typed a FastAPI `TestClient` fixture that merely built an SDK inside itself and
+    rewrote `client.delete(` into `client._delete(` — a false positive this arm exists to make
+    impossible.
+    """
+    parents: dict[int, ast.AST] = {}
+    scope_nodes: list[ast.AST] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and is_sdk_value(node.value):
-            out.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        elif isinstance(node, ast.AnnAssign):
-            if isinstance(node.target, ast.Name) and (
-                _annotation_is_sdk(node.annotation) or is_sdk_value(node.value)
-            ):
-                out.add(node.target.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for arg in (*node.args.args, *node.args.kwonlyargs, *node.args.posonlyargs):
-                if _annotation_is_sdk(arg.annotation):
-                    out.add(arg.arg)
-        elif isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if is_sdk_value(item.context_expr) and isinstance(item.optional_vars, ast.Name):
-                    out.add(item.optional_vars.id)
-
-    # SECOND PASS — fixtures, which is where the fleet's suites actually bind the SDK.
-    # `@pytest.fixture def lane(...): sdk = TortoiseSDK(...); yield sdk` is the dominant
-    # spelling, so the yielded value is usually a NAME this file already typed rather than
-    # a constructor call. Typing the fixture by its yielded value is what reaches
-    # `lane.create_point(…)` — 273 references on this tree that a call-only arm misses.
-    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+        if isinstance(node, _SCOPE_NODES):
+            scope_nodes.append(node)
+    bindings: dict[int, tuple[set[str], set[str]]] = {
+        id(n): _scope_bindings(n) for n in scope_nodes
+    }
+    for node in scope_nodes:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        is_fixture = any(
+        if not any(
             (getattr(d, "attr", None) or getattr(d, "id", None)) == "fixture"
             for d in node.decorator_list
-        )
-        if not is_fixture:
+        ):
             continue
-        for sub in ast.walk(node):
-            if not isinstance(sub, (ast.Return, ast.Yield)):
-                continue
-            value = sub.value
-            if is_sdk_value(value):
-                out.add(node.name)
-            elif isinstance(value, ast.Name) and value.id in out:
-                out.add(node.name)
-    return out
+        own_typed = bindings[id(node)][0]
+        if not any(
+            isinstance(sub, (ast.Return, ast.Yield))
+            and (
+                _is_sdk_value(sub.value)
+                or (isinstance(sub.value, ast.Name) and sub.value.id in own_typed)
+            )
+            for sub in _scope_body(node)
+        ):
+            continue
+        owner = node
+        while not isinstance(parents.get(id(owner)), _SCOPE_NODES) and id(owner) in parents:
+            owner = parents[id(owner)]
+        enclosing = parents.get(id(owner))
+        if enclosing is None or id(enclosing) not in bindings:
+            continue
+        typed, untyped = bindings[id(enclosing)]
+        typed.add(node.name)
+        untyped.discard(node.name)
+        bindings[id(enclosing)] = (typed, untyped)
+    scopes = []
+    for n in scope_nodes:
+        lo = 1 if isinstance(n, ast.Module) else n.lineno
+        hi = getattr(n, "end_lineno", None) or lo
+        typed, untyped = bindings[id(n)]
+        scopes.append(Scope(lo, hi, frozenset(typed), frozenset(untyped)))
+    return Typing(scopes)
 
 
 def sdk_standin_classes(tree: ast.Module, rmap: dict[str, str]) -> set[str]:
@@ -310,7 +434,7 @@ def sdk_standin_classes(tree: ast.Module, rmap: dict[str, str]) -> set[str]:
 
 
 def receiver_is_sdk(
-    recv: ast.expr, bound: set[str], standins: set[str], in_sdk_class: bool
+    recv: ast.expr, typing: Typing, standins: set[str], in_sdk_class: bool, line: int
 ) -> bool:
     """Is this receiver something that carries the SDK surface? Evidence only, never a guess."""
     if isinstance(recv, ast.Name):
@@ -320,19 +444,21 @@ def receiver_is_sdk(
             return in_sdk_class
         if recv.id == "TortoiseSDK":
             return True
-        return bool(_SDKISH.search(recv.id)) or recv.id in bound or recv.id in standins
+        return (
+            bool(_SDKISH.search(recv.id))
+            or typing.typed(recv.id, line)
+            or recv.id in standins
+        )
     if isinstance(recv, ast.Attribute):
         if recv.attr == "TortoiseSDK" or _SDKISH.search(recv.attr):
             return True
-        if isinstance(recv.value, ast.Name) and recv.attr in bound:
-            return True
-        return False
+        return isinstance(recv.value, ast.Name) and typing.typed_anywhere(recv.attr)
     if isinstance(recv, ast.Call):
         name = _call_name(recv)
-        return name == "TortoiseSDK" or bool(_SDKISH.search(name)) or name in bound
+        return name == "TortoiseSDK" or bool(_SDKISH.search(name)) or typing.typed_anywhere(name)
     if isinstance(recv, ast.Subscript):
         # `sdk["x"].method` — typed by what is being subscripted.
-        return receiver_is_sdk(recv.value, bound, standins, in_sdk_class)
+        return receiver_is_sdk(recv.value, typing, standins, in_sdk_class, line)
     return False
 
 
@@ -381,14 +507,22 @@ _STRING_PLAIN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)$")
 
 def edits_for(path: Path, rmap: dict[str, str]) -> FileEdits:
     src = path.read_text(encoding="utf-8")
-    empty = FileEdits([], [], [], Counter())
+    # SOUND, not a heuristic: an attribute, `def` or string reference to a name cannot exist
+    # without that name's literal text in the file, so a file containing none of them has no
+    # edit and no residue. It is what keeps `--check` a gate people will actually run.
+    if not any(name in src for name in rmap):
+        return FileEdits([], [], [], Counter())
     try:
-        tree = ast.parse(src)
+        with warnings.catch_warnings():
+            # These files are READ, never run: a `\s`-in-docstring warning from someone else's
+            # module is not this gate's business, and it buries the verdict line.
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(src)
     except SyntaxError:
         return FileEdits([], [], [], Counter({"<<syntax-error>>": 1}))
     in_sdk = path.resolve() == SDK_SRC.resolve()
     standins = sdk_standin_classes(tree, rmap)
-    bound = sdk_bound_names(tree) | standins
+    typing = sdk_typing(tree)
     ranges = _class_ranges(tree)
     lines = src.splitlines()
     attrs: list[tuple[int, int, int, str]] = []
@@ -400,7 +534,7 @@ def edits_for(path: Path, rmap: dict[str, str]) -> FileEdits:
         # ── attribute accesses ────────────────────────────────────────────────
         if isinstance(node, ast.Attribute) and node.attr in rmap:
             in_class = in_sdk and _in_sdk_class(node.lineno, ranges)
-            if not receiver_is_sdk(node.value, bound, standins, in_class):
+            if not receiver_is_sdk(node.value, typing, standins, in_class, node.lineno):
                 residue[f"{ast.unparse(node.value)[:40]}.{node.attr}"] += 1
                 continue
             if node.value.end_lineno != node.end_lineno:
@@ -436,7 +570,7 @@ def edits_for(path: Path, rmap: dict[str, str]) -> FileEdits:
                 if isinstance(literal, ast.Constant) and isinstance(literal.value, str):
                     m = _STRING_PLAIN.match(literal.value)
                     if m and m.group(1) in rmap and receiver_is_sdk(
-                        target, bound, standins, False
+                        target, typing, standins, False, literal.lineno
                     ):
                         strings.append(
                             (literal.lineno, literal.col_offset + 1,
@@ -511,35 +645,42 @@ def main() -> int:
                     help="classification, collisions, stand-ins and every untyped residue shape")
     ap.add_argument("--apply", action="store_true", help="rewrite the tree")
     ap.add_argument("--check", action="store_true",
-                    help="exit 1 while any TYPED reference to a now-private name survives")
+                    help="exit 1 while any TYPED reference to a now-private name survives, or "
+                         "the residue set moved off its pin, or the map derived from the "
+                         "pinned base is empty/wrong-sized (a vacuous verifier is a failure)")
     ap.add_argument(
         "--base", default=None,
-        help="rev to derive the rename map from (default: merge-base with origin/main). "
-             "⛔ REQUIRED IN EFFECT for `--check`: after `--apply` the live class no longer "
-             "holds the names, so a map derived from the CURRENT class is empty and `--check` "
-             "would answer 0 references over an unswept tree — a vacuous pass.")
+        help=f"rev to derive the rename map from (default for --check: the PINNED sweep base "
+             f"{SWEEP_BASE[:12]}; default for --plan/--apply/--report: the working tree). "
+             "⛔ `--check` MUST NOT default to `merge-base origin/main`: after this branch "
+             "merges the live class no longer holds the names, the map is empty, and the "
+             "check would answer 0 references over an unswept tree — a vacuous PASS.")
+    ap.add_argument("--repin", action="store_true",
+                    help="print the SWEEP_RESIDUE pin for the current tree (deliberate re-pin)")
     ap.add_argument("--top", type=int, default=25, help="residue rows to print")
     args = ap.parse_args()
-    if not (args.plan or args.apply or args.check or args.report):
+    if not (args.plan or args.apply or args.check or args.report or args.repin):
         ap.print_help()
         return 2
 
-    if args.base is None and args.check:
-        # `--check` without a base answers a DIFFERENT question after `--apply` — one whose
-        # answer is always zero — so the base is resolved here rather than left to the caller.
-        mb = subprocess.run(
-            ["git", "merge-base", "HEAD", "origin/main"], cwd=ROOT,
-            capture_output=True, text=True,
-        )
-        if mb.returncode != 0:
-            raise SystemExit(
-                "`--check` needs --base (cannot resolve merge-base with origin/main): "
-                f"{mb.stderr.strip()}"
-            )
-        args.base = mb.stdout.strip()
+    if args.base is None and (args.check or args.repin):
+        args.base = SWEEP_BASE
 
     entries = rename_map(rev=args.base)
     rmap = {e.name: e.private for e in entries}
+
+    if args.check and len(entries) != SWEEP_NAMES:
+        # A map that is empty (or a different size) means the check is answering about a
+        # different tree than the one the sweep was applied to. That is a FAILURE, not a pass:
+        # a verifier whose answer cannot vary is the fail-open this file exists to prevent.
+        print(
+            f"VACUOUS CHECK: the rename map derived from {args.base[:12]} holds "
+            f"{len(entries)} name(s), expected exactly {SWEEP_NAMES}. `--check` cannot answer "
+            "\"did we finish\" from a map that is empty or has drifted; re-pin SWEEP_BASE / "
+            "SWEEP_NAMES deliberately, in a commit that says why.",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.plan or args.report:
         print(f"{len(entries)} off-surface methods on TortoiseSDK\n")
@@ -551,8 +692,11 @@ def main() -> int:
     total_attrs = total_defs = total_strings = 0
     residue_all: Counter = Counter()
     per_file_attrs: Counter = Counter()
-    standin_files: Counter = Counter()
-    for p in py_files():
+    # ONE walk per invocation: the check block below re-derives the same counts, so running
+    # this loop for `--check` too doubled the gate's wall clock for nothing (measured: 4m20 →
+    # 2m10 on the tree at this head).
+    walk_here = args.plan or args.report or args.apply
+    for p in py_files() if walk_here else ():
         e = edits_for(p, rmap)
         residue_all.update(e.residue)
         if e.attrs or e.defs or e.strings:
@@ -577,15 +721,33 @@ def main() -> int:
         for r, c in residue_all.most_common(args.top):
             print(f"  {c:5d}  {r}")
 
-    if args.check:
+    if args.check or args.repin:
         after = 0
         after_residue: Counter = Counter()
         for p in py_files():
             e2 = edits_for(p, rmap)
             after += len(e2.attrs) + len(e2.defs) + len(e2.strings)
             after_residue.update(e2.residue)
+        digest = residue_digest(after_residue)
+        if args.repin:
+            print(f"SWEEP_RESIDUE = ({sum(after_residue.values())}, {digest!r})")
+            return 0
         print(f"typed references still pointing at a public name: {after}")
         print(f"untyped receivers left alone (deliberate, reported): {sum(after_residue.values())}")
+        pinned = SWEEP_RESIDUE
+        if (sum(after_residue.values()), digest) != pinned:
+            print(
+                "the residue SET moved off its pin: a reference shape that was not there when "
+                "this sweep was verified is now on the tree, and the ordinary-word receivers "
+                "(`x.query`, `x.update`, `x.delete`) are exactly the shape a typed-reference "
+                "count cannot see. Read the rows below, fix or declare the new shape, then "
+                f"re-pin with --repin.\n  observed: ({sum(after_residue.values())}, "
+                f"{digest!r})\n  pinned:   {pinned}",
+                file=sys.stderr,
+            )
+            for r, c in after_residue.most_common(10):
+                print(f"  {c:5d}  {r}", file=sys.stderr)
+            return 1
         return 1 if after else 0
 
     return 0
