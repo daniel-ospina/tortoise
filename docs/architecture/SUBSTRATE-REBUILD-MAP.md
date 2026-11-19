@@ -193,7 +193,7 @@ Taken from the import graph, not from prose.
 | component | depends on | the interface it exposes | issues that change it |
 |---|---|---|---|
 | `projection/__init__.py` | `projection.entities` · `projection.edges` · `projection.grounding` · `projection.propagation` · `config` · `ids` · `live` | **the replay entrypoint + `_ensure_indexes`** | #5026 · #4997 · #4240 · #5004 (all closed) |
-| `projection/entities.py` | `ids` · `live` · `source_identity` | the source/entity writers; `_SOURCE_HANDLED` (`entities.py:1485`) | #5026 · #5025 · #5024 · #5038 (all closed) |
+| `projection/entities.py` | `ids` · `live` · `source_identity` | the source/entity writers; `_SOURCE_HANDLED` (`entities.py:2189`) | #5026 · #5025 · #5024 · #5038 (all closed) |
 | `projection/edges.py` | `source_identity` | `STRUCTURAL_REL_LABELS` (`:55`) + `stub_key` (`:84`) — **the replay keys** | #5026 · #5025 (closed) |
 | `source_identity.py` | *leaf* | canonical source identity (the dedup key) | #5038 |
 | `fanout.py` | *leaf* | the fan-out cap | #4999 |
