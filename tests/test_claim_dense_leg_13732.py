@@ -835,6 +835,100 @@ class TestTheArmsConstruction:
         assert embeddings.EmbeddingModel.get() == "A-MODEL"
 
 
+# ── 5c. the call sites the review rounds fixed (wiring, not logic) ─────────
+
+
+class TestTheWiringTheReviewFixed:
+    """⛔ A PURITY PIN DOES NOT PIN THE CALL SITE.
+
+    Measured: three fixes from rounds 2-3 could each be reverted with the whole
+    suite green — `preregistered_n = len(population)` (reinstate the
+    own-n bar), deleting `reset_coverage_cache()`, and `_exit_code` returning 0
+    (publish a partial artifact as the paired answer). All three are asserted
+    here against the shipped source or the shipped helper, because a later lane
+    must not be free to reinstate them silently.
+    """
+
+    def _run_measurement(self) -> ast.AST:
+        tree = ast.parse(TOOL.read_text())
+        fn = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        ]
+        assert fn, "run_measurement is gone"
+        return fn[0]
+
+    def test_the_pre_registered_n_comes_from_the_flag_not_the_built_population(self):
+        run = self._run_measurement()
+        assigns = [
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "preregistered_n" for t in n.targets)
+        ]
+        assert assigns, "preregistered_n is never assigned"
+        src = ast.dump(assigns[0].value)
+        assert "'population'" in src and "Attribute" in src, src
+        assert "Call" not in src or "len" not in src, (
+            "preregistered_n is computed rather than taken from --population — that "
+            "reinstate the run-own-n bar the pre-registration exists to replace"
+        )
+
+    def test_the_coverage_cache_is_evicted_after_coverage_and_before_the_arms(self):
+        run = self._run_measurement()
+        cov = [
+            n.lineno
+            for n in ast.walk(run)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "require_coverage"
+        ]
+        reset = [
+            n.lineno
+            for n in ast.walk(run)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "reset_coverage_cache"
+        ]
+        arms = [
+            n.lineno
+            for n in ast.walk(run)
+            if isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == "ARMS"
+        ]
+        assert cov and reset and arms
+        assert min(cov) < min(reset), "the population-scoped verdict is never evicted"
+        assert min(reset) < min(arms), (
+            "the eviction lands AFTER the arms — the shipped read path would then "
+            "consume this population's denominator"
+        )
+
+    def test_the_incomplete_run_exits_non_zero(self, tool_mod):
+        """The artifact is written, so the exit code is the ONLY incompleteness signal."""
+        assert tool_mod._exit_code(None) == 0
+        assert tool_mod._exit_code(tool_mod.Refused("record_population_absent", "x")) == 3
+
+    def test_both_bars_bind_so_a_smaller_population_cannot_loosen_the_gate(self, tool_mod):
+        """⛔ A run that built FEWER claims gets a LARGER observed bar.
+
+        `detectable_effect_pp` is `2.8016·sqrt(p_d/n)`, so with the pre-registered
+        n fixed, a smaller run has the easier committed bar. Gating on the
+        pre-registered bar ALONE therefore published GAIN at deltas the
+        population cannot resolve — the false-PASS class, in the direction that
+        flatters the arm. Both bars must bind.
+        """
+        cmp = {
+            "delta_pp": 4.80,
+            "mcnemar_p_two_sided": 1e-9,
+            "detectable_pp": 5.12,  # observed at n = 600
+            "detectable_pp_preregistered": 4.47,  # committed at n = 786
+            "found_deep_delta_pp": 0.0,
+        }
+        assert tool_mod.classify(cmp) == "UNRESOLVED"
+        cmp["delta_pp"] = 5.50  # above BOTH
+        assert tool_mod.classify(cmp) == "GAIN"
+
+
 # ── 6. the contradiction test, structurally ───────────────────────────────
 
 

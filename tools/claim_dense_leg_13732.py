@@ -83,10 +83,12 @@ store: the ``record_dense`` arm would then rank none of them, report
 ``recall@3 = 0.0``, and publish *"the record's dense leg collapses claim recall"*
 with a valid McNemar p — a figure about the seeding step wearing the leg's name.
 That is the ``0 >= 0`` trap one level deeper, and it is why this instrument asks a
-SECOND, id-scoped question before any arm runs:
+SECOND, id-scoped question:
 :func:`record_population_vectors` counts how many of the POPULATION's own ids the
 record holds a vector for, and :func:`require_population_in_record` REFUSES the
-run when that is not all of them. ``coverage`` is left as it is — changing it
+``record_dense`` ARM when that is not all of them — the arm, not the run: the
+``lexical`` and ``graph_dense`` arms need no record cohort and still publish.
+``coverage`` is left as it is — changing it
 would reverse a documented decision and break every other label's reader; the
 id-set half belongs here, where the population is known.
 
@@ -181,7 +183,10 @@ relaxed: publishing a ``record_dense`` figure over ids the record does not hold 
 exactly the ``#5090`` Q2 false PASS the id-scoped half exists to stop.
 
 Exit codes: ``0`` ran · ``2`` precondition refused (named) · ``3`` an arm's trace
-contradicted its own declaration · ``4`` argument error.
+contradicted its own declaration, **or an arm was BLOCKED by a precondition**
+(recorded by name in ``arms``/``not_measured``, with the artifact still written)
+· ``4`` argument error. Rule: exit ``3`` alone means "published, but not the
+complete paired answer" — never read it as a measurement.
 """
 
 from __future__ import annotations
@@ -947,7 +952,33 @@ def run_measurement(args: argparse.Namespace) -> int:
     sessions = Path(os.path.expanduser(args.sessions_dir))
     files = require_corpus(sessions)
     model = require_embedder()
-    dsn = require_record(_resolve_dsn(args.dsn))
+
+    # ⛔ THE RECORD'S PRECONDITIONS BELONG TO THE `record_dense` ARM, NOT TO THE
+    # RUN — the scoping principle the population guard carries one level down,
+    # applied to the DSN/driver/tenant gates. `lexical` and `graph_dense` touch the
+    # record NOWHERE (`_read_arm` → `_query` → `tortoise_fts_query`; the graph arm
+    # sets `ARMING_ENV=0`), so a run-level `no_record_dsn` / `no_record_driver` /
+    # `record_leg_disarmed` / `no_tenant` refused the WHOLE run on a box that could
+    # still reproduce M2's lexical baseline — publishing nothing while looking
+    # like a strict gate. Resolving them here also keeps the tenant check AHEAD of
+    # the graph seed, so a refused run leaves no seeded graph behind.
+    record_blocked: Refused | None = None
+    dsn: str | None = None
+    scope = None
+    try:
+        dsn = require_record(_resolve_dsn(args.dsn))
+        scope = record_vector._resolve_scope()
+        if scope is None:
+            raise Refused(
+                "no_tenant",
+                "no record tenant resolved for this process — export the PAIR "
+                "TORTOISE_RECORD_ORG_ID and TORTOISE_RECORD_GRAPH_ID *and* "
+                "TORTOISE_RECORD_SINGLE_TENANT=1 (record_tenant() refuses a half-"
+                "configured pair rather than completing it); without it the record's "
+                "RLS policies read a GUC nobody set and every read returns zero rows",
+            )
+    except Refused as exc:
+        record_blocked = exc
 
     # ⛔ THE PRE-REGISTERED n — the bar committed in `preregistration.json`
     # BEFORE any number existed. It decides the verdict; the run's own n is
@@ -993,27 +1024,6 @@ def run_measurement(args: argparse.Namespace) -> int:
             ).result_set
         ]
     )
-    scope = record_vector._resolve_scope()
-    if scope is None:
-        raise Refused(
-            "no_tenant",
-            "no record tenant resolved for this process — export the PAIR "
-            "TORTOISE_RECORD_ORG_ID and TORTOISE_RECORD_GRAPH_ID *and* "
-            "TORTOISE_RECORD_SINGLE_TENANT=1 (record_tenant() refuses a half-"
-            "configured pair rather than completing it); without it the record's "
-            "RLS policies read a GUC nobody set and every read returns zero rows",
-        )
-    coverage = require_coverage(
-        record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn)
-    )
-    require_seeded(graph_vectors, coverage["record_vectors"])
-    # ⛔ DROP THE CACHE `coverage` JUST WROTE. The cached verdict is keyed by
-    # LABEL and stored stickily, and this call supplied a POPULATION count as
-    # the label's denominator — so the shipped read path, which asks the
-    # label-wide question, would receive this population-scoped answer instead
-    # of measuring for itself. On a fresh graph the two denominators coincide;
-    # with `--graph` pointed at a real tenant they do not.
-    record_vector.reset_coverage_cache()
 
     # ⛔ THE ID-SCOPED HALF (see the docstring): `coverage` is a LABEL-WIDE count
     # by design, so it verifies a tenant whose record holds SOME embedded points
@@ -1033,20 +1043,42 @@ def run_measurement(args: argparse.Namespace) -> int:
     # carries the refusal BY NAME against the one arm it blocks (exit 3) rather
     # than skipping it silently.
     population_ids = [row["id"] for row in population]
-    population_vectors = record_population_vectors(population_ids, scope, dsn)
-    coverage["population_n"] = len(population_ids)
-    coverage["population_vectors"] = population_vectors
+    coverage: dict = {}
+    population_vectors: int | None = None
+    if record_blocked is None:
+        try:
+            coverage = require_coverage(
+                record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn)
+            )
+            require_seeded(graph_vectors, coverage["record_vectors"])
+            # ⛔ DROP THE CACHE `coverage` JUST WROTE. The cached verdict is keyed
+            # by LABEL and stored stickily, and this call supplied a POPULATION
+            # count as the label's denominator — so the shipped read path, which
+            # asks the label-wide question, would receive this population-scoped
+            # answer instead of measuring for itself.
+            record_vector.reset_coverage_cache()
+            population_vectors = record_population_vectors(population_ids, scope, dsn)
+            coverage["population_n"] = len(population_ids)
+            coverage["population_vectors"] = population_vectors
+        except Refused as exc:
+            record_blocked = exc
+            coverage = {}
+            population_vectors = None
 
     queries = [(row["id"], row["query"]) for row in population]
     arms: dict[str, dict] = {}
     blocked: Refused | None = None
     for arm in ARMS:
         if arm == ARM_RECORD_DENSE:
-            try:
-                require_population_in_record(population_vectors, len(population_ids))
-            except Refused as exc:
-                blocked = exc
-                arms[arm] = {"arm": arm, "blocked": exc.code, "message": exc.message}
+            gate = record_blocked
+            if gate is None:
+                try:
+                    require_population_in_record(population_vectors, len(population_ids))
+                except Refused as exc:
+                    gate = exc
+            if gate is not None:
+                blocked = gate
+                arms[arm] = {"arm": arm, "blocked": gate.code, "message": gate.message}
                 continue
         ranks, _traces, verdict = _read_arm(sdk, arm, queries, args.deep, _sanitise_query_text)
         arms[arm] = {
@@ -1077,7 +1109,15 @@ def run_measurement(args: argparse.Namespace) -> int:
             "per_k": per_k,
             "primary": cmp,
             "label": classify(cmp),
-            "detectable_pp_pre_registered": round(
+            # ⛔ THE BAR THAT DECIDED, not a number that merely looks like it.
+            # This field used to carry the bar at a FIXED assumed p_d = 0.20
+            # (always 4.47) while `classify` gated on the bar at the OBSERVED
+            # discordance (5.47 at p_d = 0.30, 2.23 at 0.05) — so a reader quoting
+            # it could conclude GAIN where the label said UNRESOLVED. The deciding
+            # bar is `primary`'s; the fixed-p_d figure is kept under a name that
+            # says what it is.
+            "detectable_pp_gated": cmp["detectable_pp_preregistered"],
+            "detectable_pp_at_assumed_pd_0.20": round(
                 detectable_effect_pp(preregistered_n, DISCORDANCES[2]), 2
             ),
         }
@@ -1094,6 +1134,22 @@ def run_measurement(args: argparse.Namespace) -> int:
         ),
         "head": _git_head(),
         "graph": graph_name,
+        # ⛔ A RUN THAT REFUSES AFTER THE SEED LEAVES THE GRAPH BEHIND, AND NOTHING
+        # DROPS IT. The tenant/DSN gates now resolve BEFORE `_seed_graph`, so the
+        # most common refusal leaves nothing; the ones that need a seeded graph to
+        # be answerable (coverage, the id-scoped cohort) cannot, so the artifact
+        # declares the leftover rather than letting the next lane discover it —
+        # `window_quality_m2` commits the same field for the same reason.
+        "cleanup": {
+            "graph": graph_name,
+            "dropped_by_this_run": False,
+            "note": (
+                "the population is written to this graph and NOT dropped; on the "
+                "lane container it dies with the container, but with `--graph` "
+                "pointed at a real tenant it is a leftover. Drop it by hand or "
+                "reuse the name."
+            ),
+        },
         "corpus": {"files": len(files), "stats": corpus_stats, "point_build": funnel},
         "population": {"built": len(population), "written": written},
         "coverage": coverage,
@@ -1143,14 +1199,25 @@ def run_measurement(args: argparse.Namespace) -> int:
         print(f"wrote {out}", file=sys.stderr)
     else:
         print(text)
-    if blocked is not None:
-        # ⛔ THE ARTIFACT IS WRITTEN FIRST, THEN THE REFUSAL IS NAMED. The two
-        # arms that need no record cohort are real measurements and are kept;
-        # exit 3 says the run is INCOMPLETE, so no caller can mistake it for the
-        # paired answer the pre-registration exists to price.
-        print(f"REFUSED[{blocked.code}]: {blocked.message}", file=sys.stderr)
-        return 3
+        if blocked is not None:
+            # ⛔ THE ARTIFACT IS WRITTEN FIRST, THEN THE REFUSAL IS NAMED. The two
+            # arms that need no record cohort are real measurements and are kept;
+            # the exit says the run is INCOMPLETE, so no caller can mistake it for
+            # the paired answer the pre-registration exists to price.
+            print(f"REFUSED[{blocked.code}]: {blocked.message}", file=sys.stderr)
+        return _exit_code(blocked)
     return 0
+
+
+def _exit_code(blocked: Refused | None) -> int:
+    """The run's exit: ``0`` complete, ``3`` incomplete-but-published.
+
+    ⛔ A PURE HELPER BECAUSE IT IS LOAD-BEARING AND WAS UNPINNED. Inline, the
+    ``return 3`` could become ``return 0`` with the whole suite green — which
+    would let a partial artifact (two arms measured, `record_dense` BLOCKED)
+    publish as the paired answer the pre-registration exists to price.
+    """
+    return 3 if blocked is not None else 0
 
 
 def _git_head() -> str:

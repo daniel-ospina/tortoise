@@ -20,7 +20,7 @@ claim recall?"* — and it is **unanswered here**, because this box cannot run t
 
 | ingredient | state on this box (`cmux`, 2026-11-19) |
 |---|---|
-| capture corpus (`~/.tortoise/session-events/*.jsonl`) | **absent** — 0 files, so the population `build_point_population` builds has no real turn text |
+| capture corpus (`~/.tortoise/session-events/*.jsonl`) | **absent under the lane's `HOME=/tmp/cell-home`** — 0 files. ⚠️ NOT absent on the box itself: under `HOME=/home/cmux` the same path holds **25** dated `*.jsonl` captures (measured 2026-11-19). The row is a statement about the lane's home, not about `cmux`, and the run on the real home gets PAST `require_corpus` and refuses `no_embedder` instead |
 | embedder (`fastembed`) | **absent**; `https://huggingface.co` → `000`, so it cannot be installed (`pyproject` extras are `embeddings`) |
 | record driver (`psycopg2`) | **absent**; `https://pypi.org` is unreachable, so it cannot be installed — every record read in this tree goes through it |
 | pgvector image | **present** (`pgvector/pgvector:pg16`), so the *store* is not the blocker |
@@ -123,7 +123,8 @@ name. The instrument therefore asks a second, **id-scoped** question before any 
 `record_population_vectors` counts how many of the population's own ids the record holds a vector
 for (the same predicates as the label-wide count — `org_id`/`graph_id` from the one tenant prologue,
 `embedding_vec IS NOT NULL`, since that is the column the serve slices), and
-`require_population_in_record` REFUSES the run when that is not all of them:
+`require_population_in_record` REFUSES the `record_dense` ARM when that is not all of them (the
+`lexical` and `graph_dense` arms need no record cohort and still publish):
 `record_population_absent` (or `record_population_unmeasurable` when the count could not be taken —
 unmeasured is never zero). `coverage` itself is unchanged: widening it would reverse a documented
 decision and change every other label's reader, and the id-set half belongs in the instrument, which
@@ -133,6 +134,12 @@ So the truth about this instrument, stated plainly: **it embeds and writes the p
 GRAPH, and it REQUIRES — never writes — the record's matching cohort.** `#13210` is the backfill's
 tool, and the record is a journal fold with no side door; a second writer for its population is the
 one thing this file promised not to be.
+
+⛔ **The record's own preconditions gate the ARM too, not just the cohort.** `no_record_dsn`,
+`no_record_driver`, `record_leg_disarmed` and `no_tenant` are resolved BEFORE the graph is seeded
+(so a refused run leaves no seeded graph) and are applied to `record_dense` alone — `lexical` and
+`graph_dense` publish regardless. The artifact carries a `cleanup` block naming the graph a
+completed run leaves behind, because nothing drops it.
 
 ⛔ **And this population's ids cannot reach the record by any backfill.** `_seed_graph` writes
 through `proj._upsert_point_props`, which is the apply-FOLD — it emits no journal record — while the
@@ -170,9 +177,11 @@ python -m tortoise record-reconcile --journal "$TORTOISE_RECORD_JOURNAL"   # exi
 uv run python tools/claim_dense_leg_13732.py --preregister --population 786
 
 # 3. the paired run:
-#    `record_dense` refuses by name unless the record holds THIS population's ids; the
-#    `lexical`/`graph_dense` arms publish regardless, and the run exits 3, so the artifact
-#    is never mistaken for the paired answer the pre-registration prices.
+#    `record_dense` refuses by name unless the record holds THIS population's ids AND the
+#    record's DSN / driver / arming / tenant all resolve; the `lexical`/`graph_dense` arms
+#    publish regardless (those four gates are applied to the record arm alone), and the run
+#    exits 3, so the artifact is never mistaken for the paired answer the pre-registration
+#    prices.
 uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
 uv run python tools/claim_dense_leg_13732.py --points 900 --deep 50 \
     --out /tmp/claim-dense-13732.json
