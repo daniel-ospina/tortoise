@@ -568,40 +568,54 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # --name-only origin/main...HEAD -- tortoise/`"), ONE quotes the opposite only in order to
     # refute it ("returns exactly those two" — FALSE in every half), and ONE names the command
     # with no verdict at all ("read them from …"). So the false sentence SATISFIED that leg —
-    # and the cell contradicted itself, five sentences apart. Presence was never the property
-    # being relied on; AGREEMENT is, so that is what is asserted here.
+    # and the cell contradicted itself, five sentences apart.
     #
-    # NON-VACUITY, MEASURED: on the pre-fix document the first tuple member below IS present
-    # (`grep -c 'and neither is'` -> 1) and this leg reds on it; it is green only after the
-    # clause is deleted. The third member refuses the same claim in the other spelling the cell
+    # ⛔ AN EARLIER CUT OF THIS LEG *REQUIRED* ONE OF THOSE EMPTY SPELLINGS ("`… -- tortoise/`
+    # is empty", `-> empty`, `is EMPTY`) and it became a FALSE BLOCK on the branch that made
+    # the sentence true by shipping code. MEASURED at this head:
+    #
+    #     $ git diff --name-only origin/main...HEAD -- tortoise/
+    #     tortoise/activation_scorecard.py
+    #     tortoise/hosted_api.py
+    #     tortoise/projection/__init__.py
+    #
+    # — three paths, one of them (`projection/__init__.py`) THIS PR's own runtime change. The
+    # leg therefore demanded that the document assert a falsehood, and the lane that corrected
+    # the document to the measured set (and to the command, which is this document's own rule
+    # for a head-bound figure) red this arm instead of passing it. A verdict is stale the moment
+    # the diff moves, so the arm no longer pins WHICH WAY the measurement went: it forbids the
+    # claims that are false for the tree as it stands and leaves the reading to the command the
+    # document names. The `is NOT empty` spelling is no longer forbidden for the same reason —
+    # it is what the command prints here, so refusing it refused the truth.
+    #
+    # NON-VACUITY, MEASURED: on the pre-fix document every one of these spellings was present
+    # (`grep -c 'and neither is'` -> 1) and this leg reds on it; it is green only once the empty
+    # claims are gone. The last member refuses a different claim in the other spelling the cell
     # used to carry — `… tortoise/` "returns exactly those two" — and the QUOTES are what tell
     # that quoted retraction apart from a re-assertion (the pattern matches only the unquoted
     # form, so the retraction that still records the false spelling stays legal).
     _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
-        f"{_tortoise_cmd}` is NOT empty",
+        f"{_tortoise_cmd}` is empty",
+        f"{_tortoise_cmd}` -> empty",
+        f"{_tortoise_cmd}` is EMPTY",
         f"{_tortoise_cmd}` returns exactly those two",
     ):
         assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints 0 lines at "
-            "this head (the `#12943` modules landed on `main`, so they sit on BOTH sides "
-            "of the merge and contribute no path here), so the sentence is refuted by the "
-            "very command it quotes — and it satisfied the presence-only leg above while "
-            "contradicting the empty claims beside it (#13489 review, P1)")
-    assert any(f"{_tortoise_cmd}` {_word}" in doc
-               for _word in ("is empty", "-> empty", "is EMPTY")), (
-        "05-verify.md must still state, in words, that the `tortoise/` path list is EMPTY "
-        "— naming the command is not an answer, and deleting the FALSE reading must leave a "
-        "reader who can see which way the measurement went (#13489 review, P1)")
+            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints the PR's OWN "
+            "`tortoise/` paths (measured: three of them, `projection/__init__.py` among "
+            "them), so the empty claim is refuted by the very command it quotes — and it "
+            "satisfied the presence-only leg above while contradicting the empty claims "
+            "beside it (#13489 review, P1)")
     # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
     # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
     # head they were measured at". The first cut of the repair said "at the head that still
     # carried those modules" — a DESCRIPTION of a head, not one a reader can open, so the
     # statements stayed exactly as uncheckable as before and this arm stayed green over
     # them: `activation_scorecard.py` being the only `tortoise/` module `#12943` did not
-    # touch is true of `2584a86ec1` and false of THIS head (no `tortoise/` path is in the
-    # diff at all), so without a head the sentence reads as this head's.
+    # touch is true of `2584a86ec1` and false of THIS head (that file IS in the diff here,
+    # beside two others), so without a head the sentence reads as this head's.
     #
     # NON-VACUITY, MEASURED: reds on that cut (no SHA in the paragraph); green once the
     # MERGE head is named beside the statements.
