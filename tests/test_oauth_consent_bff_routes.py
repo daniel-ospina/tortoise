@@ -1649,7 +1649,7 @@ def test_a_GENUINE_DDL_fault_PROPAGATES_and_the_duplicate_column_does_not() -> N
     `ensureColumn`'s catch widened to `catch { return; }`, (b) the call site replaced by a local
     swallow-all. Both are the same shipped regression — a genuinely failed `ALTER TABLE` swallowed,
     leaving a half-evolved schema that 503s with nothing anywhere to act on, which is precisely the
-    outcome `start.ts:232-238` exists to remove.
+    outcome `start.ts`'s session-read `try`/`catch` exists to remove.
 
     SQLite makes this a MESSAGE question and not a code one: a duplicate column and a genuine DDL
     failure both surface as SQLITE_ERROR (https://sqlite.org/rescode.html §4 — the primary result
@@ -2415,8 +2415,8 @@ def test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_clo
     `presented_consent_attempt_key`'s docstring records a residual the AS hop does
     not close: the page and `start.ts` do not strip, so a whitespace
     `attempt_key` presented STRAIGHT to `/api/consent/start` — bypassing the AS —
-    is still adopted verbatim (`start.ts:255-256`,
-    `presentedKey || newAttemptKey()`). That residual was written down on #10487,
+    is still adopted verbatim (`start.ts::presentedKey || newAttemptKey()`).
+    That residual was written down on #10487,
     which this fold retires, so the docstring points a reader at #10884 instead.
 
     A pointer is a CLAIM, and the previous review found it was one the artifact
@@ -2460,7 +2460,7 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
 
     `docs/engineering/auth/consent-identity-bridge.md` described the delivered rule
     as "…ADOPTED by `/api/consent/start` on the insert — the entry leg no longer
-    invents one". The entry leg still invents one: `start.ts:255-256` is
+    invents one". The entry leg still invents one: `start.ts` still has
 
         const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";
         const attemptKey = presentedKey || newAttemptKey();
@@ -2492,7 +2492,7 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
 
     assert "the entry leg no longer" not in doc, (
         "the bridge record claims the ENTRY leg stopped minting an attempt key, but "
-        "`start.ts:255-256` still does (`presentedKey || newAttemptKey()`), and no "
+        "`start.ts::presentedKey || newAttemptKey()` still does, and no "
         "guard before it requires a presented key. Restore the qualifier — the entry "
         "leg mints one when it is handed none (the direct-to-`start` residual on "
         "#10884/#10865) — instead of stating an absolute the code falsifies.")
