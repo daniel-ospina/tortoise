@@ -2062,6 +2062,24 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     #     #13674's objective (production warm-up ON) — the operator step that
     #     returns the shipped default would need a code change instead;
     #   * `unmanaged` is the #4126 defect the gate exists to refuse.
+    # ⚠️ MEASURED WHICH ASSERTION REDS FIRST — each mutant below was applied ALONE
+    # and restored, at this head, not reasoned from the source. Two of the three
+    # are the FIRST red; the third is a BELT and is stated as one, so a future
+    # reader does not count three independent surfaces where there are two.
+    #   * kind    (`fly-only:#13674` -> `unmanaged`) -> REDS on the `declared[...]
+    #     == "fly-only:#13674"` assertion immediately below (`AssertionError:
+    #     unmanaged`).
+    #   * payload (`TORTOISE_EMBEDDER_WARMUP: ${{ secrets.… }}` added to
+    #     `deploy-hosted.yml`'s propagation env, at the `TURNSTILE_SECRET_KEY`
+    #     indent) -> REDS on the `not in workflow_refs` assertion below, naming
+    #     this switch. So that direction IS independently guarded.
+    #   * `[env]` (`TORTOISE_EMBEDDER_WARMUP = "1"` added to `fly.toml`) -> the
+    #     `not in env_keys` assertion below is NOT the first red: the GATE refuses
+    #     that shape (`STALE DECLARATION … is an assigned key in fly.toml's [env]
+    #     table`, `check-fly-secret-drift.py:1383-1389`), so this test reds earlier
+    #     on `assert "STALE DECLARATION" not in r.stdout`. Kept anyway — the reason
+    #     the #13209 `workflow_secret_refs` belt above is kept: the gate and this
+    #     file are different readers, and a divergence in either should red HERE.
     embedder_warmup = "TORTOISE_EMBEDDER_WARMUP"
     assert declared[embedder_warmup] == "fly-only:#13674", declared[embedder_warmup]
     assert embedder_warmup not in workflow_refs, (
