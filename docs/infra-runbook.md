@@ -1206,7 +1206,7 @@ A reading that stays past the bound for minutes is a WEDGED import, and that doe
 path, not the app. ⛔ But establish that it is wedged from OUTSIDE this block first: the elapsed time
 is wall-clock since the attempt started, so `status()` cannot tell a slow-but-advancing import from a
 stuck one, and a starved loader may legitimately overrun (`#13674`'s bound exists because the measured
-COLD cost is 195.8 s — 156.5 s of imports alone plus a 39.3 s construct — and 300.0 = 195.8 × 1.53).
+COLD cost is 195.8 s — 156.5 s of imports alone plus a 39.3 s construct — and 300.0 ≈ 195.8 × 1.53).
 
 ⛔ **Three routes that look like evidence here and are not.** (1) **An absence of further `embedder:`
 lines.** The LOADER logs nothing between the timeout line and the load finishing or its overrun

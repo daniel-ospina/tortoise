@@ -896,7 +896,8 @@ class EmbeddingModel:
     # cost, so every attempt on a cold box timed out — and each timeout used to
     # abandon an importer and start another.
     #
-    # 300.0 = 195.8 s x 1.53, i.e. 104.2 s (53 %) of headroom over the measured
+    # 300.0 ≈ 195.8 s x 1.53 (299.6, rounded to the declared bound), i.e. 104.2 s
+    # (53 %) of headroom over the measured
     # cold cost for the contention the same box shows while serving traffic (the
     # 39.3 s warm figure was IDLE; the intra-op pin stays 1, #10296, so a live
     # box has no spare thread). It is the same number the hosted lifespan
