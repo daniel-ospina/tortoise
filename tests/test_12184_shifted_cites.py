@@ -122,8 +122,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is a docstring line at this
     # head, at `f07b73b1de` and on `origin/main`, where the statement is `:57387` (the `#13550` /
-    # `#13584` integration inserted 186 lines above it). A cite re-derived before a merge is stale
-    # after it, which is D5's own rule; the pin is what makes the next one red instead of silent.
+    # `#13584` integration inserted 186 lines above it, and later merges 111 more — 297 in all).
+    # A cite re-derived before a merge is stale after it, which is D5's own rule; the pin is what
+    # makes the next one red instead of silent.
     # ⚠️ This branch's own `#5425` seam wrap sits ABOVE this cite and is written LINE-COUNT NEUTRAL
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
@@ -862,7 +863,8 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # row names — measured above the rows. The pair pins could not see them: a `:37467` anywhere on
     # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6989` was.
     # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
-    # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57387`).
+    # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`),
+    # and 297 by this head (`:57387`).
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
     assert len(_PINS) == 59
 
