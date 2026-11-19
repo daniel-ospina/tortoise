@@ -1090,9 +1090,9 @@ class TestGraphOverviewSections:
         """The recorded gap must be the OBSERVED answer, not a note: -32004 over
         the tenant transport. If the section ever starts answering here the gap is
         stale, and this arm is what notices."""
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
-                               {"section": "dream_health"})
+        door, _, _ = seeded
+        _, out = door.call("tortoise_graph_overview",
+                           {"section": "dream_health"})
         text = json.dumps(out)
         assert "-32004" in text or "not available over HTTP" in text, (
             f"the recorded gap is stale — `dream_health` answered: {out!r}")
