@@ -6799,16 +6799,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "satisfies a row scoped to the line, so this sentence is asserted whole.")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15225-15302`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15261-15338`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15264` (both needles are the file's only occurrences —
-    # `:15254` and `:15264` — so a later end cannot change the sum). Ends below `:15264` fail
+    # true for any end at or beyond `:15300` (both needles are the file's only occurrences —
+    # `:15290` and `:15300` — so a later end cannot change the sum). Ends below `:15300` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15225`-`:15263` gives a non-empty window that lacks at least the second needle,
-    # and an end below `:15225` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15261`-`:15299` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15261` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
@@ -6827,7 +6827,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     _i7_end_ok = _org_info[15338 - 1].strip() == "" and bool(
         _org_info[15338].lstrip().startswith("return OrgInfoResponse("))
     assert _i7_end_ok, (
-        "04-plan.md I7's range end (`:15302`) is no longer the blank line before "
+        "04-plan.md I7's range end (`:15338`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
 
@@ -16475,24 +16475,29 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
 
     # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while after the rebase that file is not in
-    # this diff at all (`git diff --name-only origin/main...HEAD` does not list it) and the
-    # document's own row reads `sdk.py:28607`. A phrase-only assertion was green over that,
-    # re-landed, and was green again: that is the class this pin exists to close. No count
-    # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
+    # re-point — `sdk.py:28559` → `:28592`", while the document's own row did not read that
+    # and the file contributed none at that head. A phrase-only assertion was green over
+    # that, re-landed, and was green again: that is the class this pin exists to close.
+    # ⛔ RE-MEASURED at the head #13699's lane re-pointed that file: it now contributes
+    # exactly TWO numeric re-points (`git diff --numstat origin/main...HEAD -- <the file>`
+    # -> `2 2`), the I7 `hosted_api.py` range and the operator row's `sdk.py` cite. A
+    # typed COUNT is still not written here in either direction — that is the head-bound
+    # figure the D5 row forbids, and it is what this message points a reader at instead.
     for stale in ("carries TWO numeric re-points", "a document that carries two"):
         assert stale not in text, (
-            f"D5 states `{stale}` about `04-plan.md`. The `hosted_api.py` "
-            "`:15202-15279` -> `:15225-15302` move it is paired with is `origin/main`'s "
-            "own and is INHERITED, not contributed (`git show origin/main:docs/epics/"
-            "2026-11-04-7949-extractor-v4-capstone/04-plan.md` already carries "
-            "`:15225-15302`). Do not re-inflate the count")
+            f"D5 states `{stale}` about `04-plan.md`. ⛔ NOT because that file contributes no "
+            "re-point — measured at this head it contributes exactly the rows `git diff "
+            "--numstat origin/main...HEAD -- docs/epics/2026-11-04-7949-extractor-v4-"
+            "capstone/04-plan.md` prints (`2 2`) — but because a typed COUNT is the "
+            "head-bound figure this row's own thesis forbids: it goes stale on the next "
+            "forward merge. Read the numstat; do not re-inflate a number into D5")
     assert "carries ONE numeric re-point" not in text, (
-        "D5 states that `04-plan.md` carries a numeric re-point in this PR's diff. "
-        "Measured after the rebase: that file is not in `git diff --name-only "
-        "origin/main...HEAD` at all, so this diff contributes NO re-point there — and the "
-        "pair the clause used to name (`sdk.py:28559` -> `:28592`) does not describe the "
-        "document either, whose row reads `sdk.py:28682`")
+        "D5 states that `04-plan.md` carries ONE numeric re-point. Measured at this head "
+        "it carries two (`git diff --numstat origin/main...HEAD -- docs/epics/2026-11-04-"
+        "7949-extractor-v4-capstone/04-plan.md` -> `2 2`: the I7 `hosted_api.py` range and "
+        "the operator row's `sdk.py` cite), and a count typed into D5 is stale the moment "
+        "the next forward merge moves one — the `sdk.py:28559` -> `:28592` pair the clause "
+        "used to name does not describe the document's row either, which is the same defect")
     assert "sdk.py:28682" in text, (
         "D5 no longer names `sdk.py:28682`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
