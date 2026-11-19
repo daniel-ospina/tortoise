@@ -275,8 +275,23 @@ def test_the_measured_door_is_the_one_the_search_tool_is_registered_to():
     The arms call `sdk.tortoise_fts_query`; this asserts the registry still
     binds that tool to that verb, so "we measured the user's door" is checked
     rather than asserted in prose.
+
+    ⛔ A HARD IMPORT, NOT `pytest.importorskip` (this row's own history). The skip
+    guard was a FAIL-OPEN: a skip is green, so an unimportable registry made the
+    pin read as "nothing to check" and disappear instead of failing. Measured on
+    the pre-fix file — `sys.modules["tortoise.tool_registry"]` poisoned for this
+    body only (a session-wide import block is unusable here: `tests/conftest.py`'s
+    autouse `_analytics_alert_isolation` imports `tortoise.hosted_api` ->
+    `tortoise.mcp_auth` -> `tortoise.tool_registry` at SETUP, so it errors before
+    the body) — reported `1 skipped`, exit 0. The registry is a direct dependency
+    (`mcp` is declared in `pyproject.toml`), not an optional extra, so an
+    ImportError here is a real failure; `_user_door_binding()` imports the same
+    symbol, which is what reds.
     """
-    pytest.importorskip("tortoise.tool_registry")
+    from tortoise.tool_registry import get_tool_by_name
+
+    tool = get_tool_by_name()["tortoise_search"]
+    assert (tool.rest_spec.method, tool.rest_spec.path) == ("GET", "/v1/search")
     binding = cap._user_door_binding()
     assert binding["present"] is True
     assert binding["sdk_method"] == "tortoise_fts_query"
