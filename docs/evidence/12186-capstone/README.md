@@ -255,8 +255,11 @@ over 5 arms × 300 queries, 145 s for the 411 variant reads.
 them in `post_run_edits`:
 
 1. **`cleanup`** — the block was added by hand, because the tool at `code_head` has no `cleanup`
-   builder at all (`git show HEAD:tools/capstone_12186_recall.py | grep -c 'def _cleanup'`;
-   the builder arrived AFTER the run, so a reproduction at the run head has no such block).
+   builder at all: `git show 318950c6e0:tools/capstone_12186_recall.py | grep -c 'def _cleanup'`
+   prints **`0`** at the reachable equivalent named in the masthead. ⛔ The SAME command run against
+   `HEAD` prints **`1`**, and that `1` is the whole point rather than a contradiction: the builder
+   arrived AFTER the run, so `HEAD` carries it and the run head does not. `post_run_edits[0].why`
+   states the identical pair.
 2. **`arms`** — the three `user_search*` arms' `door_note` **prose** was restated. The note as run
    read *"at the MCP tool `tortoise_search`'s own defaults"*, which is false about two default
    values: the doors default to `entity_type='point'` / `limit=10`, while the arms call
@@ -277,9 +280,9 @@ three arms, the `paired` cap unmarked, and no `code_head_note`. Any later run wr
 and records `post_run_edits: []`.
 
 ⛔ **`code_head` `31bce52ddb` is the RUN head and is a LABEL, not a runnable anchor.** It predates
-the rebase onto `origin/main`, which REWROTE it: it is an ancestor of no published ref, so
-`git show 31bce52ddb:…` fails with `fatal: invalid object name` for anyone without the pre-rebase
-object. **Reproduce at the branch's own head instead** — `git show HEAD:tools/capstone_12186_recall.py`
+the rebase onto `origin/main`, which REWROTE it: it is an ancestor of no published ref, so any
+`git show` written against that sha fails with `fatal: invalid object name` for anyone without the
+pre-rebase object. **Reproduce at the branch's own head instead** — `git show HEAD:tools/capstone_12186_recall.py`
 resolves everywhere, and the two INPUTS a reproduction needs are `queries.json` (whose sha256 the
 `pin` block pins) and the tool's query/recall code, which the run head and `HEAD` share: the tool's
 later changes are comments and new builder functions, never the recall computation. **In a shallow

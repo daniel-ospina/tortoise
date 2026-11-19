@@ -627,10 +627,72 @@ def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifa
         "resolves in every checkout — a command written against the pre-rebase label "
         "fails with `fatal: invalid object name`")
     # ⛔ The regression itself: §6 must not present the label as the thing to run.
-    for bad in (f"git show {label}:", f"git show {artifact['code_head']}:"):
-        assert bad not in flat, (
-            f"README §6 still hands out an unresolvable command ({bad!r}) — that is "
-            f"exactly the defect this record was corrected for")
+    #
+    # ⛔ THIS GUARD WAS KEYED TO ONE SPELLING AND WAS THEREFORE INERT (found by a
+    # fresh-context review, verified by execution). It used to assert the ABSENCE of
+    # `git show {code_head[:12]}:` — that is `git show 31bce52ddbb3:`. The README's own
+    # counter-example abbreviates to TEN characters (`31bce52ddb`), and a `git show
+    # <sha>` abbreviation is a prefix of ANY length >= 7, so rewriting that line into an
+    # INSTRUCTION in the ten-character spelling left the suite GREEN at 47 passed. A
+    # guard that matches a literal token can only ever see the one token it names, so
+    # this now derives the forbidden set from `code_head` at EVERY abbreviation length
+    # a reader could type, and refuses any `git show <hex>:` that is a prefix of it.
+    shown = set(re.findall(r"git show ([0-9a-f]{7,40}):", flat))
+    code_head = artifact["code_head"]
+    for token in sorted(shown):
+        # A sha abbreviation is a prefix; comparing with a common prefix of any length
+        # >= 7 closes the spelling hole the twelve-character form left open.
+        if len(token) >= 7 and code_head.startswith(token):
+            raise AssertionError(
+                f"README §6 still hands out an unresolvable command (`git show {token}:`), "
+                f"which is a {len(token)}-character abbreviation of `code_head` — that is "
+                f"exactly the defect this record was corrected for. Write reproduction "
+                f"commands against `HEAD`, or against the reachable equivalent the "
+                f"masthead names.")
+    # The one sha-shaped hand-out the record is ALLOWED is the reachable equivalent in
+    # the masthead; anything else is an unpinned integer-in-prose. Pin the hand-out
+    # itself so it cannot drift to a foreign sha unnoticed (a `git show <hex>:` whose
+    # token is neither `code_head`-prefixed nor the declared equivalent is a NEW
+    # instruction nobody reviewed).
+    named = re.search(r"reachable equivalent is `([0-9a-f]{7,40})`", flat)
+    assert named, (
+        "the masthead must name the reachable equivalent a reader can actually run — "
+        "`code_head` itself is a pre-rebase label and resolves on no published ref")
+    equivalent = named.group(1)
+    assert not code_head.startswith(equivalent), (
+        f"the masthead names {equivalent!r} as a reachable equivalent, but it is a "
+        f"prefix of `code_head` {code_head!r} — that is the same unresolvable sha "
+        f"under a different abbreviation, not an equivalent")
+    assert shown <= {equivalent}, (
+        f"README hands out `git show <sha>:` commands against {sorted(shown)}, but the "
+        f"only sha the record declares reachable is {equivalent!r}; every other sha in "
+        f"that form is an unpinned hand-out")
+
+    # ⛔ THE CLAUSE THAT MOTIVATED THIS PIN, CHECKED AGAINST ITSELF. Verified defect at
+    # this head: §6's `cleanup` item read "the tool at `code_head` has no `cleanup`
+    # builder at all (git show HEAD:... | grep -c 'def _cleanup'; ...)" — and executing
+    # that citation prints 1, i.e. the cited command REFUTED the sentence it was cited
+    # for. A citation whose own output contradicts its clause is worse than no citation,
+    # because a reader who runs it concludes the record is wrong (or that the clause is).
+    # The clause must therefore cite the head that HAS no builder and state that count.
+    clause_at = flat.index("the block was added by hand")
+    clause = flat[clause_at:flat.index("`arms`** — the three `user_search*")]
+    assert f"git show {equivalent}:tools/capstone_12186_recall.py" in clause, (
+        f"§6's `cleanup` clause must cite `git show {equivalent}:` — the run-head "
+        f"equivalent is the head with NO builder. The clause as committed cites "
+        f"{sorted(shown)}; a `HEAD`-anchored command prints 1 and refutes the clause")
+    assert "**`0`**" in clause, (
+        "§6's `cleanup` clause must state the count its citation produces (`0`), so a "
+        "reader does not have to run it to learn that the run head emits no block")
+    # …and the artifact's own declaration must name the SAME head, or the two documents
+    # disagree about which sha proves the claim (the exact divergence this round found).
+    declared_why = next(e["why"] for e in artifact["post_run_edits"]
+                        if e["field"] == "cleanup")
+    assert f"git show {equivalent}:" in declared_why, (
+        f"`post_run_edits`' cleanup reason cites a different head than README §6 — it "
+        f"must name `git show {equivalent}:` too, so the record and its summary cannot "
+        f"state the `cleanup` provenance against two different shas. It reads: "
+        f"{declared_why[:200]!r}")
 
     # The note is a DECLARED edit, not free text the ledger cannot see (round-3 P1).
     declared = {e["field"] for e in artifact["post_run_edits"]}
