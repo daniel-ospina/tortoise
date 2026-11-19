@@ -1691,10 +1691,14 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     (`zip(("embedding",), (vec,))`, `map(...)`, a generator expression) is the stated residual
     — extracting a pair out of a call result is data flow this module does not do, and it is
     disclosed here rather than left to be rediscovered. ⛔ THE SAME RESIDUAL COVERS A MAPPING
-    BUILT BY A CALL THAT IS NOT A CONSTRUCTOR: `dict.fromkeys(["embedding"], vec)` and
-    `dict(zip(keys, values))` place the vector and are CERTIFIED (measured at `716991951e`),
-    because answering them needs the call's RESULT — a key list read through a literal match,
-    or a zip of names — which is the data flow stated above, not a wrapper or an operand.
+    BUILT BY A CALL THAT IS NOT A RECOGNISED BUILDER: `dict(zip(keys, values))` places the
+    vector and is CERTIFIED (measured at `716991951e`), because answering it needs the call's
+    RESULT — a zip of names — which is the data flow stated above, not a wrapper or an
+    operand. ⛔ `dict.fromkeys(["embedding"], vec)` USED TO BE IN THIS RESIDUAL AND IS NOT
+    ANY MORE (`#13788` F6, measured at `78cbe4da`): its operands are a KEY SEQUENCE and one
+    value, both statically readable, so `_constructor_stores_the_vector` recognises it when
+    the key list is a literal containing the EXACT property name; a COMPUTED key sequence
+    (`dict.fromkeys(_keys(), vec)`) remains a residual, and the fixture pins it.
 
     ⛔ AND IT IS NOT THE MAPPING RULE — `{"embedding": vec}` has no pair in it, so this
     helper answers False for the mapping spelling BY DESIGN. Every caller that can be handed
