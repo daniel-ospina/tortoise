@@ -2346,6 +2346,31 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
             else:
                 pairs.append((key, value))
         return pairs
+    # ⛔ A MAPPING CONSTRUCTOR OVER A MAPPING IS THE SAME VIEW, and this arm read it in NEITHER
+    #    of its two spellings (`#13788`, measured at `bb16c4b2de`). `dict(mapping)` is a shallow
+    #    copy — the CPython docs' own wording — so its `.items()` is `mapping.items()`, and the
+    #    module already says so at the TWIN seam: `_comprehension_source_yields` reads a
+    #    single-positional `_is_mapping_constructor(...)` call as a keys source, so the bare
+    #    iteration was REFUSED while the `.items()` view of the same constructor CERTIFIED:
+    #
+    #        props |= {k: _encode(ev) for k in     OrderedDict({'embedding': 1})}              refused
+    #        props |= {k: _encode(ev) for k, _v in OrderedDict({'embedding': 1}).items()}      CERTIFIED
+    #
+    #    The include list is `_is_mapping_constructor` — the one the operand side owns — and the
+    #    KEYWORD form is answered beside the positional one for the reason the twin seam gives:
+    #    `dict(embedding=1).items()` yields the pair `("embedding", 1)` exactly as `dict(embedding=1)`
+    #    iterates `"embedding"`. Both directions only ever REFUSE.
+    #    ⚠️ ANY OTHER ARITY IS LEFT AS IT IS ON PURPOSE: `defaultdict(int, {...})` and
+    #    `dict(**{...})` CERTIFY on BOTH seams today, so resolving them here would make this arm
+    #    disagree with its twin in the OTHER direction — a separate, larger change.
+    if isinstance(mapping, ast.Call) and _is_mapping_constructor(_callee_name(mapping)):
+        if len(mapping.args) == 1 and not mapping.keywords:
+            return _mapping_items_pairs(mapping.args[0], _depth + 1)
+        if not mapping.args and mapping.keywords and all(
+                keyword.arg is not None for keyword in mapping.keywords):
+            return [(ast.Constant(value=keyword.arg), keyword.value)
+                    for keyword in mapping.keywords]
+        return None
     return None
 
 

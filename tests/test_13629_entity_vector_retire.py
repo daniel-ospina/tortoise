@@ -6766,6 +6766,55 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND A MAPPING CONSTRUCTOR OVER A MAPPING IS THE SAME `.items()` VIEW (`#13788`,
+        # measured at `bb16c4b2de` — the round-6 fix's own residue, one spelling family over).
+        # `dict(mapping)` is a shallow copy, so its `.items()` is `mapping.items()`, and the
+        # module ALREADY reads a single-positional `_is_mapping_constructor(...)` call as a
+        # keys source at the twin seam (`_comprehension_source_yields`), so the bare iteration
+        # was REFUSED while the `.items()` view CERTIFIED:
+        #
+        #     {k: _encode(ev) for k in     OrderedDict({"embedding": 1})}              refused
+        #     {k: _encode(ev) for k, _v in OrderedDict({"embedding": 1}).items()}      CERTIFIED
+        #
+        # The include list is `_is_mapping_constructor` (the one the operand side owns), and
+        # the KEYWORD form is answered beside it for the twin seam's own reason:
+        # `dict(embedding=1).items()` yields `("embedding", 1)` exactly as `dict(embedding=1)`
+        # iterates `"embedding"`. The controls are in the `accepted` tuple below.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict({"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in OrderedDict({"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in MappingProxyType({"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(embedding=1).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(OrderedDict({"embedding": 1})).items()}
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -7964,6 +8013,28 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: 1 for k, _v in ({"embedding": 1} if _f() else {}).items()}
+        return None
+    _write(props)
+""",
+        # ⛔ THE TWO NARROWINGS OF THE CONSTRUCTOR RECEIVER, or that fix becomes an
+        # over-refusal (`#13788`). Same spellings as the five `refused` rows above and they
+        # must still CERTIFY: one keys the produced mapping by a name that is not the
+        # property, the other produces a CONSTANT value, which is not the vector. Without
+        # them a resolver that answered "yes" to every constructor would pass every refused
+        # row above. ⚠️ `defaultdict(int, {...})` and `dict(**{...})` are deliberately NOT
+        # rows: both CERTIFY on the twin seam too, so pinning them here would assert a
+        # behaviour this change does not have (recorded, not silently dropped).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in OrderedDict({"embedding_model": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: 1 for k, _v in dict({"embedding": 1}).items()}
         return None
     _write(props)
 """,
