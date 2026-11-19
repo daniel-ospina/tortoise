@@ -144,6 +144,42 @@ def test_a_leading_article_is_dropped_because_it_is_the_duplicate_noun_class():
     assert cap.is_near_duplicate("The Diff", "the-diff")
 
 
+def test_the_article_direction_the_rule_names_is_the_one_the_key_drops():
+    """The recorded article DIRECTION is tied to the KEY's behaviour, not to itself.
+
+    ⛔ MEASURED GAP (round 32; the review's open P2 on the peer lane's commits).
+    `NEARDUP_KEY_NOTE` says "… leading article dropped", the artifact stores that
+    same string, and §3a is pinned to state `drop a leading article` *because* the
+    key says so — but NOTHING read what `near_dup_key` actually drops. Setting the
+    constant, the artifact's `key` and README §3a to **trailing** TOGETHER left the
+    suite GREEN at **58 passed** (measured), while `near_dup_key("the diff")` still
+    returned `"diff"` — a record stating the INVERSE of the code.
+
+    Why it is not cosmetic: §3a is the one section whose numbers cannot be
+    re-derived from `measurement.json` (aggregates only, never the returned name
+    windows), so the stated rule IS the reader's re-derivation key. A name that
+    agrees with itself in three places and disagrees with the fold is exactly the
+    "claim wider than the code" this file keeps finding one level down.
+
+    So the direction is DERIVED FROM BEHAVIOUR here and compared to the name — and
+    the two directions are first asserted to be separable, because a fold that
+    dropped BOTH ends would make "leading" and "trailing" equally true and the
+    comparison below vacuous.
+    """
+    drops_leading = cap.near_dup_key("the diff") == "diff"
+    drops_trailing = cap.near_dup_key("diff the") == "diff"
+    assert drops_leading != drops_trailing, (
+        f"the article drop is not one-directional (leading={drops_leading}, "
+        f"trailing={drops_trailing}); the name below could then be satisfied by "
+        f"either direction, so §3a's `leading`/`trailing` would pin nothing")
+    observed = "leading" if drops_leading else "trailing"
+    assert f"{observed} article dropped" in cap.NEARDUP_KEY_NOTE, (
+        f"`near_dup_key` drops the {observed.upper()} article, but the recorded "
+        f"rule says {cap.NEARDUP_KEY_NOTE!r} — the artifact's `key` and §3a are "
+        f"pinned to that same string, so all three would state the inverse of the "
+        f"code the numbers come from")
+
+
 def test_a_different_noun_is_never_a_near_duplicate():
     # The M-1 trap from #12186's research brief: "the plan doc" vs "the play doc"
     # differ by ONE character and are unrelated nouns. A rule that bound them
