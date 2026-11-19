@@ -2133,8 +2133,9 @@ _READER_NEEDLE = {
 }
 #: A numbered reader entry STARTS a new claim, so its symbol is its own. Two
 #: spellings, because the two artifacts are: the manifest's `#   1. …` inside a
-#: comment block, and the runbook's `> 1. …` inside a blockquote.
-_READER_ENTRY_RE = re.compile(r"^\s*(?:#|>)?\s*\d+\.\s")
+#: comment block, and the runbook's `> 1. …` inside a blockquote. The ordinal is
+#: CAPTURED, because the prose below binds its range cites to it.
+_READER_ENTRY_ORDINAL_RE = re.compile(r"^\s*(?:#|>)?\s*(\d+)\.\s")
 #: The sentence that ENDS the numbered claims in both artifacts: the prose after
 #: it names no function, so nothing in it may inherit reader 5's symbol.
 #: Markdown emphasis is stripped before matching — the runbook bolds
@@ -2142,8 +2143,6 @@ _READER_ENTRY_RE = re.compile(r"^\s*(?:#|>)?\s*\d+\.\s")
 _READER_SYMBOL_RESET_RE = re.compile(
     r"function names? (?:above )?are the invariant", re.IGNORECASE
 )
-#: A numbered entry's ORDINAL, capturing it, in both artifacts' spellings.
-_READER_ENTRY_ORDINAL_RE = re.compile(r"^\s*(?:#|>)?\s*(\d+)\.\s")
 #: The sentence that names, BY ORDINAL, which readers a pair of range cites below
 #: belongs to — the manifest says "Readers 2 and 3", the runbook "Number 2 and 3".
 #: Without this the ranges could only be needle-checked, and the needle passes a
@@ -2233,6 +2232,19 @@ def _reader_citations(
         f"{ordinal_bound} of them, not 2 — reworded, or the ranges moved off it? A range "
         f"left unbound is only needle-checked, and the needle passes a range re-pinned "
         f"onto another reader"
+    )
+    # Counting BINDS is not counting COVERAGE. `ordinal_bound` says two cites consumed
+    # the queue; it does not say WHICH two, so a decoy cite line above the real pair can
+    # consume both and leave the real one needle-only, and an ordinary reflow that leaves
+    # a cite on the line ABOVE its `::name` silently unbinds THAT cite. Either way a
+    # re-pin onto another reader's byte-identical gate line passes the needle, so the
+    # unbound SET is the thing to pin: only the resolver's own definition may stay
+    # unbound, because the block names no reader for `:40-50` anywhere.
+    unbound = {(fname, lo, hi) for fname, lo, hi, sym in cites if sym is None}
+    assert unbound <= {("embeddings.py", 40, 50)}, (
+        f"{artifact}: these cites name no reader INLINE and were not bound by the "
+        f"ordinal sentence either, so they are needle-only and a re-pin onto another "
+        f"reader's identical gate line passes: {sorted(unbound)}"
     )
     return cites
 
