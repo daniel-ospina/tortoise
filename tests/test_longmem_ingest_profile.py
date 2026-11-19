@@ -11,8 +11,11 @@ Run::
 """
 from __future__ import annotations
 
+import json
 import math
 import os
+
+import pytest
 
 from tools.longmem_eval import ingest_profile as prof
 from tools.longmem_eval.ingest import DEFAULT_CHUNK_TURNS, _session_chunks
@@ -192,6 +195,107 @@ def test_an_explicit_socket_bound_is_respected(monkeypatch):
     assert os.environ[ENV_SOCKET_TIMEOUT] == "45"
     cleanup()
     assert os.environ[ENV_SOCKET_TIMEOUT] == "45"
+
+
+#: A complete shape row, so ``main`` never needs a lane, a graph or an
+#: embedder to finish: every field below is what the human render formats and
+#: what the JSON report passes through unchanged.
+_STUB_SHAPE = {
+    "sessions": 1, "turns": 1, "chunks": 0, "points": 1,
+    "fixed_setup_s": 0.0, "ingest_s": 0.0, "s_per_point": 0.0,
+}
+
+
+def _main_report(monkeypatch, capsys, argv: list[str]) -> dict:
+    """Run ``main`` with the embedder and the measurement stubbed.
+
+    Nothing here may touch a lane: ``EmbeddingModel.get`` is the first real
+    dependency inside ``main`` (it loads the cached weights), and
+    ``measure_shape`` writes a throwaway graph per rung. Both are replaced, so
+    the report is the only thing under test.
+    """
+    class _StubModel:
+        @staticmethod
+        def get(*_a, **_kw):
+            return None
+
+    import tortoise.embeddings as embeddings
+
+    monkeypatch.setattr(embeddings, "EmbeddingModel", _StubModel)
+    monkeypatch.setattr(prof, "measure_shape", lambda **_kw: dict(_STUB_SHAPE))
+    assert prof.main([*argv, "--json", "--no-profile"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_the_reported_arm_is_the_one_actually_selected(monkeypatch, capsys):
+    """``report["db"]`` describes the ARM, not the ``--db`` flag.
+
+    An exported ``TORTOISE_DB_URI`` with no ``--db`` takes the SERVER arm —
+    ``_sdk`` promotes it exactly as ``run_main`` does (pinned by
+    ``test_the_ambient_uri_selects_the_server_arm_like_runpy``) — so reporting
+    ``bool(args.db)`` emitted ``"db": false`` about a server run: the artifact
+    disagreeing with the run, which is #8486's own defect class, in the state
+    the module calls the likeliest (``tools/test_lane.py`` exports this
+    variable on every smoke lane).
+
+    Non-vacuity: restore ``bool(args.db)`` and this row reds (``False`` against
+    the assertion's ``True``) while the no-URI contrast below stays green.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@ambient:6379/lane")
+    report = _main_report(monkeypatch, capsys, [])
+    assert report["db"] is True, (
+        "the ambient URI selects the SERVER arm, so the report must say so — "
+        "otherwise the record describes a different engine than the run")
+
+
+def test_the_reported_arm_is_embedded_with_no_uri_at_all(monkeypatch, capsys):
+    """The contrast half: the report is not simply the constant ``True``."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    report = _main_report(monkeypatch, capsys, [])
+    assert report["db"] is False, (
+        "no --db and no ambient URI is the embedded arm, and the report must "
+        "name it rather than defaulting to the server")
+
+
+def test_an_empty_db_is_refused_instead_of_silently_embedded(monkeypatch,
+                                                             capsys):
+    """``--db ""`` must ERROR, not measure a different engine.
+
+    ``--db "$TORTOISE_DB_URI"`` with the variable unset is the ordinary shape
+    of this mistake. ``"" is not None`` promotes nothing and ``""`` is falsy,
+    so without the guard the profiler silently took the EMBEDDED arm — five
+    throwaway graphs on a different engine, with no error — while ``run_main``
+    refuses the same argument. This pins the refusal (and its parity with
+    ``run_main``'s message) at ``main``'s own entry point.
+
+    Non-vacuity: delete the ``"://" not in args.db`` guard and the stubbed
+    measurement below is REACHED, so the ``_never`` raise replaces the
+    ``SystemExit`` and this row reds.
+    """
+    def _never(**_kw):
+        raise AssertionError(
+            "--db '' must be refused before any rung is measured")
+
+    class _NeverModel:
+        @staticmethod
+        def get(*_a, **_kw):
+            raise AssertionError(
+                "--db '' must be refused before the embedder is loaded")
+
+    import tortoise.embeddings as embeddings
+
+    monkeypatch.setattr(embeddings, "EmbeddingModel", _NeverModel)
+    monkeypatch.setattr(prof, "measure_shape", _never)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
+    with pytest.raises(SystemExit) as exit_info:
+        prof.main(["--db", "", "--json", "--no-profile"])
+    assert exit_info.value.code == 2, "an argparse error exits 2, not 0"
+    err = capsys.readouterr().err
+    assert "--db must be a FalkorDB URI" in err, (
+        "the refusal must be ``run_main``'s own message, so the two entry "
+        "points cannot drift into different answers for the same argument")
+    assert "got ''" in err, "the message must name the value it refused"
 
 
 def test_the_evidence_turn_is_marked_once_per_question():
