@@ -5408,7 +5408,108 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE VECTOR CAN BE THE COMPREHENSION'S **PRODUCED VALUE**, not the pair's second
+        # element (`#13788`, measured by the review of this branch). Every arm hunted the
+        # vector inside the SOURCE's pair, so a shape with no pair at all — and the spellings
+        # that put the property in the pair and the VECTOR in the value — were CERTIFIED while
+        # the literal spelling was refused. Each was runtime-checked to leave
+        # `{'embedding': VEC}` in `props`:
+        #
+        #     props |= {k: _encode(ev) for k in ["embedding"]}
+        #     props |= {k: _encode(ev) for k, _i in [("embedding", 1)]}
+        #     props |= {v: _encode(ev) for _i, v in [(1, "embedding")]}
+        #     props |= {f"{k}": _encode(ev) for k, _i in [("embedding", 1)]}
+        #
+        # ⛔ THE F-STRING ROW IS WHY THE TERM ASKS *MENTIONS*, NOT *IS*: a `Name`-only version
+        # of `_comprehension_key_mentions_the_bound_property` refused the first three and
+        # ACCEPTED this one (measured).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ["embedding"]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _i in [("embedding", 1)]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v: _encode(ev) for _i, v in [(1, "embedding")]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {f"{k}": _encode(ev) for k, _i in [("embedding", 1)]}
+        return None
+    _write(props)
+""",
+        # ⛔ AND A PAIR WITH EXTRAS IS NOT NAMED-KEY ONLY (`#13788`, measured by the review of
+        # this branch). `_unpacked_element_stores_the_vector` was added for the extras shape by
+        # the same commit that shipped this branch's key fixes, and wired only into the `Name`
+        # branch — so a non-`Name` key read the SAME extras pair differently:
+        #
+        #     props |= {v[0]: v[1] for v in [("embedding", _encode(ev), 1)]}          <- CERTIFIED
+        #     props |= {v[0]: v[1] for v in [("embedding", _encode(ev))]}             <- refused
+        #
+        # Measured CERTIFIED in the `|=`, `update(…)` and plain-assign positions, each
+        # runtime-checked to place the vector.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v[0]: v[1] for v in [("embedding", _encode(ev), 1)]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({v[0]: v[1] for v in [("embedding", _encode(ev), 1)]})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {v[0]: v[1] for v in [("embedding", _encode(ev), 1)]}
+        return None
+    _write(props)
+""",
+        # ⛔ A SET IS AN ITERABLE OF PAIRS TOO (`#13788`, measured by the review of this
+        # branch). `dict.__ior__`/`dict.update` accept any iterable of pairs, and a set
+        # literal is one — so this is a store whenever the vector is HASHABLE (`(0.1, 0.2)`)
+        # and a `TypeError` when it is not (`[0.1, 0.2]`). The verdict turned on a type no
+        # static check can see, and the list spelling beside it was refused the whole time:
+        #
+        #     props |= [("embedding", _encode(ev))]            <- refused
+        #     props |= {("embedding", _encode(ev))}            <- CERTIFIED
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {("embedding", _encode(ev))}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({("embedding", _encode(ev))})
+        return None
+    _write(props)
+""",
     )
+    # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
+    # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
+    # merge, which this branch has already survived twice — would leave the loop below
+    # iterating nothing and the test passing while the whole rule went unpinned.
+    assert refused, "the refused fixture tuple is EMPTY — the loop below asserts nothing"
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
@@ -6081,7 +6182,65 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE OVER-REFUSALS ARE PINNED, NOT MERELY WRITTEN DOWN (`#13788`, measured by the
+        # review of this branch). The doctrine ACCEPTS refusing a key that transforms the
+        # property name away, and until now that cost lived only in prose — a reader holding a
+        # "must not over-refuse" argument had no artifact to read and no way to tell a
+        # deliberate narrowing from an accident. `over_refused` below makes the cost VISIBLE: it
+        # asserts the refusal, so an implementation that gets cleverer at reading the key will
+        # red there and be made to argue the doctrine rather than quietly widen acceptance.
+        # ⛔ THE HONEST CONTROLS FOR THE NEW VALUE-SIDE TERM follow — the value is a CONSTANT,
+        # the source is a name this check cannot read (the disclosed residual), or the pair is
+        # consumed WHOLE — so none of them places a top-level vector and all must certify.
+        # …the value is a CONSTANT, so no vector is placed.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: 1 for k in ["embedding"]}
+        return None
+    _write(props)
+""",
+        # …the key is bound to the property but the SOURCE is a name — the disclosed residual.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in _keys()}
+        return None
+    _write(props)
+""",
+        # …and the pair is consumed WHOLE, so the mapping is keyed by the pair and no
+        # top-level `embedding` key is placed.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {x: 1 for x in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
     )
+    assert accepted, "the accepted fixture tuple is EMPTY — the loop below asserts nothing"
+    # ⛔ A DELIBERATE OVER-REFUSAL MUST STAY PINNED AS ONE. `k.upper()` can never produce
+    # `"embedding"` from `"embedding"`, so refusing it loses an honest writer — and it is
+    # refused anyway, because failing closed on a stop arm is the cheaper error. The point of
+    # this tuple is that these rows are NOT stores: widening acceptance here needs the doctrine
+    # argued first, not a quiet key-reading improvement.
+    over_refused = (
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k.upper(): _encode(ev) for k, _i in [("embedding", 1)]}
+        return None
+    _write(props)
+""",
+    )
+    for source in over_refused:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, (
+            f"a DELIBERATE over-refusal stopped being refused — this is not a bug to fix in a "
+            f"hurry: the doctrine (fail closed on a stop arm) is what makes it acceptable, and "
+            f"widening acceptance needs that argument made first: {source!r} ({why})"
+        )
     for source in accepted:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))

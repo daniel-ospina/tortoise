@@ -1732,7 +1732,7 @@ def _pairs_operand_stores_the_vector(node) -> bool:
 
     if isinstance(node, ast.Starred):
         return _pairs_operand_stores_the_vector(node.value)
-    if isinstance(node, ast.List | ast.Tuple):
+    if isinstance(node, ast.List | ast.Tuple | ast.Set):
         return (_pairs_store_the_vector(node)
                 # …and a `Starred` ELEMENT splices another sequence in (`(*[pairs],)`).
                 or any(_pairs_operand_stores_the_vector(element)
@@ -1775,9 +1775,31 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # mentioning it anywhere in the key means refusing. ⛔ The cost is an over-refusal of
         # a key that transforms it AWAY (`{k.upper(): v …}`), which the doctrine permits and
         # which is cheap beside certifying a stop arm that stores.
+        if (_comprehension_key_mentions_the_bound_property(node.key, node.generators)
+                and not isinstance(node.value, ast.Constant)):
+            return True
         if not isinstance(node.key, ast.Name):
             return any(_pairs_operand_stores_the_vector(generator.iter)
+                       # ⛔ …AND THE EXTRAS TERM IS NOT NAMED-KEY ONLY (`#13788`, measured by
+                       # the review of this branch): a NON-`Name` key reads a pair-with-extras
+                       # exactly as an unpacking clause does — `{v[0]: v[1] for v in
+                       # [("embedding", vec, 1)]}` places the vector and CERTIFIED while the
+                       # two-element source was refused, in every position (`|=`, `update(…)`,
+                       # plain assign). The extras term was added 20 lines below by the same
+                       # commit and wired only into the `Name` branch.
+                       or _unpacked_element_stores_the_vector(generator.iter)
                        for generator in node.generators)
+        # ⛔ AND THE VECTOR CAN BE THE PRODUCED **VALUE**, with the key the property by a
+        # literal BINDING (`#13788`, measured by the review of this branch). Every arm above
+        # hunts the vector inside the SOURCE's pair, so the shapes with no pair in the source
+        # were invisible: `{k: _encode(ev) for k in ["embedding"]}` needs no pair at all, and
+        # the unpack-position spellings `{k: _encode(ev) for k, _i in [("embedding", 1)]}` and
+        # `{v: _encode(ev) for _i, v in [(1, "embedding")]}` put the property in the pair and
+        # the VECTOR in the value — each places a real top-level vector, each runtime-checked,
+        # each CERTIFIED. See the term ABOVE, which runs before the unreadable-key refusal so
+        # that the same store with an f-string key is answered too. Narrowed as everywhere
+        # else: the produced value must be NON-CONSTANT, so `{k: 1 for k in ["embedding"]}`
+        # still certifies.
         # ⛔ AND THE SOURCE IS A STORE ONLY WHEN THE PAIR IS **UNPACKED INTO THE KEY AND THE
         # VALUE**, because a pair used as a whole places nothing:
         # `{x: 1 for x in [("embedding", vec)]}` keys the mapping by the PAIR and
@@ -1937,6 +1959,56 @@ def _generator_unpacks_the_pair_into_the_key(key, generator) -> bool:
             and key.id == first.id)
 
 
+def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
+    """Does this comprehension's produced KEY reference a name bound to the property?
+
+    The sibling `_generator_unpacks_the_pair_into_the_key` asks whether the clause binds the
+    key to the pair's FIRST name; this one asks the STATIC VALUE of the names the key reads,
+    because the vector can arrive through the comprehension's VALUE expression instead of the
+    source's pair — `{k: _encode(ev) for k in ["embedding"]}` has no pair in it at all
+    (`#13788`, measured by the review of this branch).
+
+    Static and narrowed exactly as the rest of this module is: a name the key MENTIONS must be
+    bound by a clause over a LITERAL container of CONSTANTS containing the exact property —
+    directly (`for k in ["embedding"]`) or through the unpack POSITION that name takes
+    (`for k, _i in [("embedding", 1)]`, `for _i, v in [(1, "embedding")]`). ⛔ IT MENTIONS AND
+    IS NOT THE KEY, on purpose: `{f"{k}": _encode(ev) for k, _i in [("embedding", 1)]}`
+    computes the same key and is the same store, and a `Name`-only version accepted it
+    (measured). The cost is the same over-refusal of a key that transforms the name AWAY
+    (`k.upper()`) that the unreadable-key term beside it already pays, and the doctrine permits
+    it. A source this check cannot read answers False, and the caller's other arms still run.
+    """
+    import ast
+
+    referenced = {node.id for node in ast.walk(key) if isinstance(node, ast.Name)}
+    if not referenced:
+        return False
+    for generator in generators:
+        container = getattr(generator, "iter", None)
+        if not isinstance(container, ast.List | ast.Tuple | ast.Set):
+            continue
+        target = getattr(generator, "target", None)
+        if isinstance(target, ast.Name):
+            if target.id in referenced and any(
+                    isinstance(element, ast.Constant)
+                    and element.value == EMBEDDING_PROPERTY
+                    for element in container.elts):
+                return True
+            continue
+        if not isinstance(target, ast.Tuple | ast.List):
+            continue
+        for index, bound in enumerate(target.elts):
+            if not (isinstance(bound, ast.Name) and bound.id in referenced):
+                continue
+            for element in container.elts:
+                if (isinstance(element, ast.Tuple | ast.List)
+                        and index < len(element.elts)
+                        and isinstance(element.elts[index], ast.Constant)
+                        and element.elts[index].value == EMBEDDING_PROPERTY):
+                    return True
+    return False
+
+
 def _unpacked_element_stores_the_vector(node) -> bool:
     """Does this iterable literal hold an element whose FIRST TWO items are the store?
 
@@ -2013,7 +2085,15 @@ def _container_literal(node):
 
 
 def _pairs_store_the_vector(node) -> bool:
-    """Does this list/tuple literal hold an `(EXACT property, non-constant)` pair?"""
+    """Does this list/tuple/SET literal hold an `(EXACT property, non-constant)` pair?
+
+    ⛔ A SET IS AN ITERABLE OF PAIRS TOO (`#13788`, measured by the review of this branch):
+    `d |= {("k", v)}` and `d.update({("k", v)})` are accepted by CPython, so
+    `props |= {("embedding", vec)}` is a store whenever the vector is HASHABLE (a tuple
+    vector) and a `TypeError` when it is not (a list vector) — the verdict depended on the
+    vector's type, which no static check can see, so the stop arm must refuse it either way.
+    It was CERTIFIED while the list spelling was refused.
+    """
     import ast
 
     return any(
