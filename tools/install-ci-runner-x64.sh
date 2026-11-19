@@ -279,13 +279,13 @@ for _size in CORES_PER_RUNNER CORES_RESERVED_FOR_AGENT_LANES DISK_PER_RUNNER_GB 
   _size_val="${!_size}"
   [ "${#_size_val}" -le 9 ] || die "$_size must be at most 9 digits (got '$_size_val')" 1
   # ⛔ AND REBUILT IN BASE 10 HERE, ONCE, FOR EVERY CONSUMER. "All digits" is NOT "safe in $(( ))":
-  # bash reads a leading zero as OCTAL, so `08`/`09` are an ARITHMETIC ERROR — and its consequence is
-  # not a bad number, it is `count * 08` aborting the REST OF THE ENCLOSING `if` BLOCK, i.e. every
-  # headroom gate after that line silently SKIPPED while the run still exits 0. Measured on
-  # `MEM_PER_RUNNER_GB=08`: the fork/disk gates printed, the memory refusal never ran at all
-  # (fail-open, and the gate the comment below calls "deliberate fail-closed"). Normalising the
-  # validated value in ONE place closes the whole class — forks, disk, cpu, memory and the derived
-  # bound all read these variables — instead of hardening the four `$(( ))` sites one review at a time.
+  # bash reads a leading zero as OCTAL, so `08`/`09` are an ARITHMETIC ERROR — and ⚠️ its consequence
+  # is NOT a silent pass, which three earlier rounds recorded. MEASURED (bash 5.2.21, this file's own
+  # `set -uo pipefail`): `mem_need_gb=$(( COUNT * 08 + 0 ))` errors and LEAVES `mem_need_gb` UNSET, so
+  # the next line's `"$mem_need_gb"` is a `set -u` violation and the installer ABORTS with exit 1 — a
+  # loud abort on a USAGE code with the memory refusal never reached, not a vanished guard over a zero
+  # exit. Normalising in ONE place closes the class for forks, disk, cpu, memory and the derived bound
+  # — instead of hardening the four `$(( ))` sites one review at a time.
   printf -v "$_size" '%d' "$(( 10#$_size_val ))"
 done
 # ⛔ THE TWO UNIT VALUES THAT ARE NOT INTEGERS GET THEIR OWN VALIDATION, because the digits-only loop
@@ -329,8 +329,8 @@ done
 
 # ⛔ THE DERIVED BOUND IS COMPUTED ONCE, HERE, AND BOTH READERS USE IT (the dry-run plan and the
 # drop-in writer). Computing it lazily in two places is how they drifted: the dry-run's own
-# `$(( MEM_PER_RUNNER_GB * MEM_MAX_FACTOR ))` read `08` as OCTAL (an ERROR that silently emptied the
-# value and dropped the bound while reporting success). `10#` forces base 10, and a positive sizing
+# `$(( MEM_PER_RUNNER_GB * MEM_MAX_FACTOR ))` read `08` as OCTAL; the error left `MEM_MAX_GB` UNSET
+# for the guard below's `set -u` reference. Same loud abort, not a silent pass. `10#` forces base 10:
 # unit that produces a non-positive GIGABYTE product (an absurd knob wrapping negative) is REFUSED —
 # the whole point of this file's validator is that a bound nobody can read never quietly becomes no
 # bound at all.
@@ -404,11 +404,11 @@ write_unit_dropin() { # $1 = instance name, e.g. pi-runner-x64-1
 
 # Remove OUR drop-in only. ⛔ NEVER `rm -rf` the `.d` directory: other drop-ins may live there and
 # removing one is not this installer's decision (pi-cell-4 carries a hand-written `restart.conf` in
-# exactly that directory, which sorts AFTER `10-` and wins every shared key). ⛔ AND `rmdir
-# --ignore-fail-on-non-empty` ignores ONLY `ENOTEMPTY`: on a target that never had a `.d` dir it
-# exits 1 ("No such file or directory"), so the `[ -d ]` guard is what keeps a clean uninstall from
-# reporting rc=3 — and the existence check afterwards is what stops the same flag from swallowing a
-# failed `rm`.
+# exactly that directory, which sorts AFTER `10-` and wins every shared key). ⚠️ WHAT KEEPS A MISSING
+# `.d` DIRECTORY FROM BECOMING rc=3 IS NOT THE `[ -d ]` GUARD — that is the `2>/dev/null || true` on the
+# `rmdir` line (measured: delete the guard and this still returns 0, because `sudo rm -f` on an absent
+# path exits 0 and rmdir's ENOENT is swallowed). The existence check afterwards stops `rm -f`'s status
+# being swallowed; the guard's real benefit is that a target with nothing of ours gets no `sudo` at all.
 remove_unit_dropin() { # $1 = unit name (NOT the instance name)
   local unit="$1" dropin
   dropin="$UNIT_DIR/$unit.d/10-restart-and-memory.conf"

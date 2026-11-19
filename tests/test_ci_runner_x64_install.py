@@ -5920,12 +5920,22 @@ def test_uninstall_without_svc_sh_still_removes_our_dropin(tmp_path: Path):
 
 
 def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_path: Path):
-    """⛔ `rmdir --ignore-fail-on-non-empty` ignores ONLY `ENOTEMPTY`. On a target that never had a `.d`
-    directory it exits 1 ("No such file or directory") — so an unguarded teardown would report a clean
-    uninstall as rc=3 on every box this installer has ever touched. Measured: rc=1 for a missing dir,
-    rc=0 for a non-empty one.
+    """rc=0 on a target that never had a `.d` directory — and the teardown is not even INVOKED.
+
+    ⛔ THE rc=0 IS NOT THE GUARD'S DOING, and this arm used to assert NOTHING ELSE: `sudo rm -f` on an
+    absent path exits 0 and the `rmdir` ENOENT is swallowed by the `2>/dev/null || true` already on
+    that line, so deleting `[ -d "$UNIT_DIR/$unit.d" ] || return 0` left the old assertion GREEN — a
+    proven-green mutant. It pinned "uninstall exits 0", which was equally true before this PR, when
+    no drop-in code existed at all. What the guard actually buys is that a box with nothing of ours to
+    remove runs no `sudo` and no `rmdir`, so THAT is what is asserted here, and it is the thing that
+    reddens when the guard is deleted (mutant: drop the `[ -d ]` line ⇒ `sudo rm -f` and `sudo rmdir`
+    both run, `rmdir.log` appears, the arm reds while rc stays 0).
     """
     env = _uninstall_env(tmp_path)
+    # `rmdir` stub: logs its argv and exits 1, exactly as the REAL one does on a missing directory.
+    _stub_tool(
+        tmp_path / "bin", "rmdir", f'printf "%s\\n" "$*" >> {tmp_path / "rmdir.log"}\nexit 1'
+    )
     runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
     _stub_tool(runner, "svc.sh", "exit 0")
     (Path(env["CI_RUNNER_UNIT_DIR"]) / _unit_for()).write_text("[Unit]\nDescription=x\n")
@@ -5933,6 +5943,20 @@ def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_pat
 
     r = _run("--uninstall", "--count", "1", env=env)
     assert r.returncode == 0, f"no `.d` dir is not a failure: rc={r.returncode}: {r.stderr}"
+    assert not (tmp_path / "rmdir.log").exists(), (
+        "the teardown ran `rmdir` on a target that never had a `.d` directory — the "
+        "`[ -d ] || return 0` guard is gone, and it is the guard (not the exit code) that this arm "
+        f"exists to pin: {(tmp_path / 'rmdir.log').read_text()}"
+    )
+    sudo_log = tmp_path / "sudo.log"
+    tried = [
+        line
+        for line in (sudo_log.read_text().splitlines() if sudo_log.exists() else [])
+        if "10-restart-and-memory.conf" in line
+    ]
+    assert not tried, (
+        f"the teardown tried to remove a drop-in that cannot exist on this target: {tried}"
+    )
 
 
 def test_the_timespan_validator_refuses_trailing_junk_after_a_valid_suffix(tmp_path: Path):
@@ -5964,13 +5988,14 @@ def test_a_leading_zero_sizing_unit_still_derives_the_bound(tmp_path: Path):
     guard that reads as present and is not, which is this change's whole subject. `10#` forces base 10;
     this arm pins the arithmetic, not the string.
 
-    ⛔ AND IT PINS THAT THE HEADROOM GATE **RAN**. The first version of this arm was green for a wrong
-    reason: bash aborts the rest of the enclosing `if` block on the arithmetic error, so the memory
-    refusal at the END of that block was SKIPPED and the run exited 0 — the arm certified a run in
-    which a safety gate had vanished (measured; the review found it). `headroom: cpu ok` is emitted
-    only AFTER the memory gate has decided, so asserting it is what makes this arm's `rc == 0` a
-    statement about the arithmetic instead of about a skipped guard. The sibling arm below pins the
-    refusal that the skip was hiding.
+    ⛔ AND IT PINS THAT THE HEADROOM GATE **RAN**. The first version of this arm asserted `rc == 0`
+    and nothing else, which distinguished nothing: on the PRE-FIX installer this run does not succeed
+    at all — `$(( 1 * 08 + 0 ))` errors, `mem_need_gb` is left UNSET, and the next line references it
+    under `set -u`, so the installer ABORTS with exit 1 (measured on bash 5.2.21; the sibling arm
+    below pins that abort). So the old arm was green for a reason it did not name — `10#` made the
+    arithmetic work — and could not tell "the arithmetic is right" from "the run got this far".
+    `headroom: cpu ok` is emitted only AFTER the memory gate has decided, so asserting it makes this
+    arm's `rc == 0` a statement about the ARITHMETIC rather than about how far the script got.
     """
     env = _dropin_env(tmp_path, unit_present=True, CI_RUNNER_MEM_PER_RUNNER_GB="08")
     unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
@@ -5988,14 +6013,18 @@ def test_a_leading_zero_sizing_unit_still_derives_the_bound(tmp_path: Path):
 
 
 def test_a_leading_zero_sizing_unit_cannot_skip_the_memory_headroom_refusal(tmp_path: Path):
-    """⛔ THE FAIL-OPEN THE `08` ARM USED TO CERTIFY. `$(( 1 * 08 + 0 ))` is an arithmetic ERROR, and
-    bash's reaction is to abandon the REST OF THE ENCLOSING `if` BLOCK — so on a box with too little
-    memory the refusal never ran, the install continued and the run exited 0: the one gate the code
-    calls "deliberate fail-closed" silently vanished because of a leading zero in a DIFFERENT knob.
-    The validated knobs are therefore rebuilt in base 10 once, before any consumer, and this arm pins
-    the observation that used to be impossible without the `CI_RUNNER_MEM_AVAILABLE_GB` seam.
+    """⛔ THE ABORT THE `08` ARM NEVER NAMED. `$(( 1 * 08 + 0 ))` is an arithmetic ERROR, so
+    `mem_need_gb` is left UNSET and the next line's `"$mem_need_gb"` reference is a `set -u`
+    violation — fatal in a non-interactive script. MEASURED on bash 5.2.21 with this file's own
+    `set -uo pipefail`: the installer ABORTS with exit 1 and prints no `REFUSED:` line. So on a box
+    with too little memory the headroom refusal this code calls "deliberate fail-closed" was never
+    reached, and the caller was told **1** (usage) rather than 0 — a loud abort on the wrong code, not
+    a silent pass. (Three earlier rounds recorded this as "silently skipped, run exited 0"; that is
+    refuted, see the installer's validator comment.) Normalising every validated knob in base 10 in
+    ONE place, before any consumer, closes the class.
 
-    Non-vacuity (measured): against the pre-fix installer this exits 0 and the arm reds.
+    Non-vacuity (measured): against the pre-fix installer this exits 1 and the arm reds — it requires
+    the GUARD refusal, exit 2.
     """
     env = _dropin_env(
         tmp_path,

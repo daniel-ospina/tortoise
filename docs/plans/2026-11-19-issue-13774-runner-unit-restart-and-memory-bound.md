@@ -159,11 +159,13 @@ installed by any path other than this installer; the `exit 0` death class's own 
 - **The headroom coercion is fixed here, at the root, rather than deferred.** This was recorded as
   "not fixed here, filed instead": the pre-existing headroom gates
   (`mem_need_gb=$(( COUNT * MEM_PER_RUNNER_GB + MEM_RESERVE_GB ))` and its fork/disk siblings) coerced
-  without `10#`, so a leading zero made `$(( ))` ERROR — and bash's reaction is to abandon the rest of
-  the enclosing `if`, so every later headroom refusal (the live `MemAvailable` one included) was
-  silently SKIPPED while the run exited 0. That is a fail-open in a gate this file calls "deliberate
-  fail-closed", and the PR's own `08` arm was certifying a run in which it had vanished, so deferring
-  it would have shipped the arm that hides it. The validated sizing knobs are now rebuilt in base 10
-  ONCE, after the digits/length checks — one place, every consumer — instead of hardening four
-  `$(( ))` sites one review at a time. `CI_RUNNER_MEM_AVAILABLE_GB` was added as a seam so the refusal
-  can be observed at all, and two arms pin it.
+  without `10#`, so a leading zero made `$(( ))` ERROR — and the measured consequence is a LOUD abort:
+  `mem_need_gb` is left UNSET and the next line's reference to it is a `set -u` violation, so the
+  installer exits **1** (usage) with no `REFUSED:` line (bash 5.2.21, this file's own
+  `set -uo pipefail`). ⛔ An earlier round of this plan recorded that as "every later refusal silently
+  SKIPPED while the run exited 0"; that is **refuted** and must not be reinstated. What the deferral
+  actually cost was the memory refusal never being reached and a wrong exit code (a usage error where
+  the contract promises a guard refusal), not a hidden pass. The validated sizing knobs are now
+  rebuilt in base 10 ONCE, after the digits/length checks — one place, every consumer — instead of
+  hardening four `$(( ))` sites one review at a time. `CI_RUNNER_MEM_AVAILABLE_GB` was added as a seam
+  so the refusal can be observed at all, and two arms pin it.
