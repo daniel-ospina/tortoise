@@ -5760,6 +5760,50 @@ class TestThe12244TheHostedAnchorCollapsesAMergedPair:
             "expected ONE edge, on the survivor: "
             f"{survivor_edges} (carrier got {carrier_edges})")
 
+    def test_a_LEGACY_non_string_id_keeps_its_edge(self, client):
+        """#12244: an `Object` whose `id` is not a STRING is addressable, not id-less.
+
+        The anchor now attaches through an ID-KEYED MERGE (`o.id IN $ids`) fed
+        by `attachment_target_ids`, which answers in the STRING spelling (the
+        hop, `entity_resolver.follow_resolved_from`, does `str(node_id)` at its
+        own entry). A legacy/imported row can carry a non-string `id`, and the
+        string form matches nothing: measured on the intermediate code, an
+        `Object {id: 4242}` matched by the name space lost its edge at this
+        anchor, where main's single name-keyed MERGE — which matches NODES, not
+        id spellings — wrote it. So the raw value rides beside the string ones.
+
+        ⛔ Only THIS site had that exposure: the local capture seam
+        (`sdk._extract_session_v2`) and `apply_merge_union` both filtered to
+        `isinstance(row[0], str)` before #12244 and attached nothing for a
+        non-string id, so restoring the edge here is parity with main, not a
+        new policy.
+        """
+        sdk = _team_sdk()
+        try:
+            sdk._get_proj().g.query(
+                "CREATE (o:Object {id: 4242, name:'Legacy Int', "
+                "canonical_name:'legacy int', status:'active'})")
+            assert sdk._get_proj().g.query(
+                "MATCH (o:Object {id:4242}) RETURN o.id").result_set == [[4242]]
+        finally:
+            sdk.close()
+
+        raw = _raw_payload(
+            1, session_id="s12244-h-int",
+            entities=[{"name": "Legacy Int", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["Legacy Int"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        edges = _team_sdk()._get_proj().g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object) "
+            "WHERE o.id = 4242 RETURN count(o)").result_set[0][0]
+        assert edges == 1, (
+            "a non-string `id` was treated as unaddressable and lost its "
+            f"`aboutObject` edge (edges={edges}); the string spelling of "
+            "4242 names no node")
+
 
 class TestThe12120HostedAboutObjectAnchor:
     """The hosted session-capture `about_entities` anchor (POST /v1/sessions/commit).
