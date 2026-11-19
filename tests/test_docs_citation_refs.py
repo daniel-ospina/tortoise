@@ -503,6 +503,18 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
+def _census_verdict_row_heads(row: str) -> list[str]:
+    """The head-shaped tokens a census-verdict row names, or `[]` when it names none.
+
+    A census verdict (`--check` exits 0 / reports `== measured`) is only readable beside
+    the head it was minted at, so a row that states one and names no head is a false PASS
+    the moment the checker's state moves. Factored out so the leg that reads it can be
+    driven with synthetic rows — a guard whose discrimination is asserted, not described.
+    """
+    return [h for h in re.findall(r"\b[0-9a-f]{7,40}\b", row)
+            if any(c.isdigit() for c in h) and any(c.isalpha() for c in h)]
+
+
 def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     """⛔ A document reported a checker's EXIT CODE as green while the checker was RED.
 
@@ -546,8 +558,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     gap is recorded here and in the PR body rather than papered over by a gate that
     reports OK over a wrong artifact.
 
-    NON-VACUITY, MEASURED: on the pre-fix document **leg (a) reds**
-    (`AssertionError: 05-verify.md asserts '--check` exits 0'`). Legs (b) and (c)
+    NON-VACUITY, MEASURED: the arm is driven by a SYNTHETIC pair of rows — the green
+    with no head yields no heads (reds), the same green carrying a sha yields one — so
+    its discrimination is PROVEN rather than described. It is stated this way because the
+    earlier claim that it "reds on the pre-fix document" could not be reproduced at any
+    head reachable from `origin/main` or from this branch: the census cells are single
+    ~40 KB table rows that carry hex-like tokens for other reasons, so every live row
+    already passes (#13746 review, P3). Legs (b) and (c)
     already HELD there — the command string and the inherited-red attribution were
     both present while the false green sat beside them — so they are REGRESSION
     legs: they keep the reader pointed at the verb and at the inherited-red
@@ -555,6 +572,16 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
+    # ⛔ THE ARM'S OWN REDDENING ROW (#13746 review): the wrong-direction row is refused and
+    # the head-carrying row is not, asserted on synthetic text so the discrimination is
+    # proven rather than described.
+    _no_head_row = "and `tools/hosted_api_cite_census.py --check` exits 0"
+    assert _census_verdict_row_heads(_no_head_row) == [], (
+        "the census-verdict leg no longer discriminates: a row stating the green with no "
+        "head it was minted at must yield no heads, so the assert below reds on it")
+    assert _census_verdict_row_heads(_no_head_row + " (`5db18e9a77`)"), (
+        "the census-verdict leg no longer discriminates: the same green carrying a head "
+        "must yield one, so the assert below stays green on it")
     for green in (
         "--check` exits 0",
         "--check` reports every stated figure `== measured`",
@@ -571,10 +598,9 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             # force the document to say RED about a checker that exits 0 — a false
             # report is a false report in either direction. So the property asserted is
             # the one #13489 was after: a verdict must travel with the head it belongs
-            # to. NON-VACUITY, MEASURED: on the pre-fix row (the green with no sha in
-            # it) this leg reds; it is green once the row names the re-taking commit.
-            _heads = [h for h in re.findall(r"\b[0-9a-f]{7,40}\b", _row)
-                      if any(c.isdigit() for c in h) and any(c.isalpha() for c in h)]
+            # to. The predicate is factored out so this arm can be driven with synthetic
+            # rows above; on the live document every such row already carries its head.
+            _heads = _census_verdict_row_heads(_row)
             assert _heads, (
                 f"05-verify.md states a census verdict ({green!r}) in a row that names no "
                 "head. `tools/hosted_api_cite_census.py --check` is RED on `origin/main` "
@@ -603,12 +629,24 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # and the cell contradicted itself, five sentences apart. Presence was never the property
     # being relied on; AGREEMENT is, so that is what is asserted here.
     #
-    # NON-VACUITY, MEASURED: on the pre-fix document the first tuple member below IS present
-    # (`grep -c 'and neither is'` -> 1) and this leg reds on it; it is green only after the
-    # clause is deleted. The third member refuses the same claim in the other spelling the cell
-    # used to carry — `… tortoise/` "returns exactly those two" — and the QUOTES are what tell
-    # that quoted retraction apart from a re-assertion (the pattern matches only the unquoted
-    # form, so the retraction that still records the false spelling stays legal).
+    # NON-VACUITY, MEASURED PER ARM (this paragraph was false as written: its
+    # `grep -c 'and neither is'` counts the RETRACTION phrase below, not the arm it claims
+    # to justify — #13746 review, same class as the `_stale_direction` note). Measured with
+    # `git show <ref>:<doc>` + `str.count`: the first member is carried by the pre-fix
+    # document `16ace39823` (1) and by `9f830c6dbc^` (1) — the `origin/main`-reachable head
+    # `9f830c6dbc` deleted it from — so restoring either wording reds here. The other two
+    # members measure 0 at `16ace39823`, at `9f830c6dbc^`, and at every head reachable from
+    # `origin/main` or from this branch: ``… tortoise/` is NOT empty`` was never typed in that
+    # order (the cell wrote `… is NOT empty, and neither is <cmd>`, which the first member
+    # already refuses), and the third member's spelling — the command immediately followed by
+    # `` ` returns exactly those two`` — occurs only at `88a14eea7c2`, a `refs/wip/*` rescue
+    # snapshot whose own message says it is "not for merge" (the cell at `16ace39823` does
+    # carry the phrase, but quoted and in the other arrangement, which is why no arm matches
+    # it there). So those two stay as FORWARD guards: they are not claimed as measured
+    # regressions, and no head a reader can open from `main` carries either. The quotes in
+    # them are what tell that quoted retraction apart from a re-assertion (the pattern matches
+    # only the unquoted form, so the retraction that still records the false spelling stays
+    # legal).
     _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
@@ -616,11 +654,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         f"{_tortoise_cmd}` returns exactly those two",
     ):
         assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints 0 lines at "
-            "this head (the `#12943` modules landed on `main`, so they sit on BOTH sides "
-            "of the merge and contribute no path here), so the sentence is refuted by the "
-            "very command it quotes — and it satisfied the presence-only leg above while "
-            "contradicting the empty claims beside it (#13489 review, P1)")
+            f"05-verify.md asserts {_negation!r}. That is a DIRECTION about the `tortoise/` "
+            f"set typed as a current fact, and it is refuted by the very command it quotes: "
+            f"`{_tortoise_cmd}` prints two comment-only paths at this head "
+            "(`tortoise/activation_scorecard.py` and `tortoise/hosted_api.py`), so the "
+            "sentence contradicts the claims beside it — and it satisfied the presence-only "
+            "leg above while doing so. Read the set at the head being merged; never type a "
+            "direction (#13489 review, P1)")
     # ⛔ …AND THE DIRECTION IS READ, NEVER TYPED (#13550 review, P1 — MEASURED at
     # `618b1ec0e4`). The leg this replaces demanded that the document say the `tortoise/`
     # set was EMPTY. That is a claim about ONE head, and it is FALSE at this one:
