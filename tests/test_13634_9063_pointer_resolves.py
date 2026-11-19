@@ -122,7 +122,7 @@ def _claimed_open(issue: int):
         # Form 2 is the MIRROR word order and gets the same copula family — widening only form 1
         # left `#9063 is open` / `#9063 stays open` / `#9063 remain open` green (measured).
         r"#" + n + r"\s+(?:(?:still|now)\s+)?(?:remain(?:s)?|is|are|stay(?:s)?)\s+"
-        r"(?:(?:still|now)\s+)?(?:an?\s+)?open(?:\s+(?:question|issue|tracker))?",
+        r"(?:(?:still|now)\s+)?(?:an?\s+)?open",
         # The NOUN forms — this file is named after "the open tracker", and it was the one shape
         # the claim family did not cover (`#9063 is the open tracker`, `the open question is #9063`).
         r"open\s+(?:issue|question|tracker)\s+(?:is|in|remains)\s+#" + n,
@@ -130,6 +130,11 @@ def _claimed_open(issue: int):
         # The retired sdk.py wording's OWN shape, which mentions neither `open` next to the copula
         # nor a link: "…are the open belief-model decision in #9063".
         r"(?:open|unsettled)\s+(?:[\w-]+\s+){0,3}(?:decision|question)\s+in\s+#" + n,
+        # The same claim with the issue FIRST and a linking preposition — the README's own retired
+        # wording ("the refusal names #9063 as the open belief-model decision") was the one shape the
+        # family missed, so re-introducing THAT sentence stayed GREEN (measured).
+        r"#" + n + r"\s+(?:as|is)\s+(?:the\s+)?(?:open|unsettled)\s+"
+        r"(?:[\w-]+\s+){0,3}(?:decision|question)",
         r"tracked\s+(?:by|in)\s+#" + n,  # tracked by #9063
     )
     return re.compile("|".join(forms), re.I)
@@ -230,6 +235,8 @@ def test_no_v338_entry_calls_9063_the_open_tracker():
         # the `reads`/`read` record verb, and the single-curly glyph family.
         'The v3.38 entry reads `remains open (#9063)`; that was false.',
         "The old wording, withdrawn, read \u2018remains open (#9063)\u2019.",
+        # Pins the `\s+` substitution in the regex construction: a correction may wrap its words.
+        'As  merged, "remains open (#9063)" was the wording recorded there.',
         "As merged it read \u201cremains open (#9063)\u201d and that was false.",
         "The wording used to read \u00abremains open (#9063)\u00bb before the correction.",
         "The earlier text, withdrawn, used to read `remains open (#9063)`.",
@@ -269,7 +276,12 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
         "#9063 remains the open tracker",
         "#9063 is still the open tracker for declared priors",
         # One row per ALTERNATIVE of every form, so an alternative cannot be deleted without reddening
-        # a row (a 60-mutation sweep found 13 unpinned alternatives: #13675 review, round 6).
+        # a row (two sweeps found 19 unpinned alternatives: #13675 review, rounds 6-7). An alternative
+        # SUBSUMED by another form cannot be pinned on its own — `#9063 is the open question` is also
+        # matched by the `#N (as|is) the open … decision|question` form — so coverage, not the
+        # alternative, is the invariant; the subsumed ones are listed here so a reader does not mistake
+        # their absence for an oversight.
+        "Whether declared priors stays open (#9063)",
         "declared priors are open (#9063)",
         "remains an open issue (#9063).",
         "remains an open tracker (#9063).",
@@ -283,6 +295,13 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
         "#9063 is now the open tracker for declared priors.",
         "#9063 stays the open tracker for declared priors.",
         "an unsettled belief-model question in #9063",
+        "the refusal names #9063 as the open belief-model decision",
+        # The remaining enumerated alternatives a round-7 sweep found unpinned:
+        "declared priors stay open (#9063)",
+        "#9063 is now open on declared priors.",
+        "#9063 remains an open question",
+        "#9063 is the open question for declared priors",
+        "#9063 is the open issue for declared priors",
         # Pins the trailing `\b` of the marker class: `readable` is not a record marker, so this is the
         # claim, not a record (without the `\b` it would be stripped and GREEN).
         'The entry is no longer readable: "remains open (#9063)".',
@@ -342,6 +361,13 @@ def test_every_record_marker_introduces_a_skipped_span(marker):
         f"real correction written that way is a false BLOCK"
     )
     passage = _RECORD_MARKER_PASSAGES[marker]
+    # ⛔ The pin must prove the CLAIM was present before the marker skipped it. Asserting only the
+    # post-strip direction let a passage be rewritten claim-free with the row still green (measured:
+    # "It carried a sentence that was retired." kept 72 passed).
+    assert _claimed_open(9063).search(passage), (
+        f"the pin passage for {marker!r} no longer CONTAINS the claim, so this row proves nothing "
+        f"about stripping: {passage}"
+    )
     unquoted = _QUOTED_IN_CORRECTION.sub(" ", passage)
     assert not _claimed_open(9063).search(unquoted), (
         f"the record marker {marker!r} no longer introduces a skipped span, so a legitimate "
