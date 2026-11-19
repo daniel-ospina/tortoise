@@ -504,6 +504,43 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
+def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
+    """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
+
+    The SHAPE is what is matched — the command, then an answer predicate (`prints`,
+    `returns`, `yields`, `->`, `→`, `is`, `=`), then the answer — because the guard's own
+    docstring claims it refuses ANY typed present-tense answer, and a literal list cannot
+    hold that promise (#13728 review, finding 4): `returns nothing` and `is empty at this
+    head` are one-word variations of the refused `prints NOTHING`.
+
+    `claims_empty` says which DIRECTION the answer asserts. A negation (`is NOT empty`) is
+    a MEMBERSHIP claim even though it contains the word `empty`, and a window that carries
+    no answer token at all (`is the command that answers it`) is not an answer and is
+    skipped — refusing the document's own pointer to the command would be the same class
+    of defect in the other direction.
+    """
+    answers: list[tuple[str, bool]] = []
+    for match in re.finditer(
+            r"`?" + re.escape(cmd)
+            + r"`?[\s*]*(prints|returns|yields|->|→|is|=|:)", doc):
+        rest = doc[match.end():match.end() + 90]
+        rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
+        window = f"{match.group(1)} {rest}".strip()
+        low = window.lower()
+        if not rest:
+            continue
+        if re.search(r"\b(?:not|never)\b", low):
+            claims_empty = False
+        elif re.search(r"empty|nothing|no path|no `tortoise/`", low):
+            claims_empty = True
+        elif re.search(r"tortoise/|comment-only|exactly|\btwo\b|\bseven\b", low):
+            claims_empty = False
+        else:
+            continue
+        answers.append((window, claims_empty))
+    return answers
+
+
 def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     """⛔ A document reported a checker's EXIT CODE as green while the checker was RED.
 
@@ -534,10 +571,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           send the reader to the command, never away from it) and names every path
           `_note_paths` returns — the two `tortoise/` notes the verb grades and the test
           and tool rows it also lists — which is WHICH files the verdict is about;
-      (c) RETIRED SPELLINGS — the phrasings that were FALSE against this tree are
-          refused by name, so a hand edit cannot quietly restore one. If a future head
-          really does empty that path list, re-scope (c) deliberately instead of letting
-          the old sentence back in.
+      (c) TYPED ANSWERS — a typed answer to the `-- tortoise/` command is refused in the
+          direction the MEASUREMENT refutes at this head: membership phrasings are refused
+          when the command prints nothing, emptiness phrasings when it prints a path.
+          The spellings measured FALSE are refused by name AND by SHAPE (the command
+          followed by `prints`/`returns`/`is`/`->` and an answer), so neither a frozen
+          sign nor a one-word re-wording can quietly restore a claim the tree refutes
+          (#13728 review, findings 1 and 4).
     """
     from tools.hosted_api_cite_census import _note_paths, _sweep, census
 
@@ -592,32 +632,65 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "`tortoise/` modules the verdict is about; the empty-list reading that stood "
             "here before was FALSE at this head (#13750 review, cycle 1)")
 
-    # (c) RETIRED SPELLINGS — measured FALSE against the tree, so the arm READS the tree
-    # instead of freezing which direction the answer points.
-    # ⛔ MEASURED (#13746 review, finding 7): this list was five literals assuming a NON-EMPTY
-    # `-- tortoise/` set. `main`'s own `#13790`/`#13786` then re-took the same census figures,
-    # so at this head the command prints NOTHING and every one of those five spellings became
-    # the TRUE statement — the same class of error as the frozen sign this arm replaced
-    # (a guard that pins a MEASUREMENT has to READ it). The prohibition is therefore applied
-    # only where the measurement supports it.
+    # (c) TYPED ANSWERS — refused in WHICHEVER DIRECTION the tree refutes at this head.
+    # ⛔ TWO DEFECTS OF ONE SHAPE ARE FIXED HERE (#13728 review, P1/P2). (i) The cut before
+    # this one listed five literals that assumed a NON-EMPTY `-- tortoise/` set and SKIPPED
+    # the whole loop when the set was empty — so on an empty set it refused NOTHING,
+    # including `... prints the two COMMENT-ONLY modules`, which is the FALSE claim at
+    # exactly that head. (ii) The docstring above claimed "ANY typed present-tense answer"
+    # was refused while the code matched nine spellings by name, so `returns nothing`,
+    # `is empty at this head` and `carries no `tortoise/` path at all` all walked through
+    # GREEN. Both are the frozen-measurement defect: the guard must READ the measurement and
+    # then enforce the reading in BOTH directions, which is what the two arms below do —
+    # the named spellings, and a structural match for any re-wording of the same answer.
     _tortoise_set = subprocess.run(
         ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
         cwd=REPO, capture_output=True, text=True, check=False).stdout.split()
-    for _negation in (
-        f"neither is `{_tortoise_cmd}`",
-        f"{_tortoise_cmd}` is NOT empty",
-        f"{_tortoise_cmd}` returns exactly those two",
-        f"{_tortoise_cmd}` -> empty",
-        f"{_tortoise_cmd}` prints NOTHING",
+    _measured = " ".join(_tortoise_set) if _tortoise_set else "NOTHING"
+    for _claim, _claim_is_empty in (
+            *((_c, True) for _c in (
+                f"neither is `{_tortoise_cmd}`",
+                f"{_tortoise_cmd}` -> empty",
+                f"{_tortoise_cmd}` prints NOTHING",
+            )),
+            *((_c, False) for _c in (
+                f"{_tortoise_cmd}` is NOT empty",
+                f"{_tortoise_cmd}` returns exactly those two",
+                f"{_tortoise_cmd}` prints the two COMMENT-ONLY modules",
+                f"{_tortoise_cmd}` prints exactly `tortoise/activation_scorecard.py`",
+                "the `tortoise/` set above is the two COMMENT-ONLY modules",
+                "which two `tortoise/` paths this diff carries",
+            )),
     ):
-        if not _tortoise_set:
-            # The empty claim is the measured one here; asserting it is not a defect.
-            continue
-        assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints "
-            f"{' '.join(_tortoise_set)!r}, so the sentence is refuted by the very command "
-            "it quotes (#13489 review, P1; #13750 review, cycle 1 — the empty claim was "
-            "true of an earlier head and is not true of this one)")
+        # contradiction iff the claim's direction equals the measurement's (a member claim
+        # when the set is empty, or an emptiness claim when it is not).
+        assert _claim_is_empty != bool(_tortoise_set) or _claim not in doc, (
+            f"05-verify.md asserts {_claim!r} — an answer to `{_tortoise_cmd}` in the "
+            f"direction the tree refutes at this head, where that command prints "
+            f"{_measured}. A guard that pins a MEASUREMENT must not pin its SIGN either "
+            "(#13489 review, P1; #13750 review, cycle 1; #13728 review, P1)")
+    # NON-VACUITY (#13728 review, finding 4): the shape detector must SEE an answer in both
+    # directions and must read a NEGATION as a membership claim, or the arm below is inert
+    # and its silence proves nothing.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` returns nothing", _tortoise_cmd) == [("returns nothing", True)], (
+            "the shape detector does not see `returns nothing` as an EMPTINESS answer, so "
+            "the re-wording class this arm exists for would walk through green")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` is NOT empty", _tortoise_cmd) == [("is NOT empty", False)], (
+            "the shape detector reads `is NOT empty` as an emptiness claim; it is a "
+            "MEMBERSHIP claim, and inverting it would refuse the true sentence and pass "
+            "the false one")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` is the command that answers it", _tortoise_cmd) == [], (
+            "the shape detector treats `is the command that answers it` as a typed answer, "
+            "which would refuse the document's own pointer to the command")
+    for _answer, _claims_empty in _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd):
+        assert _claims_empty != bool(_tortoise_set), (
+            f"05-verify.md types {_answer!r} as the answer to `{_tortoise_cmd}`, which "
+            f"prints {_measured} at this head — a typed present-tense ANSWER to a head-bound "
+            "measurement, in the direction the measurement refutes (#13728 review, "
+            "finding 4)")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
