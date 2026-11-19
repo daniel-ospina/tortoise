@@ -3484,7 +3484,7 @@ _APPROVAL_RECORD_BEHIND_AN_H1_HEADING_AFTER_AN_ITEM = (
     "> # **Owner approval of the exact changes** — given in-session, no comment cited.")
 # ⛔ AND THE SHAPE NO FIXTURE REACHED (review: measured FAIL-OPEN, a regression from
 # `main`): the heading on its OWN line and the label on the NEXT one — what a lane writes
-# when it titles an entry. A heading is a whole block (CommonMark §4.3), so the label
+# when it titles an entry. A heading is a whole block (CommonMark §4.2), so the label
 # opens a new paragraph and is a record; before `_HEADING_START_RE` closed the heading's
 # paragraph the two lines fused, the paragraph began with `###`, and the record PASSED.
 _APPROVAL_RECORD_AFTER_A_HEADING_LINE = (
@@ -3522,7 +3522,7 @@ _APPROVAL_RECORD_IN_A_TABLE_ROW = (
 # ⛔ AND THE REMEDY IS NOT THE ROW'S, MEASURED: the row closes through the STRIPPER
 # (`_LEADING_LIST_MARKER_RE` taught `|\s+` → REFUSED), while these two close only through
 # the SPLITTER — an END-of-paragraph boundary in `_quoted_paragraphs` (the
-# `_HEADING_START_RE` shape, because a break is a whole block, CommonMark §4.4). Teaching
+# `_HEADING_START_RE` shape, because a break is a whole block, CommonMark §4.1). Teaching
 # `_PARAGRAPH_START_RE` their STARTS alone moves nothing (measured: both still PASS — that
 # pattern is consulted on the NEXT line, which is the label), and no stripper can reach
 # them either: there is no delimiter in front of the run to strip. `docs/ONTOLOGY-CHANGELOG.md`
@@ -3547,7 +3547,7 @@ _PARAGRAPH_START_RE = re.compile(
 # ⛔ AND A HEADING IS ALSO A PARAGRAPH's END (review: measured FAIL-OPEN, and a
 # regression from `main`). `_PARAGRAPH_START_RE` decides where a paragraph BEGINS, so a
 # heading line started one — but nothing ended it, and the NEXT line was appended to the
-# heading's paragraph. Per CommonMark §4.3 an ATX heading is a whole block (its content
+# heading's paragraph. Per CommonMark §4.2 an ATX heading is a whole block (its content
 # is the line it is written on), so the line after it opens a NEW paragraph — which by
 # this arm's own contract means its opening emphasis run is a label. Measured before this
 # cut: "### v3.41 — a wording fix" followed by the label on the next line PASSED, while
@@ -3558,6 +3558,16 @@ _PARAGRAPH_START_RE = re.compile(
 # both `""` and `">"` as a break), so the fused shape never arises there. `_APPROVAL_RECORD_AFTER_A_HEADING_
 # LINE` pins the end-of-paragraph rule, `_APPROVAL_RECORD_AFTER_AN_H4_HEADING_LINE` drives
 # the H4-H6 half of the class, and `_NOT_A_HEADING_WITHOUT_A_SPACE` pins the required space.
+# ⛔ EVERY ``CommonMark §N`` IN THIS MODULE IS VERIFIED, NOT RECALLED (2026-11-19).
+# Measured against the RENDERED spec at spec.commonmark.org/0.31.2 — the raw
+# `spec.txt` carries no section numbers, so a citation checked against it is
+# uncheckable: a THEMATIC BREAK is **§4.1**, an ATX HEADING **§4.2**, SETEXT
+# HEADINGS §4.3, INDENTED CODE §4.4, a FENCED BLOCK §4.5, PARAGRAPHS §4.8 and
+# LIST ITEMS §5.2. An earlier cut of these comments cited **§4.4 for a break**
+# and **§4.3 for an ATX heading** — the two adjacent-section errors a reader
+# cannot catch without the rendered spec, which is why the version is stamped
+# here rather than left for the next lane to re-derive. Both claims the numbers
+# annotate are separately measured by the fixtures below; only the numbers moved.
 _HEADING_START_RE = re.compile(r"^#{1,6}\s+")
 
 
@@ -3576,7 +3586,7 @@ def _quoted_paragraphs(block: str) -> list[str]:
     list item is a container block whose text is its OWN paragraph, so each item's first
     inline run does open one — the exact contract this arm is built on. A heading splits
     the same way, for the same reason: it STARTS a paragraph, and — because a heading is a
-    whole block, CommonMark §4.3 — it also ENDS one, so the line after it begins a new
+    whole block, CommonMark §4.2 — it also ENDS one, so the line after it begins a new
     paragraph rather than continuing the heading.
     """
     paragraphs: list[str] = []
@@ -3783,7 +3793,7 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         · the BREAK and the FENCE close through the SPLITTER only, and no stripper can reach
           them — there is no delimiter in front of the run, the block IS the delimiter.
           They need an END-of-paragraph boundary in ``_quoted_paragraphs`` (the
-          ``_HEADING_START_RE`` shape, a break being a whole block, CommonMark §4.4).
+          ``_HEADING_START_RE`` shape, a break being a whole block, CommonMark §4.1).
           Measured, and it is why the guess costs a cycle: adding their STARTS to
           ``_PARAGRAPH_START_RE`` alone leaves BOTH still PASS (that pattern is consulted on
           the NEXT line, which is the label), while an end-boundary split turns both
