@@ -4355,20 +4355,25 @@ operator who read the line above as "CI defends this" would never run it.
 > `tortoise/embeddings.py::_embedder_warmup_enabled` (`:40-50`, `env_flag(..., True)` — shipped
 > default **ON**), and it gates **five** read sites:
 >
-> 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1296`;
+> 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1361`;
 > 2. the SDK **write-path** bound — `tortoise/embeddings.py::await_write_ready_reason`,
->    `:1401` (#13224);
+>    `:1466` (#13224);
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
->    `:1527` (#13528);
+>    `:1592` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
 >    `:3225-3235` (the reader that runs on the deployed box);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
 >    read at `:432`.
 >
+> ⛔ Count these in the right UNIT: **three warm-up surfaces** (1, 4, 5) **+ two readiness bounds**
+> (2, 3) **= five read sites**. "Five warm-up surfaces" is wrong; "three read sites" omits the bound
+> pair. The **function names** are the invariant — the line numbers are a convenience and they move
+> whenever `embeddings.py` grows, so re-pin them on a merge.
+>
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
 > Number 2 and 3 are the second most likely to be missed, and they change behaviour: with the flag
-> `0` each returns `None` immediately (`:1401-1405`, `:1527-1530`), so the write and read paths fall
+> `0` each returns `None` immediately (`:1466-1470`, `:1592-1593`), so the write and read paths fall
 > back to the **synchronous in-request load** — that fallback is part of what flipping the switch
 > chooses.
 

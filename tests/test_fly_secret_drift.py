@@ -2044,16 +2044,21 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         "deploy-set value"
     )
     # ── #13674: the embedder warm-up's EMERGENCY SWITCH ──────────────────────
-    # `TORTOISE_EMBEDDER_WARMUP` gates FIVE read sites — the SDK engine-init
-    # warm-up (`tortoise/embeddings.py::start_warm_up`, gated at `:1296`), the
-    # WRITE-path bound (`::await_write_ready_reason`, `:1401`, #13224), the
-    # READ-path bound (`::await_read_ready_reason`, `:1527`, #13528), the HOSTED
-    # lifespan pre-warm (`tortoise/hosted_api.py::_lifespan`, `:3225-3235` — the
-    # consumer that runs on the deployed box this declaration unblocks), and the
-    # boot pre-warm (`entrypoint.sh:432`). The two bound readers are NOT
-    # cosmetic: with the flag off each returns `None` immediately (`:1401-1405`,
-    # `:1527-1530`), so the WRITE and READ paths fall back to the synchronous
-    # in-request load — part of what flipping the switch chooses. Production RAN
+    # `TORTOISE_EMBEDDER_WARMUP` gates FIVE read sites = THREE warm-up surfaces
+    # (`tortoise/embeddings.py::start_warm_up` gated at `:1361`; the HOSTED
+    # lifespan pre-warm `tortoise/hosted_api.py::_lifespan` at `:3225-3235` — the
+    # consumer that runs on the deployed box this declaration unblocks; and the
+    # boot pre-warm `entrypoint.sh:432`) PLUS TWO readiness bounds
+    # (`::await_write_ready_reason` `:1466`, #13224; `::await_read_ready_reason`
+    # `:1592`, #13528).
+    # ⛔ Count in the right UNIT: three warm-up surfaces + two readiness bounds =
+    # five read SITES. "FIVE warm-up surfaces" is wrong (the withdrawn #13814
+    # review P2 — this comment said THREE warm-up surfaces and was CORRECT, in a
+    # different unit), and "THREE read sites" omits the bound pair.
+    # The two bound readers are NOT cosmetic: with the flag off each returns
+    # `None` immediately (`:1466-1470`, `:1592-1593`), so the WRITE and READ
+    # paths fall back to the synchronous in-request load — part of what flipping
+    # the switch chooses. Production RAN
     # it at `0` while the embedder could not load, which is what makes it a live
     # operator switch and not a deploy-set value (#13674 Scope item 3: "`TORTOISE_EMBEDDER_WARMUP=0`
     # is the *emergency* switch it is, not the steady state"; the merged fix
@@ -2101,6 +2106,81 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     )
     assert debt == set(), f"recorded debt remains: {sorted(debt)}"
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# ── The #13674 block's line citations (#13814) ───────────────────────────────
+# The block cites `embeddings.py` BY LINE, so a merge that grows that module
+# silently turns a cite into a pointer at unrelated code while every sentence
+# around it still reads as true. Measured: the origin/main integration that
+# brought #13819 added 113 lines to `tortoise/embeddings.py`, and `:1296` /
+# `:1401` / `:1527` — the three gate lines — all moved. No other check in CI
+# reads a line number, and a reviewer who follows one lands nowhere.
+
+_READER_CITE_RE = re.compile(r"`(?::|(?:tortoise/)?[a-z_]+\.(?:py|sh):)(\d+)(?:-(\d+))?`")
+#: What a cited line has to contain to be the thing the block says it is. The
+#: SHELL reads its own copy of the variable, so it is spelled out there.
+_READER_NEEDLE = {
+    "embeddings.py": "_embedder_warmup_enabled",
+    "hosted_api.py": "_embedder_warmup_enabled",
+    "entrypoint.sh": "TORTOISE_EMBEDDER_WARMUP",
+}
+
+
+def _embedder_warmup_reader_citations() -> list[tuple[str, int, int]]:
+    """(file, start, end) for every cite inside the manifest's reader list.
+
+    Derived from the SHIPPED manifest text — the artifact a reviewer reads — not
+    from a copy here, so a cite edited out of the block cannot stay green in the
+    test. The region is the numbered reader list (the `:40-50` resolver line
+    through reader 5); the prose AFTER it deliberately cites a NON-reader (the
+    `warm_up` body), so it is outside the span.
+    """
+    lines = REAL_MANIFEST.read_text().splitlines()
+    start = next(
+        i for i, ln in enumerate(lines)
+        if "is the resolver's DEFINITION; the readers are" in ln
+    )
+    end = next(
+        i for i, ln in enumerate(lines) if "The FUNCTION NAMES above are the invariant" in ln
+    )
+    assert start < end, (start, end)
+    cites: list[tuple[str, int, int]] = []
+    current = "embeddings.py"
+    for ln in lines[start:end]:
+        for token in ("hosted_api.py", "entrypoint.sh", "embeddings.py"):
+            if token in ln:
+                current = token
+                break
+        for m in _READER_CITE_RE.finditer(ln):
+            lo = int(m.group(1))
+            cites.append((current, lo, int(m.group(2) or lo)))
+    return cites
+
+
+def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
+    """#13814: every cited line MUST be code that reads the flag.
+
+    A line number is the one claim in this block that cannot be right by
+    accident — the cited line either reads `TORTOISE_EMBEDDER_WARMUP` or it does
+    not. Re-pinning is a one-line edit; finding the stale one after a deploy is
+    not.
+    """
+    cites = _embedder_warmup_reader_citations()
+    # Non-vacuity: a parser that found nothing would clear every assertion below.
+    assert len(cites) >= 6, f"the reader list's citations could not be read: {cites}"
+    for fname, lo, hi in cites:
+        assert fname in _READER_NEEDLE, f"unattributed citation: {fname}:{lo}-{hi}"
+        path = (REPO_ROOT / fname) if fname == "entrypoint.sh" else (REPO_ROOT / "tortoise" / fname)
+        body = path.read_text().splitlines()
+        assert 1 <= lo <= hi <= len(body), f"{fname}:{lo}-{hi} is outside the file ({len(body)} lines)"
+        span = "\n".join(body[lo - 1:hi])
+        assert _READER_NEEDLE[fname] in span, (
+            f"{fname}:{lo}-{hi} is cited as a TORTOISE_EMBEDDER_WARMUP reader, but the "
+            f"cited lines do not read it — a merge moved the code and the cite went "
+            f"stale. Re-pin the numbers in .github/scripts/fly-managed-secrets.txt "
+            f"(the function names are the invariant; the numbers are a convenience). "
+            f"Cited lines: {span[:300]!r}"
+        )
 
 
 # ── The allowlist shape predicate, on its own (#10472 review F1) ─────────────
