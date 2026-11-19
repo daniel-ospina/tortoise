@@ -222,6 +222,19 @@ function ctx(urlStr) {
       if (isBlogFunction(u.pathname)) {
         return new Response(`<html data-function="blog"></html>`, { status: 200 });
       }
+      // ⛔ `/contact`'s form posts to `functions/contact/submit.ts`, which is a Pages
+      // FUNCTION and so resolves ABOVE the asset router. It refuses every method but
+      // POST with 405 (`Allow: POST, OPTIONS`) — so this mock answers it the same way.
+      // Modelled (review finding): without it `/contact/submit` fell through to this
+      // router's bare 404, and the arm below only asserted "not a 301/302" — i.e. it
+      // was green over an endpoint nothing served, proving "un-redirected" while its
+      // comment claimed "reached".
+      if (u.pathname === "/contact/submit") {
+        return new Response("method_not_allowed", {
+          status: 405,
+          headers: { Allow: "POST, OPTIONS" },
+        });
+      }
       if (u.pathname === "/") {
         return new Response(`<html data-asset="/index.html"></html>`, { status: 200 });
       }
@@ -376,6 +389,17 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
         `a GET and drops the body (got ${status})`,
     );
     assertEq(location, null, `${from} emits no Location`);
+    // ⛔ AND IT MUST BE REACHED, not merely un-redirected (review finding). The mock now
+    // answers the Function as `submit.ts` does for a non-POST, so a 405 is positive
+    // evidence the request ARRIVED. Without this the arm was green on the mock's bare
+    // 404 — "not a 3xx" over an endpoint nothing served, which is the silent-gap shape
+    // this whole file exists to refuse.
+    assertEq(
+      status,
+      405,
+      `${from} must be REACHED — the Function answers a GET with 405 (POST only), so ` +
+        `anything else means the request never arrived`,
+    );
   }
 
   // ⛔ THE CRAWLER SURFACE IS NOT A PAGE (#11766). `robots.txt` and the sitemaps are root
