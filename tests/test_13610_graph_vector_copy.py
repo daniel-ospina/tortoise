@@ -1009,7 +1009,16 @@ def test_a_CACHED_trivial_verdict_does_not_claim_this_read_is_empty(
         f"sticky verdict from the cache: {len(aggregates)} aggregate(s) — {aggregates}")
     # The record answered, healthily: this is the caught-up case, not a decline.
     assert trace2[-1]["reason"] == "ok", trace2
-    assert trace2[-1]["degraded"] is False, trace2
+    # ⛔ `mechanism`, NOT `degraded`. `reason == "ok"` already implies
+    # `degraded is False` at every emit site in `search_engine.run_vector_query`
+    # (`:3045`, `:3180`, `:3633`, `:4229`, `:4444`, `:4551`, `:4644`, `:4904` all pass
+    # `degraded=False` literally) and the one re-labelling that flips it also rewrites
+    # `reason` (`:3935-3945`), so a `degraded is False` line here could never fail on
+    # its own — the dead-assertion shape. `mechanism` CAN differ at `reason="ok"`:
+    # the graph legs record `"ok"` with `MECHANISM_INDEX` (`:4445`, `:4552`) and with
+    # the scan mechanism (`:4645`), so this pins the thing the case is about — the
+    # cohort came from the RECORD, not from a graph leg that answered instead.
+    assert trace2[-1]["mechanism"] == "pgvector", trace2
 
     # ⛔ The verdict is STILL reported (provenance is the line's job) ...
     assert "TRIVIALLY" in caplog.text, (
