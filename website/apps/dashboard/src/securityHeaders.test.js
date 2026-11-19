@@ -112,6 +112,11 @@ const HTML_SITES = [
   ['website/apps/dashboard/functions/welcome.ts', 1],
   ['website/apps/dashboard/functions/auth/confirm.ts', 1],
   ['website/apps/dashboard/functions/admin/[[path]].ts', 3],
+  // 2026-11-19 (#10884/#10865 arm B): the consent route's refusal page. ONE
+  // construction site (`consentRefusalPage`), so one stamp — and arriving with no
+  // stamp at all would have been a page whose URL carries a per-attempt key,
+  // served with no policy. It is the fifth HTML producer in this list.
+  ['website/apps/dashboard/functions/_shared/auth/consent-refusal.ts', 1],
   // TWO HTML paths: the root marketing document (`RELAXED_CSP`) and the stray
   // authorization-response refusal (#10088 ask 3), which stamps the strict
   // credential-refusal policy — see `STRICT_LOCAL_POLICY` below.
@@ -140,6 +145,7 @@ const HTML_SITE_POLICY = {
   'website/apps/dashboard/functions/welcome.ts': 'RELAXED_CSP',
   'website/apps/dashboard/functions/auth/confirm.ts': 'strictCspWithNonce',
   'website/apps/dashboard/functions/admin/[[path]].ts': 'ADMIN_CSP',
+  'website/apps/dashboard/functions/_shared/auth/consent-refusal.ts': 'CONSENT_REFUSAL_CSP',
   'website/functions/_middleware.ts': ['RELAXED_CSP', 'STRAY_RETURN_CSP'],
   'website/functions/blog/_lib.ts': 'RELAXED_CSP',
 }
@@ -263,6 +269,10 @@ const POLICY_NAMES = new Set([...CSP_CONSTANTS, 'strictCspWithNonce'])
  * iterate and invite exactly the "unify them" edit that would relax a page holding
  * a credential.
  *
+ * Its dashboard sibling is `consent-refusal.ts` (#10884/#10865 arm B): the consent
+ * route's failure page, reached by a URL carrying `attempt_key`, held to the same
+ * no-outbound rule for the same reason.
+ *
  * Accepting the NAME is scoped to the declaring file: in every other file an
  * identifier outside `CSP_CONSTANTS` still records as `(Identifier)` and fails the
  * entitlement check, so this cannot become a general escape hatch. The VALUE is
@@ -272,6 +282,14 @@ const POLICY_NAMES = new Set([...CSP_CONSTANTS, 'strictCspWithNonce'])
  */
 const STRICT_LOCAL_POLICY = {
   'website/functions/_middleware.ts': 'STRAY_RETURN_CSP',
+  // The SECOND credential-refusal surface, and the first under the dashboard project
+  // (#10884/#10865 arm B). `/api/consent/start`'s failure page is reached by a URL
+  // carrying `attempt_key` and `state`, so the same rule applies for the same reason:
+  // no outbound request at all, the analytics beacon included. It is declared locally
+  // rather than in `_shared/security-headers.ts` for the reason stated above — the
+  // dashboard's audited set must not grow a beacon-less policy. The VALUE is still
+  // pinned, by the test below, which iterates this map.
+  'website/apps/dashboard/functions/_shared/auth/consent-refusal.ts': 'CONSENT_REFUSAL_CSP',
 }
 
 /** The local policy names `relPath` may stamp, or null when it may stamp none. */

@@ -31,12 +31,23 @@ shipped ones.
 
 WHAT THIS FILE PINS, AND WHAT IT DOES NOT (#10487 residual)
 -----------------------------------------------------------
-Both consent legs answer a STORE fault with the typed `503 consent_store_unavailable` below,
-and that response SHAPE is asserted here. What is neither asserted nor fixed is what the
-VISITOR sees: the reason is returned as raw JSON on a blank page. That arm is a store fault,
-not a carriage fault — it needs the Pages Function logs (`wrangler pages deployment tail`) to
-name the failing store call before it can be fixed honestly, so it is tracked OPEN on #10884
-rather than guessed at. #10487 (whose title names this arm) and its keyless-re-entry sibling
+The PRESENTATION half is now delivered (#10884/#10865 arm B): `/api/consent/start` renders a page
+for every REFUSAL arm instead of raw JSON, with the status unchanged and the machine reason in
+`x-consent-refusal` — `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`
+enumerates ALL of them, not the four either issue names by line. Two `json(...)` returns survive on
+purpose and are classified in the guard's own docstring (`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`):
+the `400 invalid_request` caller error, and the terminal `200` flow state (#10865 records that as a
+different contract).
+
+The STORE FAULT ITSELF is still unfixed, and that is a different question from its face. Which
+store call raises, and why, is **not determinable from outside** (#10487's body said so; #10884
+records it), so naming it honestly still needs the Pages Function logs
+(`wrangler pages deployment tail`). A lane without those logs would be guessing at the store's
+failure mode, so the CONDITION stays tracked OPEN on #10884 rather than guessed at — and the mint
+leg (`token.ts`) legitimately keeps answering JSON for it, because that route is called by the AS
+page's `fetch()` and the page — not the visitor — is its reader; the page renders the human copy
+there (`showError(...)` + its retry button). #10487 (whose title names the raw-JSON arm) and its
+keyless-re-entry sibling
 are retired by the fold that lands this hop, so #10884 — not the closed thread — is the OPEN
 home; `tortoise/oauth.py` points at it from both residual docstrings.
 """
@@ -123,8 +134,16 @@ class FakeD1 {
     //   "fault"     → a genuine DDL failure (the SQLITE_FULL/READONLY shape): must PROPAGATE.
     //   "duplicate" → the already-evolved column: must be SWALLOWED and the route continue.
     this._ddlFault = (opts && opts.ddlFault) || null;
+    // A SESSION-read fault, which is NOT the same failure as a consent-store fault: the accessor
+    // answers `unavailable` (never `no_session`), so the route's decision arm — the one that must
+    // never redirect — is reached. Without a way to provoke it, that arm's response was pinned by
+    // nothing at all.
+    this._sessionReadThrows = Boolean(opts && opts.sessionReadThrows);
   }
   _maybeThrow(sql) {
+    if (this._sessionReadThrows && /FROM sessions/.test(sql)) {
+      throw new Error("D1_ERROR: control plane unreachable");
+    }
     if (this._ddlFault && /^\s*ALTER TABLE/i.test(sql)) {
       throw new Error(this._ddlFault === "duplicate"
         ? "D1_ERROR: duplicate column name: attempt_key_hash"
@@ -220,7 +239,10 @@ class FakeD1 {
       return out.rows ?? [];
     }
     const rows = this.tables.sessions || (this.tables.sessions = []);
-    if (/FROM sessions/.test(sql)) return rows.filter((r) => r.handle === args[0] && r.revoked === 0);
+    if (/FROM sessions/.test(sql)) {
+      this._maybeThrow(sql);
+      return rows.filter((r) => r.handle === args[0] && r.revoked === 0);
+    }
     return [];
   }
   _first(sql, args) { const rows = this._rows(sql, args); return rows.length ? { ...rows[0] } : null; }
@@ -441,9 +463,14 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
   const seeded = opts.seededAttempts || [];
   const store = new FakeD1({ sessions, consent_attempts: seeded },
-                          { throws: Boolean(opts.storeThrows), ddlFault: opts.ddlFault ?? null });
+                           { throws: Boolean(opts.storeThrows), ddlFault: opts.ddlFault ?? null,
+                             sessionReadThrows: Boolean(opts.sessionReadThrows) });
   if (opts.wantLegacySchema) store._legacySchema();
   const e = env({ SESSIONS: store });
+  // ⛔ Absence of the binding, not a faulting store: `delete` rather than a blank value, because
+  // `if (!env.SESSIONS)` and `if (env.SESSIONS)` are two DIFFERENT arms of the route and only an
+  // absent binding reaches the first one.
+  if (opts.noStore) delete e.SESSIONS;
   // The AS-origin knob, movable on the start leg too (the mint leg has its own override above).
   // `dropAsOrigin` DELETES the key rather than blanking it, so the default can be exercised.
   if (opts.asOrigin !== undefined) e.CONSENT_AS_ORIGIN = opts.asOrigin;
@@ -461,9 +488,20 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   const res = await startRoute.onRequestGet({ request, env: e });
   out.status = res.status;
   out.location = res.headers.get("Location");
+  out.contentType = res.headers.get("Content-Type");
+  // #10884/#10865 arm B: the machine reason moved out of the BODY and into a header, because the
+  // body is now a page a person reads. Both are captured, and `bodyText` is kept RAW so a test can
+  // prove the body is not JSON at all rather than proving it fails to parse as some object shape.
+  out.refusal = res.headers.get("x-consent-refusal");
+  out.cacheControl = res.headers.get("Cache-Control");
+  out.csp = res.headers.get("Content-Security-Policy");
+  out.referrerPolicy = res.headers.get("Referrer-Policy");
+  out.bodyText = await res.text();
   out.body = null;
-  try { out.body = await res.json(); } catch { out.body = null; }
-  out.attempts = e.SESSIONS.tables.consent_attempts;
+  try { out.body = JSON.parse(out.bodyText); } catch { out.body = null; }
+  // `store`, not `env.SESSIONS`: the `noStore` arm DELETES the binding, and the rows a scenario
+  // wrote are still the evidence it must assert on.
+  out.attempts = store.tables.consent_attempts;
   if (opts.wantValidated) {
     // The params `validate()` RETURNS (not just its verdict) — what the route records, binds into
     // the token and forwards to the AS. The AS matches `redirect_uri` byte-exactly, so the VALUE is
@@ -678,6 +716,54 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
 
 console.log("RESULT " + JSON.stringify(out));
 """
+
+
+# ── the refusal PAGE contract (#10884 / #10865 arm B) ───────────────────────
+
+
+def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
+    """A hard failure of the carriage is a PAGE — with the status and the reason UNCHANGED.
+
+    #10884 (the `503` store arms) and #10865 arm B (the `403`) are one root: `start` answered a
+    browser with `json({error, reason})`, so a person saw a JSON blob on a blank page with no way
+    forward. The fix is deliberately presentation-only, and this helper is where that is enforced:
+
+      * the STATUS is exactly what it was — the `403`'s deliberate, recorded exemption from §2.3's
+        no-oracle rule is carried by the code, so a page that answered `200` would retire a refusal;
+      * the body is a page (`text/html`, not JSON, and not naming the code reason at all);
+      * the machine reason survives in `x-consent-refusal`, so anything that watches the flow keeps
+        a stable signal;
+      * it decides NOTHING: no script, no external asset, and not one byte echoed from the request
+        — which is also why `no-store` and `no-referrer` are asserted, since the URL carries a
+        per-attempt key.
+    """
+    assert out["status"] == status, (reason, out)
+    assert out["location"] is None, (
+        f"{reason}: a refusal produced a REDIRECT to {out['location']!r} — a redirect on a store "
+        "blip reads as a sign-out (#3485)")
+    ctype = (out.get("contentType") or "").lower()
+    assert ctype.startswith("text/html"), (
+        f"{reason}: the visitor is served {ctype!r}, not a page: {out.get('bodyText')!r}")
+    assert out["body"] is None, (
+        f"{reason}: the body is STILL JSON ({out['body']!r}) — this is the defect #10884/#10865 "
+        "were filed for")
+    body = out["bodyText"]
+    assert body.lstrip().lower().startswith("<!doctype html"), (
+        f"{reason}: not an HTML document: {body[:120]!r}")
+    assert out["refusal"] == reason, (
+        f"{reason}: the machine reason left the response entirely "
+        f"(x-consent-refusal={out['refusal']!r}) — a watcher that keyed on it lost its signal")
+    assert reason not in body, (
+        f"{reason}: the machine reason reached the COPY — a visitor cannot act on it and naming it "
+        "invites a guess")
+    assert "no-store" in (out.get("cacheControl") or ""), (
+        f"{reason}: a refusal is cacheable ({out.get('cacheControl')!r}) and its URL carried a key")
+    # …and it DECIDES NOTHING: no script, no external asset, no echo of the request.
+    assert "<script" not in body.lower(), f"{reason}: the refusal page carries script"
+    assert "http://" not in body and "https://" not in body, (
+        f"{reason}: the refusal page names an origin (an external asset, or an echoed URL)")
+    for echoed in ("state-xyz", "client-abc", "attempt_key", "code_challenge"):
+        assert echoed not in body, f"{reason}: the page ECHOES {echoed!r} from the request"
 
 
 def _run(scenario: str, **opts) -> dict:
@@ -1563,7 +1649,7 @@ def test_a_GENUINE_DDL_fault_PROPAGATES_and_the_duplicate_column_does_not() -> N
     `ensureColumn`'s catch widened to `catch { return; }`, (b) the call site replaced by a local
     swallow-all. Both are the same shipped regression — a genuinely failed `ALTER TABLE` swallowed,
     leaving a half-evolved schema that 503s with nothing anywhere to act on, which is precisely the
-    outcome `start.ts:232-238` exists to remove.
+    outcome `start.ts`'s session-read `try`/`catch` exists to remove.
 
     SQLite makes this a MESSAGE question and not a code one: a duplicate column and a genuine DDL
     failure both surface as SQLITE_ERROR (https://sqlite.org/rescode.html §4 — the primary result
@@ -1738,13 +1824,11 @@ def test_a_store_fault_is_a_typed_503_and_never_a_redirect() -> None:
     header (a redirect on an infrastructure blip reads as a sign-out, #3485).
     """
     out = _run("start_signed_in", storeThrows=True)
-    assert out["status"] == 503, out
     assert "consent attempt write failed" in out["stderr"], (
         "a store fault answered 503 with NO log line anywhere — a genuinely failed ALTER TABLE is "
         "indistinguishable from a transient blip and nothing in the logs can ever flag it: "
         f"{out['stderr'][-600:]!r}")
-    assert out["body"] == {"error": "unavailable", "reason": "consent_store_unavailable"}, out["body"]
-    assert out["location"] is None, f"a store fault produced a REDIRECT: {out['location']!r}"
+    _assert_refusal_page(out, "consent_store_unavailable", 503)
 
 
 def test_a_GENUINE_DDL_fault_PROPAGATES_on_start_too() -> None:
@@ -1759,16 +1843,153 @@ def test_a_GENUINE_DDL_fault_PROPAGATES_on_start_too() -> None:
     faulted = _run("start_signed_in", ddlFault="fault")
     assert faulted["status"] == 503, (
         f"a genuine DDL failure was SWALLOWED and `start` carried on to a redirect: {faulted}")
-    assert faulted["body"] == {
-        "error": "unavailable", "reason": "consent_store_unavailable"}, faulted["body"]
-    assert faulted["location"] is None, (
-        f"a genuine DDL failure produced a REDIRECT: {faulted['location']!r}")
+    _assert_refusal_page(faulted, "consent_store_unavailable", 503)
     assert "consent attempt write failed" in faulted["stderr"], (
         f"a propagated DDL failure answered 503 with NO log line: {faulted['stderr'][-600:]!r}")
     # The duplicate-column error is the NORMAL path on every already-evolved database: swallowed.
     evolved = _run("start_signed_in", ddlFault="duplicate")
     assert evolved["status"] == 302, (
         f"`duplicate column name` was PROPAGATED, so an already-evolved database could never start: {evolved}")
+
+
+# A row this browser does NOT hold the key for — the `403 flow_not_yours` precondition, as a
+# module-level literal so the parametrisation below stays a literal too.
+_FOREIGN_OWNED_ROW = [{
+    "state": "state-xyz", "client_id": "client-abc",
+    "redirect_uri": "https://client.example/cb",
+    "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    "scope": "mcp", "resource": None, "user_id": "user-1",
+    "created_at": 0, "expires_at": 9_999_999_999_999, "attempt_key_hash": "a" * 64,
+}]
+
+
+@pytest.mark.parametrize(("scenario", "opts", "reason", "status"), [
+    # #10884 — the store arms. Three DISTINCT faults reach three distinct code paths (the write
+    # raising, a DDL failure propagating, the binding being ABSENT), and the decision arm is a
+    # fourth: a session READ that faults answers `unavailable` rather than `no_session`, and that
+    # path must never redirect (#3485). Nothing pinned that arm's response before.
+    ("start_signed_in", {"storeThrows": True}, "consent_store_unavailable", 503),
+    ("start_signed_in", {"ddlFault": "fault"}, "consent_store_unavailable", 503),
+    ("start_signed_in", {"noStore": True}, "session_store_unavailable", 503),
+    ("start_signed_in", {"sessionReadThrows": True}, "session_store_unavailable", 503),
+    ("start_signed_in", {"asOrigin": "api.premiselabs.co"}, "as_origin_misconfigured", 503),
+    # #10865 arm B — the `403`.
+    ("start_signed_in", {"seededAttempts": _FOREIGN_OWNED_ROW, "sessionUserId": "user-2",
+                         "params": dict(_PARAMS, attempt_key="b-attempt-key")},
+     "flow_not_yours", 403),
+])
+def test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status(
+    scenario: str, opts: dict, reason: str, status: int,
+) -> None:
+    """#10884 + #10865 arm B, one root, ONE assertion: EVERY hard failure is a page.
+
+    The four `json({error, reason})` bodies were the defect: a person in a browser got a JSON blob
+    and no way forward. Pinning only the arms the issues name by line would let the NEXT refusal
+    added to this route ship as JSON again — the root is "the carriage's failure states were never
+    given a user-facing face", not "this arm at this line" — so the whole family is enumerated and
+    each one is held to the same four properties (status unchanged, page, reason in a header, body
+    not JSON) by ONE helper.
+
+    ⚠️ `as_origin_misconfigured` is included deliberately and is NOT named by either issue: it is
+    the same route, the same class, and the same one-line fix. Leaving it as JSON would make the
+    claim "every hard failure of this route is a page" false, which is the kind of half-face that
+    produced these issues in the first place.
+    """
+    _assert_refusal_page(_run(scenario, **opts), reason, status)
+
+
+def test_the_refusal_page_leaks_NO_topology_and_does_not_offer_a_dead_retry() -> None:
+    """The COPY is a decision, and it is pinned in both directions.
+
+    Two properties that a status/header assertion cannot see:
+
+      * the three `503` reasons render ONE body. They are three of OUR pathologies (a consent-store
+        fault, a session-store fault, a misconfigured deployment binding) and one situation for the
+        visitor, so distinct copy would leak our topology into prose nobody can act on — and would
+        make the page a probe for which store is broken.
+      * the `403` renders DIFFERENT copy, and says reloading will not help. The bridge doc records
+        that reloading the same URL is refused again while the row lives, so a "reload to retry"
+        line here would send the visitor into the same dead end this page exists to end.
+    """
+    store_arms = {
+        "consent_store_unavailable": _run("start_signed_in", storeThrows=True),
+        "session_store_unavailable": _run("start_signed_in", noStore=True),
+        "as_origin_misconfigured": _run("start_signed_in", asOrigin="api.premiselabs.co"),
+    }
+    bodies = {reason: out["bodyText"] for reason, out in store_arms.items()}
+    assert len(set(bodies.values())) == 1, (
+        "the 503 arms render DIFFERENT copy, so the page distinguishes which store failed — "
+        f"that is a topology leak in prose: {list(bodies)}")
+
+    foreign = _run("start_signed_in", seededAttempts=_FOREIGN_OWNED_ROW, sessionUserId="user-2",
+                   params=dict(_PARAMS, attempt_key="b-attempt-key"))
+    assert foreign["bodyText"] != next(iter(bodies.values())), (
+        "the 403 renders the retryable copy — reloading a `flow_not_yours` URL is refused again, "
+        "so the page would offer the visitor a dead end")
+    assert "reload" in foreign["bodyText"].lower(), (
+        "the 403 page does not tell the visitor that reloading will not help")
+    assert "start the connection again" in foreign["bodyText"], (
+        "the 403 page offers no way forward — the whole point of the page is that there is one")
+
+
+def test_the_refusal_page_makes_NO_outbound_request_and_carries_no_referrer() -> None:
+    """The page's URL carries the attempt key (and the `state`), so it must fetch NOTHING.
+
+    Same reasoning as the stray-authorization refusal in `website/functions/_middleware.ts`: a
+    refusal page reached by a URL carrying a credential must not make an outbound request, or the
+    key rides a `Referer` into a third party's log. The CSP is therefore `default-src 'none'` with
+    no origin at all — the platform-injected analytics beacon included — and `Referrer-Policy`
+    states it a second time for anything added later. `src/securityHeaders.test.js` pins the policy
+    VALUE separately (`STRICT_LOCAL_POLICY`); this pins that the route actually SERVES it.
+    """
+    for scenario, opts in (
+        ("start_signed_in", {"storeThrows": True}),
+        ("start_signed_in", {"noStore": True}),
+        ("start_signed_in", {"seededAttempts": _FOREIGN_OWNED_ROW, "sessionUserId": "user-2",
+                             "params": dict(_PARAMS, attempt_key="b-attempt-key")}),
+    ):
+        out = _run(scenario, **opts)
+        csp = out.get("csp") or ""
+        assert "default-src 'none'" in csp, (opts, csp)
+        assert "http://" not in csp and "https://" not in csp, (
+            f"the refusal page's CSP allows an origin, so the URL's attempt key can leave in a "
+            f"Referer: {csp}")
+        assert "*" not in csp, (opts, csp)
+        assert (out.get("referrerPolicy") or "").lower() == "no-referrer", (opts, out.get("referrerPolicy"))
+
+
+def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
+    """The class, not the instances: a NEW refusal added as `json(...)` reds here.
+
+    The parametrised test enumerates the arms that exist TODAY. That is the right shape for
+    behaviour, and the wrong shape for the defect: the root of #10884/#10865 is "a hard failure of
+    this route was never given a face", so the next failure someone adds to `start.ts` would ship as
+    JSON again with every arm-specific test still green — nobody would have written an arm for it
+    yet. This guard counts the SHAPES instead, so the two numbers can only move together:
+
+      * every refusal returns `consentRefusalPage(...)` — five of them (four `503` arms over the
+        three `503` reasons, plus the `403`), and the count is asserted so deleting one is a
+        failure rather than a quiet drop;
+      * `return json(` survives in exactly TWO places, and they are named: the `400` for an
+        unparseable authorize request (a CALLER error — its message is worded for the caller that
+        built the URL) and the terminal `200` flow state, which is a decided outcome rather than a
+        refusal. BOTH bodies reach a BROWSER, and claiming otherwise would be false: this route is
+        navigation-only (`src/authBounce.js` admits it to `APP_RETURN_ROUTES`) and the AS never
+        bounds `state`, so a `state` past this route's 512-char bound gets the `400` on a blank
+        page. Neither is changed here — a caller-visible JSON body is a contract, so retiring one
+        is an owner decision — and both are recorded OPEN on #10884/#10865. The terminal arm's
+        comment no longer claims a page exists (#10865's owner ruling).
+    """
+    src = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
+    pages = re.findall(r"return consentRefusalPage\(", src)
+    jsons = re.findall(r"return json\(", src)
+    assert len(pages) == 5, (
+        f"`start.ts` renders {len(pages)} refusal page(s), not 5 — a refusal arm moved back to a "
+        "machine body, or a new one was added without a face (#10884/#10865)")
+    assert len(jsons) == 2, (
+        f"`start.ts` returns JSON from {len(jsons)} place(s), not the 2 accounted for — a hard "
+        "failure of the carriage is being answered with a JSON body again; render it with "
+        "`consentRefusalPage(...)` and keep the status (#10884/#10865)")
 
 
 def _key_from(location: str | None) -> str:
@@ -1866,8 +2087,7 @@ def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> Non
     # …and the control is untouched: a DIFFERENT identity still cannot walk in on a guess.
     foreign = _run("start_signed_in", seededAttempts=back["attempts"],
                    sessionUserId="user-2", params=dict(_PARAMS, attempt_key="ak-guessed"))
-    assert foreign["status"] == 403, foreign
-    assert foreign["body"]["reason"] == "flow_not_yours", foreign["body"]
+    _assert_refusal_page(foreign, "flow_not_yours", 403)
 
 
 def test_the_ownerless_window_is_closed_by_the_attempt_key() -> None:
@@ -1898,7 +2118,7 @@ def test_the_ownerless_window_is_closed_by_the_attempt_key() -> None:
     assert b["status"] == 403, (
         "a second identity was ADVANCED into a flow it does not hold — it would reach the AS's "
         f"consent page and then be unable to mint: {b}")
-    assert b["body"] == {"error": "no_authorize_attempt", "reason": "flow_not_yours"}, b["body"]
+    _assert_refusal_page(b, "flow_not_yours", 403)
     assert b["attempts"][0]["user_id"] is None, (
         f"a second identity CLAIMED the ownerless row — owner is now {b['attempts'][0]['user_id']!r}")
     assert b["attempts"][0]["attempt_key_hash"] == row["attempt_key_hash"], (
@@ -1970,11 +2190,7 @@ def test_a_misconfigured_AS_origin_is_a_TYPED_503_and_never_an_untyped_500() -> 
         "ftp://api.premiselabs.co",        # special scheme, wrong protocol: 302 pre-fix
     ):
         out = _run("start_signed_in", asOrigin=bad)
-        assert out["status"] == 503, (bad, out)
-        assert out["body"] == {"error": "unavailable", "reason": "as_origin_misconfigured"}, (
-            bad, out["body"])
-        assert out["location"] is None, (
-            f"{bad!r} produced a REDIRECT to {out['location']!r} instead of failing closed")
+        _assert_refusal_page(out, "as_origin_misconfigured", 503)
         # Refused BEFORE the store: a deployment that cannot build an authorize URL must not leave
         # attempt rows behind that no browser can ever complete.
         assert out["attempts"] == [], (bad, out["attempts"])
@@ -2152,11 +2368,19 @@ def test_start_validates_the_params_the_way_the_AS_will(broken: dict, needle: st
 def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> None:
     """#10790 review (P2): the residual's declared home must OUTLIVE the fold.
 
-    Both consent legs still answer a store fault with the raw
-    `503 consent_store_unavailable` JSON asserted above, on a blank page. That arm was
-    recorded on #10487 — which this fold CLOSES — so after landing the residual was
-    reachable only by someone who already knew to read a closed issue's comments.
-    Its open home is #10884, filed from that review.
+    Both consent legs still EMIT `consent_store_unavailable` when a store fault
+    raises. ⚠️ Read the biconditional for what it actually holds: it is the ARM
+    that is still emitted, not the raw body. Since #10884/#10865 arm B the
+    `start` leg renders that arm as a PAGE (`x-consent-refusal: …`, asserted by
+    `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`),
+    and the mint leg (`token.ts`) still answers JSON — deliberately, because the
+    AS page's `fetch()` is its reader and that page renders the human copy.
+    The CONDITION is what is unfixed: which store call raises is not
+    determinable from outside and needs `wrangler pages deployment tail`.
+
+    That arm was recorded on #10487 — which this fold CLOSES — so after landing
+    the residual was reachable only by someone who already knew to read a closed
+    issue's comments. Its open home is #10884, filed from that review.
 
     The assertion is a BICONDITIONAL so the guard cannot rot into a tautology either way:
 
@@ -2165,6 +2389,9 @@ def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> Non
     * the arm is FIXED and the docstring still declares it → RED (a stale claim pointing
       the next reader at a closed thread). Fixing the arm means updating the note here,
       and this test says so at the moment it happens.
+
+    ⛔ NOT a licence to re-point it: presenting the arm as a page does NOT fix the
+    fault, so this paragraph stays until the `503` condition itself does.
     """
     routes = CONSENT_DIR / "start.ts", CONSENT_DIR / "token.ts"
     arm_present = any(
@@ -2188,8 +2415,8 @@ def test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_clo
     `presented_consent_attempt_key`'s docstring records a residual the AS hop does
     not close: the page and `start.ts` do not strip, so a whitespace
     `attempt_key` presented STRAIGHT to `/api/consent/start` — bypassing the AS —
-    is still adopted verbatim (`start.ts:255-256`,
-    `presentedKey || newAttemptKey()`). That residual was written down on #10487,
+    is still adopted verbatim (`start.ts::presentedKey || newAttemptKey()`).
+    That residual was written down on #10487,
     which this fold retires, so the docstring points a reader at #10884 instead.
 
     A pointer is a CLAIM, and the previous review found it was one the artifact
@@ -2233,7 +2460,7 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
 
     `docs/engineering/auth/consent-identity-bridge.md` described the delivered rule
     as "…ADOPTED by `/api/consent/start` on the insert — the entry leg no longer
-    invents one". The entry leg still invents one: `start.ts:255-256` is
+    invents one". The entry leg still invents one: `start.ts` still has
 
         const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";
         const attemptKey = presentedKey || newAttemptKey();
@@ -2265,7 +2492,7 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
 
     assert "the entry leg no longer" not in doc, (
         "the bridge record claims the ENTRY leg stopped minting an attempt key, but "
-        "`start.ts:255-256` still does (`presentedKey || newAttemptKey()`), and no "
+        "`start.ts::presentedKey || newAttemptKey()` still does, and no "
         "guard before it requires a presented key. Restore the qualifier — the entry "
         "leg mints one when it is handed none (the direct-to-`start` residual on "
         "#10884/#10865) — instead of stating an absolute the code falsifies.")

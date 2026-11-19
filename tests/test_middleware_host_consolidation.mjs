@@ -192,12 +192,12 @@ async function assetsFetch(assetUrl) {
   return new Response("Not Found", { status: 404 });
 }
 
-function ctx(urlStr) {
+function ctx(urlStr, method = "GET") {
   const u = new URL(urlStr);
   return {
     request: {
       url: urlStr,
-      method: "GET",
+      method,
       headers: new Headers({ host: u.host }),
     },
     env: { ASSETS: { fetch: assetsFetch } },
@@ -222,6 +222,25 @@ function ctx(urlStr) {
       if (isBlogFunction(u.pathname)) {
         return new Response(`<html data-function="blog"></html>`, { status: 200 });
       }
+      // ⛔ `/contact`'s form posts to `functions/contact/submit.ts`, which is a Pages
+      // FUNCTION and so resolves ABOVE the asset router. Its contract is TWO-branch
+      // (`submit.ts:392-399`): `OPTIONS` answers **204** with `Allow: POST, OPTIONS`
+      // (the CORS preflight), and every OTHER non-POST method is refused with **405**.
+      // Modelled faithfully on both — ⛔ "refuses every method but POST with 405"
+      // would be false for `OPTIONS`, the very method its own `Allow` names, and a mock
+      // that 405'd the preflight would let a later CORS arm here encode a behaviour the
+      // Function does not have (review finding, cycle 2).
+      //
+      // Modelled AT ALL because (review finding, cycle 1) without this branch
+      // `/contact/submit` fell through to this router's bare 404 and the arm below only
+      // asserted "not a 301/302" — i.e. it was green over an endpoint nothing served,
+      // proving "un-redirected" while its comment claimed "reached".
+      if (u.pathname === "/contact/submit") {
+        const allow = { Allow: "POST, OPTIONS" };
+        return method === "OPTIONS"
+          ? new Response(null, { status: 204, headers: allow })
+          : new Response("method_not_allowed", { status: 405, headers: allow });
+      }
       if (u.pathname === "/") {
         return new Response(`<html data-asset="/index.html"></html>`, { status: 200 });
       }
@@ -236,8 +255,8 @@ function ctx(urlStr) {
   };
 }
 
-async function hit(urlStr) {
-  const res = await onRequest(ctx(urlStr));
+async function hit(urlStr, method = "GET") {
+  const res = await onRequest(ctx(urlStr, method));
   return { status: res.status, location: res.headers.get("location") };
 }
 
@@ -276,6 +295,7 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
 //                                                 → premiselabs.co/tortoise/…
 //   tortoise.premiselabs.co/license               → premiselabs.co/tortoise/license
 //   tortoise.premiselabs.co/{privacy,dpa,tos}     → premiselabs.co/…
+//   tortoise.premiselabs.co/contact               → premiselabs.co/contact  (#13636)
 //   tortoise.premiselabs.co/blog/*                → premiselabs.co/blog/*
 {
   const productRows = [
@@ -311,6 +331,94 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
     await assertOneHop(`https://${PRODUCT}${from}`, {
       expectLocation: `https://${COMPANY}${to}`,
     });
+  }
+
+  // ⛔ `/contact` IS A COMPANY PAGE AT THE ROOT (#13636) — and this row is the one
+  // that was MISSING, not one that existed and did not fire. `website/_redirects`
+  // carries `/contact/` and `/contact.html` → `/contact` HOST-AGNOSTICALLY (those
+  // collapse SPELLINGS; they do not move a page between hosts), so with no branch
+  // in `_middleware.ts` `/contact` fell through to `context.next()` and Pages served
+  // `website/contact.html` with a 200 on BOTH hosts — measured live, the last
+  // marketing document left on two addresses after #11762. Every sibling row in the
+  // loops above fired because it was a member of a set; this one was in no set.
+  //
+  // ALL THREE SPELLINGS, one hop each — and the trailing-slash arm is WHY the row is
+  // keyed on the middleware's own slash-stripped `path`: without that, `/contact/`
+  // would take `_redirects`' same-host 301 onto `/contact` and then this hop, which
+  // is the two-hop chain `assertOneHop` exists to refuse.
+  const contactRows = ["/contact", "/contact.html", "/contact/"];
+  for (const from of contactRows) {
+    await assertOneHop(`https://${PRODUCT}${from}`, {
+      expectLocation: `https://${COMPANY}/contact`,
+    });
+  }
+  // ⛔ AND THE SET CANNOT GROW SILENTLY. Those rows are hand-kept, so a member added
+  // to `CONTACT_AT_ROOT` without a row here would be a behaviour change with no
+  // assertion over it — the silent-gap class. So the rows are compared with the
+  // POPULATION (the literal in the middleware) instead of trusted, the same shape as
+  // the crawler-surface pin in `tests/test_website_docs_consistency.py`. Mutation-
+  // measured: adding `"/contact-us"` to the set reds here and nowhere else.
+  const contactSet = new Set(
+    (
+      /const CONTACT_AT_ROOT = new Set\(\[(.*?)\]\)/s.exec(
+        readFileSync(join(WEBSITE, "functions", "_middleware.ts"), "utf8"),
+      )?.[1] ?? ""
+    )
+      .match(/"[^"]+"/g)
+      ?.map((s) => s.slice(1, -1)) ?? [],
+  );
+  assert(
+    contactSet.size > 0,
+    "CONTACT_AT_ROOT is no longer a `new Set([...])` literal this harness can read — " +
+      "re-derive the contact rows by hand rather than letting this comparison pass empty",
+  );
+  for (const member of contactSet) {
+    assert(
+      contactRows.includes(member),
+      `${member} is in CONTACT_AT_ROOT but has no row above — add the row (this arm ` +
+        `exists so an edit to the set cannot change behaviour with no assertion over it)`,
+    );
+  }
+  // ⛔ AND IT IS EXACT-PATH KEYED, which is the constraint the row must keep: the
+  // contact form posts to `/contact/submit` (`website/functions/contact/submit.ts`),
+  // so a PREFIX row (`path.startsWith("/contact")`) would answer a POST with a 301 —
+  // the browser re-issues it as a GET and the message body is gone. Asserted on the
+  // path alone (this harness drives GET), because a 3xx here is the defect whatever
+  // the method: the endpoint must be reached, not redirected. Mutation-measured —
+  // swapping the membership test for `path.startsWith("/contact")` reds THIS arm
+  // while every other row in the map stays green.
+  for (const from of ["/contact/submit"]) {
+    const { status, location } = await hit(`https://${PRODUCT}${from}`);
+    assert(
+      status !== 301 && status !== 302,
+      `${from} on the product host must NOT be redirected — a 301 turns the POST into ` +
+        `a GET and drops the body (got ${status})`,
+    );
+    assertEq(location, null, `${from} emits no Location`);
+    // ⛔ AND IT MUST BE REACHED, not merely un-redirected (review finding, cycle 1).
+    // The mock answers the Function as `submit.ts` does for a non-POST, so a 405 is
+    // positive evidence the request ARRIVED. Without this the arm was green on the
+    // mock's bare 404 — "not a 3xx" over an endpoint nothing served, which is the
+    // silent-gap shape this whole file exists to refuse.
+    assertEq(
+      status,
+      405,
+      `${from} must be REACHED — the Function answers a GET with 405 (POST only), so ` +
+        `anything else means the request never arrived`,
+    );
+    // ⛔ AND THE CORS PREFLIGHT MUST BE REACHED TOO, with the Function's OWN status —
+    // `OPTIONS` is the one method `Allow` names besides POST, and `submit.ts:392-396`
+    // answers it 204 rather than 405 (review finding, cycle 2). A redirect here breaks
+    // the preflight the form's cross-origin POST depends on just as surely as a 301 on
+    // the POST does.
+    const preflight = await hit(`https://${PRODUCT}${from}`, "OPTIONS");
+    assertEq(
+      preflight.status,
+      204,
+      `${from} preflight (OPTIONS) must be REACHED — the Function answers 204 ` +
+        `(\`Allow: POST, OPTIONS\`), so anything else means it was intercepted`,
+    );
+    assertEq(preflight.location, null, `${from} preflight emits no Location`);
   }
 
   // ⛔ THE CRAWLER SURFACE IS NOT A PAGE (#11766). `robots.txt` and the sitemaps are root
@@ -393,7 +501,7 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
 
 // ── The company host IS the site now ──────────────────────────────────────
 {
-  for (const p of ["/", "/blog", "/blog/types-of-agent-memory", "/privacy", "/tos", "/dpa"]) {
+  for (const p of ["/", "/blog", "/blog/types-of-agent-memory", "/privacy", "/tos", "/dpa", "/contact"]) {
     const { status } = await hit(`https://${COMPANY}${p}`);
     assertEq(status, 200, `company ${p} is SERVED here, not redirected off-host`);
   }
