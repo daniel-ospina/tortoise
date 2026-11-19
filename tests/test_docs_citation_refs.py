@@ -662,16 +662,17 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             low = re.sub(
                 r"^(?:prints|returns|yields|reports|gives|outputs|carries|lists|shows"
                 r"|names|includes|contains|has)\s+", "", low, count=1)
-            # (no leading `` `? ``: :573 already stripped every backtick from `low`, so that
-            # branch could never match — dropped rather than left as an inert alternative.)
+            # (no leading `` `? ``: the normalisation above strips every backtick from
+            # `low`, so that branch could never match — dropped rather than left as an inert
+            # alternative. Named rather than numbered: a line reference here rotted twice in
+            # this PR, pointing at a `rest = …` line instead of the strip.)
             # ⛔ A NUMERAL THAT IS NOT A COUNT IS NOT A MEMBER EITHER (#13831 review, P1):
             # `\d+\b` matches the `0` of `0-based` and stops at the hyphen boundary, so a
             # token that computes an OFFSET was read as a MEMBERSHIP claim — the same
             # accident that made `zero-length output` SKIP while `0-length output` did not.
             # The bound keeps a count (`1 path`, `10 paths`) and drops a token continuing
             # into a hyphen. (`\w` needs no listing: `\b` already refuses a following word
-            # character, and a `.` cannot reach here — :567 cuts the window at the first
-            # one.)
+            # character, and a `.` cannot reach here — the window is cut at the first one.)
             _member = re.match(
                 r"(?:tortoise/|comment-only\b|non[- ]?empty\b"
                 r"|\d+\b(?!-)|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b"
@@ -689,7 +690,7 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # as membership. `zero-length output` already skipped; this makes the digit form
             # agree with it.
             # ⛔ ONE LIMIT THIS LEAVES, STATED RATHER THAN IMPLIED: `prints 0.5 coverage`
-            # still reads as `prints 0`, because :567 cuts the window at the first `.` — the
+            # still reads as `prints 0`, because the window is cut at the first `.` — the
             # `0` really is the whole of what the classifier sees, so it is indistinguishable
             # from a bare zero and is read as emptiness. That truncation is pre-existing and
             # not introduced here; naming it keeps the comments above honest about it.
@@ -698,6 +699,15 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 r"|(?:zero|0)\b(?!-)"
                 r"|no\b\s*(?:path|paths|tortoise/))", low)
             if _empty:
+                if re.match(r"(?:zero|0)\s+or\s+more\b", low):
+                    # ⛔ THE SAME TAUTOLOGY AS `at least zero`, ONE SPELLING OVER (#13831
+                    # review, P2): `zero or more` is satisfied by ANY count, so it asserts
+                    # neither direction — and it is a SUFFIX, so the filler loop above (which
+                    # strips prefixes) never sees it and the bare `zero` it leaves behind
+                    # was read as EMPTINESS, REFUSING a true sentence at a non-empty head.
+                    # Skips like every other out-of-class head; `two or more paths` is
+                    # untouched (a real lower bound, still membership).
+                    continue
                 if _lower_bound:
                     # `more than zero` asserts AT LEAST ONE — membership, never emptiness.
                     claims_empty = False
@@ -1060,6 +1070,8 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             ("prints more than 0 files", False),
             ("prints 0-based offsets", None),
             ("prints zero-length output", None),
+            ("prints zero or more paths", None),
+            ("prints 0 or more files", None),
             ("prints no fewer than zero paths", None)):
         _edge_expect = [] if _edge_want is None else [(_edge_spelling, _edge_want)]
         assert _typed_answers_to_tortoise_cmd(
@@ -1080,9 +1092,11 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # ⛔ AND A FILLER IN FRONT OF A FILLER (#13728 review, P1): the last five spellings put a
     # DETERMINER between the quantifier and the numeral, which is where the fixpoint used to
     # stop — restoring the one-shot determiner strip reds exactly those rows.
-    # ⛔ AND THE FORM AND ITS ADVERB CAN THEMSELVES BE MARKED (#13831 review, P2): the last
-    # two rows were SKIPPED entirely before the gap accepted markers on both sides of the
-    # adverb, so the refuted claim passed green in that spelling.
+    # ⛔ AND THE FORM AND ITS ADVERB CAN THEMSELVES BE MARKED (#13831 review, P2): the
+    # `**now** prints …` and `_now_ prints …` rows were SKIPPED entirely before the gap
+    # accepted markers on both sides of the adverb, so the refuted claim passed green in
+    # those spellings. (The five rows before them are the determiner-in-front-of-a-filler
+    # rows described above; the marked-form rows above those are the #13795 round-5 set.)
     for _formatted_spelling, _reported in (
             ("prints `two` paths", "prints `two` paths"),
             ("**prints** the two COMMENT-ONLY modules", "prints the two COMMENT-ONLY modules"),
