@@ -621,8 +621,10 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # silently if this were 0.
     assert typed >= 10 and unions >= 1, (
         f"sweep found {typed} typed + {unions} union envelopes; measured at "
-        "10 + 2 after #11609 batch 1 archived `tortoise_packs_list` (11 + 2 when "
-        "this guard was written). Shrinkage is what this floor guards, so it "
+        "10 + 1 at this head — 10 + 2 after #11609 batch 1 archived "
+        "`tortoise_packs_list` (11 + 2 when this guard was written), and the second "
+        "union door went with #11609 P6's `tortoise_delete_entity` retirement. "
+        "Shrinkage is what this floor guards, so it "
         "follows a deliberate removal; growth is covered by the loop itself.")
 
 
