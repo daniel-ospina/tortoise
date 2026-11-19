@@ -2629,6 +2629,32 @@ def test_parity_requires_a_READABLE_ROW_PER_GRAPH_VECTOR():
     assert row.at_parity is True
 
 
+def test_the_collision_clause_of_at_parity_stands_alone():
+    """The COLLISION clause of `at_parity`, asserted directly so it cannot be deleted quietly.
+
+    `#13647`'s instrument is a false-PASS gate, so it states the render-collision invariant
+    more than once on purpose: `census()` folds the collision excess into `graph_only`
+    (which is what the OTHER consumers, including `execute`'s live parity re-check, read),
+    and `at_parity` states it again on the typed count. That redundancy is the point — the
+    two statements are deleted independently — but it also means the verdict-level test
+    (`test_a_render_collision_is_not_parity`) does NOT redden when this clause alone is
+    removed, because `graph_only > 0` still refuses. MEASURED: dropping
+    `and self.render_collision == 0` left that test green, i.e. an unreddened guard.
+
+    So this asserts the clause on the one shape only it covers: a row whose `graph_only`
+    and `unkeyed` are clean and whose counts agree, leaving the collision bucket as the
+    sole evidence. The control at the end keeps it from being an always-False assertion.
+    """
+    row = parity.LabelCensus(label="Object", table="object", entity_types=["object"],
+                             graph_vectors=2, record_vectors=2, render_collision=1)
+    assert row.graph_only == 0 and row.unkeyed_graph_nodes == 0
+    assert row.graph_vectors <= row.record_vectors
+    assert row.at_parity is False, "a render collision read as parity"
+    assert row.verdict == "RENDER-COLLISION(1)"
+    row.render_collision = 0
+    assert row.at_parity is True, "the control: without the collision this row IS at parity"
+
+
 def test_a_store_or_exit_behind_a_LIVE_condition_does_not_certify_the_arm(tmp_path,
                                                                        monkeypatch):
     """⛔ A CONDITIONAL STOP IS NOT A STOP (`#13647` round-3 P1, and its 2b spellings).
