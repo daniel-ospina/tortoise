@@ -2140,9 +2140,12 @@ def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]
     why that one is outside the span.
 
     `symbol` is the function the block names for that cite (`::start_warm_up` and
-    so on), or `None` where it names none (the `:40-50` resolver line and the two
-    prose range cites). The numbered-list symbol is tracked per ENTRY, so reader
-    2's cite cannot inherit reader 1's function.
+    so on), or `None` where it names none. The numbered-list symbol is tracked per
+    ENTRY, so reader 2's cite cannot inherit reader 1's function. The two prose
+    range cites name no function INLINE; they take the reader their sentence names
+    by ORDINAL ("Readers 2 and 3"), so a range re-pinned onto another reader reds.
+    The `:40-50` resolver cite is the only cite left with `symbol is None`, and for
+    it alone the needle is the check.
     """
     lines = REAL_MANIFEST.read_text().splitlines()
     start = next(
@@ -2158,18 +2161,25 @@ def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]
     cites: list[tuple[str, int, int, str | None]] = []
     current = "embeddings.py"
     symbol: str | None = None
-    #: cite start -> the reader the numbered list names for it, so the two RANGE
-    #: cites in the prose below are bound to the same reader their start number
-    #: belongs to instead of being left unbound.
-    by_number: dict[int, str] = {}
+    ordinal: int | None = None
+    #: numbered ENTRY -> the reader that entry names, so the prose's two ranges can
+    #: be bound to the readers ITS SENTENCE names for them ("Readers 2 and 3").
+    by_ordinal: dict[int, str] = {}
+    #: readers the prose has named by ORDINAL and whose ranges have not been read
+    #: yet. The sentence wraps across lines, so this must outlive one line.
+    pending: list[str] = []
+    ordinal_bound = 0
     for ln in lines[start:end]:
         # A numbered reader entry starts a new claim: its symbol is its own.
-        if re.match(r"\s*#\s+\d+\.\s", ln):
+        entry = re.match(r"\s*#\s+(\d+)\.\s", ln)
+        if entry:
             symbol = None
-        # The list ends here. The prose below names no reader, so it must not
-        # inherit reader 5's symbol — its cites are bound by NUMBER instead.
+            ordinal = int(entry.group(1))
+        # The list ends here. The prose below names no reader INLINE, so it must not
+        # inherit reader 5's symbol — its ranges are bound by ORDINAL instead.
         if "The FUNCTION NAMES above are the invariant" in ln:
             symbol = None
+            ordinal = None
         for token in ("hosted_api.py", "entrypoint.sh", "embeddings.py"):
             if token in ln:
                 current = token
@@ -2179,16 +2189,40 @@ def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]
         )
         if named:
             symbol = named.group(1)
+            if ordinal is not None:
+                by_ordinal.setdefault(ordinal, symbol)
+        # "Readers 2 and 3 ... (`:a-b`, `:c-d`)": the sentence names the readers by
+        # ORDINAL, so the ranges after it bind IN ORDER to those readers. Binding
+        # them by their start NUMBER instead is inert — that number is the one the
+        # named entry already asserted, so a range re-pinned onto another reader
+        # would match its own lookup and pass.
+        prose = re.search(r"Readers?\s+(\d+)\s+and\s+(\d+)", ln)
+        if prose:
+            for group in prose.groups():
+                named_ordinal = int(group)
+                assert named_ordinal in by_ordinal, (
+                    f"the prose names reader {named_ordinal}, but the numbered list has no "
+                    f"such entry (it has {sorted(by_ordinal)})"
+                )
+                pending.append(by_ordinal[named_ordinal])
         for m in _READER_CITE_RE.finditer(ln):
             lo = int(m.group(1))
-            if symbol is not None:
-                by_number.setdefault(lo, symbol)
-            cites.append((current, lo, int(m.group(2) or lo), symbol))
-    # The prose repeats two of those numbers as ranges; bind them to the reader
-    # their start number names. The resolver cite (`:40-50`) names no reader, so
-    # it stays unbound and is covered by the needle check alone.
-    return [(f, lo, hi, sym if sym is not None else by_number.get(lo))
-            for f, lo, hi, sym in cites]
+            hi = int(m.group(2) or lo)
+            bound = symbol
+            if bound is None and pending:
+                bound = pending.pop(0)
+                ordinal_bound += 1
+            cites.append((current, lo, hi, bound))
+    # Non-vacuity, and it is the whole point: if this sentence is reworded the
+    # ranges silently fall back to the needle-only check, which passes a range
+    # re-pinned onto ANY flag-reading line — the wrong reader included.
+    assert ordinal_bound == 2, (
+        f"the prose's 'Readers N and M' sentence bound {ordinal_bound} range cite(s), not 2 — "
+        f"reworded, or the ranges moved off that line? The two ranges below the reader "
+        f"list must stay bound to the readers that sentence names, or a range re-pinned "
+        f"onto another reader passes the needle check"
+    )
+    return cites
 
 
 def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
