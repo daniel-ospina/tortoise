@@ -2349,7 +2349,16 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
             if key is None:
                 merged = _mapping_items_pairs(value, _depth + 1)
                 if merged is None:
-                    return None
+                    # ⛔ AN UNREADABLE MERGE OPERAND CONTRIBUTES NOTHING — it does NOT abort
+                    # the walk (`#13788` review round 7, P1, measured). `{**{"embedding": 1},
+                    # **d}.items()` CERTIFIED while `{**{"embedding": 1}}.items()` was
+                    # refused, because this arm gave up on the whole expression when ONE
+                    # operand could not be read — and a merge's key set is a UNION, so the
+                    # readable operand alone proves the property is there for every possible
+                    # `d`. The sibling conditional arm eight lines up already unions its
+                    # readable branches for exactly this reason; `None` here is not
+                    # fail-closed, it is ABSTENTION, and abstention certifies.
+                    continue
                 pairs.extend(merged)
             else:
                 pairs.append((key, value))
@@ -2368,17 +2377,51 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
     #    KEYWORD form is answered beside the positional one for the reason the twin seam gives:
     #    `dict(embedding=1).items()` yields the pair `("embedding", 1)` exactly as `dict(embedding=1)`
     #    iterates `"embedding"`. Both directions only ever REFUSE.
-    #    ⚠️ ANY OTHER ARITY IS LEFT AS IT IS ON PURPOSE: `defaultdict(int, {...})` and
-    #    `dict(**{...})` CERTIFY on BOTH seams today, so resolving them here would make this arm
-    #    disagree with its twin in the OTHER direction — a separate, larger change.
-    if isinstance(mapping, ast.Call) and _is_mapping_constructor(_callee_name(mapping)):
-        if len(mapping.args) == 1 and not mapping.keywords:
-            return _mapping_items_pairs(mapping.args[0], _depth + 1)
-        if not mapping.args and mapping.keywords and all(
-                keyword.arg is not None for keyword in mapping.keywords):
-            return [(ast.Constant(value=keyword.arg), keyword.value)
-                    for keyword in mapping.keywords]
-        return None
+    #
+    # ⛔ AND THE CONSTRUCTOR'S OTHER TWO OPERAND FORMS ARE THE SAME MAPPING (`#13788` review
+    #    round 7, P1, measured at `6489ca3fec`). A single positional that does not read as a
+    #    MAPPING is the PAIRS ITERABLE form (`dict([("embedding", 1)])`), which the sequence
+    #    resolver already reads as element lists; and a `**` keyword is the MERGE form
+    #    (`dict(**{"embedding": 1})`), which is a union of the readable operand's keys. Leaving
+    #    those two CERTIFIED because "the twin seam does" was the asymmetry this branch keeps
+    #    closing, one arity over — the twin was brought with them rather than cited as a reason
+    #    to stay open (see the keys source's constructor arm, which now answers the same three
+    #    forms). `dict.fromkeys(KEYS)` is the same `(KEY, VALUE)` view with a constant value, so
+    #    only its KEY can carry the property; a dict COMPREHENSION's one pair is its own
+    #    key/value expression. `defaultdict(int, {...})` — a TWO-argument constructor — is
+    #    still unread on BOTH seams, and is left as the stated residual.
+    if isinstance(mapping, ast.DictComp):
+        return [(mapping.key, mapping.value)]
+    if isinstance(mapping, ast.Call):
+        name = _callee_name(mapping)
+        if _is_mapping_constructor(name):
+            if len(mapping.args) == 1 and not mapping.keywords:
+                inner = _mapping_items_pairs(mapping.args[0], _depth + 1)
+                if inner is not None:
+                    return inner
+                options = _sequence_options(mapping.args[0], _depth + 1)
+                if options is None:
+                    return None
+                return [(tuple(element.elts)
+                         if isinstance(element, ast.Tuple | ast.List) else (element,))
+                        for option in options for element in option]
+            if not mapping.args and mapping.keywords:
+                pairs: list = []
+                for keyword in mapping.keywords:
+                    if keyword.arg is None:       # `dict(**X)`: a merge, read as one
+                        merged = _mapping_items_pairs(keyword.value, _depth + 1)
+                        if merged is not None:    # unreadable ⇒ contributes nothing
+                            pairs.extend(merged)
+                        continue
+                    pairs.append((ast.Constant(value=keyword.arg), keyword.value))
+                return pairs
+            return None
+        if name == "fromkeys" and mapping.args and not mapping.keywords:
+            keys = _sequence_options(mapping.args[0], _depth + 1)
+            if keys is None:
+                return None
+            value = mapping.args[1] if len(mapping.args) > 1 else ast.Constant(value=None)
+            return [(key, value) for option in keys for key in option]
     return None
 
 
@@ -2498,7 +2541,12 @@ def _comprehension_source_yields(source, _depth: int = 0):
             if key is None:
                 merged = _comprehension_source_yields(value, _depth + 1)
                 if merged is None:
-                    return None
+                    # ⛔ THE SAME UNION RULE THE RECEIVER'S ARM NOW APPLIES (`#13788` review
+                    # round 7, P1, measured): `{k: _encode(ev) for k in {**{"embedding": 1},
+                    # **d}}` CERTIFIED while the readable-only merge was refused, because one
+                    # unreadable operand aborted the whole walk. A merge's key set is a UNION,
+                    # so the readable operand alone proves the key is there for every `d`.
+                    continue
                 yielded.extend(merged)
             else:
                 yielded.append(_comprehension_yielded_item(key))
@@ -2580,10 +2628,23 @@ def _comprehension_source_yields(source, _depth: int = 0):
         if _is_mapping_constructor(name):
             if len(source.args) == 1 and not source.keywords:
                 return _comprehension_source_yields(source.args[0], _depth + 1)
-            if not source.args and source.keywords and all(
-                    keyword.arg is not None for keyword in source.keywords):
-                return [_comprehension_yielded_item(ast.Constant(value=keyword.arg))
-                        for keyword in source.keywords]
+            if not source.args and source.keywords:
+                # ⛔ A `**` OPERAND IS A MERGE, THE SAME AS IN A LITERAL (`#13788` review
+                # round 7, P1): `dict(**{"embedding": 1})` iterates `"embedding"` exactly as
+                # `{**{"embedding": 1}}` does, and the receiver arm now answers it — leaving
+                # this twin open would move the asymmetry one seam over instead of closing it.
+                # An unreadable merge operand contributes nothing, because a merge's key set is
+                # a UNION: the readable operand alone proves the key for every possible other.
+                yielded: list = []
+                for keyword in source.keywords:
+                    if keyword.arg is None:
+                        merged = _comprehension_source_yields(keyword.value, _depth + 1)
+                        if merged is not None:
+                            yielded.extend(merged)
+                        continue
+                    yielded.append(
+                        _comprehension_yielded_item(ast.Constant(value=keyword.arg)))
+                return yielded
             return None
         if name == "fromkeys" and source.args and not source.keywords:
             return _comprehension_source_yields(source.args[0], _depth + 1)

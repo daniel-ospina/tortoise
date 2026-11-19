@@ -7784,6 +7784,99 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE `.items()` RECEIVER'S *CONSTRUCTOR* IS THE SAME MAPPING (`#13788` review
+        # round 7, P1, measured). The receiver resolver learned the copy/conditional/merge
+        # wrappers and still read a BARE mapping spelling only, so every builder the OPERAND
+        # side already refuses (`_is_mapping_constructor`, `fromkeys`) re-opened the hole one
+        # view over — and the KEYS source in the same function already reads them, one line
+        # apart from the certified twin:
+        #
+        #     {k: _encode(ev) for k in dict({"embedding": 1})}              refused
+        #     {k: _encode(ev) for k, _v in dict({"embedding": 1}).items()}  CERTIFIED
+        #
+        # `dict([("embedding", 1)])` and `dict(**{…})` are the same mapping through the other
+        # two constructor forms (`_sequence_options` already reads the first, and a `**`
+        # keyword is the merge arm), and a dict COMPREHENSION is a mapping whose one pair is
+        # its own key/value expression. The controls below keep the arm from refusing an
+        # honest non-property key.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict({"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in OrderedDict({"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict([("embedding", 1)]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(**{"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict.fromkeys(["embedding"]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {"embedding": 1 for _x in _keys()}.items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({k: _encode(ev) for k, _v in dict({"embedding": 1}).items()})
+        return None
+    _write(props)
+""",
+        # ⛔ AND ONE UNREADABLE MERGE OPERAND MUST NOT ABORT THE WALK (`#13788` review round 7,
+        # P1, measured). A merge's key set is a UNION, so `{**{"embedding": 1}, **d}` holds
+        # `"embedding"` for EVERY possible `d` and the readable operand alone proves the store:
+        # the arm returned `None` on the unreadable one instead, and `None` is ABSTENTION at the
+        # `.items()` arm, i.e. CERTIFIED. Its own comment claimed the opposite ("both callers
+        # REFUSE on what this returns"), which is what made the defect invisible. The sibling
+        # CONDITIONAL arm already unions its readable branches; the keys-source twin ten lines
+        # down had the identical defect and is fixed in the same rule.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {**{"embedding": 1}, **d}.items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {**d, **{"embedding": 1}}.items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {**{"embedding": 1}, **d}}
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -8844,6 +8937,39 @@ def _upsert_object(props, ev):
     x, *_r = 1, key
     if not _derived_mirror_required("object"):
         props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        # ⛔ THE CONSTRUCTOR AND MERGE ARMS MUST NOT SWALLOW A NON-STORE (`#13788` review round
+        # 7). A constructor whose key names no property, a comprehension whose value is a
+        # constant, a `fromkeys` over a non-property key and a merge whose only READABLE
+        # operand holds no property are all honest write-stops; without these rows an arm that
+        # refused everything the new vocabulary can see would pass every refused row above.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict({"embedding_model": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: 1 for k, _v in dict({"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict.fromkeys(["embedding_model"]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {**{"embedding_model": 1}, **d}}
         return None
     _write(props)
 """,
