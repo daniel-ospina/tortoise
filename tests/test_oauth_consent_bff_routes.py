@@ -90,6 +90,36 @@ _PARAMS = {
 # gets its own row in the echoed-value tuple below.
 _RESOURCE = "cursor://tools.internal/v1"
 
+# The OTHER destination the origin assertion cannot see, and the reason `resource` is NOT the only
+# parameter that can name one: `redirect_uri` accepts this exact shape — `consent-bridge.ts:64`
+# `NATIVE_REDIRECT_SCHEMES = ["cursor"]`, accepted at `:244-248` — because the beta's only native
+# harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED value in
+# `_CROSS_HALF_URIS`, `:1417`). `cursor://…` carries no `http(s)://`, so it is invisible to the origin
+# assertion AND absent from the scheme-less `client.example/cb` tail row: a page that rendered it
+# passed every assertion in `_assert_refusal_page` GREEN (review of #13712, F1).
+_NATIVE_REDIRECT = "cursor://sentinel.example/cb"
+
+# `scope` is unvalidated free text (`start.ts:135`), so the sentinel arm sends this instead of the
+# production-shaped `"mcp"`. A production-shaped value made the echo row's GREENNESS a coincidence of
+# the copy's capitalisation (the page renders "MCP"), so an ordinary copy edit to `your mcp client`
+# would red six arms with "the page ECHOES 'mcp' from the request" — an accusation of an interpolation
+# that does not exist (review of #13712, F2). A sentinel is absent for a reason no copy edit supplies.
+_SCOPE_SENTINEL = "scope-sentinel-mcp"
+
+# The ONE arm that presents what a `_PARAMS` arm cannot. `_PARAMS` stays the set EVERY arm presents
+# (widening it would change what every other arm proves), so the values that need to be distinctive —
+# both non-http destinations and the `scope` sentinel — are spread onto a copy by this arm instead.
+_SENTINEL_PARAMS = dict(
+    _PARAMS, resource=_RESOURCE, redirect_uri=_NATIVE_REDIRECT, scope=_SCOPE_SENTINEL)
+
+# Every way an element can be talked into a destination, matched as a PATTERN rather than as a bare
+# token. HTML permits ASCII whitespace on BOTH sides of `=` in an attribute (whatwg HTML: attribute
+# name state → before attribute value state), so `<img src = "//evil.example/x">` and
+# `<link rel=stylesheet href = "/x.css">` are well-formed documents that match none of the flat
+# tokens (`"src="`, `"href="`). The classes stay narrow enough that the page's legitimate
+# `<meta charset>` / `<meta name=viewport>` match nothing here.
+_AFFORDANCE_RE = re.compile(r"<\s*a[\s>]|(?:href|src)\s*=|(?:<\s*form)|http-equiv")
+
 _HOOKS_MJS = """
 export async function resolve(specifier, context, next) {
   if (specifier.startsWith("./") || specifier.startsWith("../")) {
@@ -785,34 +815,46 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     # (`default-src 'none'`, no `navigate-to`) does not block, and a protocol-relative `<img src>`
     # or `<iframe src>` is a subresource with no scheme. `<meta charset>`/`<meta name=viewport>`
     # stay legal, which is what the page actually needs.
-    for forbidden in ("<a ", "href=", "<form", "http-equiv", "src="):
-        assert forbidden not in body.lower(), (
-            f"{reason}: the refusal page carries {forbidden!r} — the retry affordance must be prose, "
-            "because any link would have to echo the query or choose a destination")
+    # ⛔ Matched as PATTERNS (`_AFFORDANCE_RE`), not as flat tokens: a whitespace-bearing attribute
+    # (`<img src = "//evil.example/x">`) is well-formed HTML and matched none of the bare strings a
+    # token loop carried — a hole in the very guard this change adds (review of #13712, note 1).
+    affordance = _AFFORDANCE_RE.search(body.lower())
+    assert affordance is None, (
+        f"{reason}: the refusal page carries an affordance ({affordance.group(0)!r}) — the retry "
+        "affordance must be prose, because any link would have to echo the query or choose a "
+        "destination")
     # The VALUES, not only the param NAMES. `attempt_key` (the name) is not a substring of the key
     # the arms actually present (`b-attempt-key`, `ak-guessed`), so a name-only tuple left a mutant
     # that interpolates `url.searchParams.get(ATTEMPT_KEY_PARAM)` into the copy fully GREEN — and
     # that key is the one secret this page's CSP + `Referrer-Policy` exist to keep out of a third
     # party's log. These are the values a mutant can interpolate into the copy and still slip past
     # every assertion above — a new arm that presents a different key is pinned by adding it here
-    # rather than by remembering to. ⛔ `redirect_uri` appears only as its SCHEME-LESS tail: the full
-    # literal is `https://client.example/cb`, and the origin assertion above (`#13671`) already
-    # forbids `https://` in the body, so the whole URL would be a row that can never be the failing
-    # one (the red would land on the origin assertion instead). `scope` ("mcp") and
-    # `code_challenge_method` ("S256") ARE here: this assertion is case-SENSITIVE over the raw body
-    # and the copy renders "MCP" (upper) and never "S256", so both rows are green today and DO fire
-    # on an echo — measured by mutating the 503 arm to interpolate `searchParams.get("scope")`, which
-    # survived every other assertion (review of #13712, P1).
+    # rather than by remembering to.
+    #
+    # ⛔ `redirect_uri` appears TWICE, and the split is load-bearing. The `_PARAMS` literal is pinned
+    # only as its SCHEME-LESS tail (`client.example/cb`): the full `https://client.example/cb` is
+    # already forbidden by the origin assertion above (`#13671`), so the whole URL would be a row that
+    # can never be the failing one (the red would land on the origin assertion instead). The tail
+    # alone was NOT enough for the NATIVE-scheme form — see `_NATIVE_REDIRECT` — hence its own row.
+    #
+    # `code_challenge_method` stays production-shaped and is the one deliberate exception: it has
+    # exactly ONE legal value (`start.ts:124-125` upper-cases and requires `S256`), so there is
+    # nothing to make distinctive; the copy renders no "S256" today. If the copy ever explains PKCE
+    # this row must become a sentinel-or-nothing decision rather than a coupling to prose casing.
     for echoed in (
         _PARAMS["client_id"],
         "client.example/cb",  # `_PARAMS["redirect_uri"]` minus the scheme the origin assert forbids
         _PARAMS["state"],
         _PARAMS["code_challenge"],
-        _PARAMS["scope"],
         _PARAMS["code_challenge_method"],
-        # `resource` is the sixth validated param and the only one that can carry a destination in
-        # a non-http scheme (RFC 8707 audiences are URIs), so it needs the same row.
+        # the native-scheme redirect the origin assertion structurally cannot see (`_NATIVE_REDIRECT`)
+        _NATIVE_REDIRECT,
+        # `resource` (RFC 8707) carries a URI with NO scheme check (`start.ts:136`), so it names a
+        # destination in a non-http scheme exactly as `redirect_uri` can — and the origin assertion
+        # is blind to both. Reachable only through `_SENTINEL_PARAMS`, which is why that arm exists.
         _RESOURCE,
+        # a `scope` no copy edit can produce, so the row's greenness is not a coincidence of casing
+        _SCOPE_SENTINEL,
         # the attempt keys the arms present (the one credential, #10487/#10884)
         "b-attempt-key",
         "ak-guessed",
@@ -1936,13 +1978,14 @@ _FOREIGN_OWNED_ROW = [{
     ("start_signed_in", {"noStore": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"sessionReadThrows": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"asOrigin": "api.premiselabs.co"}, "as_origin_misconfigured", 503),
-    # `resource` (RFC 8707) is a validated param `start.ts` carries, and it is deliberately NOT a key
-    # on `_PARAMS`: that dict is the set EVERY arm presents, and `resource` is presented only by the
-    # arm below, so it spreads a copy instead of widening the common case. It matters because it is a
-    # DESTINATION in a non-http scheme — `cursor://…` is not `http(s)://`, and this repo already
-    # handles such schemes in `NATIVE_REDIRECT_SCHEMES` — so a refusal page that interpolated it would
-    # carry a target the `http://`/`https://` check cannot see.
-    ("start_signed_in", {"storeThrows": True, "params": dict(_PARAMS, resource=_RESOURCE)},
+    # The SENTINEL arm: the one refusal that presents the values a `_PARAMS` arm cannot, all of them
+    # `cursor://`-class destinations or distinctive sentinels (see `_SENTINEL_PARAMS`). It matters
+    # because `resource` and `redirect_uri` are both DESTINATIONS that may carry a non-http scheme —
+    # `cursor://…` is not `http(s)://`, and this repo accepts exactly that scheme for `redirect_uri`
+    # in `NATIVE_REDIRECT_SCHEMES` — so a refusal page that interpolated either one would carry a
+    # target the `http://`/`https://` check cannot see. `_PARAMS` deliberately stays unnarrowed: it is
+    # the set EVERY arm presents, so widening it would change what every other arm proves.
+    ("start_signed_in", {"storeThrows": True, "params": _SENTINEL_PARAMS},
      "consent_store_unavailable", 503),
     # #10865 arm B — the `403`.
     ("start_signed_in", {"seededAttempts": _FOREIGN_OWNED_ROW, "sessionUserId": "user-2",
