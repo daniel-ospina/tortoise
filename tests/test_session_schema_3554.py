@@ -3025,6 +3025,60 @@ _PREFIX_APPROVAL_RECORD_IN_ALL_CAPS = (
 _APPROVAL_CITING_AFTER_AN_ABBREVIATION = (
     "> **Owner approval of the exact changes:** given in-session on 2026-11-18, e.g. as\n"
     "> comment `6993778525`, which the reader can resolve.")
+# ⛔ THE BOLDED LABEL WITH NO COLON, driven because the arm was measured FAIL-OPEN on it
+# (review @ 9d34e510, finding 1): the detector required ``…changes:`` — phrase AND colon —
+# so the em-dash form and the ``is on record`` form were ACCEPTED with no home at all.
+# Five of the seven landed records write one of these two shapes. BOLD is the label's
+# boundary; the punctuation after it is prose.
+_PREFIX_APPROVAL_RECORD_WITH_AN_EM_DASH = (
+    "> **Owner approval of the exact changes** — given in-session on 2026-11-18.\n"
+    "> The artifact is the text itself.")
+_PREFIX_APPROVAL_RECORD_IS_ON_RECORD = (
+    "> **Owner approval of the exact changes** is on record. The artifact is the text\n"
+    "> itself.")
+# ⛔ AND THE LANDED SHAPE WITH ITS ID DELETED (review @ 9d34e510, finding 1), because the
+# fail-open above was measured on REAL entries, not only on synthetic text: v3.32/v3.31/
+# v3.30 write ``**Owner approval of the exact changes** is on record on #NNNNN (comment
+# <id>…)``, so the colon cut read none of them. ``#11824`` alone is an ISSUE number, which
+# ``_CITATION_RE`` does not accept as a comment citation — so this record owes an id.
+_PREFIX_APPROVAL_RECORD_LANDED_SHAPE_NO_ID = (
+    "> **Owner approval of the exact changes** is on record on #11824, with the\n"
+    "> provenance corrections relayed separately. The artifact is the text itself.")
+# ⛔ AND THE LABEL CLOSED BY A PERIOD, with the id in the NEXT sentence (review @
+# 9d34e510, finding 3): the sentence scope refuses this — but it used to raise a bare
+# `StopIteration` out of the label lookup, so a lane saw a traceback instead of the
+# refusal. Driven as an AssertionError from this arm's own frame.
+_APPROVAL_WITH_THE_ID_IN_A_LATER_SENTENCE = (
+    "> **Owner approval of the exact changes.** Given in-session: comment `6993778525`.")
+# ⛔ AND THE LABEL RUN **CUT BY** THE SENTENCE END (review of #13679, finding 2). The
+# paragraph detector sees a run, but the splitter cuts the period INSIDE it, so neither
+# sentence carries a CLOSED run and the label lookup returns `None`. This is the only shape
+# that drives `assert label is not None`: with the phrase-only selector both sentences
+# matched, the citation assert fired instead, and the guard could not be reddened by any
+# mutant of this diff.
+_APPROVAL_LABEL_STRADDLING_A_SENTENCE_END = (
+    "> **Owner approval of the exact changes. The rest runs on** and names no id.")
+# ⛔ AND THE TWO DIRECTIONS THE SENTENCE SCOPE'S BOLD BOUNDARY DECIDES (review of #13679,
+# finding 1), both measured against the phrase-only selector. FIRST, the FALSE BLOCK it
+# introduced: an unbolded mention earlier in the paragraph was selected as "the sentence
+# that records the approval", so a record whose LABEL sentence carries the id was refused.
+_APPROVAL_LABEL_AFTER_AN_UNBOLDED_MENTION = (
+    "> Following the owner approval relayed earlier, the wording was corrected. **Owner\n"
+    "> approval of the exact changes:** the ruling is at comment `6993778525`.")
+# …and SECOND, the fail-open it left OPEN: `_PREFIX_APPROVAL_RECORD_LANDED_SHAPE_NO_ID` —
+# the landed shape with its id deleted — with one plausible neighbour sentence prepended.
+# The borrowed id satisfied a citation demand for a label sentence that names none.
+_PREFIX_APPROVAL_RECORD_WITH_AN_UNBOLDED_MENTION_CITING_AN_ID = (
+    "> The owner approval for v3.31 was relayed at comment `6912345`. **Owner approval\n"
+    "> of the exact changes** is on record. The artifact is the text itself.")
+# ⛔ THE VARIANT THIS ARM DECLARES OUT OF SCOPE (review @ 9d34e510, finding 1's third
+# shape), kept as a GREEN pin rather than as prose: v3.33 writes ``**Approval** is the
+# owner's decision …`` and cites an ISSUE and a decision label, not a comment id. Detect it
+# and this test reds — which is the moment the false-block decision must be re-made, since
+# demanding an id there refuses a LANDED block.
+_APPROVAL_RECORD_IN_THE_APPROVAL_ONLY_VARIANT = (
+    "> **Approval** is the owner's decision D2 — A on #11824 (2026-11-11): core Object\n"
+    "> types get their own lifecycle vocabulary.")
 _PREFIX_UNRESOLVED_POINTER = (
     "> reads four conditions). That is a code defect with its own issue; it is not a "
     "sentence to rewrite.")
@@ -3076,6 +3130,19 @@ _POINTER_IN_THE_PLURAL = (
 _POINTER_CAPITALISED = (
     "> reads four conditions). That is a code defect with its own Issue; it is not a "
     "sentence to rewrite.")
+# ⛔ THE PHRASE IN THE OTHER WORD ORDER, measured ACCEPTED (review @ 9d34e510, finding 2):
+# ``an issue of its own`` and ``a tracking issue of its own`` are the same pointer as
+# ``its own issue`` — a reader follows either to nothing — and the regex knew one direction
+# only. The third fixture is the MIRROR: resolved prose in that order must stay green.
+_POINTER_WITH_THE_ISSUE_FIRST = (
+    "> reads four conditions). That is a code defect with an issue of its own; it is not "
+    "a sentence to rewrite.")
+_POINTER_WITH_A_TRACKING_ISSUE_OF_ITS_OWN = (
+    "> reads four conditions). That is a code defect with a tracking issue of its own; it "
+    "is not a sentence to rewrite.")
+_POINTER_RESOLVED_WITH_THE_ISSUE_FIRST = (
+    "> reads four conditions). That is a code defect with an issue of its own, #13450; it "
+    "is not a sentence to rewrite.")
 # ⛔ AND THE MIRROR DIRECTION THE SPLITTER WAS GETTING WRONG (review @ 95a8df2f): `;` is
 # NOT a sentence boundary a reader sees, so a resolved pointer after one is ONE sentence
 # and must stay GREEN. The arm refused it — a false block on true prose, the same
@@ -3102,6 +3169,20 @@ _NO_APPROVAL_RECORD_IN_PROSE = (
     "> **Changelog v3.39 (2026-11-19 — a wording fix that records no approval):**\n"
     ">\n"
     "> Owner approval was not required for a wording fix.")
+# ⛔ AND THE NEGATIVE SENTENCE WITH A COLON (review @ 9d34e510, finding 5): the cut that
+# required the colon claimed the colon was what kept "no approval was recorded" out of the
+# detector. This fixture HAS one and records no approval, so the boundary is BOLD, not the
+# colon — the claim was false, and the shape is driven here so the fix is a measurement.
+_NO_APPROVAL_RECORD_WITH_A_COLON = (
+    "> **Changelog v3.39 (2026-11-19 — a wording fix that records no approval):**\n"
+    ">\n"
+    "> No owner approval was required for a wording fix: the change is trivial.")
+# ⛔ …AND ITS RESIDUAL, DRIVEN SO IT IS A PIN AND NOT A CLAIM: a BOLDED negative sentence is
+# read as a record and demands a citation it cannot have. No landed block writes one, and
+# the arm's docstring says so; widening the detector to separate it needs the sentence's
+# grammar (``was not required`` is a claim about absence, not a record), not its markup.
+_BOLDED_NEGATIVE_APPROVAL_SENTENCE = (
+    "> **Owner approval was not required:** this was a wording fix in §4.5.")
 # ⛔ THE F2 FAIL-OPEN, driven as a fixture (review: "needs its own fixture (an id that is
 # NOT the approval's)"). This is the landed v3.38 record with its OWN relay deleted: the
 # only id left is the incidental one the next sentence cites, for a comment about the
@@ -3221,12 +3302,36 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     (comment `6965147045`)``), which is precisely the state this arm exists to refuse.
     An id in a LATER sentence belongs to whatever that sentence says.
     ⛔ THE SCOPE IS THE SENTENCE, NOT THE ATTRIBUTED-QUOTATION FORM, and the two were
-    measured against the landed text before choosing. At this head **7** blocks record an
-    owner approval: **6** of them carry an id in the label sentence, and **none** carries
-    the attributed ``comment <id>: "…"`` form the §4.3 pin demands — so that demand would
-    refuse ALL SEVEN, the file's own whole practice, the same measured false-block this
-    arm's first cut was already caught making. The sentence scope accepts those 6 and
-    still refuses the borrow.
+    measured against the landed text before choosing. At this head **7** blocks carry the
+    bolded label: **6** of them cite an id in the label sentence, and **2** of those 6 —
+    v3.38 and v3.36 — carry the attributed ``comment <id>: "…"`` form the §4.3 pin
+    demands. So that demand would accept 2 and refuse the other 5, i.e. most of the file's
+    own practice — the measured false-block class this arm's first cut was already caught
+    making. The sentence scope accepts those 6 and still refuses the borrow.
+    ⛔ AND THE BOLD CONTRACT IS THE SAME AT BOTH SCOPES (review of #13679, finding 1). The
+    paragraph is detected on a bolded label, so the SENTENCE the citation is read from is
+    selected by that same predicate — not by the bare phrase. Selecting on the phrase let an
+    UNBOLDED mention earlier in the paragraph decide the scope, which both refused a record
+    that does cite its home (a false block) and let the landed shape with its id deleted pass
+    once a neighbouring sentence carried an id (F1's fail-open, one sentence away).
+    ⛔ WHAT COUNTS AS "RECORDS AN APPROVAL" IS A STRUCTURAL CONVENTION, NOT A PHRASING
+    (review @ 9d34e510, findings 1 and 5). The file writes the label BOLDED — every one of
+    the 7 landed records is ``**Owner approval …**`` — so the detector reads an emphasis
+    RUN on the raw text and normalises only its interior; what FOLLOWS the run is prose,
+    not contract. ``…of the exact changes:``, ``…of the exact changes** — given
+    in-session`` and ``…of the exact changes** is on record on #11824`` are ONE label, and
+    an earlier cut that required the COLON accepted the last two only by accident
+    (measured: with the id deleted, both passed unread). ⛔ AND THE MIRROR: an UNBOLDED
+    negative sentence (``No owner approval was required for a wording fix: the change is
+    trivial.``) records no approval — BOLD is the boundary, not the colon, so the earlier
+    cut's claim that the colon excluded negative evidence was measurably false.
+    ⛔ OUT OF SCOPE, NAMED RATHER THAN IMPLIED. v3.33 records its approval as
+    ``**Approval** is the owner's decision …`` (a bolded run that says APPROVAL without
+    OWNER) and one entry records rulings as ``**Owner rulings, 2026-10-26 …**``; neither is
+    detected. The first is deliberate: v3.33 cites an ISSUE and a decision label, not a
+    comment id, so demanding an id there would refuse a LANDED block — the false-block
+    class, not the fail-open one. An UNBOLDED ``Owner approval:`` is likewise out of
+    scope; no landed record writes one.
     ⛔ AND IT REFUSES ONE LANDED BLOCK, stated rather than glossed: the **v3.35** entry
     (2026-11-13) records an approval and cites nothing at all, so this arm refuses it —
     a sweep over all 43 blocks reds TODAY. The test reads the NEWEST block alone, which
@@ -3247,13 +3352,14 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     # APPROVAL**` (another casing a reader reads identically). Each of those left a
     # record with NO resolvable home passing — the one artifact this arm exists to
     # refuse. `_reader_text` drops the markup and collapses the spacing and
-    # `_OWNER_APPROVAL_LABEL_RE` reads case-insensitively, so the RENDERED label is what
-    # is found; requiring the label's COLON is what keeps "no owner approval was
-    # recorded" out of the detector on its own merit rather than by casing accident.
+    # `_bolded_approval_label` reads an emphasis RUN's interior case-insensitively, so
+    # the RENDERED label is what is found — and BOLD is what keeps "no owner approval was
+    # recorded" out of the detector on its own merit rather than by a colon or a casing
+    # accident (review @ 9d34e510, findings 1 and 5).
     # ⛔ THE CITATION below is still read from the RAW sentence, so markup can neither
     # hide nor manufacture an id.
     records = [paragraph for paragraph in _quoted_paragraphs(block)
-               if _OWNER_APPROVAL_LABEL_RE.search(_reader_text(paragraph))]
+               if _bolded_approval_label(paragraph) is not None]
     if not records:
         # ⛔ RETURN, DO NOT ASSERT (review F1). This release records no owner approval,
         # so it owes no citation: the unconditional demand was measured to false-block
@@ -3264,8 +3370,32 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         f"the newest block carries {len(records)} owner-approval paragraphs; this arm "
         "reads exactly ONE, so a second copy would shadow the one checked")
     record = records[0]
-    label = next(sentence for sentence in _sentences(record)
-                 if _OWNER_APPROVAL_LABEL_RE.search(_reader_text(sentence)))
+    # ⛔ THE SENTENCE SCOPE READS THE SAME PREDICATE AS THE PARAGRAPH (review of #13679,
+    # finding 1). It used to select the first sentence matching the bare PHRASE while the
+    # record was detected on the BOLDED label, so an UNBOLDED mention earlier in the same
+    # paragraph decided which sentence the citation was read from — BOLD was the boundary at
+    # one scope and any occurrence of the two words at the other. Both directions were
+    # measured: a record whose label sentence DOES cite its home was refused (the false
+    # block this arm spends a docstring paragraph avoiding), and F1's landed-shape-with-no-id
+    # passed again once a neighbouring sentence carrying an id was prepended (the fail-open
+    # F1 closed). `_bolded_approval_label` therefore scopes BOTH the record and its sentence.
+    # ⛔ NO BARE `next(...)` (review @ 9d34e510, finding 3). With `**Owner approval of the
+    # exact changes.** Given in-session: comment `6993778525`.` the label run is detected on
+    # the paragraph but no SENTENCE carries it, and an un-defaulted `next` raised
+    # `StopIteration` out of here — a frame `_assert_refused_by` cannot classify and a lane
+    # reads as a traceback rather than a verdict. The default turns it into an assertion
+    # with a message; the citation check below then reports the real defect. The bold-aware
+    # selector is what makes this branch REACHABLE and attributable: a label run cut by a
+    # sentence end has no CLOSED run in either sentence, so the lookup returns `None` there
+    # and the row below drives THIS assert rather than the citation one (review of #13679,
+    # finding 2).
+    label = next((sentence for sentence in _sentences(record)
+                  if _bolded_approval_label(sentence) is not None), None)
+    assert label is not None, (
+        "the block's approval paragraph is detected by its bolded label, but no SENTENCE "
+        "of it carries that label — the sentence splitter and the detector disagree, so "
+        "the citation cannot be scoped to the approval's own sentence and this arm "
+        f"refuses rather than raising a bare StopIteration: {record!r}")
     assert _CITATION_RE.search(label), (
         "the newest changelog block records an owner approval but names no comment id "
         "in the SENTENCE that records it, so the approval has no home a reader can "
@@ -3275,8 +3405,19 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         f"is the form the owner rejected; the paragraph reads: {record!r}")
 
 
-_OWNER_APPROVAL_LABEL_RE = re.compile(r"\bowner\s+approval\b[^:]{0,120}:", re.IGNORECASE)
-_OWN_ISSUE_RE = re.compile(r"\bown\b(?:\s+[^\s]+){0,3}\s+issues?\b", re.IGNORECASE)
+_OWNER_APPROVAL_LABEL_RE = re.compile(r"\bowner\s+approval\b", re.IGNORECASE)
+# ⛔ AN EMPHASIS RUN, ``**…**`` or ``__…__``. BOLD is this file's own label convention (all
+# 7 landed approval records open with one), so it is the detector's boundary — see the
+# arm's docstring for what that puts out of scope and why.
+_EMPHASIS_RUN_RE = re.compile(r"(\*\*|__)(.+?)\1", re.S)
+# ⛔ THE PHRASE IN EITHER WORD ORDER (review @ 9d34e510, finding 2): ``its own issue`` was
+# the only order the regex knew, so ``an issue of its own`` and ``a tracking issue of its
+# own`` — the same pointer, the same defect — were ACCEPTED (measured). The window between
+# the two content words stays bounded so a DIFFERENT sentence's words cannot be spanned.
+_OWN_ISSUE_RE = re.compile(
+    r"\bown\b(?:\s+[^\s]+){0,3}\s+issues?\b"
+    r"|\bissues?\b(?:\s+[^\s]+){0,3}\s+of\s+(?:its|their)\s+own\b",
+    re.IGNORECASE)
 _ISSUE_NUMBER_RE = re.compile(r"#\d{2,}")
 
 
@@ -3296,6 +3437,29 @@ def _reader_text(sentence: str) -> str:
     pointer nor manufacture one: ``#13450`` survives the transformation.
     """
     return re.sub(r"\s+", " ", sentence.replace("*", "").replace("_", "").replace("`", "")).strip()
+
+
+def _bolded_approval_label(paragraph: str) -> str | None:
+    """The paragraph's BOLDED approval label, as a reader renders it — or `None`.
+
+    ⛔ THE LABEL IS A STRUCTURAL CONVENTION, and this is the whole of it: an emphasis run
+    (``**…**`` / ``__…__``) whose INTERIOR, normalised, says ``owner approval``. Nothing
+    after the run is read — not the colon, not the em dash, not ``is on record on …`` —
+    because those are prose and the file varies them (measured: two of the seven landed
+    records follow the run with `` is on record on #11824`` and no colon at all, and an
+    earlier cut that required a colon never saw them). Casing, a doubled space and an
+    emphasis run inside the label are normalised away by ``_reader_text``, so ``**Owner
+    Approval**``, ``**Owner  approval**`` and ``**Owner *approval* …**`` are the same
+    label a reader reads.
+
+    ⛔ THE RECOGNISED VARIANTS AND THE DECLARED GAPS ARE IN THE ARM'S DOCSTRING, not
+    implied here: ``**Approval**``-only, ``**Owner rulings …**`` and unbolded
+    ``Owner approval:`` are NOT detected.
+    """
+    for match in _EMPHASIS_RUN_RE.finditer(paragraph):
+        if _OWNER_APPROVAL_LABEL_RE.search(_reader_text(match.group(2))):
+            return _reader_text(match.group(2))
+    return None
 
 
 def _refuse_an_unresolvable_pointer(block: str) -> None:
@@ -3327,6 +3491,10 @@ def _refuse_an_unresolvable_pointer(block: str) -> None:
     pointer with no number at all. ⛔ AND the same widening is why `;` is no longer a
     terminator (a semicolon is not a sentence break to a reader) — stated HERE, next to
     the window it widens, rather than left to be discovered.
+    ⛔ AND THE PHRASE IS ORDER-INSENSITIVE, measured rather than assumed (review @
+    9d34e510, finding 2): ``an issue of its own`` and ``a tracking issue of its own`` are
+    the same pointer to a reader, and ``_OWN_ISSUE_RE`` carries both orders. The bounded
+    window is what keeps the two orders from spanning unrelated words.
     ⛔ AND ONE QUOTED SHAPE IS STILL REFUSED, named because the approval arm names its
     own: text inside a nested ``> > `` run is a QUOTATION OF DEFUNCT PROSE, not a claim
     this release makes, and this arm reads it as a claim — so an entry quoting the old
@@ -3410,6 +3578,16 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # the case accident above used to skip: the label's colon, not the casing, is what
     # keeps a "no approval was recorded" sentence out of the detector (review @ 95a8df2f).
     _refuse_an_approval_record_with_no_resolvable_home(_NO_APPROVAL_RECORD_IN_PROSE)
+    # …and with a COLON in the negative sentence, which the colon-requiring cut claimed was
+    # what excluded this class (review @ 9d34e510, finding 5): BOLD is the boundary.
+    _refuse_an_approval_record_with_no_resolvable_home(_NO_APPROVAL_RECORD_WITH_A_COLON)
+    # NON-VACUITY: the bolded negative residual is a record to this arm, and it is driven
+    # so the declaration in the docstring cannot drift from the code.
+    with pytest.raises(AssertionError) as bolded_negative:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _BOLDED_NEGATIVE_APPROVAL_SENTENCE)
+    _assert_refused_by(
+        bolded_negative, "_refuse_an_approval_record_with_no_resolvable_home")
     # NON-VACUITY: both shapes this release shipped are refused, verbatim.
     with pytest.raises(AssertionError) as refused:
         _refuse_an_approval_record_with_no_resolvable_home(_PREFIX_APPROVAL_RECORD)
@@ -3428,6 +3606,60 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
             _refuse_an_approval_record_with_no_resolvable_home(copy_edit)
         _assert_refused_by(
             rendered, "_refuse_an_approval_record_with_no_resolvable_home")
+    # …and the BOLDED LABEL WITH NO COLON — the em-dash form, the ``is on record`` form,
+    # and the LANDED v3.32 shape with its id deleted. Each was measured GREEN while the
+    # detector required ``…changes:``, so the arm was vacuous on five of its own seven
+    # landed records (review @ 9d34e510, finding 1).
+    for no_colon in (_PREFIX_APPROVAL_RECORD_WITH_AN_EM_DASH,
+                     _PREFIX_APPROVAL_RECORD_IS_ON_RECORD,
+                     _PREFIX_APPROVAL_RECORD_LANDED_SHAPE_NO_ID):
+        with pytest.raises(AssertionError) as uncolonised:
+            _refuse_an_approval_record_with_no_resolvable_home(no_colon)
+        _assert_refused_by(
+            uncolonised, "_refuse_an_approval_record_with_no_resolvable_home")
+    # …and the DECLARED GAP is a pin, not prose: ``**Approval**``-only is accepted, so
+    # widening the detector to it reds here — where the false-block on landed v3.33 has to
+    # be decided rather than discovered.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_RECORD_IN_THE_APPROVAL_ONLY_VARIANT)
+    # …and the label closed by a PERIOD with the id in the next sentence is REFUSED, not a
+    # bare `StopIteration` out of the label lookup (review @ 9d34e510, finding 3).
+    with pytest.raises(AssertionError) as later_sentence:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _APPROVAL_WITH_THE_ID_IN_A_LATER_SENTENCE)
+    _assert_refused_by(
+        later_sentence, "_refuse_an_approval_record_with_no_resolvable_home")
+    # ⛔ NON-VACUITY FOR THE `None` DEFAULT ITSELF (review of #13679, finding 2): the row
+    # above reddens under a mutant of the CITATION assert too, so it does not attribute the
+    # guard it names. This fixture cuts the bold RUN at the sentence end, so no sentence
+    # carries a closed run and the label lookup returns `None` — the only shape that drives
+    # `assert label is not None`. The message check is used HERE and not inside
+    # `_assert_refused_by` because both asserts live in the SAME frame: the frame name
+    # cannot tell them apart, and the alternative is a row that reports the guard green
+    # while a neighbour fired.
+    with pytest.raises(AssertionError) as straddling:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _APPROVAL_LABEL_STRADDLING_A_SENTENCE_END)
+    _assert_refused_by(
+        straddling, "_refuse_an_approval_record_with_no_resolvable_home")
+    assert "the sentence splitter and the detector disagree" in str(straddling.value), (
+        "the straddling fixture was refused, but not by the None-default guard — a "
+        f"neighbouring assertion fired instead: {straddling.value}")
+    # ⛔ AND THE SENTENCE SCOPE'S BOLD BOUNDARY, both directions (review of #13679,
+    # finding 1). A record that DOES cite stays green — the unbolded mention earlier in the
+    # paragraph must not decide which sentence the citation is read from…
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_LABEL_AFTER_AN_UNBOLDED_MENTION)
+    # …and the landed shape with no id stays REFUSED when a neighbouring sentence carries
+    # an id, so F1's fail-open cannot be re-opened by prepending a plausible sentence.
+    with pytest.raises(AssertionError) as earlier_mention:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _PREFIX_APPROVAL_RECORD_WITH_AN_UNBOLDED_MENTION_CITING_AN_ID)
+    _assert_refused_by(
+        earlier_mention, "_refuse_an_approval_record_with_no_resolvable_home")
+    assert "names no comment id" in str(earlier_mention.value), (
+        "the earlier-mention fixture was refused, but not for the borrowed citation — "
+        f"a neighbouring assertion fired instead: {earlier_mention.value}")
     # NON-VACUITY, the F2 direction: an id that is NOT the approval's — the landed
     # record with its own relay deleted, only the incidental reference left. Pre-fix
     # this was GREEN (a paragraph-wide search found the borrowed id), so the arm could
@@ -3489,6 +3721,16 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
         with pytest.raises(AssertionError) as reworded_pointer:
             _refuse_an_unresolvable_pointer(reworded)
         _assert_refused_by(reworded_pointer, "_refuse_an_unresolvable_pointer")
+    # …and the phrase in the OTHER WORD ORDER, measured ACCEPTED before the regex carried
+    # both directions (review @ 9d34e510, finding 2):
+    for other_order in (_POINTER_WITH_THE_ISSUE_FIRST,
+                        _POINTER_WITH_A_TRACKING_ISSUE_OF_ITS_OWN):
+        with pytest.raises(AssertionError) as reordered:
+            _refuse_an_unresolvable_pointer(other_order)
+        _assert_refused_by(reordered, "_refuse_an_unresolvable_pointer")
+    # …and the MIRROR of that order: resolved prose stays green, so the second direction
+    # is not satisfied by refusing every sentence that puts the issue first.
+    _refuse_an_unresolvable_pointer(_POINTER_RESOLVED_WITH_THE_ISSUE_FIRST)
     # …and the MIRROR direction: a semicolon is not a sentence break to a reader, so a
     # resolved pointer after one is ONE sentence and stays green (measured refusal of
     # true prose while `;` was a terminator).
