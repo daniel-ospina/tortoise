@@ -374,7 +374,8 @@ def test_the_statement_shapes_are_valid_on_the_real_engine(tmp_path):
     graph.query("CREATE (o:Object {id:'obj-3', name:'c'})")  # no vector: not the population
 
     assert parity.read_graph_vector_keys(graph, "Object", "id") == {
-        "count": 2, "keys": ["obj-1", "obj-2"], "unkeyed": 0}
+        "count": 2, "keys": ["obj-1", "obj-2"], "text": ["obj-1", "obj-2"],
+        "unkeyed": 0}
 
     original = parity.GRAPH_PAGE_SIZE
     parity.GRAPH_PAGE_SIZE = 1  # force the keyset walk across two pages
@@ -393,6 +394,56 @@ def test_the_statement_shapes_are_valid_on_the_real_engine(tmp_path):
     # The untouched node keeps its (absent) vector state — the statement never widened
     # beyond its `IN $keys` set.
     assert graph.query("MATCH (n:Object {id:'obj-3'}) RETURN count(n)").result_set == [[1]]
+
+
+def test_a_typed_identity_key_needs_the_VALUE_and_the_renderings_are_not_it(tmp_path):
+    """⛔ WHY THE PLAN CARRIES THE RAW VALUE — MEASURED on the real engine, not assumed.
+
+    Cypher `IN` is equality and equality is TYPE-SENSITIVE: an integer `:Object.id` is not
+    selected by `n.id IN ["123"]`. A plan built from `str()` renderings therefore removes
+    NOTHING on exactly the population that motivated accepting typed keys, and the run then
+    reports a residual as a *concurrent writer* — a diagnosis that sends an operator to the
+    wrong system and whose own remedy ("re-plan") reproduces the identical plan.
+
+    ⛔ AND THE OBVIOUS REPAIR — compare `toString(n.<key>) IN $keys` — IS NOT ONE. The
+    engine's `toString` is not Python's `str`: `toString(1.5)` is `1.500000` while `str(1.5)`
+    is `1.5`. Only the value as the store holds it round-trips, which is why
+    `read_graph_vector_keys` returns the typed key AND its rendering as two fields.
+
+    Mutation: drop the raw value from `read_graph_vector_keys` (append `str(node_key)`
+    instead of `node_key`) and the first removal assertion below reds.
+    """
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection(str(tmp_path / "g.db"), graph_name="typed_key_13629",
+                            skip_health_check=True, ensure_indexes=False)
+    graph = proj.g
+    graph.query("CREATE (o:Object {id:123, name:'int'}) "
+                "SET o.embedding = vecf32([0.1,0.2])")
+    graph.query("CREATE (o:Object {id:'456', name:'text'}) "
+                "SET o.embedding = vecf32([0.3,0.4])")
+
+    read = parity.read_graph_vector_keys(graph, "Object", "id")
+    # ONE identity, TWO forms — both are carried, because each answers a different store.
+    assert read["keys"] == [123, "456"]
+    assert read["text"] == ["123", "456"]
+    # …and an all-string label is unaffected: the same value in both fields.
+    assert parity.read_graph_vector_keys(graph, "Subject", "id") == {
+        "count": 0, "keys": [], "text": [], "unkeyed": 0}
+
+    statement = (
+        "MATCH (n:Object) WHERE n.embedding IS NOT NULL AND n.id IN $keys "
+        "REMOVE n.embedding RETURN count(n)")
+    # THE DEFECT, reproduced: the rendered key selects nothing on the integer node.
+    assert graph.query(statement, params={"keys": ["123"]}).result_set == [[0]]
+    assert parity.read_graph_vector_keys(graph, "Object", "id")["count"] == 2
+    # THE FIX: the value as the store holds it selects it.
+    assert graph.query(statement, params={"keys": [123]}).result_set == [[1]]
+    assert parity.read_graph_vector_keys(graph, "Object", "id")["count"] == 1
+    # …and `toString` would NOT have been a safe substitute (this is the trap, not a fix).
+    assert graph.query("RETURN toString(1.5), toString(1e20)").result_set == [
+        ["1.500000", "100000000000000000000.000000"]]
+    assert [str(1.5), str(1e20)] == ["1.5", "1e+20"]
 
 
 def test_a_graph_that_cannot_be_counted_refuses(stores):
@@ -482,12 +533,13 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
     # second inherits a failure caused by the other. `sdk::_update_entity` stores the
     # property through `SET n += $props` and is not part of #13617, so a set-based
     # assertion stays true before AND after it.
-    assert "_update_entity" in reason
-    # ⛔ AND IT NAMES THE WRITERS THE FOLD MAP ALONE MISSED. `tortoise.sdk::_update_entity`
-    # re-adds a caller-supplied `embedding` on Subject/Object/Source/Event through
-    # `SET n += $props`, so a gate that cleared the `entities.py` folds alone would license
-    # a strip its own refusal claims to prevent. Mutation: drop `_register_writers` from
-    # `_writers_for` and this assertion (plus four other tests) reds.
+    # ⛔ ONE ASSERTION, AND IT CARRIES BOTH CLAIMS: the writer must be named at all, and it
+    # must be one the FOLD MAP ALONE MISSED — `sdk::_update_entity` re-adds a
+    # caller-supplied `embedding` through `SET n += $props`, so a gate that cleared the
+    # `entities.py` folds alone would license a strip its own refusal claims to prevent.
+    # The register-vs-fold-map population is pinned by
+    # `test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map`, which can
+    # fail independently; an assertion repeated here could only fail when this one does.
     assert "_update_entity" in reason
 
 
@@ -1621,6 +1673,62 @@ def test_the_removal_statement_is_idempotent_on_an_already_stripped_node(stores,
     assert graph.vector_keys("Object") == set()
 
 
+def test_a_typed_identity_key_is_stripped_and_the_refusal_is_not_blamed_on_a_writer(
+        stores, monkeypatch):
+    """⛔ F1 (PR #13647) — a plan accepted a typed key and the removal could not match it.
+
+    `read_graph_vector_keys` made a non-string `:Object.id` keyable, `build_plan` carried
+    its `str()` rendering, and `execute` compared that rendering against the TYPED property
+    with a type-sensitive `IN`. The removal selected nothing, so the node kept its vector
+    and the run exited 5 — whose message names a **concurrent writer** or an open write gate,
+    neither of which is true, and whose remedy ("re-plan") reproduces the identical plan.
+    The retirement would be wedged for that label with no path the message names.
+
+    The repair is that the plan carries the VALUE as the graph holds it, so the plan and the
+    removal compare the same thing.
+
+    Mutation: append `str(node_key)` instead of `node_key` in `read_graph_vector_keys` (the
+    pre-fix behaviour) and this test fails at `result["removed"] == 0`.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", 123)            # an integer `:Object.id`
+    record.holds("object", "123")        # the record's `text` column renders it
+    plan = _plan(graph)
+    # The plan carries the GRAPH's value, not a rendering of it.
+    assert plan["labels"][0]["keys"] == [123]
+    assert plan["total_nodes"] == 1
+
+    result = _execute(graph, plan)
+    assert result["removed"] == 1
+    assert result["removed_by_label"]["Object"] == 1
+    assert result["shortfall_by_label"]["Object"] == 0
+    assert result["residual_by_label"]["Object"] == 0
+    assert graph.vector_keys("Object") == set()
+    # …so the post-write verdict is a COMPLETED retirement, not exit 5 blaming a writer.
+    assert strip.result_exit_code(result) == 0
+
+
+def test_a_plan_that_RENDERED_a_typed_key_is_refused_as_stale(stores, monkeypatch):
+    """A plan minted before typed keys were first-class is STALE, never a silent no-op.
+
+    Such a plan is self-consistent (its own digest matches its lists), so only the LIVE
+    comparison can catch it — which is exactly what the fail-closed direction needs: the
+    operator is told to re-plan rather than shown a residual blamed on a concurrent writer.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", 123)
+    record.holds("object", "123")
+    plan = _plan(graph)
+    plan["labels"][0]["keys"] = ["123"]          # the pre-fix rendering, self-consistently
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    with pytest.raises(strip.Refusal) as excinfo:
+        _execute(graph, plan)
+    assert excinfo.value.token == strip.REFUSE_PLAN_STALE
+    assert graph.vector_keys("Object") == {123}   # nothing was removed
+
+
 def test_a_second_execute_with_the_same_plan_refuses_as_stale(stores, monkeypatch):
     """A drained graph is a STALE plan, not a vacuous success — re-plan instead."""
     _ready(monkeypatch)
@@ -1897,6 +2005,28 @@ def test_the_digest_cannot_collide_on_a_key_containing_its_separator():
     # version of this line) is green under the pre-fix `label\tkey` join too.
     assert strip.digest([("Object", "obj-1")]) == \
         "sha256:" + hashlib.sha256(b"6:Object5:obj-1").hexdigest()
+
+
+def test_the_digest_distinguishes_a_typed_key_from_its_rendering():
+    """⛔ `str(123)` and `"123"` are DIFFERENT nodes, so they must not share a digest.
+
+    The digest is the authority to delete: if an integer key and a same-text string key
+    framed identically, a plan could certify a set and the removal act on the other one. A
+    typed key is framed with a leading `~`, which a string frame can never start with (its
+    first character is always the length's digit).
+
+    ⛔ AND THE STRING FRAME IS UNCHANGED, byte for byte — a plan minted against an all-string
+    population must still re-derive to the digest it recorded (asserted by the literal
+    above), so this is an ADDITION to the framing, not a replacement of it.
+    """
+    assert strip.digest([("Object", 123)]) != strip.digest([("Object", "123")])
+    assert strip.digest([("Object", 123)]) == \
+        "sha256:" + hashlib.sha256(b"6:Object~int:3:123").hexdigest()
+    # A mixed-type label is still a well-defined set (the sort is type-safe, not a crash).
+    assert strip.digest([("Object", 123), ("Object", "456")]) != \
+        strip.digest([("Object", 123)])
+    # …and one key moving between the two families is one key moving.
+    assert strip.digest([("Object", 123)]) != strip.digest([("Object", 124)])
 
 
 # ── the post-write verdict is fail-closed ──────────────────────────────────

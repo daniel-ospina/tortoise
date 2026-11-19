@@ -296,12 +296,45 @@ def affected_entity_types(label: str) -> list[str]:
     return sorted(t for t, lbl in ENTITY_TYPE_LABELS.items() if lbl == label)
 
 
+def identity_sort_key(value: Any) -> tuple[int, Any]:
+    """An ordering token for a graph identity value that cannot raise on mixed types.
+
+    ⛔ TYPE-SAFE BY CONSTRUCTION. Identity values arrive TYPED from FalkorDB — an integer
+    `:Object.id` is legal (see `read_graph_vector_keys`) — so a bare `sorted(keys)` raises
+    `TypeError` the moment one label holds both an integer and a string key. That is a
+    crash in a READ, in a tool whose whole job is to refuse before a write, and it would
+    arrive on exactly the population the typed-key support exists for.
+
+    Strings keep their NATURAL lexicographic order, so an all-string population sorts
+    exactly as it did before typed keys were first-class; anything else sorts after them,
+    ordered by its own rendering. One declaration, used by the census and by the
+    stripper's plan/digest paths, so the two cannot order a set differently.
+    """
+    return (0, value) if isinstance(value, str) else (1, repr(value))
+
+
 def read_graph_vector_keys(g: Any, label: str, key_prop: str) -> dict:
     """The graph leg for ONE label: every vector-bearing node's identity key.
 
-    Returns ``{"count", "keys", "unkeyed"}``. Raises :class:`CensusError` when the
-    count cannot be taken, when the paged read comes back SHORT of it (truncation), or
+    Returns ``{"count", "keys", "text", "unkeyed"}``. Raises :class:`CensusError` when
+    the count cannot be taken, when the paged read comes back SHORT of it (truncation), or
     when a page cannot be read — an absence is never established from a failed read.
+
+    ⛔ TWO RENDERINGS OF THE SAME IDENTITY, AND NEITHER IS REDUNDANT.
+
+    * ``keys`` is the value **AS THE GRAPH HOLDS IT** — typed. It is the only form that can
+      MATCH the property again: Cypher `IN` is equality, equality is type-sensitive, so
+      ``n.id IN ["123"]`` does not select an integer-keyed node (MEASURED on the embedded
+      engine, `tests/test_13629_entity_vector_retire.py`).
+    * ``text`` is that value rendered with ``str()``. The record's identity column is
+      ``text``, so the record leg can only be asked in this form.
+
+    Carrying one and deriving the other is how the census came to certify a key it could
+    describe but not remove (`#13647`'s F1). ⛔ AND THE RENDERING MUST NOT BE RE-DERIVED IN
+    CYPHER: `toString(1.5)` is ``1.500000`` and `toString(1e20)` is
+    ``100000000000000000000.000000`` while `str()` gives ``1.5`` and ``1e+20``, so a
+    `toString(n.<key>) IN $keys` comparison would silently select nothing on exactly the
+    non-string keys it was added for.
     """
     quoted, quoted_key = _quote_identifier(label), _quote_identifier(key_prop)
     try:
@@ -313,7 +346,8 @@ def read_graph_vector_keys(g: Any, label: str, key_prop: str) -> dict:
             f"({type(exc).__name__}: {exc}) — an absence is NOT established, so no "
             "label is certified") from exc
 
-    keys: list[str] = []
+    keys: list[Any] = []
+    text: list[str] = []
     unkeyed = 0
     cursor = 0
     while True:
@@ -354,7 +388,10 @@ def read_graph_vector_keys(g: Any, label: str, key_prop: str) -> dict:
             if node_key is None or node_key == "":
                 unkeyed += 1
                 continue
-            keys.append(node_key if isinstance(node_key, str) else str(node_key))
+            # the RAW value — the one the removal must compare against — and its
+            # rendering for the record leg. Never `str()` alone: see the docstring.
+            keys.append(node_key)
+            text.append(node_key if isinstance(node_key, str) else str(node_key))
         if last is None:  # pragma: no cover - a page exists, so it has rows
             break
         cursor = last + 1
@@ -366,7 +403,7 @@ def read_graph_vector_keys(g: Any, label: str, key_prop: str) -> dict:
             "when a result set exceeds RESULTSET_SIZE. A truncated population would "
             "report graph-only nodes as absent from the graph and licence their "
             "strip, so nothing is certified")
-    return {"count": total, "keys": keys, "unkeyed": unkeyed}
+    return {"count": total, "keys": keys, "text": text, "unkeyed": unkeyed}
 
 
 #: The record leg's TWO statements. `node_key` is the record's one identity column
@@ -589,12 +626,15 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
             f"unknown --label value(s): {sorted(set(labels) - {r[1] for r in RETIRED})} "
             f"— this census covers {[r[1] for r in RETIRED]}")
     rows: list[LabelCensus] = []
-    keys_by_label: dict[str, list[str]] = {}
+    keys_by_label: dict[str, list[Any]] = {}
     for table, label, key_prop in wanted:
         graph = read_graph_vector_keys(g, label, key_prop)
-        keys_by_label[label] = sorted(graph["keys"])
+        # ⛔ THE PLAN'S SET IS THE TYPED ONE. `keys_by_label` is the authority the stripper
+        # builds its plan from, so it must be the form the removal can MATCH; `identity_sort_key`
+        # keeps a mixed-type label from raising here.
+        keys_by_label[label] = sorted(graph["keys"], key=identity_sort_key)
         record = read_record_vector_keys(record_dsn, org_id, graph_id, table,
-                                         graph["keys"])
+                                         graph["text"])
         row = LabelCensus(
             label=label,
             table=table,
@@ -609,7 +649,9 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
             record_readable_total=record["record_readable_total"],
             record_unreadable_total=record["record_unreadable_total"],
         )
-        keyed_graph_only = sorted(set(graph["keys"]) - record["readable"])
+        # ⛔ THE RENDERED FORM HERE, because the other side is the record's `text` column:
+        # comparing a typed value against it would report EVERY typed key as graph-only.
+        keyed_graph_only = sorted(set(graph["text"]) - record["readable"])
         row.graph_only = len(keyed_graph_only) + graph["unkeyed"]
         row.graph_only_sample = keyed_graph_only[:5]
         blocks: list[str] = []

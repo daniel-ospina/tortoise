@@ -106,6 +106,17 @@ Per label, batched (`--batch`, default 200), and IDEMPOTENT BY CONSTRUCTION:
 raises nothing; the per-batch removed count is compared against the batch size and a
 shortfall is REPORTED, never silently accepted.
 
+⛔ **`$keys` CARRIES THE GRAPH'S OWN VALUES — typed, never rendered.** `IN` is equality
+and Cypher equality is type-sensitive, so `n.id IN ["123"]` does not select an integer
+`:Object.id` (MEASURED, `tests/test_13629_entity_vector_retire.py`). A plan that carried
+`str()` renderings would match nothing on such a node, count a shortfall, read a residual
+and report exit 5 — blaming a concurrent writer for the tool's own rendering, with
+"re-plan" producing the identical plan. The plan therefore holds the RAW identity value
+and the record leg is asked in the rendered form; one value, two uses, no re-derivation.
+For the same reason the comparison is NOT `toString(n.<key>) IN $keys`: the engine's
+`toString(1.5)` is `1.500000` while `str()` is `1.5`, so that would fail on exactly the
+non-string keys it was added for.
+
 ⛔ **The removal is NOT journaled, and that is correct rather than an omission.** The
 value being removed is a DERIVED one — `derived_embedding.encode(name)` for the four
 entity folds (`tortoise/projection/entities.py`), re-derivable from the row's own
@@ -1046,11 +1057,32 @@ def strip_readiness(label: str) -> tuple[bool, str]:
 # ── the plan ────────────────────────────────────────────────────────────────
 
 
-def digest(entries: list[tuple[str, str]]) -> str:
+def _digest_key(value: Any) -> str:
+    """The framed rendering of ONE identity value inside a digest row.
+
+    ⛔ A TYPED KEY AND ITS RENDERING MUST NOT SHARE A DIGEST. `str(123)` and `"123"` are
+    two different nodes — the removal selects one and not the other — so a digest that
+    framed both as ``3:123`` would certify the wrong set, and the digest IS the authority
+    to delete.
+
+    ⛔ AND A STRING KEY KEEPS ITS BYTE-IDENTICAL FRAMING. Length-prefixed, exactly as
+    before typed keys were first-class, so every plan minted against an all-string
+    population still re-derives to the value it recorded and stays executable. A typed key
+    is framed with a leading ``~`` that a string frame can never start with (its first
+    character is always a digit), so the two families cannot collide.
+    """
+    if isinstance(value, str):
+        return f"{len(value)}:{value}"
+    rendered = repr(value)
+    return f"~{type(value).__name__}:{len(rendered)}:{rendered}"
+
+
+def digest(entries: list[tuple[str, Any]]) -> str:
     """The canonical digest of an exact node set: one LENGTH-FRAMED row per node.
 
-    Sorted, `sha256`-prefixed, and **length-framed** — ``<len(label)>:<label>`` then
-    ``<len(key)>:<key>`` per row. Three properties, all load-bearing:
+    Sorted, `sha256`-prefixed, and **length-framed** — ``<len(label)>:<label>`` then the
+    key's own frame (``<len(key)>:<key>``, or a ``~<type>:`` frame for a typed key; see
+    `_digest_key`). Three properties, all load-bearing:
 
     * over the WHOLE set, so a single key moving changes it;
     * over ROWS rather than a JSON blob, so a re-serialisation of the plan file cannot
@@ -1063,8 +1095,13 @@ def digest(entries: list[tuple[str, str]]) -> str:
       Length framing makes an embedded separator unrepresentable rather than unlikely.
     """
     body = "\n".join(
-        f"{len(label)}:{label}{len(key)}:{key}"
-        for label, key in sorted(set(entries)))
+        f"{len(label)}:{label}{_digest_key(key)}"
+        # `identity_sort_key`, not the bare tuple: an integer key and a string key in one
+        # label cannot be compared, and the ORDER here is only canonicalisation — the
+        # frame is what makes a row unambiguous. String-only sets order exactly as before.
+        for label, key in sorted(set(entries),
+                                  key=lambda entry: (entry[0],
+                                                     parity.identity_sort_key(entry[1]))))
     return "sha256:" + hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -1085,6 +1122,9 @@ def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
         # vector that appeared between the digest check and the `REMOVE` be deleted
         # without ever having been in the approved plan, and without its record copy
         # having been parity-checked: the authority gap the token exists to close.
+        # ⛔ AND THEY ARE THE GRAPH'S OWN TYPED VALUES, not `str()` renderings: the removal
+        # matches them against the property with a type-sensitive `IN`, so a rendered key
+        # is a key nothing can match (see the module docstring's THE REMOVAL ITSELF).
         if row["unkeyed_graph_nodes"]:
             # An unkeyed vector-bearing node cannot be named in a plan, so it cannot be
             # stripped — and it must not be silently left out of the population a human
@@ -1127,8 +1167,13 @@ def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
         # emptiness refusal and the "expected" count both read this.
         "total_nodes": len(entries),
         "digest": digest(entries),
-        "digest_scope": "one LENGTH-FRAMED `len(label):label len(key):key` row per "
-                        "node, sorted, sha256",
+        #: ⛔ THE GRAPH'S OWN VALUES, NOT A RENDERING OF THEM. The removal compares these
+        #: against the typed property, and Cypher equality is type-sensitive: a plan of
+        #: `["123"]` matches nothing on an integer `:Object.id`, leaving the vector in
+        #: place and reporting a concurrent writer. The record leg is asked in the
+        #: rendered form separately (`read_graph_vector_keys` returns both).
+        "digest_scope": "one row per node: `len(label):label` then `len(key):key` (a typed "
+                        "key is framed `~<type>:len:repr`), sorted, sha256",
         "ready": all(row["strip_ready"] for row in per_label) and bool(entries),
     }
 
@@ -1382,7 +1427,7 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
         # a vector that appeared in the check-to-write window be deleted without ever
         # being in the plan a human approved, and without its record copy having been
         # parity-checked.
-        keys = sorted(row.get("keys") or ())
+        keys = sorted(row.get("keys") or (), key=parity.identity_sort_key)
         quoted_label = parity._quote_identifier(label)
         quoted_key = parity._quote_identifier(_key_prop(label))
         # ⛔ `setdefault`, NOT assignment. A plan whose `labels` list repeats a label would
@@ -1397,6 +1442,10 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
                 continue
             statement = (
                 f"MATCH (n:{quoted_label}) "
+                # ⛔ THE PLAN'S VALUES, UNCHANGED — `chunk` holds the typed identity as the
+                # graph holds it. Any rendering here (`str()` on the way out, or
+                # `toString(n.<key>)` here) reintroduces F1: a typed key stops matching and
+                # the shortfall is then reported as a concurrent writer.
                 f"WHERE n.embedding IS NOT NULL AND n.{quoted_key} IN $keys "
                 "REMOVE n.embedding RETURN count(n)")
             try:
