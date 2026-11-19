@@ -1950,14 +1950,29 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     assert strip.uri_fingerprint("docker://:pw#x@prod:6379/g") == "docker://prod:6379/g"
     # …and a query BEFORE a path (`host:6379?x@y/g`) resolves to its real host rather than
     # letting the query tail become one.
-    # ⛔ A QUERY TAIL THAT ITSELF LOOKS LIKE `host:port` IS THE ESCAPE HATCH THE PORT GUARD
-    # LEFT OPEN: position alone cannot tell "genuine query" from "password containing ?",
-    # so `y:123` became the host and prod/staging folded onto `docker://y:123/g`
-    # (measured). The discriminator is the text BEFORE the marker: a real `host[:port]`
-    # there means the query is genuine and the whole tail is dropped.
-    assert strip.uri_fingerprint("docker://prod:6379?x@y:123/g") == "docker://prod:6379/g"
-    assert strip.uri_fingerprint("docker://prod:6379?x@y:123/g") != \
-        strip.uri_fingerprint("docker://staging:6379?x@y:123/g")
+    # ⛔ BUT A QUERY TAIL THAT ITSELF LOOKS LIKE `host:port` IS NOT RESOLVED EITHER WAY —
+    # `prod:6379?x@y:123/g` reads BOTH as "a genuine query after host prod" AND as "a
+    # password containing `?` whose host is `y:123`", and nothing in the URI prefers one.
+    # Taking the query reading can print the userinfo into the plan and fold two
+    # deployments onto one fingerprint (`docker://admin:1234?x@prod:6379/g` did exactly
+    # that: prod/staging both rendered `docker://admin:1234/g`); taking the userinfo
+    # reading folds the other pair. So the class is REFUSED. Fail-closed and provable,
+    # instead of picking a reading and hoping the input was the kind we guessed.
+    for ambiguous in (
+        "docker://prod:6379?x@y:123/g",
+        "docker://staging:6379?x@y:123/g",
+        "docker://admin:1234?x@prod:6379/g",
+        "docker://admin:1234?x@staging:6379/g",
+        "docker://svc:1?pass@prod:6379/g",
+        "docker://user?pw@prod:6379/g",
+        "docker://prod:6379?x@other:6379",
+    ):
+        with pytest.raises(strip.Refusal) as amb:
+            strip.uri_fingerprint(ambiguous)
+        assert amb.value.token == strip.REFUSE_TARGET_UNPARSEABLE
+        # the refusal must not echo the credential material it could not classify
+        assert "1234" not in str(amb.value) and "pass@" not in str(amb.value)
+    # A bare-word tail is NOT a plausible second host, so it still resolves.
     assert strip.uri_fingerprint("docker://host:6379?x@y/g") == "docker://host:6379/g"
     # ⛔ AND THE QUERY IS DROPPED FROM THE AUTHORITY TOO, not only from the path: with no
     # path segment it used to be re-emitted WHOLE into the plan (`?api_key=SECRET…`) —

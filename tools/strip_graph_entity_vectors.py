@@ -2208,13 +2208,55 @@ def uri_fingerprint(uri: str) -> str:
     #    Position alone is not a discriminator: requiring merely that SOME `host:port`
     #    followed the last `@` accepted `docker://prod:6379?x@y:123/g`, whose query tail
     #    `y:123` then became the host — measured, prod and staging folded onto
-    #    `docker://y:123/g`. The two readings are told apart by `_host_port` below.
+    #    `docker://y:123/g`.
+    #
+    #    ⛔ AND `_host_port` ON THE TEXT BEFORE THE MARKER IS NOT SUFFICIENT ON ITS OWN,
+    #    because it answers "could a query start here?", never "is the userinfo reading
+    #    impossible?". `docker://admin:1234?x@prod:6379/g` has `admin:1234` before the `?`
+    #    — host `admin`, port `1234` — so the query reading was taken and the REAL host
+    #    after the `@` was discarded as query content: measured, prod and staging folded
+    #    onto `docker://admin:1234/g` and the userinfo itself was emitted into the plan a
+    #    human approves.
+    #
+    #    So the discriminator is applied BOTH WAYS: the text before the marker must be a
+    #    `host[:port]`, AND no `host:port` may follow an `@` after the marker. When both
+    #    readings are grammatical the URI is REFUSED — the only answer that neither prints
+    #    the credential nor folds two targets — because a fingerprint is a comparison key
+    #    and an unresolvable key is not a key.
     authority, _, path = rest.partition("/")
     marker = min((i for i in (authority.find("?"), authority.find("#")) if i >= 0),
                  default=len(authority))
     head = authority[:marker]
     head_host = _host_port(head.split("@")[-1])
     if marker < len(authority) and head_host is not None:
+        # ⛔ BUT ONLY WHEN THE *OTHER* READING IS NOT EQUALLY PLAUSIBLE. `_host_port` on
+        #    the pre-marker text says "a query could start here"; it does NOT say the
+        #    userinfo reading is impossible. `docker://admin:1234?x@prod:6379/g` has a
+        #    pre-marker `admin:1234` that parses as host `admin` + port `1234`, so the
+        #    query reading was taken and everything after the `?` — the REAL host — was
+        #    discarded as query content: measured, prod and staging folded onto
+        #    `docker://admin:1234/g` AND the userinfo itself was emitted into the plan.
+        #    `docker://prod:6379?x@other:6379` is character-for-character the same shape.
+        #    When a `host:port` follows an `@` after the marker as well, both readings are
+        #    grammatical and nothing in the URI prefers one — so it is REFUSED, which is
+        #    the only answer that neither prints the credential nor folds two targets.
+        after_marker = authority[marker:]
+        tail = after_marker[after_marker.rfind("@") + 1:] if "@" in after_marker else ""
+        tail_host = _host_port(tail)
+        # ⛔ A PORT IS REQUIRED on the competing reading too. A bare word tail (`?x@y/g`)
+        #    is not a plausible second host, and refusing it would take a shape the tool
+        #    has always resolved correctly (`docker://host:6379?x@y/g`).
+        if tail_host is not None and tail_host[1]:
+            raise Refusal(
+                REFUSE_TARGET_UNPARSEABLE,
+                f"the graph target {scheme}://… cannot be fingerprinted: a '?'/'#' is "
+                "followed by an '@' whose tail is a host:port, so this reads BOTH as a "
+                "query after a real host AND as a password containing a '?'/'#' — and "
+                "the two readings name different targets. Taking the query reading can "
+                "print the userinfo into the plan and fold two deployments onto one "
+                "fingerprint; taking the userinfo reading can fold two others. "
+                "Percent-encode the credential ('?' → '%3F', '#' → '%23', '/' → '%2F') "
+                "so the boundary is unambiguous.")
         # a GENUINE query/fragment: it is not target identity and can carry a credential
         # (`?api_key=…`), so it is dropped — from the authority AND from the path.
         host = head.split("@")[-1] if "@" in head else head
