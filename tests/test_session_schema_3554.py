@@ -3842,19 +3842,32 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         it is ``_reader_text`` that strips no HTML tags and no link syntax, so the run's
         rendered text carries ``<b>``/``</b>`` or ``[...](url)`` and does not begin with
         the phrase. Closing either needs the MARKUP stripped first, not the run unsplit;
-      - a label behind one of the THREE BLOCK KINDS this paragraph model does not name — the
-        table ROW (``| **Owner approval …** | given in-session |``), a THEMATIC BREAK
-        (``> ---``, then the label) or a FENCED BLOCK (a ``` fence, then the label) —
-        **PASSES** (fail-open, out of scope). ⛔ THEY ARE ONE CLASS WITH TWO DIFFERENT FIXES,
-        which is why they are named separately instead of as "the one block kind" (review
-        P3: the completeness word pointed the next fix at the wrong half). Every one is
-        measured against ``markdown_it(commonmark)``, and the READING is what splits the
-        class in two (⛔ NOT "all three give the label its own paragraph" — that reads as
-        if every paragraph OPENS with the label, which is true only of the break and the
-        fence): the BREAK and the FENCE make the label OPEN its own paragraph, while the
-        ROW makes ONE paragraph whose text OPENS with the table's leading ``|`` and carries
-        the label mid-paragraph — the same reason a mid-sentence bold run passes. What
-        differs is what has to learn about it:
+      - a label behind a BLOCK KIND this paragraph model does not name — the table ROW
+        (``| **Owner approval …** | given in-session |``), a THEMATIC BREAK (``> ---``,
+        then the label) or a FENCED BLOCK (a ``` fence, then the label), all three PINNED
+        below — **PASSES** (fail-open, out of scope). ⛔ THE SET IS OPEN, NOT A COUNT
+        (review P2: this bullet said "one of the THREE BLOCK KINDS" and "ONE CLASS WITH
+        TWO DIFFERENT FIXES", which is the same completeness word it replaced "the one
+        block kind" with — a reader told there are three stops looking). TWO FURTHER KINDS
+        ARE MEASURED, not pinned: a SETEXT HEADING (``> v3.41 — a fix`` then ``> ---``) and
+        an INDENTED CODE BLOCK (``>     x = 1``) — CommonMark opens a paragraph for the
+        label in each (measured: ``heading_close, paragraph_open`` and ``code_block,
+        paragraph_open``), and this arm's ``_quoted_paragraphs`` fuses the block's own line
+        with the label exactly as it does for the break (measured, one paragraph:
+        ``'v3.41 — a wording fix --- **Owner approval …**'``), so both PASS. ⛔ THE SAME
+        END-OF-PARAGRAPH BOUNDARY §4.1 prescribes for the break ALSO CLOSES THE SETEXT
+        HEADING (measured: flushing the paragraph on a ``---`` line turns
+        ``'v3.41 — a wording fix --- **Owner approval …**'`` into ``'… ---'`` +
+        ``'**Owner approval …**'``) but NOT the INDENTED CODE BLOCK, whose delimiter is
+        indentation and whose remedy is therefore UNMEASURED here. Neither has a fixture,
+        which is why the class is stated as open: an unnamed kind is to be treated as
+        fail-OPEN.
+        The READING is what splits the PINNED shapes (⛔ NOT "all three give the label its
+        own paragraph" — that reads as if every paragraph OPENS with the label, which is
+        true only of the break and the fence): the BREAK and the FENCE make the label OPEN
+        its own paragraph, while the ROW makes ONE paragraph whose text OPENS with the
+        table's leading ``|`` and carries the label mid-paragraph — the same reason a
+        mid-sentence bold run passes. What differs is what has to learn about it:
         · the ROW's opening run is not read because the table's leading ``|`` sits BEFORE it
           — the same reason a mid-sentence bold run passes — so the fix lives in the
           STRIPPER, not in ``_PARAGRAPH_START_RE``: teaching that pattern a `|` row start
