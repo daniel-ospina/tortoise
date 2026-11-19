@@ -182,6 +182,18 @@ SELECTED = [
     # the same sentence as `which claims were archived`. Named in the round-5
     # review's gap list as a row that should exist; it is a SELECTED row rather
     # than a refusal because the question really does ask for the ended set.
+    # ⛔ THE ROUND-5 REVIEW LEFT THIS AS AN OPEN JUDGEMENT CALL FOR THE NEXT
+    # REVIEWER, AND THIS IS THE RULING (see `test_the_partitive_is_not_the_
+    # discriminator`). It stays SELECTED. The reviewer's objection was that
+    # `of our endpoints` is the only narrowing in the question and the population
+    # read cannot apply it — but that is true of `which claims were archived`
+    # too, where the wh-noun `claims` is equally unapplied, and that row is the
+    # capability's canonical Q6 spelling. Refusing the partitive would refuse
+    # both. What was actually wrong with this shape was the FREE WINDOW, not the
+    # partitive: the same window admitted `which vendor said our commitments
+    # were archived`. Bounding the window fixes the hijack and leaves every
+    # genuine set question working, which is the narrower change and the one the
+    # precision contract asks for.
     ("which of our endpoints is deprecated", "ended", "which_predicate"),
     ("what did we archive last quarter", "ended", "do_support"),
     ("did we retire the onboarding flow", "ended", "do_support"),
@@ -333,6 +345,25 @@ NOT_SELECTED = [
     "what did legal advise about our commitments",
     "what are the risks to our commitments",
     "the board discussed current commitments",
+    # ── the SUBORDINATE-CLAUSE class on `which_predicate` (this lane, ruling on
+    # the round-5 review's open judgement call) ─────────────────────────────
+    # The `which` window was a free 30 characters, so an ending participle inside
+    # SOMEBODY ELSE'S clause selected the whole ended population — the caller's
+    # head noun, and with it the question, silently dropped. The shape now
+    # requires the wh-phrase's head noun to be ADJACENT to the auxiliary, which
+    # is what refuses these. Measured on the pre-fix module: all four routed.
+    "which vendor said our commitments were archived",
+    "which report says the product was deprecated",
+    "which notice confirmed the account was cancelled",
+    "which customer reported that our claims were retracted",
+    # …and the ATTRIBUTIVE twin the adjacency guard also refuses, which is why
+    # `which archived report has the Q3 numbers` (already pinned above) can never
+    # come back through the window it was fixed for.
+    "which archived reports were retracted",
+    # …and the recall the adjacency guard gives up, stated rather than discovered:
+    # a MODIFIED head noun sits in the same slot as the subordinate clause's verb,
+    # so it keeps the relevance read. See the shape's docstring.
+    "which customer claims were archived",
     # …and the recall the start anchor gives up, stated rather than discovered:
     # an IMPERATIVE set request keeps the relevance read, because the measured
     # hijack `show me the retired onboarding flow` is the same imperative frame
@@ -357,6 +388,56 @@ def test_none_is_a_full_scan_not_a_question():
     from tortoise.state_intent import detect_state_question
 
     assert detect_state_question(None).population is None
+
+
+def test_the_partitive_is_not_the_discriminator():
+    """The `which` guard is HEAD-NOUN ADJACENCY, not the partitive marker.
+
+    The round-5 review left `which of our endpoints is deprecated` as an open
+    judgement call: keep it a SELECTED row (as the previous round pinned it, on
+    the reading that the wh-noun is the thing the question asks about) or move it
+    to NOT_SELECTED (the review's reading, that `of our endpoints` is a narrowing
+    the population read cannot apply).
+
+    ⛔ IT STAYS SELECTED, and the two rows below are why: the objection that the
+    wh-noun is unapplied is equally true of `which claims were archived` — the
+    capability's canonical Q6 spelling — so refusing the partitive would refuse
+    both, and the shape would stop answering the question it exists for. What was
+    actually wrong with this shape was its FREE WINDOW: the same 30 characters
+    that admit `of our endpoints` admitted a whole subordinate clause. Bounding
+    the window to the head noun fixes the hijack and leaves every genuine set
+    question working — the narrower change, and the one the module's precision
+    contract asks for.
+
+    This test is the falsifier for that reasoning: the three rows differ only in
+    where the wh-phrase ends and the auxiliary begins, so a guard that keyed on
+    the partitive, or that let the window come back, reds here.
+    """
+    from tortoise.state_intent import ENDED, detect_state_question
+
+    # A partitive wh-phrase whose predicate IS the ending — a real set question.
+    partitive = detect_state_question("which of our endpoints is deprecated")
+    assert partitive.population == ENDED, (
+        "`which of our endpoints is deprecated` asks for the ended set of a "
+        "named family; refusing it would cost the same recall as refusing "
+        "`which claims were archived`")
+
+    # …and its bare twin, which carries the same unapplied wh-noun. If the
+    # partitive is refused, this must be refused too, or the ruling is arbitrary.
+    assert detect_state_question("which claims were archived").population == ENDED
+
+    # The clause twin: the ending participle belongs to a SUBORDINATE clause, so
+    # the question is about the vendor, not about what ended.
+    for clause in (
+        "which vendor said our commitments were archived",
+        "which report says the product was deprecated",
+        "which notice confirmed the account was cancelled",
+    ):
+        got = detect_state_question(clause)
+        assert got.population is None, (
+            f"{clause!r} was answered with the {got.population!r} population "
+            f"(shape {got.shape!r}) — the ending belongs to somebody else's "
+            f"clause, and the caller's head noun was dropped")
 
 
 def test_an_ending_question_outranks_a_commitment_noun():

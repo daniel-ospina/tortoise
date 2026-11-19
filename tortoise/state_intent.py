@@ -186,14 +186,30 @@ _ENDING_BASE = (
 #:   "what ended", "what has been withdrawn". Anchored at both ends, so a trailing
 #:   constraint (`what is the archived pricing document`) cannot reach it.
 #: * ``which_predicate`` — the wh-word's OWN predicate: "which claims were
-#:   archived". Anchored at the start and requiring the auxiliary immediately, so
-#:   `which archived report has the Q3 numbers` (an attributive use) cannot.
+#:   archived". Anchored at the start and requiring the auxiliary IMMEDIATELY
+#:   after the wh-phrase's HEAD NOUN, so `which archived report has the Q3
+#:   numbers` (an attributive use) cannot.
 #:   ⛔ AND ANCHORED AT THE END (round-4 review, P1), for the same reason: with
 #:   nothing required after the participle, `which products have archived
 #:   documentation` and `which units are cancelled in the export` fired, and in
 #:   both the participle modifies the noun that follows it. Requiring the
 #:   participle to END the question admits the wh-word's own predicate ("which
 #:   claims were archived") and refuses the attributive use.
+#:   ⛔ AND THE WINDOW IS NOT FREE — THE ADJACENCY IS THE GUARD (this lane, on
+#:   the round-5 review's open judgement call). Round 4 bounded the window to
+#:   30 characters while this paragraph already claimed the auxiliary followed
+#:   "immediately"; 30 characters is not "immediately", and a bounded-FREE
+#:   window admits a whole clause. Measured on the pre-fix module, all three
+#:   routed as ``which_predicate`` and were served the WHOLE ended population
+#:   of the family — the caller's head noun, and with it the question, dropped:
+#:   `which vendor said our commitments were archived`, `which report says the
+#:   product was deprecated`, `which notice confirmed the account was
+#:   cancelled`. In each, the ending participle belongs to a SUBORDINATE clause
+#:   whose own finite verb (`said`, `says`, `confirmed`) sits where a head
+#:   noun's determiner must be — so the shape now requires the head noun to be
+#:   ADJACENT to the auxiliary, behind at most a partitive (`of`) and a
+#:   determiner, and every word the question turns on is the wh-word's own
+#:   subject again.
 #: * ``do_support`` — "what did WE <base verb>", "did we retire …". Anchored, and
 #:   the base verb must follow the pronoun IMMEDIATELY — a window let
 #:   `what do we do when we cancel a subscription` (a how-to question) through.
@@ -271,10 +287,26 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("wh_whole_question", re.compile(
         rf"^what\s+(?:(?:is|are|was|were|has|have|had)\s+)?(?:been\s+)?"
         rf"(?:{_ENDING_WORDS})\s*[?.!]*$")),
-    # "which claims were archived?" / "which commitments were withdrawn?" — the
-    # wh-word's own predicate, anchored at the start of the question.
+    # "which claims were archived?" / "which of our endpoints is deprecated?" /
+    # "which commitments were withdrawn?" — the wh-word's own predicate.
+    # ⛔ THE HEAD NOUN IS ADJACENT TO THE AUXILIARY. The window used to be a free
+    # 30 characters, which admits a subordinate clause: `which vendor said our
+    # commitments were archived`, `which report says the product was deprecated`
+    # and `which notice confirmed the account was cancelled` all routed and were
+    # answered with the whole ended population. A head noun cannot be followed
+    # by its own finite verb before the auxiliary, so the NP is bounded to an
+    # optional partitive + determiner + ONE head noun — the same grammatical-role
+    # anchor `do_support` and `committed_to` use, not a wider vocabulary.
+    # The recall this gives up is stated rather than discovered: a MODIFIED head
+    # noun (`which customer claims were archived`, `which older endpoints are
+    # deprecated`) keeps the relevance read, because a modifier is the same slot
+    # the subordinate clause occupies and the shape does not fire where it could
+    # go either way.
     ("which_predicate", re.compile(
-        rf"^which\b[^?]{{0,30}}?\b(?:is|are|was|were|has|have|had)\s+"
+        rf"^which\s+(?:of\s+)?"
+        rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
+        rf"[a-z]+\s+"                      # the wh-phrase's HEAD noun
+        rf"(?:is|are|was|were|has|have|had)\s+"
         rf"(?:been\s+)?(?:{_ENDING_WORDS})\s*[?.!]*$")),
     # "what did we archive last quarter" / "did we retire the onboarding flow".
     # ⛔ THE BASE VERB MUST FOLLOW THE PRONOUN IMMEDIATELY. A window let a
