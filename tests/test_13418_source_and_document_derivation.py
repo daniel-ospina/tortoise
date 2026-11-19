@@ -14,7 +14,7 @@ Two defects, one seam, one table (`record_writer._RECORD_EMBEDDING_TEXT`):
 2. **#13412 — a document's two stores encoded DIFFERENT text.** After #8419/PR
    #13290 the graph composes the document vector's input from
    `_build_search_text(title, summary, topics)` and writes it to `s._searchText`
-   (`projection/entities.py:5423`, `:5530`), while the record still folded
+   (`projection/entities.py:5488`, `:5606`), while the record still folded
    `title + content` — two different texts, two different vectors, for one row.
    `content` is not even a graph property post-D10 (`_DOC_RETIRED_KEYS`).
 
@@ -99,7 +99,7 @@ def test_a_document_derives_from_the_graphs_search_text(encoder):
 
     `_upsert_document` computes `st = _build_search_text(title, summary, topics)`
     on ONE line and reads it TWICE — for the vector and for `s._searchText`
-    (`projection/entities.py:5423`, `:5530`) — so the graph's dense and sparse
+    (`projection/entities.py:5488`, `:5606`) — so the graph's dense and sparse
     legs describe the same text by construction. The record must encode that
     text and no other, or one journal line yields two vectors (#13412).
     """
@@ -172,8 +172,8 @@ def test_the_document_rule_composes_from_the_graphs_fields_and_not_content():
 def test_a_plain_source_derives_from_the_text_the_RECORD_row_holds(encoder):
     """`_searchText` is the one text the row is known to hold — and it is enough.
 
-    `projection/entities.py:7106` composes `ev.get("_searchText") or ev.get("title")`
-    and writes it to the node at `:7194`; the record binds its own `_search_text`
+    `projection/entities.py:7198` composes `ev.get("_searchText") or ev.get("title")`
+    and writes it to the node at `:7286`; the record binds its own `_search_text`
     column from the payload's `_searchText` key (the split), so this is the one
     arm where the vector and the column are provably one datum. `#13418`.
     """
