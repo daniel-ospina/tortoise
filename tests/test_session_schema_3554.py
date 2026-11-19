@@ -3964,8 +3964,10 @@ _OPENING_EMPHASIS_RE = re.compile(r"^(\*\*\*|\*\*|__|\*|_)(.+?)\1", re.S)
 # measured, `The change landed. **Owner approval …**` → None under both the bounded and a
 # `.*`-prefixed pattern). What an unbounded prefix actually does is read a PORTRAIT-
 # OPENING mention that records nothing: measured, a `.*` lead-in with no separator
-# requirement changes the landed refusal set from ['3.35','3.33'] to ['3.35','3.32'],
-# turning v3.32's `Build record for v3.31 …` into a refused approval record. So the bound
+# requirement ADDS v3.32 to the landed refusal set — ['3.35','3.33'] becomes
+# ['3.35','3.33','3.32'], and v3.33 never leaves (the anchor is unchanged, so widening can
+# only turn its `None` into a match and the set is monotone non-decreasing) — turning
+# v3.32's `Build record for v3.31 …` into a refused approval record as well. So the bound
 # is a short alphanumeric release id (`R1`, `D2`, `ID12` — `[A-Za-z]` under IGNORECASE) or a bare
 # dash, each followed by one separator. A lead-in outside that class (`v3.41 — `, `1. `)
 # stays fail-OPEN and is named in the residual list above, rather than widening this until
