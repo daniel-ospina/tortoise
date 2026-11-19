@@ -530,11 +530,22 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     `claims_empty` says which DIRECTION the answer asserts, read from the ANSWER's own
     content rather than from the verb: an emptiness word (`nothing`, `empty`, `no path`,
     `no `tortoise/``, `none`, `zero`, `blank`) makes it an EMPTINESS claim; a member
-    (`tortoise/…`, `comment-only`, `exactly`, `two`/`three`/`four`/`seven`, `both`) makes it
-    a MEMBERSHIP claim. A negation (`is NOT empty`) is a MEMBERSHIP claim even though it
-    contains the word `empty`, and a window that carries no answer token at all (`is the
-    command that answers it`) is not an answer and is skipped — refusing the document's own
-    pointer to the command would be the same class of defect in the other direction.
+    (`tortoise/…`, `comment-only`, `exactly`, a `path`/`paths` or `module`/`modules` noun,
+    or a numeral `one`…`ten`/`both`/`single`) makes it a MEMBERSHIP claim. A negation or
+    qualifier (`is NOT empty`, `never empty`, `a non-empty set`) is a MEMBERSHIP claim even
+    though it contains the word `empty` — that test runs FIRST, because an unanchored
+    `empty` would otherwise read `non-empty` as an emptiness claim and invert the
+    direction (#13795 review, finding 3) — and a window that carries no answer token at all
+    (`is the command that answers it`) is not an answer and is skipped: refusing the
+    document's own pointer to the command would be the same class of defect in the other
+    direction.
+
+    ⛔ THE MEMBERSHIP WORD LIST IS THE PART THAT WENT STALE (#13795 review, finding 3). It
+    read `two`/`three`/`four`/`seven`/`both` — no `one` — so changing this document's own
+    `prints NO path at all` to `prints one path at all`, a ONE-WORD edit onto a verb already
+    in the list, restored the refuted membership claim and the guard stayed GREEN. The
+    numerals `one`…`ten` and the `path`/`module` nouns are therefore IN the class, and the
+    `one`-word mutation is pinned as a witness below.
     """
     answers: list[tuple[str, bool]] = []
     for match in re.finditer(
@@ -547,13 +558,20 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         low = window.lower()
         if not rest:
             continue
-        if re.search(r"\b(?:not|never)\b", low):
+        # ⛔ NEGATED / QUALIFIED EMPTINESS FIRST (#13795 review, finding 3): `non-empty`
+        # carries `empty`, so an unanchored match on the bare word would classify it as an
+        # EMPTINESS claim — inverting the direction, which passes a false membership claim
+        # at an empty head and would REFUSE the true sentence at a non-empty one.
+        if re.search(r"\b(?:not|never)\b|\bnon[- ]empty\b", low):
             claims_empty = False
         elif re.search(
-                r"empty|nothing|no path|no `tortoise/`|\bnone\b|\bzero\b|\bblank\b", low):
+                r"\b(?:empty|nothing|none|zero|blank)\b"
+                r"|\bno\b\s+`?(?:path|paths|tortoise/)", low):
             claims_empty = True
         elif re.search(
-                r"tortoise/|comment-only|exactly|\b(?:two|three|four|seven|both)\b", low):
+                r"tortoise/|comment-only|exactly|\ba path\b|\bpaths?\b|\bmodules?\b"
+                r"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|both|single)\b",
+                low):
             claims_empty = False
         else:
             continue
@@ -595,9 +613,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           direction the MEASUREMENT refutes at this head: membership phrasings are refused
           when the command prints nothing, emptiness phrasings when it prints a path.
           The spellings measured FALSE are refused by name AND by SHAPE (the command
-          followed by one of the LISTED answer forms, then an answer), so a frozen sign or
-          a one-word re-wording onto another listed form cannot quietly restore a claim the
-          tree refutes (#13728 review, findings 1 and 4). ⛔ It lives in its OWN test —
+          followed by one of the LISTED answer forms, then an answer), so neither a frozen
+          sign nor a re-wording of the ANSWER — a different listed verb, or a different
+          membership word (`one` as readily as `two`) — can quietly restore a claim the
+          tree refutes (#13728 review, findings 1 and 4; #13795 review, finding 3). The
+          class stays FINITE and the docstring above says so: a verb outside the list, or
+          an answer carrying none of the listed words, is not detected. ⛔ It lives in its
+          OWN test —
           `test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree` — because
           its direction comes from a subprocess this file cannot run in every checkout, and
           an UNMEASURABLE set now SKIPS that test instead of being read as "empty"
@@ -796,6 +818,26 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     ) == [("names two `tortoise/` paths", False)], (
         "the shape detector does not read `names two `tortoise/` paths` — a synonym for "
         "`prints` that the closed 8-token list missed (#13795 review, finding 2)")
+    # ⛔ THE ONE-WORD ANSWER MUTATION (#13795 review, finding 3). The membership word list
+    # stopped at `two`, so this document's own `prints NO path at all` could be edited to
+    # `prints one path at all` — ONE word, a verb already in the list — and the guard stayed
+    # GREEN over a membership claim the empty set refutes. The witness is that mutation.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints one path at all", _tortoise_cmd
+    ) == [("prints one path at all", False)], (
+        "the shape detector does not read `prints one path at all` as a MEMBERSHIP answer, "
+        "so the `NO` -> `one` one-word edit reinstates the refuted claim green "
+        "(#13795 review, finding 3)")
+    # ⛔ AND THE QUALIFIED NEGATION (#13795 review, finding 3): `non-empty` CONTAINS the
+    # word `empty`, and reading it as an emptiness claim inverts the direction — it passes
+    # a false membership claim at THIS (empty) head and would refuse the true sentence at a
+    # non-empty one. The negation test has to see the qualifier, not just a bare `not`.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` returns a non-empty set", _tortoise_cmd
+    ) == [("returns a non-empty set", False)], (
+        "the shape detector reads `returns a non-empty set` as an EMPTINESS claim because "
+        "the word `empty` sits inside `non-empty`; it is a MEMBERSHIP claim, so the "
+        "direction is inverted (#13795 review, finding 3)")
 
     # (c) THE MEASUREMENT — taken, or UNKNOWN. Never a silent "empty".
     try:
