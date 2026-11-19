@@ -270,15 +270,27 @@ class LabelCensus:
     def at_parity(self) -> bool:
         """Graph ⊆ record: every vector the graph holds is readable in the record.
 
-        ⛔ THREE CLAUSES, and the third is the one a set-difference cannot give you.
-        `graph_only` is computed as `set(graph_text) - set(record_readable)`, so it
-        answers *"is every DISTINCT rendering answered"* — not *"is every NODE
+        ⛔ FOUR CLAUSES, and the ones a set-difference cannot give you are the last
+        three. `graph_only` is computed as `set(graph_text) - set(record_readable)`, so
+        it answers *"is every DISTINCT rendering answered"* — not *"is every NODE
         answered"*. With `:Object {id:123}` and `:Object {id:"123"}` the graph holds
         TWO vectors that render to one string, while the record's text-keyed column can
         hold ONE readable row for it; the set difference is empty and the population is
-        not covered. `graph_vectors <= record_vectors` is the count-based statement of
-        the same invariant, kept alongside the collision bucket so neither can be
-        deleted without the other one reddening a falsifier.
+        not covered.
+
+        ⛔ EACH CLAUSE CARRIES ITS OWN FALSIFIER, and that was MEASURED, not assumed:
+        deleting any ONE of them leaves the others intact, so a test that reddens only
+        on the bare verdict would let a silent deletion through. `census()` already adds
+        the collision excess into `graph_only` (so the live-parity re-check in `execute`
+        refuses a collision population, not merely this property), which means the
+        `render_collision == 0` clause is REDUNDANT for every producer in this module —
+        it is kept because a false PASS is the failure mode, and a redundant clause is
+        cheap while a reconstructed/replayed census row is not guaranteed to have been
+        through `census()`. Its own falsifier is
+        `test_the_collision_clause_of_at_parity_stands_alone`; the count clause's is
+        `test_parity_requires_a_READABLE_ROW_PER_GRAPH_VECTOR`; the bucket in
+        `graph_only` is falsified by `test_a_render_collision_is_not_parity`'s
+        `graph_only == 1` assertion.
         """
         return (self.graph_only == 0 and self.unkeyed_graph_nodes == 0
                 and self.render_collision == 0
