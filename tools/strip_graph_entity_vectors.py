@@ -52,9 +52,22 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     NOT ceremony: `_upsert_object`/`_upsert_subject` write `embedding` on `ON MATCH`
     too, so stripping a node before the write half stops means the next mention of that
     node RE-ADDS the vector — the strip would be undone, and the operator would have no
-    way to tell a completed retirement from a racing writer. The write half is `#13610`
-    option 2 (PR #13617) for `object`/`subject`; for `event`/`source` it is unimplemented,
-    and this tool says so rather than stripping into a race.
+    way to tell a completed retirement from a racing writer.
+
+    ⛔ AND ONE PR IS NOT ENOUGH TO SATISFY IT, which this file previously got wrong. `#13610`
+    option 2 (PR #13617) gates the `object`/`subject` FOLDS; the same properties are also
+    stored by `tortoise.sdk::_update_entity` (a caller-supplied `embedding` rides
+    `SET n += $props` on Subject/Object/Source/Event), by
+    `tortoise.hosted_backup::restore_graph` (all five labels) and, for `:Event`, by five
+    more `sdk`/`session_indexer` writers. Every one of those re-adds the vector on the next
+    call, so the requirement this gate enforces is **every declared writer of the label
+    asks the gate** — not "the fold does". The gate therefore refuses all four labels
+    today, INCLUDING after #13617 lands, and it names each un-cleared writer. That is the
+    true state of a two-pronged retirement, and it is a satisfiable one: as each
+    writer's `stores` entry loses the label, the gate opens for it. Testing that the gate
+    CAN open (rather than only that it refuses) is
+    `test_the_gate_OPENS_when_every_declared_writer_asks` — an enforcer whose firing
+    condition can never hold would be the defect, not the refusal.
 ``REFUSE_TARGET_DRIFT``
     The target this run resolved is not the one the plan was built against — compared on
     all four axes that name a store: the graph NAME, `org_id`, `graph_id` and the graph
@@ -330,11 +343,19 @@ def _asks_the_gate(node) -> bool:
 
     So a mention is not evidence and a call is not sufficient: the call must sit in a
     position whose value DECIDES something: an ``if``/``while``/conditional-expression
-    test that is not a constant, or a returned value. Reachability of a NON-constant branch
-    is not decidable here and is not claimed: this answers *"does the code ask"*, never
-    *"does the answer hold"*.
+    TEST that is not a constant. That is the shape the real write-stop uses (`if
+    _derived_mirror_required("object"):` around the encode in `_upsert_object`), and it is
+    the ONLY position where the gate demonstrably prevents a write *inside the function*.
 
-    ⛔ AN ASSIGNMENT DOES **NOT** COUNT, and the earlier version of this function accepted
+    ⛔ A RETURNED VALUE IS NOT ACCEPTED, even when it is the gate's own answer.
+    ``self._write(ev); return mirror_required("object")``, ``return (self._write(ev),
+    mirror_required(…))`` and ``return self._write(ev) or mirror_required(…)`` all call the
+    gate and all write unconditionally first — the gate's answer is merely handed to a
+    caller who may ignore it. Reachability of a NON-constant branch is not decidable here
+    and is not claimed: this answers *"does the code ask before writing"*, never *"does the
+    answer hold"*.
+
+    ⛔ AN ASSIGNMENT DOES **NOT** COUNT, and the earlier versions of this function accepted
     ``x = mirror_required(...)`` — a call whose answer is then discarded while the write
     runs unconditionally. That is the same "dying declaration" the paragraph above refuses,
     one line longer. A value that reaches an ``if`` through a local name is therefore not
@@ -356,9 +377,6 @@ def _asks_the_gate(node) -> bool:
             # `BoolOp.value`/`UnaryOp.value` — as an earlier version did — read a field
             # those nodes do not have, so both promised arms were dead code.
             if _gate_call(sub.test):
-                return True
-        elif isinstance(sub, ast.Return):
-            if sub.value is not None and _gate_call(sub.value):
                 return True
     return False
 
@@ -718,6 +736,18 @@ def _load_plan(path: str, confirmed: str) -> dict:
             REFUSE_PLAN_UNREADABLE,
             f"the plan's per-label key lists could not be read as an entry set "
             f"({type(exc).__name__}: {exc}). Nothing was removed.") from exc
+    # ⛔ A DUPLICATE LABEL ROW is invisible to the digest (`sorted(set(entries))`) and makes
+    # the removal strip the same label twice with a reset counter. Refused here because a
+    # plan this tool did not print is not the approved artefact.
+    rows = plan.get("labels") or []
+    labels = [row.get("label") for row in rows if isinstance(row, dict)]
+    duplicated = sorted({label for label in labels if labels.count(label) > 1})
+    if duplicated:
+        raise Refusal(
+            REFUSE_PLAN_UNREADABLE,
+            f"the plan lists {', '.join(duplicated)} more than once. A digest is a set, so "
+            "duplication cannot be seen in it — and executing it would strip the same "
+            f"label twice. Re-plan. Nothing was removed.")
     if recomputed != confirmed:
         raise Refusal(
             REFUSE_DIGEST_MISMATCH,
@@ -855,8 +885,12 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
         keys = sorted(row.get("keys") or ())
         quoted_label = parity._quote_identifier(label)
         quoted_key = parity._quote_identifier(_key_prop(label))
-        removed[label] = 0
-        shortfalls[label] = 0
+        # ⛔ `setdefault`, NOT assignment. A plan whose `labels` list repeats a label would
+        # otherwise RESET that label's running count on the second row, so a later failure
+        # would report "nothing was stripped" (exit 2) over a half-stripped table — the
+        # exact lie this split exists to remove.
+        removed.setdefault(label, 0)
+        shortfalls.setdefault(label, 0)
         for start in range(0, len(keys), batch):
             chunk = keys[start:start + batch]
             if not chunk:
@@ -881,9 +915,10 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
                     raise Refusal(
                         REFUSE_WRITE_ERROR,
                         f"the removal statement FAILED on {label} at offset {start} "
-                        f"({type(exc).__name__}: {exc}) and NO node was stripped — the "
-                        "failure was on the first batch, so nothing was removed and "
-                        "re-running once the store error is understood is safe.") from exc
+                        f"({type(exc).__name__}: {exc}) and NO node was stripped — no "
+                        "batch had stripped anything before this failure, so nothing was "
+                        "removed and re-running once the store error is understood is "
+                        "safe.") from exc
                 raise Refusal(
                     REFUSE_WRITE_FAILED,
                     f"the removal statement FAILED on {label} at offset {start} "
@@ -1005,8 +1040,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label", action="append", default=None,
                         choices=[label for _, label, _ in parity.RETIRED],
                         help="plan only this label (repeatable); default: all four")
-    parser.add_argument("--batch", type=int, default=DEFAULT_BATCH,
-                        help=f"nodes per removal statement (default {DEFAULT_BATCH})")
+    parser.add_argument("--batch", type=int, default=None,
+                        help="nodes per removal statement (default: the plan's recorded "
+                             f"batch on --execute, else {DEFAULT_BATCH})")
     parser.add_argument("--plan-out", default=None,
                         help="write the preview plan to this path "
                              "(required to execute it later)")
@@ -1027,7 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
     if empty_flag:
         sys.stderr.write(f"strip_graph_entity_vectors: {empty_flag}\n")
         return 1
-    if args.batch <= 0:
+    if args.batch is not None and args.batch <= 0:
         parser.error("--batch must be > 0")
     if args.execute and args.label:
         # ⛔ THE PLAN'S DIGEST IS THE AUTHORITY AT EXECUTE TIME, so a narrowing flag here is
@@ -1096,7 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
                 g=proj.g, record_dsn=record_dsn, org_id=args.org_id,
                 graph_id=args.graph_id, graph_name=graph_name,
                 graph_uri=args.uri or args.db_path or "", labels=args.label,
-                batch=args.batch)
+                batch=args.batch or DEFAULT_BATCH)
         except CensusError as exc:
             sys.stderr.write(
                 f"strip_graph_entity_vectors: REFUSED — {exc}. A census that cannot be "
@@ -1112,6 +1148,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         plan = _load_plan(args.plan, args.confirm_plan_digest)
+        # ⛔ THE PLAN'S BATCH IS HONOURED when the operator did not restate it: the plan is
+        # the approved artefact, and a value it records must not be silently ignored at the
+        # moment it is used (the same defect class as `--label` on `--execute`).
+        try:
+            plan_batch = int(plan.get("batch") or DEFAULT_BATCH)
+        except (TypeError, ValueError):
+            plan_batch = DEFAULT_BATCH
+        if plan_batch <= 0:
+            plan_batch = DEFAULT_BATCH
         result = execute(
             g=proj.g, plan=plan, record_dsn=record_dsn, org_id=args.org_id,
             graph_id=args.graph_id, graph_name=graph_name,
@@ -1121,7 +1166,7 @@ def main(argv: list[str] | None = None) -> int:
             # the argument would raise `TypeError` out of the destructive path instead
             # of refusing it. Both are the same bug seen from two sides.
             graph_uri=uri_fingerprint(args.uri or args.db_path or ""),
-            confirmed=args.confirm_plan_digest, batch=args.batch,
+            confirmed=args.confirm_plan_digest, batch=args.batch or plan_batch,
             expect_empty=args.expect_empty)
     except Refusal as exc:
         sys.stderr.write(
