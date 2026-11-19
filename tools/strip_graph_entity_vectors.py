@@ -1107,6 +1107,7 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
     import ast
 
     clause_names, run_names = _clause_flow(scope)
+    alias_keys = _property_alias_names(scope) if anywhere else frozenset()
     for sub in (_own_walk(node) if anywhere else _unconditional_walk(node)):
         if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign):
             value = sub.value
@@ -1127,7 +1128,18 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                 # CONSTRUCTOR SPELLING IS THE SAME MERGE (`props |= dict(embedding=vec)`),
                 # recognised STOP-ARM ONLY: on the mirror arm it would WIDEN acceptance.
                 return True
-            if not all(_names_embedding(target) for target in targets):
+            # ⛔ AND A REBUILT MAPPING IS THE SAME STORE, one expression form over: the
+            # operator and method forms above are recognised only in the spellings that
+            # happened to have been written down, so `props = {**props, "embedding": …}`,
+            # `props = props | {"embedding": …}` and `props |= dict(embedding=…)` each
+            # certified a stop arm that placed the vector (measured fail-OPEN at
+            # `98eec2ca`). STOP ARM ONLY, like every other widening here: on the mirror
+            # arm the same recognition would make the destructive gate ACCEPT a writer it
+            # refuses today, and a fix may add refusals, never acceptances.
+            if anywhere and _rebuild_stores_the_vector(value):
+                return True
+            if not all(_names_embedding(target) or (anywhere and _keyed_by_alias(target, alias_keys))
+                       for target in targets):
                 continue
             if value is None or isinstance(value, ast.Constant):
                 continue                  # `embedding = None` places nothing
@@ -1160,6 +1172,14 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                 for argument in sub.args:
                     if isinstance(argument, ast.Dict) and _dict_stores_the_vector(argument):
                         return True
+            # ⛔ AND A WRITER HANDED THE REBUILT MAPPING IS THE SAME STORE: `_write({**props,
+            # "embedding": vec})`. Narrow by construction — `_rebuild_stores_the_vector`
+            # asks for a merge (`**`/`|`) or a `dict(embedding=…)`, so a plain literal
+            # handed to a logger (`_audit({"embedding": props.get(…)})`) is a mention and
+            # stays a mention.
+            if anywhere and any(_rebuild_stores_the_vector(operand)
+                                for operand in _call_operands(sub)):
+                return True
             # ⛔ AND THE MUTATOR'S METHOD SPELLING IS THE SAME STORE, which the vocabulary
             # above missed: it recognises the OPERATOR form `props |= {"embedding": vec}`
             # and `update(…)` but not the methods those survive as
@@ -1235,10 +1255,113 @@ def _mutator_stores_the_vector(call) -> bool:
         return any(_mapping_argument_stores_the_vector(argument)
                    for argument in arguments)
     # `props.__setitem__("embedding", vec)` / `props.setdefault("embedding", vec)`
-    return (len(arguments) >= 2
+    if (len(arguments) >= 2
             and isinstance(arguments[0], ast.Constant)
             and arguments[0].value == EMBEDDING_PROPERTY
-            and not isinstance(arguments[1], ast.Constant))
+            and not isinstance(arguments[1], ast.Constant)):
+        return True
+    # ⛔ AND THE KEYWORD SPELLING IS THE SAME STORE: `props.__setitem__("embedding",
+    # value=vec)` certified a stop arm that placed the vector (measured fail-OPEN at
+    # `98eec2ca`) because only positional arguments were read. Both halves are required —
+    # a `key=` naming the property AND a non-constant `value=` — so `setdefault(
+    # key="embedding", default=None)` (a placeholder) is still not a store.
+    by_name = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
+    key = by_name.get("key")
+    stored = by_name.get("value") or by_name.get("default")
+    return (isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
+            and isinstance(stored, ast.AST)
+            and not isinstance(stored, ast.Constant))
+
+
+def _rebuild_stores_the_vector(node) -> bool:
+    """Does this expression REBUILD a mapping WITH the vector, rather than mention it?
+
+    ⛔ ONE EXPRESSION FORM OVER (#13647, measured fail-OPEN at `98eec2ca`). The dict
+    vocabulary recognised the operator form `props |= {"embedding": vec}` and the method
+    forms `update(…)` / `__setitem__(…)` / `setdefault(…)` / `__ior__(…)` / `setattr(…)`,
+    but not the three ways those same stores are actually spelled when a mapping is
+    REBUILT instead of mutated:
+
+        props = {**props, "embedding": _encode(ev)}     # unpacked merge
+        props = props | {"embedding": _encode(ev)}      # dict union
+        props |= dict(embedding=_encode(ev))            # mapping CONSTRUCTOR
+
+    The constructor spelling is answered by `_mapping_argument_stores_the_vector`; what is
+    NOT is the REBUILD — an unpacked literal (`{**props, …}`), a `|` union, and the writer
+    being handed either — because those place the property through no mutator and no
+    embedding-named target at all.
+
+    Each certified a writer that placed the vector exactly when the gate said stop, which
+    lifts `REFUSE_WRITE_STILL_EMITS` — the boolean that authorises deleting the only
+    readable copy of a fingerprint.
+
+    ⛔ DELIBERATELY NARROW, so this is not "any dict mentioning the property": a plain
+    literal that does not merge with an existing mapping (`_audit({"embedding":
+    props.get(…)})`) is a MENTION and must stay one, and the value must be non-constant
+    (`{**props, "embedding": None}` is the pre-guard reset, which places nothing).
+
+    ⛔ CALLED FROM THE STOP ARM ONLY — see the call site. On the mirror arm the identical
+    recognition would WIDEN the destructive gate's acceptances, and a fix may add
+    refusals, never acceptances.
+    """
+    import ast
+
+    for leaf in _own_walk(node):
+        if isinstance(leaf, ast.Dict):
+            merges = any(key is None for key in leaf.keys)
+            if merges and _dict_stores_the_vector(leaf):
+                return True       # `{**props, "embedding": vec}`
+        elif isinstance(leaf, ast.BinOp) and isinstance(leaf.op, ast.BitOr):
+            # `props | {"embedding": vec}` — the union's literal operand merges by
+            # construction, so the `merges` requirement above is met by the operator.
+            if any(isinstance(side, ast.Dict) and _dict_stores_the_vector(side)
+                   for side in (leaf.left, leaf.right)):
+                return True
+        elif isinstance(leaf, ast.Call) and _callee_name(leaf) == "dict":
+            # ONE recognition, not two: the CONSTRUCTOR spelling is answered by
+            # `_mapping_argument_stores_the_vector` (the neighbouring fix at `fbc8c04ac0`),
+            # and a second implementation of the same rule is how two answers to one
+            # question drift apart.
+            if _mapping_argument_stores_the_vector(leaf):
+                return True
+    return False
+
+
+def _property_alias_names(scope) -> frozenset[str]:
+    """Names a scope binds to the CONSTANT property string — `key = "embedding"`.
+
+    ⛔ THE KEY NEED NOT BE SPELLED AT THE SUBSCRIPT (#13647, measured fail-OPEN at
+    `98eec2ca`): `key = "embedding"; props[key] = _encode(ev)` placed the vector on the
+    stop arm and certified the writer, because `_names_embedding` reads only a literal
+    subscript key. Resolving the name is still a static answer — it is a local bound to a
+    constant IN THIS SCOPE, not a computed key — so the precision the exact-property rule
+    exists for is preserved.
+
+    ⛔ STOP ARM ONLY, at the call site: on the mirror arm this would be a new ACCEPTANCE.
+    """
+    import ast
+
+    if scope is None:
+        return frozenset()
+    nodes = ([leaf for statement in getattr(scope, "body", ()) for leaf in _own_walk(statement)]
+             if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef) else list(_own_walk(scope)))
+    return frozenset(
+        target.id
+        for sub in nodes
+        if isinstance(sub, ast.Assign | ast.AnnAssign)
+        and isinstance(sub.value, ast.Constant) and sub.value.value == EMBEDDING_PROPERTY
+        for target in (sub.targets if isinstance(sub, ast.Assign) else [sub.target])
+        if isinstance(target, ast.Name)
+    )
+
+
+def _keyed_by_alias(target, alias_keys: frozenset[str]) -> bool:
+    """Is this assignment target a SUBSCRIPT keyed by a name bound to the property string?"""
+    import ast
+
+    return (isinstance(target, ast.Subscript)
+            and isinstance(target.slice, ast.Name)
+            and target.slice.id in alias_keys)
 
 
 def _mapping_argument_stores_the_vector(node) -> bool:

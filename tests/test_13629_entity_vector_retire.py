@@ -3091,6 +3091,15 @@ def test_the_stop_arm_must_not_store_the_vector(tmp_path, monkeypatch):
     `props.update(dict(embedding=vec))` / `props |= dict(embedding=vec)` / `update(**{…})`
     place exactly the mapping the literal forms already refuse. Measured fail-OPEN at
     `8637df0f`: all of them certified the writer. Same rule, one spelling over.
+
+    ⛔ AND ONE EXPRESSION FORM OVER (`98eec2ca`). Beyond those mutators, three ways a
+    mapping is REBUILT — `props = {**props, "embedding": …}`, `props = props |
+    {"embedding": …}`, and the writer being HANDED either — plus the keyword mutator
+    spelling (`setdefault(key="embedding", default=…)`) and a subscript keyed by a LOCAL
+    bound to the property string all certified the stop arm. Each is refused now, stop-arm
+    only (`_rebuild_stores_the_vector`, `_property_alias_names`), and the mention-shaped
+    controls at the end keep the rule from swallowing a read: a plain literal for reporting
+    is not a merge, and a constant value places nothing.
     """
     refused = (
         # the arm places the vector, THEN leaves
@@ -3187,11 +3196,27 @@ def _upsert_object(props, ev):
 """,
         # ⛔ the FUNCTIONAL `operator` spellings of the same stores, measured fail-OPEN at
         # `8637df0f`: `setitem` is what `props["embedding"] = vec` compiles to, `ior` what
-        # `props |= {…}` does.
+        # `props |= {…}` does. The bare `setitem` is the `from operator import setitem` form.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         operator.setitem(props, "embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        setitem(props, "embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        # ⛔ …and the three ways a mapping is REBUILT rather than mutated. Measured
+        # fail-OPEN at `98eec2ca`: each certified a stop arm that placed the vector.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**props, "embedding": _encode(ev)}
         return None
     _write(props)
 """,
@@ -3213,14 +3238,47 @@ def _upsert_object(props, ev):
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
-        props |= dict(embedding=_encode(ev))
+        props = props | {"embedding": _encode(ev)}
         return None
     _write(props)
 """,
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
+        props |= dict(embedding=_encode(ev))
+        return None
+    _write(props)
+""",
+        # ⛔ the SPLATTED constructor: the keyword mapping is not positionally visible.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
         props.update(**{"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        # …the writer is handed the rebuilt mapping instead of assigning it
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, "embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        # …the KEYWORD spelling of the same mutator
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.setdefault(key="embedding", default=_encode(ev))
+        return None
+    _write(props)
+""",
+        # …and a subscript keyed by a LOCAL bound to the property string
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        key = "embedding"
+        props[key] = _encode(ev)
         return None
     _write(props)
 """,
@@ -3268,6 +3326,23 @@ def _upsert_object(props):
     if not _derived_mirror_required("object"):
         _audit(props.get("embedding"), props.setdefault("embedding", None))
         props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE REBUILD VOCABULARY MUST NOT SWALLOW A MENTION EITHER: a plain literal
+        # carrying the property for REPORTING is not a merge, and a constant is not a store.
+        """
+def _upsert_object(props):
+    if not _derived_mirror_required("object"):
+        _audit({"embedding": props.get("embedding")})
+        props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props):
+    if not _derived_mirror_required("object"):
+        props.setdefault(key="embedding", default=None)
         return None
     _write(props)
 """,
