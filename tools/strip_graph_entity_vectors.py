@@ -1611,6 +1611,14 @@ def _fold_consults_gate(label: str) -> tuple[bool, str]:
     # stops document writes the moment source coverage verifies, leaving a vector in neither
     # store (#11395). So: every served type must be asked about by SOME writer that stores it
     # (below), and each writer must ask about at least one of the label's types.
+    #
+    # ⛔ AND `_upsert_source` STORES ITS VECTOR THROUGH THE **PASSTHROUGH**, NOT A CLAUSE — do
+    # not "correct" it out of the population on a `set_embedding_clause`/`clear_embedding`
+    # count (a concurrent review proposed exactly that at `96f36c3d`). Its own `SET` lists name
+    # no vector, but it ends by handing `_SOURCE_EXTRA_PROPS` — which DECLARES `embedding` — to
+    # `_persist_extra_props`, whose `SET n += $extra` persists a caller-supplied vector. The
+    # writer register records that correction at `#12182` cycle 9 and `#12180` owns the
+    # store; `test_upsert_source_IS_a_Source_writer_through_the_PASSTHROUGH` pins all of it.
     ungated: list[str] = []
     asked: set[str] = set()
     for key in writers:

@@ -33,6 +33,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_the_collision_clause_of_at_parity_stands_alone` | each `at_parity` clause has its OWN falsifier | the `render_collision == 0` clause is deleted and only `graph_only` refuses |
 | `test_the_stop_arm_must_not_store_the_vector` | the stop arm stops — it does not place the vector first | a stop arm that STORES (then exits, or pops-then-stores) certifies the writer as write-stopped |
 | `test_the_stop_arm_of_a_POSITIVE_ask_must_not_store_either` | the `else` of `if gate(l):` is the STOP arm, and it is read | a store on that arm (`orelse` never examined) certifies the writer as write-stopped |
+| `test_upsert_source_IS_a_Source_writer_through_the_PASSTHROUGH` | `_upsert_source` persists a caller `embedding` via `SET n += $extra` | the name is dropped from `:Source`'s population on a static-clause count, letting a strip run into a live writer |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -2785,6 +2786,61 @@ def _upsert_source(ev):
         (f"{split}::_upsert_document", f"{split}::_upsert_source"), None))
     gated, why = strip._fold_consults_gate("Source")
     assert gated is True, f"the natural split population was refused: {why}"
+
+
+def test_upsert_source_IS_a_Source_writer_through_the_PASSTHROUGH(tmp_path, monkeypatch):
+    """⛔ `_upsert_source` STORES A VECTOR — DROPPING IT FROM `FOLD_WRITERS` WOULD FAIL OPEN.
+
+    A concurrent review at `96f36c3d` proposed exactly that drop: it measured
+    `grep -cE 'set_embedding_clause|clear_embedding'` over
+    `tortoise/projection/entities.py:7117-7546` → **0** and concluded the fold "stores no
+    vector", so `:Source` could never open on it. The measurement is true and the
+    conclusion is not: it reads the STATIC clause text only, which is the measurement the
+    writer register itself already corrected at `#12182` cycle 9 (P1). `_upsert_source`
+    ends by funnelling extra props through
+    `_persist_extra_props(..., allow_keys=_allow)` with `_allow = self._SOURCE_EXTRA_PROPS`,
+    whose CLOSED surface declares `embedding`, and that helper emits `SET n += $extra`.
+    A caller-supplied `embedding` therefore lands on the node (measured live in `#12182`:
+    `create_source(..., props={'embedding': [...]})` then `RETURN s.embedding` answers),
+    which is `#12180`'s open subject — a writer that re-adds the vector on its next call.
+
+    Removing the name would let `_fold_consults_gate("Source")` clear a population that
+    still writes: the exact fail-open `FOLD_WRITERS` exists to prevent, and the reason it
+    is a REFUSAL rather than a design review. The three facts the refusal rests on are
+    pinned here so the drop cannot be re-derived from the grep.
+
+    Mutation: delete `"embedding"` from `_SOURCE_EXTRA_PROPS`, or route the allowlist past
+    `_persist_extra_props`, or drop the name from `FOLD_WRITERS["Source"]` — each reds
+    this test.
+    """
+    import inspect
+
+    from tortoise.projection import entities as entities_module
+
+    assert "embedding" in entities_module._EntityHandlers._SOURCE_EXTRA_PROPS, (
+        "the :Source caller allowlist stopped declaring `embedding` — re-measure "
+        "whether `_upsert_source` can still persist a caller vector before trusting "
+        "the static-clause count")
+
+    body = inspect.getsource(entities_module._EntityHandlers._upsert_source)
+    assert "_allow = self._SOURCE_EXTRA_PROPS" in body, (
+        "the fold no longer hands the caller allowlist to the passthrough")
+    assert "_persist_extra_props" in body and "allow_keys=_allow" in body, (
+        "the fold no longer persists caller props through the closed passthrough")
+
+    passthrough = inspect.getsource(entities_module._EntityHandlers._persist_extra_props)
+    assert "SET n += $extra" in passthrough, (
+        "the passthrough stopped emitting the map SET — re-measure the store")
+
+    assert "_upsert_source" in strip.FOLD_WRITERS["Source"], (
+        "`_upsert_source` was dropped from :Source's declared writers, so a strip would "
+        "be undone by the next caller-supplied embedding")
+
+    # …and the operator-facing refusal reason says so, because it is the sentence an
+    # operator reads when the gate shuts: an inaccurate writer list is a diagnosis bug.
+    gated, why = strip._fold_consults_gate("Source")
+    assert gated is False
+    assert "tortoise.projection.entities::_upsert_source" in why
 
 
 def test_a_census_over_no_label_refuses_instead_of_certifying_nothing(stores):
