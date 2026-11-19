@@ -3868,6 +3868,126 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …and `operator.or_`, the NON-IN-PLACE functional `|`: the same store as
+        # `props = props | {"embedding": vec}`, through the one synonym the include list did
+        # not name — measured CERTIFIED GATED by the first review of this commit. This row is
+        # the DISCRIMINATING one (delete `"or_"` and it alone reddens); the `dict(…)` operand
+        # beside it is refused by the constructor arm either way, so it is a spelling control,
+        # not a second pin — stated because the earlier comment claimed two pins and only one
+        # was, measured by the review of this branch.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = operator.or_(props, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = operator.or_(props, dict(embedding=_encode(ev)))
+        return None
+    _write(props)
+""",
+        # ⛔ …and the ITERABLE-OF-PAIRS spelling of the `|=` merge, which `dict.__ior__`
+        # accepts exactly as it accepts the literal: `props |= [("embedding", vec)]`. The
+        # AugAssign arm narrowed to `ast.Dict` and walked past it — measured CERTIFIED by the
+        # review of this branch while the CALL form `props.update([("embedding", vec)])` was
+        # already refused. Both narrowings of the pairs rule still hold, which is what the two
+        # `accepted` controls below assert.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (("embedding", _encode(ev)),)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding_model", _m()), ("embedding", _encode(ev))]
+        return None
+    _write(props)
+""",
+        # ⛔ …and one TRANSPARENT WRAPPER in, which is where the pairs rule was leaking:
+        # `.copy()`, `list(…)`, `tuple(…)`, a whole-list slice and an `if`-expression around
+        # the same literal all place the vector and all were CERTIFIED (measured by the review
+        # of this branch) — one `.copy()` re-opened the hole the plain spelling had closed.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))].copy()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= list([("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= tuple([("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))][:]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))] if _flag(ev) else []
+        return None
+    _write(props)
+""",
+        # ⛔ …and the DUNDER ALIAS of the same function (`operator.__or__ is operator.or_`),
+        # in all three spellings the review of this branch measured CERTIFIED: the functional,
+        # the METHOD form on the mapping, and the unbound `dict.__or__(props, …)`. A tuple that
+        # names `__ior__` beside `ior` and only `or_` for the non-in-place operator is half a
+        # vocabulary, and half a vocabulary is a false PASS.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = operator.__or__(props, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = props.__or__({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = dict.__or__(props, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = operator.__or__(props, {**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4464,6 +4584,25 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND A REMOVAL WITH A SENTINEL DEFAULT IS STILL THE WRITE-STOP, not a store: the
+        # third-argument rule (written for `_set(props, "embedding", vec)`) reads
+        # `pop("embedding", _MISSING)` as `(receiver, PROPERTY, non-constant)` and refused it —
+        # measured by the first review of this commit, which found the parent CERTIFIED it.
+        # `pop` is separated in `_mutator_stores_the_vector` for exactly this shape.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.pop("embedding", _MISSING)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        dict.pop(props, "embedding", _MISSING)
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4505,6 +4644,32 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= dict([("embedding", None)])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", None)]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding_model", _m())]
+        return None
+    _write(props)
+""",
+        # ⛔ AND A CONTAINER OF MAPPINGS IS NOT AN ITERABLE OF PAIRS: `dict.__ior__` rejects
+        # `[{"embedding": vec}]` with a `ValueError` (element 0 has length 1, 2 required), so
+        # this is not a store — and the `update` arm's recursive container rule, borrowed here,
+        # refused it. That is a refusal the branch never had, on a statement Python rejects
+        # outright; it stays CERTIFIED so the vocabulary says what the language says.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [{"embedding": _encode(ev)}]
         return None
     _write(props)
 """,

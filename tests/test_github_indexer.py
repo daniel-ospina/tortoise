@@ -981,7 +981,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6348`, `excluded = _terminal_object_statuses()` at `:6014` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:55469-55478`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:55505-55514`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1100,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:55469-55478`) — so each poll minted another `-reopened`
+    `sdk.py:55505-55514`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6348`).
@@ -1451,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:55317-55319`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:55353-55355`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3261,7 +3261,6 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurs **once**.
     # A row recorded as "found by its pinned text" must name text that actually finds
     # it, or the record does not reproduce the address it explains.
-    #
     # ⛔ RE-DERIVED AGAIN (#13728) at `main` `a6fed32ab4` — the merge base this branch
     # is 0 behind — because every row above had gone stale there: the required `test
     # (d)` shard was RED on `main` itself, with all four inputs
@@ -3283,11 +3282,37 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # first assertion above), so one derivation keeps the two halves consistent.
     # `SET n += $props` is still the non-unique case and `55918` was again located by
     # its per-label write, which occurs once.
-    ("sdk.py", 55317, 55319): (
+    #
+    # ⛔ #13767's own review pass then narrowed the last two `sdk.py` rows, each of
+    # which carried a locator that could not FAIL on the defect it exists to catch:
+    # `55807`→`55918` stored the bare `SET n += $props` (occurs **40×** in `sdk.py`,
+    # 25 of them in comments), so a uniform drift landed it on a comment; the
+    # per-label write it was actually found by occurs **once** and is what it now
+    # stores. And `22593-22768` recorded `None` for its end — its START text
+    # `def update_knowledge(` is unique and did red, but an end that is never read
+    # let an insert INSIDE the function leave the cited end naming nothing while
+    # both guards stayed green.
+    # Both ADDRESSES were re-derived at `ef0abcb`; both LOCATORS were narrowed at
+    # `c50a03a` (the commit carrying this note), by the texts pinned below.
+    #
+    # ⛔ RE-DERIVED ONCE MORE at the merge of `origin/main` `e679d22286` (#13728's
+    # conflict resolution), because `#13724`'s `sdk.py` attachment-site COLLAPSE
+    # inserted **+36** lines above all four `sdk.py` rows: 55317→55353 (non-scalar
+    # refusal), 55469→55505 (un-supersede arm), 22593→22629 / 22768→22804
+    # (`update_knowledge`), 55918→55954 (the per-label write). Each was located by its
+    # own pinned text, never by the delta; `+36` is the consistency check on the four
+    # measurements, not their input. The thirteen `entities.py` rows and
+    # `cache_projection.py:811` are unchanged (`#13724` touches `sdk.py` alone).
+    # ⚠️ `if (_np_dead == [_SUPERSEDED_STATUS]` now occurs TWICE (55505, 55544): the
+    # pinned row is the FIRST — the admission arm — and its `continue` end line is what
+    # distinguishes it from the hint clause below it.
+    ("sdk.py", 55353, 55355): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 55469, 55478): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22593, 22768): ("def update_knowledge(", None),
-    ("sdk.py", 55918, 55918): ("MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
+    ("sdk.py", 55505, 55514): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 22629, 22804): (
+        "def update_knowledge(", "return self._update_entity_any(id, **props)"),
+    ("sdk.py", 55954, 55954): (
+        "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 
 

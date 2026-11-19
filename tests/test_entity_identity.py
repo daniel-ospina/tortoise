@@ -736,6 +736,73 @@ class TestThe12120NameKeySpaceHelper:
             sdk.close()
 
 
+class TestThe12244ANonStringHolderIsNotAnswered:
+    """A NON-STRING holder id is not answered, so it cannot name a STRING TWIN.
+
+    ``_collapse_resolved_holders`` follows the merge pointer through
+    ``entity_resolver.follow_resolved_from``, which does ``str(node_id)`` at its
+    own entry — so a non-string ``id`` can never be followed (the string form
+    matches no row carrying the int) and the collapse answered it with
+    ``str(holder)`` anyway. That string is a *different* spelling: the writers
+    match on ``id``, so ``"4242"`` addresses any node whose id is literally the
+    string ``"4242"`` — a twin the writer's name space never matched. It took
+    the edge, which is the over-attachment class #12244 removes.
+
+    Pre-fix measurement (this test, before the filter): ``['4242']``.
+    """
+
+    def test_a_non_string_holder_id_answers_nothing(self, sdk_factory):
+        from tortoise.entity_identity import attachment_target_ids
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (a:Object {id: 4242, name:'Legacy Int', "
+                "canonical_name:'legacy int', status:'live'}) "
+                "CREATE (b:Object {id:'4242', name:'Unrelated Twin', "
+                "canonical_name:'unrelated twin', status:'live'})")
+            seeded = {str(r[0]) for r in g.query(
+                "MATCH (o:Object) WHERE o.id = 4242 OR o.id = '4242' "
+                "RETURN o.id").result_set}
+            assert seeded == {"4242"}, f"fixture drift: {seeded}"
+            assert attachment_target_ids(g, "Object", [4242]) == [], (
+                "a non-string holder id was answered with its STRING spelling, "
+                "which names a different row")
+        finally:
+            sdk.close()
+
+
+class TestThe12244AttachmentTargetLabelGuard:
+    """``attachment_target_ids`` validates its OWN label (agent-infra#3442).
+
+    The helper is PUBLIC and ``label`` lands in a Cypher label position inside
+    ``_collapse_resolved_holders``. Borrowing the hop's validation is not enough
+    once the hop is optional: an all-id-less holder set never calls it, so the
+    label would reach the id-less query unvalidated. Before this pin, deleting
+    the ``_require_identity_label(label)`` line at ``entity_identity.py:554``
+    left the whole suite green (every in-repo caller passes the literal
+    ``"Object"``), which is why the guard gets an assertion of its own.
+
+    Neither test touches a graph: validation is the helper's FIRST statement, so
+    ``None`` stands in for ``g`` and a non-empty holder list proves the guard
+    runs *before* any read rather than after one.
+    """
+
+    def test_an_injected_label_raises_before_any_read(self):
+        from tortoise.entity_identity import attachment_target_ids
+
+        with pytest.raises(RuntimeError, match="unsafe label"):
+            attachment_target_ids(None, "Object) DETACH DELETE o //", ["obj-1"])
+
+    def test_every_label_outside_the_identity_pair_raises(self):
+        from tortoise.entity_identity import attachment_target_ids
+
+        for bad in ("Point", "object", "Object ` MATCH (n) DETACH DELETE n `"):
+            with pytest.raises(RuntimeError, match="unsafe label"):
+                attachment_target_ids(None, bad, [])
+
+
 class TestNonFoldedRecord:
     """The refusal must be a STRUCTURED, assertable record — not merely a log
     line (decision record R8: "a refused fold is an assertion failure, not a log

@@ -1965,6 +1965,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_13629_entity_vector_retire.py::test_a_tools_only_diff_selects_this_pin.
              "tools/entity_vector_parity_census.py",
              "tools/strip_graph_entity_vectors.py",
+             # #13685: the BACKFILL that unblocks the retirement
+             # (`tools/entity_vector_backfill.py`) owns
+             # tests/test_13685_entity_vector_backfill.py (registered `core`, and a
+             # `slow_files` member because its acceptance leg mints a throwaway
+             # `pgvector/pgvector:pg16`). Same flat `tools/` swallow, and the stakes are
+             # the mirror image of the entry above: this tool is the one that FILLS, so a
+             # diff that dropped the `AND embedding IS NULL` guard, the exact-population
+             # digest, the two token refusals or the unmatched-node count would merge
+             # with every falsifier that catches those asleep — and the failure it would
+             # ship is a RECORD VECTOR OVERWRITTEN, which no later run can undo. Pinned by
+             # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin
+             # and by
+             # tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row.
+             "tools/entity_vector_backfill.py",
              # #12926: the pre-merge deployment-config check. `tools/` is in
              # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
              # tool-only diff answers with `surfaces: []` — measured before this entry:

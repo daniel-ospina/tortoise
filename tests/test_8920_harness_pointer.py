@@ -370,6 +370,50 @@ def test_the_split_covers_both_branches_at_this_head(tmp_path: Path):
     assert _classify("x", "py", tests_dir=tmp_path) == ("file", "tests/x.py")
 
 
+def test_the_file_pointer_rule_cannot_be_replaced_by_a_suffix_list():
+    """The rule must be EVIDENCE, not an enumeration — pinned by a same-suffix PAIR.
+
+    Two REAL tokens differ only in whether the target file exists: an existing
+    `.mjs` file is a FILE pointer, while the SAME `.mjs` suffix on a path with no
+    file is a SYMBOL pointer. No suffix list can satisfy both — whichever way it
+    rules on `.mjs`, one of the two reds — which is what makes "a rule, not a
+    list" an assertion instead of a docstring claim. Enumerating suffixes could
+    never pin it: every list is finite and the next citation can carry the next
+    suffix.
+
+    The bare-file set is asserted to stay BARE (`py`): the moment a data suffix
+    is folded into `_NOT_A_SYMBOL`, the pair stops discriminating and the rest of
+    this row stays green with the existence conjunct deleted.
+    """
+    assert "mjs" not in _NOT_A_SYMBOL and "jsonl" not in _NOT_A_SYMBOL, (
+        "this row is only a discriminator while the data-file suffixes are NOT "
+        f"in `_NOT_A_SYMBOL` (now {sorted(_NOT_A_SYMBOL)}) — a list that answers "
+        "for them leaves it green with the existence rule deleted"
+    )
+    # a REAL fixture, carrying a suffix the bare-file set does not know
+    assert (TESTS_DIR / "fixtures" / "labeled_pairs.jsonl").is_file(), (
+        "the list discriminator needs its own real file — point this row at "
+        "another non-`.py` test artefact rather than extending `_NOT_A_SYMBOL`"
+    )
+    assert _classify("fixtures/labeled_pairs", "jsonl") == (
+        "file",
+        "tests/fixtures/labeled_pairs.jsonl",
+    )
+    # THE PAIR: same suffix, and the only difference is whether the file is there
+    assert _classify("test_middleware_host_consolidation", "mjs") == (
+        "file",
+        "tests/test_middleware_host_consolidation.mjs",
+    )
+    assert not (TESTS_DIR / "test_8920_harness_pointer.mjs").exists(), (
+        "the same-suffix control only tests the rule while this path does NOT "
+        "exist — pick another name rather than deleting the control"
+    )
+    assert _classify("test_8920_harness_pointer", "mjs") == (
+        "symbol",
+        "tests.test_8920_harness_pointer",
+    )
+
+
 def test_both_spellings_reach_the_same_classifier_on_a_real_scan(tmp_path: Path):
     """The ROUTING, not just the predicate: `_production_pointers` on a synthetic tree.
 

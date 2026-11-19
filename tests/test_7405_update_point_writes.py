@@ -56,6 +56,7 @@ and on embedded FalkorDBLite otherwise — the same dual-lane convention as
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import json
 import os
@@ -5291,20 +5292,62 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
         encoding="utf-8")
     record = (_REPO / "tortoise" / "record_projection.py").read_text(
         encoding="utf-8")
+    entities = (_REPO / "tortoise" / "projection" / "entities.py").read_text(
+        encoding="utf-8")
     for symbol, owner, source in (
         ("plan_point_restamp_folds", "projection/__init__.py", proj),
         ("FalkorProjection", "projection/__init__.py", proj),
         ("_anchor_on_create", "projection/edges.py", edges),
         ("_relation_upsert_statement", "record_projection.py", record),
+        # The one line in this file that cited a `projection/entities.py` LINE
+        # now names the module and lets this symbol carry the reference, so the
+        # symbol's DEFINITION is pinned here with the others.
+        ("_upsert_point_props", "projection/entities.py", entities),
     ):
-        assert symbol in sdk, (
+        # ⛔ WORD-BOUNDED, not a substring: `plan_point_restamp_folds` surviving
+        # only as the prefix of `plan_point_restamp_folds_v2` used to satisfy a
+        # bare `symbol in sdk`, so a rename reported the symbol as still named.
+        assert re.search(rf"(?<!\w){re.escape(symbol)}(?!\w)", sdk), (
             f"`{symbol}` is no longer named in `tortoise/sdk.py` — the comment "
             "that used to cite it by line now cites nothing, so its claim is "
             "unattributable")
-        assert symbol in source, (
+        # ⛔ DEFINES, not merely NAMES — and the test is a PARSE, not a pattern.
+        # `symbol in source` is a substring test over a module that discusses its
+        # own mechanics in prose: a definition-only rename (`def
+        # _upsert_point_props` → `..._v2`) leaves 26 of the name's 27 occurrences
+        # in `entities.py` intact and stayed GREEN. A `(?:def|class)\s+<sym>`
+        # regex fixes that only until some comment quotes the old signature —
+        # measured: the rename PLUS one comment line `# the old \`def
+        # _upsert_point_props(\` lived here` passed again. An AST cannot be
+        # satisfied by prose, so the definition itself is what is asked for.
+        assert any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef))
+            and node.name == symbol for node in ast.walk(ast.parse(source))), (
             f"`tortoise/sdk.py` attributes a claim to `{symbol}` in `{owner}`, but "
-            f"`{owner}` no longer defines it — re-derive the symbol the mechanic "
-            "moved to")
+            f"`{owner}` no longer DEFINES it (the name may survive in prose) — "
+            "re-derive the symbol the mechanic moved to")
+
+    # ⛔ The arm above is FILE-wide, so it is satisfied by the symbol appearing
+    # anywhere in a 60k-line module — it says nothing about the sentence this
+    # change made symbol-carried. Measured: deleting `_upsert_point_props` from
+    # `create_point`'s note left the four-symbol arm GREEN. The cite must have
+    # its symbol IN FRONT of it, or the reference is a module holding hundreds
+    # of functions — the same unattributable claim the numeric ban replaces.
+    #
+    # ⛔ ADJACENCY, NOT WORD ORDER — the pin accepts `MERGE` before or after the
+    # cite, and the siblings' `::symbol` spelling of it. The claim is that the
+    # symbol sits beside the module cite in the same sentence; pinning this
+    # branch's exact word order instead red an identical repair that landed on
+    # `main` independently (word order is the one thing two correct spellings of
+    # the same cite do not share).
+    assert re.search(
+        r"`_upsert_point_props`(?:\s+MERGE)?\s+\(`projection/entities\.py"
+        r"(?:::_upsert_point_props)?`\)",
+        _decommented(sdk_path)), (
+        "`create_point`'s note no longer names `_upsert_point_props` beside its "
+        "`projection/entities.py` cite — re-derive the symbol, do not drop it: a "
+        "bare module cite cannot red when the mechanic is renamed")
 
     # The CLAIM the presence-fold comment makes still holds: the projection folds
     # a merged-away id to NOT-present (a pending delete), the same verdict this

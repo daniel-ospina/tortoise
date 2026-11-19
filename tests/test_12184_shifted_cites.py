@@ -197,8 +197,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- three re-derived addresses that had NO pin at all, so a `+1` mutation left 441 tests green
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
     # the guard set is per-token, and an unlisted token is coverage the file only APPEARED to have.
-    (_INDEX, '`sdk.py:28142` at this head', _SDK, 28142, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
-    (_EVIDENCE, '(`sdk.py:28142`), so any non-NULL', _SDK, 28142, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
+    (_INDEX, '`sdk.py:28178` at this head', _SDK, 28178, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
+    (_EVIDENCE, '(`sdk.py:28178`), so any non-NULL', _SDK, 28178, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, 'called at `sdk.py:28431`', _SDK, 28431, 'result = apply_entity_merge('),
 )
 
@@ -306,14 +306,21 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3081-3096'): 1,
     # ⛔ `origin/main`'s two `sdk.py:28019` rows are DROPPED at this merge, not carried: `28019` is
     # `main`'s value for the content-review filter, and this branch re-derived that cite to `:28142`
-    # in BOTH documents. ⚠️ `:28142` is the value at THIS head, re-read with
-    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` (the file's ONLY occurrence); `:28067` — what
-    # this comment and the two pins above carried until the `#13728` fix — was one re-point BEHIND
-    # it, and it was applied to `docs/00_index.md` only, so the cross-document promise the row makes
-    # broke while the pin set stayed green on the stale token. Measured at this head: `grep -rn
-    # 'sdk.py:28019' docs/00_index.md docs/architecture/ENTITY-VERDICT-BANDS.md` -> no match (the
-    # token survives only in `05-verify.md`'s sentence stating the re-point), so a row asserting 1
-    # occurrence would be a false pin over a token the documents no longer carry.
+    # in BOTH documents. Measured at this head: `grep -rn 'sdk.py:28019' docs/00_index.md
+    # docs/architecture/ENTITY-VERDICT-BANDS.md` -> no match (the token survives only in
+    # `05-verify.md`'s sentence stating the re-point), so a row asserting 1 occurrence would be a
+    # false pin over a token the documents no longer carry.
+    # ⛔ `:28142` was itself re-derived to `:28178` on the #13724 re-cut, and the reason is the rule
+    # this file enforces: #13724's own `tortoise/sdk.py` insertion (the attachment-site collapse)
+    # ADDS lines above this statement, so the filter moves. Re-derived by CONTENT, not by a delta:
+    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28178:` (at origin/main `945817d22a`
+    # the same command -> `28142:`). Both documents and both pin rows move together, which is the
+    # only edit that keeps the D-1 promise true; the arm reads the address out of the documents, so
+    # it would have reddened on the address that no longer opens.
+    # ⚠️ HISTORY KEPT, not carried as a reading: an earlier cut of this row wrote `:28067`, which
+    # was one re-point BEHIND `:28142` and was applied to `docs/00_index.md` only, so the
+    # cross-document promise the row makes broke while the pin set stayed green on the stale token.
+    # That is the defect class this row exists to catch, recorded rather than silently dropped.
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21756'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21798'): 2,
@@ -325,8 +332,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7061` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6681` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3005` derives the label'): 1,
-    ('docs/00_index.md', '`sdk.py:28142` at this head'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28142`), so any non-NULL'): 1,
+    ('docs/00_index.md', '`sdk.py:28178` at this head'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28178`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28431`'): 1,
 }
 

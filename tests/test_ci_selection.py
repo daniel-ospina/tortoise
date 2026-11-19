@@ -10308,6 +10308,15 @@ ROWED_BY_THIS_FOLD = (
     # run. The row is here for the same reason as the one above: the ENTRY-RULE pin
     # iterates this EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
     "test_13629_entity_vector_retire.py",
+    # #13685 — the BACKFILL that unblocks that retirement
+    # (`tools/entity_vector_backfill.py`): the additive half of the same contract, which
+    # copies the graph's vectors into the record so the strip is finally allowed to run.
+    # A file this fold ADDED, registered on `core` plus a `CORE_ALSO` entry (a tools-only
+    # diff otherwise selects `surfaces: []`) and on `slow_files` (its acceptance leg mints
+    # a throwaway `pgvector/pgvector:pg16`). Listed here for the reason every row above
+    # states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody listed
+    # has no `durations:` row and nothing reds.
+    "test_13685_entity_vector_backfill.py",
     # #13665 — the Sentry STARTUP seam. A file this fold ADDED, registered on `api`
     # because the behaviour it pins is a call made from `_lifespan` in
     # `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match that REPLACES the
