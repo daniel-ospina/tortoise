@@ -252,7 +252,7 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:2257`, at this head — `1584` at
+`_DOC_RETIRED_KEYS` (`projection/entities.py:2288`, at this head — `1584` at
 `4f68a2aa7`) and the graph migration `relabel_legacy_documents`
 (`migrate_kinds.py:167`).
 
@@ -286,8 +286,8 @@ count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `tortoise/hosted_backup.py` — a file the population had not previously reached,
 carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
 the pre-D10 dump/restore refusal and repair prose — #11682's BM25 corpus-join
-comment (`tortoise/search_engine.py:3451` — the counted `:Document` line; the block opens at
-`:3449`, one added line in an existing file, re-measured at this head because the
+comment (`tortoise/search_engine.py:3508` — the counted `:Document` line; the block opens at
+`:3506`, one added line in an existing file, re-measured at this head because the
 `:2107`/`:2109` this sentence used to carry was true only at `d06c001ff9` and had
 drifted since) — #12015's edge-vector prose, which added three lines to that same
 `hosted_backup.py` bound and one to `tortoise/cache_projection.py` (a file the
