@@ -529,7 +529,8 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
 
     `claims_empty` says which DIRECTION the answer asserts, and it is read from the HEAD of
     the answer — the head is advanced by stripping, UNTIL A WHOLE PASS CHANGES NOTHING,
-    every leading negation (`not`/`never`/`n't`, each one inverting the direction), every
+    every leading negation (`not`/`never`/`n't`, each one inverting the direction — EXCEPT
+    the `not only` / `not just` idiom, below), every
     leading FILLER (`the`, `only`, `still`, `just`, `at least`, …) and every listed answer
     FORM — the WORD forms AND the punctuation ones (`is`, `->`, `→`, `=`, `:`), so a
     DOUBLED form (`prints contains …`, `prints -> …`, `prints is …`) is stripped too — and
@@ -551,8 +552,12 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     filler hidden behind another strip.
 
     So a head negation (`is NOT empty`, `never empty`, `isn't empty`) INVERTS the head
-    token's direction; `nothing but …` / `none other than …` are MEMBERSHIP in their own
-    right; `non-empty`/`nonempty` are MEMBERSHIP without needing the negation rule; and
+    token's direction — with TWO exceptions, both because the negation is not the
+    claim's negation: `not only X` / `not just X` asserts that X is EXCEEDED (so the head's
+    own direction survives: `not only two paths` and `not only empty` are both MEMBERSHIP),
+    and `not nothing but X` is not the negation of a membership claim (`not nothing` =
+    something), so it keeps MEMBERSHIP too. `nothing but …` / `none other than …` are
+    MEMBERSHIP in their own right; `non-empty`/`nonempty` are MEMBERSHIP without needing the negation rule; and
     anything after the head token is context, not direction. A window whose head token is
     none of these (`is the command that answers it`, `is the command that prints the
     paths`) is not an answer and is skipped — refusing the document's own pointer to the
@@ -691,11 +696,12 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # so a GLUED spelling — ``is`two` paths``, `is_empty` — arrives here as `istwo` /
             # `isempty`, and the strip is what re-exposes `two` / `empty` in it. Those are
             # MUTATIONS of the document's `… is <answer>` form, not quotations of it: measured,
-            # `05-verify.md` contains ZERO `` is` `` and ZERO `_empty` occurrences — its `is`
-            # is glued to a BACKTICK or an UNDERSCORE (the document does glue it to `.`, `,`
-            # and `"` in prose — a different thing, not claimed here) — so they are named as
-            # mutations, the convention the markup comment above already states for the same
-            # reason: a witness attributed to the tree goes stale when the tree stops writing it.
+            # `05-verify.md` contains ZERO `` is` `` and ZERO `_empty`, and its only `is_` is a
+            # substring of a TEST FUNCTION NAME (`…_is_what_that_head_carries`), not the verb.
+            # (It does glue `is` to `.`, `,` and `"` in prose — a different thing, not claimed
+            # here.) So they are named as mutations, the convention the markup comment above
+            # already states for the same reason: a witness attributed to the tree goes stale
+            # when the tree stops writing it.
             # The cost is measured too: a token that merely STARTS with `is` loses those two
             # characters, so `prints istwo paths` types as MEMBERSHIP and `prints isempty` as
             # EMPTINESS (both were SKIPPED before this strip).
@@ -812,7 +818,11 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 r"|(?:zero|0)\b(?!-(?:based|indexed))"
                 r"|no\b\s*(?:path|tortoise/))", low)
             if _empty:
-                if re.match(r"(?:zero|0)\s+or\s+more\b", low):
+                if _not_only:
+                    # The idiom is carried below, where it forces MEMBERSHIP — it must not
+                    # be swallowed by a skip-branch decided on the head token alone.
+                    pass
+                elif re.match(r"(?:zero|0)\s+or\s+more\b", low):
                     # ⛔ THE SAME TAUTOLOGY AS `at least zero`, ONE SPELLING OVER (#13831
                     # review, P2): `zero or more` is satisfied by ANY count, so it asserts
                     # neither direction — and it is a SUFFIX, so the filler loop above (which
@@ -824,10 +834,12 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 if _lower_bound:
                     # `more than zero` asserts AT LEAST ONE — membership, never emptiness.
                     claims_empty = False
-                elif _tautology:
+                elif _tautology and not _not_only:
                     # `at least zero` / `no fewer than zero` are satisfied by ANY count, so
                     # they assert neither direction; reading them as emptiness would REFUSE
                     # a true hedge at a non-empty head — the harm the docstring records.
+                    # `not only at least zero` asserts the bound is EXCEEDED, so the idiom
+                    # keeps its direction instead of being skipped (#13831 review, round 6).
                     continue
                 else:
                     claims_empty = True
@@ -840,7 +852,13 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 # `zero or more`, and this arm is where a positive numeral lands, since
                 # `_empty` above only catches a zero. `at most zero` really does mean
                 # emptiness and is caught there, so it keeps its direction.
-                if _at_most:
+                if _at_most and not _not_only:
+                    # ⛔ AND THE IDIOM SURVIVES THIS SKIP (#13831 review, round 6): `not only
+                    # at most two paths` asserts the upper bound is EXCEEDED (>=3), which IS
+                    # a direction. Skipping it on the bound alone would leave the just-added
+                    # idiom inert behind this branch — measured, `prints not only at most two
+                    # paths`, `… no more than two paths`, `… at least zero paths` and
+                    # `… zero or more paths` all typed NO direction before this guard.
                     continue
                 claims_empty = False
             else:
@@ -1319,7 +1337,14 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "prints not only two paths",
             "prints not just two paths",
             "prints not only the two comment-only modules",
-            "prints not only empty"):
+            "prints not only empty",
+            # the idiom must also survive the BOUND/TAUTOLOGY skip-branches: `not only at
+            # most two paths` asserts the bound is EXCEEDED, which is a direction, so a
+            # skip decided on the head token alone left the idiom inert (#13831 review, r6).
+            "prints not only at most two paths",
+            "prints not only no more than two paths",
+            "prints not only at least zero paths",
+            "prints not only zero or more paths"):
         assert _typed_answers_to_tortoise_cmd(
             f"`{_tortoise_cmd}` {_not_only_spelling}", _tortoise_cmd
         ) == [(_not_only_spelling, False)], (
