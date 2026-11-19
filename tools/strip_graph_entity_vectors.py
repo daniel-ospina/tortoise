@@ -101,8 +101,17 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     ambiguous URI: cutting at the last ``@`` keeps the password out of the plan but can
     DROP the host, and dropping the host makes two different targets compare EQUAL, which
     is a fail-open on the very check that stops a plan approved against production from
-    executing against staging. Percent-encode the credential (``/`` → ``%2F``) and the
-    target becomes parseable.
+    executing against staging. THREE SHAPES reach it, with two different remedies:
+
+    * an ``@`` after the first ``/`` (a password containing ``/``, or an ``@`` inside the
+      graph name) — percent-encode the credential (``/`` → ``%2F``), or pass the NAME out
+      of band with ``--graph-name`` (percent-encoding a name silently targets a different
+      graph);
+    * a ``?``/``#`` before the last ``@`` where no ``host:port`` follows it — the authority
+      cannot be separated from the credential; percent-encode ``?`` → ``%3F``, ``#`` →
+      ``%23``;
+    * userinfo on a target written without a scheme separator (``docker::pw@host:6379/g``),
+      which would otherwise be passed through verbatim as a db path.
 ``REFUSE_WRITE_FAILED``
     A removal statement raised AFTER at least one batch had already been stripped. Exit is
     ``6``, not ``2``: the graph is PART-STRIPPED, and the only correct next action is to
@@ -2103,7 +2112,8 @@ def uri_fingerprint(uri: str) -> str:
     (`tortoise/__main__.py::_mask_uri_userinfo`) accepts that over-reach because its
     output is only ever *rendered*; this value is COMPARED, so it may not.
 
-    Both properties are therefore held by REFUSING the one shape that cannot satisfy both:
+    Both properties are therefore held by REFUSING the shape that cannot satisfy both, and
+    by telling the two readings apart with ONE discriminator: a real ``host[:port]``.
 
     1. The AMBIGUITY CHECK runs on the RAW remainder, before anything is cut. If an ``@``
        appears AFTER the first ``/``, the userinfo boundary is genuinely undeterminable —
@@ -2111,15 +2121,24 @@ def uri_fingerprint(uri: str) -> str:
        the query, and nothing in the URI distinguishes them. Cut at the last ``@`` and the
        credential is hidden but the host is lost (false equality); cut at the first ``/``
        and the host survives but the credential leaks. So it raises
-       `REFUSE_TARGET_UNPARSEABLE` and the operator percent-encodes the credential.
-    2. The userinfo is then stripped from the AUTHORITY WINDOW, so a password carrying
-       ``?``, ``#`` or ``@`` is removed WITH it. Cutting the query first — the tidier
-       order, and the first cut of this fix — truncated the credential at that character
-       and emitted the remainder as the HOST (``docker://:s3cret``), re-creating the
-       ``#2983`` leak this paragraph cites.
-    3. The query and the fragment are dropped LAST, from the path, once the host is known.
-       Neither is part of the target identity, and both can carry a credential
-       (`?api_key=…`) that the path-preserving return below would otherwise re-emit.
+       `REFUSE_TARGET_UNPARSEABLE`, and the two remedies are named in the message
+       (percent-encode the credential; or ``--graph-name`` when the NAME is what carries
+       the ``@``).
+    2. Inside the authority window, a ``?``/``#`` is EITHER a genuine query start (RFC 3986
+       §3.2 terminates ``authority`` on ``/``, ``?`` or ``#``) OR part of a password
+       (#2983). The text BEFORE it decides: a real ``host[:port]`` there means a genuine
+       query, and the whole tail is dropped; anything else means credential material, and
+       the userinfo runs to the LAST ``@``. ⛔ POSITION ALONE IS NOT A DISCRIMINATOR —
+       requiring merely that a ``host:port`` follow the last ``@`` accepted
+       `docker://prod:6379?x@y:123/g`, whose query tail ``y:123`` became the host and
+       folded prod onto staging (measured).
+    3. Whatever follows a resolved host is dropped if it is a query or fragment — from the
+       authority as well as the path. Dropping it only from the PATH left
+       `docker://:pw@prod:6379?api_key=SECRET` rendering the secret, and with no path
+       segment at all the query is re-emitted whole (measured) into the plan a human
+       pastes.
+    4. Scheme and host are lowercased (RFC 3986 §6.2.2.1: both are case-insensitive), so a
+       re-run spelled in another case is the SAME target rather than a refused drift.
 
     The boundary rule itself is already recorded repo-wide (#720 P2 conf 68,
     `tortoise/__main__.py::_mask_uri_userinfo`, hardened by #2983/#2987): a password may
@@ -2128,6 +2147,19 @@ def uri_fingerprint(uri: str) -> str:
     """
     scheme, sep, rest = uri.partition("://")
     if not sep:
+        # ⛔ A `--uri` WITHOUT `://` IS PASSED THROUGH as a bare db path — but only when it
+        # cannot be carrying userinfo. Measured, `docker::pw@host:6379/g` (no `://`) came
+        # back VERBATIM, password included, because the pass-through branch never looked.
+        # A `:` before an `@` is userinfo, so that shape is refused rather than copied into
+        # the plan a human pastes.
+        at = uri.rfind("@")
+        if at >= 0 and ":" in uri[:at]:
+            raise Refusal(
+                REFUSE_TARGET_UNPARSEABLE,
+                f"the graph target {uri.split('@')[0]}://… came without a scheme separator "
+                "but carries userinfo, so no credential-free fingerprint of it exists. "
+                "Percent-encode the credential, or pass the graph name out of band with "
+                "`--graph-name`.")
         return uri
     # ⛔ 1. THE AMBIGUITY CHECK RUNS ON THE RAW REMAINDER, BEFORE ANYTHING IS CUT. An `@`
     #    past the first `/` is the one shape whose userinfo boundary cannot be determined
@@ -2147,45 +2179,91 @@ def uri_fingerprint(uri: str) -> str:
             "one fingerprint (and a folded fingerprint is what stops REFUSE_TARGET_DRIFT "
             "from seeing a production→staging swap). Percent-encode the credential "
             "('/' → '%2F', '?' → '%3F', '#' → '%23') so the target becomes parseable.")
-    # 2. A well-formed URI has its userinfo INSIDE the authority window, so the boundary
-    #    is the last `@` and what follows it is the host. A password carrying `?`, `#` or
-    #    `@` is still inside that window and is removed with the rest of the userinfo —
-    #    never truncated, which is why the userinfo strip precedes the query cut.
+    # 2. ⛔ THE QUERY/PASSWORD DISCRIMINATOR IS `host:port`, NOT THE POSITION OF THE `@`.
+    #    A `?`/`#` inside the authority window is EITHER a genuine query start (RFC 3986
+    #    §3.2: `authority` is terminated by `/`, `?` or `#`) OR part of a password (#2983:
+    #    a password may carry one). The text BEFORE the first `?`/`#` decides: if it is a
+    #    real `host[:port]` then the query is genuine and anything after it — `@`
+    #    included — is query content; otherwise the `?`/`#` is credential material and the
+    #    userinfo runs to the LAST `@`.
+    #
+    #    Position alone is not a discriminator: requiring merely that SOME `host:port`
+    #    followed the last `@` accepted `docker://prod:6379?x@y:123/g`, whose query tail
+    #    `y:123` then became the host — measured, prod and staging folded onto
+    #    `docker://y:123/g`. The two readings are told apart by `_host_port` below.
     authority, _, path = rest.partition("/")
-    userinfo, _, host = authority.rpartition("@")      # drop `user:password@`
-    # ⛔ AND THE BOUNDARY IS ONLY BELIEVABLE WHEN A REAL `host:port` FOLLOWS IT. A `?`/`#`
-    #    BEFORE the last `@` is either a password character or the start of a genuine
-    #    query, and the split above cannot tell them apart: measured,
-    #    `docker://host:6379?x@y/g` yielded host `y` — junk from the query — so two
-    #    deployments folded onto `docker://y/g`. Requiring a PORT after the `@` separates
-    #    the password case (`:s3cret?xx@prod:6379`) from that one, and the ambiguous
-    #    remainder is REFUSED rather than guessed.
-    if userinfo and any(ch in userinfo for ch in "?#") and not _host_with_port(host):
-        raise Refusal(
-            REFUSE_TARGET_UNPARSEABLE,
-            f"the graph target {scheme}://… cannot be fingerprinted: a '?'/'#' precedes "
-            "the last '@' and no host:port follows it, so the authority cannot be "
-            "separated from a credential without either printing it or dropping the "
-            "host. Percent-encode the credential ('/' → '%2F', '?' → '%3F', '#' → '%23') "
-            "or pass the graph name out of band with `--graph-name`.")
-    # 3. The query and the fragment are not target identity, and `?api_key=…` is a
-    #    credential — drop them from BOTH segments. ⛔ FROM THE HOST TOO, and that is not
-    #    symmetry for its own sake: a PATH-LESS target (`docker://prod:6379?api_key=…`)
-    #    has no `/` at all, so the ambiguity guard above cannot fire and the query stays
-    #    inside `host` — measured, `docker://prod:6379?api_key=s3cret` was returned
-    #    VERBATIM into the plan, `--json` and the drift message, and
-    #    `docker://:pw@host:6379?api_key=s3cret` returned the query alongside the host.
-    #    Cutting only `path` left the credential in the one branch that has no path.
-    def _drop_query_fragment(segment: str) -> str:
-        i = min(
-            (k for k in (segment.find("?"), segment.find("#")) if k >= 0),
-            default=len(segment),
-        )
-        return segment[:i]
+    marker = min((i for i in (authority.find("?"), authority.find("#")) if i >= 0),
+                 default=len(authority))
+    head = authority[:marker]
+    head_host = _host_port(head.split("@")[-1])
+    if marker < len(authority) and head_host is not None:
+        # a GENUINE query/fragment: it is not target identity and can carry a credential
+        # (`?api_key=…`), so it is dropped — from the authority AND from the path.
+        host = head.split("@")[-1] if "@" in head else head
+    else:
+        # a password containing `?`/`#`: the userinfo runs to the LAST `@`, and whatever
+        # follows it is the host — which must still be a real `host[:port]` for the
+        # reading to be believable at all.
+        userinfo, _, tail = authority.rpartition("@")
+        host = tail
+        tail_marker = min((i for i in (host.find("?"), host.find("#")) if i >= 0),
+                          default=len(host))
+        # ⛔ THE QUERY AFTER A REAL HOST IS DROPPED FROM THE AUTHORITY TOO, not only from
+        # the path: a PATH-LESS target (`docker://prod:6379?api_key=…`) has no `/` at all,
+        # so nothing else would cut it and the query was returned VERBATIM into the plan a
+        # human pastes, `--json` and the drift message (measured —
+        # `docker://:pw@prod:6379?api_key=SECRET` rendered the secret).
+        host = host[:tail_marker]
+        if userinfo and any(ch in userinfo for ch in "?#") and not _host_with_port(host):
+            raise Refusal(
+                REFUSE_TARGET_UNPARSEABLE,
+                f"the graph target {scheme}://… cannot be fingerprinted: a '?'/'#' precedes "
+                "the last '@' and no host:port follows it, so the authority cannot be "
+                "separated from a credential without either printing it or dropping the "
+                "host. Percent-encode the credential ('/' → '%2F', '?' → '%3F', "
+                "'#' → '%23') or pass the graph name out of band with `--graph-name`.")
+    # 3. The path carries the graph name; a query/fragment there is neither identity nor
+    #    safe (`?api_key=…`), so it is cut after the host is known.
+    cut = min(
+        (i for i in (path.find("?"), path.find("#")) if i >= 0),
+        default=len(path),
+    )
+    path = path[:cut]
+    # 4. Scheme and host are case-insensitive (RFC 3986 §6.2.2.1), so a re-run spelled in
+    #    another case must not read as a DIFFERENT target and be refused as drift.
+    return (f"{scheme.lower()}://{host.lower()}/{path.lstrip('/')}"
+            if path else f"{scheme.lower()}://{host.lower()}")
 
-    host = _drop_query_fragment(host)
-    path = _drop_query_fragment(path)
-    return f"{scheme}://{host}/{path.lstrip('/')}" if path else f"{scheme}://{host}"
+
+def _host_port(segment: str) -> tuple[str, str] | None:
+    """``(host, port-or-"")`` for a plausible ``host[:port]``, else ``None``.
+
+    This is the discriminator between "a genuine query starts here" and "the `?`/`#` is
+    part of a password": only a real ``host[:port]`` before the marker makes the query
+    genuine. Deliberately strict — a false ``None`` sends the reading to the refusal
+    branch, which is the safe direction for a value that decides whether two deployments
+    are the same target.
+    """
+    if not segment or any(ch in segment for ch in "@/?#"):
+        return None
+    if segment.startswith("["):                       # an IPv6 literal
+        end = segment.find("]")
+        if end < 0:
+            return None
+        host, rest = segment[: end + 1], segment[end + 1:]
+        if not rest:
+            return host, ""
+        if not rest.startswith(":") or not rest[1:].isdigit() or not rest[1:]:
+            return None
+        return host, rest[1:]
+    host, sep, port = segment.partition(":")
+    if not host:
+        return None
+    if not sep:
+        return host, ""
+    if not port.isdigit():
+        return None
+    return host, port
 
 
 def _unexpected_failure(exc: BaseException) -> str:

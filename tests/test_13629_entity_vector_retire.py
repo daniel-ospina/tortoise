@@ -1948,11 +1948,41 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     assert strip.uri_fingerprint("docker://:pa?ss@prod:6379/g") != \
         strip.uri_fingerprint("docker://:pa?ss@staging:6379/g")
     assert strip.uri_fingerprint("docker://:pw#x@prod:6379/g") == "docker://prod:6379/g"
-    # …and a query BEFORE a path (`host:6379?x@y/g`) is the shape where requiring a real
-    # port after the last `@` matters: without it, `y` became the host and two deployments
-    # folded. It is refused rather than guessed.
+    # …and a query BEFORE a path (`host:6379?x@y/g`) resolves to its real host rather than
+    # letting the query tail become one.
+    # ⛔ A QUERY TAIL THAT ITSELF LOOKS LIKE `host:port` IS THE ESCAPE HATCH THE PORT GUARD
+    # LEFT OPEN: position alone cannot tell "genuine query" from "password containing ?",
+    # so `y:123` became the host and prod/staging folded onto `docker://y:123/g`
+    # (measured). The discriminator is the text BEFORE the marker: a real `host[:port]`
+    # there means the query is genuine and the whole tail is dropped.
+    assert strip.uri_fingerprint("docker://prod:6379?x@y:123/g") == "docker://prod:6379/g"
+    assert strip.uri_fingerprint("docker://prod:6379?x@y:123/g") != \
+        strip.uri_fingerprint("docker://staging:6379?x@y:123/g")
+    assert strip.uri_fingerprint("docker://host:6379?x@y/g") == "docker://host:6379/g"
+    # ⛔ AND THE QUERY IS DROPPED FROM THE AUTHORITY TOO, not only from the path: with no
+    # path segment it used to be re-emitted WHOLE into the plan (`?api_key=SECRET…`) —
+    # measured, and reachable end to end because the resolver accepts that URI.
+    assert strip.uri_fingerprint("docker://:pw@prod:6379?api_key=SECRETVALUE") == \
+        "docker://prod:6379"
+    assert "SECRETVALUE" not in strip.uri_fingerprint(
+        "docker://:pw@prod:6379?api_key=SECRETVALUE")
+    # …including when the `?` is ALSO inside the password and a second one starts a real
+    # query: the userinfo runs to the last `@` and the query after the host is cut from
+    # the AUTHORITY (this is the only shape the authority-side cut is load-bearing for).
+    assert strip.uri_fingerprint("docker://:pa?ss@prod:6379?api_key=SECRET") == \
+        "docker://prod:6379"
+    assert "SECRET" not in strip.uri_fingerprint("docker://:pa?ss@prod:6379?api_key=SECRET")
+    assert strip.uri_fingerprint("docker://prod:6379#frag") == "docker://prod:6379"
+    assert strip.uri_fingerprint("docker://h:6379?") == "docker://h:6379"
+    # Case is not identity (RFC 3986 §6.2.2.1): a re-run in another case must not be
+    # refused as drift.
+    assert strip.uri_fingerprint("DOCKER://H:6379/g") == \
+        strip.uri_fingerprint("docker://h:6379/g") == "docker://h:6379/g"
+    # ⛔ A `--uri` WITHOUT `://` IS PASSED THROUGH AS A DB PATH — but not when it carries
+    # userinfo: measured, `docker::pw@host:6379/g` came back VERBATIM, password included.
     with pytest.raises(strip.Refusal):
-        strip.uri_fingerprint("docker://host:6379?x@y/g")
+        strip.uri_fingerprint("docker::pw@host:6379/g")
+    assert strip.uri_fingerprint("/tmp/a@b.db") == "/tmp/a@b.db"
     assert strip.uri_fingerprint("docker://:pa%2Fss@prod:6379/tortoise") != \
         strip.uri_fingerprint("docker://:pa%2Fss@staging:6379/tortoise")
     # A bare db-path carries no credential and is passed through unchanged, so the
