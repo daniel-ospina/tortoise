@@ -229,65 +229,84 @@ def test_a_token_naming_a_real_file_is_not_a_symbol_pointer():
     `test_production_pointers_into_the_test_tree_resolve` was red on a line that
     is correct, in every PR, with nothing in the diff to blame.
 
-    NON-VACUITY, and it is asserted here rather than claimed, on THREE tokens:
+    NON-VACUITY, asserted rather than claimed, on FOUR tokens — and this
+    docstring claims only what each token is MEASURED to catch:
 
-    * Token 1 is the token that redded `test (d)` — it must be EXCLUDED. If
-      `is_file()` stops being consulted, this arm reds.
-    * Token 2 is a second file pointer whose suffix is NOT in `_NOT_A_SYMBOL`
-      (`.jsonl`), so it must be EXCLUDED too. This is the arm that shows the
-      rule is a RULE and not a list: an extension list that had merely been
-      taught `.mjs` resolves this one as a symbol and reds here.
-    * Token 3 is the CONTROL, and both halves of it matter. It uses the SAME
-      `tests/<path>.<symbol>` SPELLING as tokens 1-2 — a DOTTED control
-      (`tests.<module>.<symbol>`) would exercise nothing, because `_pointer_at`
-      only asks the filesystem on the `dotted is None` branch, so it stays green
-      under any slash-form exclusion. And its target must NOT exist as a file: if
-      someone later creates that exact path, the control silently turns INTO a
-      file pointer and this row would keep passing while testing nothing.
+    * 1 is the token that redded `test (d)`; it must be EXCLUDED. Mutant:
+      `is_file()` stops being consulted -> reds here.
+    * 2 is a second REAL file pointer, whose suffix `_NOT_A_SYMBOL` does not
+      carry (`.jsonl`); it must be EXCLUDED. It catches a rule that hardcodes
+      one suffix: a list taught only `.mjs` resolves this one and reds.
+    * 3 carries the SAME `.mjs` SUFFIX as token 1 on a path that does NOT
+      exist, and must RESOLVE. This pair — 1 versus 3 — is the one that makes
+      "the rule is a rule and not a list" an ASSERTION: the two differ only in
+      whether the target file exists, so NO suffix list can satisfy both.
+      Whichever way a list rules on `.mjs`, one of the two reds. (A fourth
+      synthetic suffix would not do this: every list is finite and the next
+      suffix can simply be added, which is exactly why an enumerated class
+      cannot be pinned by enumerating it.)
+    * 4 is the CONTROL, in the same `tests/<path>.<symbol>` spelling this rule
+      gates, and must RESOLVE. Mutant: the exclusion grows past "is a file"
+      and swallows a slash pointer naming no file -> reds here. A DOTTED
+      control (`tests.<module>.<symbol>`) would have caught nothing:
+      `_pointer_at` asks the filesystem only on the `dotted is None` branch,
+      so a dotted token stays green under any slash-form exclusion.
 
-    So the row reds if `is_file()` is ignored (token 1), if the exclusion grows
-    past "is a file" to swallow a slash pointer naming no file (token 3), and if
-    the rule is ever replaced by a hand-maintained suffix list (token 2).
+    Tokens 3 and 4 also assert their targets do NOT exist. That is not
+    decoration: if someone creates one of those paths, the token silently turns
+    INTO a file pointer and the row keeps passing while testing nothing.
     """
     file_pointer = "`tests/test_middleware_host_consolidation.mjs`"
     list_pointer = "`tests/fixtures/labeled_pairs.jsonl`"
+    same_suffix_control = "`tests/test_8920_harness_pointer.mjs`"
     broken = "`tests/test_8920_harness_pointer.definitely_not_a_symbol`"
-    broken_target = TESTS_DIR / "test_8920_harness_pointer.definitely_not_a_symbol"
-    matches = list(_POINTER.finditer(f"see {file_pointer}, {list_pointer} and {broken}"))
-    assert len(matches) == 3, f"the scan itself broke on {file_pointer}: {matches}"
+    absent_targets = (
+        TESTS_DIR / "test_8920_harness_pointer.mjs",
+        TESTS_DIR / "test_8920_harness_pointer.definitely_not_a_symbol",
+    )
+    matches = list(_POINTER.finditer(
+        f"see {file_pointer}, {list_pointer}, {same_suffix_control} and {broken}"))
+    assert len(matches) == 4, f"the scan itself broke on {file_pointer}: {matches}"
     assert (TESTS_DIR / "test_middleware_host_consolidation.mjs").is_file(), (
         "the file-pointer arm needs a REAL file to test against; if this one was "
         "renamed, point the arm at another non-`.py` test artefact rather than "
         "deleting it — the rule is 'the file exists', not 'the suffix is .mjs'"
     )
     assert (TESTS_DIR / "fixtures" / "labeled_pairs.jsonl").is_file(), (
-        "the extension-list discriminator needs its OWN real file, with a suffix "
+        "the single-suffix discriminator needs its OWN real file, with a suffix "
         "`_NOT_A_SYMBOL` does not carry — that is the whole point of this token"
     )
     assert "jsonl" not in _NOT_A_SYMBOL, (
-        "the discriminator above is only a discriminator while `jsonl` is NOT in "
-        "`_NOT_A_SYMBOL` — with it there, a suffix LIST answers for both file "
-        "pointers and this row stays green with the rule deleted; pick a suffix "
-        "the list does not carry, do not extend the list"
+        "token 2 is only a discriminator while `jsonl` is NOT in `_NOT_A_SYMBOL` "
+        "— with it there, the module-level list answers for both file pointers "
+        "and this row stays green with the rule deleted; pick a suffix the list "
+        "does not carry, do not extend the list"
     )
-    assert not broken_target.exists(), (
-        f"the control token only tests the rule while `{broken_target.name}` does "
-        "NOT exist — now that it does, this pointer IS a file pointer, so pick "
-        "another symbol name instead of deleting the control"
-    )
+    for absent in absent_targets:
+        assert not absent.exists(), (
+            f"tokens 3-4 only test the rule while `{absent.name}` does NOT exist "
+            "— now that it does, that token IS a file pointer, so pick another "
+            "name instead of deleting the control"
+        )
     assert _pointer_at(matches[0]) is None, (
         f"{file_pointer} names a real file, so it is out of scope — it was "
         f"resolved to {_pointer_at(matches[0])}"
     )
     assert _pointer_at(matches[1]) is None, (
         f"{list_pointer} names a real file too, and `.jsonl` is not in "
-        f"`_NOT_A_SYMBOL` — an extension list cannot close this class — it was "
+        f"`_NOT_A_SYMBOL` — a rule that only knew `.mjs` cannot pass — it was "
         f"resolved to {_pointer_at(matches[1])}"
     )
-    assert _pointer_at(matches[2]) == (
+    assert _pointer_at(matches[2]) == ("tests.test_8920_harness_pointer", "mjs"), (
+        f"{same_suffix_control} carries the SAME `.mjs` suffix as {file_pointer} "
+        "but names no file, so it MUST still resolve — a suffix list cannot "
+        "pass this pair — it was resolved to "
+        f"{_pointer_at(matches[2])}"
+    )
+    assert _pointer_at(matches[3]) == (
         "tests.test_8920_harness_pointer",
         "definitely_not_a_symbol",
-    ), f"the file-pointer narrowing also swallowed a real pointer: {_pointer_at(matches[2])}"
+    ), f"the file-pointer narrowing also swallowed a real pointer: {_pointer_at(matches[3])}"
 
 
 def test_no_source_still_names_the_pre_move_symbols():
