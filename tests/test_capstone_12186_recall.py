@@ -935,7 +935,16 @@ def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifa
     # committed copy) with the suite GREEN at 54 passed. The note is where a reader of
     # the ARTIFACT learns what to run, and it is the field the defect lived in, so it is
     # scanned with the same derivation: one `shown` set, both surfaces.
-    shown = set(re.findall(r"git show ([0-9a-f]{4,40}):", flat + " " + note))
+    # ⛔ AND THE SCAN IS CASE-INSENSITIVE (fresh-context review, verified by execution).
+    # Git resolves object names case-insensitively, so an UPPERCASE abbreviation is the
+    # same abbreviation and equally unresolvable — but `[0-9a-f]` never saw it. Measured
+    # at this head, inserting `git show 31BCE52DDB:tools/capstone_12186_recall.py` into
+    # §6 left the suite GREEN at 55 passed (and a foreign `git show DEADBEEF1234:`
+    # likewise), while the lowercase spellings of each red. This is the same "keyed to
+    # one spelling" defect the length paragraph above records, one level down, so the
+    # token is FOLDED before it is compared.
+    shown = {tok.lower() for tok in
+             re.findall(r"git show ([0-9a-fA-F]{4,40}):", flat + " " + note)}
     code_head = artifact["code_head"]
     for token in sorted(shown):
         # A sha abbreviation is a prefix; comparing with a common prefix of any length
