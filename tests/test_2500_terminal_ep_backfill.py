@@ -91,7 +91,7 @@ def _sweep_predicate_count(graph) -> int:
 def _freeze(sdk, content: str, *, status: str, outdated: bool = False,
             **overrides) -> str:
     """Create a Point and plant the PRE-#2490 stored state on it directly."""
-    pid = sdk.create_point("statement", content, status="live")["id"]
+    pid = sdk._create_point("statement", content, status="live")["id"]
     cols = {**_FROZEN, **overrides}
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status=$status, n.outdated=$outdated, "
@@ -209,12 +209,12 @@ def test_prior_only_terminal_claim_is_swept_so_the_prior_stops_ranking(sdk):
     the read (0.909 and 0.25), so both must be swept; ``ep_alpha``/``ep_beta``
     survive as the #2490 recovery vector.
     """
-    pid = sdk.create_point("statement", "prior-only retracted",
+    pid = sdk._create_point("statement", "prior-only retracted",
                            status="live")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status='retracted', n.ep_alpha=10.0, "
         "n.ep_beta=1.0", params={"id": pid})
-    degenerate = sdk.create_point("statement", "beta-only retracted",
+    degenerate = sdk._create_point("statement", "beta-only retracted",
                                   status="live")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status='retracted', "
@@ -252,9 +252,9 @@ def test_operator_with_a_terminal_flag_is_never_swept(sdk):
     CLAIMS). The operator is created through the SDK so it carries the real
     ``is_operator``/``op_type`` markers, not planted ones.
     """
-    premise_a = sdk.create_point("statement", "premise a")["id"]
-    premise_b = sdk.create_point("statement", "premise b")["id"]
-    op = sdk.create_operator("IMPL", premise_a, [premise_b])["id"]
+    premise_a = sdk._create_point("statement", "premise a")["id"]
+    premise_b = sdk._create_point("statement", "premise b")["id"]
+    op = sdk._create_operator("IMPL", premise_a, [premise_b])["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.outdated=true, n.confidence=0.9, "
         "n.posterior_alpha=9.0, n.posterior_beta=1.0", params={"id": op})

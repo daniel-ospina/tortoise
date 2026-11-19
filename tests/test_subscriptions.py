@@ -10,20 +10,20 @@ import pytest
 
 def test_poll_after_cursor_roundtrip(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "first")  # noqa: F841
-    p2 = sdk.create_point("statement", "second")
+    p1 = sdk._create_point("statement", "first")  # noqa: F841
+    p2 = sdk._create_point("statement", "second")
     r1 = sdk.poll_events(after=None)
     assert [e["type"] for e in r1["events"]] == ["PointAdded", "PointAdded"]
     r2 = sdk.poll_events(after=r1["next_cursor"])
     assert r2["events"] == []  # nothing after tail
-    sdk.retract_point(p2["id"])
+    sdk._retract_point(p2["id"])
     r3 = sdk.poll_events(after=r1["next_cursor"])
     assert [e["type"] for e in r3["events"]] == ["PointRetracted"]
 
 
 def test_cursor_is_opaque_and_deterministic(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    sdk.create_point("statement", "x")
+    sdk._create_point("statement", "x")
     r = sdk.poll_events()
     # opaque: base64url JSON {v:1, seq:N}
     decoded = json.loads(base64.urlsafe_b64decode(r["next_cursor"]))
@@ -46,8 +46,8 @@ def test_empty_graph_cursor_roundtrip(sdk_factory, tmp_path):
 
 def test_types_filter(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    sdk.create_point("statement", "a")
-    sdk.retract_point(sdk.query()[0]["id"])
+    sdk._create_point("statement", "a")
+    sdk._retract_point(sdk._query()[0]["id"])
     r = sdk.poll_events(types=["PointRetracted"])
     assert [e["type"] for e in r["events"]] == ["PointRetracted"]
     with pytest.raises(ValueError, match="unknown event type"):
@@ -56,7 +56,7 @@ def test_types_filter(sdk_factory, tmp_path):
 
 def test_malformed_cursor_raises(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    sdk.create_point("statement", "x")
+    sdk._create_point("statement", "x")
     with pytest.raises(ValueError, match="invalid cursor"):
         sdk.poll_events(after="not-a-cursor!!")
 
@@ -67,12 +67,12 @@ def test_expired_cursor_raises_valueerror(sdk_factory, tmp_path):
     not depend on Task 7's purge helper)."""
     from tortoise import event_store  # noqa: F401
     sdk = sdk_factory(tmp_path)
-    sdk.create_point("statement", "will-purge")
+    sdk._create_point("statement", "will-purge")
     old_cursor = sdk.poll_events()["next_cursor"]
     proj = sdk._get_proj()
     proj.g.query("MATCH (e:GraphEvent) SET e.ts = $old_ts",
                  params={"old_ts": "2020-01-01T00:00:00+00:00"})
-    sdk.create_point("statement", "kept")  # newer event survives the purge
+    sdk._create_point("statement", "kept")  # newer event survives the purge
     # purge helper lands in Task 7 — trigger expiry here via direct Cypher
     # DELETE. The old cursor points at seq 1; purge seq <= 1 so min becomes 2
     # and the cursor (1) is below it → expired. (Plan snippet said seq < 1,
@@ -87,7 +87,7 @@ def test_expired_cursor_raises_valueerror(sdk_factory, tmp_path):
 def test_limit_respected(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
     for i in range(5):
-        sdk.create_point("statement", f"p{i}")
+        sdk._create_point("statement", f"p{i}")
     r = sdk.poll_events(limit=2)
     assert len(r["events"]) == 2
     r2 = sdk.poll_events(after=r["next_cursor"], limit=2)

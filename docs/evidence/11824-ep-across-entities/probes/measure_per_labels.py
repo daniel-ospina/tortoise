@@ -64,11 +64,11 @@ print("=" * 100)
 print("A. WIRING — which labels an operator/direct edge may address")
 print("=" * 100)
 
-P1 = sdk.create_point("statement", f"A-point-src-{SFX}", status="live")["id"]
-P2 = sdk.create_point("statement", f"A-point-tgt-{SFX}", status="live")["id"]
-O1 = sdk.create_object(f"A-object-{SFX}", "core:goal")["id"]
-E1 = sdk.create_event(f"A-event-{SFX}", "decision")["id"]
-S1 = sdk.create_subject(f"A-subject-{SFX}", "naturalPerson")["id"]
+P1 = sdk._create_point("statement", f"A-point-src-{SFX}", status="live")["id"]
+P2 = sdk._create_point("statement", f"A-point-tgt-{SFX}", status="live")["id"]
+O1 = sdk._create_object(f"A-object-{SFX}", "core:goal")["id"]
+E1 = sdk._create_event(f"A-event-{SFX}", "decision")["id"]
+S1 = sdk._create_subject(f"A-subject-{SFX}", "naturalPerson")["id"]
 src_id = f"src-{SFX}"
 q("MERGE (s:Source {url:$u}) SET s.sourceKind='document', s.id=$i",
   u=f"https://x/{SFX}", i=src_id)
@@ -88,16 +88,16 @@ for tag, src, tgt in [
 ]:
     try:
         if "direct" in tag:
-            r = sdk.create_direct_edge("IMPL", src, tgt, direction="unidirectional")
+            r = sdk._create_direct_edge("IMPL", src, tgt, direction="unidirectional")
         else:
-            r = sdk.create_operator("IMPL", src, [tgt], direction="unidirectional")
+            r = sdk._create_operator("IMPL", src, [tgt], direction="unidirectional")
         print(f"  {tag:<32} WROTE  op={str(r.get('id'))[-8:]}")
     except Exception as exc:
         print(f"  {tag:<32} REFUSED {type(exc).__name__}: {str(exc)[:110]}")
 
 print("\n  -- :Source endpoint (documented as NOT admitted) --")
 try:
-    sdk.create_operator("IMPL", src_id, [P1], direction="unidirectional")
+    sdk._create_operator("IMPL", src_id, [P1], direction="unidirectional")
     print("  Source -> Point                  WROTE")
 except Exception as exc:
     print(f"  Source -> Point                  REFUSED {type(exc).__name__}: {str(exc)[:150]}")
@@ -111,20 +111,20 @@ print("=" * 100)
 print("B. ENTITY BELIEF SEED — does a stored `confidence` feed EP?")
 print("=" * 100)
 
-O2 = sdk.create_object(f"B-object-conf1-{SFX}", "core:goal",
+O2 = sdk._create_object(f"B-object-conf1-{SFX}", "core:goal",
                        confidence=1.0)["id"]
 show("Object w/ confidence=1.0", O2)
 print("  served belief_value(cols):", belief(O2))
 
-P3 = sdk.create_point("statement", f"B-point-tgt-{SFX}", status="live")["id"]
-opB = sdk.create_operator("IMPL", O2, [P3], direction="unidirectional")["id"]
-sdk.compute_confidence(factors=[opB], require_calibration=False)
+P3 = sdk._create_point("statement", f"B-point-tgt-{SFX}", status="live")["id"]
+opB = sdk._create_operator("IMPL", O2, [P3], direction="unidirectional")["id"]
+sdk._compute_confidence(factors=[opB], require_calibration=False)
 print("  after EP run over IMPL(Object->Point):")
 print("    Object posterior:", belief(O2))
 print("    Point  posterior:", belief(P3))
 
 try:
-    sdk.set_point_baseline(O2, 9.0, 1.0)
+    sdk._set_point_baseline(O2, 9.0, 1.0)
     print("  set_point_baseline on an OBJECT: no exception")
 except Exception as exc:
     print(f"  set_point_baseline on an OBJECT: {type(exc).__name__}: {str(exc)[:120]}")
@@ -139,16 +139,16 @@ print("=" * 100)
 
 
 def run_pair(src_id, tgt_label="Point"):
-    tgt = sdk.create_point("statement", f"C-tgt-{uuid.uuid4().hex[:6]}",
+    tgt = sdk._create_point("statement", f"C-tgt-{uuid.uuid4().hex[:6]}",
                            status="live")["id"]
-    op = sdk.create_operator("IMPL", src_id, [tgt], direction="unidirectional")["id"]
-    sdk.compute_confidence(factors=[op], require_calibration=False)
+    op = sdk._create_operator("IMPL", src_id, [tgt], direction="unidirectional")["id"]
+    sdk._compute_confidence(factors=[op], require_calibration=False)
     return tgt, belief(tgt)
 
 
 # C1: control — a live Point source with a strong prior moves its target
-C1 = sdk.create_point("statement", f"C1-live-{SFX}", status="live")["id"]
-sdk.set_point_baseline(C1, 8.0, 2.0)
+C1 = sdk._create_point("statement", f"C1-live-{SFX}", status="live")["id"]
+sdk._set_point_baseline(C1, 8.0, 2.0)
 tgt, _ = run_pair(C1)
 CONTROL = belief(tgt)   # the verdict every other case is read against
 
@@ -171,31 +171,31 @@ def verdict(b):
 print(f"  C1 live Point (prior 8,2)          -> target {CONTROL}  ({verdict(CONTROL)})")
 
 # C2: superseded on the STATUS axis — must NOT contribute
-C2 = sdk.create_point("statement", f"C2-superseded-{SFX}", status="live")["id"]
-sdk.set_point_baseline(C2, 8.0, 2.0)
+C2 = sdk._create_point("statement", f"C2-superseded-{SFX}", status="live")["id"]
+sdk._set_point_baseline(C2, 8.0, 2.0)
 q("MATCH (n:Point {id:$id}) SET n.status = 'superseded'", id=C2)
 tgt, b = run_pair(C2)
 print(f"  C2 status=superseded (prior 8,2)   -> target {b}  ({verdict(b)})")
 print("    C2 shape:", node(C2))
 
 # C3: isClosed=true on the POSITION axis (status left live, flag unset)
-C3 = sdk.create_point("statement", f"C3-closed-{SFX}", status="live")["id"]
-sdk.set_point_baseline(C3, 8.0, 2.0)
+C3 = sdk._create_point("statement", f"C3-closed-{SFX}", status="live")["id"]
+sdk._set_point_baseline(C3, 8.0, 2.0)
 q("MATCH (n:Point {id:$id}) SET n.isClosed = true", id=C3)
 tgt, b = run_pair(C3)
 print(f"  C3 isClosed=true, status=live      -> target {b}  ({verdict(b)})")
 print("    C3 shape:", node(C3))
 
 # C4: terminal pipeline slot on the POSITION axis
-C4 = sdk.create_point("statement", f"C4-slot-{SFX}", status="live")["id"]
-sdk.set_point_baseline(C4, 8.0, 2.0)
+C4 = sdk._create_point("statement", f"C4-slot-{SFX}", status="live")["id"]
+sdk._set_point_baseline(C4, 8.0, 2.0)
 q("MATCH (n:Point {id:$id}) SET n.pipelineSlot = 'terminal'", id=C4)
 tgt, b = run_pair(C4)
 print(f"  C4 pipelineSlot=terminal           -> target {b}  ({verdict(b)})")
 print("    C4 shape:", node(C4))
 
 # C5: an OBJECT ended only by isClosed, carrying a measured posterior
-C5 = sdk.create_object(f"C5-closed-object-{SFX}", "core:goal")["id"]
+C5 = sdk._create_object(f"C5-closed-object-{SFX}", "core:goal")["id"]
 q("MATCH (n:Object {id:$id}) SET n.posterior_alpha = 9.0, "
   "n.posterior_beta = 1.0, n.confidence = 0.9, n.isClosed = true", id=C5)
 tgt, b = run_pair(C5)
@@ -204,7 +204,7 @@ print("    C5 shape:", node(C5))
 
 # C6: the same Object, an :Source-shaped control — Source cannot be wired at all
 print("\n  control: wiring an ended Point as an operator SEED (compute_confidence(factors=[...])):")
-sdk.compute_confidence(factors=[C3], require_calibration=False)
+sdk._compute_confidence(factors=[C3], require_calibration=False)
 print("    seed C3 (isClosed) posterior:", belief(C3))
 
 print()
@@ -213,7 +213,7 @@ print("D. goalState — is it read by EP at all?")
 print("=" * 100)
 
 # D1: goal Object with goalState=abandoned + status=live (legacy shape)
-G1 = sdk.create_object(f"D1-goal-{SFX}", "core:goal")["id"]
+G1 = sdk._create_object(f"D1-goal-{SFX}", "core:goal")["id"]
 q("MATCH (n:Object {id:$id}) SET n.goalState='abandoned', n.status='live', "
   "n.posterior_alpha=9.0, n.posterior_beta=1.0, n.confidence=0.9", id=G1)
 tgt, b = run_pair(G1)
@@ -221,7 +221,7 @@ print(f"  D1 goal goalState=abandoned,status=live -> target {b}")
 print("    D1 shape:", node(G1))
 
 # D2: same but the write boundary's coherent shape (status also ended)
-G2 = sdk.create_object(f"D2-goal-{SFX}", "core:goal")["id"]
+G2 = sdk._create_object(f"D2-goal-{SFX}", "core:goal")["id"]
 q("MATCH (n:Object {id:$id}) SET n.goalState='abandoned', n.status='deprecated', "
   "n.posterior_alpha=9.0, n.posterior_beta=1.0, n.confidence=0.9", id=G2)
 tgt, b = run_pair(G2)
@@ -229,7 +229,7 @@ print(f"  D2 goal goalState=abandoned,status=deprecated -> target {b}")
 print("    D2 shape:", node(G2))
 
 # D3: goalState=met with status=live — is 'met' an ending anywhere?
-G3 = sdk.create_object(f"D3-goal-{SFX}", "core:goal")["id"]
+G3 = sdk._create_object(f"D3-goal-{SFX}", "core:goal")["id"]
 q("MATCH (n:Object {id:$id}) SET n.goalState='met', n.status='live', "
   "n.posterior_alpha=9.0, n.posterior_beta=1.0, n.confidence=0.9", id=G3)
 tgt, b = run_pair(G3)
@@ -251,32 +251,32 @@ print("=" * 100)
 print("E. EVENT — does an Event endpoint receive a posterior, and can it seed?")
 print("=" * 100)
 
-E5 = sdk.create_event(f"E5-event-src-{SFX}", "decision")["id"]
-P9 = sdk.create_point("statement", f"E5-point-tgt-{SFX}", status="live")["id"]
-opE = sdk.create_operator("IMPL", E5, [P9], direction="unidirectional")["id"]
-sdk.compute_confidence(factors=[opE], require_calibration=False)
+E5 = sdk._create_event(f"E5-event-src-{SFX}", "decision")["id"]
+P9 = sdk._create_point("statement", f"E5-point-tgt-{SFX}", status="live")["id"]
+opE = sdk._create_operator("IMPL", E5, [P9], direction="unidirectional")["id"]
+sdk._compute_confidence(factors=[opE], require_calibration=False)
 print("  Event id present?", q("MATCH (n:Event {id:$id}) RETURN n.id, n.eventId",
                               id=E5))
 print("    Event posterior after run:", belief(E5))
 print("    Point posterior after run:", belief(P9))
 q("MATCH (n:Event {id:$id}) SET n.posterior_alpha=9.0, n.posterior_beta=1.0",
   id=E5)
-sdk.compute_confidence(factors=[opE], require_calibration=False)
+sdk._compute_confidence(factors=[opE], require_calibration=False)
 print("    Event seeded (9,1) -> Point:", belief(P9))
 
 print("\n  -- :Event and :Subject in the TARGET slot (operator source = a live Point) --")
 for kind in ("Event", "Subject", "Object"):
-    srcP = sdk.create_point("statement", f"E-src-{uuid.uuid4().hex[:6]}",
+    srcP = sdk._create_point("statement", f"E-src-{uuid.uuid4().hex[:6]}",
                             status="live")["id"]
-    sdk.set_point_baseline(srcP, 9.0, 1.0)
+    sdk._set_point_baseline(srcP, 9.0, 1.0)
     if kind == "Event":
-        tgt = sdk.create_event(f"E-tgt-{SFX}", "decision")["id"]
+        tgt = sdk._create_event(f"E-tgt-{SFX}", "decision")["id"]
     elif kind == "Subject":
-        tgt = sdk.create_subject(f"E-tgt-{SFX}", "naturalPerson")["id"]
+        tgt = sdk._create_subject(f"E-tgt-{SFX}", "naturalPerson")["id"]
     else:
-        tgt = sdk.create_object(f"E-tgt-{SFX}", "core:goal")["id"]
-    op = sdk.create_operator("IMPL", srcP, [tgt], direction="unidirectional")["id"]
-    sdk.compute_confidence(factors=[op], require_calibration=False)
+        tgt = sdk._create_object(f"E-tgt-{SFX}", "core:goal")["id"]
+    op = sdk._create_operator("IMPL", srcP, [tgt], direction="unidirectional")["id"]
+    sdk._compute_confidence(factors=[op], require_calibration=False)
     print(f"    {kind:<8} TARGET posterior={belief(tgt)}")
 
 print("\n  -- hydrate_evidence universe --")

@@ -96,8 +96,8 @@ class TestNANDCalibrationAtRealWeights:
         """
         sdk = sdk_factory(namespace=f"test_ep_calib_{os.urandom(4).hex()}")
         # Create two claim points (regular points, not operators).
-        claim_a = sdk.create_point("evidence", "Claim A: high-confidence finding", status="live")
-        claim_b = sdk.create_point("evidence", "Claim B: contradictory finding", status="live")
+        claim_a = sdk._create_point("evidence", "Claim A: high-confidence finding", status="live")
+        claim_b = sdk._create_point("evidence", "Claim B: contradictory finding", status="live")
 
         # Set T0 baselines via the SDK (persistent evidence). #2199: live
         # decide-part claims now carry an explicit system-default prior from
@@ -105,12 +105,12 @@ class TestNANDCalibrationAtRealWeights:
         # a raw graph overwrite would leave the SDK's in-memory evidence cache
         # stale (the cache is hydrated additively from the graph).
         for claim in (claim_a, claim_b):
-            sdk.set_point_baseline(claim["id"], self.T0_ALPHA, self.T0_BETA)
+            sdk._set_point_baseline(claim["id"], self.T0_ALPHA, self.T0_BETA)
 
         # Create bidirectional NAND operator: mutual contradiction between
         # both claims. Bidirectional is required for the "both claims drop"
         # calibration — unidirectional NAND only penalizes the target.
-        op = sdk.create_operator("NAND", claim_a["id"], [claim_b["id"]],
+        op = sdk._create_operator("NAND", claim_a["id"], [claim_b["id"]],
                                  direction="bidirectional")
 
         yield sdk, claim_a["id"], claim_b["id"], op["id"]
@@ -135,7 +135,7 @@ class TestNANDCalibrationAtRealWeights:
         w = compute_operator_weight(proj, op_id)
         assert w == 8.0, f"Expected w=8.0 for plain NAND, got {w}"
 
-        result = sdk.compute_confidence(factors=[op_id])
+        result = sdk._compute_confidence(factors=[op_id])
         assert result["converged"], (
             f"EP did not converge: {result['iterations']} iterations"
         )
@@ -182,13 +182,13 @@ class TestNANDCalibrationAtRealWeights:
         # was written to measure — the NAND's weight at the 16 → 10 clamp — and
         # removes the incidental cross-talk the old comment noted (`claim_b` was
         # being pulled UP by the dummy IMPL).
-        dummy_target = sdk.create_point(
+        dummy_target = sdk._create_point(
             "statement", "dummy operator target")["id"]
         # The dummy target needs the same calibrated prior as the claims, or the
         # run refuses with "uncalibrated evidence points" — the old shape reused
         # an already-calibrated claim, which the closed set no longer permits.
-        sdk.set_point_baseline(dummy_target, self.T0_ALPHA, self.T0_BETA)
-        dummy = sdk.create_operator("IMPL", claim_a_id, [dummy_target],
+        sdk._set_point_baseline(dummy_target, self.T0_ALPHA, self.T0_BETA)
+        dummy = sdk._create_operator("IMPL", claim_a_id, [dummy_target],
                                     direction="unidirectional")
         proj = sdk._get_proj()
         proj.g.query(
@@ -203,7 +203,7 @@ class TestNANDCalibrationAtRealWeights:
         w = compute_operator_weight(proj, op_id)
         assert w == 10.0, f"Expected w=10.0 for mitigated NAND, got {w}"
 
-        result = sdk.compute_confidence(factors=[op_id])
+        result = sdk._compute_confidence(factors=[op_id])
         assert result["converged"], (
             f"EP did not converge: {result['iterations']} iterations"
         )
@@ -234,7 +234,7 @@ class TestNANDCalibrationAtRealWeights:
         """NAND is symmetric: both T0 claims converge to ~same confidence."""
         sdk, claim_a_id, claim_b_id, op_id = ep_graph
 
-        result = sdk.compute_confidence(factors=[op_id])
+        result = sdk._compute_confidence(factors=[op_id])
         conf_a = result["confidences"][claim_a_id]["mean"]
         conf_b = result["confidences"][claim_b_id]["mean"]
 

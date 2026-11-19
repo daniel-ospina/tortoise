@@ -177,12 +177,12 @@ def test_order_by_graph_ranks_high_ep_above_low_ep(force_sparse_tfidf):
     """
     sdk = _fresh_sdk()
     proj = sdk._get_proj()  # noqa: F841
-    p_high = sdk.create_point("statement", "vector embedding cache invalidation strategy")
-    p_low = sdk.create_point("statement", "cache strategy invalidation vector embedding")
+    p_high = sdk._create_point("statement", "vector embedding cache invalidation strategy")
+    p_low = sdk._create_point("statement", "cache strategy invalidation vector embedding")
     _set_confidence(sdk, p_high["id"], 0.9)
     _set_confidence(sdk, p_low["id"], 0.1)
 
-    results = sdk.tortoise_fts_query("cache invalidation", limit=10, order_by="graph")
+    results = sdk._tortoise_fts_query("cache invalidation", limit=10, order_by="graph")
     ids = [r["id"] for r in results]
     assert p_high["id"] in ids and p_low["id"] in ids
     assert ids.index(p_high["id"]) < ids.index(p_low["id"])
@@ -198,12 +198,12 @@ def test_order_by_confidence_uses_persisted_not_proxy():
     point with no operator edges but a persisted EP confidence of 0.9 must
     outrank a proxy-1.0 point with persisted confidence 0.1."""
     sdk = _fresh_sdk()
-    p_high = sdk.create_point("statement", "epistemic grounding with high belief")
-    p_low = sdk.create_point("statement", "grounding epistemic belief low")
+    p_high = sdk._create_point("statement", "epistemic grounding with high belief")
+    p_low = sdk._create_point("statement", "grounding epistemic belief low")
     _set_confidence(sdk, p_high["id"], 0.9)
     _set_confidence(sdk, p_low["id"], 0.1)
 
-    results = sdk.tortoise_fts_query("epistemic grounding belief", limit=10, order_by="confidence")
+    results = sdk._tortoise_fts_query("epistemic grounding belief", limit=10, order_by="confidence")
     ids = [r["id"] for r in results]
     assert ids.index(p_high["id"]) < ids.index(p_low["id"])
 
@@ -211,9 +211,9 @@ def test_order_by_confidence_uses_persisted_not_proxy():
 def test_default_relevance_unchanged():
     """AC4: default ordering untouched by the new option."""
     sdk = _fresh_sdk()
-    p1 = sdk.create_point("statement", "unique zebra finch migration pattern analysis")
-    p2 = sdk.create_point("statement", "zebra finch migration pattern analysis unique")
-    results = sdk.tortoise_fts_query("zebra finch migration", limit=10)
+    p1 = sdk._create_point("statement", "unique zebra finch migration pattern analysis")
+    p2 = sdk._create_point("statement", "zebra finch migration pattern analysis unique")
+    results = sdk._tortoise_fts_query("zebra finch migration", limit=10)
     assert "graph_ranking" not in results[0]  # no annotation on default path
     assert {r["id"] for r in results} == {p1["id"], p2["id"]}
 
@@ -222,8 +222,8 @@ def test_suggest_entry_points_with_graph_ranker():
     sdk = _fresh_sdk()
     from tortoise.ranking import GraphRanker
     ranker = GraphRanker(sdk._get_proj())
-    p_high = sdk.create_point("decision", "pricing model for premium subscription tiers")
-    p_low = sdk.create_point("decision", "subscription pricing tiers model premium")
+    p_high = sdk._create_point("decision", "pricing model for premium subscription tiers")
+    p_low = sdk._create_point("decision", "subscription pricing tiers model premium")
     _set_confidence(sdk, p_high["id"], 0.95)
     _set_confidence(sdk, p_low["id"], 0.05)
 
@@ -233,7 +233,7 @@ def test_suggest_entry_points_with_graph_ranker():
     # gives zero RRF for this query (→ zero-signal fallback returns []), so
     # mock the hybrid query deterministically with rrf > 0 to exercise the
     # ranker path (mirrors test_fallback_confidence_scale_invariant_to_rrf).
-    sdk.tortoise_fts_query = lambda q, **kw: [
+    sdk._tortoise_fts_query = lambda q, **kw: [
         {"id": p_high["id"], "content": "pricing model for premium subscription tiers",
          "point_kind": "decision", "scores": {"rrf": 0.0164}},
         {"id": p_low["id"], "content": "subscription pricing tiers model premium",
@@ -273,8 +273,8 @@ def test_order_by_graph_surfaces_contestation_without_penalty():
     try:
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
         # Identical content → identical FTS/vector similarity.
-        pa = sdk.create_point("statement", "zebra finch migration phenology contested claim")
-        pb = sdk.create_point("statement", "zebra finch migration phenology contested claim")
+        pa = sdk._create_point("statement", "zebra finch migration phenology contested claim")
+        pb = sdk._create_point("statement", "zebra finch migration phenology contested claim")
         proj = sdk._get_proj()
         for pid, a, b in [(pa["id"], 10.0, 10.0), (pb["id"], 2.0, 2.0)]:
             proj.g.query(
@@ -282,7 +282,7 @@ def test_order_by_graph_surfaces_contestation_without_penalty():
                 "n.ep_alpha = $a, n.ep_beta = $b",
                 params={"id": pid, "a": a, "b": b},
             )
-        results = sdk.tortoise_fts_query("zebra finch migration", limit=10, order_by="graph")
+        results = sdk._tortoise_fts_query("zebra finch migration", limit=10, order_by="graph")
         ids = [r["id"] for r in results]
         assert pa["id"] in ids and pb["id"] in ids
         # Identical similarity + confidence + connectivity → identical graph
@@ -307,17 +307,17 @@ def sdk(tmp_path):
 
 
 def test_event_signal_counts_about_objects(sdk):
-    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s2")
+    ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s2")
     proj = sdk._get_proj()
     # Public SDK path for Object nodes; distinct names survive the #452 MERGE dedup.
-    objs = [sdk.create_object(f"obj{i}", "issue") for i in range(3)]
+    objs = [sdk._create_object(f"obj{i}", "issue") for i in range(3)]
     for o in objs:
         proj.create_about_edge(ev["eventId"], o["id"], "aboutObject")
     # Negative direction of the swap in the happy path: a legacy INSTANTIATES
     # edge must NOT add to the count even when aboutObject edges exist (a
     # conditional legacy fallback would only show up here). Mirrors the
     # confidence-only pin in test_event_signal_confidence_only_degradation.
-    legacy = sdk.create_object("legacy-inst-object", "issue")
+    legacy = sdk._create_object("legacy-inst-object", "issue")
     # Constant-interpolated rel-type: legacy edge created at runtime, no
     # edge-syntax literal in source (Task 5 sweep requires zero hits).
     proj.g.query(
@@ -349,7 +349,7 @@ def test_event_signal_counts_about_objects(sdk):
 
 
 def test_event_signal_degrades_without_about_objects(sdk):
-    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s3")
+    ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s3")
     ranker = GraphRanker(projection=sdk._get_proj())
     sig = ranker._fetch_event_signals([ev["eventId"]])[ev["eventId"]]
     assert sig["about_objects"] == 0
@@ -373,10 +373,10 @@ def test_rerank_event_boost_from_about_objects(sdk):
     seam); NB: create_event sets node id == eventId, so eventId-keying is
     pinned exactly by test_event_signal_keyed_by_eventId_not_id.
     """
-    ev_a = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s4")
-    ev_b = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s4b")
+    ev_a = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s4")
+    ev_b = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s4b")
     proj = sdk._get_proj()
-    objs = [sdk.create_object(f"rerank-obj{i}", "issue") for i in range(3)]
+    objs = [sdk._create_object(f"rerank-obj{i}", "issue") for i in range(3)]
     for o in objs:
         proj.create_about_edge(ev_a["eventId"], o["id"], "aboutObject")
     ranker = GraphRanker(projection=proj)
@@ -414,13 +414,13 @@ def test_event_signal_includes_produces_confidence(sdk):
     consumes it; when the #25 fix lands (lowercase query), flip the edge
     creation to lowercase and update expectations.
     """
-    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s5")
+    ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s5")
     proj = sdk._get_proj()
-    objs = [sdk.create_object(f"prod-obj{i}", "issue") for i in range(3)]
+    objs = [sdk._create_object(f"prod-obj{i}", "issue") for i in range(3)]
     for o in objs:
         proj.create_about_edge(ev["eventId"], o["id"], "aboutObject")
-    p_hi = sdk.create_point("statement", "session-produced finding hi")
-    p_lo = sdk.create_point("statement", "session-produced finding lo")
+    p_hi = sdk._create_point("statement", "session-produced finding hi")
+    p_lo = sdk._create_point("statement", "session-produced finding lo")
     _set_confidence(sdk, p_hi["id"], 0.9)
     _set_confidence(sdk, p_lo["id"], 0.3)
     # No SDK path emits uppercase PRODUCES; raw Cypher matches the query shape.
@@ -447,9 +447,9 @@ def test_event_signal_lowercase_produces_edge_not_matched(sdk):
     test_event_signal_batch_fetch_preserves_per_event_grouping (0.36 → 0.2).
     They are expected pin flips, not regressions.
     """
-    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s5b")
+    ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s5b")
     proj = sdk._get_proj()
-    p = sdk.create_point("statement", "decision-produced point")
+    p = sdk._create_point("statement", "decision-produced point")
     _set_confidence(sdk, p["id"], 0.9)
     assert proj.create_edge(ev["eventId"], p["id"], "produces") is True
     ranker = GraphRanker(projection=proj)
@@ -470,10 +470,10 @@ def test_event_signal_confidence_only_degradation(sdk):
     legacy INSTANTIATES edge must NOT count. NB: flips when #25 lands
     (lowercase PRODUCES query) — 0.24 → 0.2.
     """
-    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s5c")
+    ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s5c")
     proj = sdk._get_proj()
-    p_hi = sdk.create_point("statement", "old-graph finding hi")
-    p_lo = sdk.create_point("statement", "old-graph finding lo")
+    p_hi = sdk._create_point("statement", "old-graph finding hi")
+    p_lo = sdk._create_point("statement", "old-graph finding lo")
     _set_confidence(sdk, p_hi["id"], 0.9)
     _set_confidence(sdk, p_lo["id"], 0.3)
     proj.g.query(
@@ -484,7 +484,7 @@ def test_event_signal_confidence_only_degradation(sdk):
     # Negative direction of the #281 swap: a legacy INSTANTIATES edge must
     # NOT contribute to the aboutObject count. A union or partial rename
     # would silently INFLATE counts on live pre-migration graphs.
-    legacy = sdk.create_object("legacy-inst-object", "issue")
+    legacy = sdk._create_object("legacy-inst-object", "issue")
     # Constant-interpolated rel-type: legacy edge created at runtime, no
     # edge-syntax literal in source (Task 5 sweep requires zero hits).
     proj.g.query(
@@ -506,13 +506,13 @@ def test_event_signal_batch_fetch_preserves_per_event_grouping(sdk):
     counts and confidence must not merge across events. Production rerank
     batches all search results in a single fetch
     (``ranking.py::GraphRanker._fetch_event_signals``)."""
-    ev_a = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s8")
-    ev_b = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s9")
+    ev_a = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s8")
+    ev_b = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s9")
     proj = sdk._get_proj()
-    objs = [sdk.create_object(f"batch-obj{i}", "issue") for i in range(3)]
+    objs = [sdk._create_object(f"batch-obj{i}", "issue") for i in range(3)]
     for o in objs:
         proj.create_about_edge(ev_a["eventId"], o["id"], "aboutObject")
-    p_b = sdk.create_point("statement", "batch-produced point")
+    p_b = sdk._create_point("statement", "batch-produced point")
     _set_confidence(sdk, p_b["id"], 0.9)
     proj.g.query(
         "MATCH (e:Event {eventId:$eid}), (p:Point {id:$pid}) CREATE (e)-[:PRODUCES]->(p)",
@@ -567,7 +567,7 @@ def test_rerank_event_unmatched_signals_are_neutral(sdk):
     cross-contaminate matched events. Asserting matched (0.2) and unknown
     (0.0) divergence in ONE rerank call makes a swallowed producer crash
     (defensive try/except → {}) visible: it would collapse everything to 0.0."""
-    ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s6")
+    ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s6")
     ranker = GraphRanker(projection=sdk._get_proj())
     out = ranker.rerank(
         [{"id": ev["eventId"], "scores": {"rrf": 0.05}},
@@ -586,7 +586,7 @@ def test_rerank_event_unmatched_signals_are_neutral(sdk):
     # WHERE eventId IN $ids must scope to requested ids: fetching one event
     # never returns another event's row (would pass if the filter were removed).
     # Arrange: a second, unrequested event.
-    other = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s7")
+    other = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s7")
     # Act: fetch only the requested id.
     assert other["eventId"] not in ranker._fetch_event_signals([ev["eventId"]])
     # Result without an id → neutral 0.0, no crash. NB: this pins the

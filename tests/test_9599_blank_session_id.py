@@ -507,7 +507,7 @@ def test_the_fold_writes_no_session_for_a_blank_contains_session(sdk, blank):
     """
     client, _ = sdk
     proj = client._get_proj()
-    created = client.create_point(
+    created = client._create_point(
         kind="observation", content="the CONTAINS carrier probe")
     pid = created.get("id") or created["point"]["id"]
     proj._link_session(blank, pid)
@@ -532,7 +532,7 @@ def test_the_contains_carrier_still_links_a_padded_real_session(sdk):
     """
     client, _ = sdk
     proj = client._get_proj()
-    created = client.create_point(
+    created = client._create_point(
         kind="observation", content="the padded CONTAINS carrier probe")
     pid = created.get("id") or created["point"]["id"]
     proj._link_session("  s1  ", pid)
@@ -681,7 +681,7 @@ def test_rebuild_all_does_not_restore_a_blank_session_from_the_sidecar(
         proj = c._get_proj()
         # Seed a point (so `rebuild_all` has a graph to rebuild) and then the
         # blank container written the way a PRE-FIX capture wrote it.
-        created = c.create_point(kind="observation", content="sidecar probe")
+        created = c._create_point(kind="observation", content="sidecar probe")
         pid = created.get("id") or created["point"]["id"]
         proj.g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
@@ -715,7 +715,7 @@ def test_rebuild_all_still_restores_a_padded_real_session(tmp_path):
     c = _SDK(db, event_log_path=log)
     try:
         proj = c._get_proj()
-        c.create_point(kind="observation", content="padded sidecar probe")
+        c._create_point(kind="observation", content="padded sidecar probe")
         proj.g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
             params={"sid": "  s1  "})

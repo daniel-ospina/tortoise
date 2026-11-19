@@ -2764,7 +2764,7 @@ def test_the_control_cites_a_call_site_symbol_that_resolves():
     assert "sdk.SDK.search_graph" not in note, (
         "that symbol does not exist — the conclusion must cite the call site it "
         "actually leans on")
-    assert hasattr(_sdk.TortoiseSDK, "tortoise_fts_query")
+    assert hasattr(_sdk.TortoiseSDK, "_tortoise_fts_query")
     assert not hasattr(_sdk, "SDK")
 
 

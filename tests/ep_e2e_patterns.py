@@ -51,12 +51,12 @@ def test_chain():
     sdk = TortoiseSDK(namespace="ep_test_chain")
 
     # Create points
-    source = sdk.create_point("observation",
+    source = sdk._create_point("observation",
         "T0 Source: Meta-analysis of 50 studies confirms X",
         credibility="T0")
-    middle = sdk.create_point("statement",
+    middle = sdk._create_point("statement",
         "Middle: If X is confirmed, then mechanism Y is likely")
-    conclusion = sdk.create_point("hypothesis",
+    conclusion = sdk._create_point("hypothesis",
         "Conclusion: Therefore, outcome Z is probable")
 
     print(f"  Source:     {source['id']}")
@@ -64,18 +64,18 @@ def test_chain():
     print(f"  Conclusion: {conclusion['id']}")
 
     # Create operators (chain)
-    op1 = sdk.create_operator("IMPL", source["id"], [middle["id"]])
-    op2 = sdk.create_operator("IMPL", middle["id"], [conclusion["id"]])
+    op1 = sdk._create_operator("IMPL", source["id"], [middle["id"]])
+    op2 = sdk._create_operator("IMPL", middle["id"], [conclusion["id"]])
     print(f"  Op1 (src→mid): {op1['id']}")
     print(f"  Op2 (mid→con): {op2['id']}")
 
     # Run EP
-    result = sdk.compute_confidence()
+    result = sdk._compute_confidence()
     print(f"\n  EP: {result['iterations']} iters, converged={result['converged']}")
 
-    source_conf = sdk.get_confidence(source["id"])
-    middle_conf = sdk.get_confidence(middle["id"])
-    conclusion_conf = sdk.get_confidence(conclusion["id"])
+    source_conf = sdk._get_confidence(source["id"])
+    middle_conf = sdk._get_confidence(middle["id"])
+    conclusion_conf = sdk._get_confidence(conclusion["id"])
 
     print(f"\n  Source:     {fmt(source_conf)}")
     print(f"  Middle:     {fmt(middle_conf)}")
@@ -116,24 +116,24 @@ def test_convergent():
     sdk = TortoiseSDK(namespace="ep_test_conv")
 
     # Create points
-    source_a = sdk.create_point("observation",
+    source_a = sdk._create_point("observation",
         "T0 Source A: Clinical trial shows treatment is effective",
         credibility="T0")
-    source_b = sdk.create_point("observation",
+    source_b = sdk._create_point("observation",
         "T0 Source B: Independent replication confirms effectiveness",
         credibility="T0")
-    claim = sdk.create_point("hypothesis",
+    claim = sdk._create_point("hypothesis",
         "Claim: The treatment is effective for the target population")
 
     # Create BOTH operators
-    op_a = sdk.create_operator("IMPL", source_a["id"], [claim["id"]])  # noqa: F841
-    op_b = sdk.create_operator("IMPL", source_b["id"], [claim["id"]])
+    op_a = sdk._create_operator("IMPL", source_a["id"], [claim["id"]])  # noqa: F841
+    op_b = sdk._create_operator("IMPL", source_b["id"], [claim["id"]])
 
     # Run EP with both sources
-    result_both = sdk.compute_confidence()
-    claim_both = sdk.get_confidence(claim["id"])
-    source_a_conf = sdk.get_confidence(source_a["id"])
-    source_b_conf = sdk.get_confidence(source_b["id"])
+    result_both = sdk._compute_confidence()
+    claim_both = sdk._get_confidence(claim["id"])
+    source_a_conf = sdk._get_confidence(source_a["id"])
+    source_b_conf = sdk._get_confidence(source_b["id"])
 
     print(f"\n  Sources: A={source_a['id'][:12]}..., B={source_b['id'][:12]}...")
     print(f"  Claim:   {claim['id'][:12]}...")
@@ -144,9 +144,9 @@ def test_convergent():
 
     # Now remove source B's operator
     subheader("After removing Source B's operator")
-    sdk.delete_point(op_b["id"])
-    result_a_only = sdk.compute_confidence()
-    claim_a_only = sdk.get_confidence(claim["id"])
+    sdk._delete_point(op_b["id"])
+    result_a_only = sdk._compute_confidence()
+    claim_a_only = sdk._get_confidence(claim["id"])
 
     print(f"  EP (source A only): {result_a_only['iterations']} iters, converged={result_a_only['converged']}")
     print(f"  Claim (A only): {fmt(claim_a_only)}")
@@ -189,18 +189,18 @@ def test_undercutter():
 
     sdk = TortoiseSDK(namespace="ep_test_under")
 
-    source = sdk.create_point("observation",
+    source = sdk._create_point("observation",
         "T0 Source: Observational study finds correlation X-Y",
         credibility="T0")
-    claim = sdk.create_point("hypothesis",
+    claim = sdk._create_point("hypothesis",
         "Claim: X causes Y")
 
-    op = sdk.create_operator("IMPL", source["id"], [claim["id"]])
+    op = sdk._create_operator("IMPL", source["id"], [claim["id"]])
 
     # Run EP BEFORE mitigation
-    result_before = sdk.compute_confidence()
-    claim_before = sdk.get_confidence(claim["id"])
-    source_conf = sdk.get_confidence(source["id"])
+    result_before = sdk._compute_confidence()
+    claim_before = sdk._get_confidence(claim["id"])
+    source_conf = sdk._get_confidence(source["id"])
 
     print(f"\n  Source: {source['id'][:12]}...")
     print(f"  Claim:  {claim['id'][:12]}...")
@@ -211,7 +211,7 @@ def test_undercutter():
 
     # Mitigate the operator
     subheader("After mitigating the operator (strength=0.3)")
-    mitigation = sdk.mitigate_operator(
+    mitigation = sdk._mitigate_operator(
         op["id"],
         reason="Study has no control group — correlation, not causation",
         strength=0.3
@@ -225,20 +225,20 @@ def test_undercutter():
     print(f"  Operator weight (computed): {op_weight:.4f}")
 
     # Run EP AFTER mitigation
-    result_after = sdk.compute_confidence()
-    claim_after = sdk.get_confidence(claim["id"])
+    result_after = sdk._compute_confidence()
+    claim_after = sdk._get_confidence(claim["id"])
 
     print(f"\n  EP (after mitigation): {result_after['iterations']} iters, converged={result_after['converged']}")
     print(f"  Claim (after mitigation): {fmt(claim_after)}")
 
     # Also test with annotate_operator (bias=0.9 = high hidden stake)
     subheader("After annotating operator (bias=0.9, precision=0.3)")
-    sdk.annotate_operator(op["id"], bias=0.9, precision=0.3, consistency=0.5, directness=0.4)
+    sdk._annotate_operator(op["id"], bias=0.9, precision=0.3, consistency=0.5, directness=0.4)
     op_weight_annotated = compute_operator_weight(sdk._get_proj(), op["id"])
     print(f"  Operator weight (annotated): {op_weight_annotated:.4f}")
 
-    result_annotated = sdk.compute_confidence()  # noqa: F841
-    claim_annotated = sdk.get_confidence(claim["id"])
+    result_annotated = sdk._compute_confidence()  # noqa: F841
+    claim_annotated = sdk._get_confidence(claim["id"])
     print(f"  Claim (after annotation): {fmt(claim_annotated)}")
 
     # Sense checks
@@ -282,17 +282,17 @@ def test_defeater():
 
     sdk = TortoiseSDK(namespace="ep_test_defeat")
 
-    source = sdk.create_point("observation",
+    source = sdk._create_point("observation",
         "T0 Source: Study finds drug reduces symptoms by 40%",
         credibility="T0")
-    defeater = sdk.create_point("observation",
+    defeater = sdk._create_point("observation",
         "T0 Defeater: Independent review finds results not replicable in comorbid populations",
         credibility="T0")
-    claim = sdk.create_point("hypothesis",
+    claim = sdk._create_point("hypothesis",
         "Claim: The drug is effective for the general population")
 
-    op_impl = sdk.create_operator("IMPL", source["id"], [claim["id"]])
-    op_nand = sdk.create_operator("NAND", defeater["id"], [claim["id"]])
+    op_impl = sdk._create_operator("IMPL", source["id"], [claim["id"]])
+    op_nand = sdk._create_operator("NAND", defeater["id"], [claim["id"]])
 
     print(f"\n  Source:   {source['id'][:12]}... (IMPL)")
     print(f"  Defeater: {defeater['id'][:12]}... (NAND)")
@@ -300,10 +300,10 @@ def test_defeater():
     print(f"  Op IMPL:  {op_impl['id'][:12]}...")
     print(f"  Op NAND:  {op_nand['id'][:12]}...")
 
-    result = sdk.compute_confidence()
-    source_conf = sdk.get_confidence(source["id"])
-    defeater_conf = sdk.get_confidence(defeater["id"])
-    claim_conf = sdk.get_confidence(claim["id"])
+    result = sdk._compute_confidence()
+    source_conf = sdk._get_confidence(source["id"])
+    defeater_conf = sdk._get_confidence(defeater["id"])
+    claim_conf = sdk._get_confidence(claim["id"])
 
     print(f"\n  EP: {result['iterations']} iters, converged={result['converged']}")
     print(f"\n  Source:     {fmt(source_conf)}")
@@ -348,43 +348,43 @@ def test_linked_premises():
     sdk = TortoiseSDK(namespace="ep_test_linked")
 
     # Three T2 premises
-    prem_a = sdk.create_point("observation",
+    prem_a = sdk._create_point("observation",
         "T2 Premise A: Expert consensus favors approach",
         credibility="T2")
-    prem_b = sdk.create_point("observation",
+    prem_b = sdk._create_point("observation",
         "T2 Premise B: Case studies show positive results",
         credibility="T2")
-    prem_c = sdk.create_point("observation",
+    prem_c = sdk._create_point("observation",
         "T2 Premise C: Historical data supports the pattern",
         credibility="T2")
 
     # Bottleneck: joint support claim
-    bottleneck = sdk.create_point("statement",
+    bottleneck = sdk._create_point("statement",
         "Bottleneck: A, B, C jointly support the conclusion")
 
     # Conclusion
-    conclusion = sdk.create_point("hypothesis",
+    conclusion = sdk._create_point("hypothesis",
         "Conclusion: The approach is sound and should be adopted")
 
     # Operators: premises → bottleneck
-    op_a = sdk.create_operator("IMPL", prem_a["id"], [bottleneck["id"]])  # noqa: F841
-    op_b = sdk.create_operator("IMPL", prem_b["id"], [bottleneck["id"]])  # noqa: F841
-    op_c = sdk.create_operator("IMPL", prem_c["id"], [bottleneck["id"]])
+    op_a = sdk._create_operator("IMPL", prem_a["id"], [bottleneck["id"]])  # noqa: F841
+    op_b = sdk._create_operator("IMPL", prem_b["id"], [bottleneck["id"]])  # noqa: F841
+    op_c = sdk._create_operator("IMPL", prem_c["id"], [bottleneck["id"]])
 
     # Operator: bottleneck → conclusion
-    op_btl = sdk.create_operator("IMPL", bottleneck["id"], [conclusion["id"]])  # noqa: F841
+    op_btl = sdk._create_operator("IMPL", bottleneck["id"], [conclusion["id"]])  # noqa: F841
 
     print(f"\n  Premises: A, B, C (T2 credibility)")  # noqa: F541
     print(f"  Bottleneck: {bottleneck['id'][:12]}...")
     print(f"  Conclusion: {conclusion['id'][:12]}...")
 
     # Run EP with all three premises
-    result_all = sdk.compute_confidence()
-    prem_a_conf_all = sdk.get_confidence(prem_a["id"])
-    prem_b_conf_all = sdk.get_confidence(prem_b["id"])
-    prem_c_conf_all = sdk.get_confidence(prem_c["id"])
-    bottleneck_all = sdk.get_confidence(bottleneck["id"])
-    conclusion_all = sdk.get_confidence(conclusion["id"])
+    result_all = sdk._compute_confidence()
+    prem_a_conf_all = sdk._get_confidence(prem_a["id"])
+    prem_b_conf_all = sdk._get_confidence(prem_b["id"])
+    prem_c_conf_all = sdk._get_confidence(prem_c["id"])
+    bottleneck_all = sdk._get_confidence(bottleneck["id"])
+    conclusion_all = sdk._get_confidence(conclusion["id"])
 
     print(f"\n  EP (all 3 premises): {result_all['iterations']} iters, converged={result_all['converged']}")
     print(f"\n  Premise A:   {fmt(prem_a_conf_all)}")
@@ -395,10 +395,10 @@ def test_linked_premises():
 
     # Remove premise C's operator
     subheader("After invalidating Premise C (delete its operator)")
-    sdk.delete_point(op_c["id"])
-    result_two = sdk.compute_confidence()
-    bottleneck_two = sdk.get_confidence(bottleneck["id"])
-    conclusion_two = sdk.get_confidence(conclusion["id"])
+    sdk._delete_point(op_c["id"])
+    result_two = sdk._compute_confidence()
+    bottleneck_two = sdk._get_confidence(bottleneck["id"])
+    conclusion_two = sdk._get_confidence(conclusion["id"])
 
     print(f"  EP (2 premises): {result_two['iterations']} iters, converged={result_two['converged']}")
     print(f"  Bottleneck:  {fmt(bottleneck_two)}")

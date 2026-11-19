@@ -247,7 +247,7 @@ def test_the_sdk_public_write_api_is_unaffected(sdk_with_journal):
     public writers issue raw Cypher through the guarded HANDLE, which this lane
     deliberately does not close (recorded on #7951)."""
     sdk = sdk_with_journal
-    point = sdk.create_point("statement", "a claim", source="s1")
+    point = sdk._create_point("statement", "a claim", source="s1")
     assert point.get("id"), f"create_point returned no id: {point!r}"
 
 
@@ -355,7 +355,7 @@ def test_the_mcp_lane_is_armed(tmp_path, monkeypatch):
         proj = _armed(sdk)
         # The arming must not have broken the lane's own writes: the SDK's
         # live handle write still lands, and the chokepoint still folds.
-        assert sdk.create_point("statement", "mcp write").get("id")
+        assert sdk._create_point("statement", "mcp write").get("id")
         sdk._apply_and_journal(proj, _subject(proj, "subj-mcp-ok"))
         assert _count(proj, "Subject", "id", "subj-mcp-ok") == 1
     finally:
@@ -557,7 +557,7 @@ def test_create_point_journals_the_record_before_the_cache_write(
 
     monkeypatch.setattr(sdk, "_emit_event", spy_emit)
 
-    point = sdk.create_point("statement", "a journal-first claim")
+    point = sdk._create_point("statement", "a journal-first claim")
     assert point.get("id"), f"create_point returned no id: {point!r}"
 
     assert cache_at_journal == [0], (

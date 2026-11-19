@@ -183,8 +183,8 @@ class TestDeterministicResolutionReusesTheEntity:
     def test_two_spellings_that_carry_no_identity_produce_one_node(self, sdk_factory):
         """The repro: today's tree mints a twin; after the fix it reuses the node."""
         sdk = sdk_factory()
-        first = sdk.create_subject("fresh-context code reviewer", "role")
-        second = sdk.create_subject("the fresh-context code reviewer", "role")
+        first = sdk._create_subject("fresh-context code reviewer", "role")
+        second = sdk._create_subject("the fresh-context code reviewer", "role")
         assert first["id"] == second["id"]
         assert _count(sdk, "Subject") == 1
         # The caller's surface form is preserved on the surviving node — the fold
@@ -195,8 +195,8 @@ class TestDeterministicResolutionReusesTheEntity:
 
     def test_punctuation_and_case_also_resolve(self, sdk_factory):
         sdk = sdk_factory()
-        a = sdk.create_object("daniel-ospina/agent-infra", "repository")
-        b = sdk.create_object("Daniel Ospina Agent Infra", "repository")
+        a = sdk._create_object("daniel-ospina/agent-infra", "repository")
+        b = sdk._create_object("Daniel Ospina Agent Infra", "repository")
         assert a["id"] == b["id"]
         assert _count(sdk, "Object") == 1
 
@@ -208,20 +208,20 @@ class TestDeterministicResolutionReusesTheEntity:
         folded lookup inert exactly here, minting the twin the issue is about.
         """
         sdk = sdk_factory()
-        first = sdk.create_subject("the owner", "naturalPerson")
-        second = sdk.create_subject("owner", "naturalPerson")
+        first = sdk._create_subject("the owner", "naturalPerson")
+        second = sdk._create_subject("owner", "naturalPerson")
         assert second["id"] == first["id"]
         assert _count(sdk, "Subject") == 1
 
     def test_a_genuinely_different_name_still_mints(self, sdk_factory):
         sdk = sdk_factory()
-        sdk.create_subject("the founder", "naturalPerson")
-        sdk.create_subject("the operator", "naturalPerson")
+        sdk._create_subject("the founder", "naturalPerson")
+        sdk._create_subject("the operator", "naturalPerson")
         assert _count(sdk, "Subject") == 2
 
     def test_resolve_entity_name_reports_the_rung_it_took(self, sdk_factory):
         sdk = sdk_factory()
-        node = sdk.create_subject("owner", "naturalPerson")
+        node = sdk._create_subject("owner", "naturalPerson")
         g = sdk._get_proj().g
         exact = resolve_entity_name(g, "Subject", "the OWNER")
         assert exact["resolution"] == "exact" and exact["entity_id"] == node["id"]
@@ -395,7 +395,7 @@ class TestApproveMergeOnEntities:
                 ] == []
 
         # …and a LATER write of the variant resolves instead of minting a twin.
-        again = sdk.create_subject("the fresh-context reviewer role", "role")
+        again = sdk._create_subject("the fresh-context reviewer role", "role")
         assert again["id"] == row["existing_id"]
         assert _count(sdk, "Subject") == 2
 
@@ -452,7 +452,7 @@ class TestApproveMergeOnEntities:
 
     def test_apply_entity_merge_refuses_a_self_merge(self, sdk_factory):
         sdk = sdk_factory()
-        node = sdk.create_subject("self merge", "other")
+        node = sdk._create_subject("self merge", "other")
         with pytest.raises(ValueError):
             apply_entity_merge(sdk, node["id"], node["id"],
                                method="exact", similarity=1.0)
@@ -482,8 +482,8 @@ class TestMergeIsDurable:
                           event_log_path=str(events / "events.jsonl"),
                           namespace=f"test_suite_{os.urandom(4).hex()}")
         try:
-            sdk.create_subject("fresh-context code reviewer", "role")
-            sdk.create_subject("the fresh-context reviewer role", "role")
+            sdk._create_subject("fresh-context code reviewer", "role")
+            sdk._create_subject("the fresh-context reviewer role", "role")
             row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
             sdk.approve_merge(row["candidate_id"], action="merge")
             g = sdk._get_proj().g
@@ -515,8 +515,8 @@ class TestMergeIsDurable:
                           event_log_path=str(events / "events.jsonl"),
                           namespace=f"test_suite_{os.urandom(4).hex()}")
         try:
-            sdk.create_subject("plate one", "other")
-            sdk.create_subject("plate wun", "other")
+            sdk._create_subject("plate one", "other")
+            sdk._create_subject("plate wun", "other")
             row = sdk.review_link_candidates("dedup", candidate_type="entity")[0]
             sdk.approve_merge(row["candidate_id"], action="reject")
             g = sdk._get_proj().g
@@ -598,19 +598,19 @@ class TestReviewFixes:
         with pytest.raises(AmbiguousEntityName):
             refuse_ambiguous_create(g, "Subject", "owner")
         with pytest.raises(AmbiguousEntityName):
-            sdk.create_subject("owner", "naturalPerson")
+            sdk._create_subject("owner", "naturalPerson")
 
     def test_a_refused_role_holder_leaves_nothing_behind(self, sdk_factory):
         """F5: the refusal ran AFTER the node and its journal line were written."""
         sdk = sdk_factory()
-        sdk.create_subject("Daniel", "naturalPerson")
+        sdk._create_subject("Daniel", "naturalPerson")
         before = _count(sdk, "Subject")
         with pytest.raises(ValueError, match="matches no live"):
-            sdk.create_subject("owner", "role", roleHolder="nobody at all")
+            sdk._create_subject("owner", "role", roleHolder="nobody at all")
         assert _count(sdk, "Subject") == before, (
             "a refused create wrote a Subject — the caller was told it failed")
         with pytest.raises(ValueError, match="subjectKind='role'"):
-            sdk.create_subject("an org", "organization", roleHolder="Daniel")
+            sdk._create_subject("an org", "organization", roleHolder="Daniel")
         assert _count(sdk, "Subject") == before
 
     def test_a_merged_variant_resolves_by_the_alias_rung_not_as_ambiguous(
@@ -652,8 +652,8 @@ class TestHoldsRoleProduction:
     def test_a_role_declared_with_a_holder_is_linked(self, sdk_factory):
         """The edge both hosted graphs had ZERO of (#12047)."""
         sdk = sdk_factory()
-        person = sdk.create_subject("Daniel", "naturalPerson")
-        role = sdk.create_subject("owner", "role", roleHolder="Daniel")
+        person = sdk._create_subject("Daniel", "naturalPerson")
+        role = sdk._create_subject("owner", "role", roleHolder="Daniel")
         rows = sdk._get_proj().g.query(
             "MATCH (p:Subject)-[:holdsRole]->(r:Subject) "
             "RETURN p.id, r.id").result_set
@@ -661,10 +661,10 @@ class TestHoldsRoleProduction:
 
     def test_the_holder_may_be_addressed_by_id(self, sdk_factory):
         sdk = sdk_factory()
-        person = sdk.create_subject("Operator", "naturalPerson")
+        person = sdk._create_subject("Operator", "naturalPerson")
         # Distinct role name: a role whose fold collides with the holder's would
         # resolve ONTO the holder — a self edge, refused by `wire_holds_role` (N7).
-        sdk.create_subject("the operator role", "role", roleHolder=person["id"])
+        sdk._create_subject("the operator role", "role", roleHolder=person["id"])
         assert sdk._get_proj().g.query(
             "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
         ).result_set[0][0] == 1
@@ -672,21 +672,21 @@ class TestHoldsRoleProduction:
     def test_an_unresolvable_holder_refuses_rather_than_guessing(self, sdk_factory):
         sdk = sdk_factory()
         with pytest.raises(ValueError, match="matches no live"):
-            sdk.create_subject("owner", "role", roleHolder="nobody at all")
+            sdk._create_subject("owner", "role", roleHolder="nobody at all")
         assert sdk._get_proj().g.query(
             "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
         ).result_set[0][0] == 0
 
     def test_role_holder_on_a_non_role_refuses(self, sdk_factory):
         sdk = sdk_factory()
-        sdk.create_subject("Daniel", "naturalPerson")
+        sdk._create_subject("Daniel", "naturalPerson")
         with pytest.raises(ValueError, match="subjectKind='role'"):
-            sdk.create_subject("an organisation", "organization", roleHolder="Daniel")
+            sdk._create_subject("an organisation", "organization", roleHolder="Daniel")
 
     def test_the_holder_prop_never_lands_on_the_node(self, sdk_factory):
         sdk = sdk_factory()
-        sdk.create_subject("Daniel", "naturalPerson")
-        role = sdk.create_subject("owner", "role", roleHolder="Daniel")
+        sdk._create_subject("Daniel", "naturalPerson")
+        role = sdk._create_subject("owner", "role", roleHolder="Daniel")
         props = sdk._get_proj().g.query(
             "MATCH (s:Subject {id:$id}) RETURN properties(s)",
             params={"id": role["id"]}).result_set[0][0]
@@ -792,7 +792,7 @@ class TestSecondReviewRoundBounded:
         _create_raw(sdk, "Subject", "sub-b", "The Acme Holdings", "subjectKind",
                     "other", ts="2026-01-02", canonical_name="acme")
         with pytest.raises(AmbiguousEntityName):
-            sdk.create_subject("Acme")
+            sdk._create_subject("Acme")
         exists, _t, _op, _st, count, merges, _tid = sdk._entity_name_holders(
             "Subject", "Acme")
         assert exists and count == 2 and not merges, (
@@ -821,8 +821,8 @@ class TestSecondReviewRoundBounded:
         the string simply does not participate.
         """
         sdk = sdk_factory()
-        sdk.create_subject("Foo", "other", aliases="a bare string")
-        made = sdk.create_subject("Bar", "other")
+        sdk._create_subject("Foo", "other", aliases="a bare string")
+        made = sdk._create_subject("Bar", "other")
         assert made["id"]
         g = sdk._get_proj().g
         assert find_live_holder(g, "Subject", normalize_entity_name("Foo"))
@@ -847,7 +847,7 @@ class TestSecondReviewRoundBounded:
             g, "Subject", "Bob Smith",
             name_props=("name", "canonical_name")) is None, (
             "a retired survivor was handed back as a live holder")
-        minted = sdk.create_subject("Bob Smith")
+        minted = sdk._create_subject("Bob Smith")
         assert minted["id"] != "sub-a", (
             "the create MERGEd onto the retired incarnation instead of minting")
         assert minted.get("status") != "superseded"
@@ -910,7 +910,7 @@ class TestSecondReviewRoundBounded:
             g, "Subject", "Acme Owner",
             name_props=("name", "canonical_name")) == "sub-a", (
             "a name the merge just unified still answers 'ambiguous' on the read path")
-        role = sdk.create_subject("owner role", "role", roleHolder="Acme Owner")
+        role = sdk._create_subject("owner role", "role", roleHolder="Acme Owner")
         assert role["id"]
         wired = g.query(
             "MATCH (:Subject {id:'sub-a'})-[r:holdsRole]->(:Subject) "
@@ -942,7 +942,7 @@ class TestSecondReviewRoundBounded:
             g, "Subject", "Bob Smith",
             name_props=("name", "canonical_name")) == "sub-a", (
             "the read path resolved the merged-away spelling onto the retired carrier")
-        assert sdk.create_subject("Bob Smith")["id"] == "sub-a", (
+        assert sdk._create_subject("Bob Smith")["id"] == "sub-a", (
             "the write path and the read path disagree about a merged spelling")
 
     def test_the_fold_resolver_also_collapses_a_merged_carrier(self, sdk_factory):
@@ -1045,7 +1045,7 @@ class TestSecondReviewRoundBounded:
         onto the RENAMED entity — a wrong-entity write, with the pre-flight probe
         agreeing because it reads the same key."""
         sdk = sdk_factory()
-        obj = sdk.create_object("owner", "concept")
+        obj = sdk._create_object("owner", "concept")
         sdk.update_knowledge(obj["id"], name="Alice")
         g = sdk._get_proj().g
         folded = g.query("MATCH (o:Object {id:$id}) RETURN o.canonical_name",
@@ -1053,7 +1053,7 @@ class TestSecondReviewRoundBounded:
         assert folded == normalize_entity_name("Alice"), (
             "the rename left the stale folded key on the node")
         # Creating the OLD spelling must mint a NEW entity, not write onto Alice.
-        again = sdk.create_object("owner", "concept")
+        again = sdk._create_object("owner", "concept")
         assert again["id"] != obj["id"], (
             "a write of the pre-rename spelling resolved onto the renamed entity")
 
@@ -1067,7 +1067,7 @@ class TestSecondReviewRoundBounded:
         the gate raw.
         """
         sdk = sdk_factory()
-        sdk.create_subject("Daniel", "naturalPerson")
+        sdk._create_subject("Daniel", "naturalPerson")
         # ⛔ `create_entity` directly, NOT the `create_subject` alias (#12047
         # review F5): the alias normalises its `subjectKind` PARAMETER
         # (`subjectKind = named_kind(subjectKind)`) before the prop ever reaches
@@ -1087,8 +1087,8 @@ class TestSecondReviewRoundBounded:
     def test_both_role_holder_spellings_are_popped_off_the_node(self, sdk_factory):
         """P2: supplying both spellings left `role_holder` on the node."""
         sdk = sdk_factory()
-        sdk.create_subject("Daniel", "naturalPerson")
-        role = sdk.create_subject("owner", "role", roleHolder="Daniel",
+        sdk._create_subject("Daniel", "naturalPerson")
+        role = sdk._create_subject("owner", "role", roleHolder="Daniel",
                                   role_holder="Daniel")
         props = sdk._get_proj().g.query(
             "MATCH (s:Subject {id:$id}) RETURN properties(s)",
@@ -1148,7 +1148,7 @@ class TestSecondReviewRound:
     def _two_folded_carriers(self, sdk):
         """Two LIVE carriers of ONE folded identity: `an owner` (canonical_name
         `owner`) and the raw node `owner` (name only) — the pre-#3590 shape."""
-        sdk.create_subject("an owner", "role")          # stamps canonical_name
+        sdk._create_subject("an owner", "role")          # stamps canonical_name
         _create_raw(sdk, "Subject", "sub-raw", "owner", "subjectKind", "role")
 
     def test_the_raw_spelling_does_not_evade_the_folded_count(self, sdk_factory):
@@ -1159,21 +1159,21 @@ class TestSecondReviewRound:
         self._two_folded_carriers(sdk)
         for spelling in ("owner", "the owner", "OWNER", "an owner"):
             with pytest.raises(AmbiguousEntityName):
-                sdk.create_subject(spelling, "role")
+                sdk._create_subject(spelling, "role")
         assert _count(sdk, "Subject", subjectKind="role") == 2
 
     def test_a_single_entity_matching_both_arms_is_not_ambiguous(self, sdk_factory):
         """The union must dedupe: one node holding both spellings is ONE holder."""
         sdk = sdk_factory()
-        sdk.create_subject("owner", "role")
-        again = sdk.create_subject("the owner", "role")  # idempotent re-mention
+        sdk._create_subject("owner", "role")
+        again = sdk._create_subject("the owner", "role")  # idempotent re-mention
         assert _count(sdk, "Subject", subjectKind="role") == 1
         assert again["id"]
 
     def test_the_role_door_sees_the_same_ambiguity(self, sdk_factory):
         self._two_folded_carriers(sdk := sdk_factory())
         with pytest.raises(AmbiguousEntityName):
-            sdk.create_subject("a role", "role", roleHolder="owner")
+            sdk._create_subject("a role", "role", roleHolder="owner")
 
     # ── N2: a `semantic` queue row is mergeable ──────────────────────────
 
@@ -1218,7 +1218,7 @@ class TestSecondReviewRound:
         rename left the NEW spelling invisible to the deterministic rung — and a
         create of it minted a twin, the damage this issue removes."""
         sdk = sdk_factory()
-        obj = sdk.create_object("Acme Corp", "document")
+        obj = sdk._create_object("Acme Corp", "document")
         oid = obj["id"]
         sdk.update_knowledge(oid, name="Acme Corporation")
         props = sdk._get_proj().g.query(
@@ -1227,14 +1227,14 @@ class TestSecondReviewRound:
         assert props["name"] == "Acme Corporation"
         assert props["canonical_name"] == "acme corporation"
         # …so the loud spelling resolves onto the renamed entity, not a twin.
-        again = sdk.create_object("ACME CORPORATION", "document")
+        again = sdk._create_object("ACME CORPORATION", "document")
         assert again["id"] == oid
         assert _count(sdk, "Object") == 1
 
     def test_a_rename_onto_a_folded_collision_refuses(self, sdk_factory):
         sdk = sdk_factory()
-        first = sdk.create_object("Acme Corp", "document")
-        second = sdk.create_object("Beta Inc", "document")
+        first = sdk._create_object("Acme Corp", "document")
+        second = sdk._create_object("Beta Inc", "document")
         with pytest.raises(NameAlreadyHeld):
             sdk.update_knowledge(second["id"], name="the acme corp")
         props = sdk._get_proj().g.query(
@@ -1273,8 +1273,8 @@ class TestSecondReviewRound:
         from tortoise.entity_identity import non_folded_entries
 
         sdk = sdk_factory()
-        sdk.create_subject("owner", "naturalPerson")
-        role = sdk.create_subject("the operator", "role")
+        sdk._create_subject("owner", "naturalPerson")
+        role = sdk._create_subject("the operator", "role")
         from tortoise.entity_resolver import wire_holds_role
 
         wire_holds_role(sdk, "the owner", role["id"])  # raw spelling misses, fold hits
@@ -1288,11 +1288,11 @@ class TestSecondReviewRound:
 
     def test_a_role_cannot_hold_itself(self, sdk_factory):
         sdk = sdk_factory()
-        person = sdk.create_subject("Dana", "naturalPerson")
+        person = sdk._create_subject("Dana", "naturalPerson")
         # `Dana` names the person, so the role create resolves ONTO the person and
         # the holder is that same node — the self edge the guard exists for.
         with pytest.raises(ValueError, match="cannot hold itself"):
-            sdk.create_subject("Dana", "role", roleHolder="Dana")
+            sdk._create_subject("Dana", "role", roleHolder="Dana")
         assert sdk._get_proj().g.query(
             "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
         ).result_set[0][0] == 0
@@ -1338,7 +1338,7 @@ class TestSecondReviewRound:
         assert props["name"] == "The Pricing Memo"      # surface form preserved
         assert props["canonical_name"] == "pricing memo"  # one fold for the key
         # …so the folded spelling resolves onto it instead of minting a twin.
-        again = sdk.create_object("the pricing memo", "document")
+        again = sdk._create_object("the pricing memo", "document")
         assert again["id"] == oid
         assert _count(sdk, "Object") == 1
 
@@ -1358,8 +1358,8 @@ class TestThirdReviewRound:
         from tortoise.entity_resolver import apply_entity_merge
 
         sdk = sdk_factory()
-        survivor = sdk.create_object("Acme Corp", "document")["id"]
-        twin = sdk.create_object("Acme Corporaton", "document")["id"]
+        survivor = sdk._create_object("Acme Corp", "document")["id"]
+        twin = sdk._create_object("Acme Corporaton", "document")["id"]
         assert twin != survivor
         apply_entity_merge(sdk, candidate_id=twin, survivor_id=survivor,
                            method="fuzzy", similarity=0.9)
@@ -1371,17 +1371,17 @@ class TestThirdReviewRound:
             return rows[0]
 
         assert props(survivor) == ["Acme Corp", "acme corp"]
-        again = sdk.create_object("Acme Corporaton", "document")  # the alias
+        again = sdk._create_object("Acme Corporaton", "document")  # the alias
         assert again["id"] == survivor, "the merged-away spelling must hop"
         assert props(survivor) == ["Acme Corp", "acme corp"], (
             "a re-mention rewrote the survivor's resolution key")
         # …and the survivor is STILL addressable under its own spelling.
-        assert sdk.create_object("acme corp", "document")["id"] == survivor
+        assert sdk._create_object("acme corp", "document")["id"] == survivor
 
     def test_a_plain_re_mention_does_not_rewrite_the_key(self, sdk_factory):
         sdk = sdk_factory()
-        oid = sdk.create_object("Acme Corp", "document")["id"]
-        sdk.create_object("ACME CORPORATION", "document")  # mints its own entity
+        oid = sdk._create_object("Acme Corp", "document")["id"]
+        sdk._create_object("ACME CORPORATION", "document")  # mints its own entity
         rows = sdk._get_proj().g.query(
             "MATCH (o:Object {id:$id}) RETURN o.name, o.canonical_name",
             params={"id": oid}).result_set
@@ -1398,7 +1398,7 @@ class TestThirdReviewRound:
         g.query("CREATE (:Subject {name:'Ghost3'}) CREATE (:Subject {name:'Ghost3'})")
         assert _count(sdk, "Subject") == 2
         with pytest.raises(AmbiguousEntityName):
-            sdk.create_subject("Ghost3", "role")
+            sdk._create_subject("Ghost3", "role")
         ids = g.query("MATCH (n:Subject) RETURN n.id").result_set
         assert [r[0] for r in ids] == [None, None], (
             f"an id was stamped onto an id-less holder despite the refusal: {ids}")
@@ -1535,7 +1535,7 @@ class TestThirdReviewRound:
         out = sdk.approve_merge(row["candidate_id"], "merge")
         assert out["survived_id"] == a
         for spelling in ("The Owner", "the owner", "OWNER", "The  Owner"):
-            assert sdk.create_object(spelling, "document")["id"] == a, (
+            assert sdk._create_object(spelling, "document")["id"] == a, (
                 f"{spelling!r} no longer resolves onto the survivor after a merge")
         # …and the survivor may be renamed onto the variant's spelling.
         sdk.update_knowledge(a, name="THE OWNER ")
@@ -1551,11 +1551,11 @@ class TestThirdReviewRound:
         _create_raw(sdk, "Object", "p-1", "The Owner", "objectKind", "document")
         sdk._get_proj().g.query(
             "MATCH (o:Object {id:'p-1'}) REMOVE o.canonical_name")
-        assert sdk.create_object("The Owner", "document")["id"] == "p-1"
+        assert sdk._create_object("The Owner", "document")["id"] == "p-1"
         rows = sdk._get_proj().g.query(
             "MATCH (o:Object {id:'p-1'}) RETURN o.canonical_name").result_set
         assert rows[0][0] == "owner", "the create did not fill the absent fold"
-        assert sdk.create_object("the owner", "document")["id"] == "p-1"
+        assert sdk._create_object("the owner", "document")["id"] == "p-1"
         assert _count(sdk, "Object") == 1
 
     def test_an_adopted_id_less_row_gains_the_fold(self, sdk_factory):
@@ -1563,7 +1563,7 @@ class TestThirdReviewRound:
         sdk._get_proj().g.query(
             "CREATE (:Object {name:'Legacy Doc', objectKind:'document', "
             "status:'live'})")
-        oid = sdk.create_object("Legacy Doc", "document")["id"]
+        oid = sdk._create_object("Legacy Doc", "document")["id"]
         rows = sdk._get_proj().g.query(
             "MATCH (o:Object {id:$id}) RETURN o.canonical_name",
             params={"id": oid}).result_set
@@ -1587,8 +1587,8 @@ class TestThirdReviewRound:
     def test_a_hyphenated_name_does_not_resolve_onto_an_unrelated_node(
             self, sdk_factory):
         sdk = sdk_factory()
-        ab = sdk.create_object("AB", "document")["id"]
-        assert sdk.create_object("a-b", "document")["id"] != ab, (
+        ab = sdk._create_object("AB", "document")["id"]
+        assert sdk._create_object("a-b", "document")["id"] != ab, (
             "a-name with a hyphen resolved onto an unrelated 'AB' node")
 
     # ── F-F (P2): a pre-#12047 row is REPAIRED by the review flow ────────
@@ -1608,7 +1608,7 @@ class TestThirdReviewRound:
         writes the new-shape key onto the node.
         """
         sdk = sdk_factory()
-        obj = sdk.create_object("The Owner", "document")["id"]
+        obj = sdk._create_object("The Owner", "document")["id"]
         sdk._get_proj().g.query(
             "MATCH (o:Object {id:$id}) SET o.canonical_name='the owner'",
             params={"id": obj})   # the pre-#12047 shape
@@ -1633,7 +1633,7 @@ class TestThirdReviewRound:
         # retired carrier is superseded (a terminal node is excluded from the
         # live-holder union, so the alias is the only remaining evidence).
         sdk.update_knowledge(out["candidate_id"], status="superseded", supersededBy="the merging survivor")
-        assert sdk.create_object("the owner", "document")["id"] == surv
+        assert sdk._create_object("the owner", "document")["id"] == surv
 
     def test_the_alias_arm_survives_the_carriers_retirement(self, sdk_factory):
         """Finding 3: the write path read `name`/`canonical_name` only, so the
@@ -1641,21 +1641,21 @@ class TestThirdReviewRound:
         the retired carrier stayed LIVE — it died the moment it was superseded,
         which is the ordinary next step."""
         sdk = sdk_factory()
-        a = sdk.create_object("Acme Corp", "document")["id"]
-        b = sdk.create_object("Acme Corporaton", "document")
+        a = sdk._create_object("Acme Corp", "document")["id"]
+        b = sdk._create_object("Acme Corporaton", "document")
         if b["id"] == a:
             pytest.skip("resolved at create time — no merge to test")
         out = sdk.approve_merge(b["id"], "merge")
         assert out["survived_id"] == a
         sdk.update_knowledge(b["id"], status="superseded", supersededBy="the merging survivor")
-        assert sdk.create_object("Acme Corporaton", "document")["id"] == a
+        assert sdk._create_object("Acme Corporaton", "document")["id"] == a
         assert _count(sdk, "Object") == 2, "the merge must not delete either node"
 
     # ── F-H (P2): a no-op re-write keeps a caller-supplied key ───────────
 
     def test_an_unchanged_name_does_not_clobber_a_caller_supplied_key(self, sdk_factory):
         sdk = sdk_factory()
-        oid = sdk.create_object("Widget", "document")["id"]
+        oid = sdk._create_object("Widget", "document")["id"]
         sdk._get_proj().g.query(
             "MATCH (o:Object {id:$id}) SET o.canonical_name='my own key'",
             params={"id": oid})
@@ -1703,13 +1703,13 @@ class TestThe12120RemainingReaders:
                           event_log_path=str(events / "events.jsonl"),
                           namespace=f"test_suite_{os.urandom(4).hex()}")
         try:
-            first = sdk.create_object("Acme Corp", "document")["id"]
+            first = sdk._create_object("Acme Corp", "document")["id"]
             # the PR's headline behaviour: the variant lands on the SAME node,
             # which keeps the caller's original surface form as `name`.
-            assert sdk.create_object("The Acme Corp", "document")["id"] == first
+            assert sdk._create_object("The Acme Corp", "document")["id"] == first
             assert _count(sdk, "Object") == 1
 
-            sdk.create_event("ev-1", "github.issue.open",
+            sdk._create_event("ev-1", "github.issue.open",
                              object="The Acme Corp", objectType="Object")
 
             g = sdk._get_proj().g
@@ -1764,8 +1764,8 @@ class TestThe12120RemainingReaders:
         assert _count(sdk, "Object") == 1
 
         # …and the name is still writable (the create-poisoning is the harm).
-        assert sdk.create_object("Acme Corp", "document")["id"] == held
-        assert sdk.create_object("the acme corp", "document")["id"] == held
+        assert sdk._create_object("Acme Corp", "document")["id"] == held
+        assert sdk._create_object("the acme corp", "document")["id"] == held
 
     def test_the_onboarding_anchor_guard_sees_a_fold_collision(self, sdk_factory):
         """P2 — both anchor probes enumerated the raw `name` only.
@@ -1779,7 +1779,7 @@ class TestThe12120RemainingReaders:
 
         sdk = sdk_factory()
         g = sdk._get_proj().g
-        first = sdk.create_subject("Acme", subjectKind="organization",
+        first = sdk._create_subject("Acme", subjectKind="organization",
                                    org_id="org-1")["id"]
 
         # A fold-colliding spelling must resolve to the held anchor, not read as
@@ -1791,7 +1791,7 @@ class TestThe12120RemainingReaders:
             "the carry's existence probe read a fold-colliding name as free")
 
         # The harm the guard prevents: the writer would have rewritten org_id.
-        sdk.create_subject("ACME", subjectKind="organization", org_id="org-2")
+        sdk._create_subject("ACME", subjectKind="organization", org_id="org-2")
         row = g.query("MATCH (s:Subject {id:$id}) RETURN s.org_id",
                       params={"id": first}).result_set
         assert row[0][0] == "org-2", (
@@ -1850,8 +1850,8 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
 
     def _merged_then_retired(self, sdk):
         """Two spellings merged onto one node, then BOTH incarnations retired."""
-        survivor = sdk.create_object("Acme Corp", "document")["id"]
-        candidate = sdk.create_object("Acme Corporaton", "document")["id"]
+        survivor = sdk._create_object("Acme Corp", "document")["id"]
+        candidate = sdk._create_object("Acme Corporaton", "document")["id"]
         assert candidate != survivor, "fixture drift: no merge to set up"
         sdk.approve_merge(candidate, action="merge")
         sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
@@ -1881,7 +1881,7 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
             # A status-fold event naming the merged-away spelling. No live entity
             # may be resurrected (R5), so this is the bounded, non-fatal
             # `unfolded-mention` — NOT a missing creation event.
-            sdk.create_event("ev-1", "github.issue.open",
+            sdk._create_event("ev-1", "github.issue.open",
                              object="Acme Corporaton", objectType="Object")
 
             # A non-exempt record would make the run boundary raise.
@@ -1920,8 +1920,8 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         proj = sdk._get_proj()
         api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
                        projection=proj)
-        survivor = sdk.create_object("Acme Corp", "document")["id"]
-        candidate = sdk.create_object("Acme Corporaton", "document")["id"]
+        survivor = sdk._create_object("Acme Corp", "document")["id"]
+        candidate = sdk._create_object("Acme Corporaton", "document")["id"]
         sdk.approve_merge(candidate, action="merge")
         sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
         sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
@@ -1966,7 +1966,7 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         proj = sdk._get_proj()
         api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
                        projection=proj)
-        holder = sdk.create_object("Acme Corp", "document")["id"]
+        holder = sdk._create_object("Acme Corp", "document")["id"]
         sdk.update_knowledge(holder, status="superseded", supersededBy="Acme Corp (retired)")
         before = _count(sdk, "Object")
 
@@ -2069,8 +2069,8 @@ class TestThe12120ReadersOutsideTheEntityModule:
                           event_log_path=str(events / "events.jsonl"),
                           namespace=f"test_suite_{os.urandom(4).hex()}")
         try:
-            survivor = sdk.create_object("Acme Corp", "document")["id"]
-            candidate = sdk.create_object("Acme Corporaton", "document")["id"]
+            survivor = sdk._create_object("Acme Corp", "document")["id"]
+            candidate = sdk._create_object("Acme Corporaton", "document")["id"]
             assert candidate != survivor, "fixture drift: no merge to set up"
             sdk.approve_merge(candidate, action="merge")
             # ONLY the survivor is retired — the carrier stays live (the merge is
@@ -2085,7 +2085,7 @@ class TestThe12120ReadersOutsideTheEntityModule:
                 "superseded", "deprecated", "archived", "retracted"), (
                 f"fixture drift: the carrier is not LIVE: {carrier}")
 
-            sdk.create_event("ev-1", "github.issue.open",
+            sdk._create_event("ev-1", "github.issue.open",
                              object="Acme Corporaton", objectType="Object")
 
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -2103,12 +2103,12 @@ class TestThe12120ReadersOutsideTheEntityModule:
         `belief_timeline("Widget")` answered — an empty list read as "no beliefs",
         which is the exact class #12047 exists to remove."""
         sdk = sdk_factory()
-        obj = sdk.create_object("Widget", "document")["id"]
-        point = sdk.create_point("decision", "the widget ships in Q3")["id"]
-        sdk.create_edge("aboutObject", point, obj)
+        obj = sdk._create_object("Widget", "document")["id"]
+        point = sdk._create_point("decision", "the widget ships in Q3")["id"]
+        sdk._create_edge("aboutObject", point, obj)
 
-        named = sdk.belief_timeline("Widget")
-        folded = sdk.belief_timeline("the widget")
+        named = sdk._belief_timeline("Widget")
+        folded = sdk._belief_timeline("the widget")
         assert named, "fixture drift: the belief did not attach to the Object"
         assert folded == named, (
             "a fold-colliding spelling answered with a different chain "
@@ -2125,9 +2125,9 @@ class TestThe12120ReadersOutsideTheEntityModule:
         raw read hit `name` — measured.)
         """
         sdk = sdk_factory()
-        sdk.create_subject("Acme Corp", subjectKind="naturalPerson")
-        artifact = sdk.create_object("Spec", "document")["id"]
-        claim = sdk.create_point("statement", "the spec is approved")["id"]
+        sdk._create_subject("Acme Corp", subjectKind="naturalPerson")
+        artifact = sdk._create_object("Spec", "document")["id"]
+        claim = sdk._create_point("statement", "the spec is approved")["id"]
 
         out = sdk.record_decision(
             approver_id="the acme corp", artifact_id=artifact, point_ids=[claim])
@@ -2153,7 +2153,7 @@ class TestThe12120AnchorReaderCollapsesToo:
 
         sdk = sdk_factory()
         proj = sdk._get_proj()
-        anchor = sdk.create_subject("Acme Corp", "org")["id"]
+        anchor = sdk._create_subject("Acme Corp", "org")["id"]
         # the pre-#12047 damage shape the queue exists to merge: a second node
         # carrying the SAME folded key under a different surface form
         proj.g.query(
@@ -2166,7 +2166,7 @@ class TestThe12120AnchorReaderCollapsesToo:
         assert props is not None and props["id"] == anchor, (
             f"the guard refused a merged pair the writer collapses: {props!r}")
         # …and the write path agrees on the same single node.
-        assert sdk.create_subject("The Acme Corp", "org")["id"] == anchor
+        assert sdk._create_subject("The Acme Corp", "org")["id"] == anchor
         assert _count(sdk, "Subject") == 2, "the merge must not delete either node"
 
     def test_a_second_distinct_holder_still_refuses(self, sdk_factory):
@@ -2175,7 +2175,7 @@ class TestThe12120AnchorReaderCollapsesToo:
 
         sdk = sdk_factory()
         proj = sdk._get_proj()
-        anchor = sdk.create_subject("Acme Corp", "org")["id"]
+        anchor = sdk._create_subject("Acme Corp", "org")["id"]
         proj.g.query(
             "CREATE (:Subject {id:'sub-legacy', name:'The Acme Corp', "
             "subjectKind:'org', status:'live', canonical_name:'acme corp'})")
@@ -2215,8 +2215,8 @@ class TestThe12120FourthRoundReaders:
         )
 
         sdk = sdk_factory()
-        survivor = sdk.create_subject("Acme Corp", "organization")["id"]
-        candidate = sdk.create_subject("Acme Corporaton", "organization")["id"]
+        survivor = sdk._create_subject("Acme Corp", "organization")["id"]
+        candidate = sdk._create_subject("Acme Corporaton", "organization")["id"]
         assert candidate != survivor, "fixture drift: nothing to merge"
         sdk.approve_merge(candidate, action="merge")
         # The retired CARRIER only: the survivor stays live, which is the state a
@@ -2224,7 +2224,7 @@ class TestThe12120FourthRoundReaders:
         sdk.update_knowledge(candidate, status="superseded", supersededBy="Acme Corp")
         clear_non_folded_entries()
 
-        role = sdk.create_subject("the admin role", "role",
+        role = sdk._create_subject("the admin role", "role",
                                   roleHolder="Acme Corporaton")
         assert role["id"], "the role's own write failed"
         wired = sdk._get_proj().g.query(
@@ -2248,8 +2248,8 @@ class TestThe12120FourthRoundReaders:
         TERMINAL-only reference keeps answering True") two lines above the call.
         """
         sdk = sdk_factory()
-        survivor = sdk.create_object("Acme Corp", "document")["id"]
-        candidate = sdk.create_object("Acme Corporaton", "document")["id"]
+        survivor = sdk._create_object("Acme Corp", "document")["id"]
+        candidate = sdk._create_object("Acme Corporaton", "document")["id"]
         assert candidate != survivor, "fixture drift: nothing to merge"
         sdk.approve_merge(candidate, action="merge")
         sdk.update_knowledge(survivor, status="superseded", supersededBy="Acme Corporaton")
@@ -2286,8 +2286,8 @@ class TestThe12120AboutEdgeStubIsFoldAware:
         raised. Discriminating assertion: `create_subject("owner")` succeeds."""
         sdk = sdk_factory()
         try:
-            owner = sdk.create_subject("The Owner")["id"]
-            sdk.create_event("ev-12055-1", "github.issue.open",
+            owner = sdk._create_subject("The Owner")["id"]
+            sdk._create_event("ev-12055-1", "github.issue.open",
                              aboutSubject="the owner")
 
             g = sdk._get_proj().g
@@ -2308,7 +2308,7 @@ class TestThe12120AboutEdgeStubIsFoldAware:
 
             # THE POISONING. Before the fix this raised `AmbiguousEntityName`
             # (`candidate_ids=['<ulid>', 'the owner']`, measured).
-            again = sdk.create_subject("owner")
+            again = sdk._create_subject("owner")
             assert again["id"] == owner, (
                 "the folded spelling resolved to a different entity than the one "
                 f"the mention wired: {again!r}")
@@ -2327,8 +2327,8 @@ class TestThe12120AboutEdgeStubIsFoldAware:
                           event_log_path=str(events / "events.jsonl"),
                           namespace=f"test_suite_{os.urandom(4).hex()}")
         try:
-            owner = sdk.create_subject("The Owner")["id"]
-            sdk.create_event("ev-12055-2", "github.issue.open",
+            owner = sdk._create_subject("The Owner")["id"]
+            sdk._create_event("ev-12055-2", "github.issue.open",
                              aboutSubject="the owner")
             g = sdk._get_proj().g
             q = ("MATCH (e:Event)-[:aboutSubject]->(s:Subject) "
@@ -2395,15 +2395,15 @@ class TestThe12120AboutEdgeStubIsFoldAware:
                           event_log_path=str(events / "events.jsonl"),
                           namespace=f"test_suite_{os.urandom(4).hex()}")
         try:
-            owner = sdk.create_subject("The Owner")["id"]
-            sdk.create_event("ev-12055-3", "github.issue.open",
+            owner = sdk._create_subject("The Owner")["id"]
+            sdk._create_event("ev-12055-3", "github.issue.open",
                              aboutSubject="the owner")
             g = sdk._get_proj().g
             assert g.query(
                 "MATCH (:Event)-[:aboutSubject]->(s:Subject) RETURN s.id"
             ).result_set == [[owner]], "fixture drift: the link was not wired"
 
-            assert sdk.delete_entity(owner) is True, (
+            assert sdk._delete_entity__svc(owner) is True, (
                 "fixture drift: the Subject was not hard-deleted")
 
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -2431,9 +2431,9 @@ class TestThe12120AboutEdgeStubIsFoldAware:
         """
         sdk = sdk_factory()
         try:
-            buried = sdk.create_subject("The Owner")["id"]
+            buried = sdk._create_subject("The Owner")["id"]
             assert sdk.update_knowledge(buried, status="superseded", supersededBy="The Owner II") is not False
-            sdk.create_event("ev-12055-4", "github.issue.open",
+            sdk._create_event("ev-12055-4", "github.issue.open",
                              aboutSubject="the owner")
             g = sdk._get_proj().g
             wired = g.query(
@@ -2457,11 +2457,11 @@ class TestThe12120AboutEdgeStubIsFoldAware:
         """
         sdk = sdk_factory()
         try:
-            survivor = sdk.create_subject("Acme Corp")["id"]
-            candidate = sdk.create_subject("Acme Corporaton")["id"]
+            survivor = sdk._create_subject("Acme Corp")["id"]
+            candidate = sdk._create_subject("Acme Corporaton")["id"]
             assert candidate != survivor, "fixture drift: no pair to merge"
             sdk.approve_merge(candidate, action="merge")
-            sdk.create_event("ev-12055-5", "github.issue.open",
+            sdk._create_event("ev-12055-5", "github.issue.open",
                              aboutSubject="the acme corporaton")
             g = sdk._get_proj().g
             wired = g.query(
@@ -2555,8 +2555,8 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
         """
         sdk = sdk_factory()
         try:
-            sdk.create_object("Widget", "document")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Widget", "supersedes_by": "the new widget",
                  "evidence": "test"}])
@@ -2577,9 +2577,9 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
             # fixture must give it one: without an input 4b emits NO row and its
             # assertion below is VACUOUS (it passes for any stored value — the
             # trap this pin fell into on its first version).
-            _pt = sdk.create_point("statement", "the widget is the factor input")
+            _pt = sdk._create_point("statement", "the widget is the factor input")
             _wid = rows[0][0]
-            sdk.create_operator("IMPL", _pt["id"], [_wid])
+            sdk._create_operator("IMPL", _pt["id"], [_wid])
             from tortoise.audit import audit_graph
             issues = audit_graph(sdk._get_proj()).issues
             assert [i for i in issues
@@ -2608,8 +2608,8 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
         """
         sdk = sdk_factory()
         try:
-            sdk.create_object("Widget", "document")
-            sdk.create_object("Acme Corporation", "document")
+            sdk._create_object("Widget", "document")
+            sdk._create_object("Acme Corporation", "document")
             # The post-merge shape `apply_entity_merge` produces: the survivor
             # carries the retired candidate's folded key in `aliases`, so the
             # successor probe resolves "Acme" onto THIS node.
@@ -2642,8 +2642,8 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
         """
         sdk = sdk_factory()
         try:
-            sdk.create_object("Widget", "document")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "the widget", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -2663,8 +2663,8 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
         """
         sdk = sdk_factory()
         try:
-            sdk.create_subject("Old Team", "organization")
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("Old Team", "organization")
+            sdk._create_subject("New Team", "organization")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Team", "supersedes_by": "the new team",
                  "evidence": "test"}])
@@ -2685,8 +2685,8 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
         """
         sdk = sdk_factory()
         try:
-            sdk.create_subject("Old Team", "organization")
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("Old Team", "organization")
+            sdk._create_subject("New Team", "organization")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "the old team", "supersedes_by": "New Team",
                  "evidence": "test"}])
@@ -2716,9 +2716,9 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Widget", "document")   # Object-first routing
-            sdk.create_subject("New Widget", "organization")
-            sdk.create_subject("Old Team", "organization")  # the EXACT ref
+            sdk._create_object("New Widget", "document")   # Object-first routing
+            sdk._create_subject("New Widget", "organization")
+            sdk._create_subject("Old Team", "organization")  # the EXACT ref
             # An Object whose folded name IS the ref, collapsed onto a survivor
             # the graph no longer holds: the Object ref arm matches the row and
             # then drops it. Its carrier is TERMINAL — a group whose survivor is
@@ -2756,9 +2756,9 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
         """
         sdk = sdk_factory()
         try:
-            sdk.create_object("New Team", "document")   # Object-first routing
-            sdk.create_subject("New Team", "organization")
-            sdk.create_subject("Old Team", "organization")
+            sdk._create_object("New Team", "document")   # Object-first routing
+            sdk._create_subject("New Team", "organization")
+            sdk._create_subject("Old Team", "organization")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Team", "supersedes_by": "the new team",
                  "evidence": "test"}])
@@ -2873,13 +2873,13 @@ class TestThe12120ReviewRound6:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            dead = sdk.create_object("Acme Corp", "document")["id"]
+            dead = sdk._create_object("Acme Corp", "document")["id"]
             sdk.update_knowledge(dead, status="superseded", supersededBy="Acme Corp II")
-            live = sdk.create_object("ACME CORP", "document")["id"]
+            live = sdk._create_object("ACME CORP", "document")["id"]
             assert live != dead
             g.query("MATCH (o:Object {id:$id}) SET o.canonical_name='acme corp'",
                     params={"id": live})
-            sdk.create_object("Gamma Ltd", "document")
+            sdk._create_object("Gamma Ltd", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "ACME CORP", "supersedes_by": "Gamma Ltd",
                  "evidence": "test"}])
@@ -2901,13 +2901,13 @@ class TestThe12120ReviewRound6:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            dead = sdk.create_subject("Acme Corp", "organization")["id"]
+            dead = sdk._create_subject("Acme Corp", "organization")["id"]
             g.query("MATCH (s:Subject {id:$id}) SET s.status='superseded', "
                     "s.supersededBy='Old Corp'", params={"id": dead})
-            live = sdk.create_subject("ACME CORP", "organization")["id"]
+            live = sdk._create_subject("ACME CORP", "organization")["id"]
             g.query("MATCH (s:Subject {id:$id}) SET s.canonical_name='acme corp'",
                     params={"id": live})
-            sdk.create_subject("Gamma Ltd", "organization")
+            sdk._create_subject("Gamma Ltd", "organization")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "ACME CORP", "supersedes_by": "Gamma Ltd",
                  "evidence": "test"}])
@@ -2926,7 +2926,7 @@ class TestThe12120ReviewRound6:
             g.query(
                 "CREATE (o:Object {name:'Legacy Thing', objectKind:'document', "
                 "status:'live', canonical_name:'legacy thing'})")
-            sdk.create_object("New Thing", "document")
+            sdk._create_object("New Thing", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Legacy Thing", "supersedes_by": "New Thing",
                  "evidence": "test"}])
@@ -2953,7 +2953,7 @@ class TestThe12120ReviewRound6:
             g.query(
                 "CREATE (o:Object {canonical_name:'legacy widget', "
                 "status:'live'})")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Legacy Widget", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -2985,7 +2985,7 @@ class TestThe12120ReviewRound6:
                 "CREATE (b:Object {id:'r6-dup', name:'Widget', "
                 "objectKind:'document', status:'live', "
                 "canonical_name:'widget'})")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Widget", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -3031,7 +3031,7 @@ class TestThe12120ReviewRound8:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            survivor = sdk.create_object("Widget", "document")["id"]
+            survivor = sdk._create_object("Widget", "document")["id"]
             # The create door folds "The Widget" onto the live survivor, so the
             # second live node is minted directly (the door's own dedupe is what
             # makes a second live carrier legitimate at all — see round 6).
@@ -3045,7 +3045,7 @@ class TestThe12120ReviewRound8:
             # Retire the SURVIVOR only — the carrier stays live, so
             # `recall_state` still shows "The Widget".
             sdk.update_knowledge(survivor, status="superseded", supersededBy="The Widget")
-            target = sdk.create_object("Old Co", "document")["id"]
+            target = sdk._create_object("Old Co", "document")["id"]
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "The Widget",
                  "evidence": "test"}])
@@ -3082,7 +3082,7 @@ class TestThe12120ReviewRound8:
             g = sdk._get_proj().g
             # Terminal target: the re-record's DIVERGENT arm is the one that
             # reads the candidate spellings.
-            sdk.create_object("Widget", "document")
+            sdk._create_object("Widget", "document")
             sdk.update_knowledge(
                 g.query("MATCH (o:Object {name:'Widget'}) RETURN o.id")
                 .result_set[0][0],
@@ -3094,8 +3094,8 @@ class TestThe12120ReviewRound8:
                 "objectKind:'document', status:'live', "
                 "canonical_name:'gone co', "
                 "resolved_from:'obj-12120-survivor-deleted'})")
-            sdk.create_object("Alpha", "document")
-            sdk.create_object("Later Co", "document")
+            sdk._create_object("Alpha", "document")
+            sdk._create_object("Later Co", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Widget", "supersedes_by": "Gone Co",
                  "evidence": "test"},
@@ -3126,7 +3126,7 @@ class TestThe12120ReviewRound8:
                 "CREATE (o:Object {id:'r8-dead-carrier', name:'Ghost Widget', "
                 "objectKind:'document', status:'superseded', "
                 "canonical_name:'ghost widget'})")
-            sdk.create_object("Old Co", "document")
+            sdk._create_object("Old Co", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "Ghost Widget",
                  "evidence": "test"}])
@@ -3180,7 +3180,7 @@ class TestThe12120ReviewRound9:
                 "CREATE (c:Object {id:'r9-carrier', name:'Widget', "
                 "objectKind:'document', status:'live', "
                 "canonical_name:'widget', resolved_from:'r9-dup'})")
-            sdk.create_object("Old Co", "document")
+            sdk._create_object("Old Co", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "Widget",
                  "evidence": "test"}])
@@ -3212,7 +3212,7 @@ class TestThe12120ReviewRound9:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            survivor = sdk.create_object("Widget", "document")["id"]
+            survivor = sdk._create_object("Widget", "document")["id"]
             carrier = "r9-carrier-gone"
             g.query(
                 "CREATE (o:Object {id:'r9-carrier-gone', name:'The Widget', "
@@ -3220,8 +3220,8 @@ class TestThe12120ReviewRound9:
                 "canonical_name:'widget'})")
             apply_entity_merge(sdk, candidate_id=carrier, survivor_id=survivor,
                                method="fuzzy", similarity=0.9)
-            assert sdk.delete_entity(survivor)
-            target = sdk.create_object("Old Co", "document")["id"]
+            assert sdk._delete_entity__svc(survivor)
+            target = sdk._create_object("Old Co", "document")["id"]
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "The Widget",
                  "evidence": "test"}])
@@ -3242,7 +3242,7 @@ class TestThe12120ReviewRound9:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            survivor = sdk.create_object("Widget", "document")["id"]
+            survivor = sdk._create_object("Widget", "document")["id"]
             g.query(
                 "CREATE (o:Object {id:'r9-merged-carrier', name:'The Widget', "
                 "objectKind:'document', status:'live', "
@@ -3250,7 +3250,7 @@ class TestThe12120ReviewRound9:
             apply_entity_merge(sdk, candidate_id="r9-merged-carrier",
                                survivor_id=survivor, method="fuzzy",
                                similarity=0.9)
-            target = sdk.create_object("Old Co", "document")["id"]
+            target = sdk._create_object("Old Co", "document")["id"]
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "WIDGET",
                  "evidence": "test"}])
@@ -3301,7 +3301,7 @@ class TestThe12120ReviewRound10:
 
         g = sdk._get_proj().g
         if label == "Object":
-            survivor = sdk.create_object("Widget", "document")["id"]
+            survivor = sdk._create_object("Widget", "document")["id"]
             g.query(
                 "CREATE (o:Object {id:'r10-carrier', name:'The Widget', "
                 "objectKind:'document', status:'live', "
@@ -3309,9 +3309,9 @@ class TestThe12120ReviewRound10:
             apply_entity_merge(sdk, candidate_id="r10-carrier",
                                survivor_id=survivor, method="fuzzy",
                                similarity=0.9)
-            sdk.delete_entity(survivor)
+            sdk._delete_entity__svc(survivor)
             return "r10-carrier"
-        survivor = sdk.create_subject("Acme Corp", "organization")["id"]
+        survivor = sdk._create_subject("Acme Corp", "organization")["id"]
         g.query(
             "CREATE (s:Subject {id:'r10-subj-carrier', name:'The Acme Corp', "
             "subjectKind:'organization', status:'live', "
@@ -3319,7 +3319,7 @@ class TestThe12120ReviewRound10:
         apply_entity_merge(sdk, candidate_id="r10-subj-carrier",
                            survivor_id=survivor, method="fuzzy",
                            similarity=0.9)
-        sdk.delete_entity(survivor)
+        sdk._delete_entity__svc(survivor)
         return "r10-subj-carrier"
 
     def test_a_live_ref_carrier_beside_a_gone_survivor_is_addressable(
@@ -3328,7 +3328,7 @@ class TestThe12120ReviewRound10:
         try:
             g = sdk._get_proj().g
             carrier = self._orphaned_live_carrier(sdk)
-            sdk.create_object("Gadget", "document")
+            sdk._create_object("Gadget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "The Widget", "supersedes_by": "Gadget",
                  "evidence": "test"}])
@@ -3347,7 +3347,7 @@ class TestThe12120ReviewRound10:
         try:
             g = sdk._get_proj().g
             carrier = self._orphaned_live_carrier(sdk, label="Subject")
-            sdk.create_subject("Other Team", "organization")
+            sdk._create_subject("Other Team", "organization")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "The Acme Corp", "supersedes_by": "Other Team",
                  "evidence": "test"}])
@@ -3395,13 +3395,13 @@ class TestThe12120ReviewRound3:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("ACME", "organization")
-            sdk.create_subject("New Acme", "organization")
+            sdk._create_subject("ACME", "organization")
+            sdk._create_subject("New Acme", "organization")
             g.query(
                 "CREATE (o:Object {id:'obj-12120-tie', name:'Acme!', "
                 "objectKind:'document', status:'live', "
                 "canonical_name:'acme'})")
-            sdk.create_object("New Acme Thing", "document")
+            sdk._create_object("New Acme Thing", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "acme", "supersedes_by": "New Acme Thing",
                  "evidence": "test"}])
@@ -3426,9 +3426,9 @@ class TestThe12120ReviewRound3:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("Acme Corp", "organization")
-            sdk.create_subject("Other Corp", "organization")
-            sdk.create_subject("New Acme", "organization")
+            sdk._create_subject("Acme Corp", "organization")
+            sdk._create_subject("Other Corp", "organization")
+            sdk._create_subject("New Acme", "organization")
             g.query(
                 "MATCH (s:Subject {name:'Acme Corp'}) "
                 "SET s.status='superseded', s.supersededBy='Other Corp'")
@@ -3465,7 +3465,7 @@ class TestThe12120ReviewRound3:
                 "objectKind:'document', status:'live', "
                 "canonical_name:'widget', "
                 "resolved_from:'row:survivor-12120'})")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Widget", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -3504,7 +3504,7 @@ class TestThe12120ReviewRound3:
                 "objectKind:'document', status:'live', "
                 "canonical_name:'widget', "
                 "resolved_from:'dup-survivor-12120'})")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Widget", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -3551,7 +3551,7 @@ class TestThe12120ReviewRound3:
                 "objectKind:'document', status:'superseded', "
                 "supersededBy:'Even Older Team', "
                 "canonical_name:'old team', resolved_from:'gone-survivor-12120'})")
-            sdk.create_object("New Team", "document")
+            sdk._create_object("New Team", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Team", "supersedes_by": "New Team",
                  "evidence": "test"}])
@@ -3583,7 +3583,7 @@ class TestThe12120ReviewRound3:
                 "CREATE (o:Object {id:'obj-12120-term', name:'Widget', "
                 "objectKind:'document', status:'superseded', "
                 "canonical_name:'widget', supersededBy:'Older Widget'})")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Widget", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -3620,8 +3620,8 @@ class TestThe12120Finding4TheUnpinnedMigratedReaders:
         """
         sdk = sdk_factory()
         try:
-            author = sdk.create_subject("Acme Corp", "naturalPerson")["id"]
-            pid = sdk.create_point("statement", "the spec is approved",
+            author = sdk._create_subject("Acme Corp", "naturalPerson")["id"]
+            pid = sdk._create_point("statement", "the spec is approved",
                                    authoredBy="the acme corp")["id"]
             # The chain is not an EP surface: the posterior gate is opted out, exactly as
             # `_check_confidence_provenance` (mcp_server) does the same for the live door.
@@ -3642,17 +3642,17 @@ class TestThe12120Finding4TheUnpinnedMigratedReaders:
         """
         sdk = sdk_factory()
         try:
-            sdk.create_subject("Frank", "analyst")
+            sdk._create_subject("Frank", "analyst")
             proj = sdk._get_proj()
             proj.apply({"type": "EventRecorded", "id": "ev-f4-rep",
                         "eventId": "ev-f4-rep", "eventKind": "analysis",
                         "subject": "Frank"})
-            point = sdk.create_point("observation", "frank's claim")["id"]
+            point = sdk._create_point("observation", "frank's claim")["id"]
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}), (p:Point {id:$pid}) "
                 "CREATE (e)-[:IMPL]->(p)",
                 params={"eid": "ev-f4-rep", "pid": point})
-            rep = sdk.compute_reputation("the frank")
+            rep = sdk._compute_reputation("the frank")
             assert rep["total_events"] == 1, (
                 f"the fold-equivalent subject scored nothing: {rep}")
             assert rep["outcomes"][0]["content"] == "frank's claim"
@@ -3668,10 +3668,10 @@ class TestThe12120Finding4TheUnpinnedMigratedReaders:
         """
         sdk = sdk_factory()
         try:
-            owner = sdk.create_subject("Owner X", "organization")["id"]
-            point = sdk.create_point("observation", "an owned thing")["id"]
+            owner = sdk._create_subject("Owner X", "organization")["id"]
+            point = sdk._create_point("observation", "an owned thing")["id"]
             sdk._get_proj().create_owned_by(point, owner)
-            owned = sdk.get_owned_entities("the owner x")
+            owned = sdk._get_owned_entities("the owner x")
             assert any(e.get("id") == point for e in owned), (
                 f"the fold-equivalent owner owned nothing: {owned}")
         finally:
@@ -3688,7 +3688,7 @@ class TestThe12120Finding4TheUnpinnedMigratedReaders:
 
         sdk = sdk_factory()
         try:
-            target = sdk.create_subject("Acme Corp", "organization")["id"]
+            target = sdk._create_subject("Acme Corp", "organization")["id"]
             resolved, kind = _resolve_target(
                 sdk._get_proj(), "Subject", "the acme corp")
             assert resolved == target, (
@@ -3707,7 +3707,7 @@ class TestThe12120Finding4TheUnpinnedMigratedReaders:
 
         sdk = sdk_factory()
         try:
-            sdk.create_object("Deal R", "venture:deal")
+            sdk._create_object("Deal R", "venture:deal")
             P.advance_stage(sdk, "Deal R", "venture:deal", "stg_contact",
                             declared=_PIPELINE_DECL)
             cur = P.current_stage(sdk._get_proj().g, "the deal r")
@@ -3726,7 +3726,7 @@ class TestThe12120Finding4TheUnpinnedMigratedReaders:
 
         sdk = sdk_factory()
         try:
-            sdk.create_object("Deal S", "venture:deal")
+            sdk._create_object("Deal S", "venture:deal")
             P.advance_stage(sdk, "Deal S", "venture:deal", "stg_contact",
                             declared=_PIPELINE_DECL)
             resolved = P._resolve_object(sdk._get_proj().g, "the deal s")
@@ -3757,8 +3757,8 @@ class TestThe12120Finding4TheUnpinnedMigratedReaders:
                 "objectKind:'org', status:'live', canonical_name:'zq5510solo'}) "
                 "CREATE (o2:Object {id:'obj-f4-b', name:'The zq5510solo', "
                 "objectKind:'org', status:'live', canonical_name:'zq5510solo'})")
-            pa = sdk.create_point("statement", "unrelated alpha claim")["id"]
-            pb = sdk.create_point("statement", "unrelated beta claim")["id"]
+            pa = sdk._create_point("statement", "unrelated alpha claim")["id"]
+            pb = sdk._create_point("statement", "unrelated beta claim")["id"]
             for pid, oid in ((pa, "obj-f4-a"), (pb, "obj-f4-b")):
                 g.query(
                     "MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
@@ -3801,7 +3801,7 @@ class TestThe12120Finding2CollapsesMergedCarriersFirst:
     @staticmethod
     def _merged_pair(sdk):
         """A live survivor + a live merged-away carrier sharing ONE folded key."""
-        survivor = sdk.create_object("Widget", "document")["id"]
+        survivor = sdk._create_object("Widget", "document")["id"]
         g = sdk._get_proj().g
         g.query(
             "CREATE (o:Object {id:'obj-12120-dup', name:'The Widget', "
@@ -3869,7 +3869,7 @@ class TestThe12120Finding2CollapsesMergedCarriersFirst:
         sdk = sdk_factory()
         try:
             survivor = self._merged_pair(sdk)
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Widget", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -3898,7 +3898,7 @@ class TestThe12120Finding2CollapsesMergedCarriersFirst:
                 "objectKind:'document', status:'live', canonical_name:'widget'}) "
                 "CREATE (b:Object {id:'obj-12120-b', name:'The Widget', "
                 "objectKind:'document', status:'live', canonical_name:'widget'})")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Widget", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -3936,7 +3936,7 @@ class TestThe12120Finding2CollapsesMergedCarriersFirst:
                 "CREATE (b:Object {id:'obj-12120-dup-id', name:'The Frobnicator', "
                 "objectKind:'document', status:'live', "
                 "canonical_name:'frobnicator'})")
-            sdk.create_object("New Frobnicator", "document")
+            sdk._create_object("New Frobnicator", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Frobnicator", "supersedes_by": "New Frobnicator",
                  "evidence": "test"}])
@@ -3969,8 +3969,8 @@ class TestThe12120Finding2CollapsesMergedCarriersFirst:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("Acme Corp", "organization")
-            sdk.create_subject("New Acme", "organization")
+            sdk._create_subject("Acme Corp", "organization")
+            sdk._create_subject("New Acme", "organization")
             g.query(
                 "CREATE (a:Object {id:'obj-12120-case-a', name:'acme corp', "
                 "objectKind:'document', status:'live', canonical_name:'acme corp'}) "
@@ -4071,9 +4071,9 @@ class TestThe12120ReviewRound13:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("Acme Corp", "organization")
-            sdk.create_subject("New Corp", "organization")
-            sdk.create_object("New Corp", "document")
+            sdk._create_subject("Acme Corp", "organization")
+            sdk._create_subject("New Corp", "organization")
+            sdk._create_object("New Corp", "document")
             g.query(
                 "CREATE (s:Object {id:'obj-r13-surv', name:'Acme Holdings', "
                 "objectKind:'document', status:'live', "
@@ -4110,8 +4110,8 @@ class TestThe12120ReviewRound13:
         sdk = sdk_factory()
         try:
             proj = sdk._get_proj()
-            sdk.create_object("Widget", "document")
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("Widget", "document")
+            sdk._create_object("New Widget", "document")
             monkeypatch.setattr(proj.__class__, "_fold_object_superseded",
                                 lambda self, ev, *, cas=False: (0, 0))
             applied, skips, msgs = self._apply(sdk, [
@@ -4161,7 +4161,7 @@ class TestThe12120ReviewRound14:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             g.query(
                 "CREATE (a:Object {id:'dup-r14', name:'Twinned', "
                 "objectKind:'document', status:'live'}) "
@@ -4191,7 +4191,7 @@ class TestThe12120ReviewRound14:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("New Team", "organization")
             g.query(
                 "CREATE (a:Subject {id:'dup-subj-r14', name:'Old Team', "
                 "subjectKind:'organization', status:'live'}) "
@@ -4243,7 +4243,7 @@ class TestThe12120ReviewRound15:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("Old Co", "document")
+            sdk._create_object("Old Co", "document")
             # Two nodes claim one id and BOTH are terminal, so neither is a
             # visible successor; the only visible successor is `r15-carrier`,
             # which holds the successor name and points at that id.
@@ -4467,7 +4467,7 @@ class TestThe12120ReviewRound16:
             try:
                 g = sdk._get_proj().g
                 if label == "Object":
-                    sdk.create_object("New Co", "document")
+                    sdk._create_object("New Co", "document")
                     g.query(
                         "CREATE (a:Object {id:'gone-r17-a', name:'Old Co', "
                         "objectKind:'document', status:'live', "
@@ -4478,7 +4478,7 @@ class TestThe12120ReviewRound16:
                     rec = {"superseded": "Old Co",
                            "supersedes_by": "New Co", "evidence": "test"}
                 else:
-                    sdk.create_subject("New Team", kind)
+                    sdk._create_subject("New Team", kind)
                     g.query(
                         "CREATE (a:Subject {id:'gone-r17-a', name:'Old Team', "
                         "subjectKind:'organization', status:'live', "
@@ -4588,9 +4588,9 @@ class TestThe12120ReviewRound16FamilyGuard:
                 "objectKind:'organization', status:'superseded', "
                 "supersededBy:'Elsewhere', "
                 "canonical_name:'old team', resolved_from:'r16f-deleted'})")
-            sdk.create_subject("The Old Team", "organization")
-            sdk.create_object("New Widget", "document")
-            sdk.create_subject("New Widget", "organization")
+            sdk._create_subject("The Old Team", "organization")
+            sdk._create_object("New Widget", "document")
+            sdk._create_subject("New Widget", "organization")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Team", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -4625,8 +4625,8 @@ class TestThe12120ReviewRound16FamilyGuard:
             g.query("CREATE (s:Subject {id:'ent-r16g-sub', "
                     "name:'Subject By Id', subjectKind:'organization', "
                     "status:'live'})")
-            sdk.create_object("New Widget", "document")
-            sdk.create_subject("New Widget", "organization")
+            sdk._create_object("New Widget", "document")
+            sdk._create_subject("New Widget", "organization")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "ent-r16g-sub", "supersedes_by": "New Widget",
                  "evidence": "test"}])
@@ -4674,7 +4674,7 @@ class TestThe12120ReviewRound17:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Co", "document")
+            sdk._create_object("New Co", "document")
             g.query(
                 "CREATE (a1:Object {id:'p-a1', name:'Old Co', "
                 "objectKind:'document', status:'live', "
@@ -4729,7 +4729,7 @@ class TestThe12120ReviewRound18:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Co", "document")
+            sdk._create_object("New Co", "document")
             g.query(
                 "CREATE (s:Object {id:'r18-surv', name:'Acme Holdings', "
                 "objectKind:'document', status:'superseded', "
@@ -4768,7 +4768,7 @@ class TestThe12120ReviewRound18:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("New Team", "organization")
             g.query(
                 "CREATE (s:Subject {id:'r18-ssurv', name:'Acme Holdings', "
                 "subjectKind:'organization', status:'superseded', "
@@ -4809,7 +4809,7 @@ class TestThe12120ReviewRound18:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("Even Older Team", "document")
+            sdk._create_object("Even Older Team", "document")
             g.query(
                 "CREATE (o:Object {id:'r18-old', name:'Old Team', "
                 "objectKind:'document', status:'superseded', "
@@ -4920,7 +4920,7 @@ class TestThe12120ReviewRound18:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Co", "document")
+            sdk._create_object("New Co", "document")
             g.query(
                 "CREATE (o:Object {id:'r18-old2', name:'Old Co', "
                 "objectKind:'document', status:'superseded', "
@@ -4957,7 +4957,7 @@ class TestThe12120ReviewRound18:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Widget", "document")
+            sdk._create_object("New Widget", "document")
             # The legacy id-less holder `_upsert_object` never mints, plus a
             # carrier of an entity whose survivor is gone.
             g.query(
@@ -5056,7 +5056,7 @@ class TestThe12120ReviewRound20:
         """
         sdk = sdk_factory()
         try:
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("New Team", "organization")
             g = sdk._get_proj().g
             g.query(
                 "CREATE (s:Subject {id:'r20-idt', name:'Shared Co', "
@@ -5167,7 +5167,7 @@ class TestThe12120ReviewRound19:
                 "CREATE (b:Object {id:'obj-t1-name', name:'obj-t1', "
                 "objectKind:'document', status:'live', "
                 "supersededBy:'New Co'})")
-            sdk.create_object("New Co", "document")
+            sdk._create_object("New Co", "document")
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "obj-t1", "supersedes_by": "New Co",
                  "evidence": "test"}])
@@ -5195,7 +5195,7 @@ class TestThe12120ReviewRound19:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Co", "document")
+            sdk._create_object("New Co", "document")
             g.query(
                 "CREATE (t:Object {id:'c-target', name:'Shared Co', "
                 "objectKind:'document', status:'superseded', "
@@ -5232,7 +5232,7 @@ class TestThe12120ReviewRound19:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("New Team", "organization")
             g.query(
                 "CREATE (t:Subject {id:'sc-target', name:'Shared Co', "
                 "subjectKind:'organization', status:'superseded', "
@@ -5284,8 +5284,8 @@ class TestThe12120ReviewRound21:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("New Acme", "organization")
-            created = sdk.create_subject("Old Acme", "organization")
+            sdk._create_subject("New Acme", "organization")
+            created = sdk._create_subject("Old Acme", "organization")
             _tid = (created.get("id") if isinstance(created, dict)
                     else created)
             assert isinstance(_tid, str) and _tid, created
@@ -5306,7 +5306,7 @@ class TestThe12120ReviewRound21:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Co", "document")
+            sdk._create_object("New Co", "document")
             # Two entities, both with a deleted survivor: the first stores THIS
             # record's successor, the second a DIVERGENT one.
             g.query(
@@ -5375,7 +5375,7 @@ class TestThe12120ReviewRound22:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Co", "document")
+            sdk._create_object("New Co", "document")
             g.query(
                 "CREATE (a:Object {id:'r22-a', name:'Old Co', "
                 "objectKind:'document', status:'superseded', "
@@ -5422,7 +5422,7 @@ class TestThe12120ReviewRound22SubjectTwin:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("New Team", "organization")
             g.query(
                 "CREATE (a:Subject {id:'r22s-a', name:'Old Team', "
                 "subjectKind:'organization', status:'superseded', "
@@ -5444,7 +5444,7 @@ class TestThe12120ReviewRound22SubjectTwin:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("New Team", "organization")
             g.query(
                 "CREATE (a:Subject {id:'r22s-c', name:'Shared Team', "
                 "subjectKind:'organization', status:'superseded', "
@@ -5530,7 +5530,7 @@ class TestThe12120ReviewRound25:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_object("New Co", "document")
+            sdk._create_object("New Co", "document")
             # ONE entity: both carriers name the SAME gone survivor. The successor
             # is deliberately different from the one either carrier stores, so the
             # silent-dedup `continue` cannot swallow the record and the report arm
@@ -5569,7 +5569,7 @@ class TestThe12120ReviewRound25:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            sdk.create_subject("New Team", "organization")
+            sdk._create_subject("New Team", "organization")
             g.query(
                 "CREATE (a:Subject {id:'r24s-a', name:'Shared Team', "
                 "subjectKind:'organization', status:'superseded', "
@@ -5608,7 +5608,7 @@ class TestThe12120ReviewRound25:
         try:
             created = []
             for _kind in ("organization", "organization"):
-                c = sdk.create_subject("Exact Co", _kind)
+                c = sdk._create_subject("Exact Co", _kind)
                 created.append(c.get("id") if isinstance(c, dict) else c)
             assert all(isinstance(_i, str) and _i for _i in created), created
             ids = _exact_subject_ref_ids(sdk._get_proj(), "Exact Co")
@@ -5636,7 +5636,7 @@ class TestThe12120ReviewRound25:
             # The SUCCESSOR must exist, or the record refuses for a reason of its
             # own and this pin passes vacuously (the vacuity this file has already
             # been bitten by twice — the fixture, not the assertion, is the risk).
-            sdk.create_object("New Team", "document")
+            sdk._create_object("New Team", "document")
             # An ID-LESS Subject named exactly as the ref, beside an Object whose
             # FOLDED name matches — the Object lane would fold that carrier if the
             # defer were asked the wrong question.

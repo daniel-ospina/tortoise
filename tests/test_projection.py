@@ -3125,7 +3125,7 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
             g, "Source", "https://x/5206-prov", "aboutDocument") is None, \
             "replay resolved a provenance Source as an aboutDocument target"
         with pytest.raises(ValueError) as ei:
-            sdk.create_edge("aboutDocument", "5206-p", "5206-prov")
+            sdk._create_edge("aboutDocument", "5206-p", "5206-prov")
         assert "aboutSource" in str(ei.value), ei.value
 
         # ...and so is a document-bearing :Source with no `url`: replay
@@ -3134,7 +3134,7 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
         g.query("MERGE (s:Source {id:'5206-doc-nourl', "
                 "documentKind:'report'})")
         with pytest.raises(ValueError) as ei_nourl:
-            sdk.create_edge("aboutDocument", "5206-p", "5206-doc-nourl")
+            sdk._create_edge("aboutDocument", "5206-p", "5206-doc-nourl")
         assert "url" in str(ei_nourl.value), ei_nourl.value
 
         # ...and an EMPTY url is no more an identity than a missing one:
@@ -3142,12 +3142,12 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
         g.query("MERGE (s:Source {id:'5206-doc-emptyurl', url:'', "
                 "documentKind:'report'})")
         with pytest.raises(ValueError) as ei_eurl:
-            sdk.create_edge("aboutDocument", "5206-p", "5206-doc-emptyurl")
+            sdk._create_edge("aboutDocument", "5206-p", "5206-doc-emptyurl")
         assert "url" in str(ei_eurl.value), ei_eurl.value
 
         # ── 2. Through ingest, that refusal is a Phase2Error. ──
         with pytest.raises(Phase2Error) as ei2:
-            sdk.ingest({
+            sdk._ingest({
                 "points": [{"kind": "statement", "content": "claim A",
                             "ref": "pa"}],
                 "sources": [{"url": "https://x/5206-prov-ingest",
@@ -3163,7 +3163,7 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
         # still surface as the primitive's own error. Phase2Error subclasses
         # ValueError, so the type is checked exactly rather than by isinstance.
         with pytest.raises(ValueError) as ei_own:
-            sdk.ingest({
+            sdk._ingest({
                 "points": [{"kind": "statement", "content": "own A",
                             "ref": "oa"},
                            {"kind": "statement", "content": "own B",
@@ -3180,7 +3180,7 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
         # (a) the CANONICAL document: a `sources` item with sourceKind=
         #     'document' + documentKind (tests/fixtures/
         #     document_source_gold.jsonl, case `doc-with-genre`).
-        a = sdk.ingest({
+        a = sdk._ingest({
             "sources": [{"url": "https://x/5206-doc-a",
                          "sourceKind": "document", "documentKind": "brief",
                          "ref": "d1"}],
@@ -3193,7 +3193,7 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
 
         # (b) the same, with the genre in nested `props` — an explicitly
         #     supported ingest shape (`_coerce_props` flattens it at write time).
-        b = sdk.ingest({
+        b = sdk._ingest({
             "sources": [{"url": "https://x/5206-doc-b",
                          "sourceKind": "document",
                          "props": {"documentKind": "brief"}, "ref": "d2"}],
@@ -3207,7 +3207,7 @@ def test_5206_aboutdocument_target_contract_holds_on_write_and_ingest():
         # (c) a document declared as an `entities` item of type 'document'.
         #     This asserts only that the target-kind guard accepts it — its
         #     durability is #2296's question, not this test's.
-        c = sdk.ingest({
+        c = sdk._ingest({
             "entities": [{"type": "document", "name": "Doc 5206",
                           "documentKind": "report", "ref": "d3"}],
             "points": [{"kind": "statement", "content": "claim D",
@@ -3265,7 +3265,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
     `:Source` may carry these keys.
     """
     sdk = sdk_factory()
-    doc = sdk.create_document("B6ThirdDoor", "report")
+    doc = sdk._create_document("B6ThirdDoor", "report")
     did = doc["id"]
     assert doc["url"] == did, "a document Source is keyed by the doc id"
     for key, val in (("content", "SECRET BODY"),
@@ -3288,7 +3288,7 @@ def test_5026_b6_update_entity_cannot_rewrite_retired_fields(sdk_factory):
     # clause, which left exactly this node as an open third door: the same
     # field denied by the document path and writable by the generic one, on
     # the same node.
-    tdoc = sdk.create_document("B6ThirdDoorTranscript", "transcript")
+    tdoc = sdk._create_document("B6ThirdDoorTranscript", "transcript")
     tid = tdoc["id"]
     assert tdoc["documentKind"] == "transcript"
     with pytest.raises(ValueError, match="retired field"):
@@ -3514,14 +3514,14 @@ def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch)
 
     # Door 1 — the generic entity surface (#5135 itself); reads the registry
     # directly at the boundary.
-    doc = sdk.create_document("Registry1", "report")
+    doc = sdk._create_document("Registry1", "report")
     with pytest.raises(ValueError, match="retired field"):
         sdk.update_knowledge(doc["id"], **{probe: "FORGED"})
 
     # Door 2 — the document open passthrough (`_upsert_document`). The only
     # way to deny a key absent from the historical `_DOCUMENT_HANDLED` base is
     # the registry union at the call site.
-    d2 = sdk.create_document("Registry2", "report", **{probe: "FORGED"})
+    d2 = sdk._create_document("Registry2", "report", **{probe: "FORGED"})
     got2 = proj.g.query(
         f"MATCH (s:Source {{url:$u}}) RETURN s.{probe}",
         params={"u": d2["id"]}).result_set[0][0]
@@ -3549,7 +3549,7 @@ def test_5135_retired_registry_is_the_single_authority(sdk_factory, monkeypatch)
 
     # Contrast — the union did not turn the passthrough into a no-op: a key it
     # does NOT list still rides through (the #228 pin).
-    d4 = sdk.create_document("Registry4", "report", domain="legal")
+    d4 = sdk._create_document("Registry4", "report", domain="legal")
     assert proj.g.query(
         "MATCH (s:Source {url:$u}) RETURN s.domain",
         params={"u": d4["id"]}).result_set[0][0] == "legal"
@@ -4056,15 +4056,15 @@ def test_falkor_rebuild_all_with_sdk_points():
         # Create points via SDK (event_log_path configured)
         sdk = TortoiseSDK(db_path=db_path, event_log_path=events_path)
         try:
-            p1 = sdk.create_point("statement", "SDK point alpha",
+            p1 = sdk._create_point("statement", "SDK point alpha",
                                   authoredBy="alice", tags=["important"])
-            p2 = sdk.create_point("statement", "SDK point beta",
+            p2 = sdk._create_point("statement", "SDK point beta",
                                   authoredBy="bob")
             # Operator linking p2 → p1
-            op = sdk.create_operator("IMPL", p2["id"], [p1["id"]])
-            p3 = sdk.create_point("observation", "SDK point gamma")
+            op = sdk._create_operator("IMPL", p2["id"], [p1["id"]])
+            p3 = sdk._create_point("observation", "SDK point gamma")
             # Update a point
-            sdk.update_point(p3["id"], content="SDK point gamma REVISED")
+            sdk._update_point(p3["id"], content="SDK point gamma REVISED")
         finally:
             sdk.close()
 
@@ -4148,12 +4148,12 @@ def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
         # Create SDK points WITHOUT event_log_path (simulating pre-#548)
         sdk = TortoiseSDK(db_path=db_path, event_log_path=None)
         try:
-            p1 = sdk.create_point("statement", "Legacy SDK claim ONE",
+            p1 = sdk._create_point("statement", "Legacy SDK claim ONE",
                                   authoredBy="alice")
-            p2 = sdk.create_point("statement", "Legacy SDK claim TWO",
+            p2 = sdk._create_point("statement", "Legacy SDK claim TWO",
                                   authoredBy="bob")
             # Operator (also without log)
-            op = sdk.create_operator("IMPL", p2["id"], [p1["id"]])
+            op = sdk._create_operator("IMPL", p2["id"], [p1["id"]])
         finally:
             sdk.close()
 
@@ -4334,14 +4334,14 @@ def test_retract_tombstone_get_point_hidden():
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(db_path=_tmp("g_sdk_retracted.db"))
     try:
-        p = sdk.create_point("statement", "visible at first")
+        p = sdk._create_point("statement", "visible at first")
         pid = p["id"]
-        assert sdk.get_point(pid) != {}
+        assert sdk._get_point(pid) != {}
         # Apply retraction via the projection raw path (simulates event replay)
         sdk._get_proj().apply({"type": "PointRetracted", "id": pid})
         # #432 contract: get_point keeps returning the tombstone (full fidelity)
-        assert sdk.get_point(pid) != {}
-        assert sdk.get_point(pid).get("status") == "retracted"
+        assert sdk._get_point(pid) != {}
+        assert sdk._get_point(pid).get("status") == "retracted"
         # Raw query can also find it
         r = sdk._get_proj().query(
             "MATCH (n:Point {id:$id}) RETURN n.status", id=pid
@@ -4359,17 +4359,17 @@ def test_retract_tombstone_skipped_in_query():
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(db_path=_tmp("g_sdk_query_ret.db"))
     try:
-        p1 = sdk.create_point("statement", "keep me")
-        p2 = sdk.create_point("statement", "retract me")
+        p1 = sdk._create_point("statement", "keep me")
+        p2 = sdk._create_point("statement", "retract me")
         # Retract p2
         sdk._get_proj().apply({"type": "PointRetracted", "id": p2["id"]})
         # query should only return p1
-        results = sdk.query(kind="statement")
+        results = sdk._query(kind="statement")
         ids = {r["id"] for r in results}
         assert p1["id"] in ids
         assert p2["id"] not in ids, "retracted point must not appear in query"
         # paginated_query same
-        page = sdk.paginated_query(kind="statement")
+        page = sdk._paginated_query(kind="statement")
         page_ids = {r["id"] for r in page["results"]}
         assert p1["id"] in page_ids
         assert p2["id"] not in page_ids
@@ -4525,11 +4525,11 @@ def test_retract_tombstone_excluded_from_evidence():
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(db_path=_tmp("g_ret_evidence.db"))
     try:
-        p1 = sdk.create_point("statement", "keep baseline")
-        p2 = sdk.create_point("statement", "retracted baseline")
+        p1 = sdk._create_point("statement", "keep baseline")
+        p2 = sdk._create_point("statement", "retracted baseline")
         # Set baselines on both
-        sdk.set_point_baseline(p1["id"], 2.0, 8.0)
-        sdk.set_point_baseline(p2["id"], 3.0, 7.0)
+        sdk._set_point_baseline(p1["id"], 2.0, 8.0)
+        sdk._set_point_baseline(p2["id"], 3.0, 7.0)
         # Retract p2
         sdk._get_proj().apply({"type": "PointRetracted", "id": p2["id"]})
         # Hydrate evidence — should only load p1
@@ -4851,11 +4851,11 @@ def _interrupted_rebuild(prefix: str, *, fail_on: int = 1,
 
     sdk = TortoiseSDK(db_path=db_path, event_log_path=None)
     try:
-        p1 = sdk.create_point("statement", "graph-only claim ONE",
+        p1 = sdk._create_point("statement", "graph-only claim ONE",
                               authoredBy="alice")
-        p2 = sdk.create_point("statement", "graph-only claim TWO",
+        p2 = sdk._create_point("statement", "graph-only claim TWO",
                               authoredBy="bob")
-        op = sdk.create_operator("IMPL", p2["id"], [p1["id"]])
+        op = sdk._create_operator("IMPL", p2["id"], [p1["id"]])
     finally:
         sdk.close()
 

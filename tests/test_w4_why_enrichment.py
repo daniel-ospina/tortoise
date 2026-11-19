@@ -119,11 +119,11 @@ def _plant_conflicted(sdk, topic: str, alpha: float = 2.0, beta: float = 2.0,
     """Plant one conflicted claim: 1 IMPL support + 1 NAND counterargument,
     balanced persisted posterior (variance 0.05 > threshold → contested).
     Returns the claim + supporting + counterargument ids."""
-    ev = sdk.create_point("evidence", f"{topic} supporting record alpha")
-    claim = sdk.create_point(kind, f"{topic} belief statement")
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
-    counter = sdk.create_point("statement", f"{topic} counterargument gamma")
-    sdk.create_operator("NAND", counter["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", f"{topic} supporting record alpha")
+    claim = sdk._create_point(kind, f"{topic} belief statement")
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
+    counter = sdk._create_point("statement", f"{topic} counterargument gamma")
+    sdk._create_operator("NAND", counter["id"], [claim["id"]])
     _set_posterior(sdk, claim["id"], alpha, beta)
     _set_posterior(sdk, ev["id"], 12.0, 1.0)
     _set_posterior(sdk, counter["id"], 6.0, 1.0)
@@ -136,9 +136,9 @@ def _plant_variance_contested_no_nand(sdk, topic: str) -> dict:
     0.05 > threshold) and NO counterargument. The contestation signal comes
     purely from the persisted ep variance — the mirror of the
     NANDed-but-uncontested quadrant."""
-    ev = sdk.create_point("evidence", f"{topic} supporting record alpha")
-    claim = sdk.create_point("statement", f"{topic} belief statement")
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", f"{topic} supporting record alpha")
+    claim = sdk._create_point("statement", f"{topic} belief statement")
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     _set_posterior(sdk, claim["id"], 2.0, 2.0)      # v=0.05 > threshold
     _set_posterior(sdk, ev["id"], 12.0, 1.0)
     return {"claim": claim["id"], "support": ev["id"]}
@@ -147,11 +147,11 @@ def _plant_variance_contested_no_nand(sdk, topic: str) -> dict:
 def _plant_clean(sdk, topic: str) -> dict:
     """Plant one clean claim: 2 IMPL supports, high-support posterior
     (variance ≈ 0.005 → NOT contested), no NANDs anywhere."""
-    ev1 = sdk.create_point("evidence", f"{topic} clean record one")
-    ev2 = sdk.create_point("evidence", f"{topic} clean record two")
-    claim = sdk.create_point("statement", f"{topic} clean belief statement")
-    sdk.create_operator("IMPL", ev1["id"], [claim["id"]])
-    sdk.create_operator("IMPL", ev2["id"], [claim["id"]])
+    ev1 = sdk._create_point("evidence", f"{topic} clean record one")
+    ev2 = sdk._create_point("evidence", f"{topic} clean record two")
+    claim = sdk._create_point("statement", f"{topic} clean belief statement")
+    sdk._create_operator("IMPL", ev1["id"], [claim["id"]])
+    sdk._create_operator("IMPL", ev2["id"], [claim["id"]])
     _set_posterior(sdk, claim["id"], 12.0, 1.0)
     _set_posterior(sdk, ev1["id"], 12.0, 1.0)
     _set_posterior(sdk, ev2["id"], 12.0, 1.0)
@@ -162,17 +162,17 @@ def _plant_decision(sdk, topic: str) -> dict:
     """Plant one decision point: kind=decision + 2 option alternatives
     (IMPL via operators) + a mitigation on each connecting operator, all
     within a conflicted structure (variance > threshold)."""
-    ev = sdk.create_point("evidence", f"{topic} decision support record")
-    dec = sdk.create_point("decision", f"{topic} decision point")
-    opt1 = sdk.create_point("option", f"{topic} alternative one")
-    opt2 = sdk.create_point("option", f"{topic} alternative two")
-    counter = sdk.create_point("statement", f"{topic} decision counterargument")
-    sdk.create_operator("IMPL", ev["id"], [dec["id"]])
-    op1 = sdk.create_operator("IMPL", dec["id"], [opt1["id"]])
-    op2 = sdk.create_operator("IMPL", dec["id"], [opt2["id"]])
-    sdk.create_operator("NAND", counter["id"], [dec["id"]])
-    sdk.mitigate_operator(op1["id"], "QA gate + staged rollout")
-    sdk.mitigate_operator(op2["id"], "communicate the delay")
+    ev = sdk._create_point("evidence", f"{topic} decision support record")
+    dec = sdk._create_point("decision", f"{topic} decision point")
+    opt1 = sdk._create_point("option", f"{topic} alternative one")
+    opt2 = sdk._create_point("option", f"{topic} alternative two")
+    counter = sdk._create_point("statement", f"{topic} decision counterargument")
+    sdk._create_operator("IMPL", ev["id"], [dec["id"]])
+    op1 = sdk._create_operator("IMPL", dec["id"], [opt1["id"]])
+    op2 = sdk._create_operator("IMPL", dec["id"], [opt2["id"]])
+    sdk._create_operator("NAND", counter["id"], [dec["id"]])
+    sdk._mitigate_operator(op1["id"], "QA gate + staged rollout")
+    sdk._mitigate_operator(op2["id"], "communicate the delay")
     _set_posterior(sdk, dec["id"], 2.0, 2.0)
     _set_posterior(sdk, opt1["id"], 4.0, 1.0)
     _set_posterior(sdk, opt2["id"], 5.0, 2.0)
@@ -194,7 +194,7 @@ def _plant_superseded(sdk, topic: str) -> dict:
     successor id."""
     planted = _plant_conflicted(sdk, topic)
     old = planted["claim"]
-    succ = sdk.create_point("statement", f"{topic} successor belief")
+    succ = sdk._create_point("statement", f"{topic} successor belief")
     _set_posterior(sdk, succ["id"], 10.0, 1.0)
     proj = sdk._get_proj()
     proj.g.query(
@@ -209,7 +209,7 @@ def _plant_superseded(sdk, topic: str) -> dict:
 def _search_for(sdk, token: str, limit: int = 10, include_terminal: bool = False) -> list[dict]:
     """Search a distinctive token and return the hits (enriched on the search
     surface with the W4 flag ON)."""
-    return sdk.tortoise_fts_query(
+    return sdk._tortoise_fts_query(
         token, limit=limit, include_terminal=include_terminal)
 
 
@@ -223,7 +223,7 @@ def _recall_all_points(sdk) -> list[dict]:
     on the shared session graph (bulk wipes can lag the index)."""
     hits: list[dict] = []
     for kind in ("statement", "decision"):
-        hits.extend(sdk.tortoise_fts_query(
+        hits.extend(sdk._tortoise_fts_query(
             None, kind=kind, limit=1000, include_terminal=True))
     return hits
 
@@ -255,7 +255,7 @@ def test_flag_off_emission_byte_identical(monkeypatch):
         # Existing keys untouched.
         assert "ep" in claim_hit and "content" in claim_hit
         # recall_state surface — locate the claim in the window first.
-        rec = sdk.recall_state(query="flag-off-topic", limit=10)
+        rec = sdk._recall_state(query="flag-off-topic", limit=10)
         rec_hit = _hit_by_id(rec, g["claim"])
         assert rec_hit is not None, "recall_state must retrieve the claim"
         for k in W4_KEYS:
@@ -398,7 +398,7 @@ def test_dig_deeper_cap_and_tradeoff_precedence(w4_flag):
         # tradeoffs dimension is a read-path projection and the WRITE path is
         # exercised in test_e2e6_supersession_aware_recall.
         d = _plant_decision(sdk, "precedence-topic")
-        succ = sdk.create_point("statement", "precedence-topic successor belief")
+        succ = sdk._create_point("statement", "precedence-topic successor belief")
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$old}), (s:Point {id:$new}) "
             "CREATE (s)-[:CORRECTS]->(n) SET n.status='superseded', "
@@ -493,13 +493,13 @@ def test_budgets_enforced(w4_flag):
     sdk = _fresh_sdk()
     try:
         # 5 supports + 5 NANDers on one claim.
-        claim = sdk.create_point("statement", "budget-topic belief statement")
+        claim = sdk._create_point("statement", "budget-topic belief statement")
         for i in range(5):
-            ev = sdk.create_point("evidence", f"budget-topic support record {i}")
-            sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+            ev = sdk._create_point("evidence", f"budget-topic support record {i}")
+            sdk._create_operator("IMPL", ev["id"], [claim["id"]])
         for i in range(5):
-            cntr = sdk.create_point("statement", f"budget-topic counterargument {i}")
-            sdk.create_operator("NAND", cntr["id"], [claim["id"]])
+            cntr = sdk._create_point("statement", f"budget-topic counterargument {i}")
+            sdk._create_operator("NAND", cntr["id"], [claim["id"]])
         _set_posterior(sdk, claim["id"], 2.0, 2.0)
         # limit=50: the 10 planted neighbors all match the topic token — the
         # claim must still be inside the window (FTS index lag on the shared
@@ -874,14 +874,14 @@ def test_e2e6_supersession_aware_recall(w4_flag):
     try:
         # Chain A (superseded) → B (superseded) → C (live): contiguous
         # bi-temporal windows via the production write verb.
-        a = sdk.create_point("statement", "chain-topic-a original belief statement")
+        a = sdk._create_point("statement", "chain-topic-a original belief statement")
         a_id = a["id"]
-        b = sdk.create_point("statement", "chain-topic-b successor belief statement")
+        b = sdk._create_point("statement", "chain-topic-b successor belief statement")
         b_id = b["id"]
-        sdk.supersede_point(a_id, b_id, valid_from="2026-06-01")
-        c = sdk.create_point("statement", "chain-topic-c current belief statement")
+        sdk._supersede_point(a_id, b_id, valid_from="2026-06-01")
+        c = sdk._create_point("statement", "chain-topic-c current belief statement")
         c_id = c["id"]
-        sdk.supersede_point(b_id, c_id, valid_from="2026-07-01")
+        sdk._supersede_point(b_id, c_id, valid_from="2026-07-01")
 
         # Recall A directly (include_terminal — the superseded predecessor).
         hits = _search_for(sdk, "chain-topic-a", limit=20, include_terminal=True)
@@ -965,10 +965,10 @@ def test_superseded_kind_pointer_only_when_supersession_data_exists(w4_flag):
         # Terminal superseded predecessor via the REAL supersede + retract
         # verbs: old is superseded by succ, then succ is retracted → old's
         # superseded_by resolves to None (no live successor to point at).
-        old = sdk.create_point("statement", "term-succ-topic old belief statement")
-        succ = sdk.create_point("statement", "term-succ-topic successor belief")
-        sdk.supersede_point(old["id"], succ["id"], valid_from="2026-05-01")
-        sdk.retract_point(succ["id"])
+        old = sdk._create_point("statement", "term-succ-topic old belief statement")
+        succ = sdk._create_point("statement", "term-succ-topic successor belief")
+        sdk._supersede_point(old["id"], succ["id"], valid_from="2026-05-01")
+        sdk._retract_point(succ["id"])
         thits = _search_for(sdk, "term-succ-topic", limit=20, include_terminal=True)
         t_hit = _hit_by_id(thits, old["id"])
         assert t_hit is not None, "terminal superseded predecessor must be retrievable"
@@ -1128,9 +1128,9 @@ def test_supersession_fetch_failure_degrades_honestly(w4_flag, monkeypatch):
     import tortoise.why as why_mod
     sdk = _fresh_sdk()
     try:
-        old = sdk.create_point("statement", "fetch-fail old belief statement")
-        succ = sdk.create_point("statement", "fetch-fail successor belief")
-        sdk.supersede_point(old["id"], succ["id"], valid_from="2026-06-01")
+        old = sdk._create_point("statement", "fetch-fail old belief statement")
+        succ = sdk._create_point("statement", "fetch-fail successor belief")
+        sdk._supersede_point(old["id"], succ["id"], valid_from="2026-06-01")
         fired: list[str] = []
 
         def _explode(*args, **kwargs):
@@ -1344,11 +1344,11 @@ def test_nand_snippet_prefers_counterargument_content(w4_flag):
     content — never the NAND operator's label (a verb like "opposes")."""
     sdk = _fresh_sdk()
     try:
-        ev = sdk.create_point("evidence", "labelled-nand support record")
-        claim = sdk.create_point("statement", "labelled-nand belief statement")
-        sdk.create_operator("IMPL", ev["id"], [claim["id"]])
-        counter = sdk.create_point("statement", "labelled-nand counterargument text")
-        sdk.create_operator("NAND", counter["id"], [claim["id"]], label="opposes")
+        ev = sdk._create_point("evidence", "labelled-nand support record")
+        claim = sdk._create_point("statement", "labelled-nand belief statement")
+        sdk._create_operator("IMPL", ev["id"], [claim["id"]])
+        counter = sdk._create_point("statement", "labelled-nand counterargument text")
+        sdk._create_operator("NAND", counter["id"], [claim["id"]], label="opposes")
         _set_posterior(sdk, claim["id"], 2.0, 2.0)
         blocks = assemble_why_blocks(sdk._get_proj(), [claim["id"]])
         nands = blocks[claim["id"]]["conflicts"]["nands"]
@@ -1439,7 +1439,7 @@ def test_bare_point_empty_conventions(w4_flag):
     that rendered a live point as line:"superseded" would fail here)."""
     sdk = _fresh_sdk()
     try:
-        bare = sdk.create_point("statement", "bare-empty belief statement")
+        bare = sdk._create_point("statement", "bare-empty belief statement")
         _set_posterior(sdk, bare["id"], 12.0, 1.0)  # uncontested, no edges
         # Canonical block: support_chain == [] (empty collection, present on
         # the block — the assembly always materializes the collection).
@@ -1486,22 +1486,22 @@ def test_mixed_edge_support_legs_merge(w4_flag):
     sdk = _fresh_sdk()
     try:
         topic = "mixed-edge-topic"
-        strong_op = sdk.create_point("evidence", f"{topic} strong op-mediated record")
-        strong_direct = sdk.create_point("statement", f"{topic} strong direct support")
-        both_legs = sdk.create_point("evidence", f"{topic} reachable via both legs")
-        weak_op = sdk.create_point("evidence", f"{topic} weak op-mediated record")
-        claim = sdk.create_point("statement", f"{topic} mixed-edge belief statement")
+        strong_op = sdk._create_point("evidence", f"{topic} strong op-mediated record")
+        strong_direct = sdk._create_point("statement", f"{topic} strong direct support")
+        both_legs = sdk._create_point("evidence", f"{topic} reachable via both legs")
+        weak_op = sdk._create_point("evidence", f"{topic} weak op-mediated record")
+        claim = sdk._create_point("statement", f"{topic} mixed-edge belief statement")
         # Leg 1: operator-mediated (create_operator wires source →INPUT idx0→
         # op →IMPL→ target). strong_op, weak_op AND both_legs ride this leg
         # (both_legs is an operator source for the claim).
-        sdk.create_operator("IMPL", strong_op["id"], [claim["id"]])
-        sdk.create_operator("IMPL", weak_op["id"], [claim["id"]])
-        sdk.create_operator("IMPL", both_legs["id"], [claim["id"]])
+        sdk._create_operator("IMPL", strong_op["id"], [claim["id"]])
+        sdk._create_operator("IMPL", weak_op["id"], [claim["id"]])
+        sdk._create_operator("IMPL", both_legs["id"], [claim["id"]])
         # Leg 2: operator-less direct IMPL edges (reification rule, §8).
         # strong_direct rides direct only; both_legs rides BOTH (operator-
         # mediated INPUT path AND a direct edge — the dedup branch).
-        sdk.create_direct_edge("IMPL", strong_direct["id"], claim["id"])
-        sdk.create_direct_edge("IMPL", both_legs["id"], claim["id"])
+        sdk._create_direct_edge("IMPL", strong_direct["id"], claim["id"])
+        sdk._create_direct_edge("IMPL", both_legs["id"], claim["id"])
         _set_posterior(sdk, claim["id"], 12.0, 1.0)
         # Distinct weights to force a deterministic (weight desc) ordering:
         # strong_op 12/1 → 0.92, strong_direct 9/1 → 0.90, both_legs 6/1 →
@@ -1544,7 +1544,7 @@ def test_rogue_variance_coerces_and_projection_fail_open(w4_flag, monkeypatch):
     import tortoise.why as why_mod
     sdk = _fresh_sdk()
     try:
-        claim = sdk.create_point("statement", "rogue-variance topic belief")
+        claim = sdk._create_point("statement", "rogue-variance topic belief")
         _set_posterior(sdk, claim["id"], 12.0, 1.0)
         block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
 
@@ -1586,11 +1586,11 @@ def test_single_alternative_decision_no_tradeoffs(w4_flag):
     sdk = _fresh_sdk()
     try:
         topic = "single-alt-decision"
-        ev = sdk.create_point("evidence", f"{topic} support record")
-        dec = sdk.create_point("decision", f"{topic} decision point")
-        opt = sdk.create_point("option", f"{topic} the one option")
-        sdk.create_operator("IMPL", ev["id"], [dec["id"]])
-        sdk.create_operator("IMPL", dec["id"], [opt["id"]])
+        ev = sdk._create_point("evidence", f"{topic} support record")
+        dec = sdk._create_point("decision", f"{topic} decision point")
+        opt = sdk._create_point("option", f"{topic} the one option")
+        sdk._create_operator("IMPL", ev["id"], [dec["id"]])
+        sdk._create_operator("IMPL", dec["id"], [opt["id"]])
         _set_posterior(sdk, dec["id"], 12.0, 1.0)
         _set_posterior(sdk, opt["id"], 8.0, 1.0)
         _set_posterior(sdk, ev["id"], 12.0, 1.0)
@@ -1619,14 +1619,14 @@ def test_tradeoffs_bounded_cap(w4_flag):
     sdk = _fresh_sdk()
     try:
         topic = "many-alt-decision"
-        ev = sdk.create_point("evidence", f"{topic} support record")
-        dec = sdk.create_point("decision", f"{topic} decision point")
-        sdk.create_operator("IMPL", ev["id"], [dec["id"]])
+        ev = sdk._create_point("evidence", f"{topic} support record")
+        dec = sdk._create_point("decision", f"{topic} decision point")
+        sdk._create_operator("IMPL", ev["id"], [dec["id"]])
         # 8 alternatives with descending EP weights (8/1 strongest … 1/8
         # weakest) — the cap must keep the strongest W4_MAX_TRADEOFFS.
         for i in range(8):
-            o = sdk.create_point("option", f"{topic} option {i}")
-            sdk.create_operator("IMPL", dec["id"], [o["id"]])
+            o = sdk._create_point("option", f"{topic} option {i}")
+            sdk._create_operator("IMPL", dec["id"], [o["id"]])
             w = 8 - i
             _set_posterior(sdk, o["id"], float(w), 1.0)
         _set_posterior(sdk, dec["id"], 12.0, 1.0)

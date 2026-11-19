@@ -68,11 +68,11 @@ def _seed_team_sdk(org_id: str = TEST_ORG_ID) -> TortoiseSDK:
 
 def _plant_contested(sdk, content: str, counter_content: str) -> str:
     proj = sdk._get_proj()
-    ev = sdk.create_point("evidence", f"{content} [supporting record]")
-    claim = sdk.create_point("statement", content)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
-    counter = sdk.create_point("statement", counter_content)
-    sdk.create_operator("NAND", counter["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", f"{content} [supporting record]")
+    claim = sdk._create_point("statement", content)
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
+    counter = sdk._create_point("statement", counter_content)
+    sdk._create_operator("NAND", counter["id"], [claim["id"]])
     for pid, a, b in ((claim["id"], 2.0, 0.7), (ev["id"], 12.0, 1.0),
                       (counter["id"], 10.0, 1.0)):
         mean = round(a / (a + b), 4)
@@ -180,7 +180,7 @@ def test_sdk_http_deep_equal_parity(client):
     _plant_contested(sdk, "Lumen canary ships to five percent",
                      "Lumen canary is gated behind the SLO fix")
     window = _window("Is the Lumen canary shipping to five percent yet?")
-    sdk_r = sdk.volunteer_context(window, session_id="sess_par",
+    sdk_r = sdk._volunteer_context(window, session_id="sess_par",
                                   prior_context=None, why=True)
     http_r = client.post("/v1/context", json={
         "window": window, "session_id": "sess_par", "why": True,
@@ -217,7 +217,7 @@ def test_server_error_degrades_200_never_503(client, monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("simulated assembly failure")
 
-    monkeypatch.setattr(ha_mod.TortoiseSDK, "volunteer_context", _boom)
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "_volunteer_context", _boom)
     r = client.post("/v1/context", json={"window": _window(
         "What did Alice decide?")})
     assert r.status_code == 200, r.text  # fail-open, NEVER 503
@@ -233,13 +233,13 @@ def test_enforced_slo_breach_degrades_timeout(client, monkeypatch):
     import tortoise.hosted_api as ha_mod
     monkeypatch.setenv("TORTOISE_VOLUNTEER_ENFORCE_SLO", "1")
 
-    orig = ha_mod.TortoiseSDK.volunteer_context
+    orig = ha_mod.TortoiseSDK._volunteer_context
 
     def _slow(self, window, *a, **k):
         time.sleep(0.4)  # > 300 ms SLO
         return orig(self, window, *a, **k)
 
-    monkeypatch.setattr(ha_mod.TortoiseSDK, "volunteer_context", _slow)
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "_volunteer_context", _slow)
     r = client.post("/v1/context", json={"window": _window(
         "What did Alice decide?")})
     assert r.status_code == 200
@@ -259,7 +259,7 @@ def test_hard_ceiling_never_hangs_caller(client, monkeypatch):
     def _hung(self, window, *a, **k):
         time.sleep(10)
 
-    monkeypatch.setattr(ha_mod.TortoiseSDK, "volunteer_context", _hung)
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "_volunteer_context", _hung)
     r = client.post("/v1/context", json={"window": _window(
         "What did Alice decide?")})
     assert r.status_code == 200  # never 503, never a hung caller
@@ -294,9 +294,9 @@ def test_sdk_validates_before_http(client):
     sdk = _seed_team_sdk()
     from tortoise.volunteer import VolunteerValidationError
     with pytest.raises(VolunteerValidationError):
-        sdk.volunteer_context([])
+        sdk._volunteer_context([])
     with pytest.raises(VolunteerValidationError):
-        sdk.volunteer_context(_window("hi"), max_pointers=9)
+        sdk._volunteer_context(_window("hi"), max_pointers=9)
 
 
 # ── 429 backoff contract (standard per-key limiter + Retry-After) ──────────
@@ -416,15 +416,15 @@ def _plant_team_fact(real_auth, org_id: str, content: str,
     """Seed a measured belief in the team's data graph via the SAME tenancy
     resolver the endpoint uses (per-request _make_sdk(namespace=org_id))."""
     sdk = real_auth.ha_mod._make_sdk(namespace=org_id)
-    claim = sdk.create_point("statement", content)
+    claim = sdk._create_point("statement", content)
     proj = sdk._get_proj()
     proj.g.query(
         "MATCH (n:Point {id:$id}) SET n.confidence=0.92, "
         "n.posterior_alpha=12.0, n.posterior_beta=1.0",
         params={"id": claim["id"]})
     if counter:
-        c = sdk.create_point("statement", counter)
-        sdk.create_operator("NAND", c["id"], [claim["id"]])
+        c = sdk._create_point("statement", counter)
+        sdk._create_operator("NAND", c["id"], [claim["id"]])
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=0.9, "
             "n.posterior_alpha=10.0, n.posterior_beta=1.0",

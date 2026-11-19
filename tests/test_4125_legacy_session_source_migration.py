@@ -114,11 +114,11 @@ def pre_4005_commit(sdk, sid: str, *, doc_id: str = "doc_x1",
         g.query("MERGE (s:Source {url:$did}) "
                 "SET s.documentKind='transcript', s.sessionId=$sid",
                 params={"did": doc_id, "sid": dsid})
-    sdk.link_source_to_entity(basename, doc_id, "Document")
+    sdk._link_source_to_entity(basename, doc_id, "Document")
     props = {"extractedFrom": basename, "source_ref": basename}
     if psid is not None:
         props["session_id"] = psid
-    sdk.create_point("statement", point_content, **props)
+    sdk._create_point("statement", point_content, **props)
     return basename
 
 
@@ -130,7 +130,7 @@ def post_4005_commit(sdk, sid: str, *, doc_id: str = "doc_x1",
                       provenance_spans=list(SPANS), is_episodic=True,
                       source_path=LEGACY_URL,
                       sourceDate="2026-01-01T00:00:00+00:00")
-    sdk.link_source_to_entity(canonical, doc_id, "Document")
+    sdk._link_source_to_entity(canonical, doc_id, "Document")
     return canonical
 
 
@@ -148,7 +148,7 @@ def corpus_indexed_session_source(sdk, sid: str = "s1",
                       is_episodic=True)
     g_of(sdk).query("MERGE (e:Event {id:$eid}) SET e.session_id=$sid",
                     params={"eid": event_id, "sid": sid})
-    sdk.link_source_to_entity(url, event_id, "Event")
+    sdk._link_source_to_entity(url, event_id, "Event")
     return url
 
 
@@ -526,7 +526,7 @@ class TestAttribution:
         pre_4005_commit(s, "s1", doc_id="doc_a", doc_session=None,
                         point_content="claim from s1", point_session="s1")
         g_of(s).query("MERGE (s:Source {url:'doc_b'}) SET s.sessionId='s2'")
-        s.create_point("statement", "claim from s2", extractedFrom=LEGACY_URL,
+        s._create_point("statement", "claim from s2", extractedFrom=LEGACY_URL,
                        source_ref=LEGACY_URL, session_id="s2")
 
         report = reconcile_legacy_session_sources(g_of(s))

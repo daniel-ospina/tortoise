@@ -89,7 +89,7 @@ def sdk():
 
 
 def _make_point(sdk: TortoiseSDK, content: str, **kw):
-    return sdk.create_point("statement", content, **kw)
+    return sdk._create_point("statement", content, **kw)
 
 
 def _forward_chain(sdk: TortoiseSDK) -> tuple[str, str]:
@@ -101,7 +101,7 @@ def _forward_chain(sdk: TortoiseSDK) -> tuple[str, str]:
     """
     old = _make_point(sdk, "7818 claim v1", validFrom=P_START)
     new = _make_point(sdk, "7818 claim v2", validFrom=BOUNDARY)
-    sdk.supersede_point(old["id"], new["id"], valid_from=BOUNDARY)
+    sdk._supersede_point(old["id"], new["id"], valid_from=BOUNDARY)
     return old["id"], new["id"]
 
 

@@ -312,7 +312,7 @@ class TestSeed:
         so identity-unprovable) is a collision — surfaced, never merged."""
         sdk = _sdk()
         try:
-            sdk.create_subject("Ada", subjectKind="naturalPerson")
+            sdk._create_subject("Ada", subjectKind="naturalPerson")
             r = sh.seed_selfhost_anchors(sdk, org_name="Acme",
                                          person_name="Ada")
             subjects = _subjects(sdk)
@@ -329,7 +329,7 @@ class TestSeed:
         self-hosted lane too (it consumes the same core)."""
         sdk = _sdk()
         try:
-            sdk.create_subject("Ada", subjectKind="person",
+            sdk._create_subject("Ada", subjectKind="person",
                                user_id=sh.selfhost_local_user_ref())
             r = sh.seed_selfhost_anchors(sdk, org_name="Acme",
                                          person_name="Ada")

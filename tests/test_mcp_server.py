@@ -911,7 +911,7 @@ class TestEventsTools:
 
         db = os.path.join(str(tmp_path), "evt.db")
         sdk = TortoiseSDK(db)
-        sdk.create_point("statement", "hello from mcp")
+        sdk._create_point("statement", "hello from mcp")
         monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
@@ -939,7 +939,7 @@ class TestEventsTools:
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt3.db"))
-        p = sdk.create_point("statement", "retract me")
+        p = sdk._create_point("statement", "retract me")
         monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:

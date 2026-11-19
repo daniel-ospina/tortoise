@@ -53,7 +53,7 @@ def sdk(tmp_path, monkeypatch):
 
 @pytest.fixture
 def team(sdk):
-    return sdk.org_create("acme-10015")
+    return sdk._org_create("acme-10015")
 
 
 def _bind(sdk, team, graph_id="g-10015"):
@@ -258,7 +258,7 @@ class TestReply:
         monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "the-gates-store.db"))
         own = TortoiseSDK(db_path=str(tmp_path / "this-handles-store.db"),
                           namespace="registry")
-        team = own.org_create("split-store-10015")
+        team = own._org_create("split-store-10015")
         assert own._org_get(team["id"]) is not None   # the caller CAN see it
         own._record_tenant = (team["id"], "g-10015")
         with pytest.raises(ControlPlaneError) as exc:
@@ -293,8 +293,8 @@ class TestTenancy:
         assert "TORTOISE_RECORD_ORG_ID" in message
 
     def test_a_caller_reads_its_own_account_and_not_another(self, sdk):
-        a = sdk.org_create("tenant-a-10015")
-        b = sdk.org_create("tenant-b-10015")
+        a = sdk._org_create("tenant-a-10015")
+        b = sdk._org_create("tenant-b-10015")
         _set_points_override(sdk, a, 7)
         _set_points_override(sdk, b, 11)
 
@@ -317,8 +317,8 @@ class TestTenancy:
         Otherwise a scope left on the context could redirect a credential's read
         to another account, which is the same defect class on the read side.
         """
-        a = sdk.org_create("carried-a-10015")
-        b = sdk.org_create("carried-b-10015")
+        a = sdk._org_create("carried-a-10015")
+        b = sdk._org_create("carried-b-10015")
         sdk._record_tenant = (a["id"], "g-a")
         with use_record_tenant(b["id"], "g-b"):
             reply = sdk.get_organisation_account()
@@ -327,7 +327,7 @@ class TestTenancy:
     def test_an_ambient_single_tenant_scope_is_honoured_when_nothing_is_carried(
         self, sdk,
     ):
-        a = sdk.org_create("scoped-a-10015")
+        a = sdk._org_create("scoped-a-10015")
         with use_record_tenant(a["id"], "g-a"):
             reply = sdk.get_organisation_account()
         assert reply["org_id"] == a["id"]
@@ -427,7 +427,7 @@ class TestTenancy:
         mode — a registry-written org on a Supabase deployment is exactly the
         state this arm exists for.
         """
-        team = sdk.org_create("p3-present-org-10015")
+        team = sdk._org_create("p3-present-org-10015")
         assert sdk._get_registry(create=False) is not None, (
             "org_create must have materialised the registry this test relies on"
         )

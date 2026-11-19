@@ -358,7 +358,7 @@ class TestE2E17HttpRefusal:
 
         reg = TortoiseSDK(os.path.join(str(tmp_path), "reg.db"),
                           namespace="registry")
-        team = reg.org_create("e2e17-http")
+        team = reg._org_create("e2e17-http")
         key = reg._apikey_create(team["id"], "e2e17-fixture")["api_key"]
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               _registry_sdk=reg)

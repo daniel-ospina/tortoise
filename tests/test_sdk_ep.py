@@ -26,7 +26,7 @@ def sdk():
 
 
 def _make_claim(sdk: TortoiseSDK, content: str):
-    return sdk.create_point("statement", content, status="live")  # #780 default excludes drafts
+    return sdk._create_point("statement", content, status="live")  # #780 default excludes drafts
 
 
 # ── set_prior / get_confidence ────────────────────────────────────
@@ -38,7 +38,7 @@ class TestEvidence:
         # point must exist first — an id naming no node is refused (a real
         # caller always has the point whose prior it is setting).
         p = _make_claim(sdk, "claim-1")
-        result = sdk.set_point_baseline(p["id"], 5.0, 2.0)
+        result = sdk._set_point_baseline(p["id"], 5.0, 2.0)
         # #398/#2199: return includes baseline provenance (source defaults to
         # the #2199 token family's author-set value, renamed from 'explicit').
         assert result == {"claim_id": p["id"], "alpha": 5.0, "beta": 2.0,
@@ -48,7 +48,7 @@ class TestEvidence:
         p = _make_claim(sdk, "some claim")
         # #1157: live-uncalibrated claim trips the fail-closed gate; this
         # asserts the read surface's return contract, not the gate — opt out.
-        c = sdk.get_confidence(p["id"], require_calibration=False)
+        c = sdk._get_confidence(p["id"], require_calibration=False)
         assert "mean" in c
         assert "variance" in c
         assert c["alpha"] == 1.0 and c["beta"] == 1.0  # default uniform
@@ -59,7 +59,7 @@ class TestEvidence:
 
 class TestRunEP:
     def test_empty_graph_returns_zero(self, sdk):
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         assert result["iterations"] == 0
         assert result["converged"] is True
         assert result["confidences"] == {}
@@ -69,11 +69,11 @@ class TestRunEP:
         b = _make_claim(sdk, "B")
         # #344: neutral Beta(1,1) baselines keep the fail-closed EP gate active
         # (uncalibrated points previously carried the same prior silently).
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._set_point_baseline(a["id"], 1, 1)
+        sdk._set_point_baseline(b["id"], 1, 1)
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
 
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         assert result["iterations"] > 0
         assert result["converged"] is True
         assert a["id"] in result["confidences"]
@@ -84,34 +84,34 @@ class TestRunEP:
         b = _make_claim(sdk, "B")
         c = _make_claim(sdk, "C")
         for cid in (a["id"], b["id"], c["id"]):
-            sdk.set_point_baseline(cid, 1, 1)  # #344: neutral calibrated baselines
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.create_operator("NAND", b["id"], [c["id"]])
+            sdk._set_point_baseline(cid, 1, 1)  # #344: neutral calibrated baselines
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("NAND", b["id"], [c["id"]])
 
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         for cid, conf in result["confidences"].items():
             assert 0 <= conf["mean"] <= 1, f"mean {conf['mean']} out of [0,1] for {cid}"
 
     def test_evidence_affects_confidence(self, sdk):
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
 
         # Strong evidence on A → B should inherit higher confidence
-        sdk.set_point_baseline(a["id"], 10.0, 1.0)
-        sdk.set_point_baseline(b["id"], 1, 1)  # #344: neutral baseline (gate active)
-        result = sdk.compute_confidence()
+        sdk._set_point_baseline(a["id"], 10.0, 1.0)
+        sdk._set_point_baseline(b["id"], 1, 1)  # #344: neutral baseline (gate active)
+        result = sdk._compute_confidence()
         assert result["confidences"][a["id"]]["mean"] > 0.8
 
     def test_with_explicit_factors(self, sdk):
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
-        sdk.set_point_baseline(a["id"], 1, 1)  # #344: neutral calibrated baselines
-        sdk.set_point_baseline(b["id"], 1, 1)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._set_point_baseline(a["id"], 1, 1)  # #344: neutral calibrated baselines
+        sdk._set_point_baseline(b["id"], 1, 1)
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
 
         # Pass factors with the real operator ID
-        result = sdk.compute_confidence(factors=[(op["id"], "IMPL", [a["id"], b["id"]], 1.0)])
+        result = sdk._compute_confidence(factors=[(op["id"], "IMPL", [a["id"], b["id"]], 1.0)])
         assert result["iterations"] > 0
 
 
@@ -130,7 +130,7 @@ class TestEvidenceLeak:
     def test_run_evidence_does_not_leak_to_next_run(self, sdk):
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         ep = sdk._get_ep()
         ep.run([op["id"]], evidence={b["id"]: (10.0, 1.0)})
 
@@ -160,7 +160,7 @@ class TestEvidenceLeak:
         from tortoise.ep import TortoiseEP
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         proj = sdk._get_proj()
         ep = TortoiseEP(proj, evidence={b["id"]: (3.0, 1.0)})
         # Run-level evidence must override the constructor evidence for this
@@ -179,7 +179,7 @@ class TestEvidenceLeak:
         from tortoise.ep import TortoiseEP
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         proj = sdk._get_proj()
         ep = TortoiseEP(proj, evidence={b["id"]: (10.0, 1.0)})
         # Constructor evidence is persistent: applied on EVERY run, even with
@@ -215,7 +215,7 @@ class TestCacheFreshness:
     def test_early_return_clears_stale_cache(self, sdk):
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         ep = sdk._get_ep()
         ep.run([op["id"]], evidence={b["id"]: (10.0, 1.0)})
 
@@ -251,8 +251,8 @@ class TestZeroTotalGuard:
         # Isolated claim with NO operators (dream() early-returns; the guard
         # fires on the raw stored (0,0)).
         p = _make_claim(sdk, "degenerate-claim")
-        sdk.set_point_baseline(p["id"], 0.0, 0.0)
-        c = sdk.get_confidence(p["id"])   # was ZeroDivisionError
+        sdk._set_point_baseline(p["id"], 0.0, 0.0)
+        c = sdk._get_confidence(p["id"])   # was ZeroDivisionError
         assert c["mean"] == 0.5           # uniform fallback
         assert abs(c["variance"] - 1/12) < 1e-9  # Beta(1,1) uniform variance
         assert c["effective_n"] == 0
@@ -288,17 +288,17 @@ class TestZeroTotalGuard:
         # compute_confidence) without crashing.
         a = _make_claim(sdk, "A-zero")
         b = _make_claim(sdk, "B-zero")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
         proj = sdk._get_proj()
         for cid in (a["id"], b["id"]):
             # #344: baseline first (keeps the gate active), then the (0,0)
             # params the test exercises below.
-            sdk.set_point_baseline(cid, 1, 1)
+            sdk._set_point_baseline(cid, 1, 1)
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.ep_alpha=0.0, n.ep_beta=0.0",
                 params={"id": cid},
             )
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         assert result["iterations"] >= 0
         for cid, conf in result["confidences"].items():  # noqa: B007
             assert 0 <= conf["mean"] <= 1, f"mean {conf['mean']} out of range"

@@ -27,7 +27,7 @@ def _seed(sdk: TortoiseSDK) -> list[str]:
         ("B2B carousel pipeline", "carousel-design", "decision"),
         ("FalkorDB setup guide", "infrastructure", "statement"),
     ]:
-        p = sdk.create_point(kind, content)
+        p = sdk._create_point(kind, content)
         ids.append(p["id"])
     return ids
 
@@ -103,9 +103,9 @@ def test_results_sorted_by_confidence():
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
     # Create points with varying match quality
-    sdk.create_point("test", "the quick brown fox")
-    sdk.create_point("test", "quick fox jumps")
-    sdk.create_point("test", "the fox says hello")
+    sdk._create_point("test", "the quick brown fox")
+    sdk._create_point("test", "quick fox jumps")
+    sdk._create_point("test", "the fox says hello")
 
     results = sdk.search_knowledge("quick", mode="entry_points")
     # "quick fox jumps" (shortest content with match) should have highest confidence
@@ -146,9 +146,9 @@ def test_limit_respects_confidence_sort():
     sdk = TortoiseSDK(db_path)
     # Many partial matches (longer content = lower confidence)
     for i in range(10):
-        sdk.create_point("test", f"competitor project alpha beta gamma delta {i}")
+        sdk._create_point("test", f"competitor project alpha beta gamma delta {i}")
     # One exact match
-    sdk.create_point("test", "competitor")
+    sdk._create_point("test", "competitor")
 
     results = sdk.search_knowledge("competitor", mode="entry_points", limit=3)
     # Exact match must be in results and at top
@@ -208,7 +208,7 @@ def test_fallback_confidence_scale_invariant_to_rrf():
              "scores": {"rrf": 0.0041}},
         ]
 
-    sdk.tortoise_fts_query = fake_fts
+    sdk._tortoise_fts_query = fake_fts
     results = sdk.search_knowledge("no substring match at all", mode="entry_points", limit=5)
     confs = {r["id"]: r["confidence"] for r in results}
     assert confs["a"] == 0.49                       # strongest → top of band
@@ -234,7 +234,7 @@ def test_fallback_zero_signal_returns_empty():
             {"id": "b", "content": "y", "point_kind": "statement", "scores": {"rrf": 0.0}},
         ]
 
-    sdk.tortoise_fts_query = fake_fts
+    sdk._tortoise_fts_query = fake_fts
     results = sdk.search_knowledge("zzz", mode="entry_points", limit=5)
     assert results == []
     print("PASS test_fallback_zero_signal_returns_empty")

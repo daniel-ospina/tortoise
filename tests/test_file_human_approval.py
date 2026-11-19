@@ -24,7 +24,7 @@ from tortoise.sdk import TortoiseSDK
 def sdk():
     db_path = f"{tempfile.mkdtemp(prefix='tt_531_')}/test.db"
     s = TortoiseSDK(db_path)
-    s.test_guard = lambda: None  # bypass production guard for test graph
+    s._test_guard = lambda: None  # bypass production guard for test graph
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -32,10 +32,10 @@ def sdk():
 
 def _setup_approval(sdk):
     """Create approver, artifact, claims; file an approval; return ids."""
-    subj = sdk.create_subject("daniel", "engineer")
-    doc = sdk.create_document("customer-profile-cp-001", "artifact")
-    c1 = sdk.create_point("statement", "CP-001 targets the SMB segment", status="live")  # #992: live — draft stripped by EP filter
-    c2 = sdk.create_point("statement", "CP-001 addresses the onboarding pain", status="live")
+    subj = sdk._create_subject("daniel", "engineer")
+    doc = sdk._create_document("customer-profile-cp-001", "artifact")
+    c1 = sdk._create_point("statement", "CP-001 targets the SMB segment", status="live")  # #992: live — draft stripped by EP filter
+    c2 = sdk._create_point("statement", "CP-001 addresses the onboarding pain", status="live")
     result = sdk.record_decision(
         approver_id=subj["id"],
         artifact_id=doc["id"],
@@ -109,7 +109,7 @@ class TestFileHumanApproval:
         subj, doc, c1, c2, result = _setup_approval(sdk)  # noqa: RUF059
         proj = sdk._get_proj()  # noqa: F841
         for c in (c1, c2):
-            p = sdk.get_point(c["id"])
+            p = sdk._get_point(c["id"])
             assert p["confidence"] > 0.5, f"claim {c['id']} not strengthened: {p['confidence']}"
 
     def test_confidence_delta_is_null_when_the_claim_had_no_belief(self, sdk):
@@ -125,7 +125,7 @@ class TestFileHumanApproval:
         assert set(result["confidence_delta"].keys()) == {c1["id"], c2["id"]}
         for c in (c1, c2):
             assert result["confidence_delta"][c["id"]] is None, c["id"]
-            assert sdk.get_point(c["id"])["confidence"] > 0.5, (
+            assert sdk._get_point(c["id"])["confidence"] > 0.5, (
                 f"the approval did not strengthen {c['id']}")
 
     def test_confidence_delta_is_numeric_when_a_belief_existed(self, sdk):
@@ -133,7 +133,7 @@ class TestFileHumanApproval:
         subj, doc, c1, c2, _ = _setup_approval(sdk)
         # Give both claims a persisted prior, so the pre-run value is a number.
         for c in (c1, c2):
-            sdk.set_point_baseline(c["id"], 2.0, 2.0)
+            sdk._set_point_baseline(c["id"], 2.0, 2.0)
         result = sdk.record_decision(
             approver_id=subj["id"], artifact_id=doc["id"],
             point_ids=[c1["id"], c2["id"]],
@@ -144,9 +144,9 @@ class TestFileHumanApproval:
 
     def test_validates_approver_artifact_and_points(self, sdk):
         """Fail loudly on missing approver / artifact / point ids."""
-        subj = sdk.create_subject("daniel", "engineer")
-        doc = sdk.create_document("cp-002", "artifact")
-        c1 = sdk.create_point("statement", "some claim")
+        subj = sdk._create_subject("daniel", "engineer")
+        doc = sdk._create_document("cp-002", "artifact")
+        c1 = sdk._create_point("statement", "some claim")
 
         with pytest.raises(ValueError):
             sdk.record_decision("ghost", doc["id"], [c1["id"]])
@@ -162,9 +162,9 @@ class TestFileHumanApproval:
         subj, doc, c1, c2, result = _setup_approval(sdk)  # noqa: RUF059
         # Supersede the decision Point with a retraction (#547: new_id must be
         # an existing Point — create the retraction point first).
-        revoke = sdk.create_point("statement", "Approval revoked: CP-001")
-        sdk.supersede_point(result["decision_point_id"], revoke["id"])
-        p = sdk.get_point(result["decision_point_id"])
+        revoke = sdk._create_point("statement", "Approval revoked: CP-001")
+        sdk._supersede_point(result["decision_point_id"], revoke["id"])
+        p = sdk._get_point(result["decision_point_id"])
         assert p.get("outdated") is True or p.get("status") == "superseded" or \
             p.get("outdated") is True
 
@@ -183,7 +183,7 @@ class TestGroundingSeeding:
 
     def test_mined_decision_does_not_seed_grounding(self, sdk):
         """A mined 'decision' point (not humanApproval) is NOT a seed."""
-        sdk.create_point("decision", "let's use postgres")
+        sdk._create_point("decision", "let's use postgres")
         proj = sdk._get_proj()
         if hasattr(proj, "compute_grounding"):
             g = proj.compute_grounding()
@@ -200,7 +200,7 @@ class TestReputationExclusion:
         # An approval alone must not inflate the approver's reputation.
         # Beta reputation starts at (1,1) → mean 0.5; an approval-induced
         # IMPL counted as success would push it > 0.5.
-        rep = sdk.compute_reputation(subj["id"])
+        rep = sdk._compute_reputation(subj["id"])
         # If the exclusion works, reputation stays at baseline (no outcomes).
         assert rep.get("successes", 0) == 0 or rep.get("mean", 0.5) <= 0.6, \
             f"reputation inflated by own approval: {rep}"

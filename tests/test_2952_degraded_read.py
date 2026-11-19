@@ -456,12 +456,12 @@ class TestHealthyRankingByteIdentical:
     def test_leg_trace_is_observational_only(self, sdk_factory, fake_embedder):
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma", id="p1")
-            sdk.create_point("statement", "delta epsilon zeta", id="p2")
-            base = sdk.tortoise_fts_query(
+            sdk._create_point("statement", "alpha beta gamma", id="p1")
+            sdk._create_point("statement", "delta epsilon zeta", id="p2")
+            base = sdk._tortoise_fts_query(
                 "alpha beta", limit=5, _elevated_timeout_ms=5000)
             trace: list[dict] = []
-            traced = sdk.tortoise_fts_query(
+            traced = sdk._tortoise_fts_query(
                 "alpha beta", limit=5, leg_trace=trace,
                 _elevated_timeout_ms=5000)
             assert _canon(base) == _canon(traced)
@@ -475,12 +475,12 @@ class TestHealthyRankingByteIdentical:
                                                       fake_embedder):
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma", id="p1")
-            before = sdk.tortoise_fts_query(
+            sdk._create_point("statement", "alpha beta gamma", id="p1")
+            before = sdk._tortoise_fts_query(
                 "alpha beta", limit=5, _elevated_timeout_ms=5000)
             # (B) warm-up on the SAME healthy embedder is a no-op for ranking
             assert EmbeddingModel.warm_up() is True
-            after = sdk.tortoise_fts_query(
+            after = sdk._tortoise_fts_query(
                 "alpha beta", limit=5, _elevated_timeout_ms=5000)
             assert _canon(before) == _canon(after)
         finally:
@@ -489,16 +489,16 @@ class TestHealthyRankingByteIdentical:
     def test_recall_state_leg_trace_forwarded(self, sdk_factory, fake_embedder):
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma", id="p1")
+            sdk._create_point("statement", "alpha beta gamma", id="p1")
             trace: list[dict] = []
-            sdk.recall_state("alpha beta", limit=5, leg_trace=trace)
+            sdk._recall_state("alpha beta", limit=5, leg_trace=trace)
             assert any(e["leg"] == "fts" for e in trace)
             # forwarding proof: the vector-leg entry is recorded (its
             # degradation is asserted by the helper unit tests, not here —
             # the 500ms collective cap makes a healthy assertion flaky)
             assert any(e["leg"] == "vector" for e in trace)
             # default (leg_trace=None) call still works — byte-identical
-            plain = sdk.recall_state("alpha beta", limit=5)
+            plain = sdk._recall_state("alpha beta", limit=5)
             assert isinstance(plain, list) and plain
         finally:
             sdk.close()

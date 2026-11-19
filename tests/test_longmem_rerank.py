@@ -554,7 +554,7 @@ def test_retrieve_rerank_degraded_pool_depth(tmp_path, monkeypatch):
     }
     try:
         for i in range(DEFAULT_POOL_SIZE + 1):
-            sdk.create_point(
+            sdk._create_point(
                 "point", f"the widget status is {i} and the serial is {i}",
                 id=f"synth:q1:t{i}", pointKind="event",
                 session_id="synth-s0", lme_session_index=0,

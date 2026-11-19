@@ -54,7 +54,7 @@ def sdk():
 def _clean_graph(sdk: TortoiseSDK) -> None:
     """Delete all nodes and edges from the test graph."""
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")
     except Exception:
@@ -62,7 +62,7 @@ def _clean_graph(sdk: TortoiseSDK) -> None:
 
 
 def _make_point(sdk: TortoiseSDK, kind: str = "statement", content: str = "test", **kw):
-    return sdk.create_point(kind, content, **kw)
+    return sdk._create_point(kind, content, **kw)
 
 
 def _create_raw_point(sdk: TortoiseSDK, pid: str, kind: str, content: str,
@@ -122,7 +122,7 @@ class TestListPointKinds:
         p1 = _make_point(sdk, kind="statement", content="regular point")
         p2 = _make_point(sdk, kind="statement", content="another point")
         # Create an operator (is_operator=true) — needs real source/target
-        sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+        sdk._create_operator("IMPL", p1["id"], [p2["id"]])
 
         result = sdk.graph_overview("pointkinds")
         # Only "statement" should appear (2 points), not the operator
@@ -151,7 +151,7 @@ class TestListPointKinds:
 
     def test_pack_field_from_colon_kind(self, sdk):
         """When pointKind has colon prefix, pack field is extracted."""
-        sdk.create_point("product-strategy:jobToBeDone", "test jtbd")
+        sdk._create_point("product-strategy:jobToBeDone", "test jtbd")
 
         result = sdk.graph_overview("pointkinds")
         assert len(result) >= 1
@@ -204,7 +204,7 @@ class TestListSources:
         p = _make_point(sdk, kind="statement", content="temp",
                         extractedFrom=url)
         # Delete the point but Source remains
-        sdk.delete_point(p["id"])
+        sdk._delete_point(p["id"])
 
         result = sdk.list_knowledge("source")
         source = [s for s in result if s["url"] == url]
@@ -273,7 +273,7 @@ _GATE_KEYS = ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
 class TestSummarizeStructureRekeyed:
     def test_expected_keys(self, sdk):
         """Returns gate keys + full-graph total + operators + gate_total."""
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         for key in (*_GATE_KEYS, "total", "operators", "gate_total"):
             assert key in status, f"missing key: {key}"
             assert isinstance(status[key], int), f"{key} should be int"
@@ -281,12 +281,12 @@ class TestSummarizeStructureRekeyed:
     def test_gate_total_is_gate_subtotal(self, sdk):
         """gate_total is the sum of the five gate-kind counts — the honest
         label for the pre-#2205 'total' semantics (which was gate-scoped)."""
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         assert status["gate_total"] == sum(status[k] for k in _GATE_KEYS)
 
     def test_empty_graph_returns_zeros(self, sdk):
         """Empty graph returns 0 everywhere (no error)."""
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         assert status["total"] == 0
         assert status["operators"] == 0
         assert status["gate_total"] == 0
@@ -302,7 +302,7 @@ class TestSummarizeStructureRekeyed:
         _make_point(sdk, kind="userJourney", content="UJ 1")
         _make_point(sdk, kind="requirement", content="Req 1")
 
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         assert status["gate0_jtbds"] == 2
         assert status["gate1_use_cases"] == 1
         assert status["gate2_user_journeys"] == 1
@@ -326,7 +326,7 @@ class TestSummarizeStructureRekeyed:
         for kind, content in seeds:
             _make_point(sdk, kind=kind, content=content)
 
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         # Kind-accurate after seeds of any kinds (indicator 3): every seeded
         # non-operator point lands in total, whatever its kind.
         assert status["total"] == len(seeds)
@@ -348,7 +348,7 @@ class TestSummarizeStructureRekeyed:
         _create_raw_point(sdk, "legacy_op", "statement", "legacy op",
                           op_type="IMPL")
 
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         assert status["total"] == 2        # both legacy PLAIN points only
         assert status["operators"] == 1    # op_type-only legacy operator
         assert status["gate0_jtbds"] == 1  # legacy jtbd lands in its gate
@@ -361,9 +361,9 @@ class TestSummarizeStructureRekeyed:
         p1 = _make_point(sdk, kind="jobToBeDone", content="real jtbd")
         p2 = _make_point(sdk, kind="jobToBeDone", content="another jtbd")
         # Create operator linking the two JTBDs
-        sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+        sdk._create_operator("IMPL", p1["id"], [p2["id"]])
 
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         # Only the 2 real jtbds count; operator excluded from gates AND total
         assert status["gate0_jtbds"] == 2
         assert status["total"] == 2
@@ -377,9 +377,9 @@ class TestSummarizeStructureRekeyed:
         _make_point(sdk, kind="decision", content="d-b")
         _make_point(sdk, kind="jobToBeDone", content="j-c")
         p4 = _make_point(sdk, kind="goal", content="g-e")
-        sdk.create_operator("IMPL", p1["id"], [p4["id"]])
+        sdk._create_operator("IMPL", p1["id"], [p4["id"]])
 
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         per_kind_sum = sum(r["count"] for r in sdk.graph_overview("pointkinds"))
         assert status["total"] == per_kind_sum == 4
         assert status["operators"] == 1
@@ -394,7 +394,7 @@ class TestSummarizeStructureRekeyed:
         _create_raw_point(sdk, "legacy_op", "statement", "legacy op",
                           op_type="IMPL")
 
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         per_kind_sum = sum(r["count"] for r in sdk.graph_overview("pointkinds"))
         assert status["total"] == per_kind_sum == 2
         assert status["operators"] == 1
@@ -411,7 +411,7 @@ class TestSummarizeStructureRekeyed:
             params={"pid": "legacy_kindless", "content": "no kind"},
         )
 
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         per_kind_sum = sum(r["count"] for r in sdk.graph_overview("pointkinds"))
         assert status["total"] == 2
         assert per_kind_sum == 1  # only the kined legacy point is listable

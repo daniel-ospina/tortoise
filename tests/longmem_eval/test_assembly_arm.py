@@ -304,7 +304,7 @@ def test_r9_widened_reach_both_retrievable(sdk, monkeypatch):
     """The A-widened arm admits both golds ONLY because both are retrievable
     at the widened fetch depth (non-vacuous widening)."""
     d = ag.build_deep_rank_substrate(sdk)
-    hits = sdk.tortoise_fts_query(d["question"], entity_type="point",
+    hits = sdk._tortoise_fts_query(d["question"], entity_type="point",
                                   limit=120)
     hit_ids = {h.get("id") for h in hits}
     assert {d["gold_a"], d["gold_b"]} <= hit_ids

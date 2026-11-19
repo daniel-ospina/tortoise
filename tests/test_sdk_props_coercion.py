@@ -68,7 +68,7 @@ class TestCoerceProps:
 
 class TestCreatePointProps:
     def test_create_point_accepts_nested_props_dict(self, sdk):
-        p = sdk.create_point(
+        p = sdk._create_point(
             "statement", "nested props test",
             authoredBy="test",
             props={"topic": "props-coercion", "confidence_tier": "high"},
@@ -80,7 +80,7 @@ class TestCreatePointProps:
         assert "props" not in p or not isinstance(p.get("props"), dict)
 
     def test_create_point_flattened_kwargs_still_works(self, sdk):
-        p = sdk.create_point(
+        p = sdk._create_point(
             "statement", "flattened kwargs test",
             topic="props-coercion", confidence_tier="low",
         )
@@ -88,13 +88,13 @@ class TestCreatePointProps:
         assert p["confidence_tier"] == "low"
 
     def test_create_point_props_none(self, sdk):
-        p = sdk.create_point("statement", "props none test", props=None)
+        p = sdk._create_point("statement", "props none test", props=None)
         assert p["pointKind"] == "statement"
 
     def test_create_point_dedup_with_nested_props(self, sdk):
         content = "dedup nested props test"
-        first = sdk.create_point("statement", content, dedup=True, props={"topic": "a"})
-        second = sdk.create_point("statement", content, dedup=True, props={"topic": "b"})
+        first = sdk._create_point("statement", content, dedup=True, props={"topic": "a"})
+        second = sdk._create_point("statement", content, dedup=True, props={"topic": "b"})
         assert first["id"] == second["id"]
 
 
@@ -102,14 +102,14 @@ class TestCreatePointProps:
 
 class TestUpdateAndEntityProps:
     def test_update_point_accepts_nested_props_dict(self, sdk):
-        p = sdk.create_point("statement", "update target", status="draft")
-        updated = sdk.update_point(p["id"], props={"topic": "updated-via-props"})
+        p = sdk._create_point("statement", "update target", status="draft")
+        updated = sdk._update_point(p["id"], props={"topic": "updated-via-props"})
         assert updated.get("topic") == "updated-via-props"
 
     def test_create_object_accepts_nested_props_dict(self, sdk):
         # Coercion must accept the MCP-style nested dict without raising
         # ("Property values can only be of primitive types").
-        obj = sdk.create_object(
+        obj = sdk._create_object(
             "Test Product", "product",
             props={"tier": "free", "custodian": "pm"},
         )
@@ -148,7 +148,7 @@ class TestSearchKeysFlattenedOnEveryWritePath:
 
     def test_update_entity_flattens_a_list_search_keys(self, sdk):
         """The defect: a list landed as an ARRAY, so FTS could never match it."""
-        p = sdk.create_point("statement", "flatten target",
+        p = sdk._create_point("statement", "flatten target",
                              search_keys=["alpha", "beta"])
         sdk.update_knowledge(p["id"], search_keys=["gamma", "delta"])
         stored = self._stored(sdk, p["id"])
@@ -163,26 +163,26 @@ class TestSearchKeysFlattenedOnEveryWritePath:
         writes the key\" is the convention all three writers share and the pop
         is easy to misread as a clear.
         """
-        p = sdk.create_point("statement", "empty-list target",
+        p = sdk._create_point("statement", "empty-list target",
                              search_keys="keepme")
         sdk.update_knowledge(p["id"], search_keys=[])
         assert self._stored(sdk, p["id"]) == "keepme"
-        sdk.update_point(p["id"], search_keys=[])
+        sdk._update_point(p["id"], search_keys=[])
         assert self._stored(sdk, p["id"]) == "keepme"
 
     def test_update_entity_leaves_a_flat_string_alone(self, sdk):
         """No-op for scalars — flattening must not rewrite a flat value."""
-        p = sdk.create_point("statement", "scalar target")
+        p = sdk._create_point("statement", "scalar target")
         sdk.update_knowledge(p["id"], search_keys="already flat")
         assert self._stored(sdk, p["id"]) == "already flat"
 
     def test_the_other_two_paths_are_the_parity_baseline(self, sdk):
         """Pin the two paths that already flattened, so the parity claim above
         is checked AGAINST them rather than asserted from them."""
-        p = sdk.create_point("statement", "parity create",
+        p = sdk._create_point("statement", "parity create",
                              search_keys=["one", "two"])
         assert self._stored(sdk, p["id"]) == "one two"
-        sdk.update_point(p["id"], search_keys=["three", "four"])
+        sdk._update_point(p["id"], search_keys=["three", "four"])
         assert self._stored(sdk, p["id"]) == "three four"
 
 
@@ -301,7 +301,7 @@ class TestEntityPropsPersisted:
     """Regression: entity CRUD must persist arbitrary caller-supplied props."""
 
     def test_create_object_persists_arbitrary_props(self, sdk):
-        obj = sdk.create_object(
+        obj = sdk._create_object(
             "Arbitrary Widget", "widget",
             tier="premium", custodian="alice", region="us-east-1",
         )
@@ -318,7 +318,7 @@ class TestEntityPropsPersisted:
 
     def test_create_object_nested_props_dict_persists(self, sdk):
         """MCP-style nested props= dict also persists arbitrary props (#228)."""
-        obj = sdk.create_object(
+        obj = sdk._create_object(
             "Nested Props Widget", "gadget",
             props={"tier": "free", "custodian": "pm", "env": "staging"},
         )
@@ -327,7 +327,7 @@ class TestEntityPropsPersisted:
         assert obj.get("env") == "staging"
 
     def test_create_subject_persists_arbitrary_props(self, sdk):
-        subj = sdk.create_subject(
+        subj = sdk._create_subject(
             "charlie", "engineer",
             level="senior", team="infra", location="remote",
         )
@@ -338,7 +338,7 @@ class TestEntityPropsPersisted:
         assert subj.get("location") == "remote"
 
     def test_create_document_persists_arbitrary_props(self, sdk):
-        doc = sdk.create_document(
+        doc = sdk._create_document(
             "Meeting Notes", "notes",
             project="tortoise", reviewer="bob", priority=1,
         )
@@ -349,7 +349,7 @@ class TestEntityPropsPersisted:
         assert doc.get("priority") == 1
 
     def test_create_event_persists_arbitrary_props(self, sdk):
-        ev = sdk.create_event(
+        ev = sdk._create_event(
             "code-review", "review",
             severity="medium", sprint="S42",
         )
@@ -359,7 +359,7 @@ class TestEntityPropsPersisted:
         assert ev.get("sprint") == "S42"
 
     def test_update_entity_persists_arbitrary_props(self, sdk):
-        obj = sdk.create_object("Updatable", "service")
+        obj = sdk._create_object("Updatable", "service")
         obj_id = obj.get("id") or obj.get("eventId")
         updated = sdk.update_knowledge(obj_id, tier="enterprise", sla="99.9")
         assert updated.get("tier") == "enterprise"
@@ -367,7 +367,7 @@ class TestEntityPropsPersisted:
 
     def test_roundtrip_get_entity_returns_arbitrary_props(self, sdk):
         """Props survive full round-trip: create → get_entity."""
-        obj = sdk.create_object("Roundtrip", "test", flavor="spicy", heat=10)
+        obj = sdk._create_object("Roundtrip", "test", flavor="spicy", heat=10)
         obj_id = obj.get("id") or obj.get("eventId")
         fetched = sdk.get_entity(obj_id)
         assert fetched.get("flavor") == "spicy"
@@ -379,11 +379,11 @@ class TestEntityPropsPersisted:
         Object/Subject MERGE by name, so a second create_object with the same
         name matches the existing node.  #452 fixed _create_entity to return
         the canonical id, so the second call's return is usable."""
-        first = sdk.create_object("Dedup Object 2", "type-a", tag="v1")
+        first = sdk._create_object("Dedup Object 2", "type-a", tag="v1")
         first_id = first.get("id") or first.get("eventId")
         # Second create with same name hits the MERGE'd node; extra props
         # are applied via MATCH + SET, so tag gets updated.
-        second = sdk.create_object("Dedup Object 2", "type-a", tag="v2")
+        second = sdk._create_object("Dedup Object 2", "type-a", tag="v2")
         # #452: second call must return the canonical id
         assert second["id"] == first_id, "#452: second create must return canonical id"
         fetched = sdk.get_entity(first_id)
@@ -397,16 +397,16 @@ class TestEntityPropsPersisted:
 
     def test_idempotent_create_object_returns_canonical_id(self, sdk):
         """#452: second create_object with same name returns canonical (first) id."""
-        first = sdk.create_object("Canonical Test", "widget")
-        second = sdk.create_object("Canonical Test", "widget")
+        first = sdk._create_object("Canonical Test", "widget")
+        second = sdk._create_object("Canonical Test", "widget")
         assert second["id"] == first["id"], (
             f"Expected canonical id {first['id']}, got {second['id']}"
         )
 
     def test_idempotent_create_object_id_resolves_via_get_entity(self, sdk):
         """#452: get_entity on second-returned id returns the node, not {}."""
-        first = sdk.create_object("Resolve Test", "widget", color="blue")  # noqa: F841
-        second = sdk.create_object("Resolve Test", "widget", color="red")
+        first = sdk._create_object("Resolve Test", "widget", color="blue")  # noqa: F841
+        second = sdk._create_object("Resolve Test", "widget", color="red")
         fetched = sdk.get_entity(second["id"])
         assert fetched, f"get_entity({second['id']!r}) returned empty dict"
         assert fetched.get("name") == "Resolve Test"
@@ -414,8 +414,8 @@ class TestEntityPropsPersisted:
 
     def test_idempotent_create_object_id_works_with_update_entity(self, sdk):
         """#452: update_entity on second-returned id persists props."""
-        first = sdk.create_object("Update via second", "widget", tag="v1")
-        second = sdk.create_object("Update via second", "widget", tag="v2")
+        first = sdk._create_object("Update via second", "widget", tag="v1")
+        second = sdk._create_object("Update via second", "widget", tag="v2")
         updated = sdk.update_knowledge(second["id"], tier="gold")
         assert updated.get("tier") == "gold"
         # verify via canonical id too
@@ -424,8 +424,8 @@ class TestEntityPropsPersisted:
 
     def test_idempotent_create_subject_returns_canonical_id(self, sdk):
         """#452: second create_subject with same name returns canonical id."""
-        first = sdk.create_subject("alice-subject", "engineer", level="mid")
-        second = sdk.create_subject("alice-subject", "engineer", level="senior")
+        first = sdk._create_subject("alice-subject", "engineer", level="mid")
+        second = sdk._create_subject("alice-subject", "engineer", level="senior")
         assert second["id"] == first["id"], (
             f"Expected canonical id {first['id']}, got {second['id']}"
         )
@@ -435,21 +435,21 @@ class TestEntityPropsPersisted:
 
     def test_idempotent_create_subject_with_edges_uses_canonical_id(self, sdk):
         """#452: edge wiring on second create uses canonical node id."""
-        owner = sdk.create_subject("owner452", "person")
-        first = sdk.create_object("Edge Test 452", "widget", ownedBy=owner["id"])
+        owner = sdk._create_subject("owner452", "person")
+        first = sdk._create_object("Edge Test 452", "widget", ownedBy=owner["id"])
         first_id = first["id"]
         # second create wires edges via canonical id
-        second = sdk.create_object("Edge Test 452", "widget", managedBy=owner["id"])
+        second = sdk._create_object("Edge Test 452", "widget", managedBy=owner["id"])
         assert second["id"] == first_id
         # verify edge exists (managedBy)
-        owned = sdk.get_owned_entities(owner["id"])
+        owned = sdk._get_owned_entities(owner["id"])
         assert any(e.get("id") == first_id for e in owned), (
             "ownedBy edge should connect to canonical node"
         )
 
     def test_props_none_value_not_stored(self, sdk):
         """None-valued props are skipped (Cypher null sentinel)."""
-        obj = sdk.create_object("None Test", "type", keep="yes", drop=None)
+        obj = sdk._create_object("None Test", "type", keep="yes", drop=None)
         assert obj.get("keep") == "yes"
         # drop=None must not appear as a node property
         assert "drop" not in obj
@@ -468,7 +468,7 @@ class TestEntityPropsPersisted:
 
     def test_meta_keys_not_stored_as_props(self, sdk):
         """Control keys (edge-wired / structural) never leak as node props."""
-        obj = sdk.create_object(
+        obj = sdk._create_object(
             "Control Test", "widget",
             authoredBy="alice", ownedBy="team-x", managedBy="pm",
         )

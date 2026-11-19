@@ -55,7 +55,7 @@ def sdk(tmp_path):
 @pytest.fixture
 def team(sdk):
     """A team to own the graphs; torn down so the registry does not accumulate."""
-    result = sdk.org_create("memory-graph-surface")
+    result = sdk._org_create("memory-graph-surface")
     yield result
 
 

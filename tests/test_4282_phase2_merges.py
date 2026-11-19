@@ -141,7 +141,7 @@ def test_create_document_is_a_parallel_writer_not_an_alias_FINDING(monkeypatch):
     """
     import inspect
 
-    source = inspect.getsource(TortoiseSDK.create_document)
+    source = inspect.getsource(TortoiseSDK._create_document)
     assert "_create_entity(" in source, (
         "if this no longer holds, create_document became a real alias — delete this "
         "finding test and add it to the parametrised absorption test above")
@@ -477,8 +477,8 @@ def test_delete_knowledge_keeps_the_two_arms_the_narrow_doors_had(monkeypatch):
         inst, "_get_proj", lambda: type("P", (), {
             "_resolve_entity": lambda self, i, **k: [{"label": "Point"}],
         })())
-    monkeypatch.setattr(inst, "delete_point", lambda i: "point-arm")
-    monkeypatch.setattr(inst, "delete_entity", lambda i: "entity-arm")
+    monkeypatch.setattr(inst, "_delete_point", lambda i: "point-arm")
+    monkeypatch.setattr(inst, "_delete_entity__svc", lambda i: "entity-arm")
     assert TortoiseSDK.delete_knowledge(inst, "x") == "point-arm"
 
     monkeypatch.setattr(
@@ -530,7 +530,7 @@ def test_the_operator_door_really_does_refuse_the_uppercased_word():
     passing it could never have written anything.
     """
     with pytest.raises(ValueError, match="op_type must be"):
-        TortoiseSDK.create_operator(_sdk(), "SUPPORTS", "p1", ["p2"])
+        TortoiseSDK._create_operator(_sdk(), "SUPPORTS", "p1", ["p2"])
 
 
 @pytest.mark.parametrize("mechanism", ["IMPL", "NAND", "composedOf",
@@ -539,7 +539,7 @@ def test_every_mechanism_the_merge_can_pick_is_accepted_by_the_door(mechanism):
     """The operator door's mechanism set is closed — every member is accepted."""
     inst = _stops_at_the_graph(_sdk())
     with pytest.raises(_ReachedTheGraph):
-        TortoiseSDK.create_operator(inst, mechanism, "p1", ["p2"])
+        TortoiseSDK._create_operator(inst, mechanism, "p1", ["p2"])
 
 
 def test_operator_true_on_a_relation_with_no_mechanism_is_refused():

@@ -278,11 +278,11 @@ def test_a_written_identifier_only_point_still_exists_and_carries_no_vector(
     """
     _on(monkeypatch)
     with mock.patch(_EMBED_PATCH, _embed_a):
-        pid = sdk.create_point("statement", "#4716").get("id")
+        pid = sdk._create_point("statement", "#4716").get("id")
     assert _stored_embedding(sdk, "Point", "id", pid) is None, (
         "an identifier-only row must not carry a vector"
     )
-    assert sdk.get_point(pid)["content"] == "#4716", (
+    assert sdk._get_point(pid)["content"] == "#4716", (
         "the gate must not drop the row — no-vector is not no-row"
     )
 
@@ -291,7 +291,7 @@ def test_the_same_point_keeps_its_vector_when_the_flag_is_off(sdk, monkeypatch):
     """The control: same write, gate off ⇒ vector — the deferral is the diff."""
     monkeypatch.delenv(_FLAG, raising=False)
     with mock.patch(_EMBED_PATCH, _embed_a):
-        pid = sdk.create_point("statement", "#4716").get("id")
+        pid = sdk._create_point("statement", "#4716").get("id")
     assert _stored_embedding(sdk, "Point", "id", pid) == _embed_a("#4716")
 
 
@@ -299,7 +299,7 @@ def test_a_meaningful_point_keeps_its_vector_with_the_gate_on(sdk, monkeypatch):
     _on(monkeypatch)
     with mock.patch(_EMBED_PATCH, _embed_a):
         content = "The decision turned on #4118"
-        pid = sdk.create_point("statement", content).get("id")
+        pid = sdk._create_point("statement", content).get("id")
     assert _stored_embedding(sdk, "Point", "id", pid) == _embed_a(content)
 
 

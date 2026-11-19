@@ -189,7 +189,7 @@ def _source_props(sdk, url: str = RAW_URL) -> dict:
 
 def _memory(sdk, content: str = "a claim whose raw may be gone"):
     """A Point with a real ``extractedFrom`` edge to the raw's Source."""
-    p = sdk.create_point("statement", content, extractedFrom=RAW_URL)
+    p = sdk._create_point("statement", content, extractedFrom=RAW_URL)
     return p["id"]
 
 
@@ -607,7 +607,7 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
         raw = raw_entry(_source_props(s), observed=cause)
 
     # The memory itself stays readable — absence is not corruption.
-    assert s.get_point(pid)["content"] == "a claim whose raw may be gone"
+    assert s._get_point(pid)["content"] == "a claim whose raw may be gone"
     assert raw["available"] is False
     assert raw["raw_state"] == cause
     assert raw["source_id"] == RAW_URL
@@ -955,7 +955,7 @@ def test_an_undeclared_document_prop_is_persisted_but_never_served(sdk):
 
     s, _events = sdk
     body = "DOC_PROP " + ("payload bytes. " * 190)
-    doc = s.create_document("doc-undeclared-5196", "note",
+    doc = s._create_document("doc-undeclared-5196", "note",
                             text=body, transcript=body, summary="kept")
     did = doc["id"]
     # Half 1 — #228: the prop lands on the node AND rides the create return,
@@ -996,7 +996,7 @@ def test_a_bundle_item_cannot_set_the_raw_state(sdk):
     from tortoise.exceptions import BundleValidationError
 
     s, _events = sdk
-    s.ingest({"sources": [{"url": RAW_URL, "sourceKind": "conversation"}]})
+    s._ingest({"sources": [{"url": RAW_URL, "sourceKind": "conversation"}]})
     assert _source_props(s).get(RAW_STATE_PROP) is None, (
         "the control bundle must not record a state"
     )
@@ -1005,7 +1005,7 @@ def test_a_bundle_item_cannot_set_the_raw_state(sdk):
         bad = {"sources": [{"url": RAW_URL + "-" + key,
                             "sourceKind": "conversation", key: RAW_DELETED}]}
         with pytest.raises(BundleValidationError) as exc:
-            s.ingest(bad)
+            s._ingest(bad)
         assert any(key in v["message"] for v in exc.value.violations), (
             f"{key} was not named in the violation: {exc.value.violations}"
         )
@@ -1065,7 +1065,7 @@ def test_the_raw_reference_is_deterministic_for_a_multi_source_point(sdk):
     # nondeterminism when the engine's natural order is a WRONG answer.
     s.register_source(b, "document")
     s.register_source(a, "document")
-    pt = s.create_point("statement", "body", extractedFrom=[b, a])
+    pt = s._create_point("statement", "body", extractedFrom=[b, a])
     pid = pt["id"]
     s._get_proj()._link_source(pid, [b, a], label="Source")
 
@@ -1251,7 +1251,7 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
 
     s.register_source(RAW_URL, "document", contentHash="h1", title="t",
                     source_path="/tmp/x.md")
-    s.get_source_reliability(RAW_URL)          # the reliability cache writer
+    s._get_source_reliability(RAW_URL)          # the reliability cache writer
     produced = set(_source_props(s))
 
     # #5196 review round 2, P2: the docstring above says "each producer below is
@@ -1260,7 +1260,7 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
     # writer and the session-capture writer) were never driven. A new undeclared
     # key on either could not fail here, which is the "derive the surface from
     # what I happened to edit" failure this test exists to replace.
-    doc = s.create_document("cov-doc-5196", "note")
+    doc = s._create_document("cov-doc-5196", "note")
     doc_keys = _keys_at("url", doc["id"])     # `_upsert_document` MERGEs on url
     assert doc_keys, "the document writer produced no :Source"
     produced |= doc_keys
@@ -1294,7 +1294,7 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
     # (#4282: the original assertion read it back off `get_provenance_chain(...)[0]`
     # ["source"], the only reader that returned a `:Source` property bag. That reader is
     # deleted; this is the surviving half of the same property.)
-    served = s.get_source_reliability(RAW_URL)
+    served = s._get_source_reliability(RAW_URL)
     assert served["cache"] in {"fresh", "recomputed"}, (
         f"the reliability cache did not round-trip: {served.get('cache')!r}")
     assert served.get("components"), (
@@ -1327,7 +1327,7 @@ def test_a_url_only_source_stub_is_guarded_like_any_other_source(sdk):
     body = "STUB_PAYLOAD " + ("z" * 2000)
     _memory(s)
     obj = s.create_entity("Object", "the doc's subject")["node"]["id"]
-    s.link_source_to_entity(RAW_URL, obj, "Object")
+    s._link_source_to_entity(RAW_URL, obj, "Object")
     stubs = s._get_proj().g.query(
         "MATCH (n:Source {url:$u}) RETURN n.id", params={"u": RAW_URL}
     ).result_set
@@ -1428,7 +1428,7 @@ def test_a_create_echo_cannot_harvest_a_denied_key_from_the_node(sdk):
     # ...and the other direction: a TUPLE the write persisted reads back as a
     # LIST, and the echo must still acknowledge it — the key is undeclared, so
     # every read withholds it and the caller would have no path to it (#228).
-    doc = s.create_document("echo-tuple-5196", "note", tags=("a", "b"))
+    doc = s._create_document("echo-tuple-5196", "note", tags=("a", "b"))
     assert list(doc.get("tags") or []) == ["a", "b"], (
         f"a tuple persisted as an array was not echoed: {doc.get('tags')!r}")
     assert "tags" in doc, "the key itself was dropped from the echo"
@@ -1455,17 +1455,17 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     # the open DOCUMENT passthrough (#228), and the ingest bundle — `entities`
     # items are splatted into `create_document(**item)`.
     with pytest.raises(ValueError, match="server-managed"):
-        s.create_document("doc-forge-5196", "note", __runId="DOC_FORGED")
+        s._create_document("doc-forge-5196", "note", __runId="DOC_FORGED")
     # The same guard on the document route covers the PARAMETER spelling too —
     # there it does not write `__runId`, but `_upsert_document` would persist it
     # as a literal undeclared node property (round 6, P2).
     with pytest.raises(ValueError, match="server-managed"):
-        s.create_document("doc-forge-5196b", "note",
+        s._create_document("doc-forge-5196b", "note",
                           props={"_merge_run_id": "DOC_MID"})
     from tortoise.exceptions import BundleValidationError
 
     with pytest.raises(BundleValidationError) as exc:
-        s.ingest({"entities": [{"type": "document",
+        s._ingest({"entities": [{"type": "document",
                                 "name": "bundle-forge-5196",
                                 "documentKind": "note",
                                 "__runId": "BUNDLE_FORGED"}]})
@@ -1482,7 +1482,7 @@ def test_the_merge_run_token_is_not_caller_settable(sdk):
     # Before the flatten it reached Phase 2 and aborted AFTER an earlier section
     # had already committed, so the source below WOULD have persisted.
     with pytest.raises(BundleValidationError) as exc2:
-        s.ingest({"sources": [{"url": RAW_URL + "?nested",
+        s._ingest({"sources": [{"url": RAW_URL + "?nested",
                                "sourceKind": "document"}],
                   "entities": [{"type": "document", "name": "ie-nested-5196",
                                 "documentKind": "note",
@@ -1577,7 +1577,7 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
     s, _events = sdk
     _memory(s)  # the Point whose raw the stub Source will belong to
     obj = s.create_entity("Object", "the doc's subject")["node"]["id"]
-    s.link_source_to_entity(RAW_URL, obj, "Object")   # the real stub producer
+    s._link_source_to_entity(RAW_URL, obj, "Object")   # the real stub producer
     stubs = s._get_proj().g.query(
         "MATCH (n:Source {url:$u}) RETURN n.id", params={"u": RAW_URL}
     ).result_set
@@ -1742,10 +1742,10 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
     nodes; that belongs to #4649's OR-SET write, not here.
     """
     s, _events = sdk
-    pid = s.create_point("statement", "point A content")["id"]
+    pid = s._create_point("statement", "point A content")["id"]
     # A url-only `:Source` STUB keyed by the Point's id — the shape
     # `_link_source`/`_mint_source_stub` create (a `url`, no `id`).
-    s.create_point("statement", "sibling", extractedFrom=pid)
+    s._create_point("statement", "sibling", extractedFrom=pid)
     stub = s._get_proj().g.query(
         "MATCH (s:Source {url:$u}) RETURN s.id", params={"u": pid}
     ).result_set
@@ -1761,7 +1761,7 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
     ).result_set[0][0] == "transcript", (
         "the write no longer reaches the colliding stub — the guard's premise "
         "would then need re-deriving from this measurement")
-    assert s.get_point(pid)["format"] == "transcript"
+    assert s._get_point(pid)["format"] == "transcript"
     # A D10-retired field IS refused, because the write would put it on the
     # `:Source` above — ruling B applies to every `:Source` the write reaches.
     with pytest.raises(ValueError, match="retired field"):
@@ -1806,6 +1806,6 @@ def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(
     assert raw_entry(plain, observed=object())["raw_state"] == RAW_UNRECOGNISED
 
     # A point with NO source at all: still no raise, and NO raw key invented.
-    orphan = s.create_point("statement", "orphan claim")["id"]
+    orphan = s._create_point("statement", "orphan claim")["id"]
     assert "raw" not in s.check_confidence(orphan, include_provenance=True,
         require_calibration=False)['provenance']

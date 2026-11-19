@@ -462,7 +462,7 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             return _fn
 
         monkeypatch.setattr(
-            TortoiseSDK, "get_cross_lens_candidates",
+            TortoiseSDK, "_get_cross_lens_candidates",
             record("get_cross_lens_candidates"), raising=True)
         sdk.review_link_candidates("cross_lens", limit=3)
         assert [r[0] for r in reached] == ["get_cross_lens_candidates"], reached
@@ -537,7 +537,7 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
                 TortoiseSDK, method,
                 lambda _self, _id, _m=method: reached.append((_m, _id)) or True,
                 raising=True)
-            assert TortoiseSDK.delete(sdk, f"id-{label}") is True, label
+            assert TortoiseSDK._delete(sdk, f"id-{label}") is True, label
 
         assert reached == [("delete_point", "id-Point"),
                            ("delete_entity", "id-Object")], reached
@@ -545,7 +545,7 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
         # …and the MCP door's confirmation path lands on that same `sdk.delete`.
         monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
         monkeypatch.setattr(
-            TortoiseSDK, "delete",
+            TortoiseSDK, "_delete",
             lambda _self, _id: reached.append(("delete", _id)) or True, raising=True)
         monkeypatch.setattr(ms, "_is_dev_mode", lambda: True)
         token = ms._deletion.issue("id-x")
@@ -570,7 +570,7 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             reached.append((args, kwargs))
             return {"session": args[0] if args else None}
 
-        monkeypatch.setattr(TortoiseSDK, "get_session", _fn, raising=True)
+        monkeypatch.setattr(TortoiseSDK, "_get_session", _fn, raising=True)
         monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
         # `_safe`'s auth gate refuses when the transport mode is unset (fail-closed,
         # #236) — this case measures DISPATCH, not auth, so name the mode.

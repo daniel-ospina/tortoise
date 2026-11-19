@@ -46,7 +46,7 @@ def sdk():
     """Fresh embedded FalkorDBLite graph (per-test path isolation)."""
     db_path = f"{tempfile.mkdtemp(prefix='tt_334_')}/wiring.db"
     s = TortoiseSDK(db_path)
-    s.test_guard = lambda: None  # destructive teardown safety for tests
+    s._test_guard = lambda: None  # destructive teardown safety for tests
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -58,9 +58,9 @@ def _proj(sdk):
 
 def _seed_clean_graph(sdk) -> tuple[str, str]:
     """Small healthy graph: two points, one operator, one tiered Source."""
-    a = sdk.create_point("statement", "alice deployed the service")["id"]
-    b = sdk.create_point("statement", "deploy passed all checks")["id"]
-    sdk.create_operator("IMPL", a, [b])
+    a = sdk._create_point("statement", "alice deployed the service")["id"]
+    b = sdk._create_point("statement", "deploy passed all checks")["id"]
+    sdk._create_operator("IMPL", a, [b])
     sdk.register_source(f"https://example.com/src-{uuid.uuid4().hex[:8]}",
                       "github_issue", tier="T1")
     return a, b
@@ -81,7 +81,7 @@ def _seed_anomalies(sdk, a: str, b: str) -> dict:
             params={"id": stub_id})
 
     # ── Dead edge from a real operator into the stub (the EP garbage class)
-    op_id = sdk.create_operator("IMPL", a, [b])["id"]
+    op_id = sdk._create_operator("IMPL", a, [b])["id"]
     g.query("MATCH (o:Point {id:$oid}), (s:Point {id:$sid}) "
             "MERGE (o)-[:IMPL {idx:2}]->(s) "
             "MERGE (s)-[:INPUT {idx:2}]->(o)",

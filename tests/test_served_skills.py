@@ -374,40 +374,40 @@ def test_1652_research_domain_uc2_step_answers(sdk):
     the unsupported claim the next research round should target is returned,
     the well-supported claim is not — otherwise the loop has no control signal
     and silently degrades into ordinary research."""
-    ev = [sdk.create_point("evidence", f"battery survey {i}") for i in range(3)]
-    gap = sdk.create_point("statement", "solid-state cycle life holds at 2000 cycles")
-    target = sdk.create_point("statement", "solid-state cells ship in 2027 vehicles")
-    well = sdk.create_point("statement", "solid-state density exceeds 400 Wh/kg")
+    ev = [sdk._create_point("evidence", f"battery survey {i}") for i in range(3)]
+    gap = sdk._create_point("statement", "solid-state cycle life holds at 2000 cycles")
+    target = sdk._create_point("statement", "solid-state cells ship in 2027 vehicles")
+    well = sdk._create_point("statement", "solid-state density exceeds 400 Wh/kg")
     for e in ev:
-        sdk.create_operator("IMPL", e["id"], [well["id"]])
-    sdk.create_operator("IMPL", gap["id"], [target["id"]])
+        sdk._create_operator("IMPL", e["id"], [well["id"]])
+    sdk._create_operator("IMPL", gap["id"], [target["id"]])
     _link_source(sdk, well["id"], "https://example.com/solid-state")
 
-    ids = {r["id"] for r in sdk.recall_gaps(kind="statement")}
+    ids = {r["id"] for r in sdk._recall_gaps(kind="statement")}
     assert gap["id"] in ids, "the load-bearing unsupported claim is the gap"
     assert well["id"] not in ids, "a well-supported claim is not a gap"
     # The breakdown the skill tells the agent to read.
-    rr = next(r for r in sdk.recall_gaps(kind="statement")
+    rr = next(r for r in sdk._recall_gaps(kind="statement")
               if r["id"] == gap["id"])["gaps_ranking"]
     assert rr["load"] == 1 and rr["support"] == 0
     # G4 — the skills gate on a structurally sound graph.
-    assert sdk.check_structure() == []
+    assert sdk._check_structure() == []
 
 
 def test_1652_contradiction_reads_answer(sdk):
     """`analyse-for-contradictions` step 3 claims three detections. Each must
     answer on a real graph: a contradictory pair (both IMPL and NAND), a live
     edge into a superseded point, and the structure gate the skill requires."""
-    left = sdk.create_point("statement", "we keep the shared connection pool")
-    right = sdk.create_point("statement", "each tenant gets a dedicated pool")
+    left = sdk._create_point("statement", "we keep the shared connection pool")
+    right = sdk._create_point("statement", "each tenant gets a dedicated pool")
     # Edge-level: the same pair is BOTH implied and mutually excluded. #12067
     # closes the mechanism set, so this shape is written RAW — it exists in every
     # graph written before the closure, and `review_connections` does no backfill
     # by ruling, so the detection step must still answer (see
     # tests/_legacy_mechanisms.py).
-    sdk.create_operator("IMPL", left["id"], [right["id"]])
+    sdk._create_operator("IMPL", left["id"], [right["id"]])
     legacy_nand_operator(sdk, left["id"], right["id"], label="opposes")
-    flags = sdk.review_connections(mode="prune")
+    flags = sdk._review_connections(mode="prune")
     contradictory = [f for f in flags["prune"] if f["issue"] == "contradictory"]
     assert contradictory, (
         "review_connections(mode='prune') must flag the contradictory pair — "
@@ -416,16 +416,16 @@ def test_1652_contradiction_reads_answer(sdk):
         left["id"], right["id"]}
 
     # Lifecycle-level: a live edge into a superseded point (audit's own check).
-    old = sdk.create_point("statement", "single-writer ingest queue")
-    new = sdk.create_point("statement", "single-flight ingest queue")
-    sdk.supersede_point(old["id"], new["id"])
-    live = sdk.create_point("statement", "the ingest path is single-writer")
-    sdk.create_operator("IMPL", live["id"], [old["id"]])
-    report = sdk.audit()
+    old = sdk._create_point("statement", "single-writer ingest queue")
+    new = sdk._create_point("statement", "single-flight ingest queue")
+    sdk._supersede_point(old["id"], new["id"])
+    live = sdk._create_point("statement", "the ingest path is single-writer")
+    sdk._create_operator("IMPL", live["id"], [old["id"]])
+    report = sdk._audit__svc()
     check = next((c for c in report["checks"]
                   if c["id"] == "superseded_active_edges"), None)
     assert check is not None and check["count"] >= 1, (
         "audit() must flag the live edge into the superseded point")
 
     # Both skills gate on this; the skills must not be built on a broken graph.
-    assert sdk.check_structure() == []
+    assert sdk._check_structure() == []

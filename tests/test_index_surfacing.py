@@ -187,7 +187,7 @@ def test_e2e6_kind_scoped_structural_fts_leg(corpus):
         # KIND-SCOPED STRUCTURAL leg for agentSession Sources: exactly the
         # {s1, s2} urls — s1 PRESENT (presence), every row an agentSession
         # Source, NEVER the meeting/doc Sources (kind scoping).
-        res = sdk.tortoise_fts_query(
+        res = sdk._tortoise_fts_query(
             "Auth refactor", kind="agentSession", entity_type="source")
         got = [row["id"] for row in res]          # id == url for sources
         assert set(got) == {s1, s2}
@@ -203,16 +203,16 @@ def test_e2e6_kind_scoped_structural_fts_leg(corpus):
         # legs are contract-aligned SUPERSETS beyond the pinned agentSession
         # leg — they strengthen falsifiability and match S7's "grouping by
         # sourceKind" verification point).
-        res_meeting = sdk.tortoise_fts_query(
+        res_meeting = sdk._tortoise_fts_query(
             "Team Sync", kind="meeting_summary", entity_type="source")
         assert [row["id"] for row in res_meeting] == [meeting]
-        res_doc = sdk.tortoise_fts_query(
+        res_doc = sdk._tortoise_fts_query(
             "GTM Strategy", kind="document", entity_type="source")
         assert [row["id"] for row in res_doc] == [doc]
 
         # Analog: meeting Event via the kind-scoped structural leg (Event
         # nodes store eventKind="meeting" — classifier spelling).
-        ev = sdk.tortoise_fts_query(
+        ev = sdk._tortoise_fts_query(
             "Team Sync", kind="meeting", entity_type="event")
         assert [row["id"] for row in ev] == ["meeting_2026-08-05-team-sync"]
 
@@ -283,7 +283,7 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
         s1 = f"corpus://{c.name}/s1.md"
         s2 = f"corpus://{c.name}/s2.md"
 
-        res = sdk.tortoise_fts_query("Auth refactor", entity_type="source")
+        res = sdk._tortoise_fts_query("Auth refactor", entity_type="source")
         got = [row["id"] for row in res]
         # True text disambiguation: s1's _searchText is "Auth refactor
         # session" (matches); s2's is "Billing migration session" (no match).
@@ -323,7 +323,7 @@ def test_e2e6_recall_subgraph_seed_by_url(corpus):
         doc = f"corpus://{corpus.name}/strategy.md"
 
         # Meeting Source seed → Source + its Event, references edge present.
-        sub = sdk.recall_subgraph(seed=meeting, completeness="full")
+        sub = sdk._recall_subgraph(seed=meeting, completeness="full")
         nodes = sub.get("nodes", [])
         assert any(n.get("id") == meeting and n.get("type") == "source"
                    for n in nodes)
@@ -339,7 +339,7 @@ def test_e2e6_recall_subgraph_seed_by_url(corpus):
         # Doc Source seed → its document :Source. D10 (#5026): a document is
         # a :Source, so the node's `type` is "source" (the lowercased graph
         # label) — its genre rides the `kind` field (documentKind).
-        sub2 = sdk.recall_subgraph(seed=doc, completeness="full")
+        sub2 = sdk._recall_subgraph(seed=doc, completeness="full")
         nodes2 = sub2.get("nodes", [])
         assert any(n.get("id") == doc and n.get("type") == "source"
                    for n in nodes2)
@@ -368,7 +368,7 @@ def test_e2e6_recall_subgraph_encoded_url_seed(tmp_path):
         sdk.index_sources_from_directory(str(c), extract_metadata=False)
         g = sdk._get_proj().g
         seed = "corpus://my%20corpus%231/my%20notes.md"
-        sub = sdk.recall_subgraph(seed=seed, completeness="full")
+        sub = sdk._recall_subgraph(seed=seed, completeness="full")
         nodes = sub.get("nodes", [])
         assert any(n.get("id") == seed and n.get("type") == "source"
                    for n in nodes)
@@ -400,7 +400,7 @@ def test_e2e6_uc1_pool_negative_regression(corpus):
             "CREATE (p:Point {id:'e2e900-point-1', content:'Refactored the "
             "auth middleware to use JWT rotation', pointKind:'decision'})")
 
-        rows = sdk.recall_state(query="auth refactor")
+        rows = sdk._recall_state(query="auth refactor")
         # Non-vacuous: the seeded Point IS returned.
         assert any(r.get("id") == "e2e900-point-1" for r in rows), \
             f"seeded point missing from UC1 pool: {rows}"

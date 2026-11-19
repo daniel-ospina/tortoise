@@ -77,9 +77,9 @@ def test_support_chain_names_the_mediating_operator():
     the epistemic mechanism (IMPL/NAND). Both are read off the operator node.
     """
     sdk = _fresh_sdk()
-    evidence = sdk.create_point("evidence", "billing record shows the renewal")
-    claim = sdk.create_point("statement", "the contract renewed in March")
-    op = sdk.create_operator("IMPL", evidence["id"], [claim["id"]],
+    evidence = sdk._create_point("evidence", "billing record shows the renewal")
+    claim = sdk._create_point("statement", "the contract renewed in March")
+    op = sdk._create_operator("IMPL", evidence["id"], [claim["id"]],
                              label="bearsOn")
 
     chain = _block(sdk, claim["id"])["support_chain"]
@@ -101,10 +101,10 @@ def test_support_chain_carries_the_mitigation_on_that_operator():
     had to be exposed first.
     """
     sdk = _fresh_sdk()
-    evidence = sdk.create_point("evidence", "staging burned half the window")
-    claim = sdk.create_point("statement", "the release slipped a week")
-    op = sdk.create_operator("IMPL", evidence["id"], [claim["id"]])
-    sdk.mitigate_operator(op["id"], "QA gate + staged rollout")
+    evidence = sdk._create_point("evidence", "staging burned half the window")
+    claim = sdk._create_point("statement", "the release slipped a week")
+    op = sdk._create_operator("IMPL", evidence["id"], [claim["id"]])
+    sdk._mitigate_operator(op["id"], "QA gate + staged rollout")
 
     entry = _block(sdk, claim["id"])["support_chain"][0]
     assert entry["operator_id"] == op["id"]
@@ -116,9 +116,9 @@ def test_unmitigated_operator_reports_mitigation_null_not_absent():
     key, are both wrong: an instrument's W3 leg must be able to RED on a
     fabricated mitigation AND on a missing one."""
     sdk = _fresh_sdk()
-    evidence = sdk.create_point("evidence", "two reviewers signed off")
-    claim = sdk.create_point("statement", "the design is accepted")
-    sdk.create_operator("IMPL", evidence["id"], [claim["id"]])
+    evidence = sdk._create_point("evidence", "two reviewers signed off")
+    claim = sdk._create_point("statement", "the design is accepted")
+    sdk._create_operator("IMPL", evidence["id"], [claim["id"]])
 
     entry = _block(sdk, claim["id"])["support_chain"][0]
     assert "mitigation" in entry
@@ -130,8 +130,8 @@ def test_direct_edge_support_keeps_the_same_key_shape():
     still present and null — uniform shape, so "no operator named" is a
     MEASURED null rather than an unread dimension."""
     sdk = _fresh_sdk()
-    premise = sdk.create_point("statement", "the vendor raised prices 20%")
-    claim = sdk.create_point("statement", "we should renegotiate")
+    premise = sdk._create_point("statement", "the vendor raised prices 20%")
+    claim = sdk._create_point("statement", "we should renegotiate")
     proj = sdk._get_proj()
     proj.g.query(
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) CREATE (a)-[:IMPL]->(b)",
@@ -154,12 +154,12 @@ def test_tradeoffs_name_the_connecting_operator():
     reach the mitigation) and DISCARDED it. Expose it: an alternative without
     its connecting operator cannot be explained either."""
     sdk = _fresh_sdk()
-    decision = sdk.create_point("decision", "which rollout strategy")
-    opt_a = sdk.create_point("option", "staged rollout")
-    opt_b = sdk.create_point("option", "big bang")
-    op_a = sdk.create_operator("IMPL", decision["id"], [opt_a["id"]])
-    op_b = sdk.create_operator("IMPL", decision["id"], [opt_b["id"]])
-    sdk.mitigate_operator(op_a["id"], "communicate the delay")
+    decision = sdk._create_point("decision", "which rollout strategy")
+    opt_a = sdk._create_point("option", "staged rollout")
+    opt_b = sdk._create_point("option", "big bang")
+    op_a = sdk._create_operator("IMPL", decision["id"], [opt_a["id"]])
+    op_b = sdk._create_operator("IMPL", decision["id"], [opt_b["id"]])
+    sdk._mitigate_operator(op_a["id"], "communicate the delay")
 
     tradeoffs = _block(sdk, decision["id"])["tradeoffs"]
     by_point = {t["point_id"]: t for t in tradeoffs}
@@ -185,10 +185,10 @@ def test_one_supporter_with_two_operators_names_a_DETERMINISTIC_one():
     ids = []
     for order in (("first", "second"), ("second", "first")):
         sdk = _fresh_sdk()
-        evidence = sdk.create_point("evidence", "the audit found 3 leaks")
-        claim = sdk.create_point("statement", "the seal is defective")
+        evidence = sdk._create_point("evidence", "the audit found 3 leaks")
+        claim = sdk._create_point("statement", "the seal is defective")
         for tag in order:
-            op = sdk.create_operator("IMPL", evidence["id"], [claim["id"]],
+            op = sdk._create_operator("IMPL", evidence["id"], [claim["id"]],
                                      label=tag)
             ids.append(op["id"])
         entry = _block(sdk, claim["id"])["support_chain"][0]
@@ -197,10 +197,10 @@ def test_one_supporter_with_two_operators_names_a_DETERMINISTIC_one():
         sdk.close()
 
     sdk_a = _fresh_sdk()
-    ev_a = sdk_a.create_point("evidence", "the audit found 3 leaks")
-    cl_a = sdk_a.create_point("statement", "the seal is defective")
-    op_a = sdk_a.create_operator("IMPL", ev_a["id"], [cl_a["id"]], label="a")
-    sdk_a.create_operator("IMPL", ev_a["id"], [cl_a["id"]], label="b")
+    ev_a = sdk_a._create_point("evidence", "the audit found 3 leaks")
+    cl_a = sdk_a._create_point("statement", "the seal is defective")
+    op_a = sdk_a._create_operator("IMPL", ev_a["id"], [cl_a["id"]], label="a")
+    sdk_a._create_operator("IMPL", ev_a["id"], [cl_a["id"]], label="b")
     assert _block(sdk_a, cl_a["id"])["support_chain"][0]["operator_id"] \
         == op_a["id"]
 
@@ -226,14 +226,14 @@ def test_one_operator_with_two_mitigations_picks_deterministically():
     """
     for order in (("alpha reason", "beta reason"), ("beta reason", "alpha reason")):
         sdk = _fresh_sdk()
-        evidence = sdk.create_point("evidence", "the audit found 3 leaks")
-        claim = sdk.create_point("statement", "the seal is defective")
-        op = sdk.create_operator("IMPL", evidence["id"], [claim["id"]])
+        evidence = sdk._create_point("evidence", "the audit found 3 leaks")
+        claim = sdk._create_point("statement", "the seal is defective")
+        op = sdk._create_operator("IMPL", evidence["id"], [claim["id"]])
         proj = sdk._get_proj()
         # The LOWEST-id mitigation point is created first and its edge written
         # LAST, so a "first row wins" fold and the id rule have a chance to
         # disagree (measured: they do not on FalkorDB — see the docstring).
-        points = [sdk.create_point("statement", f"[MITIGATION] {text}")
+        points = [sdk._create_point("statement", f"[MITIGATION] {text}")
                   for text in order]
         texts = {p["id"]: text for p, text in zip(points, order, strict=True)}
         for mit in reversed(points):
@@ -266,9 +266,9 @@ def test_the_operator_fields_are_a_READ_of_the_live_operator_node():
     implementation that returned a cached/annotated value would not follow.
     """
     sdk = _fresh_sdk()
-    evidence = sdk.create_point("evidence", "the audit found 3 leaks")
-    claim = sdk.create_point("statement", "the seal is defective")
-    op = sdk.create_operator("IMPL", evidence["id"], [claim["id"]],
+    evidence = sdk._create_point("evidence", "the audit found 3 leaks")
+    claim = sdk._create_point("statement", "the seal is defective")
+    op = sdk._create_operator("IMPL", evidence["id"], [claim["id"]],
                              label="supports")
 
     before = _block(sdk, claim["id"])["support_chain"][0]
@@ -297,11 +297,11 @@ def test_mixed_edge_supporter_keeps_its_operator_entry():
     operator keys become null) while every point-id assertion still passes.
     """
     sdk = _fresh_sdk()
-    evidence = sdk.create_point("evidence", "the audit found 3 leaks")
-    claim = sdk.create_point("statement", "the seal is defective")
-    op = sdk.create_operator("IMPL", evidence["id"], [claim["id"]],
+    evidence = sdk._create_point("evidence", "the audit found 3 leaks")
+    claim = sdk._create_point("statement", "the seal is defective")
+    op = sdk._create_operator("IMPL", evidence["id"], [claim["id"]],
                              label="supports")
-    sdk.mitigate_operator(op["id"], "only if measured")
+    sdk._mitigate_operator(op["id"], "only if measured")
     proj = sdk._get_proj()
     proj.g.query(
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) CREATE (a)-[:IMPL]->(b)",

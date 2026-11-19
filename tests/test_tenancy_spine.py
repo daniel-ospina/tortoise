@@ -56,7 +56,7 @@ def _spine_env(tmp_path):
     # it).
     g = sdk._graph_create(tid, "spine-g", kind="custom")
     default_sdk = ha_mod._make_sdk(namespace=tid)
-    default_node = default_sdk.create_point(
+    default_node = default_sdk._create_point(
         "default-secret", content="default-secret")
     default_sdk.close()
     # Registry handle bound to this temp DB for seeding keys.

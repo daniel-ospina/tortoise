@@ -110,7 +110,7 @@ def _encoded(recorder) -> list[str]:
 def test_off_path_embeds_the_bare_query(recording_embedder, sdk):
     """FAIL VALUE: any anchor on the off path — the default-off contract is
     byte-identical. Reachable: ``time_aware`` defaults to False."""
-    sdk.tortoise_fts_query("where do I live now?", limit=5)
+    sdk._tortoise_fts_query("where do I live now?", limit=5)
     assert "where do I live now?" in _encoded(recording_embedder)
     assert not any("(as of" in t for t in _encoded(recording_embedder))
 
@@ -120,7 +120,7 @@ def test_time_aware_anchors_the_dense_query(recording_embedder, sdk):
     """FAIL VALUE: the bare query reaching ``model.encode`` when the arm is
     ON with a valid date. Reachable: the recorder captures the exact
     string; a no-op injection fails the assertion."""
-    sdk.tortoise_fts_query(
+    sdk._tortoise_fts_query(
         "where do I live now?", limit=5,
         time_aware=True, query_date="2026-09-25")
     assert "where do I live now? (as of 2026-09-25)" in _encoded(
@@ -132,7 +132,7 @@ def test_date_pinned_query_is_not_anchored(recording_embedder, sdk):
     """FAIL VALUE: an anchor on a DATE-PINNED query — the invert-recency
     guard. Reachable: the query names a year, so the detector returns
     DATE_PINNED and the bare query must be embedded."""
-    sdk.tortoise_fts_query(
+    sdk._tortoise_fts_query(
         "where did I live in 2024?", limit=5,
         time_aware=True, query_date="2026-09-25")
     assert "where did I live in 2024?" in _encoded(recording_embedder)
@@ -143,7 +143,7 @@ def test_date_pinned_query_is_not_anchored(recording_embedder, sdk):
 def test_time_aware_without_a_date_is_a_noop(recording_embedder, sdk):
     """FAIL VALUE: an invented anchor when ``query_date`` is absent.
     Reachable: ``query_date`` defaults to None."""
-    sdk.tortoise_fts_query(
+    sdk._tortoise_fts_query(
         "where do I live now?", limit=5, time_aware=True)
     assert "where do I live now?" in _encoded(recording_embedder)
     assert not any("(as of" in t for t in _encoded(recording_embedder))
@@ -156,7 +156,7 @@ def test_fts_leg_keeps_the_original_query(recording_embedder, sdk):
     Reachable: the recorder proves the dense leg got the anchor; this test
     pins that a second, un-anchored embed never appears, i.e. the anchor is
     not re-encoded elsewhere."""
-    sdk.tortoise_fts_query(
+    sdk._tortoise_fts_query(
         "where do I live now?", limit=5,
         time_aware=True, query_date="2026-09-25")
     encoded = _encoded(recording_embedder)
@@ -271,7 +271,7 @@ def _ku_sdk(future_text: str = _FUTURE):
         for name, text in (("ended", _ENDED_OUTRANKING),
                            ("current", _CURRENT),
                            ("future", future_text)):
-            ids[name] = sdk.create_point("statement", text, status="live")["id"]
+            ids[name] = sdk._create_point("statement", text, status="live")["id"]
         g = sdk._get_proj().g
         g.query("MATCH (n:Point {id:$id}) "
                 "SET n.validFrom='2021-01-01', n.validTo='2023-06-01'",
@@ -311,7 +311,7 @@ def ku_graph_future_first(recording_embedder):
 
 
 def _order(sdk, query, *, limit=10, **kwargs) -> list[str]:
-    return [h["id"] for h in sdk.tortoise_fts_query(query, limit=limit,
+    return [h["id"] for h in sdk._tortoise_fts_query(query, limit=limit,
                                                     **kwargs)]
 
 
@@ -495,7 +495,7 @@ def test_a_short_state_map_records_the_demotions_it_did_make(ku_graph,
     assert entry["degraded"] is False
     # …and the reuse half is unaffected: a short map is never reused as the
     # page's decoration, so every hit keeps its window.
-    ended = _hit(sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10), ids["ended"])
+    ended = _hit(sdk._tortoise_fts_query(_PRESENT_QUERY, limit=10), ids["ended"])
     assert ended["valid_to"] == "2023-06-01"
 
 
@@ -526,7 +526,7 @@ def test_a_failed_state_read_does_not_strip_the_page_decoration(ku_graph,
 
     monkeypatch.setattr(_se, "fetch_point_epistemic_state", _first_read_fails)
     trace: list[dict] = []
-    hits = sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
+    hits = sdk._tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
     ended = _hit(hits, ids["ended"])
     assert ended["status"] == "live", "the point's status decoration was lost"
     assert ended["valid_from"] == "2021-01-01"
@@ -570,7 +570,7 @@ def test_a_raised_selection_records_its_own_reason(ku_graph, monkeypatch):
 
     monkeypatch.setattr(_ta, "prefer_latest_ids", _boom)
     trace: list[dict] = []
-    hits = sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
+    hits = sdk._tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
     assert hits, "a raised selection must never fail the read (fail-open)"
     entry = _valid_time_entry(trace)
     assert entry["reason"] == "selection_failed"
@@ -605,7 +605,7 @@ def test_a_raised_state_read_is_not_recorded_as_a_selection_failure(
 
     monkeypatch.setattr(_se, "fetch_point_epistemic_state", _first_raises)
     trace: list[dict] = []
-    hits = sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
+    hits = sdk._tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
     assert hits, "a raised state read must never fail the read (fail-open)"
     ended = _hit(hits, ids["ended"])
     assert ended["valid_to"] == "2023-06-01", (
@@ -637,7 +637,7 @@ def test_a_failed_page_state_read_is_recorded_where_it_happened(
     monkeypatch.setattr(_se, "fetch_point_epistemic_state",
                         lambda *a, **k: {})
     trace: list[dict] = []
-    hits = sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
+    hits = sdk._tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
     assert hits, "an undecorated page is still a page"
     page_entries = [e for e in trace if e.get("leg") == "epistemic_state"]
     assert len(page_entries) == 1, (
@@ -669,7 +669,7 @@ def test_a_topical_query_pays_no_pool_width_state_read(ku_graph, monkeypatch):
         return real(graph, point_ids)
 
     monkeypatch.setattr(_se, "fetch_point_epistemic_state", _counting)
-    sdk.tortoise_fts_query(_PLAIN_QUERY, limit=2)
+    sdk._tortoise_fts_query(_PLAIN_QUERY, limit=2)
     assert seen == [2], (
         "a topical query must only pay the PAGE-width state read that step 7.6 "
         f"always did; saw reads over {seen} ids")
@@ -727,7 +727,7 @@ def test_internal_pool_reads_opt_out_of_the_selection(sdk, monkeypatch):
         seen.append((args[0] if args else "", kwargs))
         return []
 
-    monkeypatch.setattr(sdk, "tortoise_fts_query", _record)
+    monkeypatch.setattr(sdk, "_tortoise_fts_query", _record)
     failures = []
     for label, method, args, kwargs in _RE_OWNING_LANES:
         seen.clear()

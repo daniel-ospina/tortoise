@@ -187,7 +187,7 @@ def sdk(tmp_path):
         with mock.patch.object(EmbeddingModel, "get", lambda *_a, **_k: None), \
                 mock.patch.object(EmbeddingModel, "await_read_ready_reason",
                                   classmethod(lambda _cls, _budget: None)):
-            sdk.tortoise_fts_query(_QUERY, limit=3)
+            sdk._tortoise_fts_query(_QUERY, limit=3)
         assert not EmbeddingModel.loaded(), (
             "priming must not load the embedder — the cold-window tests need it COLD")
         yield sdk
@@ -200,7 +200,7 @@ def sdk(tmp_path):
 
 def _read(sdk, *, trace: list | None = None):
     """One read through the ONE read path, with the trace sink the SDK uses."""
-    return sdk.tortoise_fts_query(_QUERY, limit=3, leg_trace=trace)
+    return sdk._tortoise_fts_query(_QUERY, limit=3, leg_trace=trace)
 
 
 def _vector_entry(trace: list) -> dict:

@@ -75,7 +75,7 @@ def test_derivation_link_records_the_version_read():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         rows = proj.g.query(
             "MATCH (:Source {url:'src.txt'})-[r:references]->(:Event {id:'ev-1'}) "
@@ -124,7 +124,7 @@ def test_identity_link_stays_property_free():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "obj-1", "Object")
+        sdk._link_source_to_entity("src.txt", "obj-1", "Object")
 
         rows = proj.g.query(
             "MATCH (:Source {url:'src.txt'})-[r:references]->(:Object {id:'obj-1'}) "
@@ -147,7 +147,7 @@ def test_unchanged_hash_reads_current():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         rows = proj.g.query(
             "MATCH (s:Source {url:'src.txt'})-[r:references]->(:Event {id:'ev-1'}) "
@@ -168,10 +168,10 @@ def test_relink_does_not_advance_the_recorded_version():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         _set_hash(proj, "h2")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         rows = proj.g.query(
             "MATCH (s:Source {url:'src.txt'})-[r:references]->(:Event {id:'ev-1'}) "
@@ -198,7 +198,7 @@ def test_revised_source_stales_the_derived_node_without_deleting_it():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         _set_hash(proj, "h2")
 
@@ -233,7 +233,7 @@ def test_auto_created_source_is_not_stamped():
         proj = sdk._get_proj()
         proj.g.query("CREATE (ev:Event {id:'ev-2', eventId:'ev-2', name:'Loose'})")
 
-        sdk.link_source_to_entity("never-seen.txt", "ev-2", "Event")
+        sdk._link_source_to_entity("never-seen.txt", "ev-2", "Event")
 
         rows = proj.g.query(
             "MATCH (:Source {url:'never-seen.txt'})-[r:references]->(:Event {id:'ev-2'}) "
@@ -346,7 +346,7 @@ def test_document_link_records_the_version_read():
         # D10: the document IS a :Source — the caller still says "Document".
         proj.g.query("CREATE (d:Source {url:'doc-9', name:'Spec'})")
 
-        sdk.link_source_to_entity("src3.txt", "doc-9", "Document")
+        sdk._link_source_to_entity("src3.txt", "doc-9", "Document")
 
         rows = proj.g.query(
             "MATCH (:Source {url:'src3.txt'})-[r:references]->(:Source {url:'doc-9'}) "

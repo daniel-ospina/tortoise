@@ -107,7 +107,7 @@ decision = {
 all_points = {**criteria, **assumptions, **options, **findings, **decision}
 for pid, content in all_points.items():
     try:
-        sdk.create_point(pid, content, context=ctx)
+        sdk._create_point(pid, content, context=ctx)
         print(f"  ✓ {pid}")
     except Exception as e:
         print(f"  ⚠ {pid}: {e}")
@@ -152,7 +152,7 @@ edges = [
 
 for src, op_type, tgt in edges:
     try:
-        sdk.create_operator(src, op_type, tgt)
+        sdk._create_operator(src, op_type, tgt)
         print(f"  ✓ {src} --{op_type}--> {tgt}")
     except Exception as e:
         print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
@@ -163,14 +163,14 @@ try:
     # LOCAL EP over the dirty roots (exact closure). Pinning keeps the
     # decision artifact's persisted confidence values comparable across
     # runs on this fully-connected decision graph.
-    sdk.compute_confidence(max_hops=2)
+    sdk._compute_confidence(max_hops=2)
     print("\n✓ Confidence computed")
 except Exception as e:
     print(f"\n⚠ compute_confidence: {e}")
 
 # ── Verify structure ──
 try:
-    result = sdk.check_structure()
+    result = sdk._check_structure()
     print(f"✓ Structure check: {result}")
 except Exception as e:
     print(f"⚠ check_structure: {e}")

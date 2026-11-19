@@ -125,13 +125,13 @@ class TestCreatePointRefuses:
     def test_create_point_refuses_and_writes_nothing(self, sdk, kind):
         """Refusal BEFORE any write: the caller's graph is untouched."""
         with pytest.raises(ValueError, match="pointKind must be an identifier"):
-            sdk.create_point(kind, f"kind={kind!r}", status="live")
+            sdk._create_point(kind, f"kind={kind!r}", status="live")
         assert _point_ids(sdk) == []
 
     def test_the_refusal_names_the_argument_and_the_code_point(self, sdk):
         """A refusal a caller can act on: which argument, which character."""
         with pytest.raises(ValueError) as exc:
-            sdk.create_point("\u2003statement\u2003", "x", status="live")
+            sdk._create_point("\u2003statement\u2003", "x", status="live")
         message = str(exc.value)
         assert "create_point" in message
         assert "pointKind" in message
@@ -150,7 +150,7 @@ class TestCreatePointRefuses:
         """
         for spelling in ("pointKind", "point_kind"):
             with pytest.raises(ValueError, match="pointKind must be an identifier"):
-                sdk.create_point("statement", "x", status="live",
+                sdk._create_point("statement", "x", status="live",
                                  **{spelling: "\u2003statement\u2003"})
         assert _point_ids(sdk) == []
 
@@ -161,7 +161,7 @@ class TestCreatePointRefuses:
         spelling behind under a "the point already exists" branch.
         """
         with pytest.raises(ValueError, match="pointKind must be an identifier"):
-            sdk.create_point("\u2003statement\u2003", "x", status="live",
+            sdk._create_point("\u2003statement\u2003", "x", status="live",
                              dedup=True)
         assert _point_ids(sdk) == []
 
@@ -172,7 +172,7 @@ class TestCreatePointRefuses:
         `INVISIBLE_KINDS` preamble used to CLAIM this row without having one.
         """
         with pytest.raises(ValueError, match="pointKind must be an identifier"):
-            sdk.create_point("\ud800statement", "x", status="live")
+            sdk._create_point("\ud800statement", "x", status="live")
         assert _point_ids(sdk) == []
 
 
@@ -180,15 +180,15 @@ class TestUpdatePointRefuses:
     """The second door: an UPDATE is a write and stored the same spelling."""
 
     def test_update_point_refuses_a_padded_point_kind(self, sdk):
-        p = sdk.create_point("statement", "Updatable", status="live")
+        p = sdk._create_point("statement", "Updatable", status="live")
         with pytest.raises(ValueError, match="pointKind must be an identifier"):
-            sdk.update_point(p["id"], pointKind="\u2003observation\u2003")
+            sdk._update_point(p["id"], pointKind="\u2003observation\u2003")
         assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
 
     def test_update_point_refuses_the_snake_spelling(self, sdk):
-        p = sdk.create_point("statement", "Updatable", status="live")
+        p = sdk._create_point("statement", "Updatable", status="live")
         with pytest.raises(ValueError, match="pointKind must be an identifier"):
-            sdk.update_point(p["id"], point_kind="\u2003observation\u2003")
+            sdk._update_point(p["id"], point_kind="\u2003observation\u2003")
         assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
 
 
@@ -210,14 +210,14 @@ class TestUpdateEntityRefuses:
         {"pointKind": "statement\u200b"},
     ])
     def test_update_entity_refuses_and_writes_nothing(self, sdk, kwargs):
-        p = sdk.create_point("statement", "Victim", status="live")
+        p = sdk._create_point("statement", "Victim", status="live")
         with pytest.raises(ValueError, match="pointKind must be an identifier"):
             sdk.update_knowledge(p["id"], **kwargs)
         assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
         assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
 
     def test_update_entity_still_writes_a_clean_kind(self, sdk):
-        p = sdk.create_point("statement", "Victim", status="live")
+        p = sdk._create_point("statement", "Victim", status="live")
         sdk.update_knowledge(p["id"], pointKind="observation")
         assert _kinds_in_graph(sdk, p["id"]) == ["observation"]
 
@@ -239,7 +239,7 @@ class TestUpdateEntityRefuses:
         sdk = TortoiseSDK(str(tmp_path / "test.db"),
                           event_log_path=str(tmp_path / "events.jsonl"))
         try:
-            p = sdk.create_point("statement", "Victim", status="draft")
+            p = sdk._create_point("statement", "Victim", status="draft")
             log = sdk._get_event_log()
             assert log is not None, "the fixture must wire a journal"
             before = [e for e in log.read_all()
@@ -248,7 +248,7 @@ class TestUpdateEntityRefuses:
                                match="pointKind must be an identifier"):
                 sdk.update_knowledge(p["id"], status="live",
                                   point_kind="\u2003statement\u2003")
-            assert sdk.get_point(p["id"])["status"] == "draft", (
+            assert sdk._get_point(p["id"])["status"] == "draft", (
                 "the REFUSED call had already committed the status change")
             after = [e for e in log.read_all()
                      if e.get("type") == "EntityMutated"]
@@ -307,7 +307,7 @@ class TestUpdateEntityRefuses:
         assert _point_ids(sdk) == []      # nothing was minted, padded kind or not
         # 4. The write cycle 3 dropped the gate FOR still lands: a `point_kind` prop on
         #    a label the calibration gate never reads is not a Point write.
-        obj = sdk.create_object(
+        obj = sdk._create_object(
             "Thing", props={"point_kind": "statement\u200b"})
         assert obj["id"]
 
@@ -324,7 +324,7 @@ class TestUpdateEntityRefuses:
         the ``Point`` branch of the per-label loop, so this must be INERT here
         and still CLOSED on a real ``:Point`` (the test above).
         """
-        obj = sdk.create_object("Thing", props={"point_kind": "statement\u200b"})
+        obj = sdk._create_object("Thing", props={"point_kind": "statement\u200b"})
         sdk.update_knowledge(obj["id"], point_kind="statement\u200b")
         assert obj["id"]
 
@@ -340,7 +340,7 @@ class TestUpdateEntityRefuses:
         not refuse what Phase 2 writes, or a bundle the writer accepts becomes a
         whole-bundle ``BundleValidationError``.
         """
-        obj = sdk.create_object("Thing")
+        obj = sdk._create_object("Thing")
         sdk.update_knowledge(obj["id"], point_kind=value)
         assert obj["id"]
         # …and Phase 1 agrees with the writer on the props spelling.
@@ -409,7 +409,7 @@ class TestTheRefusalIsActionable:
     def test_the_suggested_fix_is_itself_accepted(self, sdk, kind):
         from tortoise.sdk import _kind_invisible_char
         with pytest.raises(ValueError) as exc:
-            sdk.create_point(kind, "x", status="live")
+            sdk._create_point(kind, "x", status="live")
         message = str(exc.value)
         suggested = message.rsplit("e.g. ", 1)[1].rstrip(".")
         assert suggested.startswith("'") and suggested.endswith("'")
@@ -423,11 +423,11 @@ class TestTheRefusalIsActionable:
             "offending character")
         assert _kind_invisible_char(clean) is None
         # …and the suggestion really writes.
-        assert sdk.create_point(clean, "fixed", status="live")["id"]
+        assert sdk._create_point(clean, "fixed", status="live")["id"]
 
     def test_an_all_invisible_kind_says_supply_a_name(self, sdk):
         with pytest.raises(ValueError, match="only invisible characters"):
-            sdk.create_point("\u2003\u2003", "x", status="live")
+            sdk._create_point("\u2003\u2003", "x", status="live")
 
     def test_a_separator_suggestion_does_not_JOIN_words(self, sdk):
         """#9591 review cycle 7 (P3): deleting an interior separator mints a
@@ -449,7 +449,7 @@ class TestTheRefusalIsActionable:
         assert suggested == "technical debt", (
             f"the suggestion joined the words into {suggested!r}")
         assert _kind_invisible_char(suggested) is None
-        assert sdk.create_point(suggested, "fixed", status="live")["id"]
+        assert sdk._create_point(suggested, "fixed", status="live")["id"]
         # An EDGE separator is padding, not a word boundary.
         assert _kind_suggestion("\u2003technical debt\u2003") == "technical debt"
         # Consecutive separators collapse to one space, never two.
@@ -535,7 +535,7 @@ class TestLegitimateKindsStillWrite:
         space therefore cannot make a node escape, and refusing it would break
         the open-vocabulary contract (#1934 warn-not-block).
         """
-        p = sdk.create_point("technical debt", "Refactor", status="live")
+        p = sdk._create_point("technical debt", "Refactor", status="live")
         assert _kinds_in_graph(sdk, p["id"]) == ["technical debt"]
         # not an evidence kind either way
         assert p["id"] not in sdk._uncalibrated_ep_participants(None)
@@ -547,7 +547,7 @@ class TestLegitimateKindsStillWrite:
         refusing here would be a different change (and would break the
         case-insensitive filter's reason to exist).
         """
-        p = sdk.create_point("Statement", "Mis-cased", status="live")
+        p = sdk._create_point("Statement", "Mis-cased", status="live")
         assert _kinds_in_graph(sdk, p["id"]) == ["Statement"]
         assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
 
@@ -558,7 +558,7 @@ class TestLegitimateKindsStillWrite:
         to inspect) and the gate's ``toLower(typeof(…))`` guard keeps it out of
         the universe (#9063) — refusing it would be a different change.
         """
-        p = sdk.create_point(42, "Numeric kind", status="live")
+        p = sdk._create_point(42, "Numeric kind", status="live")
         assert p["id"] not in sdk._uncalibrated_ep_participants(None)
 
 
@@ -584,19 +584,19 @@ class TestTheClassIsClosed:
     def test_an_imported_in_family_padded_kind_is_demanded_and_never_stamped(
             self, sdk):
         """The read-path arm still covers what the door no longer accepts."""
-        anchor = sdk.create_point("statement", "Anchor", credibility="gold",
+        anchor = sdk._create_point("statement", "Anchor", credibility="gold",
                                   status="live")
         # An imported/hand-written row is the reachable path left (the SDK door
         # refuses the value, measured above).
-        imported = sdk.create_point("statement", "Imported", status="live")
+        imported = sdk._create_point("statement", "Imported", status="live")
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.pointKind = '\u00a0statement\u00a0'",
             params={"id": imported["id"]})
-        sdk.create_operator("IMPL", anchor["id"], [imported["id"]])
+        sdk._create_operator("IMPL", anchor["id"], [imported["id"]])
 
         assert sdk._uncalibrated_ep_participants(None) == [imported["id"]]
         with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-            sdk.compute_confidence(require_calibration=True)
+            sdk._compute_confidence(require_calibration=True)
         assert imported["id"] in str(exc.value)
         # The gate refused the run BEFORE it could stamp the node.
         stamped = sdk._get_proj().g.query(
@@ -612,7 +612,7 @@ class TestTheClassIsClosed:
         and NOT demanded. That is #9287's declared boundary with its cost
         measurement, kept here so a future change to either half has to say so.
         """
-        imported = sdk.create_point("statement", "Imported em space",
+        imported = sdk._create_point("statement", "Imported em space",
                                     status="live")
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.pointKind = '\u2003statement\u2003'",
@@ -641,7 +641,7 @@ class TestTheClassIsClosed:
         assert any("pointKind must be an identifier" in v["message"]
                    for v in violations), violations
         with pytest.raises(BundleValidationError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         landed = sdk._get_proj().g.query(
             "MATCH (n:Point) RETURN n.content").result_set
         assert landed == [], landed  # zero mutations, not a half-written graph
@@ -670,7 +670,7 @@ class TestTheClassIsClosed:
         assert any("pointKind must be an identifier" in v["message"]
                    and v["index"] == 1 for v in violations), violations
         with pytest.raises(BundleValidationError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         landed = sdk._get_proj().g.query(
             "MATCH (n:Point) RETURN n.content").result_set
         assert landed == [], landed  # zero mutations, not a half-written graph

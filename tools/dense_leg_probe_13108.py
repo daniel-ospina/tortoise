@@ -597,7 +597,7 @@ def measure_windows(sdk, names: list[str], concurrency: int, limit: int,
             trace: list[dict] = []
             t0 = time.monotonic()
             try:
-                sdk.tortoise_fts_query(
+                sdk._tortoise_fts_query(
                     _sanitise_query_text(names[i % len(names)]),
                     entity_type="object", limit=limit, include_terminal=True,
                     _record_reads=False, _valid_time_rerank=False,

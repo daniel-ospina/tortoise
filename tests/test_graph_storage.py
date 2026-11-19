@@ -528,7 +528,7 @@ def org(monkeypatch, tmp_path):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     sdk = TortoiseSDK(db, namespace="registry")
-    tid = sdk.org_create(name="byte-meter-test")["id"]
+    tid = sdk._org_create(name="byte-meter-test")["id"]
     yield tid
     sdk.close()
 

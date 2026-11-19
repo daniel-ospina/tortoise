@@ -49,7 +49,7 @@ ALL_VALUES = MODEL_VALUES + LEGACY_VALUES
 
 
 def _point(sdk: TortoiseSDK, content: str) -> dict:
-    return sdk.create_point("statement", content, status="live")
+    return sdk._create_point("statement", content, status="live")
 
 
 def _operator_stored(sdk: TortoiseSDK, op_id: str) -> str | None:
@@ -178,7 +178,7 @@ def test_operator_direction_round_trips(sdk, value):
     """A stored operator records EXACTLY the token it was written with — the
     model's four values and the two legacy aliases, all readable."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]], direction=value)
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]], direction=value)
     assert op["direction"] == value
     assert _operator_stored(sdk, op["id"]) == value
 
@@ -186,7 +186,7 @@ def test_operator_direction_round_trips(sdk, value):
 @pytest.mark.parametrize("value", ALL_VALUES)
 def test_direct_edge_direction_round_trips(sdk, value):
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    sdk.create_direct_edge("IMPL", a["id"], b["id"], direction=value)
+    sdk._create_direct_edge("IMPL", a["id"], b["id"], direction=value)
     assert _edge_stored(sdk, a["id"], b["id"]) == value
 
 
@@ -196,11 +196,11 @@ def test_out_of_vocabulary_direction_is_refused(sdk):
     launder an unrecognised direction into the vocabulary)."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     with pytest.raises(ValueError, match="direction must be one of"):
-        sdk.create_operator("IMPL", a["id"], [b["id"]], direction="sideways")
+        sdk._create_operator("IMPL", a["id"], [b["id"]], direction="sideways")
     with pytest.raises(ValueError, match="direction must be one of"):
-        sdk.create_direct_edge("IMPL", a["id"], b["id"], direction="sideways")
+        sdk._create_direct_edge("IMPL", a["id"], b["id"], direction="sideways")
     with pytest.raises(ValueError, match="direction must be one of"):
-        sdk.create_operator("IMPL", a["id"], [b["id"]],
+        sdk._create_operator("IMPL", a["id"], [b["id"]],
                             direction="sideways", semantics="addresses")
 
 
@@ -219,11 +219,11 @@ def test_defaults_are_unchanged(sdk):
     NAND (extraction default) → `unidirectional`; the SDK signature default
     stays the literal `bidirectional`."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    impl = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    impl = sdk._create_operator("IMPL", a["id"], [b["id"]])
     # A fresh pair for the NAND probe: one pair carries at most one mechanism
     # (#12067's closed set), and this test is about the DIRECTION default.
     c = _point(sdk, "c")
-    nand = sdk.create_operator("NAND", a["id"], [c["id"]], direction=None)
+    nand = sdk._create_operator("NAND", a["id"], [c["id"]], direction=None)
     assert _operator_stored(sdk, impl["id"]) == "bidirectional"
     assert _operator_stored(sdk, nand["id"]) == "unidirectional"
 
@@ -263,7 +263,7 @@ def test_ep_reaches_only_the_endpoint_the_direction_flows_to(
     a, b = _point(sdk, "strong"), _point(sdk, "neutral")
     _set_evidence(sdk, a["id"], 12.0, 1.0)
     _set_evidence(sdk, b["id"], 1.0, 1.0)
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]], direction=value)
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]], direction=value)
 
     _run_ep(sdk, seeds=[op["id"]])
 
@@ -278,7 +278,7 @@ def test_direct_edge_reverse_direction_writes_the_back_slot(sdk):
     a, b = _point(sdk, "strong-source"), _point(sdk, "target")
     _set_evidence(sdk, a["id"], 12.0, 1.0)
     _set_evidence(sdk, b["id"], 1.0, 1.0)
-    sdk.create_direct_edge("IMPL", a["id"], b["id"], direction="<-")
+    sdk._create_direct_edge("IMPL", a["id"], b["id"], direction="<-")
 
     _run_ep(sdk, seeds=[a["id"]])
 
@@ -294,7 +294,7 @@ def test_no_direction_transfers_nothing(sdk):
     a, b = _point(sdk, "strong"), _point(sdk, "neutral")
     _set_evidence(sdk, a["id"], 12.0, 1.0)
     _set_evidence(sdk, b["id"], 1.0, 1.0)
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]], direction="-")
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]], direction="-")
 
     res = _run_ep(sdk, seeds=[op["id"]])
 
@@ -319,7 +319,7 @@ def test_find_operator_matches_the_equivalence_class(sdk, written, looked_up):
     model-token operator (and vice versa) — otherwise re-ingest mints a
     duplicate of the same operator."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]], direction=written)
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]], direction=written)
     found = sdk._find_operator("IMPL", [a["id"], b["id"]], direction=looked_up)
     assert found is not None, (written, looked_up)
     assert found["kind"] == "exact"
@@ -330,7 +330,7 @@ def test_find_operator_distinguishes_opposite_one_way_directions(sdk):
     """`->` and `<-` are different operators — the equivalence class must not
     collapse them."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
-    sdk.create_operator("IMPL", a["id"], [b["id"]], direction="->")
+    sdk._create_operator("IMPL", a["id"], [b["id"]], direction="->")
     assert sdk._find_operator("IMPL", [a["id"], b["id"]], direction="<-") is None
 
 
@@ -364,7 +364,7 @@ def test_a_raw_written_non_scalar_direction_reads_as_ABSENT_not_a_TypeError(sdk)
 
     # The stored-value route, on a real node: the EP load path raises on it.
     a, b = _point(sdk, "raw junk direction source"), _point(sdk, "raw junk direction target")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]])
     sdk._get_proj().g.query(
         "MATCH (o:Point {id:$id}) SET o.direction = ['sideways']",
         params={"id": op["id"]},
@@ -390,7 +390,7 @@ def test_a_raw_written_non_scalar_EDGE_direction_reads_as_ABSENT(sdk):
     next lane to "fix" a door that has no defect).
     """
     a, b = _point(sdk, "raw junk edge source"), _point(sdk, "raw junk edge target")
-    sdk.create_direct_edge("IMPL", a["id"], b["id"])
+    sdk._create_direct_edge("IMPL", a["id"], b["id"])
     sdk._get_proj().g.query(
         "MATCH (:Point {id:$a})-[r:IMPL]->(:Point {id:$b}) "
         "SET r.direction = ['sideways']",
@@ -449,7 +449,7 @@ def test_ingest_reports_a_non_scalar_direction_as_a_SHAPE_violation(sdk):
     assert "got list" in _dir_viols[0]["message"], _dir_viols
 
     with pytest.raises(ValueError) as exc:  # TypeError is NOT a ValueError
-        sdk.ingest(bundle, promotion_policy="gated")
+        sdk._ingest(bundle, promotion_policy="gated")
     assert "direction" in str(exc.value), str(exc.value)
 
     # …and other non-scalar shapes, so the fix is not keyed on one shell: a

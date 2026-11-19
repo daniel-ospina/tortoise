@@ -174,7 +174,7 @@ def main() -> int:
         print(f"journal_backed (guard armed): {proj._journal_backed}")
 
         # ── 1. the ordering: cache delete BEFORE the record (#9207) ────────
-        pid = sdk.create_point("observation", "a deletion in order")["id"]
+        pid = sdk._create_point("observation", "a deletion in order")["id"]
         order: list[str] = []
         real_mutate = sdk._journal_entity_mutation
 
@@ -187,7 +187,7 @@ def main() -> int:
             proj.g, lambda orig: _record_deletes(orig, order))
         sdk._journal_entity_mutation = spy_mutate
         try:
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
         finally:
             restore_query()
             sdk._journal_entity_mutation = real_mutate
@@ -213,11 +213,11 @@ def main() -> int:
                            event_log_path=str(events2 / "events.jsonl"))
         try:
             proj2 = sdk2._get_proj()
-            pid2 = sdk2.create_point("observation", "must survive")["id"]
+            pid2 = sdk2._create_point("observation", "must survive")["id"]
             _orig2, restore2 = _patch_query(proj2.g, _fail_deletes)
             raised2: BaseException | None = None
             try:
-                sdk2.delete_point(pid2)
+                sdk2._delete_point(pid2)
             except Exception as exc:  # the refusal is the point of the probe
                 raised2 = exc
                 print(f"failed cache delete raised:      {type(exc).__name__}"
@@ -248,7 +248,7 @@ def main() -> int:
                            event_log_path=str(events3 / "events.jsonl"))
         try:
             proj3 = sdk3._get_proj()
-            pid3 = sdk3.create_point("observation", "destroyed, not recorded")["id"]
+            pid3 = sdk3._create_point("observation", "destroyed, not recorded")["id"]
             log3 = sdk3._get_event_log()
 
             def _boom3(_event):
@@ -258,7 +258,7 @@ def main() -> int:
             log3.append = _boom3
             raised3: BaseException | None = None
             try:
-                sdk3.delete_point(pid3)
+                sdk3._delete_point(pid3)
             except Exception as exc:
                 raised3 = exc
                 print(f"failed append after the destroy: {type(exc).__name__}"
@@ -298,7 +298,7 @@ def main() -> int:
             "CREATE (n:S1Probe {id:'raw-handle'}) RETURN 'via-raw-handle'"
         ).result_set
         print(f"RAW HANDLE LANE (proj.g.query):  SUCCEEDED, rows = {rows}")
-        p4 = sdk.create_point("observation", "delete_entity door")["id"]
+        p4 = sdk._create_point("observation", "delete_entity door")["id"]
         order4: list[str] = []
         real_mutate4 = sdk._journal_entity_mutation
 
@@ -311,7 +311,7 @@ def main() -> int:
             proj.g, lambda orig: _record_deletes(orig, order4))
         sdk._journal_entity_mutation = spy_mutate4
         try:
-            sdk.delete_entity(p4)
+            sdk._delete_entity__svc(p4)
         finally:
             restore4()
             sdk._journal_entity_mutation = real_mutate4

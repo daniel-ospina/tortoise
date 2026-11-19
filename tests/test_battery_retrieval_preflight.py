@@ -745,15 +745,15 @@ class TestRecallStateLegTrace:
             db_path=str(db), graph_name="legs",
             event_log_path=str(tmp_path / "events" / "legs.jsonl"))
         for text in POOL_UNITS:
-            sdk.create_point(kind="evidence", content=text, dedup=True,
+            sdk._create_point(kind="evidence", content=text, dedup=True,
                              credibility="medium")
         yield sdk
         sdk.close()
 
     def test_default_none_is_byte_identical(self, sdk):
-        plain = sdk.recall_state(query="Where was Thomas Kyd born?", limit=5)
+        plain = sdk._recall_state(query="Where was Thomas Kyd born?", limit=5)
         traced: list[dict] = []
-        with_trace = sdk.recall_state(query="Where was Thomas Kyd born?",
+        with_trace = sdk._recall_state(query="Where was Thomas Kyd born?",
                                       limit=5, leg_trace=traced)
         assert with_trace == plain, (
             "a trace-provided call returned different rows — the passthrough "
@@ -762,7 +762,7 @@ class TestRecallStateLegTrace:
 
     def test_trace_records_the_legs_that_ran(self, sdk):
         traced: list[dict] = []
-        sdk.recall_state(query="Where was Thomas Kyd born?", limit=5,
+        sdk._recall_state(query="Where was Thomas Kyd born?", limit=5,
                          leg_trace=traced)
         assert traced, "the trace was not forwarded to the retrieval legs"
         for entry in traced:

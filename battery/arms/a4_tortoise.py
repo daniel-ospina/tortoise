@@ -234,7 +234,7 @@ class A4TortoiseArm:
             if not query:
                 probe = _scenario_probe_query(context.scenario)
                 query = probe or ""
-            results = sdk.recall_state(
+            results = sdk._recall_state(
                 query=query or None, kind=None, limit=20, leg_trace=trace)
             out: list[Memory] = []
             seen_op_ids: set[str] = set()
@@ -391,7 +391,7 @@ class A4TortoiseArm:
         """
         sdk = self._sdk(scenario)
         anchors = _live_claim_ids(sdk, scenario)
-        cc = sdk.compute_confidence(
+        cc = sdk._compute_confidence(
             factors=None, anchors=anchors)
         conf = cc.get("confidences") or {}
         diagnostic = cc.get("diagnostic")
@@ -508,7 +508,7 @@ class A4TortoiseArm:
                     strength = 0.3  # decide-tooling default, in-range
                 op_target = (item.target_id if item.target_id is not None
                              else ops[0].id)
-                mit = sdk.mitigate_operator(
+                mit = sdk._mitigate_operator(
                     op_target, reason=item.content or "", strength=strength)
                 filed.add(mit_key)
                 self.decide_cycles += 1
@@ -539,7 +539,7 @@ class A4TortoiseArm:
             dedup_key = f"{op_kind}::{target}::{item.content}"
             if dedup_key in filed:
                 return None  # identical re-file this setup: TRUE no-op
-            created = sdk.create_point(kind=_EVIDENCE_KIND, content=item.content,
+            created = sdk._create_point(kind=_EVIDENCE_KIND, content=item.content,
                                        dedup=True, status="draft",
                                        credibility=item.credibility
                                        or _DEFAULT_EVIDENCE_CREDIBILITY,
@@ -550,10 +550,10 @@ class A4TortoiseArm:
                 raise ArmUnavailable("a4 create_point returned no id")
             try:
                 if item.kind == "nand":
-                    op = sdk.create_operator(
+                    op = sdk._create_operator(
                         "NAND", ev_id, [target], direction="unidirectional")
                 else:
-                    op = sdk.create_operator("IMPL", ev_id, [target])
+                    op = sdk._create_operator("IMPL", ev_id, [target])
             except Exception as e:  # noqa: BLE001, RUF100
                 # Evidence stays DRAFT (the explicit promotion below runs only
                 # after the operator succeeds) ⇒ inert residue, never a live
@@ -572,7 +572,7 @@ class A4TortoiseArm:
             # WITHOUT raising, which would let this arm count a cycle over
             # inert evidence. update_point promotes draft→live through the
             # guarded WHERE with neither flag and no quarantine/R16 gate.
-            promoted = sdk.update_point(ev_id, status="live")
+            promoted = sdk._update_point(ev_id, status="live")
             # No silent cycle over inert evidence: update_point raises on a
             # refused/terminal transition, and a non-live result here must
             # abort BEFORE filed.add/decide_cycles so an unpromoted point is
@@ -611,7 +611,7 @@ def _live_claim_ids(sdk, scenario: Scenario) -> list[str]:
     Read via the product state surface (recall_state), never raw queries."""
     try:
         probe = _scenario_probe_query(scenario) or None
-        rows = sdk.recall_state(query=probe, kind=None, limit=50)
+        rows = sdk._recall_state(query=probe, kind=None, limit=50)
         out = []
         for r in rows or []:
             if not isinstance(r, dict):

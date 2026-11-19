@@ -69,13 +69,13 @@ src = step(
 SRC_ID = rid(src) or SPEC_URL
 
 # --------------------------------------------------------------- ownership
-team = step("subject: Platform team", sdk.create_subject, "Platform team", subjectKind="team")
+team = step("subject: Platform team", sdk._create_subject, "Platform team", subjectKind="team")
 TEAM_ID = rid(team)
 
 # --------------------------------------------------------------- plan v2 (Object)
 plan = step(
     "object: Beta memory API plan v2",
-    sdk.create_object,
+    sdk._create_object,
     V2_NAME,
     objectKind="plan",
     status="live",
@@ -92,7 +92,7 @@ PLAN_ID = rid(plan)
 # ------------------------------------- the two v2 commitments, as target Points
 ship2 = step(
     "point: ship target 2026-11-15 (v2)",
-    sdk.create_point,
+    sdk._create_point,
     "target",
     "The beta memory API ships on 2026-11-15 (plan v2 ship target).",
     dedup=True,
@@ -108,7 +108,7 @@ SHIP2_ID = rid(ship2)
 
 metric2 = step(
     "point: success metric 40% of beta orgs writing weekly / rolling 4 weeks (v2)",
-    sdk.create_point,
+    sdk._create_point,
     "target",
     (
         "Plan v2 success = 40% of beta orgs write at least one memory per week, "
@@ -133,7 +133,7 @@ METRIC2_ID = rid(metric2)
 # ------------------- what v1 said, kept as history and then explicitly superseded
 ship1 = step(
     "point: ship target 2026-10-15 (v1, to be superseded)",
-    sdk.create_point,
+    sdk._create_point,
     "target",
     "The beta memory API ships on 2026-10-15 (plan v1 ship target, superseded by v2).",
     dedup=True,
@@ -148,7 +148,7 @@ SHIP1_ID = rid(ship1)
 
 metric1 = step(
     "point: success metric 25% of beta orgs writing weekly / rolling 4 weeks (v1, to be superseded)",
-    sdk.create_point,
+    sdk._create_point,
     "target",
     (
         "Plan v1 success = 25% of beta orgs write at least one memory per week, "
@@ -171,15 +171,15 @@ METRIC1_ID = rid(metric1)
 
 # --------------------------------------------------------------- structural wiring
 if PLAN_ID and SHIP2_ID:
-    step("edge: plan v2 hasPart ship target", sdk.create_edge, "hasPart", PLAN_ID, SHIP2_ID)
+    step("edge: plan v2 hasPart ship target", sdk._create_edge, "hasPart", PLAN_ID, SHIP2_ID)
 if PLAN_ID and METRIC2_ID:
-    step("edge: plan v2 hasPart success metric", sdk.create_edge, "hasPart", PLAN_ID, METRIC2_ID)
+    step("edge: plan v2 hasPart success metric", sdk._create_edge, "hasPart", PLAN_ID, METRIC2_ID)
 if PLAN_ID and TEAM_ID:
-    step("edge: plan v2 ownedBy Platform team", sdk.create_edge, "ownedBy", PLAN_ID, TEAM_ID)
+    step("edge: plan v2 ownedBy Platform team", sdk._create_edge, "ownedBy", PLAN_ID, TEAM_ID)
 if PLAN_ID:
-    step("edge: plan v2 wasDerivedFrom plan v1", sdk.create_edge, "wasDerivedFrom", PLAN_ID, V1_OBJ)
+    step("edge: plan v2 wasDerivedFrom plan v1", sdk._create_edge, "wasDerivedFrom", PLAN_ID, V1_OBJ)
 if PLAN_ID:
-    step("source -> plan v2 (references)", sdk.link_source_to_entity, SPEC_URL, PLAN_ID, "Object", "spec")
+    step("source -> plan v2 (references)", sdk._link_source_to_entity, SPEC_URL, PLAN_ID, "Object", "spec")
 
 # v1 is replaced entirely: it is no longer a live, actively pursued plan.
 # ⛔ #13065 review ROUND 14, finding 7 (P3) — this call used to be
@@ -203,7 +203,7 @@ if PLAN_ID:
     v1_ending["supersededBy"] = V2_NAME
 step(
     "update: plan v1 -> superseded on BOTH axes (successor named)",
-    sdk.update,
+    sdk._update,
     V1_OBJ,
     replacedByPlanId=PLAN_ID,
     **v1_ending,
@@ -211,14 +211,14 @@ step(
 
 # --------------------------------------------------------------- the corrections
 if SHIP1_ID and SHIP2_ID:
-    step("supersede: ship 2026-10-15 -> 2026-11-15", sdk.supersede_point, SHIP1_ID, SHIP2_ID)
+    step("supersede: ship 2026-10-15 -> 2026-11-15", sdk._supersede_point, SHIP1_ID, SHIP2_ID)
 if METRIC1_ID and METRIC2_ID:
-    step("supersede: 25% -> 40% weekly writers", sdk.supersede_point, METRIC1_ID, METRIC2_ID)
+    step("supersede: 25% -> 40% weekly writers", sdk._supersede_point, METRIC1_ID, METRIC2_ID)
 
 # --------------------------------------------------------------- revision Event
 ev = step(
     "event: plan revised to v2 on 2026-09-30",
-    sdk.create_event,
+    sdk._create_event,
     (
         "Beta memory API plan revised to v2 (spec dated 2026-09-30): ship date moves "
         "2026-10-15 -> 2026-11-15 and the success bar moves 25% -> 40% of beta orgs "
@@ -240,7 +240,7 @@ EV_ID = rid(ev)
 if EV_ID:
     step(
         "source -> event (derivation/references)",
-        sdk.link_source_to_entity,
+        sdk._link_source_to_entity,
         SPEC_URL,
         EV_ID,
         "Document",

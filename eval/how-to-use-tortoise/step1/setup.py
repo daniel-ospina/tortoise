@@ -173,7 +173,7 @@ def seed(input_id: str, db: str) -> dict:
     minted: dict[str, str] = {}
     try:
         if input_id == "correction_existing_claim":
-            p1 = sdk.create_point(
+            p1 = sdk._create_point(
                 "statement",
                 "Our Q3 churn was 4.1%.",
                 when="2026-10-01",
@@ -194,22 +194,22 @@ def seed(input_id: str, db: str) -> dict:
             # agent finds that route, rather than papering over it.
 
         elif input_id == "duplicate_entity":
-            o1 = sdk.create_object("Northwind Logistics", objectKind="other")
+            o1 = sdk._create_object("Northwind Logistics", objectKind="other")
             minted["O1_northwind"] = o1["id"]
 
         elif input_id == "contradicting_claim":
-            p2 = sdk.create_point(
+            p2 = sdk._create_point(
                 "statement",
                 "Solstice Robotics passed its safety audit on 2026-08-28.",
             )
-            p3 = sdk.create_point("statement", "Acme released tranche 2.")
-            op = sdk.create_operator("IMPL", p2["id"], [p3["id"]])
+            p3 = sdk._create_point("statement", "Acme released tranche 2.")
+            op = sdk._create_operator("IMPL", p2["id"], [p3["id"]])
             minted["P2_audit_passed"] = p2["id"]
             minted["P3_tranche_released"] = p3["id"]
             minted["op_impl"] = op.get("id", "") if isinstance(op, dict) else str(op)
 
         elif input_id == "product_spec_object":
-            o1 = sdk.create_object(
+            o1 = sdk._create_object(
                 "Beta memory API plan v1",
                 objectKind="plan",
                 goalState="active",

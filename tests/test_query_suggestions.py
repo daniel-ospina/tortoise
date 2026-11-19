@@ -126,7 +126,7 @@ class TestQueryWithSuggestions:
         re-review ISSUE-2-3) — other tests create 'statement' points that
         leak into this namespace when run in the same process.
         """
-        result = query_with_suggestions(sdk.query, kind="hypothesis")
+        result = query_with_suggestions(sdk._query, kind="hypothesis")
         assert result["results"] == []
         assert "suggestion" in result
         assert "valid but has 0 points" in result["suggestion"]
@@ -135,7 +135,7 @@ class TestQueryWithSuggestions:
 
     def test_misspelled_kind_suggestion(self, sdk):
         """Misspelled kind → 'did you mean' suggestion."""
-        result = query_with_suggestions(sdk.query, kind="statemant")
+        result = query_with_suggestions(sdk._query, kind="statemant")
         assert result["results"] == []
         assert "suggestion" in result
         assert "Did you mean" in result["suggestion"]
@@ -143,22 +143,22 @@ class TestQueryWithSuggestions:
 
     def test_query_results_present_no_suggestion(self, sdk):
         """Non-empty results → no suggestion key in response."""
-        sdk.create_point("statement", "Test point for suggestion test", dedup=True)
-        result = query_with_suggestions(sdk.query, kind="statement")
+        sdk._create_point("statement", "Test point for suggestion test", dedup=True)
+        result = query_with_suggestions(sdk._query, kind="statement")
         assert len(result["results"]) >= 1
         assert "suggestion" not in result
 
     def test_no_kind_no_suggestion(self, sdk):
         """Empty results without kind filter → no suggestion."""
         # Use a filter that won't match anything
-        result = query_with_suggestions(sdk.query, some_prop="nonexistent_value")
+        result = query_with_suggestions(sdk._query, some_prop="nonexistent_value")
         assert result["results"] == []
         assert "suggestion" not in result
 
     def test_unknown_kind_with_similar(self, sdk):
         """'hypothesis' when no such points exist, but it's a valid kind."""
         # 'hypothesis' is a canonical pointKind — valid but 0 points
-        result = query_with_suggestions(sdk.query, kind="hypothesis")
+        result = query_with_suggestions(sdk._query, kind="hypothesis")
         assert result["results"] == []
         assert "suggestion" in result
         assert "valid but has 0 points" in result["suggestion"]

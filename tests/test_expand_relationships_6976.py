@@ -61,7 +61,7 @@ def sdk(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "expand.db"), namespace=TEST_GRAPH)
     yield sdk
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -73,7 +73,7 @@ def _graph(sdk):
 
 
 def _point(sdk, content):
-    return sdk.create_point("statement", content)["id"]
+    return sdk._create_point("statement", content)["id"]
 
 
 def _object(sdk, name):
@@ -148,9 +148,9 @@ def _hub_with_non_point_peers(sdk):
     team = _subject(sdk, "the on-call team")
     cause = _point(sdk, "the outage was caused by a bad deploy")
 
-    sdk.create_operator("IMPL", hub, [svc_a], label="addresses")
-    sdk.create_operator("NAND", hub, [cause])
-    sdk.create_operator("composedOf", hub, [svc_b, team])
+    sdk._create_operator("IMPL", hub, [svc_a], label="addresses")
+    sdk._create_operator("NAND", hub, [cause])
+    sdk._create_operator("composedOf", hub, [svc_b, team])
     return hub, {"svc_a": svc_a, "svc_b": svc_b, "team": team, "cause": cause}
 
 
@@ -211,9 +211,9 @@ def test_direct_edge_hub_is_not_isolated(sdk):
     supported = _point(sdk, "the claim this incident supports")
     refuted = _point(sdk, "the claim this incident refutes")
     inbound = _point(sdk, "the claim asserting this incident")
-    sdk.create_direct_edge("IMPL", hub, supported, label="supports")
-    sdk.create_direct_edge("NAND", hub, refuted, label="refutes")
-    sdk.create_direct_edge("IMPL", inbound, hub, label="supports")
+    sdk._create_direct_edge("IMPL", hub, supported, label="supports")
+    sdk._create_direct_edge("NAND", hub, refuted, label="refutes")
+    sdk._create_direct_edge("IMPL", inbound, hub, label="supports")
 
     graph = _graph(sdk)
     raw_edges = graph.query(
@@ -243,7 +243,7 @@ def test_direct_edge_target_is_not_isolated(sdk):
     """The same edge from the TARGET side — the repro's other two nodes."""
     source = _point(sdk, "claim D: the deploy caused the outage")
     target = _point(sdk, "claim E: the deploy was clean")
-    sdk.create_direct_edge("NAND", source, target)
+    sdk._create_direct_edge("NAND", source, target)
 
     entries = sdk.explore_connections(target, include_content=True)
     assert _expand_set(entries) == {("NAND", source)}, (
@@ -257,8 +257,8 @@ def test_direct_and_operator_edges_coexist(sdk):
     hub = _point(sdk, "INCIDENT-52 mixed wiring")
     via_op = _point(sdk, "peer reached through an operator")
     direct = _point(sdk, "peer reached by a direct edge")
-    sdk.create_operator("IMPL", hub, [via_op])
-    sdk.create_direct_edge("NAND", hub, direct)
+    sdk._create_operator("IMPL", hub, [via_op])
+    sdk._create_direct_edge("NAND", hub, direct)
 
     entries = sdk.explore_connections(hub, include_content=True)
     assert _expand_set(entries) == {("IMPL", via_op), ("NAND", direct)}, (
@@ -307,8 +307,8 @@ def test_operator_without_is_operator_flag_is_visible(sdk):
     b = _point(sdk, "peer B of incident 44")
     c = _point(sdk, "peer C of incident 44")
     d = _point(sdk, "peer D of incident 44")
-    explicit_false = sdk.create_operator("IMPL", hub, [a, b])
-    absent = sdk.create_operator("IMPL", hub, [c, d])
+    explicit_false = sdk._create_operator("IMPL", hub, [a, b])
+    absent = sdk._create_operator("IMPL", hub, [c, d])
     _graph(sdk).query(
         "MATCH (op:Point) WHERE op.id = $oid SET op.is_operator = false",
         params={"oid": explicit_false["id"]},
@@ -353,7 +353,7 @@ def test_hybrid_peer_is_not_a_co_endpoint(sdk):
     downstream = _point(sdk, "an input of the replayed operator")
 
     # A real operator, then REPLAYED: op_type kept, is_operator lost.
-    hybrid = sdk.create_operator("IMPL", other_claim, [downstream])
+    hybrid = sdk._create_operator("IMPL", other_claim, [downstream])
     _graph(sdk).query(
         "MATCH (op:Point) WHERE op.id = $oid SET op.is_operator = false",
         params={"oid": hybrid["id"]},
@@ -366,7 +366,7 @@ def test_hybrid_peer_is_not_a_co_endpoint(sdk):
         "fixture: the hybrid peer must still LOOK like an operator (op_type "
         "set, is_operator false) — otherwise it is excluded for the wrong reason"
     )
-    sdk.create_operator("IMPL", hub, [plain_peer, hybrid["id"]])
+    sdk._create_operator("IMPL", hub, [plain_peer, hybrid["id"]])
 
     related = {e["related_id"] for e in sdk.explore_connections(hub, include_content=True)}
     assert plain_peer in related, (
@@ -416,9 +416,9 @@ def test_related_status_survives_the_widening(sdk):
         "MATCH (n:Point) WHERE n.id = $id SET n.status = 'superseded'",
         params={"id": stale_peer},
     )
-    sdk.create_operator("IMPL", hub, [live_peer, stale_peer, obj_peer])
-    sdk.create_direct_edge("NAND", hub, subj_peer)
-    sdk.create_direct_edge("IMPL", hub, event_peer)
+    sdk._create_operator("IMPL", hub, [live_peer, stale_peer, obj_peer])
+    sdk._create_direct_edge("NAND", hub, subj_peer)
+    sdk._create_direct_edge("IMPL", hub, event_peer)
 
     statuses = {e["related_id"]: e["related_status"]
                 for e in sdk.explore_connections(hub, include_content=True)}
@@ -486,11 +486,11 @@ def test_one_failing_label_does_not_discard_the_other_labels(sdk):
     """
     point_hub = _point(sdk, "INCIDENT-54 the Point-side hub")
     point_peer = _point(sdk, "the Point hub's peer")
-    sdk.create_operator("IMPL", point_hub, [point_peer])
+    sdk._create_operator("IMPL", point_hub, [point_peer])
 
     object_hub = _object(sdk, "the Object-side hub")
     object_peer = _point(sdk, "the Object hub's peer")
-    sdk.create_operator("IMPL", object_hub, [object_peer])
+    sdk._create_operator("IMPL", object_hub, [object_peer])
 
     anchors = {"Point": (point_hub, point_peer), "Object": (object_hub, object_peer)}
     for failing in EPISTEMIC_LABELS:
@@ -539,7 +539,7 @@ def test_one_malformed_status_row_costs_one_peer_not_all(sdk):
     """
     hub = _point(sdk, "INCIDENT-56 statuses through a malformed row")
     peer = _point(sdk, "a peer whose status must survive a bad sibling row")
-    sdk.create_operator("IMPL", hub, [peer])
+    sdk._create_operator("IMPL", hub, [peer])
 
     class _Proj:
         g = _MalformedRowGraph(_graph(sdk), "Point")
@@ -575,7 +575,7 @@ def test_non_scalar_related_id_does_not_fail_the_read(sdk):
     """
     hub = _point(sdk, "INCIDENT-57 with a corrupt neighbour id")
     peer = _point(sdk, "a peer whose id is about to become a list")
-    sdk.create_operator("IMPL", hub, [peer])
+    sdk._create_operator("IMPL", hub, [peer])
     _graph(sdk).query(
         "MATCH (n:Point) WHERE n.id = $id SET n.id = ['bad-id']",
         params={"id": peer},
@@ -594,7 +594,7 @@ def test_one_failing_label_does_not_blank_every_related_status(sdk):
     """Same isolation for the ``related_status`` sweep in the SDK."""
     hub = _point(sdk, "INCIDENT-55 statuses through a flaky engine")
     peer = _point(sdk, "a peer whose status must survive")
-    sdk.create_operator("IMPL", hub, [peer])
+    sdk._create_operator("IMPL", hub, [peer])
 
     real_g = _graph(sdk)
     flaky = _FlakyLabelGraph(real_g, "Object")
@@ -704,7 +704,7 @@ def test_unhashable_peer_text_does_not_empty_the_batch(sdk):
     good = _point(sdk, "a well-formed peer of incident 53")
     list_content = _point(sdk, "a peer whose text is a list")
     num_content = _point(sdk, "a peer whose text is a number")
-    op = sdk.create_operator(
+    op = sdk._create_operator(
         "IMPL", hub, [good, list_content, num_content], label="addresses")
     _graph(sdk).query(
         "MATCH (n:Point) WHERE n.id = $id SET n.content = ['a', 'b']",
@@ -744,7 +744,7 @@ def test_operator_anchor_does_not_report_its_own_typed_edges_as_direct(sdk):
     hub = _point(sdk, "a claim with two operator inputs")
     peer_a = _point(sdk, "input A")
     peer_b = _point(sdk, "input B")
-    op = sdk.create_operator("IMPL", hub, [peer_a, peer_b], label="addresses")
+    op = sdk._create_operator("IMPL", hub, [peer_a, peer_b], label="addresses")
 
     entries = sdk.explore_connections(op["id"], include_content=True)
     assert not [e for e in entries if e["operator_id"] == ""], (

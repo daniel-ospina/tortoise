@@ -542,10 +542,10 @@ def arm_kindgate(n: int, reps: int) -> dict:
             "core:Project", f"a core point {i}"), 0),
         ("point_bare", "control — names no pack", lambda i: sdk.create_point(
             "statement", f"a bare-kind point {i}"), 0),
-        ("point_ns", "names a pack", lambda i: sdk.create_point(
+        ("point_ns", "names a pack", lambda i: sdk._create_point(
             "dev:epic", f"a dev point {i}"), 1),
         ("point_ns_in_props", "names a pack through the props passthrough",
-         lambda i: sdk.create_point("statement", f"a dev point via props {i}",
+         lambda i: sdk._create_point("statement", f"a dev point via props {i}",
                                     pointKind="dev:epic"), 1),
         ("object_ns", "names a pack", lambda i: sdk.create_entity(
             type="object", name=f"a dev object {i}", objectKind="dev:epic"), 1),
@@ -556,7 +556,7 @@ def arm_kindgate(n: int, reps: int) -> dict:
         # whole-graph read is paid twice in one request. Pinned here so the arm
         # reports the count rather than leaving two as folklore.
         ("point_ns_twice", "SAME pack named twice (positional + props)",
-         lambda i: sdk.create_point("dev:epic", f"a doubled dev point {i}",
+         lambda i: sdk._create_point("dev:epic", f"a doubled dev point {i}",
                                     pointKind="dev:epic"), 2),
         ("object_ns_twice", "SAME pack named twice (camel + snake)",
          lambda i: sdk.create_entity(

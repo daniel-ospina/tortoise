@@ -361,7 +361,7 @@ class TestEffectiveTier:
 class TestApplyLimitsAndReconcile:
     def test_apply_limits_writes_tier_and_limits_atomically(self, monkeypatch, billing_sdk):
         sdk = billing_sdk
-        team = sdk.org_create("limits-team")
+        team = sdk._org_create("limits-team")
         # #4010: seed a stored cap FIRST so the assertion below distinguishes
         # "apply_limits DELETES the property" from "the field was never set"
         # (FalkorDB deletes a property written as NULL).
@@ -392,7 +392,7 @@ class TestApplyLimitsAndReconcile:
 
     def test_reconcile_subscription_repairs_mirror(self, monkeypatch, stripe_env, billing_sdk):
         sdk = billing_sdk
-        team = sdk.org_create("recon-team")
+        team = sdk._org_create("recon-team")
         # Drift: registry says free; Stripe says the team pays for pro.
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_123'",
@@ -411,7 +411,7 @@ class TestApplyLimitsAndReconcile:
         """A team with only stripe_customer_id (missed checkout event) is
         repaired via list_subscriptions — first active sub wins."""
         sdk = billing_sdk
-        team = sdk.org_create("customer-only")
+        team = sdk._org_create("customer-only")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_1'",
             params={"id": team["id"]},
@@ -440,7 +440,7 @@ class TestApplyLimitsAndReconcile:
         mirroring that one rewrites the stale pointer.
         """
         sdk = billing_sdk
-        team = sdk.org_create("stale-sub-pointer")
+        team = sdk._org_create("stale-sub-pointer")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_old', "
             "t.stripe_customer_id='cus_1'",
@@ -479,7 +479,7 @@ class TestApplyLimitsAndReconcile:
         the mirroring outcome is unchanged.
         """
         sdk = billing_sdk
-        team = sdk.org_create("ending-pointer")
+        team = sdk._org_create("ending-pointer")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_old', "
             "t.stripe_customer_id='cus_1', t.tier='solo'",
@@ -524,7 +524,7 @@ class TestApplyLimitsAndReconcile:
         the next pass sees no live ending sub and mirrors Solo then.
         """
         sdk = billing_sdk
-        team = sdk.org_create("ending-team-cheaper-newer")
+        team = sdk._org_create("ending-team-cheaper-newer")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team', "
             "t.stripe_customer_id='cus_1', t.tier='team', "
@@ -572,7 +572,7 @@ class TestApplyLimitsAndReconcile:
         stored tier"), never a downgrade on a green pass.
         """
         sdk = billing_sdk
-        team = sdk.org_create("ending-unpriceable-team")
+        team = sdk._org_create("ending-unpriceable-team")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team_rotated', "
             "t.stripe_customer_id='cus_1', t.tier='team', "
@@ -632,7 +632,7 @@ class TestApplyLimitsAndReconcile:
         import tortoise.pricing as pricing
 
         sdk = billing_sdk
-        team = sdk.org_create("ending-unreadable-ladder")
+        team = sdk._org_create("ending-unreadable-ladder")
         # ⛔ The stored tier is ``pro`` while Stripe's still-in-force sub is
         # Team: that is the only arrangement in which "the raise precedes the
         # write" is OBSERVABLE. A store already holding ``team`` would look
@@ -701,7 +701,7 @@ class TestApplyLimitsAndReconcile:
         fail-closed, never a silent downgrade.
         """
         sdk = billing_sdk
-        team = sdk.org_create("ending-unpriceable-sibling")
+        team = sdk._org_create("ending-unpriceable-sibling")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team_rotated', "
             "t.stripe_customer_id='cus_1', t.tier='team', "
@@ -753,7 +753,7 @@ class TestApplyLimitsAndReconcile:
         downgrade the fleet cadence then reports as a clean repair.
         """
         sdk = billing_sdk
-        team = sdk.org_create("customer-only-ending-team")
+        team = sdk._org_create("customer-only-ending-team")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_1', "
             "t.tier='team', t.subscription_status='active'",
@@ -780,7 +780,7 @@ class TestApplyLimitsAndReconcile:
         org paid. With NO active subscription at the customer, the stored
         (canceled) one is the truth and the org reverts to free."""
         sdk = billing_sdk
-        team = sdk.org_create("real-cancel")
+        team = sdk._org_create("real-cancel")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_gone', "
             "t.stripe_customer_id='cus_1', t.tier='pro', "
@@ -814,7 +814,7 @@ class TestApplyLimitsAndReconcile:
         correct downgrade elsewhere never becomes a permanent ``failed`` row.
         """
         sdk = billing_sdk
-        team = sdk.org_create("list-failure")
+        team = sdk._org_create("list-failure")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_gone', "
             "t.stripe_customer_id='cus_gone', t.tier='pro', "
@@ -854,7 +854,7 @@ class TestApplyLimitsAndReconcile:
         mirror image of the stored-pointer asymmetry fixed above.
         """
         sdk = billing_sdk
-        team = sdk.org_create("customer-only-list-failure")
+        team = sdk._org_create("customer-only-list-failure")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_gone' "
             "RETURN t.id",
@@ -885,7 +885,7 @@ class TestApplyLimitsAndReconcile:
         import logging  # noqa: I001
         from tortoise import billing as bl
         sdk = billing_sdk
-        team = sdk.org_create("customer-list-failure-unpaid")
+        team = sdk._org_create("customer-list-failure-unpaid")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895skip', "
             "t.tier='free'",
@@ -921,7 +921,7 @@ class TestApplyLimitsAndReconcile:
         import logging  # noqa: I001
         from tortoise import billing as bl
         sdk = billing_sdk
-        team = sdk.org_create("customer-list-failure-paid")
+        team = sdk._org_create("customer-list-failure-paid")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895paid', "
             "t.tier='pro', t.subscription_status='active'",
@@ -961,7 +961,7 @@ class TestApplyLimitsAndReconcile:
         import tortoise.pricing as pr
         from tortoise import billing as bl
         sdk = billing_sdk
-        team = sdk.org_create("customer-list-failure-unreadable-ladder")
+        team = sdk._org_create("customer-list-failure-unreadable-ladder")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895unk', "
             "t.tier='pro', t.subscription_status='active'",
@@ -1014,7 +1014,7 @@ class TestApplyLimitsAndReconcile:
         from tortoise import billing as bl
 
         sdk = billing_sdk
-        team = sdk.org_create("malformed-ladder")
+        team = sdk._org_create("malformed-ladder")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895mf', "
             "t.tier='pro', t.subscription_status='active'",
@@ -1051,7 +1051,7 @@ class TestApplyLimitsAndReconcile:
         freshness left that org capped.
         """
         sdk = billing_sdk
-        team = sdk.org_create("past-due-pointer")
+        team = sdk._org_create("past-due-pointer")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_pastdue', "
             "t.stripe_customer_id='cus_1'",
@@ -1074,7 +1074,7 @@ class TestApplyLimitsAndReconcile:
 
     def test_reconcile_noop_without_identifiers(self, stripe_env, billing_sdk):
         sdk = billing_sdk
-        team = sdk.org_create("noop-team")
+        team = sdk._org_create("noop-team")
         reconcile_org(sdk, team["id"])  # no subscription_id / customer_id → no-op
         t = sdk._org_get(team["id"])
         assert t["tier"] == "free"
@@ -1082,7 +1082,7 @@ class TestApplyLimitsAndReconcile:
     def test_reconcile_unknown_price_keeps_tier(self, monkeypatch, stripe_env, billing_sdk):
         """Unparseable price → error surfaces to caller; stored tier untouched."""
         sdk = billing_sdk
-        team = sdk.org_create("unknown-price")
+        team = sdk._org_create("unknown-price")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_1', t.tier='pro', "
             "t.subscription_status='active'",
@@ -1109,7 +1109,7 @@ class TestApplyLimitsAndReconcile:
         """
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         sdk = billing_sdk
-        team = sdk.org_create("cancel-flag")
+        team = sdk._org_create("cancel-flag")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_cf'",
             params={"id": team["id"]},
@@ -4070,7 +4070,7 @@ class TestTeamInfoBillingSurface:
         tenant = TortoiseSDK(os.path.join(tmp_path, "billing_api.db"),
                              namespace=org_id)
         try:
-            tenant.create_object("acme", objectKind="org")
+            tenant._create_object("acme", objectKind="org")
             r = billing_client["client"].get(
                 "/v1/team", headers=billing_client["headers"])
             assert r.status_code == 200, r.text

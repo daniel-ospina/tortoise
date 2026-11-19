@@ -138,10 +138,10 @@ class _SdkSeedSurface:
         subjectKind = named_kind(subjectKind)
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
-        return self._sdk.create_subject(name, **props)
+        return self._sdk._create_subject(name, **props)
 
     def create_edge(self, relation, from_id, to_id):
-        return self._sdk.create_edge(relation, from_id, to_id)
+        return self._sdk._create_edge(relation, from_id, to_id)
 
 
 # ── the ONE owned write point ────────────────────────────────

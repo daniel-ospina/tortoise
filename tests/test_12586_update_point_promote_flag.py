@@ -117,7 +117,7 @@ def _revisions(events) -> list[dict]:
 
 
 def _draft(sdk, text="draft claim") -> str:
-    return sdk.create_point("evidence", f"{text} {uuid.uuid4().hex}",
+    return sdk._create_point("evidence", f"{text} {uuid.uuid4().hex}",
                             status="draft")["id"]
 
 
@@ -137,13 +137,13 @@ def test_a_flag_dead_point_is_refused_and_the_row_is_untouched(env, stored):
     ``['live', True]``, which is the state the issue measured.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "a claim to kill", dedup=False)["id"]
+    pid = sdk._create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status=stored, outdated=True)
     before = _row(sdk, pid)
     assert before == (stored, True), "the harness did not persist the shape"
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
 
     assert _row(sdk, pid) == before, (
         "a refused promote wrote to the graph")
@@ -162,12 +162,12 @@ def test_the_refused_promote_journals_nothing(env):
     with a ``PointRevised`` a replay would apply — resurrecting the claim.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "a claim to kill", dedup=False)["id"]
+    pid = sdk._create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status=None, outdated=True)
     before = _revisions(events)
 
     with pytest.raises(ValueError):
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
 
     assert _revisions(events) == before, (
         "the refused promote was journalled: a rebuild would apply it — "
@@ -186,7 +186,7 @@ def test_the_two_point_doors_agree_on_the_flag_dead_row(env):
     the disagreement the issue exists to close.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "a claim to kill", dedup=False)["id"]
+    pid = sdk._create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status=None, outdated=True)
 
     for door in ("update_point", "update_knowledge"):
@@ -216,7 +216,7 @@ def test_a_point_that_goes_flag_dead_in_the_write_window_is_refused(
     proj.g = _AbortOnceThenFlagDead(proj.g)
 
     with pytest.raises(ValueError) as exc:
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
 
     assert "outdated=true" in str(exc.value), (
         "the flag-dead row surfaced as something other than the refusal")
@@ -268,10 +268,10 @@ def test_the_cli_backfill_shape_still_promotes(env):
     NULL-status points and this goes red, stranding every pre-#1088 node.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "a legacy claim", dedup=False)["id"]
+    pid = sdk._create_point("statement", "a legacy claim", dedup=False)["id"]
     _force(sdk, pid, status=None, outdated=False)
 
-    out = sdk.update_point(pid, status="live")
+    out = sdk._update_point(pid, status="live")
 
     assert out["status"] == "live"
     assert _row(sdk, pid) == ("live", False)
@@ -286,10 +286,10 @@ def test_a_draft_point_still_promotes_with_the_rest_of_the_props(env):
     sdk, _ = env
     pid = _draft(sdk)
 
-    sdk.update_point(pid, status="live", custom_field="promoted")
+    sdk._update_point(pid, status="live", custom_field="promoted")
 
     assert _row(sdk, pid) == ("live", False)
-    assert sdk.get_point(pid)["custom_field"] == "promoted"
+    assert sdk._get_point(pid)["custom_field"] == "promoted"
 
 
 def test_a_terminal_status_with_the_legacy_flag_keeps_the_status_message(env):
@@ -310,11 +310,11 @@ def test_a_terminal_status_with_the_legacy_flag_keeps_the_status_message(env):
     guard from the flag-only arm and this fails on the flag message.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "a claim to kill", dedup=False)["id"]
+    pid = sdk._create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status="superseded", outdated=True)
 
     with pytest.raises(ValueError, match="Illegal status transition"):
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
     assert _row(sdk, pid) == ("superseded", True)
 
 
@@ -332,9 +332,9 @@ def test_a_mixed_fan_out_is_refused_without_a_partial_promote(env):
     """
     sdk, _ = env
     twin = "twin-" + uuid.uuid4().hex
-    a = sdk.create_point("statement", "twin A", status="draft",
+    a = sdk._create_point("statement", "twin A", status="draft",
                          id=twin, dedup=False)["id"]
-    b = sdk.create_point("statement", "twin B", status="draft",
+    b = sdk._create_point("statement", "twin B", status="draft",
                          id=twin, dedup=False)
     assert b["id"] == a, "the fixture failed to mint a duplicate id"
     # One row per statement, keyed by content: the fan-out is what makes the id
@@ -347,7 +347,7 @@ def test_a_mixed_fan_out_is_refused_without_a_partial_promote(env):
         "SET n.status = 'retracted'", params={"id": twin})
 
     with pytest.raises(ValueError):
-        sdk.update_point(twin, status="live")
+        sdk._update_point(twin, status="live")
 
     rows = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
@@ -371,11 +371,11 @@ def test_a_terminal_status_keeps_its_illegal_transition_message(env, status):
     FALSIFIABLE: route every terminal row to the flag message and this fails.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "a claim to kill", dedup=False)["id"]
+    pid = sdk._create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status=status, outdated=False)
 
     with pytest.raises(ValueError, match="Illegal status transition"):
-        sdk.update_point(pid, status="live")
+        sdk._update_point(pid, status="live")
     assert _row(sdk, pid) == (status, False)
 
 
@@ -391,9 +391,9 @@ def test_an_already_live_status_only_promote_is_still_the_noop(env):
     raise, and this goes red.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "already live", dedup=False)["id"]
+    pid = sdk._create_point("statement", "already live", dedup=False)["id"]
 
-    out = sdk.update_point(pid, status="live")
+    out = sdk._update_point(pid, status="live")
 
     assert out["status"] == "live"
     assert _row(sdk, pid) == ("live", False)
@@ -415,7 +415,7 @@ def test_an_invalidated_live_row_keeps_the_1088_idempotent_answer(env):
     and this raises the flag refusal instead of returning ``True``.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "a claim to invalidate",
+    pid = sdk._create_point("statement", "a claim to invalidate",
                            dedup=False)["id"]
     _force(sdk, pid, status="live", outdated=True)
 
@@ -423,7 +423,7 @@ def test_an_invalidated_live_row_keeps_the_1088_idempotent_answer(env):
         sdk._get_proj(), pid, status_only=True, present=True) is True
 
     # …and the door itself still answers the status-only call as the no-op.
-    out = sdk.update_point(pid, status="live")
+    out = sdk._update_point(pid, status="live")
     assert out["status"] == "live"
     assert _row(sdk, pid) == ("live", True)
 
@@ -490,7 +490,7 @@ def test_the_temporal_probe_names_the_row_the_shared_key_picks(env, caplog):
         "CREATE (:Point {id:$id, status:'retracted', outdated:false})",
         params={"id": prior_live})
 
-    cid = sdk.create_point("decision", "promote over a split prior",
+    cid = sdk._create_point("decision", "promote over a split prior",
                            status="draft")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) "
@@ -499,7 +499,7 @@ def test_the_temporal_probe_names_the_row_the_shared_key_picks(env, caplog):
         params={"id": cid, "tgt": prior_live})
 
     caplog.set_level(logging.WARNING, logger="tortoise.sdk")
-    res = sdk.promote_point(cid)
+    res = sdk._promote_point(cid)
 
     assert res["promoted"] is True, res
     # A dead sibling means the prior is NOT live: no wire, no supersession.
@@ -529,7 +529,7 @@ def test_a_flag_dead_temporal_target_is_named_outdated_not_live(env, caplog):
     prior = "tgtflag-" + uuid.uuid4().hex
     sdk._get_proj().g.query(
         "CREATE (:Point {id:$id, outdated:true})", params={"id": prior})
-    cid = sdk.create_point("decision", "promote over a flag-dead prior",
+    cid = sdk._create_point("decision", "promote over a flag-dead prior",
                            status="draft")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) "
@@ -538,7 +538,7 @@ def test_a_flag_dead_temporal_target_is_named_outdated_not_live(env, caplog):
         params={"id": cid, "tgt": prior})
 
     caplog.set_level(logging.WARNING, logger="tortoise.sdk")
-    res = sdk.promote_point(cid)
+    res = sdk._promote_point(cid)
 
     assert res["promoted"] is True, res
     assert not res.get("temporal_wired"), res
@@ -600,16 +600,16 @@ def test_a_flag_dead_row_keeps_its_non_status_revision_capability(env):
     reads and the second half does.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "a dead claim", dedup=False)["id"]
+    pid = sdk._create_point("statement", "a dead claim", dedup=False)["id"]
     _force(sdk, pid, status=None, outdated=True)
 
-    sdk.update_point(pid, confidence=0.42)
+    sdk._update_point(pid, confidence=0.42)
 
     assert _row(sdk, pid) == (None, True), "the flag was cleared by a revision"
-    assert sdk.get_point(pid)["confidence"] == pytest.approx(0.42)
+    assert sdk._get_point(pid)["confidence"] == pytest.approx(0.42)
 
     with pytest.raises(ValueError, match="already terminal"):
-        sdk.update_point(pid, validTo="2026-06-10")
+        sdk._update_point(pid, validTo="2026-06-10")
     assert _row(sdk, pid) == (None, True)
 
 
@@ -621,14 +621,14 @@ def test_the_operator_arm_is_untouched(env):
     fails on the annotation never landing.
     """
     sdk, _ = env
-    claim = sdk.create_point("statement", "operator endpoint", dedup=False)["id"]
-    claim2 = sdk.create_point("statement", "operator endpoint 2",
+    claim = sdk._create_point("statement", "operator endpoint", dedup=False)["id"]
+    claim2 = sdk._create_point("statement", "operator endpoint 2",
                               dedup=False)["id"]
-    op = sdk.create_operator("IMPL", claim, [claim2])["id"]
+    op = sdk._create_operator("IMPL", claim, [claim2])["id"]
 
-    sdk.update_point(op, annotator_bias=0.25)
+    sdk._update_point(op, annotator_bias=0.25)
 
-    assert sdk.get_point(op)["annotator_bias"] == 0.25
+    assert sdk._get_point(op)["annotator_bias"] == 0.25
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -655,7 +655,7 @@ def test_promote_point_still_promotes_a_plain_draft(env):
     sdk, _ = env
     pid = _draft(sdk)
 
-    out = sdk.promote_point(pid)
+    out = sdk._promote_point(pid)
 
     assert out["promoted"] is True and out["status"] == "live"
     assert _row(sdk, pid) == ("live", False)
@@ -668,9 +668,9 @@ def test_promote_point_still_reports_a_live_node_as_already_live(env):
     returns ``blocked`` for a healthy live point.
     """
     sdk, _ = env
-    pid = sdk.create_point("statement", "already live", dedup=False)["id"]
+    pid = sdk._create_point("statement", "already live", dedup=False)["id"]
 
-    out = sdk.promote_point(pid)
+    out = sdk._promote_point(pid)
 
     assert out == {"id": pid, "status": "live", "promoted": False,
                    "blocked": False, "reason": "already_live"}

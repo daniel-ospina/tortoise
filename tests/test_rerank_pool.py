@@ -251,7 +251,7 @@ def test_the_pool_key_is_the_CONFIGURED_width_even_on_a_narrow_read(
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     _inject(rerank.FakeScorer(), monkeypatch)
     trace: list[dict] = []
-    on = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+    on = sdk._tortoise_fts_query("zebra migration", entity_type="point",
                                 limit=6, leg_trace=trace)
     candidates = len(on)
     assert candidates < rerank.DEFAULT_FUSED_RERANK_POOL, (
@@ -295,17 +295,17 @@ def test_the_pool_key_on_the_SKIP_arms_is_the_resolver_and_not_the_constant(
         assert entry[rerank.RERANK_UNSCORED_KEY] == candidates, entry
 
     opt_out: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=4,
                            _rerank_candidates=False, leg_trace=opt_out)
     _check_skip(_rerank_entries(opt_out)[0], "order_owned_downstream")
 
     ordered: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=4,
                            order_by="confidence", leg_trace=ordered)
     _check_skip(_rerank_entries(ordered)[0], "order_by_not_relevance")
 
     recency: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=4,
                            recency_field="createdAt", recency_boost=10.0,
                            leg_trace=recency)
     _check_skip(_rerank_entries(recency)[0], "recency_order_applied")
@@ -324,7 +324,7 @@ def test_the_SCORER_is_handed_the_knob_width_and_not_the_constant(
     """
     knob = rerank.DEFAULT_FUSED_RERANK_POOL + 5
     _seed(sdk, knob)
-    off = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+    off = sdk._tortoise_fts_query("zebra migration", entity_type="point",
                                  limit=knob)
     candidates = len(off)
     assert candidates > rerank.DEFAULT_FUSED_RERANK_POOL, (
@@ -334,7 +334,7 @@ def test_the_SCORER_is_handed_the_knob_width_and_not_the_constant(
     monkeypatch.setenv(rerank.FUSED_RERANK_POOL_ENV, str(knob))
     _inject(rerank.FakeScorer(), monkeypatch)
     trace: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point",
+    sdk._tortoise_fts_query("zebra migration", entity_type="point",
                            limit=knob, leg_trace=trace)
     entry = _rerank_entries(trace)[0]
     assert entry[rerank.RERANK_POOL_KEY] == knob, entry
@@ -517,7 +517,7 @@ def test_the_SOURCE_branch_of_step_7_carries_no_documentKind_predicate():
     TEXT, which the DOCUMENT branch satisfies — so it could not tell the two apart.
     This one reads the source branch itself.
     """
-    step7 = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query)
+    step7 = inspect.getsource(sdk_mod.TortoiseSDK._tortoise_fts_query)
     branch = step7.split('elif entity_type == "source":', 1)[1]
     branch = branch.split("elif entity_type ==", 1)[0]
     assert "MATCH (n:Source) WHERE n.url IN $ids RETURN n.url" in branch, branch
@@ -537,7 +537,7 @@ def test_the_two_restated_predicates_are_pinned_against_step_7():
     nothing red. So the same predicate TEXT is asserted present in step 7's own
     source: change one side and the other reds.
     """
-    step7 = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query)
+    step7 = inspect.getsource(sdk_mod.TortoiseSDK._tortoise_fts_query)
     for predicate in ("AND n.documentKind IS NOT NULL ",
                       "MATCH (n:Point {is_operator: true})"):
         assert predicate in step7, predicate
@@ -582,7 +582,7 @@ def test_the_text_column_is_the_one_STEP_7_MATERIALISES(
     # ``'elif entity_type =='`` at offset 2, so a substring search for the next
     # branch finds the marker's own tail and slices an empty branch — which reads
     # as a violation on every arm.
-    lines = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query).splitlines()
+    lines = inspect.getsource(sdk_mod.TortoiseSDK._tortoise_fts_query).splitlines()
     starts = [i for i, line in enumerate(lines) if 'entity_type == "' in line]
 
     def _slice(i: int) -> str:
@@ -638,7 +638,7 @@ def sdk(tmp_path, monkeypatch):
 
 def _seed(sdk, n):
     for i in range(n):
-        sdk.create_point(kind="statement",
+        sdk._create_point(kind="statement",
                          content=f"zebra migration claim number {i:02d}",
                          entity_type="point")
 
@@ -660,9 +660,9 @@ def test_a_point_pool_scores_an_operator_on_its_LABEL(sdk):
     writes ``label``/``op_type``/``direction`` only, so a revert to ``n.content``
     returns ``""`` here and THIS is what reds.
     """
-    a = sdk.create_point(kind="statement", content="zebrafish husbandry protocol A")
-    b = sdk.create_point(kind="statement", content="zebrafish husbandry protocol B")
-    op = sdk.create_operator(
+    a = sdk._create_point(kind="statement", content="zebrafish husbandry protocol A")
+    b = sdk._create_point(kind="statement", content="zebrafish husbandry protocol B")
+    op = sdk._create_operator(
         op_type="IMPL", source_id=_id(a), target_ids=[_id(b)],
         label="zebrafish husbandry protocol OPERATOR")
     op_id = _id(op)
@@ -703,7 +703,7 @@ def test_a_row_the_read_did_NOT_RETURN_is_never_scored(sdk, monkeypatch):
     monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _drops_the_last)
     _inject(_Recording(), monkeypatch)
     trace: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=5,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=5,
                            leg_trace=trace)
 
     entry = _rerank_entries(trace)[0]
@@ -740,7 +740,7 @@ def test_an_UNSCORED_row_keeps_its_SLOT_and_is_not_pushed_off_the_page(
     row PROMOTED over included ones). The unscored row keeps its slot.
     """
     for i in range(5):
-        sdk.create_point(kind="statement",
+        sdk._create_point(kind="statement",
                          content=f"zebra migration claim number {i:02d}")
     real_fetch = sdk_mod._fetch_rerank_pool_texts
     blanked: list[str] = []
@@ -764,7 +764,7 @@ def test_an_UNSCORED_row_keeps_its_SLOT_and_is_not_pushed_off_the_page(
 
     _inject(_Flat(), monkeypatch)
     trace: list[dict] = []
-    on = [r["id"] for r in sdk.tortoise_fts_query(
+    on = [r["id"] for r in sdk._tortoise_fts_query(
         "zebra migration", entity_type="point", limit=5, leg_trace=trace)]
     assert blanked, "premise: one row's text must have been blanked"
 
@@ -792,7 +792,7 @@ def test_the_wiring_is_a_permutation_and_discloses_the_cap(
     # The GATE-OFF control FIRST, before the flag is set, so "same rows" is
     # measured against the shipped order rather than against a second identical
     # run.
-    off = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+    off = sdk._tortoise_fts_query("zebra migration", entity_type="point",
                                  limit=5)
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     # The width knob must reach BOTH the pool text read and the scorer: pin the
@@ -821,7 +821,7 @@ def test_the_wiring_is_a_permutation_and_discloses_the_cap(
     _inject(rerank.FakeScorer(), monkeypatch)
 
     trace: list[dict] = []
-    on = sdk.tortoise_fts_query("zebra migration", entity_type="point",
+    on = sdk._tortoise_fts_query("zebra migration", entity_type="point",
                                 limit=5, leg_trace=trace)
 
     # PERMUTATION, end to end: same ids, same length, nothing dropped. The gate
@@ -867,7 +867,7 @@ def test_the_off_path_writes_no_rerank_trace_entry(sdk, monkeypatch):
     monkeypatch.delenv(rerank.FUSED_RERANK_ENV, raising=False)
     _seed(sdk, 3)
     trace: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=3,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=3,
                            leg_trace=trace)
     assert _rerank_entries(trace) == []
 
@@ -901,7 +901,7 @@ def test_a_QUERY_LESS_full_scan_discloses_the_rerank_it_could_not_run(
     #    the wide-limit read is also the independent candidate count below.
     monkeypatch.delenv(rerank.FUSED_RERANK_ENV, raising=False)
     off_trace: list[dict] = []
-    off_rows = sdk.tortoise_fts_query(None, kind="statement",
+    off_rows = sdk._tortoise_fts_query(None, kind="statement",
                                      entity_type="point", limit=50,
                                      leg_trace=off_trace)
     assert len(off_rows) == 5, off_rows
@@ -909,7 +909,7 @@ def test_a_QUERY_LESS_full_scan_discloses_the_rerank_it_could_not_run(
     # 2. GATE ON — exactly ONE entry, saying the rerank did not run and WHY.
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     on_trace: list[dict] = []
-    on_rows = sdk.tortoise_fts_query(None, kind="statement",
+    on_rows = sdk._tortoise_fts_query(None, kind="statement",
                                      entity_type="point", limit=3,
                                      leg_trace=on_trace)
     assert [r["id"] for r in on_rows] == [r["id"] for r in off_rows[:3]], (
@@ -957,13 +957,13 @@ def test_the_disclosure_does_not_DECLARE_a_full_scan_degraded(sdk,
     _seed(sdk, 3)
     monkeypatch.delenv(rerank.FUSED_RERANK_ENV, raising=False)
     off: list[dict] = []
-    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+    sdk._tortoise_fts_query(None, kind="statement", entity_type="point",
                            limit=3, leg_trace=off)
     assert declared_degraded_read(off) is None
 
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     on: list[dict] = []
-    rows = sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+    rows = sdk._tortoise_fts_query(None, kind="statement", entity_type="point",
                                   limit=3, leg_trace=on)
     assert rows
     # The disclosure IS in the trace (the issue's fix) ...
@@ -996,7 +996,7 @@ def test_a_read_whose_CANDIDATE_SET_was_emptied_says_empty_pool_not_empty_query(
     # "observation" is a real point kind and nothing in this store carries it, so
     # the fused pool fuses normally and the KIND FILTER empties ``result_ids``
     # before the rerank block — the ``result_ids``-empty exit, reached.
-    rows = sdk.tortoise_fts_query("zebra migration", kind="observation",
+    rows = sdk._tortoise_fts_query("zebra migration", kind="observation",
                                   entity_type="point", limit=3,
                                   leg_trace=trace)
     assert rows == [], "the kind filter must empty the page"
@@ -1029,7 +1029,7 @@ def test_a_CALLER_DECISION_outranks_an_empty_input_in_the_reason(sdk,
 
     # 1. the caller re-owns the order (``recall_state``'s exact shape)
     owned: list[dict] = []
-    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+    sdk._tortoise_fts_query(None, kind="statement", entity_type="point",
                            limit=3, _rerank_candidates=False,
                            leg_trace=owned)
     entries = _rerank_entries(owned)
@@ -1039,7 +1039,7 @@ def test_a_CALLER_DECISION_outranks_an_empty_input_in_the_reason(sdk,
 
     # 2. the caller asked for another ORDER — same rule, its own reason.
     ordered: list[dict] = []
-    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+    sdk._tortoise_fts_query(None, kind="statement", entity_type="point",
                            limit=3, order_by="confidence", leg_trace=ordered)
     entries = _rerank_entries(ordered)
     assert len(entries) == 1, ordered
@@ -1050,7 +1050,7 @@ def test_a_CALLER_DECISION_outranks_an_empty_input_in_the_reason(sdk,
     #    control that keeps the two above from being satisfied by a blanket
     #    rule that always names a caller decision.
     plain: list[dict] = []
-    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+    sdk._tortoise_fts_query(None, kind="statement", entity_type="point",
                            limit=3, leg_trace=plain)
     entries = _rerank_entries(plain)
     assert len(entries) == 1, plain
@@ -1060,7 +1060,7 @@ def test_a_CALLER_DECISION_outranks_an_empty_input_in_the_reason(sdk,
     #    ``empty_query`` here would be advice that loops: supplying a query then
     #    reports ``recency_order_applied`` and the lever still does not run.
     recency: list[dict] = []
-    sdk.tortoise_fts_query(None, kind="statement", entity_type="point",
+    sdk._tortoise_fts_query(None, kind="statement", entity_type="point",
                            limit=3, recency_field="createdAt",
                            recency_boost=10.0, leg_trace=recency)
     entries = _rerank_entries(recency)
@@ -1086,7 +1086,7 @@ def test_the_recency_skip_CAN_coexist_with_an_emptied_pool(sdk, monkeypatch):
     _seed(sdk, 3)
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     trace: list[dict] = []
-    rows = sdk.tortoise_fts_query(
+    rows = sdk._tortoise_fts_query(
         None, kind="statement", entity_type="point", limit=3,
         relationship_filter="IMPL:does-not-exist",
         recency_field="createdAt", recency_boost=10.0, leg_trace=trace)
@@ -1119,7 +1119,7 @@ def test_the_EMPTY_POOL_wins_when_the_query_is_empty_too(sdk, monkeypatch):
     trace: list[dict] = []
     # ``kind`` is REQUIRED for the read to return a pool at all (the full scan is
     # kind-scoped); the relationship filter then empties that pool in place.
-    rows = sdk.tortoise_fts_query(
+    rows = sdk._tortoise_fts_query(
         None, kind="statement", entity_type="point", limit=3,
         relationship_filter="IMPL:does-not-exist", leg_trace=trace)
     assert rows == [], "the relationship filter must empty the page"
@@ -1146,7 +1146,7 @@ def _candidate_count(sdk, monkeypatch, query, limit):
     """
     monkeypatch.delenv(rerank.FUSED_RERANK_ENV, raising=False)
     try:
-        return len(sdk.tortoise_fts_query(query, entity_type="point",
+        return len(sdk._tortoise_fts_query(query, entity_type="point",
                                           limit=limit))
     finally:
         monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
@@ -1165,7 +1165,7 @@ def test_an_opted_in_rerank_that_could_not_read_its_texts_says_so(
     monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts",
                         lambda *a, **k: {})
     trace: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=4,
                            leg_trace=trace)
     entries = _rerank_entries(trace)
     assert len(entries) == 1, trace
@@ -1189,7 +1189,7 @@ def test_a_read_with_no_text_property_says_that_instead_of_blaming_the_read(
     _seed(sdk, 3)
     monkeypatch.setattr(sdk_mod, "_rerank_text_field", lambda *a, **k: None)
     trace: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=3,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=3,
                            leg_trace=trace)
     entry = _rerank_entries(trace)[0]
     assert entry["reason"] == "no_text_field" and entry["ran"] is False
@@ -1208,7 +1208,7 @@ def test_a_degraded_scorer_reports_every_candidate_unscored(sdk, monkeypatch):
     _inject(RuntimeError("model unavailable"), monkeypatch)
     _seed(sdk, 4)
     trace: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=4,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=4,
                            leg_trace=trace)
     entry = _rerank_entries(trace)[0]
     assert entry["ran"] is False
@@ -1230,7 +1230,7 @@ def test_the_rerank_runs_before_the_valid_time_demotion():
     map + edge rows) to reach, so the invariant is pinned where it is legible:
     the call order in the source.
     """
-    src = inspect.getsource(sdk_mod.TortoiseSDK.tortoise_fts_query)
+    src = inspect.getsource(sdk_mod.TortoiseSDK._tortoise_fts_query)
     assert src.index("rerank_pool(") < src.index("prefer_latest_ids(")
 
 
@@ -1255,7 +1255,7 @@ def test_search_sessions_re_owns_the_order_and_does_NOT_pay_for_a_rerank(sdk, mo
         # ``subject`` is the Event's TEXT column (``_RERANK_TEXT_FIELD_BY_LABEL``):
         # without it the pool is textless, the load is skipped for that reason
         # instead, and this test would pass over the missing opt-out (measured).
-        sdk.create_event(f"{q} probe {i}", "AgentSession",
+        sdk._create_event(f"{q} probe {i}", "AgentSession",
                          subject=f"{q} body {i}",
                          keywords=[f"kw{i}"], eventStatus="completed")
 
@@ -1294,16 +1294,16 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     nonce = uuid.uuid4().hex[:8]
     q = f"zebra {nonce}"
     for i in range(6):
-        sdk.create_point(kind="statement", content=f"{q} reown probe {i}")
+        sdk._create_point(kind="statement", content=f"{q} reown probe {i}")
 
-    off = [r["id"] for r in sdk.tortoise_fts_query(
+    off = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=3, _rerank_candidates=False)]
     assert len(off) == 3, f"premise: a full page must come back (off={off})"
 
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(_Positional(), monkeypatch)
     trace: list[dict] = []
-    on = [r["id"] for r in sdk.tortoise_fts_query(
+    on = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=3, _rerank_candidates=False,
         leg_trace=trace)]
     assert on == off, (
@@ -1627,16 +1627,16 @@ def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypa
     nonce = uuid.uuid4().hex[:8]
     q = f"zebra {nonce}"
     for i in range(6):
-        sdk.create_point(kind="statement", content=f"{q} order probe {i}")
+        sdk._create_point(kind="statement", content=f"{q} order probe {i}")
 
-    off = [r["id"] for r in sdk.tortoise_fts_query(
+    off = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=3, order_by="confidence")]
     assert len(off) == 3, f"premise: a full page must come back (off={off})"
 
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(_Positional(), monkeypatch)
     trace: list[dict] = []
-    on = [r["id"] for r in sdk.tortoise_fts_query(
+    on = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=3, order_by="confidence",
         leg_trace=trace)]
     assert on == off, (
@@ -1687,18 +1687,18 @@ def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
     # Without the repetition the test is testing which way the ranker happened to
     # break. The marker's survival must come from the SCORER.
     for i in range(5):
-        sdk.create_point(kind="statement",
+        sdk._create_point(kind="statement",
                          content=f"{q} {q} {q} filler passage number {i}")
-    marker = sdk.create_point(
+    marker = sdk._create_point(
         kind="statement",
         content=f"{q} — the exact zebrafish husbandry protocol for the marker")
     marker_id = marker["id"] if isinstance(marker, dict) else marker.id
 
-    off = [r["id"] for r in sdk.tortoise_fts_query(
+    off = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=2, pool_size=25)]
     # the UNCUT gate-off order, read before the gate is armed — the reference the
     # ``count`` assertion below contrasts against
-    uncut = [r["id"] for r in sdk.tortoise_fts_query(
+    uncut = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=25, pool_size=25)]
     assert marker_id not in off, (
         "premise: the marker passage must fall OUTSIDE a limit=2 cut without "
@@ -1713,7 +1713,7 @@ def test_the_rerank_changes_WHICH_ROW_SURVIVES_THE_CUT(sdk, monkeypatch):
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(_MarkerOnly(), monkeypatch)
     trace: list[dict] = []
-    on = [r["id"] for r in sdk.tortoise_fts_query(
+    on = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=2, pool_size=25, leg_trace=trace)]
     assert marker_id in on, (
         "the rerank did not promote the marker into the cut — either it ran "
@@ -1775,7 +1775,7 @@ def test_a_pool_with_no_usable_text_makes_no_scorer_call(sdk, monkeypatch):
     monkeypatch.setattr(sdk_mod, "_fetch_rerank_pool_texts", _all_textless)
     monkeypatch.setattr(rerank, "load_scorer", _loader)
     trace: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=5,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=5,
                            leg_trace=trace)
 
     assert loads == [], f"the cross-encoder was LOADED for a textless pool: {loads}"
@@ -1805,7 +1805,7 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
     nonce = uuid.uuid4().hex[:8]
     q = f"zebra {nonce}"
     for i in range(4):
-        sdk.create_point(kind="statement", content=f"{q} real passage {i}",
+        sdk._create_point(kind="statement", content=f"{q} real passage {i}",
                          entity_type="point")
     # ⛔ THE STUBBED ROW MUST BE RETRIEVABLE, or the test proves nothing: a point
     # created with ``content=""`` has no terms to match, so it never enters the
@@ -1814,7 +1814,7 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
     # therefore matches the query so fusion retrieves it, and the injected read
     # returns ``""`` for it — which is exactly what the real read does for a row
     # whose text property is null.
-    blank = sdk.create_point(kind="statement",
+    blank = sdk._create_point(kind="statement",
                              content=f"{q} stubbed passage with no text property",
                              entity_type="point")
     blank_id = blank["id"] if isinstance(blank, dict) else blank.id
@@ -1838,7 +1838,7 @@ def test_a_row_returned_with_NO_TEXT_is_not_scored(sdk, monkeypatch):
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(rerank.FakeScorer(), monkeypatch)
     trace: list[dict] = []
-    sdk.tortoise_fts_query(q, entity_type="point", limit=4, leg_trace=trace)
+    sdk._tortoise_fts_query(q, entity_type="point", limit=4, leg_trace=trace)
     entry = _rerank_entries(trace)[0]
     # THE PREMISE, ASSERTED: the blank row reached the read. Without this the
     # assertions below pass vacuously on a pool that never contained it.
@@ -1884,9 +1884,9 @@ def test_an_all_tied_page_is_NOT_a_recency_order_in_force(sdk, monkeypatch):
     # capture burst writes exactly the shape below.
     ids = []
     for i in range(5):
-        pid = _id(sdk.create_point(kind="statement",
+        pid = _id(sdk._create_point(kind="statement",
                                    content=f"zebra migration claim number {i:02d}"))
-        sdk.update_point(pid, createdAt="2026-01-01")
+        sdk._update_point(pid, createdAt="2026-01-01")
         ids.append(pid)
     probe = {"recency_field": "createdAt", "recency_boost": 0.5}
 
@@ -1911,9 +1911,9 @@ def test_an_all_tied_page_is_NOT_a_recency_order_in_force(sdk, monkeypatch):
     assert set(factors.values()) == {1.0}, factors
     # …and at the ORDER too: on this page the weighting is a proven no-op — the
     # order with recency is the order without it.
-    without = [r["id"] for r in sdk.tortoise_fts_query(
+    without = [r["id"] for r in sdk._tortoise_fts_query(
         "zebra migration", entity_type="point", limit=5)]
-    with_recency = [r["id"] for r in sdk.tortoise_fts_query(
+    with_recency = [r["id"] for r in sdk._tortoise_fts_query(
         "zebra migration", entity_type="point", limit=5, **probe)]
     assert with_recency == without, (
         "premise: a single date group must reorder nothing, or this test proves "
@@ -1929,7 +1929,7 @@ def test_an_all_tied_page_is_NOT_a_recency_order_in_force(sdk, monkeypatch):
     monkeypatch.setenv(rerank.FUSED_RERANK_ENV, "1")
     _inject(_Recording(), monkeypatch)
     trace: list[dict] = []
-    sdk.tortoise_fts_query("zebra migration", entity_type="point", limit=5,
+    sdk._tortoise_fts_query("zebra migration", entity_type="point", limit=5,
                            leg_trace=trace, **probe)
 
     entry = _rerank_entries(trace)[0]
@@ -1953,7 +1953,7 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     q = f"zebra {nonce}"
     ids = []
     for i in range(5):
-        pt = sdk.create_point(kind="statement",
+        pt = sdk._create_point(kind="statement",
                               content=f"{q} recency probe {i}")
         pid = pt["id"] if isinstance(pt, dict) else pt.id
         # distinct increasing timestamps, so "newest" is unambiguous.
@@ -1964,10 +1964,10 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
         # `createdAt`. The premise still held only because `create_point` had
         # already stamped microsecond-increasing dates, so no update was
         # exercised at all (measured — review round 11).
-        sdk.update_point(pid, createdAt=f"2026-01-0{i + 1}")
+        sdk._update_point(pid, createdAt=f"2026-01-0{i + 1}")
         ids.append(pid)
 
-    off = [r["id"] for r in sdk.tortoise_fts_query(
+    off = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=5, recency_field="createdAt",
         recency_boost=10.0)]
     assert off, "premise: the read must return rows at all"
@@ -1978,7 +1978,7 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(_Positional(), monkeypatch)
     trace: list[dict] = []
-    on = [r["id"] for r in sdk.tortoise_fts_query(
+    on = [r["id"] for r in sdk._tortoise_fts_query(
         q, entity_type="point", limit=5, recency_field="createdAt",
         recency_boost=10.0, leg_trace=trace)]
     assert on == off, (
@@ -2000,7 +2000,7 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     # assertion. The opt-out is the reason the read had first: it declined the
     # rerank for its own sake, and recency never got a vote.
     trace_both: list[dict] = []
-    sdk.tortoise_fts_query(
+    sdk._tortoise_fts_query(
         q, entity_type="point", limit=5, recency_field="createdAt",
         recency_boost=10.0, _rerank_candidates=False, leg_trace=trace_both)
     both = _rerank_entries(trace_both)
@@ -2021,7 +2021,7 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(_Positional(), monkeypatch)
     trace2: list[dict] = []
-    sdk.tortoise_fts_query(q, entity_type="point", limit=5,
+    sdk._tortoise_fts_query(q, entity_type="point", limit=5,
                            recency_field="bad prop", recency_boost=10.0,
                            leg_trace=trace2)
     entry2 = _rerank_entries(trace2)[0]
@@ -2037,7 +2037,7 @@ def test_a_declared_RECENCY_order_is_never_inverted_by_the_rerank(
     # "the ids did not move") reports a cause that never bit — reviewed and
     # measured on the previous round with ``recency_field="sourcePath"``.
     trace3: list[dict] = []
-    sdk.tortoise_fts_query(q, entity_type="point", limit=5,
+    sdk._tortoise_fts_query(q, entity_type="point", limit=5,
                            recency_field="sourcePath", recency_boost=10.0,
                            leg_trace=trace3)
     entry3 = _rerank_entries(trace3)[0]
@@ -2059,7 +2059,7 @@ def test_an_ALL_empty_pool_says_nothing_scorable(sdk, monkeypatch):
     nonce = uuid.uuid4().hex[:8]
     q = f"zebra {nonce}"
     for i in range(4):
-        sdk.create_point(kind="statement",
+        sdk._create_point(kind="statement",
                          content=f"{q} passage that will read as blank {i}")
 
     def _all_blank(graph, entity_type, graph_label, id_field, ids):
@@ -2070,7 +2070,7 @@ def test_an_ALL_empty_pool_says_nothing_scorable(sdk, monkeypatch):
     monkeypatch.setenv("TORTOISE_FUSED_RERANK", "1")
     _inject(_Positional(), monkeypatch)
     trace: list[dict] = []
-    sdk.tortoise_fts_query(q, entity_type="point", limit=4, leg_trace=trace)
+    sdk._tortoise_fts_query(q, entity_type="point", limit=4, leg_trace=trace)
     entry = _rerank_entries(trace)[0]
     assert entry["ran"] is False, entry
     assert entry["reason"] == "pool_text_empty", (

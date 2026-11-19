@@ -104,10 +104,10 @@ def _event_records(journal, name: str) -> list[dict]:
 def test_the_observation_link_survives_a_rebuild(wired) -> None:
     """The #8398 repro, with ``create_operator``'s IMPL edge as the control."""
     sdk, proj, events, _journal = wired
-    indicator = sdk.create_object("I", objectKind="indicator")
-    sdk.create_event("obs", "observation", aboutObject=_nid(indicator))
-    a, b = sdk.create_object("A"), sdk.create_object("B")
-    sdk.create_operator("IMPL", _nid(a), [_nid(b)],
+    indicator = sdk._create_object("I", objectKind="indicator")
+    sdk._create_event("obs", "observation", aboutObject=_nid(indicator))
+    a, b = sdk._create_object("A"), sdk._create_object("B")
+    sdk._create_operator("IMPL", _nid(a), [_nid(b)],
                         label="measuredBy", direction="unidirectional")
 
     def snapshot() -> tuple[int, int]:
@@ -142,10 +142,10 @@ def test_replay_reproduces_the_live_about_counts(wired) -> None:
     rebuild changes nothing (MERGE, not append).
     """
     sdk, proj, events, _journal = wired
-    obj = _nid(sdk.create_object("TheObject"))
-    sub = _nid(sdk.create_subject("TheSubject"))
-    point = _nid(sdk.create_point("the point", "a point about something"))
-    sdk.create_event("all four", "event", aboutObject=obj, aboutSubject=sub,
+    obj = _nid(sdk._create_object("TheObject"))
+    sub = _nid(sdk._create_subject("TheSubject"))
+    point = _nid(sdk._create_point("the point", "a point about something"))
+    sdk._create_event("all four", "event", aboutObject=obj, aboutSubject=sub,
                      aboutPoint=point, aboutDocument="https://example.test/doc")
 
     before = _counts(proj)
@@ -177,8 +177,8 @@ def test_the_record_journals_the_precise_link_form(wired) -> None:
     produced — here a ``:Subject`` stub under ``aboutSubject``, NOT the
     ``aboutDocument`` the caller asked for (#8398 review P1-2). """
     sdk, _proj, _events, journal = wired
-    obj = _nid(sdk.create_object("TheObject"))
-    sdk.create_event("marked", "event", aboutObject=obj,
+    obj = _nid(sdk._create_object("TheObject"))
+    sdk._create_event("marked", "event", aboutObject=obj,
                      aboutDocument="https://example.test/doc")
     record = _event_records(journal, "marked")[0]
     links = {link["rel"]: link for link in record["aboutLinks"]}
@@ -207,8 +207,8 @@ def test_about_links_never_become_node_properties(wired) -> None:
     journal field must not leak onto the Event node in either direction.
     """
     sdk, proj, _events, _journal = wired
-    obj = _nid(sdk.create_object("TheObject"))
-    sdk.create_event("marked", "event", aboutObject=obj)
+    obj = _nid(sdk._create_object("TheObject"))
+    sdk._create_event("marked", "event", aboutObject=obj)
     row = proj.g.query(
         "MATCH (e:Event {name:'marked'}) RETURN e.aboutObject, e.aboutLinks"
     ).result_set
@@ -219,7 +219,7 @@ def test_about_links_never_become_node_properties(wired) -> None:
 def test_an_unresolvable_handle_is_not_journaled(wired) -> None:
     """No edge is wired live for a stale handle (#3586), so nothing replays."""
     sdk, proj, _events, journal = wired
-    sdk.create_event("stale ref", "event", aboutObject="obj-" + "a" * 26)
+    sdk._create_event("stale ref", "event", aboutObject="obj-" + "a" * 26)
     record = _event_records(journal, "stale ref")[0]
     assert not record.get("aboutLinks"), (
         "an unresolvable handle wired NO edge, so the record must not claim a "
@@ -238,8 +238,8 @@ def test_the_link_survives_a_ROTATED_journal(wired) -> None:
     event is forced into a file that sorts BEFORE the object registrations.
     """
     sdk, proj, events, journal = wired
-    obj = _nid(sdk.create_object("TheObject"))
-    sdk.create_event("obs", "event", aboutObject=obj)
+    obj = _nid(sdk._create_object("TheObject"))
+    sdk._create_event("obs", "event", aboutObject=obj)
     proj.rebuild_all(str(events), confirm_destructive=True)
     assert _counts(proj)["aboutObject"] == 1
 
@@ -272,8 +272,8 @@ def test_the_EventLog_engine_also_reproduces_the_links(wired) -> None:
     link here while ``rebuild_all`` keeps it (two engines, two answers).
     """
     sdk, proj, events, journal = wired
-    obj = _nid(sdk.create_object("TheObject2"))
-    sdk.create_event("obs2", "event", aboutObject=obj)
+    obj = _nid(sdk._create_object("TheObject2"))
+    sdk._create_event("obs2", "event", aboutObject=obj)
     before = _counts(proj)
 
     with open(journal, encoding="utf-8") as fh:
@@ -304,7 +304,7 @@ def test_a_name_link_replays_without_a_false_failure(wired) -> None:
     the link it was told to make — and the link's PRESENCE is still the test.
     """
     sdk, proj, events, journal = wired
-    sdk.create_event("nm", "event", aboutDocument="https://example.test/named")
+    sdk._create_event("nm", "event", aboutDocument="https://example.test/named")
     proj.rebuild_all(str(events), confirm_destructive=True)
     record = _event_records(journal, "nm")[0]
     assert [lk["rel"] for lk in record["aboutLinks"]] == ["aboutSubject"], (
@@ -326,7 +326,7 @@ def test_every_unusable_link_is_COUNTED_not_skipped(wired) -> None:
     all. Each case below must report exactly one failure and zero wired.
     """
     sdk, proj, _events, _journal = wired
-    ev = _nid(sdk.create_event("mystery", "event"))
+    ev = _nid(sdk._create_event("mystery", "event"))
     cases = [
         {"id": ev, "aboutLinks": [{"rel": "aboutObject", "how": "bogus",
                                    "targets": ["x"]}]},
@@ -359,7 +359,7 @@ def test_a_document_target_survives_a_rotated_journal(wired) -> None:
     sdk, proj, events, journal = wired
     url = "https://example.test/docs/late-report"
     sdk.register_source(url, sourceKind="document")
-    sdk.create_event("late-doc", "event", aboutDocument=url)
+    sdk._create_event("late-doc", "event", aboutDocument=url)
     before = _counts(proj)
     assert before["aboutDocument"] == 1, f"live did not wire the document: {before}"
 
@@ -404,8 +404,8 @@ def test_a_name_link_replays_the_REL_and_NODE_live_produced(wired) -> None:
             "MATCH (e:Event {name:'m'})-[r]->(t) "
             "RETURN type(r), labels(t), t.name").result_set
 
-    sdk.create_event("m", "event", aboutObject="Acme")   # no Acme node yet
-    sdk.create_object("Acme")                            # registered LATER
+    sdk._create_event("m", "event", aboutObject="Acme")   # no Acme node yet
+    sdk._create_object("Acme")                            # registered LATER
     live = edges()
     assert live == [["aboutSubject", ["Subject"], "Acme"]], (
         f"the live cascade did not mint the Subject stub: {live}")
@@ -430,9 +430,9 @@ def test_a_name_link_to_an_EXISTING_node_replays_onto_that_node(wired) -> None:
     land on the Subject branch a later registration makes available.
     """
     sdk, proj, events, journal = wired
-    obj = _nid(sdk.create_object("Acme"))
-    sdk.create_event("n", "event", aboutObject="Acme")
-    sdk.create_subject("Acme")   # a same-name Subject registered AFTER the link
+    obj = _nid(sdk._create_object("Acme"))
+    sdk._create_event("n", "event", aboutObject="Acme")
+    sdk._create_subject("Acme")   # a same-name Subject registered AFTER the link
 
     def edges() -> list:
         return proj.g.query(
@@ -481,9 +481,9 @@ def test_recording_a_name_link_leaves_no_phase_two_drift(wired) -> None:
     RESOLVED (never the caller's prop, which is not journal data).
     """
     sdk, proj, events, journal = wired
-    oid = _nid(sdk.create_object("Collide"))
+    oid = _nid(sdk._create_object("Collide"))
 
-    node = sdk.create_event("collide", "event", aboutObject=oid,
+    node = sdk._create_event("collide", "event", aboutObject=oid,
                             aboutLinks=["caller"])
     assert _nid(node), f"create_event returned no node: {node!r}"
 
@@ -522,9 +522,9 @@ def test_a_caller_aboutLinks_prop_is_not_read_as_journal_data(wired, caplog) -> 
     import logging
 
     sdk, _proj, _events, _journal = wired
-    oid = _nid(sdk.create_object("Collide"))
+    oid = _nid(sdk._create_object("Collide"))
     with caplog.at_level(logging.WARNING):
-        sdk.create_event("collide", "event", aboutObject=oid,
+        sdk._create_event("collide", "event", aboutObject=oid,
                          aboutLinks=["caller"])
     assert "#8398: apply() could not re-wire" not in caplog.text, (
         "the caller's `aboutLinks` prop was interpreted as journal data by the "
@@ -540,7 +540,7 @@ def test_a_flat_list_aboutLinks_record_never_becomes_a_node_property(wired) -> N
     ``node aboutLinks = [['aboutObject:obj-1']]``, a property live never had.
     """
     sdk, proj, _events, _journal = wired
-    ev = _nid(sdk.create_event("flat", "event"))
+    ev = _nid(sdk._create_event("flat", "event"))
     with _replay_write_scope():
         proj.apply({"type": "EventRecorded", "id": ev, "eventId": ev,
                     "name": "flat", "eventKind": "event",
@@ -562,7 +562,7 @@ def test_apply_does_not_abort_when_the_about_re_wire_raises(wired, monkeypatch) 
     policy. The record must still fold (the fold precedes the re-wire).
     """
     sdk, proj, _events, _journal = wired
-    ev = _nid(sdk.create_event("boom", "event"))
+    ev = _nid(sdk._create_event("boom", "event"))
 
     def _raise(_payload, *_rest, **_kw):
         raise RuntimeError("engine error mid re-wire")
@@ -594,7 +594,7 @@ def test_a_LEGACY_name_link_record_still_replays(wired) -> None:
     the rel-ignoring cascade finds, not on the record's ``rel``.
     """
     sdk, proj, _events, _journal = wired
-    ev = _nid(sdk.create_event("legacy", "event"))
+    ev = _nid(sdk._create_event("legacy", "event"))
     payload = {"id": ev,
                "aboutLinks": [{"rel": "aboutObject", "value": "Legacy",
                                "how": "name"}]}
@@ -625,8 +625,8 @@ def test_a_name_link_to_an_EXISTING_Subject_never_mints_at_replay(wired) -> None
     mint on a non-stubbable label is a no-op, so that test cannot see this.
     """
     sdk, proj, _events, journal = wired
-    subj = _nid(sdk.create_subject("Acme"))
-    sdk.create_event("s", "event", aboutObject="Acme")
+    subj = _nid(sdk._create_subject("Acme"))
+    sdk._create_event("s", "event", aboutObject="Acme")
 
     record = _event_records(journal, "s")[0]
     link = record["aboutLinks"][0]
@@ -669,10 +669,10 @@ def test_a_hard_deleted_Event_is_not_a_LOST_about_link(wired, caplog) -> None:
     import logging
 
     sdk, proj, events, journal = wired
-    obj = _nid(sdk.create_object("Gone"))
-    ev = _nid(sdk.create_event("gone", "event", aboutObject=obj))
+    obj = _nid(sdk._create_object("Gone"))
+    ev = _nid(sdk._create_event("gone", "event", aboutObject=obj))
     assert _counts(proj)["aboutObject"] == 1, "live did not wire the link"
-    assert sdk.delete(ev) is True, "the Event was not deleted"
+    assert sdk._delete(ev) is True, "the Event was not deleted"
     assert _counts(proj)["aboutObject"] == 0, (
         "live kept the edge of a hard-deleted Event")
 
@@ -723,10 +723,10 @@ def test_a_caller_event_prop_cannot_hide_the_HARD_DELETE_GATE(
     from tortoise.projection import _about_link_event_hard_deleted, journal_hard_delete_seqs
 
     sdk, proj, events, journal = wired
-    obj = _nid(sdk.create_object("Gone"))
-    ev = _nid(sdk.create_event("shadowed", "event", aboutObject=obj))
+    obj = _nid(sdk._create_object("Gone"))
+    ev = _nid(sdk._create_event("shadowed", "event", aboutObject=obj))
     assert _counts(proj)["aboutObject"] == 1, "live did not wire the link"
-    assert sdk.delete(ev) is True, "the Event was not deleted"
+    assert sdk._delete(ev) is True, "the Event was not deleted"
     assert _counts(proj)["aboutObject"] == 0, (
         "live kept the edge of a hard-deleted Event")
 
@@ -794,10 +794,10 @@ def test_two_same_name_carriers_are_BOTH_journaled_and_BOTH_wired(wired) -> None
     cannot see that defect at all.
     """
     sdk, proj, events, journal = wired
-    carriers = {_nid(sdk.create_event("Shared", "event")) for _ in range(3)}
+    carriers = {_nid(sdk._create_event("Shared", "event")) for _ in range(3)}
     assert len(carriers) == 3, f"the carriers collapsed: {carriers}"
 
-    sdk.create_event("dup", "event", aboutObject="Shared")
+    sdk._create_event("dup", "event", aboutObject="Shared")
 
     def edges() -> set:
         return {
@@ -825,8 +825,8 @@ def test_two_same_name_carriers_are_BOTH_journaled_and_BOTH_wired(wired) -> None
 
     # And the SINGLE-carrier case still journals one endpoint, not two: the
     # probe must not turn every name into a list.
-    sdk.create_event("only", "event")
-    sdk.create_event("solo", "event", aboutObject="only")
+    sdk._create_event("only", "event")
+    sdk._create_event("solo", "event", aboutObject="only")
     solo = _event_records(journal, "solo")[0]["aboutLinks"][0]
     assert len(solo["targets"]) == 1, (
         f"a lone carrier must journal exactly one endpoint: {solo!r}")
@@ -844,9 +844,9 @@ def test_a_non_list_targets_on_a_pinned_link_is_a_COUNTED_failure(
     vacuously empty.
     """
     sdk, proj, _events, _journal = wired
-    sdk.create_subject("Onechar")
+    sdk._create_subject("Onechar")
     proj.g.query("MATCH (s:Subject {name:'Onechar'}) SET s.id='a'")
-    ev = _nid(sdk.create_event("malf", "event"))
+    ev = _nid(sdk._create_event("malf", "event"))
     for bad in ("abcd", {"a": 1}, 7):
         payload = {"id": ev, "aboutLinks": [{
             "rel": "aboutSubject", "how": "id", "targets": bad,
@@ -886,7 +886,7 @@ def test_the_EventRecorded_emit_is_ONE_bag_so_a_shared_key_cannot_collide(
     from tortoise import sdk as sdk_mod
 
     sdk, _proj, _events, journal = wired
-    oid = _nid(sdk.create_object("Collide2"))
+    oid = _nid(sdk._create_object("Collide2"))
     real = sdk_mod._journal_record_payload
 
     def _colliding(event):
@@ -895,7 +895,7 @@ def test_the_EventRecorded_emit_is_ONE_bag_so_a_shared_key_cannot_collide(
         return out
 
     monkeypatch.setattr(sdk_mod, "_journal_record_payload", _colliding)
-    node = sdk.create_event("two-bags", "event", aboutObject=oid)
+    node = sdk._create_event("two-bags", "event", aboutObject=oid)
     monkeypatch.undo()
 
     assert _nid(node), f"create_event returned no node: {node!r}"
@@ -935,7 +935,7 @@ def test_a_title_held_by_THREE_document_Sources_wires_them_ALL(wired) -> None:
         urls.add(row.get("url") or _nid(row))
     assert len(urls) == 3, f"the carriers collapsed: {urls}"
 
-    sdk.create_event("titled", "event", aboutDocument="Same Title")
+    sdk._create_event("titled", "event", aboutDocument="Same Title")
 
     def edges() -> set:
         return {
@@ -976,9 +976,9 @@ def test_a_PARTIAL_multi_carrier_loss_is_COUNTED_per_endpoint(wired) -> None:
     failure, not a silent skip").
     """
     sdk, proj, _events, journal = wired
-    carriers = {_nid(sdk.create_event("Shared", "event")) for _ in range(3)}
+    carriers = {_nid(sdk._create_event("Shared", "event")) for _ in range(3)}
     assert len(carriers) == 3, f"the carriers collapsed: {carriers}"
-    sdk.create_event("dup", "event", aboutObject="Shared")
+    sdk._create_event("dup", "event", aboutObject="Shared")
 
     def edges() -> set:
         return {
@@ -1041,7 +1041,7 @@ def test_a_hard_deleted_LINK_TARGET_is_not_RESURRECTED(wired, caplog) -> None:
             "MATCH (e:Event)-[:aboutSubject]->(t:Subject) "
             "RETURN e.id, t.id").result_set}
 
-    ev = _nid(sdk.create_event("e", "event", aboutObject="Acme"))
+    ev = _nid(sdk._create_event("e", "event", aboutObject="Acme"))
     link = _event_records(journal, "e")[0]["aboutLinks"][0]
     assert link.get("resolve_key") == "Acme" and link.get("mint_if_absent") is True, (
         "the fixture needs the Subject-stub path (the one that MINTS on replay): "
@@ -1050,7 +1050,7 @@ def test_a_hard_deleted_LINK_TARGET_is_not_RESURRECTED(wired, caplog) -> None:
     assert edges() == {(ev, "Acme")}, f"live did not wire the edge: {edges()}"
 
     # The TARGET, through the SDK door — the only door that journals the delete.
-    assert sdk.delete("Acme") is True, "the Subject was not deleted"
+    assert sdk._delete("Acme") is True, "the Subject was not deleted"
     assert subjects() == set(), (
         "live kept the hard-deleted Subject — the fixture is not measuring a "
         f"delete: {subjects()}")
@@ -1104,15 +1104,15 @@ def test_a_hard_deleted_ID_TARGET_is_not_a_FALSE_failure(wired, caplog) -> None:
             "MATCH (e:Event)-[:aboutObject]->(t:Object) "
             "RETURN e.id, t.id").result_set}
 
-    obj = _nid(sdk.create_object("Gone"))
-    ev = _nid(sdk.create_event("obs", "observation", aboutObject=obj))
+    obj = _nid(sdk._create_object("Gone"))
+    ev = _nid(sdk._create_event("obs", "observation", aboutObject=obj))
     link = _event_records(journal, "obs")[0]["aboutLinks"][0]
     assert link.get("how") == "id" and not link.get("resolve_key"), (
         f"the fixture needs the id-resolved arm: {link!r}")
     assert objects() == {obj}, f"live did not create the Object: {objects()}"
     assert edges() == {(ev, obj)}, f"live did not wire the edge: {edges()}"
 
-    assert sdk.delete(obj) is True, "the Object was not deleted"
+    assert sdk._delete(obj) is True, "the Object was not deleted"
     assert objects() == set() and edges() == set(), (
         f"live kept the hard-deleted Object / its edge: {objects()} {edges()}")
 
@@ -1148,10 +1148,10 @@ def test_a_hard_deleted_SOURCE_target_is_not_a_LOST_about_link(
     sdk, proj, events, _journal = wired
     url = "https://example.test/docs/gone"
     sdk.register_source(url, sourceKind="document")
-    sdk.create_event("d", "event", aboutDocument=url)
+    sdk._create_event("d", "event", aboutDocument=url)
     assert _counts(proj)["aboutDocument"] == 1, (
         "live did not wire the document link")
-    assert sdk.delete(url) is True, "the Source was not deleted by its url"
+    assert sdk._delete(url) is True, "the Source was not deleted by its url"
     assert _counts(proj)["aboutDocument"] == 0, (
         "live kept the edge of a hard-deleted Source")
 
@@ -1180,7 +1180,7 @@ def test_an_EMPTY_pinned_targets_never_mints_and_is_a_COUNTED_loss(
     reason the ``else`` arm ever agreed.
     """
     sdk, proj, _events, _journal = wired
-    ev = _nid(sdk.create_event("malf", "event"))
+    ev = _nid(sdk._create_event("malf", "event"))
 
     def _edges() -> int:
         return proj.g.query(
@@ -1217,7 +1217,7 @@ def test_wire_about_link_reports_FALSE_when_the_target_is_gone(wired) -> None:
     there, and its docstring asserts "Every resolved id is written".
     """
     sdk, proj, _events, _journal = wired
-    ev = _nid(sdk.create_event("noop", "event"))
+    ev = _nid(sdk._create_event("noop", "event"))
 
     def _edges() -> int:
         return proj.g.query(
@@ -1231,7 +1231,7 @@ def test_wire_about_link_reports_FALSE_when_the_target_is_gone(wired) -> None:
 
     # Control: the SAME call with a live target does report True, so the fix is
     # "measure the write", not "return False".
-    obj = _nid(sdk.create_object("Present"))
+    obj = _nid(sdk._create_object("Present"))
     internal = proj.g.query(
         "MATCH (o:Object {id:$id}) RETURN ID(o)",
         params={"id": obj}).result_set[0][0]
@@ -1255,8 +1255,8 @@ def test_an_ALL_STALE_pinned_link_is_not_repaired_from_its_key(wired) -> None:
     Suppressing it is not a loss: nothing was wired, so nothing is reported.
     """
     sdk, proj, _events, _journal = wired
-    sdk.create_subject("Acme")           # the KEY's carrier — never journaled
-    ev = _nid(sdk.create_event("malf", "event"))
+    sdk._create_subject("Acme")           # the KEY's carrier — never journaled
+    ev = _nid(sdk._create_event("malf", "event"))
     assert proj.g.query(
         "MATCH (s:Subject {name:'Acme'}) RETURN count(s)"
     ).result_set[0][0] == 1, "the key carrier is missing"
@@ -1317,8 +1317,8 @@ def test_a_caller_event_prop_cannot_shadow_the_records_aboutLinks(wired) -> None
     (``(0, 0)``), which is the mutation.
     """
     sdk, proj, _events, _journal = wired
-    oid = _nid(sdk.create_object("Shadow"))
-    ev = _nid(sdk.create_event("shadowed", "event"))
+    oid = _nid(sdk._create_object("Shadow"))
+    ev = _nid(sdk._create_event("shadowed", "event"))
     payload = {
         "type": "EventRecorded", "id": ev, "eventId": ev,
         "name": "shadowed", "eventKind": "event", "eventStatus": "scheduled",
@@ -1364,9 +1364,9 @@ def test_a_caller_event_prop_is_STRIPPED_at_the_Event_door(wired, caplog) -> Non
     import logging
 
     sdk, proj, events, journal = wired
-    oid = _nid(sdk.create_object("Shadow"))
+    oid = _nid(sdk._create_object("Shadow"))
     with caplog.at_level(logging.WARNING):
-        node = sdk.create_event("withprop", "event", event={"payload": "x"},
+        node = sdk._create_event("withprop", "event", event={"payload": "x"},
                                 aboutObject=oid)
     ev = _nid(node)
     assert ev, (
@@ -1422,7 +1422,7 @@ def test_a_name_equal_to_the_Events_OWN_name_resolves_to_the_SUBJECT_arm(
     behaviour is stated instead of changed.
     """
     sdk, proj, events, journal = wired
-    ev = _nid(sdk.create_event("SelfName", "event", aboutSubject="SelfName"))
+    ev = _nid(sdk._create_event("SelfName", "event", aboutSubject="SelfName"))
 
     rows = proj.g.query(
         "MATCH (e:Event {id:$id})-[r]->(t) "
@@ -1484,7 +1484,7 @@ def test_the_name_path_aboutdocument_arm_reaches_the_kind_guarded_resolver(
     url = "https://example.test/docs/5265-reach"
     sdk.register_source(url, "document", title="Reach Doc 5265",
                       documentKind="report")
-    sdk.create_event("reach-5265", "event", aboutDocument="Reach Doc 5265")
+    sdk._create_event("reach-5265", "event", aboutDocument="Reach Doc 5265")
     assert _counts(proj)["aboutDocument"] == 1, (
         "live did not wire the document link")
 
@@ -1557,12 +1557,12 @@ def test_supersede_keeps_about_confidence_across_a_rebuild(wired) -> None:
     descriptor exists for.
     """
     sdk, proj, events, journal = wired
-    old = _nid(sdk.create_point("statement", "Old: the subject binding"))
-    new = _nid(sdk.create_point("statement", "New: same claim, restated"))
-    subj = _nid(sdk.create_subject("TheBoundSubject"))
+    old = _nid(sdk._create_point("statement", "Old: the subject binding"))
+    new = _nid(sdk._create_point("statement", "New: same claim, restated"))
+    subj = _nid(sdk._create_subject("TheBoundSubject"))
     _bind(proj, sdk, old, subj, 0.83)
 
-    sdk.supersede_point(old, new)
+    sdk._supersede_point(old, new)
 
     live = _about_confidence(proj, new, subj)
     assert live == pytest.approx(0.83), (
@@ -1607,13 +1607,13 @@ def test_a_successors_OWN_confidence_wins_ACROSS_a_rebuild(wired) -> None:
     `SET nr += $attrs` would clobber it.
     """
     sdk, proj, events, _journal = wired
-    old = _nid(sdk.create_point("statement", "Old: lower-confidence claim"))
-    new = _nid(sdk.create_point("statement", "New: restated, better bound"))
-    subj = _nid(sdk.create_subject("TheContestedSubject"))
+    old = _nid(sdk._create_point("statement", "Old: lower-confidence claim"))
+    new = _nid(sdk._create_point("statement", "New: restated, better bound"))
+    subj = _nid(sdk._create_subject("TheContestedSubject"))
     _bind(proj, sdk, old, subj, 0.42)
     _bind(proj, sdk, new, subj, 0.91)
 
-    sdk.supersede_point(old, new)
+    sdk._supersede_point(old, new)
 
     live = _about_confidence(proj, new, subj)
     assert live == pytest.approx(0.91), (
@@ -1654,18 +1654,18 @@ def test_a_CHAINS_latest_carry_wins_ACROSS_a_rebuild(wired) -> None:
     terminal successor cannot, which is why this leg is not an aggregation.
     """
     sdk, proj, events, journal = wired
-    x = _nid(sdk.create_point("statement", "X: original claim"))
-    y = _nid(sdk.create_point("statement", "Y: first restatement"))
-    z = _nid(sdk.create_point("statement", "Z: second restatement"))
-    subj = _nid(sdk.create_subject("TheChainedSubject"))
+    x = _nid(sdk._create_point("statement", "X: original claim"))
+    y = _nid(sdk._create_point("statement", "Y: first restatement"))
+    z = _nid(sdk._create_point("statement", "Z: second restatement"))
+    subj = _nid(sdk._create_subject("TheChainedSubject"))
     _bind(proj, sdk, x, subj, 0.42)
     _bind(proj, sdk, y, subj, 0.91)
 
-    sdk.supersede_point(x, y)
+    sdk._supersede_point(x, y)
     mid = _about_confidence(proj, y, subj)
     assert mid == pytest.approx(0.91), (
         f"the LIVE X→Y transfer did not keep Y's own confidence: {mid}")
-    sdk.supersede_point(y, z)
+    sdk._supersede_point(y, z)
 
     live = _about_confidence(proj, z, subj)
     assert live == pytest.approx(0.91), (
@@ -1721,15 +1721,15 @@ def test_two_INDEPENDENT_transfers_onto_one_successor_keep_the_first_creators_va
     a chain because only that hop created the final edge.
     """
     sdk, proj, events, journal = wired
-    x1 = _nid(sdk.create_point("statement", "X1: first restatement"))
-    x2 = _nid(sdk.create_point("statement", "X2: second restatement"))
-    z = _nid(sdk.create_point("statement", "Z: the shared successor"))
-    subj = _nid(sdk.create_subject("TheSharedSubject"))
+    x1 = _nid(sdk._create_point("statement", "X1: first restatement"))
+    x2 = _nid(sdk._create_point("statement", "X2: second restatement"))
+    z = _nid(sdk._create_point("statement", "Z: the shared successor"))
+    subj = _nid(sdk._create_subject("TheSharedSubject"))
     _bind(proj, sdk, x1, subj, 0.42)
     _bind(proj, sdk, x2, subj, 0.71)
 
-    sdk.supersede_point(x1, z)
-    sdk.supersede_point(x2, z)
+    sdk._supersede_point(x1, z)
+    sdk._supersede_point(x2, z)
 
     live = _about_confidence(proj, z, subj)
     assert live == pytest.approx(0.42), (

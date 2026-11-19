@@ -65,7 +65,7 @@ def sdk():
     """Fresh SDK on an isolated embedded graph (mirrors tests/test_about_edges.py)."""
     db_path = f"{tempfile.mkdtemp(prefix='tt_4889_')}/test.db"
     s = TortoiseSDK(db_path)
-    s.test_guard = lambda: None  # bypass production guard for test graph
+    s._test_guard = lambda: None  # bypass production guard for test graph
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -158,16 +158,16 @@ class TestSubjectUnavailableMarker:
 
 class TestSearchPathFailsLoud:
     def test_search_marks_subject_unavailable_on_a_producerless_graph(self, sdk):
-        sdk.create_point("statement", "the census lane measured this graph")
-        hits = sdk.tortoise_fts_query("census lane", entity_type="point", limit=5)
+        sdk._create_point("statement", "the census lane measured this graph")
+        hits = sdk._tortoise_fts_query("census lane", entity_type="point", limit=5)
         assert hits, "FTS should find the point just written"
         assert all("subject" not in h for h in hits)
         assert all(h.get("subject_unavailable") == SUBJECT_BINDING_UNAVAILABLE
                    for h in hits)
 
     def test_search_self_clears_once_a_producer_edge_exists(self, sdk):
-        sdk.create_point("statement", "self-clear probe point")
-        sdk.create_subject("B7-cost-research", "team")
+        sdk._create_point("statement", "self-clear probe point")
+        sdk._create_subject("B7-cost-research", "team")
         proj = sdk._get_proj()
         sid = proj.g.query(
             "MATCH (s:Subject {name:'B7-cost-research'}) RETURN s.id"
@@ -179,7 +179,7 @@ class TestSearchPathFailsLoud:
             "MATCH (p:Point {id:$p}), (s:Subject {id:$s}) "
             "MERGE (p)-[:aboutSubject]->(s)",
             params={"p": pid, "s": sid})
-        hits = sdk.tortoise_fts_query("self-clear probe", entity_type="point",
+        hits = sdk._tortoise_fts_query("self-clear probe", entity_type="point",
                                       limit=5)
         assert hits
         for h in hits:
@@ -194,9 +194,9 @@ class TestSearchPathFailsLoud:
         ``(o:Object)-[:aboutSubject]->(s:Subject)``) can never populate the
         Point field, so it must not silence a marker that is still true for
         every Point hit — that is why the probe is label-scoped."""
-        sdk.create_point("statement", "object-sourced probe point")
-        sdk.create_subject("W3A lane", "team")
-        sdk.create_object("an indexed repository", "repository")
+        sdk._create_point("statement", "object-sourced probe point")
+        sdk._create_subject("W3A lane", "team")
+        sdk._create_object("an indexed repository", "repository")
         proj = sdk._get_proj()
         sid = proj.g.query(
             "MATCH (s:Subject {name:'W3A lane'}) RETURN s.id"
@@ -208,7 +208,7 @@ class TestSearchPathFailsLoud:
             "MATCH (o:Object {id:$o}), (s:Subject {id:$s}) "
             "MERGE (o)-[:aboutSubject]->(s)",
             params={"o": oid, "s": sid})
-        hits = sdk.tortoise_fts_query("object-sourced probe",
+        hits = sdk._tortoise_fts_query("object-sourced probe",
                                       entity_type="point", limit=5)
         assert hits
         assert all("subject" not in h for h in hits)
@@ -221,9 +221,9 @@ class TestSearchPathFailsLoud:
         """The TF-IDF fallback advertises the same promoted-state fields as
         the primary path, so it owes the same fail-loud contract."""
         import tortoise.search_engine as se
-        sdk.create_point("statement", "fallback marker probe point")
+        sdk._create_point("statement", "fallback marker probe point")
         monkeypatch.setattr(se, "degradation_chain", lambda *a, **k: {})
-        hits = sdk.tortoise_fts_query("fallback marker probe",
+        hits = sdk._tortoise_fts_query("fallback marker probe",
                                       entity_type="point", limit=5)
         assert hits, "the degraded fallback should still serve the point"
         assert all(h.get("subject_unavailable") == SUBJECT_BINDING_UNAVAILABLE
@@ -232,8 +232,8 @@ class TestSearchPathFailsLoud:
     def test_degraded_fallback_does_not_mark_when_a_producer_exists(
             self, sdk, monkeypatch):
         import tortoise.search_engine as se
-        sdk.create_point("statement", "fallback producer probe point")
-        sdk.create_subject("W3A lane", "team")
+        sdk._create_point("statement", "fallback producer probe point")
+        sdk._create_subject("W3A lane", "team")
         proj = sdk._get_proj()
         sid = proj.g.query(
             "MATCH (s:Subject {name:'W3A lane'}) RETURN s.id"
@@ -246,7 +246,7 @@ class TestSearchPathFailsLoud:
             "MERGE (p)-[:aboutSubject]->(s)",
             params={"p": pid, "s": sid})
         monkeypatch.setattr(se, "degradation_chain", lambda *a, **k: {})
-        hits = sdk.tortoise_fts_query("fallback producer probe",
+        hits = sdk._tortoise_fts_query("fallback producer probe",
                                       entity_type="point", limit=5)
         assert hits
         for h in hits:

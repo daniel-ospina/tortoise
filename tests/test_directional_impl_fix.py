@@ -133,14 +133,14 @@ def make_point(sdk, content, kind="statement"):
     # it was draft from #943). Mirror of the #1000/#1004 sweep applied to
     # test_ep_directional (#1382) — target conclusions here are never
     # operator sources, so mark live explicitly.
-    return sdk.create_point(kind, content, status="live")
+    return sdk._create_point(kind, content, status="live")
 
 
 def make_operator(sdk, source_id, target_id, op_type="IMPL", direction=None):
     kwargs = {}
     if direction is not None:
         kwargs["direction"] = direction
-    return sdk.create_operator(op_type, source_id, [target_id], **kwargs)
+    return sdk._create_operator(op_type, source_id, [target_id], **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -176,8 +176,8 @@ def test_two_sources_higher_than_one():
     source_b = make_point(sdk, "T0 Source B — independent replication")
     claim = make_point(sdk, "Claim: The treatment is effective")
 
-    sdk.set_point_baseline(source_a["id"], *TIER_MAP["T0"])
-    sdk.set_point_baseline(source_b["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(source_a["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(source_b["id"], *TIER_MAP["T0"])
 
     op_a = make_operator(sdk, source_a["id"], claim["id"], "IMPL", direction="unidirectional")
     op_b = make_operator(sdk, source_b["id"], claim["id"], "IMPL", direction="unidirectional")
@@ -203,7 +203,7 @@ def test_two_sources_higher_than_one():
     print(f"    Claim:     mean={claim_both['mean']:.4f}  (α={claim_both['alpha']:.2f}, β={claim_both['beta']:.2f})")
 
     # Remove source B's operator, re-run
-    sdk.delete_point(op_b["id"])
+    sdk._delete_point(op_b["id"])
     result_a_only = run_ep_directed(sdk)
     claim_a = result_a_only[claim["id"]]
 
@@ -237,15 +237,15 @@ def test_two_sources_higher_than_one():
     s_a = make_point(sdk2, "T0 Source A")
     s_b = make_point(sdk2, "T0 Source B")
     cl = make_point(sdk2, "Claim")
-    sdk2.set_point_baseline(s_a["id"], *TIER_MAP["T0"])
-    sdk2.set_point_baseline(s_b["id"], *TIER_MAP["T0"])
+    sdk2._set_point_baseline(s_a["id"], *TIER_MAP["T0"])
+    sdk2._set_point_baseline(s_b["id"], *TIER_MAP["T0"])
     op1 = make_operator(sdk2, s_a["id"], cl["id"], "IMPL")  # noqa: F841
     op2 = make_operator(sdk2, s_b["id"], cl["id"], "IMPL")
 
     result_undirected_both = run_ep_directed(sdk2)
     cl_ub = result_undirected_both[cl["id"]]
 
-    sdk2.delete_point(op2["id"])
+    sdk2._delete_point(op2["id"])
     result_undirected_a = run_ep_directed(sdk2)
     cl_ua = result_undirected_a[cl["id"]]
 
@@ -297,7 +297,7 @@ def test_chain_propagation():
         middle = make_point(sdk, "Middle: if X then mechanism Y")
         conclusion = make_point(sdk, "Conclusion: outcome Z is probable")
 
-        sdk.set_point_baseline(source["id"], *TIER_MAP["T0"])
+        sdk._set_point_baseline(source["id"], *TIER_MAP["T0"])
 
         impl_direction = "unidirectional" if directed else "bidirectional"
         op1 = make_operator(sdk, source["id"], middle["id"], "IMPL", direction=impl_direction)
@@ -370,8 +370,8 @@ def test_nand_bidirectional():
         defeater = make_point(sdk, "T0 Defeater: review finds non-replicable")
         claim = make_point(sdk, "Claim: drug is effective")
 
-        sdk.set_point_baseline(source["id"], *TIER_MAP["T0"])
-        sdk.set_point_baseline(defeater["id"], *TIER_MAP["T0"])
+        sdk._set_point_baseline(source["id"], *TIER_MAP["T0"])
+        sdk._set_point_baseline(defeater["id"], *TIER_MAP["T0"])
 
         impl_direction = "unidirectional" if directed else "bidirectional"
         op_impl = make_operator(sdk, source["id"], claim["id"], "IMPL", direction=impl_direction)  # noqa: F841
@@ -445,7 +445,7 @@ def test_source_isolation():
     sdk = fresh_sdk()
     source = make_point(sdk, "T0 Source: evidence")
     claim = make_point(sdk, "Claim: conclusion")
-    sdk.set_point_baseline(source["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(source["id"], *TIER_MAP["T0"])
     op = make_operator(sdk, source["id"], claim["id"], "IMPL", direction="unidirectional")  # noqa: F841
 
     result = run_ep_directed(sdk)
@@ -467,7 +467,7 @@ def test_source_isolation():
     sdk2 = fresh_sdk()
     s2 = make_point(sdk2, "T0 Source: evidence")
     c2 = make_point(sdk2, "Claim: conclusion")
-    sdk2.set_point_baseline(s2["id"], *TIER_MAP["T0"])
+    sdk2._set_point_baseline(s2["id"], *TIER_MAP["T0"])
     op2 = make_operator(sdk2, s2["id"], c2["id"], "IMPL", direction="bidirectional")  # noqa: F841
 
     result2 = run_ep_directed(sdk2)
@@ -506,7 +506,7 @@ def test_edge_density_penalty_removed():
         claim = make_point(sdk, f"Claim with {n_sources} converging operators")
         for i in range(n_sources):
             src = make_point(sdk, f"Source {i+1}")
-            sdk.set_point_baseline(src["id"], *TIER_MAP["T4"])  # weak sources
+            sdk._set_point_baseline(src["id"], *TIER_MAP["T4"])  # weak sources
             op = make_operator(sdk, src["id"], claim["id"], "IMPL")
             sources.append((src, op))
 

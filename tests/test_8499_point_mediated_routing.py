@@ -95,7 +95,7 @@ class TestEndpointKindGate:
             {"from": "pA", "to": "pB", "operator": "IMPL"},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
 
         assert res["created"]["connections"] == 1
         assert _operator_count(sdk, "IMPL") == 1
@@ -120,7 +120,7 @@ class TestEndpointKindGate:
         bundle = _points_pair() | {"connections": [
             {"from": "pA", "to": "pB", "operator": "NAND"},
         ]}
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert _operator_count(sdk, "NAND") == 1
         assert any("point_mediated_route" in w for w in res["warnings"])
 
@@ -130,7 +130,7 @@ class TestEndpointKindGate:
         bundle = _points_pair() | {"connections": [
             {"from": "pA", "to": "pB", "operator": "IMPL", "reify": True},
         ]}
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert _operator_count(sdk, "IMPL") == 1
         assert not [w for w in res["warnings"] if "point_mediated_route" in w]
 
@@ -160,7 +160,7 @@ class TestObjectCarveOut:
             {"from": "oA", "to": "oB", "operator": "IMPL"},
         ]}
         assert sdk._validate_bundle(bundle) == []
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
 
         assert res["created"]["connections"] == 1
         assert _operator_count(sdk, "IMPL") == 0
@@ -178,9 +178,9 @@ class TestObjectCarveOut:
     def test_object_pair_keeps_the_direct_edge(self, sdk):
         """Object↔Object claims no epistemic weighting, so the direct edge is
         correct there — and the gate must not claim it."""
-        oa = sdk.create_object("Widget A", "product")["id"]
-        ob = sdk.create_object("Widget B", "product")["id"]
-        sdk.create_edge("related", oa, ob)
+        oa = sdk._create_object("Widget A", "product")["id"]
+        ob = sdk._create_object("Widget B", "product")["id"]
+        sdk._create_edge("related", oa, ob)
 
         assert _operator_count(sdk, "IMPL") == 0
         assert _count(sdk,
@@ -192,9 +192,9 @@ class TestObjectCarveOut:
         """Contrast on the same probe: a Point endpoint makes it True —
         including the mixed pair (the ruling's third arm), because the Point
         side is what carries belief."""
-        pa = sdk.create_point("statement", "A implies B")["id"]
-        pb = sdk.create_point("statement", "B")["id"]
-        oa = sdk.create_object("Widget A", "product")["id"]
+        pa = sdk._create_point("statement", "A implies B")["id"]
+        pb = sdk._create_point("statement", "B")["id"]
+        oa = sdk._create_object("Widget A", "product")["id"]
 
         assert sdk._point_mediated_route([pa, pb]) is True
         assert sdk._point_mediated_route([pa, oa]) is True
@@ -213,9 +213,9 @@ class TestDirectEdgeWriterUnchanged:
         gating it would break the documented migration path for existing
         operator-less relations.
         """
-        pa = sdk.create_point("statement", "A implies B")["id"]
-        pb = sdk.create_point("statement", "B")["id"]
-        res = sdk.create_direct_edge("IMPL", pa, pb)
+        pa = sdk._create_point("statement", "A implies B")["id"]
+        pb = sdk._create_point("statement", "B")["id"]
+        res = sdk._create_direct_edge("IMPL", pa, pb)
         assert res["created"] is True
         assert _operator_count(sdk, "IMPL") == 0
         assert _count(

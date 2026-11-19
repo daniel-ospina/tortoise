@@ -123,7 +123,7 @@ def test_a_dropped_increment_is_distinguishable_from_a_zero_increment(
     so neither the cap nor an operator could see the drop.
     """
     sdk, tid = reg
-    control = sdk.org_create(name="4779-control")["id"]
+    control = sdk._org_create(name="4779-control")["id"]
 
     # An inverted billing interval → ``_current_period`` RAISES (no
     # calendar-month fallback, #3825/D10). This is the REAL failure, not a stub.

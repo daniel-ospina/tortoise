@@ -597,10 +597,10 @@ def test_a_CALLER_supplied_alias_is_not_a_divergence_after_a_content_edit(
                       namespace=f"test_10203_p1_{uuid4().hex[:8]}",
                       event_log_path=log_path)
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             content="error ERR-4032 on deploy", kind="statement",
             search_keys="err4032 release")["id"]
-        sdk.update_point(pid, content="deploy failed")
+        sdk._update_point(pid, content="deploy failed")
         graph = sdk._get_proj().g
 
         rows = graph.query(
@@ -677,11 +677,11 @@ def test_the_stale_alias_is_not_a_divergence_nor_a_rehash_across_a_gate_flip(
                       namespace=f"test_10203_flip_{uuid4().hex[:8]}",
                       event_log_path=log_path)
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             content="error ERR-4032 on deploy", kind="statement")["id"]
         # The edit runs with the lever OFF: the create's alias survives.
         monkeypatch.setenv("TORTOISE_IDENTIFIER_TOKENS", "0")
-        sdk.update_point(pid, content="deploy failed")
+        sdk._update_point(pid, content="deploy failed")
 
         def keys(graph):
             rows = graph.query(

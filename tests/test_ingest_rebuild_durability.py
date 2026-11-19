@@ -48,11 +48,11 @@ def test_a10_operator_direction_label_survive_rebuild(a10):
     A10 replay-SET extension — previously the fixed SET list dropped them →
     direction=NULL + label=NULL)."""
     db, events, sdk = a10  # noqa: RUF059
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
-    pc = sdk.create_point("statement", "C")["id"]
-    labeled = sdk.create_operator("IMPL", pa, [pb], label="supports")["id"]
-    unidir = sdk.create_operator("NAND", pa, [pc], direction="unidirectional")["id"]
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
+    pc = sdk._create_point("statement", "C")["id"]
+    labeled = sdk._create_operator("IMPL", pa, [pb], label="supports")["id"]
+    unidir = sdk._create_operator("NAND", pa, [pc], direction="unidirectional")["id"]
     g = sdk._get_proj().g
     pre = {
         labeled: g.query("MATCH (o:Point {id:$p}) RETURN o.direction, o.label",
@@ -93,14 +93,14 @@ def test_a10_post_rebuild_resubmission_exactly_once(a10):
         "connections": [{"from": "pA", "to": "pB", "operator": "NAND",
                          "direction": "unidirectional", "reify": True}],
     }
-    first_l = sdk.ingest(bundle_l)
-    first_u = sdk.ingest(bundle_u)
+    first_l = sdk._ingest(bundle_l)
+    first_u = sdk._ingest(bundle_u)
     g = sdk._get_proj().g
     assert _count(g, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 2
     _rebuild(sdk, events)
     # post-rebuild resubmission → dedup hits (exactly-once), no duplicates
-    second_l = sdk.ingest(bundle_l)
-    second_u = sdk.ingest(bundle_u)
+    second_l = sdk._ingest(bundle_l)
+    second_u = sdk._ingest(bundle_u)
     assert _count(g, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 2
     assert second_l["deduped"]["connections"] == 1
     assert second_u["deduped"]["connections"] == 1
@@ -113,9 +113,9 @@ def test_a10_post_rebuild_ep_direction_semantics_preserved(a10):
     to bidirectional after rebuild — the direction the EP factor-extraction
     reads (ep.py coalesce(r.direction,'bidirectional')) is preserved."""
     db, events, sdk = a10  # noqa: RUF059
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
-    op = sdk.create_operator("NAND", pa, [pb], direction="unidirectional")["id"]
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
+    op = sdk._create_operator("NAND", pa, [pb], direction="unidirectional")["id"]
     g = sdk._get_proj().g
     _rebuild(sdk, events)
     d = g.query("MATCH (o:Point {id:$p}) RETURN o.direction",
@@ -142,7 +142,7 @@ def test_a10_content_kind_fallback_dedups_hash_less_sibling(a10):
         params={"c": content})
     # create_point(dedup=True) with the same content+kind → the fallback finds
     # the hash-less sibling → SAME id, no second point
-    p = sdk.create_point("statement", content, dedup=True)
+    p = sdk._create_point("statement", content, dedup=True)
     assert p["id"] == "crash-partial"
     assert _count(g, "MATCH (n:Point {content:$c}) RETURN count(n)",
                   {"c": content}) == 1
@@ -176,7 +176,7 @@ def test_a10_post_rebuild_fallback_dedups_unpatched_resubmission(a10):
     assert row[0] == content
     assert row[1] == hashlib.sha256(content.encode()).hexdigest()
     # unpatched resubmission → dedups to the SAME id via the PRIMARY hash MATCH
-    p = sdk.create_point("statement", content, dedup=True)
+    p = sdk._create_point("statement", content, dedup=True)
     assert p["id"] == "pr-partial"
     assert _count(g, "MATCH (n:Point {content:$c}) RETURN count(n)",
                   {"c": content}) == 1
@@ -184,7 +184,7 @@ def test_a10_post_rebuild_fallback_dedups_unpatched_resubmission(a10):
     # (hash-less) and resubmit; the content+kind scan must still dedup to the
     # SAME id (never a permanent duplicate).
     g.query("MATCH (n:Point {id:'pr-partial'}) SET n.content_hash = NULL")
-    p2 = sdk.create_point("statement", content, dedup=True)
+    p2 = sdk._create_point("statement", content, dedup=True)
     assert p2["id"] == "pr-partial"
     assert _count(g, "MATCH (n:Point {content:$c}) RETURN count(n)",
                   {"c": content}) == 1
@@ -224,9 +224,9 @@ def test_a10_direct_edge_survives_rebuild_all(a10):
     """The regression proper: create_direct_edge → rebuild_all → the edge is
     back WITH its attributes (the last-writer-wins attr SET replays)."""
     _, events, sdk = a10
-    a = sdk.create_point("statement", "A implies B.")["id"]
-    b = sdk.create_point("statement", "B.")["id"]
-    sdk.create_direct_edge("IMPL", a, b, direction="unidirectional",
+    a = sdk._create_point("statement", "A implies B.")["id"]
+    b = sdk._create_point("statement", "B.")["id"]
+    sdk._create_direct_edge("IMPL", a, b, direction="unidirectional",
                            confidence=0.7, weight=0.4, label="supports",
                            batch_id="01BATCH0000000000000000000")
 
@@ -252,11 +252,11 @@ def test_a10_direct_edge_is_exactly_once_after_rebuild(a10):
     dedups to the SAME edge (never a parallel one — EP's no-parallel-direct-
     edges contract)."""
     _, events, sdk = a10
-    a = sdk.create_point("statement", "A implies B.")["id"]
-    b = sdk.create_point("statement", "B.")["id"]
-    sdk.create_direct_edge("IMPL", a, b)
+    a = sdk._create_point("statement", "A implies B.")["id"]
+    b = sdk._create_point("statement", "B.")["id"]
+    sdk._create_direct_edge("IMPL", a, b)
     _rebuild(sdk, events)
-    res = sdk.create_direct_edge("IMPL", a, b)
+    res = sdk._create_direct_edge("IMPL", a, b)
     assert res["created"] is False and res["deduped"] is True, res
     assert _direct_edge_count(sdk, a, b) == 1
 
@@ -268,9 +268,9 @@ def test_a10_object_object_direct_edge_survives_rebuild(a10):
     silently drop every Object↔Object edge (the defect the repoint leg's
     direct branch carried until #8622 widened it)."""
     _, events, sdk = a10
-    oa = sdk.create_object("Widget A", "product")["id"]
-    ob = sdk.create_object("Widget B", "product")["id"]
-    sdk.create_direct_edge("IMPL", oa, ob, label="related-to")
+    oa = sdk._create_object("Widget A", "product")["id"]
+    ob = sdk._create_object("Widget B", "product")["id"]
+    sdk._create_direct_edge("IMPL", oa, ob, label="related-to")
 
     assert _direct_edge_count(sdk, oa, ob) == 1  # precondition
     _rebuild(sdk, events)
@@ -319,11 +319,11 @@ def _incident_direct_count(sdk, pid):
 
 @pytest.mark.parametrize("rel,direction,make_endpoint", [
     # (old)-[:IMPL]->(object)
-    ("IMPL", "out", lambda sdk: sdk.create_object("Widget", "product")["id"]),
+    ("IMPL", "out", lambda sdk: sdk._create_object("Widget", "product")["id"]),
     # (object)-[:NAND]->(old)
-    ("NAND", "in", lambda sdk: sdk.create_object("Widget", "product")["id"]),
+    ("NAND", "in", lambda sdk: sdk._create_object("Widget", "product")["id"]),
     # (subject)-[:IMPL]->(old) — the OTHER non-Point carrier
-    ("IMPL", "in", lambda sdk: sdk.create_subject("Acme")["id"]),
+    ("IMPL", "in", lambda sdk: sdk._create_subject("Acme")["id"]),
 ], ids=["point-to-object", "object-to-point", "subject-to-point"])
 def test_a10_transferred_direct_edge_with_non_point_endpoint(
         a10, rel, direction, make_endpoint):
@@ -338,24 +338,24 @@ def test_a10_transferred_direct_edge_with_non_point_endpoint(
          i.e. live == rebuilt (the #330 divergence class this issue is about).
     """
     _, events, sdk = a10
-    old = sdk.create_point("statement", "The widget ships.")["id"]
+    old = sdk._create_point("statement", "The widget ships.")["id"]
     other = make_endpoint(sdk)
     if direction == "out":
-        sdk.create_direct_edge(rel, old, other, confidence=0.6, weight=0.25,
+        sdk._create_direct_edge(rel, old, other, confidence=0.6, weight=0.25,
                                label="related-to",
                                batch_id="01BATCH0000000000000000002")
     else:
-        sdk.create_direct_edge(rel, other, old, confidence=0.6, weight=0.25,
+        sdk._create_direct_edge(rel, other, old, confidence=0.6, weight=0.25,
                                label="related-to",
                                batch_id="01BATCH0000000000000000002")
-    successor = sdk.create_point("statement", "The widget ships today.")["id"]
+    successor = sdk._create_point("statement", "The widget ships today.")["id"]
 
     if direction == "out":
         assert _edge_shape(sdk, successor, other, rel) is None  # precondition
     else:
         assert _edge_shape(sdk, other, successor, rel) is None  # precondition
 
-    sdk.supersede_point(old, successor)
+    sdk._supersede_point(old, successor)
 
     # 1. LIVE transfer — the defect destroyed the edge here, before any replay.
     if direction == "out":
@@ -400,13 +400,13 @@ def test_a10_transferred_non_point_edge_follows_a_supersede_chain(a10):
     successor (mirroring ``test_direct_edge_chain_resolves_to_final_successor``
     for the Point→Point case)."""
     _, events, sdk = a10
-    old = sdk.create_point("statement", "The widget ships.")["id"]
-    obj = sdk.create_object("Widget", "product")["id"]
-    sdk.create_direct_edge("IMPL", old, obj, label="related-to")
-    mid = sdk.create_point("statement", "The widget ships (v2).")["id"]
-    final = sdk.create_point("statement", "The widget ships (v3).")["id"]
-    sdk.supersede_point(old, mid)
-    sdk.supersede_point(mid, final)
+    old = sdk._create_point("statement", "The widget ships.")["id"]
+    obj = sdk._create_object("Widget", "product")["id"]
+    sdk._create_direct_edge("IMPL", old, obj, label="related-to")
+    mid = sdk._create_point("statement", "The widget ships (v2).")["id"]
+    final = sdk._create_point("statement", "The widget ships (v3).")["id"]
+    sdk._supersede_point(old, mid)
+    sdk._supersede_point(mid, final)
 
     _rebuild(sdk, events)
 
@@ -431,11 +431,11 @@ def test_a10_created_then_superseded_does_not_double_the_edge(a10):
     therefore replay at the FLAT endpoints and PRECEDE the repoint leg.
     """
     _, events, sdk = a10
-    a = sdk.create_point("statement", "A implies B.")["id"]
-    b = sdk.create_point("statement", "B.")["id"]
-    sdk.create_direct_edge("IMPL", a, b)
-    replacement = sdk.create_point("statement", "A, restated.")["id"]
-    sdk.supersede_point(a, replacement)
+    a = sdk._create_point("statement", "A implies B.")["id"]
+    b = sdk._create_point("statement", "B.")["id"]
+    sdk._create_direct_edge("IMPL", a, b)
+    replacement = sdk._create_point("statement", "A, restated.")["id"]
+    sdk._supersede_point(a, replacement)
 
     _rebuild(sdk, events)
 
@@ -464,13 +464,13 @@ def test_a10_post_transfer_recreation_attr_divergence_known_bound(a10):
     passing for the wrong reason.
     """
     _, events, sdk = a10
-    a = sdk.create_point("statement", "A implies B.")["id"]
-    b = sdk.create_point("statement", "B.")["id"]
-    sdk.create_direct_edge("IMPL", a, b, confidence=0.1, weight=0.1,
+    a = sdk._create_point("statement", "A implies B.")["id"]
+    b = sdk._create_point("statement", "B.")["id"]
+    sdk._create_direct_edge("IMPL", a, b, confidence=0.1, weight=0.1,
                            label="old")
-    successor = sdk.create_point("statement", "A, restated.")["id"]
-    sdk.supersede_point(a, successor)
-    sdk.create_direct_edge("IMPL", successor, b, confidence=0.9, weight=0.9,
+    successor = sdk._create_point("statement", "A, restated.")["id"]
+    sdk._supersede_point(a, successor)
+    sdk._create_direct_edge("IMPL", successor, b, confidence=0.9, weight=0.9,
                            label="new")
 
     before = _direct_edge(sdk, successor, b)

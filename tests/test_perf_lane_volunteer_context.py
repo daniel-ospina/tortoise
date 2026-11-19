@@ -167,11 +167,11 @@ def _set_posterior(sdk, point_id: str, alpha: float, beta: float) -> None:
 
 def _plant_contested(sdk, topic: str) -> str:
     """A conflicted claim (IMPL support + NAND counter, variance > threshold)."""
-    ev = sdk.create_point("evidence", f"{topic} [supporting record]")
-    claim = sdk.create_point("statement", topic)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
-    counter = sdk.create_point("statement", f"{topic} [contradicting report]")
-    sdk.create_operator("NAND", counter["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", f"{topic} [supporting record]")
+    claim = sdk._create_point("statement", topic)
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
+    counter = sdk._create_point("statement", f"{topic} [contradicting report]")
+    sdk._create_operator("NAND", counter["id"], [claim["id"]])
     _set_posterior(sdk, claim["id"], 2.0, 0.7)
     _set_posterior(sdk, ev["id"], 12.0, 1.0)
     _set_posterior(sdk, counter["id"], 10.0, 1.0)
@@ -181,7 +181,7 @@ def _plant_contested(sdk, topic: str) -> str:
 def _plant_superseded(sdk, topic: str) -> str:
     """A superseded predecessor: conflicted structure + CORRECTS + status."""
     old = _plant_contested(sdk, topic)
-    successor = sdk.create_point("statement", f"{topic} [corrected belief]")
+    successor = sdk._create_point("statement", f"{topic} [corrected belief]")
     _set_posterior(sdk, successor["id"], 10.0, 1.0)
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$old}), (s:Point {id:$new}) "
@@ -193,9 +193,9 @@ def _plant_superseded(sdk, topic: str) -> str:
 
 def _plant_clean(sdk, topic: str) -> str:
     """A supported, unconflicted claim."""
-    ev = sdk.create_point("evidence", f"{topic} [supporting record]")
-    claim = sdk.create_point("statement", topic)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", f"{topic} [supporting record]")
+    claim = sdk._create_point("statement", topic)
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     _set_posterior(sdk, claim["id"], 9.0, 1.0)
     _set_posterior(sdk, ev["id"], 12.0, 1.0)
     return claim["id"]
@@ -380,13 +380,13 @@ def test_slo_breach_degrades_timeout_never_503(perf_server, monkeypatch):
     import tortoise.hosted_api as ha_mod
 
     monkeypatch.setenv("TORTOISE_VOLUNTEER_ENFORCE_SLO", "1")
-    orig = ha_mod.TortoiseSDK.volunteer_context
+    orig = ha_mod.TortoiseSDK._volunteer_context
 
     def _slow(self, window, *args, **kwargs):
         time.sleep(SLO_MS / 1000.0 + 0.1)  # breach the SLO on the worker thread
         return orig(self, window, *args, **kwargs)
 
-    monkeypatch.setattr(ha_mod.TortoiseSDK, "volunteer_context", _slow)
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "_volunteer_context", _slow)
 
     r = httpx.post(
         f"{perf_server}/v1/context", timeout=30.0,

@@ -50,7 +50,7 @@ def test_seeded_vs_agent_provenance_distinct(tmp_path) -> None:
         seed_pts = [m for m in mems]
         assert seed_pts
         for m in seed_pts:
-            pt = sdk.get_point(m.id)
+            pt = sdk._get_point(m.id)
             if pt.get("seed") is True:
                 assert pt.get("source_harness") == "battery"
                 assert pt.get("source_session") == store._scenario.id
@@ -59,10 +59,10 @@ def test_seeded_vs_agent_provenance_distinct(tmp_path) -> None:
                          prior_memories=tuple(mems), user_message="go"),
             Memory(id="e1", content="agent filed finding", kind="nand"))
         # find the agent evidence by content
-        rows = sdk.tortoise_fts_query("agent filed finding", limit=5)
+        rows = sdk._tortoise_fts_query("agent filed finding", limit=5)
         agent = [p for p in rows if p.get("content") == "agent filed finding"]
         assert agent
-        pt = sdk.get_point(agent[0]["id"])
+        pt = sdk._get_point(agent[0]["id"])
         assert pt.get("seed") is not True
         assert pt.get("source_harness") == "battery"
         assert pt.get("source_session") == store._scenario.id

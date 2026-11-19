@@ -251,7 +251,7 @@ class TestCreateSourceBypassIsClosed:
         sdk._evidence = {}
         with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
             with pytest.raises(ValueError) as exc:
-                TortoiseSDK.set_point_baseline(sdk, "p1", alpha, beta)
+                TortoiseSDK._set_point_baseline(sdk, "p1", alpha, beta)
             msg = str(exc.value)
             assert "alpha" in msg or "beta" in msg, msg
             assert not proj.called, "the guard must fire BEFORE the write"
@@ -545,7 +545,7 @@ class TestAnnotateOperatorGuardsBeforeTheEmit:
             return_value={"is_operator": True},
         ), mock.patch.object(TortoiseSDK, "_emit_event", autospec=True) as emit:
             with pytest.raises(ValueError) as exc:
-                TortoiseSDK.annotate_operator(
+                TortoiseSDK._annotate_operator(
                     sdk, "op1", bias=D("0.12345678901234567890"),
                     precision=0.5, consistency=0.5, directness=0.5)
             assert "bias" in str(exc.value), str(exc.value)
@@ -574,7 +574,7 @@ class TestNonFiniteDecimalNamesTheKeyBeforeTheRangeCheck:
             return_value={"is_operator": True},
         ):
             with pytest.raises(ValueError) as exc:
-                TortoiseSDK.annotate_operator(
+                TortoiseSDK._annotate_operator(
                     sdk, "op1", bias=D("NaN"),
                     precision=0.5, consistency=0.5, directness=0.5)
             assert "bias" in str(exc.value), str(exc.value)
@@ -584,7 +584,7 @@ class TestNonFiniteDecimalNamesTheKeyBeforeTheRangeCheck:
 
         sdk = self._bare()
         with pytest.raises(ValueError) as exc:
-            TortoiseSDK.mitigate_operator(sdk, "op1", "why", strength=D("NaN"))
+            TortoiseSDK._mitigate_operator(sdk, "op1", "why", strength=D("NaN"))
         assert "strength" in str(exc.value), str(exc.value)
 
 
@@ -611,7 +611,7 @@ class TestDirectWriterSitesAreGuardedRoundTwo:
         ):
             proj.return_value.g.query.return_value.result_set = []
             with pytest.raises(ValueError) as exc:
-                TortoiseSDK.mitigate_operator(
+                TortoiseSDK._mitigate_operator(
                     sdk, "op1", "reason", strength=D("0.12345678901234567890"))
             assert "strength" in str(exc.value), str(exc.value)
             # cycle-8: the guard now precedes the idempotency read too,
@@ -640,7 +640,7 @@ class TestDirectWriterSitesAreGuardedRoundTwo:
         sdk = self._bare()
         with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
             with pytest.raises(ValueError) as exc:
-                TortoiseSDK.create_direct_edge(
+                TortoiseSDK._create_direct_edge(
                     sdk, "IMPL", "a", "b", weight=D("0.12345678901234567890"))
             assert "weight" in str(exc.value), str(exc.value)
             assert not proj.return_value.g.query.called
@@ -679,5 +679,5 @@ class TestDirectWriterSitesAreGuardedRoundTwo:
         with mock.patch.object(TortoiseSDK, "_get_proj", autospec=True) as proj:
             proj.return_value.g.query.return_value.result_set = []
             with pytest.raises(ValueError) as exc:
-                TortoiseSDK.ingest_corpus(sdk, str(tmp_path), extract_metadata=False)
+                TortoiseSDK._ingest_corpus(sdk, str(tmp_path), extract_metadata=False)
             assert "document_kind" in str(exc.value), str(exc.value)

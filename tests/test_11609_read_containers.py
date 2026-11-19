@@ -239,7 +239,7 @@ class TestSearchKnowledge:
         # It is ALSO asked not to record the population (#7983) — this stub has to
         # accept that kwarg, which is the same reach the pg arm performs.
         monkeypatch.setattr(
-            TortoiseSDK, "query_points_by_tag",
+            TortoiseSDK, "_query_points_by_tag",
             lambda self, tag, _record_reads=True: reached.append(
                 ("query_points_by_tag", (), {}))
             or [{"id": "point-1"}])
@@ -319,7 +319,7 @@ class TestSearchKnowledgeTagArm:
             calls.append((tag, _record_reads))
             return list(rows)
 
-        monkeypatch.setattr(TortoiseSDK, "query_points_by_tag", fake)
+        monkeypatch.setattr(TortoiseSDK, "_query_points_by_tag", fake)
         recorded: list = []
         # `kind=` (#13084) is keyword-only on the helper; the stub records the
         # rows exactly as before and ignores the call-kind it now also receives.
@@ -711,7 +711,7 @@ class TestSuggestEntryPointsFallback:
         reached = []
         sdk = _bare_sdk(monkeypatch, {"search_knowledge"}, reached)
         # the hybrid arm's own door, returning NOTHING — the fallback's trigger
-        monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", lambda *a, **k: [])
+        monkeypatch.setattr(TortoiseSDK, "_tortoise_fts_query", lambda *a, **k: [])
         monkeypatch.setattr(ms, "_get_org_sdk", lambda *a, **k: sdk)
         # `_safe`'s fail-closed auth gate needs a transport mode; stdio is the
         # dev-mode lane these routing tests run on.
@@ -820,7 +820,7 @@ class TestProvenanceDoorDoesNotPayTheCalibrationGate:
                     "get_confidence: 1 uncalibrated evidence points")
             return {"mean": 0.5, "variance": 0.1}
 
-        monkeypatch.setattr(TortoiseSDK, "get_confidence", get_confidence)
+        monkeypatch.setattr(TortoiseSDK, "_get_confidence", get_confidence)
         monkeypatch.setattr(TortoiseSDK, "_provenance",
                             lambda self, pid: chain)
         return TortoiseSDK.__new__(TortoiseSDK)

@@ -436,15 +436,15 @@ def _supersession_graph(tmp_path):
     """Write the two gym-schedule points + production supersede_point
     (CORRECTS edge) on a real embedded graph. Returns the open SDK."""
     sdk = _fresh_sdk(tmp_path)
-    sdk.create_point(
+    sdk._create_point(
         "statement", "gym class is at 6pm on weekdays.", id="gym_old",
         status="live", lme_question_id="a2_ku_e2e", lme_session_index=0,
         is_episodic=True)
-    sdk.create_point(
+    sdk._create_point(
         "statement", "gym class is now at 5pm on weekdays.", id="gym_new",
         status="live", lme_question_id="a2_ku_e2e", lme_session_index=1,
         is_episodic=True)
-    sdk.supersede_point("gym_old", "gym_new")
+    sdk._supersede_point("gym_old", "gym_new")
     return sdk
 
 
@@ -473,7 +473,7 @@ def test_supersession_chain_renders_and_answers_newest_end_to_end(tmp_path):
     sdk = _supersession_graph(tmp_path)
     try:
         # base retrieval (E5 wiring): the superseded point must survive
-        raw = sdk.tortoise_fts_query(
+        raw = sdk._tortoise_fts_query(
             "gym class", entity_type="point", limit=20,
             include_terminal=True)
         ids = {h["id"] for h in raw}

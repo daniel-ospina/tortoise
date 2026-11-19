@@ -409,7 +409,7 @@ def test_deep_rank_geometry_calibration(sdk, monkeypatch):
         "discriminator is gone.")
     # widened reach: a 120-deep FTS fetch must return BOTH golds (Task 7's
     # widened arm admits both ONLY if both are retrievable at that depth)
-    hits = sdk.tortoise_fts_query(d["question"], entity_type="point",
+    hits = sdk._tortoise_fts_query(d["question"], entity_type="point",
                                   limit=120)
     hit_ids = {h.get("id") for h in hits}
     assert {d["gold_a"], d["gold_b"]} <= hit_ids, (

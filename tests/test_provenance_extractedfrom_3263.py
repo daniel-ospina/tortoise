@@ -94,7 +94,7 @@ def _render_row(proj, pid: str) -> dict:
 
 def test_explicit_extractedfrom_still_wires_the_edge(prov):
     sdk, _events = prov
-    p = sdk.create_point("statement", "explicit source claim",
+    p = sdk._create_point("statement", "explicit source claim",
                          extractedFrom="https://doc.example/a")
     assert _sources_of(sdk._get_proj(), p["id"]) == {"https://doc.example/a"}
 
@@ -106,7 +106,7 @@ def test_session_context_wires_extractedfrom(prov):
     """A write with a session context has a derivable Source — it must be
     wired, not left orphaned."""
     sdk, _events = prov
-    p = sdk.create_point("statement", "session-context claim",
+    p = sdk._create_point("statement", "session-context claim",
                          session_id="sess-abc")
     assert _sources_of(sdk._get_proj(), p["id"]) == {"session:sess-abc"}
 
@@ -117,7 +117,7 @@ def test_eval_ingest_shape_wires_extractedfrom(prov):
     path."""
     sdk, _events = prov
     sid = "lme:q42:s0"
-    p = sdk.create_point("statement", "eval ingested claim",
+    p = sdk._create_point("statement", "eval ingested claim",
                          session_id=sid, lme_question_id="q42",
                          lme_session_index=0, is_episodic=True,
                          status="draft")
@@ -147,7 +147,7 @@ def test_real_ingest_v2_write_payload_wires_extractedfrom(prov):
 
 def test_explicit_extractedfrom_wins_over_session_inference(prov):
     sdk, _events = prov
-    p = sdk.create_point("statement", "both contexts",
+    p = sdk._create_point("statement", "both contexts",
                          session_id="sess-abc",
                          extractedFrom="https://doc.example/explicit")
     assert _sources_of(sdk._get_proj(), p["id"]) == {
@@ -158,7 +158,7 @@ def test_write_without_source_context_stays_unlinked(prov):
     """No session, no explicit ref → nothing derivable → no edge (and no
     invented Source)."""
     sdk, _events = prov
-    p = sdk.create_point("statement", "bare agent thought")
+    p = sdk._create_point("statement", "bare agent thought")
     assert _sources_of(sdk._get_proj(), p["id"]) == set()
     assert _provenance(sdk._get_proj()) == set()
 
@@ -171,11 +171,11 @@ def test_live_and_rebuild_agree_on_inferred_extractedfrom(prov):
     byte-for-byte (same url AND same sourceKind)."""
     sdk, events = prov
     sid = "lme:q99:s2"
-    sdk.create_point("statement", "claim one", session_id=sid,
+    sdk._create_point("statement", "claim one", session_id=sid,
                      is_episodic=True, status="draft")
-    sdk.create_point("statement", "claim two", session_id="sess-zzz",
+    sdk._create_point("statement", "claim two", session_id="sess-zzz",
                      is_episodic=True, status="draft")
-    sdk.create_point("statement", "explicit claim",
+    sdk._create_point("statement", "explicit claim",
                      extractedFrom="https://doc.example/keep")
     live = _provenance(sdk._get_proj())
     assert live, "guard: the live graph must have provenance to rebuild"
@@ -189,7 +189,7 @@ def test_rebuild_preserves_session_source_is_episodic(prov):
     """A ``session:`` ref mints an episodic Source on BOTH paths (the
     ``_mint_source_stub`` shared create path, #1486) — live == rebuild."""
     sdk, events = prov
-    sdk.create_point("statement", "episodic claim", session_id="sess-ep",
+    sdk._create_point("statement", "episodic claim", session_id="sess-ep",
                      is_episodic=True, status="draft")
 
     def _is_episodic(proj) -> bool:
@@ -278,10 +278,10 @@ def test_dedup_hit_accumulates_the_second_source(prov):
     """
     sdk, events = prov
     content = "quarterly revenue target raised to 40 million"
-    first = sdk.create_point("statement", content,
+    first = sdk._create_point("statement", content,
                              extractedFrom="https://example.com/alpha",
                              dedup=True)
-    second = sdk.create_point("statement", content,
+    second = sdk._create_point("statement", content,
                               extractedFrom="https://example.com/beta",
                               dedup=True)
     assert second["id"] == first["id"], (
@@ -354,21 +354,21 @@ def test_a_fold_keeps_the_read_door_answering(prov):
     sdk, _events = prov
     alpha, beta = ("https://example.com/alpha", "https://example.com/beta")
     content = "the fold must not hide the survivor from the read door"
-    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+    pid = sdk._create_point("statement", content, extractedFrom=alpha,
                            dedup=True)["id"]
-    assert [p["id"] for p in sdk.query(extractedFrom=alpha)] == [pid], \
+    assert [p["id"] for p in sdk._query(extractedFrom=alpha)] == [pid], \
         "guard: the creating source must answer BEFORE the fold"
 
-    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+    sdk._create_point("statement", content, extractedFrom=beta, dedup=True)
 
-    assert [p["id"] for p in sdk.query(extractedFrom=alpha)] == [pid], (
+    assert [p["id"] for p in sdk._query(extractedFrom=alpha)] == [pid], (
         "the fold made the survivor unfindable under the source it was "
         "CREATED under — the property is no longer equality-matchable")
-    page = sdk.paginated_query(extractedFrom=alpha)
+    page = sdk._paginated_query(extractedFrom=alpha)
     assert [p["id"] for p in page["results"]] == [pid], (
         "paginated_query went the same way — the whole read door, not one "
         f"method: {sorted(page)!r}")
-    assert [p["id"] for p in sdk.query(extractedFrom=beta)] == [pid], (
+    assert [p["id"] for p in sdk._query(extractedFrom=beta)] == [pid], (
         "#10063: the folded-in source must FIND its survivor — the property "
         "holds the creating source only, so this answer comes from the "
         "authoritative `:Source` edge (#3263). Before #10063 this was ``[]``"
@@ -397,9 +397,9 @@ def test_query_answers_for_a_folded_ref_from_another_source(prov):
     sdk, _events = prov
     alpha, beta = ("https://example.com/alpha", "https://example.com/beta")
     content = "a folded claim must answer for every source it carries"
-    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+    pid = sdk._create_point("statement", content, extractedFrom=alpha,
                            dedup=True)["id"]
-    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+    sdk._create_point("statement", content, extractedFrom=beta, dedup=True)
 
     proj = sdk._get_proj()
     # GUARDS — the write side is deliberately UNCHANGED by #10063: the
@@ -415,10 +415,10 @@ def test_query_answers_for_a_folded_ref_from_another_source(prov):
         "guard: the fold must have wired the second ref"
 
     for ref in (alpha, beta):
-        assert [p["id"] for p in sdk.query(extractedFrom=ref)] == [pid], (
+        assert [p["id"] for p in sdk._query(extractedFrom=ref)] == [pid], (
             f"query(extractedFrom={ref!r}) must return the survivor — it "
             "carries that ref on its `:Source` edges (#3263)")
-        page = sdk.paginated_query(extractedFrom=ref)
+        page = sdk._paginated_query(extractedFrom=ref)
         assert [p["id"] for p in page["results"]] == [pid], \
             "paginated_query must answer identically (its total uses the same predicate)"
         assert page["total"] == 1
@@ -426,13 +426,13 @@ def test_query_answers_for_a_folded_ref_from_another_source(prov):
     # The other direction: a ref the Point does NOT carry must not match. A
     # predicate that widened past the point's own refs would be over-matching,
     # and the count/total above would be a lie about the graph.
-    assert sdk.query(extractedFrom="https://example.com/not-a-source") == []
-    assert sdk.paginated_query(
+    assert sdk._query(extractedFrom="https://example.com/not-a-source") == []
+    assert sdk._paginated_query(
         extractedFrom="https://example.com/not-a-source")["total"] == 0
     # …and it must not drag in a Point that holds no source at all.
-    bare = sdk.create_point("statement", "a sourceless claim")
+    bare = sdk._create_point("statement", "a sourceless claim")
     assert bare["id"] != pid
-    assert sdk.query(extractedFrom="https://example.com/not-a-source") == []
+    assert sdk._query(extractedFrom="https://example.com/not-a-source") == []
 
 
 def test_query_answers_for_every_ref_of_a_sequence_born_point(prov):
@@ -444,7 +444,7 @@ def test_query_answers_for_every_ref_of_a_sequence_born_point(prov):
     """
     sdk, _events = prov
     a, b = (f"https://example.com/seq-{n}" for n in ("a", "b"))
-    pid = sdk.create_point("statement",
+    pid = sdk._create_point("statement",
                            "a claim whose provenance arrived as a sequence",
                            extractedFrom=[a, b])["id"]
     proj = sdk._get_proj()
@@ -452,10 +452,10 @@ def test_query_answers_for_every_ref_of_a_sequence_born_point(prov):
         "guard: a sequence-create stores an ARRAY"
 
     for ref in (a, b):
-        assert [p["id"] for p in sdk.query(extractedFrom=ref)] == [pid], (
+        assert [p["id"] for p in sdk._query(extractedFrom=ref)] == [pid], (
             f"query(extractedFrom={ref!r}) must return the sequence-born "
             "Point — the ref is on its `:Source` edges")
-    assert sdk.query(extractedFrom="https://example.com/seq-c") == []
+    assert sdk._query(extractedFrom="https://example.com/seq-c") == []
 
 
 def test_a_LIST_filter_value_answers_or_is_empty_but_never_raises(prov):
@@ -477,7 +477,7 @@ def test_a_LIST_filter_value_answers_or_is_empty_but_never_raises(prov):
     """
     sdk, _events = prov
     a, b = (f"https://example.com/listref-{n}" for n in ("a", "b"))
-    pid = sdk.create_point("statement",
+    pid = sdk._create_point("statement",
                            "a claim asked for by a LIST of refs",
                            extractedFrom=[a, b])["id"]
     proj = sdk._get_proj()
@@ -485,10 +485,10 @@ def test_a_LIST_filter_value_answers_or_is_empty_but_never_raises(prov):
         "guard: a sequence-create stores an ARRAY property"
 
     # The array-equality answer that existed BEFORE the fix must survive it.
-    assert [p["id"] for p in sdk.query(extractedFrom=[a, b])] == [pid], (
+    assert [p["id"] for p in sdk._query(extractedFrom=[a, b])] == [pid], (
         "a LIST filter value must still answer by array equality — the "
         "equality arm is kept for exactly this shape")
-    page = sdk.paginated_query(extractedFrom=[a, b])
+    page = sdk._paginated_query(extractedFrom=[a, b])
     assert [p["id"] for p in page["results"]] == [pid]
     assert page["total"] == 1, (
         "`total` uses the same predicate, so it cannot drift from the rows"
@@ -496,8 +496,8 @@ def test_a_LIST_filter_value_answers_or_is_empty_but_never_raises(prov):
 
     # A list that matches nothing is a NO-MATCH, not an error.
     absent = ["https://example.com/listref-absent"]
-    assert sdk.query(extractedFrom=absent) == []
-    assert sdk.paginated_query(extractedFrom=absent)["total"] == 0
+    assert sdk._query(extractedFrom=absent) == []
+    assert sdk._paginated_query(extractedFrom=absent)["total"] == 0
 
 
 def test_a_prop_only_ref_still_answers_by_equality(prov):
@@ -510,14 +510,14 @@ def test_a_prop_only_ref_still_answers_by_equality(prov):
     """
     sdk, _events = prov
     ref = "https://example.com/prop-only"
-    pid = sdk.create_point("statement", "a legacy property-only ref",
+    pid = sdk._create_point("statement", "a legacy property-only ref",
                            extractedFrom=ref)["id"]
     proj = sdk._get_proj()
     proj.g.query(
         "MATCH (p:Point {id:$id})-[r:extractedFrom]->() DELETE r",
         params={"id": pid})
     assert _sources_of(proj, pid) == set(), "guard: the edge is gone"
-    assert [p["id"] for p in sdk.query(extractedFrom=ref)] == [pid], (
+    assert [p["id"] for p in sdk._query(extractedFrom=ref)] == [pid], (
         "the property equality arm must keep answering with no edge present")
 
 
@@ -531,12 +531,12 @@ def test_scalar_property_filters_keep_EXACT_equality(prov):
     ``IN n.<prop>``.
     """
     sdk, _events = prov
-    mine = sdk.create_point("statement", "authored by tester",
+    mine = sdk._create_point("statement", "authored by tester",
                             authoredBy="tester")
-    sdk.create_point("statement", "authored by another",
+    sdk._create_point("statement", "authored by another",
                      authoredBy="another")
-    assert [p["id"] for p in sdk.query(authoredBy="tester")] == [mine["id"]]
-    assert sdk.query(authoredBy="test") == [], (
+    assert [p["id"] for p in sdk._query(authoredBy="tester")] == [mine["id"]]
+    assert sdk._query(authoredBy="test") == [], (
         "a scalar filter widened past exact equality — 'test' must not match "
         "the value 'tester'")
 
@@ -560,37 +560,37 @@ def test_the_accumulated_refs_filter_answers_for_every_carried_ref(prov):
     sdk, _events = prov
     alpha, beta = (f"https://example.com/all-{n}" for n in ("alpha", "beta"))
     content = "a folded claim answers for the accumulated set as well"
-    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+    pid = sdk._create_point("statement", content, extractedFrom=alpha,
                            dedup=True)["id"]
-    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+    sdk._create_point("statement", content, extractedFrom=beta, dedup=True)
 
     proj = sdk._get_proj()
     assert sorted(_all_prop_refs(proj, pid)) == sorted([alpha, beta]), \
         "guard: the fold must accumulate both refs on the property"
 
     for ref in (alpha, beta):
-        assert [p["id"] for p in sdk.query(extractedFromAll=ref)] == [pid], (
+        assert [p["id"] for p in sdk._query(extractedFromAll=ref)] == [pid], (
             f"query(extractedFromAll={ref!r}) must return the survivor — the "
             "accumulated ref is on its `:Source` edges (#3263)")
-        page = sdk.paginated_query(extractedFromAll=ref)
+        page = sdk._paginated_query(extractedFromAll=ref)
         assert [p["id"] for p in page["results"]] == [pid]
         assert page["total"] == 1
 
     # The ARRAY shape, which equality can never match at all.
-    seq_pid = sdk.create_point(
+    seq_pid = sdk._create_point(
         "statement", "a sequence-born claim, queried by its accumulated refs",
         extractedFrom=[alpha, beta])["id"]
     assert seq_pid != pid
     for ref in (alpha, beta):
-        assert sorted(p["id"] for p in sdk.query(extractedFromAll=ref)) == \
+        assert sorted(p["id"] for p in sdk._query(extractedFromAll=ref)) == \
             sorted([pid, seq_pid]), (
                 f"query(extractedFromAll={ref!r}) must return BOTH Points "
                 "carrying that ref")
 
     # …and the over-match direction: a ref neither Point carries is not
     # dragged in by the edge arm.
-    assert sdk.query(extractedFromAll="https://example.com/all-gamma") == []
-    assert sdk.paginated_query(
+    assert sdk._query(extractedFromAll="https://example.com/all-gamma") == []
+    assert sdk._paginated_query(
         extractedFromAll="https://example.com/all-gamma")["total"] == 0
 
 
@@ -620,13 +620,13 @@ def test_a_fold_keeps_the_refs_of_a_sequence_born_point(prov):
     proj = sdk._get_proj()
     a, b, c = (f"https://example.com/seq-{n}" for n in ("a", "b", "c"))
     content = "a claim whose provenance arrived as a ref sequence"
-    pid = sdk.create_point("statement", content, extractedFrom=[a, b],
+    pid = sdk._create_point("statement", content, extractedFrom=[a, b],
                            dedup=True)["id"]
     assert _prop_refs(proj, pid) == [a, b], (
         "guard: a sequence-create stores an ARRAY (the writer's shape rule): "
         f"{_prop_refs(proj, pid)!r}")
 
-    sdk.create_point("statement", content, extractedFrom=c, dedup=True)
+    sdk._create_point("statement", content, extractedFrom=c, dedup=True)
     assert _sources_of(proj, pid) == {a, b, c}, \
         "guard: the second write must be a fold that wires the third ref"
 
@@ -657,9 +657,9 @@ def test_dedup_hit_accumulates_the_inferred_session_source(prov):
     """
     sdk, events = prov
     content = "the enterprise pilot closes in the third quarter"
-    first = sdk.create_point("statement", content,
+    first = sdk._create_point("statement", content,
                              session_id="sess-one", dedup=True)
-    second = sdk.create_point("statement", content,
+    second = sdk._create_point("statement", content,
                               session_id="sess-two", dedup=True)
     assert second["id"] == first["id"], "guard: this must be a dedup hit"
 
@@ -702,12 +702,12 @@ def test_the_fold_journals_a_state_the_checker_agrees_with(prov):
     _seed_hashed_source(sdk, first_ref, "hash-first")
     _seed_hashed_source(sdk, second_ref, "hash-second")
     content = "the expansion is funded through next spring"
-    first = sdk.create_point("statement", content,
+    first = sdk._create_point("statement", content,
                              extractedFrom=first_ref,
                              dedup=True)
     check_consistency(log_path, proj)          # adopt the existing graph
 
-    sdk.create_point("statement", content,
+    sdk._create_point("statement", content,
                      extractedFrom=second_ref, dedup=True)
 
     result = check_consistency(log_path, proj)
@@ -741,9 +741,9 @@ def test_the_fold_replays_field_by_field(prov):
     _seed_hashed_source(sdk, two, "hash-two")
 
     content = "the fold must be replayable field by field"
-    pid = sdk.create_point("statement", content, extractedFrom=one,
+    pid = sdk._create_point("statement", content, extractedFrom=one,
                            dedup=True)["id"]
-    sdk.create_point("statement", content, extractedFrom=two, dedup=True)
+    sdk._create_point("statement", content, extractedFrom=two, dedup=True)
     assert _sources_of(proj, pid) == {one, two}, \
         "guard: the second write must be a fold, not a second Point"
 
@@ -783,7 +783,7 @@ def test_a_fold_with_no_recorded_versions_clears_the_carrier_and_replays(prov):
     one, two = "https://example.com/v-one", "https://example.com/v-two"
     stale = "https://example.com/not-an-edge"
     content = "a fold whose refs carry no recorded read-version"
-    pid = sdk.create_point("statement", content, extractedFrom=one,
+    pid = sdk._create_point("statement", content, extractedFrom=one,
                            dedup=True)["id"]
     assert _render_row(proj, pid)["sourceVersionTransit"] is None, \
         "guard: an unversioned Source must contribute NO carrier pair"
@@ -796,7 +796,7 @@ def test_a_fold_with_no_recorded_versions_clears_the_carrier_and_replays(prov):
     assert _render_row(proj, pid)["sourceVersionTransit"] == [
         [stale, "hash-stale"]]
 
-    sdk.create_point("statement", content, extractedFrom=two, dedup=True)
+    sdk._create_point("statement", content, extractedFrom=two, dedup=True)
     assert _sources_of(proj, pid) == {one, two}, \
         "guard: the second write must be a fold, not a second Point"
 
@@ -841,11 +841,11 @@ def test_a_url_variant_of_a_held_ref_is_not_refolded(prov):
         return n
 
     content = "a url variant is the same source"
-    pid = sdk.create_point("statement", content, extractedFrom=held,
+    pid = sdk._create_point("statement", content, extractedFrom=held,
                            dedup=True)["id"]
     before = _point_added()
     for _ in range(3):
-        assert sdk.create_point(
+        assert sdk._create_point(
             "statement", content,
             extractedFrom=held + "?utm_source=x", dedup=True)["id"] == pid
     assert _point_added() == before, (
@@ -885,12 +885,12 @@ def test_a_fold_keeps_the_carrier_of_a_variant_spelled_held_ref(prov):
     _seed_hashed_source(sdk, second, "hash-two")
 
     content = "a variant-spelled held ref keeps its read-version"
-    pid = sdk.create_point("statement", content, extractedFrom=raw,
+    pid = sdk._create_point("statement", content, extractedFrom=raw,
                            dedup=True)["id"]
     assert _render_row(proj, pid)["sourceVersionTransit"] == [
         [raw, "hash-one"]], "guard: the create must record the held pair"
 
-    sdk.create_point("statement", content, extractedFrom=second, dedup=True)
+    sdk._create_point("statement", content, extractedFrom=second, dedup=True)
     assert _sources_of(proj, pid) == {clean, second}, \
         "guard: the second write must be a fold, not a second Point"
 
@@ -936,10 +936,10 @@ def test_a_fold_keeps_the_carrier_when_the_nodes_spelling_was_changed(prov):
     _seed_hashed_source(sdk, second, "hash-two")
 
     content = "a held ref survives a moved spelling"
-    pid = sdk.create_point("statement", content, extractedFrom=raw,
+    pid = sdk._create_point("statement", content, extractedFrom=raw,
                            dedup=True)["id"]
-    sdk.update_point(pid, extractedFrom=moved)
-    sdk.create_point("statement", content, extractedFrom=second, dedup=True)
+    sdk._update_point(pid, extractedFrom=moved)
+    sdk._create_point("statement", content, extractedFrom=second, dedup=True)
     assert _sources_of(proj, pid) == {clean, second}, \
         "guard: the second write must be a fold, not a second Point"
 
@@ -977,9 +977,9 @@ def test_a_fold_with_an_unhashed_ref_does_not_remove_the_carrier(prov):
     _seed_hashed_source(sdk, clean, "hash-one")
 
     content = "an unhashed new ref must not remove the carrier"
-    pid = sdk.create_point("statement", content, extractedFrom=raw,
+    pid = sdk._create_point("statement", content, extractedFrom=raw,
                            dedup=True)["id"]
-    sdk.create_point("statement", content, session_id="sess-nohash",
+    sdk._create_point("statement", content, session_id="sess-nohash",
                      dedup=True)
     assert _sources_of(proj, pid) == {clean, "session:sess-nohash"}, \
         "guard: the session ref must fold onto the same Point"
@@ -1016,15 +1016,15 @@ def test_a_fold_adopts_and_WIRES_a_prop_only_ref(prov):
     prop_only = "https://example.com/prop-only"
     second = "https://example.com/second"
     content = "a prop-only ref is adopted by the fold"
-    pid = sdk.create_point("statement", content, extractedFrom=held,
+    pid = sdk._create_point("statement", content, extractedFrom=held,
                            dedup=True)["id"]
-    sdk.update_point(pid, extractedFrom=prop_only)
+    sdk._update_point(pid, extractedFrom=prop_only)
     assert _sources_of(proj, pid) == {held}, \
         "guard: update_point wires no edge, so the prop is the only name"
     assert _prop_refs(proj, pid) == prop_only, \
         f"guard: the property holds only the moved ref: {_prop_refs(proj, pid)!r}"
 
-    sdk.create_point("statement", content, extractedFrom=second, dedup=True)
+    sdk._create_point("statement", content, extractedFrom=second, dedup=True)
     assert _sources_of(proj, pid) == {held, prop_only, second}, (
         "the fold dropped a ref the caller had declared on the property (or "
         f"left it unwired): {_sources_of(proj, pid)}")
@@ -1069,14 +1069,14 @@ def test_a_fold_survives_a_non_iterable_stored_prop(prov):
     held = "https://example.com/held"
     second = "https://example.com/second"
     content = "a non-iterable stored property must not break the fold"
-    pid = sdk.create_point("statement", content, extractedFrom=held,
+    pid = sdk._create_point("statement", content, extractedFrom=held,
                            dedup=True)["id"]
-    sdk.update_point(pid, extractedFrom=123)
+    sdk._update_point(pid, extractedFrom=123)
     assert _prop_refs(proj, pid) == 123, (
         "guard: the writer really stored the non-string scalar: "
         f"{_prop_refs(proj, pid)!r}")
 
-    folded = sdk.create_point("statement", content, extractedFrom=second,
+    folded = sdk._create_point("statement", content, extractedFrom=second,
                               dedup=True)
     assert folded["id"] == pid, "guard: this must be a dedup HIT"
     assert _sources_of(proj, pid) == {held, second}, (
@@ -1117,10 +1117,10 @@ def test_a_fold_does_not_invent_refs_from_a_container_prop(prov, monkeypatch):
     held = "https://example.com/held"
     second = "https://example.com/second"
     content = "a container-shaped prop must not invent sources"
-    pid = sdk.create_point("statement", content, extractedFrom=held,
+    pid = sdk._create_point("statement", content, extractedFrom=held,
                            dedup=True)["id"]
 
-    real_get_point = sdk.get_point
+    real_get_point = sdk._get_point
     poisoned = {"url": "https://invented.example/key", "kind": "invented"}
 
     def _get_point(point_id):
@@ -1130,8 +1130,8 @@ def test_a_fold_does_not_invent_refs_from_a_container_prop(prov, monkeypatch):
             point["extractedFrom"] = poisoned
         return point
 
-    monkeypatch.setattr(sdk, "get_point", _get_point)
-    sdk.create_point("statement", content, extractedFrom=second, dedup=True)
+    monkeypatch.setattr(sdk, "_get_point", _get_point)
+    sdk._create_point("statement", content, extractedFrom=second, dedup=True)
 
     invented = _sources_of(proj, pid) - {held, second}
     assert not invented, (
@@ -1220,14 +1220,14 @@ def test_a_fold_does_not_attest_the_embedding_origin_it_did_not_compute(
     first_ref, second_ref = ("https://example.com/emb-one",
                              "https://example.com/emb-two")
     content = "the fold must not attest an origin it did not compute"
-    pid = sdk.create_point("statement", content, extractedFrom=first_ref,
+    pid = sdk._create_point("statement", content, extractedFrom=first_ref,
                            dedup=True)["id"]
-    stored = sdk.get_point(pid).get("embedding")
+    stored = sdk._get_point(pid).get("embedding")
     assert stored is not None and len(stored) == width, (
         "guard: the create must STORE a vector of the store's own width "
         f"({width}) — the width guard drops a mismatch instead of truncating "
         f"it, and a fold cannot carry what the node does not hold: {stored!r}")
-    sdk.create_point("statement", content, extractedFrom=second_ref,
+    sdk._create_point("statement", content, extractedFrom=second_ref,
                      dedup=True)
 
     with open(log_path) as fh:
@@ -1275,7 +1275,7 @@ def test_a_fold_whose_record_cannot_be_written_refuses_the_fold(prov,
     proj = sdk._get_proj()
     content = "a claim whose fold cannot be recorded"
     held, incoming = "https://example.com/held", "https://example.com/incoming"
-    pid = sdk.create_point("statement", content, extractedFrom=held,
+    pid = sdk._create_point("statement", content, extractedFrom=held,
                            dedup=True)["id"]
 
     log = sdk._get_event_log()
@@ -1286,7 +1286,7 @@ def test_a_fold_whose_record_cannot_be_written_refuses_the_fold(prov,
 
     monkeypatch.setattr(log, "append", _boom)
     with pytest.raises(WriteNotLandedError) as ei:
-        sdk.create_point("statement", content, extractedFrom=incoming,
+        sdk._create_point("statement", content, extractedFrom=incoming,
                          dedup=True)
     assert ei.value.record_committed is False, (
         "the append FAILED, so the record is not committed and the fold must "
@@ -1312,7 +1312,7 @@ def test_repeated_dedup_hit_neither_duplicates_nor_rejournals(prov):
     sdk, events = prov
     content = "idempotent source claim"
     ref = "https://example.com/once"
-    first = sdk.create_point("statement", content, extractedFrom=ref,
+    first = sdk._create_point("statement", content, extractedFrom=ref,
                              dedup=True)
     journal = os.path.join(str(events), "events.jsonl")
 
@@ -1331,7 +1331,7 @@ def test_repeated_dedup_hit_neither_duplicates_nor_rejournals(prov):
 
     before = _point_added_for(first["id"])
     for _ in range(3):
-        again = sdk.create_point("statement", content, extractedFrom=ref,
+        again = sdk._create_point("statement", content, extractedFrom=ref,
                                  dedup=True)
         assert again["id"] == first["id"]
     assert _point_added_for(first["id"]) == before, (
@@ -1352,8 +1352,8 @@ def test_dedup_hit_keeps_prop_and_edges_truthful(prov):
     """
     sdk, events = prov
     content = "identical claim text"
-    first = sdk.create_point("statement", content, dedup=True)
-    second = sdk.create_point("statement", content,
+    first = sdk._create_point("statement", content, dedup=True)
+    second = sdk._create_point("statement", content,
                               session_id="sess-dedup", dedup=True)
     assert second["id"] == first["id"], "guard: this must be a dedup hit"
 
@@ -1382,7 +1382,7 @@ def test_session_source_kind_is_agentsession(prov):
     and was invisible to ``audit.missing_sourceKind`` (which passes).
     """
     sdk, events = prov
-    p = sdk.create_point("statement", "kind claim", session_id="sess-kind",
+    p = sdk._create_point("statement", "kind claim", session_id="sess-kind",
                          is_episodic=True, status="draft")
 
     def _kinds(proj) -> set[str]:
@@ -1403,7 +1403,7 @@ def test_session_source_kind_is_agentsession(prov):
 def test_non_session_source_kind_still_defaults_to_document(prov):
     """Resolving the session default must not re-label ordinary sources."""
     sdk, _events = prov
-    p = sdk.create_point("statement", "doc kind claim",
+    p = sdk._create_point("statement", "doc kind claim",
                          extractedFrom="https://doc.example/kind")
     kinds = {
         r[0]
@@ -1426,7 +1426,7 @@ def test_multiple_source_refs_get_one_edge_each(prov):
     """
     sdk, _events = prov
     refs = ["https://a.example", "https://b.example", "https://c.example"]
-    p = sdk.create_point("statement", "multi-source claim", extractedFrom=refs)
+    p = sdk._create_point("statement", "multi-source claim", extractedFrom=refs)
     assert _sources_of(sdk._get_proj(), p["id"]) == set(refs)
 
     corrupt = sdk._get_proj().g.query(
@@ -1438,7 +1438,7 @@ def test_multi_source_survives_rebuild(prov):
     """The fan-out must be reproducible from the journal (live == rebuild)."""
     sdk, events = prov
     refs = ["https://a.example", "https://b.example"]
-    p = sdk.create_point("statement", "multi-source rebuild",
+    p = sdk._create_point("statement", "multi-source rebuild",
                          extractedFrom=refs)
     live = _sources_of(sdk._get_proj(), p["id"])
     assert live == set(refs), "guard: the live fan-out must exist to rebuild"
@@ -1451,7 +1451,7 @@ def test_non_scalar_session_id_does_not_invent_a_source(prov):
     ``session_id`` used to stringify into ``session:['s1', 's2']`` and mint
     that bogus Source."""
     sdk, _events = prov
-    p = sdk.create_point("statement", "list session id",
+    p = sdk._create_point("statement", "list session id",
                          session_id=["s1", "s2"])
     assert _sources_of(sdk._get_proj(), p["id"]) == set()
     invented = sdk._get_proj().g.query(
@@ -1486,7 +1486,7 @@ def test_bundle_extractedfrom_list_of_local_refs_links_the_real_sources(prov):
         ],
         "connections": [],
     }
-    sdk.ingest(bundle)
+    sdk._ingest(bundle)
     proj = sdk._get_proj()
 
     urls = {url for (_pid, url, _kind) in _provenance(proj)}
@@ -1518,7 +1518,7 @@ def test_bundle_rejects_non_string_extractedfrom_element(prov):
             "connections": [],
         }
         with pytest.raises(Exception, match="extractedFrom"):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
     # And nothing was committed by the rejected bundles.
     assert _provenance(sdk._get_proj()) == set()
 
@@ -1532,7 +1532,7 @@ def test_bundle_empty_extractedfrom_list_is_allowed(prov):
                     "extractedFrom": []}],
         "sources": [], "connections": [],
     }
-    sdk.ingest(bundle)
+    sdk._ingest(bundle)
     assert _provenance(sdk._get_proj()) == set()
 
 
@@ -1556,7 +1556,7 @@ def test_bundle_connection_extractedfrom_fans_out_to_every_target(prov):
              "relation": "extractedFrom"},
         ],
     }
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
     urls = {url for (_pid, url, _kind) in _provenance(sdk._get_proj())}
     assert urls == {"https://real.example/one", "https://real.example/two"}, \
         f"multi-target extractedFrom connection lost a source: {urls}"
@@ -1575,9 +1575,9 @@ def test_reingest_does_not_warn_about_provenance(prov, caplog):
                     "extractedFrom": "session:sess-re"}],
         "sources": [], "connections": [],
     }
-    sdk.ingest(bundle)
+    sdk._ingest(bundle)
     with caplog.at_level(logging.WARNING):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     noise = [r.getMessage() for r in caplog.records
              if "not applied" in r.getMessage()]
     assert noise == [], f"spurious provenance warning on re-ingest: {noise}"
@@ -1594,9 +1594,9 @@ def test_reingest_with_empty_ref_list_does_not_warn(prov, caplog):
                     "extractedFrom": []}],
         "sources": [], "connections": [],
     }
-    sdk.ingest(bundle)
+    sdk._ingest(bundle)
     with caplog.at_level(logging.WARNING):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     noise = [r.getMessage() for r in caplog.records
              if "not applied" in r.getMessage()]
     assert noise == [], f"spurious warning for an explicit empty ref list: {noise}"
@@ -1615,10 +1615,10 @@ def test_dedup_hit_with_a_CHANGED_ref_accumulates_it(prov, caplog):
     """
     sdk, _events = prov
     content = "changed ref claim"
-    first = sdk.create_point("statement", content,
+    first = sdk._create_point("statement", content,
                              extractedFrom="session:sess-OLD", dedup=True)
     with caplog.at_level(logging.WARNING):
-        second = sdk.create_point("statement", content,
+        second = sdk._create_point("statement", content,
                                   extractedFrom="session:sess-NEW", dedup=True)
     assert second["id"] == first["id"], "guard: this must be a dedup hit"
     assert _sources_of(sdk._get_proj(), first["id"]) == {
@@ -1642,7 +1642,7 @@ def test_create_point_rejects_non_string_extractedfrom_prewrite(prov):
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
     for bad in (123, 1.5, ["ok", None], [None]):
         with pytest.raises(ValueError, match="extractedFrom"):
-            sdk.create_point("statement", f"bad ref {bad!r}",
+            sdk._create_point("statement", f"bad ref {bad!r}",
                              extractedFrom=bad)
     after = sdk._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
@@ -1664,7 +1664,7 @@ def test_a_tenant_cannot_supply_the_folded_ref_set(prov):
     before = sdk._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
     with pytest.raises(ValueError, match="server-managed provenance"):
-        sdk.create_point(
+        sdk._create_point(
             "statement", "a forged folded set",
             extractedFrom="https://example.com/x",
             extractedFromAll=["https://example.com/x",
@@ -1698,9 +1698,9 @@ def test_a_re_creation_does_not_resurrect_the_folded_set(prov):
     sdk, events = prov
     content = "a folded claim that is later deleted and reborn"
     alpha, beta = "https://example.com/alpha", "https://example.com/beta"
-    first = sdk.create_point("statement", content, extractedFrom=alpha,
+    first = sdk._create_point("statement", content, extractedFrom=alpha,
                              dedup=True)
-    second = sdk.create_point("statement", content, extractedFrom=beta,
+    second = sdk._create_point("statement", content, extractedFrom=beta,
                               dedup=True)
     pid = first["id"]
     assert second["id"] == pid, "guard: the second write must FOLD"
@@ -1710,8 +1710,8 @@ def test_a_re_creation_does_not_resurrect_the_folded_set(prov):
         "guard: the fold must have accumulated the set, or this pin is "
         f"vacuous (got {_all_prop_refs(proj, pid)!r})")
 
-    assert sdk.delete_point(pid) is True, "guard: the delete must land"
-    sdk.create_point("statement", "a different claim under the same id",
+    assert sdk._delete_point(pid) is True, "guard: the delete must land"
+    sdk._create_point("statement", "a different claim under the same id",
                      id=pid, extractedFrom=[alpha, beta])
     assert _all_prop_refs(proj, pid) is None, (
         "guard: a re-creation states no folded set, so LIVE holds none "
@@ -1773,7 +1773,7 @@ def test_create_point_treats_blank_ref_as_absent(prov):
     """An empty/blank string is explicit "none", not an error — so session
     inference still applies and nothing is invented."""
     sdk, _events = prov
-    p = sdk.create_point("statement", "blank ref claim",
+    p = sdk._create_point("statement", "blank ref claim",
                          extractedFrom="   ", session_id="sess-blank")
     assert _sources_of(sdk._get_proj(), p["id"]) == {"session:sess-blank"}
 
@@ -1787,8 +1787,8 @@ def test_dedup_hit_without_the_edge_WIRES_it(prov):
     """
     sdk, _events = prov
     content = "warn-me claim"
-    sdk.create_point("statement", content, dedup=True)          # no source ctx
-    hit = sdk.create_point("statement", content, session_id="sess-w",
+    sdk._create_point("statement", content, dedup=True)          # no source ctx
+    hit = sdk._create_point("statement", content, session_id="sess-w",
                            dedup=True)
     assert _sources_of(sdk._get_proj(), hit["id"]) == {"session:sess-w"}, \
         "a dedup hit that supplies the Point's FIRST source left it an orphan"
@@ -1799,7 +1799,7 @@ def test_falsy_non_string_session_id_warns(prov, caplog):
     truthiness silently skipped them, contradicting the stated rule."""
     sdk, _events = prov
     with caplog.at_level(logging.WARNING):
-        sdk.create_point("statement", "zero session id", session_id=0)
+        sdk._create_point("statement", "zero session id", session_id=0)
     assert any("not a non-empty string" in r.getMessage()
                for r in caplog.records), "falsy non-string session_id was silent"
 
@@ -1838,25 +1838,25 @@ def test_a_fold_onto_a_dead_claim_keeps_its_terminalizer_stamp(prov):
     superseded_content = "the expansion is funded through next spring"
     invalidated_content = "the expansion is funded through next autumn"
 
-    superseded = sdk.create_point("statement", superseded_content,
+    superseded = sdk._create_point("statement", superseded_content,
                                   extractedFrom=a, dedup=True)["id"]
-    successor = sdk.create_point("statement", "the expansion is funded",
+    successor = sdk._create_point("statement", "the expansion is funded",
                                  extractedFrom=a)["id"]
-    sdk.supersede_point(superseded, successor)
-    invalidated = sdk.create_point("statement", invalidated_content,
+    sdk._supersede_point(superseded, successor)
+    invalidated = sdk._create_point("statement", invalidated_content,
                                    extractedFrom=a, dedup=True)["id"]
-    correction = sdk.create_point("statement", "the expansion is deferred",
+    correction = sdk._create_point("statement", "the expansion is deferred",
                                   extractedFrom=a)["id"]
-    sdk.invalidate_point(invalidated, correction)
+    sdk._invalidate_point(invalidated, correction)
 
-    live = {pid: sdk.get_point(pid) for pid in (superseded, invalidated)}
+    live = {pid: sdk._get_point(pid) for pid in (superseded, invalidated)}
     for pid, row in live.items():
         assert row.get("outdated") is True, (
             f"guard: the terminalizer must have stamped {pid} live", row)
 
     # The FOLD, onto each dead claim — a second source for the SAME content.
     for content in (superseded_content, invalidated_content):
-        sdk.create_point("statement", content, extractedFrom=b, dedup=True)
+        sdk._create_point("statement", content, extractedFrom=b, dedup=True)
     for pid in (superseded, invalidated):
         assert _sources_of(proj, pid) == {a, b}, (
             "guard: this must be a fold onto the dead claim, not a second "
@@ -1877,7 +1877,7 @@ def test_a_fold_onto_a_dead_claim_keeps_its_terminalizer_stamp(prov):
 
     proj.rebuild_all(str(events), confirm_destructive=True)
     for pid, before in live.items():
-        after = sdk.get_point(pid)
+        after = sdk._get_point(pid)
         assert after.get("outdated") is True, (
             "the rebuild dropped the terminalizer stamp and served a dead "
             f"claim as live: before={before!r} after={after!r}")
@@ -1906,7 +1906,7 @@ def test_the_fold_record_flag_is_refused_at_every_prop_boundary(prov):
     before = sdk._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
     with pytest.raises(ValueError, match="server-managed journal record flag"):
-        sdk.create_point("statement", "a forged fold flag",
+        sdk._create_point("statement", "a forged fold flag",
                          evidence_fold=True)
     assert sdk._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0] == before, \
@@ -1947,7 +1947,7 @@ def test_the_fold_record_flag_is_refused_at_every_prop_boundary(prov):
             "evidence_fold — the refusal would then happen inside the write "
             "loop, after the earlier sections committed (partial mutation)")
         with pytest.raises(BundleValidationError, match="evidence_fold"):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         assert sdk._get_proj().g.query(
             "MATCH (n:Point) RETURN count(n)").result_set[0][0] == before, (
             f"the {spelling} spelling of evidence_fold committed a Point "

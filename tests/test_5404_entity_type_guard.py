@@ -161,4 +161,4 @@ def test_sdk_fts_query_rejects_invalid_entity_type():
 
     sdk = TortoiseSDK.__new__(TortoiseSDK)
     with pytest.raises(ValueError, match="entity_type"):
-        sdk.tortoise_fts_query("q", entity_type=INJECTION)
+        sdk._tortoise_fts_query("q", entity_type=INJECTION)

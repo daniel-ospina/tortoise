@@ -661,7 +661,7 @@ def test_the_sdk_containers_point_arm_journals_the_status(tmp_path):
     """
     sdk, events = _sdk_with_journal(tmp_path)
     try:
-        pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
+        pid = sdk._create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
         # ⛔ THE WORD NEEDS ITS PARTNER (#12592): a bare `status="superseded"`
@@ -703,7 +703,7 @@ def test_the_sdk_containers_point_arm_names_the_refused_transition(tmp_path):
     """
     sdk, events = _sdk_with_journal(tmp_path)
     try:
-        pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
+        pid = sdk._create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
         with pytest.raises(ValueError) as excinfo:
@@ -717,7 +717,7 @@ def test_the_sdk_containers_point_arm_names_the_refused_transition(tmp_path):
             f"the refusal does not name the transition it refused: {message!r}")
         assert len(_entity_mutations(events, pid)) == before, (
             "a refused transition appended a journal record")
-        assert sdk.get_point(pid)["status"] == "live", (
+        assert sdk._get_point(pid)["status"] == "live", (
             "a refused transition moved the row")
     finally:
         sdk.close()
@@ -744,7 +744,7 @@ def test_the_mcp_containers_props_arm_journals_the_status(tmp_path, monkeypatch)
     sdk, events = _sdk_with_journal(tmp_path)
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     try:
-        pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
+        pid = sdk._create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
         # Same shape as the SDK case above: the pair, not the bare word (#12592).
@@ -781,7 +781,7 @@ def test_the_mcp_containers_props_arm_names_the_refused_transition(
     sdk, events = _sdk_with_journal(tmp_path)
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     try:
-        pid = sdk.create_point("statement", "a claim", dedup=False)["id"]
+        pid = sdk._create_point("statement", "a claim", dedup=False)["id"]
         before = len(_entity_mutations(events, pid))
 
         got = mcp_server.tortoise_update_knowledge(
@@ -795,7 +795,7 @@ def test_the_mcp_containers_props_arm_names_the_refused_transition(
             f"the refusal does not name the transition it refused: {message!r}")
         assert len(_entity_mutations(events, pid)) == before, (
             "a refused transition appended a journal record")
-        assert sdk.get_point(pid)["status"] == "live", (
+        assert sdk._get_point(pid)["status"] == "live", (
             "a refused transition moved the row")
     finally:
         sdk.close()

@@ -66,7 +66,7 @@ class TestDecisionEvidence:
     def test_plain_statement_is_not_decision_evidence(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "a first note, no decision")
+        sdk._create_point("statement", "a first note, no decision")
         ev = _os.decision_evidence(proj, org)
         assert ev["decision_evidenced"] is False
         assert ev["decision_points"] == 0
@@ -74,7 +74,7 @@ class TestDecisionEvidence:
     def test_decision_point_is_evidence(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("decision", "chose JSON")
+        sdk._create_point("decision", "chose JSON")
         ev = _os.decision_evidence(proj, org)
         assert ev["decision_evidenced"] is True
 
@@ -84,9 +84,9 @@ class TestDecisionEvidence:
         `decision` would classify that real decide as FALSE and delete it."""
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("option", "Option A")
-        sdk.create_point("criterion", "adoption cost")
-        sdk.create_point("evidence", "benchmark result")
+        sdk._create_point("option", "Option A")
+        sdk._create_point("criterion", "adoption cost")
+        sdk._create_point("evidence", "benchmark result")
         ev = _os.decision_evidence(proj, org)
         assert ev["decision_points"] == 3
         assert ev["decision_evidenced"] is True
@@ -98,7 +98,7 @@ class TestFindFalse:
     def test_false_when_edge_has_no_decision_behind_it(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "the only point in the whole graph")
+        sdk._create_point("statement", "the only point in the whole graph")
         finding = _os.find_false_decide_completion(proj, org)
         assert finding["verdict"] == "false"
         assert finding["false"] is True
@@ -109,7 +109,7 @@ class TestFindFalse:
     def test_true_when_a_decision_exists(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("decision", "chose JSON")
+        sdk._create_point("decision", "chose JSON")
         assert _os.find_false_decide_completion(proj, org)["verdict"] == "true"
 
     def test_no_edge_is_not_a_repair_target(self):
@@ -131,7 +131,7 @@ class TestRepair:
     def test_dry_run_is_read_only(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         res = _os.repair_false_decide_completion(proj, org, apply=False)
         assert res["action"] == "would-repair"
         assert "decide-completed" in _os.completed_steps(proj, org)
@@ -140,7 +140,7 @@ class TestRepair:
     def test_repair_removes_the_false_edge_and_regresses_the_status(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         res = _os.repair_false_decide_completion(proj, org, apply=True)
         assert res["action"] == "repaired"
         assert res["edge_removed"] is True
@@ -159,7 +159,7 @@ class TestRepair:
     def test_repair_is_inspectable_on_the_node(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         _os.repair_false_decide_completion(
             proj, org, apply=True, at="2026-01-01T00:00:00Z")
         node = _os.read_onboarding_node(proj, org)
@@ -171,7 +171,7 @@ class TestRepair:
     def test_repair_prunes_the_orphaned_step_node(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         _os.repair_false_decide_completion(proj, org, apply=True)
         rows = proj.query(
             f"MATCH (s:{_os.ONBOARDING_STEP_LABEL} "
@@ -182,7 +182,7 @@ class TestRepair:
     def test_repair_is_idempotent(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         assert _os.repair_false_decide_completion(
             proj, org, apply=True)["action"] == "repaired"
         assert _os.repair_false_decide_completion(
@@ -221,7 +221,7 @@ class TestRepair:
         sdk, proj = _seed(org, steps=("team-named", "harness-connected",
                                       "first-points-filed"),
                           status=_os.STATUS_COMPLETE)
-        sdk.create_point("decision", "chose JSON")
+        sdk._create_point("decision", "chose JSON")
         assert _os.find_false_decide_completion(proj, org)["verdict"] == \
             "no-edge"
 
@@ -245,7 +245,7 @@ class TestRepair:
         its status regressed (it may be a genuinely compact org)."""
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         proj.query(
             f"MATCH (n:{_os.ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
             "REMOVE n.compact", org_id=org)
@@ -279,7 +279,7 @@ class TestRepair:
         its status is not (the org is genuinely complete)."""
         org = _new_org()
         sdk, proj = _seed(org, compact=True)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         res = _os.repair_false_decide_completion(proj, org, apply=True)
         assert res["action"] == "repaired"
         assert res["edge_removed"] is True
@@ -296,7 +296,7 @@ class TestRepair:
         sdk, proj = _seed(org, fork="build", steps=(
             "team-named", "harness-connected", "first-points-filed",
             "catalog-presented", "decide-completed"))
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         res = _os.repair_false_decide_completion(proj, org, apply=True)
         assert res["still_complete_without_the_edge"] is True
         assert res["status_regressed"] is False
@@ -308,7 +308,7 @@ class TestRepair:
         AGENT step edges + legacy jsonb true. Unknown jsonb is fail-closed."""
         org = _new_org()
         sdk, proj = _seed(org, steps=("team-named", "decide-completed"))
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         res = _os.repair_false_decide_completion(proj, org, apply=True)
         assert res["still_complete_without_the_edge"] is True
         assert res["status_regressed"] is False
@@ -318,7 +318,7 @@ class TestRepair:
     def test_known_non_grandfathered_org_is_regressed(self):
         org = _new_org()
         sdk, proj = _seed(org, steps=("team-named", "decide-completed"))
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         res = _os.repair_false_decide_completion(
             proj, org, apply=True, legacy_complete=False)
         assert res["status_regressed"] is True
@@ -338,7 +338,7 @@ class TestHalfRepairIsRetrySafe:
     def test_half_repaired_state_is_still_reported_false(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         self._half_repair(org, proj)
         finding = _os.find_false_decide_completion(proj, org)
         assert finding["verdict"] == "false", (
@@ -350,7 +350,7 @@ class TestHalfRepairIsRetrySafe:
     def test_rerunning_a_half_repair_finishes_it(self):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         self._half_repair(org, proj)
         res = _os.repair_false_decide_completion(proj, org, apply=True)
         assert res["action"] == "repaired"
@@ -367,7 +367,7 @@ class TestHalfRepairIsRetrySafe:
         hostile delete is still caught.)"""
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         proj.query(
             f"MATCH (n:{_os.ONBOARDING_NODE_LABEL} {{org_id: $org_id}})"
             f"-[e:{_os.COMPLETED_STEP_EDGE}]->"
@@ -387,7 +387,7 @@ class TestHalfRepairIsRetrySafe:
         asserting the end state would pass with either order."""
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
 
         class _DeleteBoom:
             """Proxy that blows up on the DELETE, after the stamp."""
@@ -419,7 +419,7 @@ class TestHalfRepairIsRetrySafe:
         orphan node; the retry must clean it up."""
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         _os.remove_decide_completed_edge(proj, org, reason="r")
         _os.ensure_onboarding_state_node(proj, org)
         # recreate the orphan deterministically
@@ -448,7 +448,7 @@ class TestHalfRepairIsRetrySafe:
         the guard must not keep reporting it as a repair target forever."""
         org = _new_org()
         sdk, proj = _seed(org, steps=("team-named", "decide-completed"))
-        sdk.create_point("statement", "no decision")
+        sdk._create_point("statement", "no decision")
         res = _os.repair_false_decide_completion(proj, org, apply=True)
         assert res["still_complete_without_the_edge"] is True
         assert res["status_regressed"] is False
@@ -466,7 +466,7 @@ class TestTrueCompletionUntouched:
     def test_true_completion_is_never_repaired(self, evidence_kind):
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point(evidence_kind, "evidence of a real decision")
+        sdk._create_point(evidence_kind, "evidence of a real decision")
         res = _os.repair_false_decide_completion(proj, org, apply=True)
         assert res["action"] == "skipped-true", res
         assert "decide-completed" in _os.completed_steps(proj, org)
@@ -479,8 +479,8 @@ class TestTrueCompletionUntouched:
         """The #3916 shape — a real `tortoise-decide` run — is NOT repaired."""
         org = _new_org()
         sdk, proj = _seed(org)
-        sdk.create_point("option", "Option A")
-        sdk.create_point("criterion", "adoption cost")
+        sdk._create_point("option", "Option A")
+        sdk._create_point("criterion", "adoption cost")
         res = _os.repair_false_decide_completion(proj, org, apply=True)
         assert res["action"] == "skipped-true"
         assert "decide-completed" in _os.completed_steps(proj, org)

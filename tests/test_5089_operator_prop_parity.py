@@ -125,11 +125,11 @@ def sdk_and_events(tmp_path):
 
 def _sdk_operator(sdk):
     """An operator created by the SDK door: no content, status 'live' (#5089)."""
-    src = sdk.create_point("statement", "T0 source", status="live",
+    src = sdk._create_point("statement", "T0 source", status="live",
                            dedup=False)["id"]
-    claim = sdk.create_point("statement", "downstream claim", status="live",
+    claim = sdk._create_point("statement", "downstream claim", status="live",
                              dedup=False)["id"]
-    return sdk.create_operator("IMPL", src, [claim])["id"]
+    return sdk._create_operator("IMPL", src, [claim])["id"]
 
 
 def _eventapi_operator(sdk, events):
@@ -203,11 +203,11 @@ def test_non_operator_points_keep_the_status_chain(sdk_and_events):
     # power — a no-status point lands 'live', which is ALSO the replay writer's
     # own `coalesce($st, n.status, 'live')` fallback, so only an EXPLICIT draft
     # can catch that fallback silently promoting a point on replay.
-    pid = sdk.create_point("statement", "no status arg", dedup=False)["id"]
+    pid = sdk._create_point("statement", "no status arg", dedup=False)["id"]
     assert _props(sdk, pid).get("status") == "live", (
         "#1088: a point created with no explicit status lands live")
 
-    draft = sdk.create_point("statement", "explicit draft", status="draft",
+    draft = sdk._create_point("statement", "explicit draft", status="draft",
                              dedup=False)["id"]
     assert _props(sdk, draft).get("status") == "draft"
 

@@ -23,7 +23,7 @@ class TestAlarm:
             f.sdk._mark_dirty([f.regions[0].claims[0]])
             f.sdk._dream_metrics["last_pass_at"] = "2026-08-14T00:00:00Z"
             f.sdk._dream_metrics["last_pass_output"] = 0
-            h = f.sdk.dream_health_check()
+            h = f.sdk._dream_health_check()
             assert h["alarm_verdict"] is True
             assert h["alarm_reason"] == "zero_output_with_backlog"
             assert h["stale_backlog"] > 0
@@ -38,9 +38,9 @@ class TestAlarm:
         try:
             f.sdk._mark_dirty([f.regions[0].claims[0]])
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="local")
+            r = f.sdk._dream(mode="local")
             assert r["converged"] is True
-            h = f.sdk.dream_health_check()
+            h = f.sdk._dream_health_check()
             assert h["alarm_verdict"] is False, (
                 "real output must suppress the zero-output alarm")
             assert h["last_pass_output"] > 0
@@ -61,7 +61,7 @@ class TestAlarm:
                 "MATCH (n:Point) SET n.ep_dirty = null, n.ep_dirty_at = null")
             f.sdk._dream_metrics["last_pass_output"] = 0
             f.sdk._dream_metrics["last_pass_at"] = None
-            h = f.sdk.dream_health_check()
+            h = f.sdk._dream_health_check()
             assert h["alarm_verdict"] is False
             assert h["stale_backlog"] == 0
         finally:
@@ -74,10 +74,10 @@ class TestHealthRecord:
         f = f2_staleness_regions()
         try:
             random.seed(FIXED_SEED)
-            f.sdk.dream(mode="full")
+            f.sdk._dream(mode="full")
             random.seed(FIXED_SEED)
-            f.sdk.dream(mode="stale-first", budget=2)
-            h = f.sdk.dream_health_check()
+            f.sdk._dream(mode="stale-first", budget=2)
+            h = f.sdk._dream_health_check()
             assert h["per_mode_counts"].get("full", 0) >= 1
             assert h["per_mode_counts"].get("stale-first", 0) >= 1
             assert 0.0 <= h["coverage_pct"] <= 1.0
@@ -94,9 +94,9 @@ class TestHealthRecord:
         f = f3_nonconvergent()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="local")
+            r = f.sdk._dream(mode="local")
             assert r["converged"] is False
-            h = f.sdk.dream_health_check()
+            h = f.sdk._dream_health_check()
             assert h["failure_rate"] > 0.0
         finally:
             f.sdk.close()

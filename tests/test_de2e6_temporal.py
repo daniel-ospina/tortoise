@@ -119,7 +119,7 @@ class TestDe2e6:
         assert _nand_between(sdk, d2[0], d1[0]) >= 1, (
             "D1/D2 must be linked by a draft-to-draft NAND"
         )
-        timeline = sdk.belief_timeline("port 16379")
+        timeline = sdk._belief_timeline("port 16379")
         assert len(timeline) >= 2
         vfs = [t["validFrom"] for t in timeline]
         assert vfs == sorted(vfs), f"timeline must be validFrom-ordered: {vfs}"
@@ -133,7 +133,7 @@ class TestDe2e6:
         r1 = _mine(sdk, D1_TX, "s-v-d1", T1, str(tmp_path))  # noqa: F841
         pts = _decision_points(sdk)
         d1 = [p for p in pts if p[1].startswith("We decided to use port")][0]  # noqa: RUF015
-        sdk.promote_point(d1[0])
+        sdk._promote_point(d1[0])
         r2 = _mine(sdk, D2_TX, "s-v-d2", T2, str(tmp_path))
         assert r2["temporal_wired"] == 0, r2
         assert r2["temporal_candidates"] >= 1, r2
@@ -147,12 +147,12 @@ class TestDe2e6:
         )
         approved = sdk.approve_merge(cands[0]["id"], action="merge")
         assert approved["deferred_to_promotion"] is True
-        promoted = sdk.promote_point(d2[0])
+        promoted = sdk._promote_point(d2[0])
         assert promoted["temporal_wired"] is True, promoted
         assert _nand_between(sdk, d2[0], d1[0]) == 1
-        assert sdk.get_point(d1[0])["status"] == "live"
-        assert sdk.get_point(d2[0])["status"] == "live"
-        timeline = sdk.belief_timeline("port 16379")
+        assert sdk._get_point(d1[0])["status"] == "live"
+        assert sdk._get_point(d2[0])["status"] == "live"
+        timeline = sdk._belief_timeline("port 16379")
         assert len(timeline) >= 2
 
     def test_explicit_replacement_supersedes(self, sdk, tmp_path):
@@ -161,7 +161,7 @@ class TestDe2e6:
         r1 = _mine(sdk, D1_TX, "s-r-d1", T1, str(tmp_path))  # noqa: F841
         d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
-        sdk.promote_point(d1[0])
+        sdk._promote_point(d1[0])
         r3 = _mine(sdk, D3_TX, "s-r-d3", T3, str(tmp_path))
         assert r3["temporal_replacements"] >= 1, r3
         cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
@@ -170,7 +170,7 @@ class TestDe2e6:
         sdk.approve_merge(repl[0]["id"], action="merge")
         d3 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to supersede")][0]
-        promoted = sdk.promote_point(d3[0])
+        promoted = sdk._promote_point(d3[0])
         assert promoted["superseded"] is True, promoted
         after = {p[1]: p for p in _decision_points(sdk)}
         assert after[d1[1]][4] is True or after[d1[1]][4] == "true", (
@@ -281,7 +281,7 @@ class TestDe2e6:
         """
         _mine(sdk, D1_TX, "s-o-d1", None, str(tmp_path))   # undated ⇒ NULL
         _mine(sdk, D2_TX, "s-o-d2", T2, str(tmp_path))     # dated T2
-        full = sdk.belief_timeline("port 16379")
+        full = sdk._belief_timeline("port 16379")
         assert len(full) >= 2, full
         assert full[0]["validFrom"] is None, (
             f"undated (open start) must sort first: {full}"
@@ -298,7 +298,7 @@ class TestDe2e6:
         r1 = _mine(sdk, D1_TX, "s-p-d1", T1, str(tmp_path))  # noqa: F841
         d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
-        sdk.promote_point(d1[0])
+        sdk._promote_point(d1[0])
         _mine(sdk, D2_TX, "s-p-d2", T2, str(tmp_path))
         cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
         rows = sdk._get_proj().g.query(
@@ -319,7 +319,7 @@ class TestDe2e6ReviewFixes:
         r1 = _mine(sdk, D1_TX, "s-f-r1", T1, str(tmp_path))  # noqa: F841
         d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
-        sdk.promote_point(d1[0])
+        sdk._promote_point(d1[0])
         r3 = _mine(sdk,
                    "Alice: We decided to replace the port 16379 decision with port 16390.\n",
                    "s-f-r3", T3, str(tmp_path))
@@ -371,7 +371,7 @@ class TestDe2e6ReviewFixes:
         """P2: unquoted YAML date (datetime.date) must not crash the pass —
         validFrom normalized to ISO."""
         from tortoise.sdk import TortoiseSDK  # noqa: F401
-        d1 = sdk.create_point("decision", "We decided to use port 16379.",  # noqa: F841
+        d1 = sdk._create_point("decision", "We decided to use port 16379.",  # noqa: F841
                               status="live")
         corpus = tmp_path / "corpus-y"
         corpus.mkdir()
@@ -393,7 +393,7 @@ class TestDe2e6ReviewFixes:
         r1 = _mine(sdk, D1_TX, "s-i-d1", T1, str(tmp_path))  # noqa: F841
         d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
-        sdk.promote_point(d1[0])
+        sdk._promote_point(d1[0])
         _mine(sdk, D2_TX, "s-i-d2", T2, str(tmp_path))
         cand = sdk.review_link_candidates("dedup", candidate_type="temporal")[0]
         sdk.approve_merge(cand["id"], action="merge")
@@ -408,15 +408,15 @@ class TestDe2e6ReviewFixes:
         r1 = _mine(sdk, D1_TX, "s-t-d1", T1, str(tmp_path))  # noqa: F841
         d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
-        sdk.promote_point(d1[0])
+        sdk._promote_point(d1[0])
         r3 = _mine(sdk, D3_TX, "s-t-d3", T3, str(tmp_path))  # noqa: F841
         cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
         repl = [c for c in cands if c["replacement"]][0]  # noqa: RUF015
         sdk.approve_merge(repl["id"], action="merge")
         d3 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to supersede")][0]
-        sdk.promote_point(d3[0])
-        timeline = sdk.belief_timeline("port 16379")
+        sdk._promote_point(d3[0])
+        timeline = sdk._belief_timeline("port 16379")
         assert len(timeline) >= 2, f"superseded prior must remain visible: {timeline}"
         corr = [t for t in timeline if t["linked_by"] == "CORRECTS"]
         assert corr, f"timeline must show the CORRECTS link: {timeline}"
@@ -445,18 +445,18 @@ class TestDe2e6ReviewFixes:
         _seed_topic(sdk, topic)
         prior = _seed_decision(sdk, topic, "old belief", T1)
         _seed_decision(sdk, topic, "newest belief", T3)
-        current = sdk.create_point("decision", "current belief",
+        current = sdk._create_point("decision", "current belief",
                                    status="live")
         _set_valid_from(sdk, current["id"], T2)
         # supersede_point wires (current)-[:CORRECTS]->(prior) and transfers
         # the aboutObject edge, so the prior is only in the timeline via the
         # CORRECTS re-attachment.
-        sdk.supersede_point(prior, current["id"])
+        sdk._supersede_point(prior, current["id"])
 
-        one = sdk.belief_timeline(topic, limit=1)
+        one = sdk._belief_timeline(topic, limit=1)
         assert [e["content"] for e in one] == ["newest belief"], one
 
-        two = sdk.belief_timeline(topic, limit=2)
+        two = sdk._belief_timeline(topic, limit=2)
         assert [e["content"] for e in two] == [
             "current belief", "newest belief"], two
 
@@ -491,7 +491,7 @@ class TestBeliefTimelineLimitWindow:
         """limit=1 must be the CURRENT belief — never the oldest dated row,
         and never the undated (open-start) row."""
         self._seed_chain(sdk)
-        one = sdk.belief_timeline(self.TOPIC, limit=1)
+        one = sdk._belief_timeline(self.TOPIC, limit=1)
         assert [e["content"] for e in one] == ["T2 belief"], one
         assert one[0]["validFrom"] == T3, one
 
@@ -499,10 +499,10 @@ class TestBeliefTimelineLimitWindow:
         """With more entries than the limit, the window is the NEWEST N —
         the newest is never dropped (the defect dropped T2 at limit=2)."""
         self._seed_chain(sdk)
-        two = sdk.belief_timeline(self.TOPIC, limit=2)
+        two = sdk._belief_timeline(self.TOPIC, limit=2)
         assert [e["content"] for e in two] == [
             "T1 belief", "T2 belief"], two
-        three = sdk.belief_timeline(self.TOPIC, limit=3)
+        three = sdk._belief_timeline(self.TOPIC, limit=3)
         assert [e["content"] for e in three] == [
             "T0 belief", "T1 belief", "T2 belief"], three
 
@@ -510,7 +510,7 @@ class TestBeliefTimelineLimitWindow:
         """A window wide enough to hold everything still classifies the
         undated row as the OLDEST (first) and the newest dated row last."""
         self._seed_chain(sdk)
-        full = sdk.belief_timeline(self.TOPIC, limit=50)
+        full = sdk._belief_timeline(self.TOPIC, limit=50)
         assert [e["content"] for e in full] == [
             "undated belief", "T0 belief", "T1 belief", "T2 belief"], full
         vfs = [e["validFrom"] for e in full if e["validFrom"] is not None]

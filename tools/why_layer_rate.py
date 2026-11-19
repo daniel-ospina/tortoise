@@ -224,14 +224,14 @@ def seed(sdk, questions: list[dict]) -> dict[str, dict]:
     """
     planted: dict[str, dict] = {}
     for q in questions:
-        claim = sdk.create_point("statement", q["claim"])
-        support = sdk.create_point("evidence", q["support"])
-        op = sdk.create_operator(
+        claim = sdk._create_point("statement", q["claim"])
+        support = sdk._create_point("evidence", q["support"])
+        op = sdk._create_operator(
             q["operator_type"], support["id"], [claim["id"]],
             label=q.get("operator_label"),
         )
         if q.get("mitigation"):
-            sdk.mitigate_operator(op["id"], q["mitigation"])
+            sdk._mitigate_operator(op["id"], q["mitigation"])
         planted[q["question_id"]] = {
             "claim": claim["id"],
             "support": support["id"],
@@ -248,7 +248,7 @@ def _support_entry(sdk, claim_id: str, support_id: str, token: str) -> dict | No
     # #12297: ``limit=25`` < the rerank's pool width, so with the gate armed
     # the rerank re-picks which rows survive the cut and this membership lookup
     # would return the documented FAIL shape for a healthy graph. Opt out.
-    hits = sdk.tortoise_fts_query(token, limit=25, _rerank_candidates=False)
+    hits = sdk._tortoise_fts_query(token, limit=25, _rerank_candidates=False)
     item = next((h for h in hits if h.get("id") == claim_id), None)
     if item is None:
         return None

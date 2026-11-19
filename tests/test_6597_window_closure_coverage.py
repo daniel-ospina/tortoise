@@ -46,14 +46,14 @@ def _fresh_sdk():
 
 def _claim(sdk: TortoiseSDK, content: str) -> str:
     # #992/#943: EP tests model live claims (create_point defaults to draft).
-    return sdk.create_point("statement", content, dedup=False,
+    return sdk._create_point("statement", content, dedup=False,
                             status="live")["id"]
 
 
 def _chain(sdk: TortoiseSDK, length: int) -> list[str]:
     ids = [_claim(sdk, f"c{i}") for i in range(length)]
     for i in range(length - 1):
-        sdk.create_direct_edge("IMPL", ids[i], ids[i + 1])
+        sdk._create_direct_edge("IMPL", ids[i], ids[i + 1])
     return ids
 
 
@@ -80,7 +80,7 @@ def test_coverage_never_exceeds_one_on_long_direct_chains(length, max_hops):
     with _fresh_sdk() as sdk:
         ids = _chain(sdk, length)
         _pin_single_root(sdk, ids[0])
-        result = sdk.dream(mode="local", require_calibration=False,
+        result = sdk._dream(mode="local", require_calibration=False,
                            max_hops=max_hops)
         assert 0.0 <= result["coverage"] <= 1.0, (
             f"coverage={result['coverage']} on a {length}-claim chain "
@@ -119,9 +119,9 @@ def test_terminal_bridge_is_not_counted_in_closure():
         a = _claim(sdk, "a")
         b = _claim(sdk, "b")
         c = _claim(sdk, "c")
-        sdk.create_direct_edge("IMPL", a, b)
-        sdk.create_direct_edge("IMPL", b, c)
-        sdk.retract_point(c)
+        sdk._create_direct_edge("IMPL", a, b)
+        sdk._create_direct_edge("IMPL", b, c)
+        sdk._retract_point(c)
         reachable = sdk._window_closure([a], 2)
         assert c not in reachable
         assert b in reachable
@@ -133,10 +133,10 @@ def test_operator_window_closure_covers_affected():
     with _fresh_sdk() as sdk:
         src = _claim(sdk, "src")
         tgt = _claim(sdk, "tgt")
-        sdk.set_point_baseline(src, 10, 1)
-        sdk.set_point_baseline(tgt, 1, 1)
-        op = sdk.create_operator("IMPL", src, [tgt])
-        mit = sdk.mitigate_operator(op["id"], "caveat", strength=0.3)
+        sdk._set_point_baseline(src, 10, 1)
+        sdk._set_point_baseline(tgt, 1, 1)
+        op = sdk._create_operator("IMPL", src, [tgt])
+        mit = sdk._mitigate_operator(op["id"], "caveat", strength=0.3)
         window = [mit["id"], op["id"]]
         affected = sdk._get_ep()._affected_claims(window, 2)
         reachable = sdk._window_closure(window, 2)
@@ -151,7 +151,7 @@ def test_stale_first_coverage_is_bounded():
     with _fresh_sdk() as sdk:
         _chain(sdk, 6)
         # Drain the write-triggered dirty roots so the scheduler selects.
-        sdk.dream(mode="local", require_calibration=False)
-        result = sdk.dream(mode="stale-first", require_calibration=False,
+        sdk._dream(mode="local", require_calibration=False)
+        result = sdk._dream(mode="stale-first", require_calibration=False,
                            budget=2)
         assert 0.0 <= result["coverage"] <= 1.0

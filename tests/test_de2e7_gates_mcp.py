@@ -128,7 +128,7 @@ class TestDe2e7:
         # Raising SDK method → {error: message} (sanitized, no crash).
         def boom(*a, **k):
             raise RuntimeError("synthetic sdk failure")
-        monkeypatch.setattr(sdk, "belief_timeline", boom)
+        monkeypatch.setattr(sdk, "_belief_timeline", boom)
         res4 = mcp.tortoise_belief_timeline("port 16379")
         assert isinstance(res4, dict) and "error" in res4, res4
         assert "synthetic" in res4["error"]

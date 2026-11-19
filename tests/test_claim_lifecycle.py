@@ -46,37 +46,37 @@ def test_transition_guards_live_to_draft(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
     # Draft is explicit since #1088 (a no-status create is LIVE) — the guard
     # under test is the draft→live promote, so start from a real draft.
-    p = sdk.create_point("statement", "guarded", status="draft")
+    p = sdk._create_point("statement", "guarded", status="draft")
     assert p["status"] == "draft"
-    sdk.update_point(p["id"], status="live")  # draft→live promote still allowed
+    sdk._update_point(p["id"], status="live")  # draft→live promote still allowed
     with pytest.raises(ValueError, match="live"):
-        sdk.update_point(p["id"], status="draft")  # any non-promote status rejected
+        sdk._update_point(p["id"], status="draft")  # any non-promote status rejected
 
 
 def test_update_point_rejects_status_changes_except_promote(sdk_factory, tmp_path):
     # plan-review P1: update_point is non-status except draft→live promote
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "status-guard")
+    p = sdk._create_point("statement", "status-guard")
     for bad in ("retracted", "superseded", "outdated", "archived"):
         with pytest.raises(ValueError, match="retract_point|supersede_point"):  # noqa: RUF043
-            sdk.update_point(p["id"], status=bad)
+            sdk._update_point(p["id"], status=bad)
 
 
 def test_retract_tombstone_status(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "tombstone-me")
-    r = sdk.retract_point(p["id"])
+    p = sdk._create_point("statement", "tombstone-me")
+    r = sdk._retract_point(p["id"])
     assert r["status"] == "retracted"
 
 
 def test_retracted_is_terminal(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "terminal")
-    sdk.retract_point(p["id"])
+    p = sdk._create_point("statement", "terminal")
+    sdk._retract_point(p["id"])
     with pytest.raises(ValueError):
-        sdk.retract_point(p["id"])  # already retracted
+        sdk._retract_point(p["id"])  # already retracted
     with pytest.raises(ValueError):
-        sdk.update_point(p["id"], status="live")  # terminal → no promote
+        sdk._update_point(p["id"], status="live")  # terminal → no promote
 
 
 def test_retract_archived_is_terminal(sdk_factory, tmp_path):
@@ -86,30 +86,30 @@ def test_retract_archived_is_terminal(sdk_factory, tmp_path):
     # carry was deleted in v3.37) — so seed a stored `archived` row via the graph
     # directly to exercise the guard on the row a pre-#11824 writer left behind.
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "archived")
+    p = sdk._create_point("statement", "archived")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status='archived'", params={"id": p["id"]})
     with pytest.raises(ValueError, match="already"):
-        sdk.retract_point(p["id"])
+        sdk._retract_point(p["id"])
 
 
 def test_retract_point_missing_and_operator_guards(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
     with pytest.raises(ValueError, match="No point"):
-        sdk.retract_point("does-not-exist")
-    s = sdk.create_point("statement", "src")
-    t = sdk.create_point("statement", "tgt")
-    op = sdk.create_operator("IMPL", s["id"], [t["id"]])
+        sdk._retract_point("does-not-exist")
+    s = sdk._create_point("statement", "src")
+    t = sdk._create_point("statement", "tgt")
+    op = sdk._create_operator("IMPL", s["id"], [t["id"]])
     with pytest.raises(ValueError, match="operator"):
-        sdk.retract_point(op["id"])  # operators are not retractable
+        sdk._retract_point(op["id"])  # operators are not retractable
 
 
 def test_supersede_sets_status_and_keeps_flag(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    old = sdk.create_point("statement", "old")
-    new = sdk.create_point("statement", "new")
-    sdk.supersede_point(old["id"], new["id"])
-    got = sdk.get_point(old["id"])
+    old = sdk._create_point("statement", "old")
+    new = sdk._create_point("statement", "new")
+    sdk._supersede_point(old["id"], new["id"])
+    got = sdk._get_point(old["id"])
     assert got["status"] == "superseded"
     assert got.get("outdated") is True
 
@@ -120,21 +120,21 @@ def test_query_excludes_retracted_by_default(sdk_factory, tmp_path):
     # #432 Task 2: query() omits retracted points by default; the
     # include_retracted flag surfaces them (tombstone contract).
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "gone")
-    sdk.retract_point(p["id"])
-    assert p["id"] not in [q["id"] for q in sdk.query()]
-    assert p["id"] in [q["id"] for q in sdk.query(include_retracted=True)]
+    p = sdk._create_point("statement", "gone")
+    sdk._retract_point(p["id"])
+    assert p["id"] not in [q["id"] for q in sdk._query()]
+    assert p["id"] in [q["id"] for q in sdk._query(include_retracted=True)]
 
 
 def test_paginated_query_excludes_retracted_by_default(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    live = sdk.create_point("statement", "stay")
-    gone = sdk.create_point("statement", "gone")
-    sdk.retract_point(gone["id"])
-    page = sdk.paginated_query(kind="statement")
+    live = sdk._create_point("statement", "stay")
+    gone = sdk._create_point("statement", "gone")
+    sdk._retract_point(gone["id"])
+    page = sdk._paginated_query(kind="statement")
     assert [r["id"] for r in page["results"]] == [live["id"]]
     assert page["total"] == 1
-    page_all = sdk.paginated_query(kind="statement", include_retracted=True)
+    page_all = sdk._paginated_query(kind="statement", include_retracted=True)
     assert {r["id"] for r in page_all["results"]} == {live["id"], gone["id"]}
     assert page_all["total"] == 2
 
@@ -143,20 +143,20 @@ def test_query_explicit_retracted_status_filter(sdk_factory, tmp_path):
     # tombstone contract: an explicit status='retracted' filter is the
     # queryable-with-filter path (no include_retracted needed).
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "gone")
-    sdk.retract_point(p["id"])
-    hits = sdk.query(status="retracted")
+    p = sdk._create_point("statement", "gone")
+    sdk._retract_point(p["id"])
+    hits = sdk._query(status="retracted")
     assert [q["id"] for q in hits] == [p["id"]]
-    assert p["id"] not in [q["id"] for q in sdk.query(status="live")]
+    assert p["id"] not in [q["id"] for q in sdk._query(status="live")]
 
 
 def test_retracted_point_retrievable_by_id(sdk_factory, tmp_path):
     # tombstone contract: get_point on a retracted point returns it with
     # status='retracted' (not {} / 404).
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "gone")
-    sdk.retract_point(p["id"])
-    got = sdk.get_point(p["id"])
+    p = sdk._create_point("statement", "gone")
+    sdk._retract_point(p["id"])
+    got = sdk._get_point(p["id"])
     assert got["id"] == p["id"]
     assert got["status"] == "retracted"
 
@@ -170,19 +170,19 @@ def test_code_writes_only_valid_statuses(sdk_factory, tmp_path):
 
     # create_point: no-status is LIVE since #1088; an explicit draft is
     # honoured and never auto-promoted (see the p3 update below)
-    p = sdk.create_point("statement", "parity-1")
+    p = sdk._create_point("statement", "parity-1")
     assert p["status"] in POINT_STATUS_VALUES
 
     # create_operator: promotes a NEVER-SET source to live. Since #1088
     # create_point always sets a status, so this pins the resulting value —
     # the never-set promotion path is only reachable from legacy graphs.
-    p2 = sdk.create_point("statement", "parity-2")
-    op = sdk.create_operator("IMPL", p2["id"], [p["id"]])  # noqa: F841
-    assert sdk.get_point(p2["id"])["status"] == "live"
+    p2 = sdk._create_point("statement", "parity-2")
+    op = sdk._create_operator("IMPL", p2["id"], [p["id"]])  # noqa: F841
+    assert sdk._get_point(p2["id"])["status"] == "live"
     assert "live" in POINT_STATUS_VALUES
 
     # retract_point: sets the LEGACY word `retracted`
-    r = sdk.retract_point(p["id"])
+    r = sdk._retract_point(p["id"])
     # ⚠️ #11824 S0 states a RESIDUAL here rather than work around it: the verb
     # still writes `retracted` through its own CAS, while the write DOOR's
     # vocabulary is the four words. Migrating the verb to `deprecated` is plan
@@ -195,16 +195,16 @@ def test_code_writes_only_valid_statuses(sdk_factory, tmp_path):
     assert is_terminal_status("retracted")
 
     # supersede_point: sets superseded
-    old = sdk.create_point("statement", "old-parity")
-    new = sdk.create_point("statement", "new-parity")
-    sdk.supersede_point(old["id"], new["id"])
-    assert sdk.get_point(old["id"])["status"] == "superseded"
+    old = sdk._create_point("statement", "old-parity")
+    new = sdk._create_point("statement", "new-parity")
+    sdk._supersede_point(old["id"], new["id"])
+    assert sdk._get_point(old["id"])["status"] == "superseded"
     assert "superseded" in POINT_STATUS_VALUES
 
     # update_point: can promote draft→live (status='live' set)
-    p3 = sdk.create_point("statement", "parity-3", status="draft")
-    sdk.update_point(p3["id"], status="live")
-    assert sdk.get_point(p3["id"])["status"] == "live"
+    p3 = sdk._create_point("statement", "parity-3", status="draft")
+    sdk._update_point(p3["id"], status="live")
+    assert sdk._get_point(p3["id"])["status"] == "live"
 
 
 def test_all_documented_transitions_allowed(sdk_factory, tmp_path):

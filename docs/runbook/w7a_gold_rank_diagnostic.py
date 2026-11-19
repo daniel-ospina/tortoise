@@ -73,7 +73,7 @@ def measure(q: dict, *, embed: bool) -> dict:
             "MATCH (p:Point) WHERE p.embedding IS NOT NULL "
             "RETURN count(p)").result_set[0][0]
         leg_trace: list[dict] = []
-        hits = sdk.tortoise_fts_query(
+        hits = sdk._tortoise_fts_query(
             q["question"], limit=LIMIT, pool_size=LEG_DEPTH,
             include_terminal=True, leg_trace=leg_trace,
             keep_numeric=True, search_keys_prf=True,

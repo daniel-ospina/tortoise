@@ -63,9 +63,9 @@ def test_operator_dedup_exact_hit_with_event_input(s1919):
     target was invisible to the target collection → size mismatch → exact
     miss (degraded to partial-absorb or a fresh duplicate operator)."""
     events, sdk = s1919  # noqa: RUF059
-    pa = sdk.create_point("statement", "A")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
-    op = sdk.create_operator("IMPL", pa, [eid])["id"]
+    pa = sdk._create_point("statement", "A")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
+    op = sdk._create_operator("IMPL", pa, [eid])["id"]
     g = sdk._get_proj().g
     # the operator's input set includes the Event (typed edge to the Event)
     assert _count(g, "MATCH (o:Point {id:$p})-[r:IMPL]->(t) RETURN count(r)",
@@ -90,11 +90,11 @@ def test_operator_dedup_event_input_partial_absorb_path(s1919):
     (silent drop from the absorb key). Post-fix the full set surfaces in
     `written`."""
     events, sdk = s1919  # noqa: RUF059
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     # draft operator with an EVENT input (written set {pa, eid})
-    op = sdk.create_operator("IMPL", pa, [eid], promote_source=False)["id"]
+    op = sdk._create_operator("IMPL", pa, [eid], promote_source=False)["id"]
     g = sdk._get_proj().g
     # request the set {pa, eid, B}: the operator's written set {pa, eid}
     # is a proper subset → partial-absorb, with the EVENT id in `written`
@@ -117,11 +117,11 @@ def test_operator_replay_with_event_input_creates_edges(s1919):
     _emit_event is needed — pre-#2061 this test supplied the missing
     journal line by hand."""
     events, sdk = s1919
-    pa = sdk.create_point("statement", "A")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     # create_event journals the EventRecorded automatically (#2061); then
     # the operator (journals OperatorAdded with the Event input).
-    op = sdk.create_operator("IMPL", pa, [eid])["id"]
+    op = sdk._create_operator("IMPL", pa, [eid])["id"]
     g = sdk._get_proj().g
     _rebuild(sdk, events)
     # both endpoints survive the replay: typed edge to Point AND to Event
@@ -150,11 +150,11 @@ def test_operator_live_vs_replay_edge_stats_equal(s1919):
     input_edges=0 while the replay produced one INPUT edge per input
     (fold-parity violation)."""
     events, sdk = s1919
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
-    pc = sdk.create_point("statement", "C")["id"]
-    sdk.create_operator("IMPL", pa, [pb])
-    sdk.create_operator("NAND", pa, [pc], direction="unidirectional")
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
+    pc = sdk._create_point("statement", "C")["id"]
+    sdk._create_operator("IMPL", pa, [pb])
+    sdk._create_operator("NAND", pa, [pc], direction="unidirectional")
     proj = sdk._get_proj()
     live = proj.edge_stats()
     # the fix: live creates the reverse INPUT edges (one per input)
@@ -172,9 +172,9 @@ def test_operator_live_input_edge_shape_matches_replay(s1919):
     """P2-10 shape leg: the live INPUT edges carry the same (idx) property the
     replay MERGE writes — (s)-[:INPUT {idx}]->(o) per input, in input order."""
     events, sdk = s1919
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
-    op = sdk.create_operator("IMPL", pa, [pb])["id"]
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
+    op = sdk._create_operator("IMPL", pa, [pb])["id"]
     g = sdk._get_proj().g
     live_shape = sorted(tuple(r) for r in g.query(
         "MATCH (s)-[r:INPUT]->(o:Point {id:$oid}) "
@@ -203,7 +203,7 @@ def test_create_event_journals_event_recorded(s1919):
     _create_entity → proj.apply only (no _emit_event), so the JSONL carried
     no record of the Event and rebuild_all could not restore it."""
     events, sdk = s1919
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     journal = _read_journal(events)
     recs = [ev for ev in journal if ev.get("type") == "EventRecorded"]
     assert len(recs) == 1, f"expected exactly one EventRecorded, got {recs}"
@@ -257,13 +257,13 @@ def test_create_event_without_log_path_is_noop_safe(s1919, tmp_path):
     db = os.path.join(str(tmp_path), "i2061-nolog.db")
     bare = TortoiseSDK(db)  # no event_log_path
     try:
-        eid = bare.create_event("Launch party", "sessionCaptured")["eventId"]
+        eid = bare._create_event("Launch party", "sessionCaptured")["eventId"]
         g = bare._get_proj().g
         assert _count(g, "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
                       params={"eid": eid}) == 1
         # live Event-input operator still works without a journal
-        pa = bare.create_point("statement", "A")["id"]
-        op = bare.create_operator("IMPL", pa, [eid])["id"]
+        pa = bare._create_point("statement", "A")["id"]
+        op = bare._create_operator("IMPL", pa, [eid])["id"]
         assert _count(g, "MATCH (o:Point {id:$p})-[r:IMPL]->(t:Event) RETURN count(r)",
                       params={"p": op}) == 1
     finally:
@@ -279,12 +279,12 @@ def test_operator_event_input_replay_edge_stats_parity(s1919):
     not resolve to an existing Point or Event — INPUT edge skipped" and the
     rebuilt graph diverged from live."""
     events, sdk = s1919
-    pa = sdk.create_point("statement", "A")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
-    eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
+    pa = sdk._create_point("statement", "A")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
+    eid = sdk._create_event("Launch party", "sessionCaptured")["eventId"]
     # two operators: one pure-Point, one with an Event input
-    sdk.create_operator("IMPL", pa, [pb])
-    sdk.create_operator("IMPL", pa, [eid])
+    sdk._create_operator("IMPL", pa, [pb])
+    sdk._create_operator("IMPL", pa, [eid])
     proj = sdk._get_proj()
     g = proj.g
     # live: the Event endpoint resolves — typed edge + reverse INPUT edge

@@ -117,7 +117,7 @@ def _wire(sdk: TortoiseSDK, query: str, *, want: set[str],
     """
     hits: list[dict] = []
     for _ in range(attempts):
-        hits = sdk.tortoise_fts_query(query, limit=40,
+        hits = sdk._tortoise_fts_query(query, limit=40,
                                       include_terminal=True)
         if want <= {str(h.get("id")) for h in hits}:
             return hits
@@ -279,9 +279,9 @@ def test_dateless_fixture_session_records_no_recorded_time(tmp_path):
             "MATCH (t:Point) RETURN t.createdAt").result_set
         assert turns and all(r[0] is None for r in turns), turns
 
-        hits = sdk.tortoise_fts_query("gym schedule", limit=40,
+        hits = sdk._tortoise_fts_query("gym schedule", limit=40,
                                       include_terminal=True)
-        ann = sdk.annotate_ask_hits(hits)
+        ann = sdk._annotate_ask_hits(hits)
         assert ann, "fixture must retrieve"
         assert all(not h.get("session_date") for h in ann), ann
         from tortoise.retrieval import render_context

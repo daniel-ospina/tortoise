@@ -961,7 +961,7 @@ def invalidate(
 
     stamp = at or invalidation.effective_at or _now()
     try:
-        sdk.retract_point(judgement_id, valid_to=stamp)
+        sdk._retract_point(judgement_id, valid_to=stamp)
     except Exception as exc:
         # ⛔ READ THE GRAPH, NOT THE EXCEPTION CLASS (#11953's lesson). A
         # concurrent sweep can retire this claim between the read above and this

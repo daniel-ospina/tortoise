@@ -57,8 +57,8 @@ def test_create_operator_writes_a_status_the_replay_reproduces():
     sdk = TortoiseSDK(db_path=os.path.join(d, "t.db"),
                       event_log_path=os.path.join(d, "events.jsonl"))
     try:
-        p = sdk.create_point("statement", "a claim an operator attaches to")
-        op = sdk.create_operator("IMPL", p["id"], [p["id"]])
+        p = sdk._create_point("statement", "a claim an operator attaches to")
+        op = sdk._create_operator("IMPL", p["id"], [p["id"]])
 
         live = _status_of(sdk._get_proj(), op["id"])
 
@@ -107,10 +107,10 @@ def test_extraction_posture_still_births_a_draft_operator():
     sdk = TortoiseSDK(db_path=os.path.join(d, "t.db"),
                       event_log_path=os.path.join(d, "events.jsonl"))
     try:
-        p = sdk.create_point("statement", "an extraction source",
+        p = sdk._create_point("statement", "an extraction source",
                              status="draft")
         assert _status_of(sdk._get_proj(), p["id"]) == "draft"
-        op = sdk.create_operator("IMPL", p["id"], [p["id"]], promote_source=False)
+        op = sdk._create_operator("IMPL", p["id"], [p["id"]], promote_source=False)
         assert _status_of(sdk._get_proj(), op["id"]) == "draft"
         # #1088/#780: the source is NOT auto-promoted on the extraction path.
         assert _status_of(sdk._get_proj(), p["id"]) == "draft", (
@@ -152,10 +152,10 @@ def test_partial_absorb_still_finds_a_live_partial_operator():
                       event_log_path=os.path.join(d, "events.jsonl"))
     try:
         proj = sdk._get_proj()
-        a = sdk.create_point("statement", "src")["id"]
-        b = sdk.create_point("statement", "dst one")["id"]
-        c = sdk.create_point("statement", "dst two")["id"]
-        op = sdk.create_operator("IMPL", a, [b, c])
+        a = sdk._create_point("statement", "src")["id"]
+        b = sdk._create_point("statement", "dst one")["id"]
+        c = sdk._create_point("statement", "dst two")["id"]
+        op = sdk._create_operator("IMPL", a, [b, c])
 
         # The door writes the status this test is about.
         assert _status_of(proj, op["id"]) == "live"

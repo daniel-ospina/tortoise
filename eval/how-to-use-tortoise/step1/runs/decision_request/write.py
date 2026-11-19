@@ -21,7 +21,7 @@ def rec(key: str, res: dict) -> str:
 
 
 def edge(relation: str, frm: str, to: str) -> None:
-    r = sdk.create_edge(relation, from_id=frm, to_id=to)
+    r = sdk._create_edge(relation, from_id=frm, to_id=to)
     out["edges"].append({"relation": relation, "from": frm, "to": to, "ok": r.get("created")})
 
 
@@ -35,16 +35,16 @@ source = sdk.register_source(
 SRC = rec("source", source)
 
 # ---- actors / systems -------------------------------------------------------
-S_TEAM = rec("team", sdk.create_subject("Platform team", "team", extractedFrom=SESSION))
+S_TEAM = rec("team", sdk._create_subject("Platform team", "team", extractedFrom=SESSION))
 
-O_PIPELINE = rec("pipeline", sdk.create_object("Ingestion pipeline", "workflow", extractedFrom=SESSION))
-O_WORKERS = rec("workers", sdk.create_object("Ingestion workers", "other",
+O_PIPELINE = rec("pipeline", sdk._create_object("Ingestion pipeline", "workflow", extractedFrom=SESSION))
+O_WORKERS = rec("workers", sdk._create_object("Ingestion workers", "other",
                                              description="workers that perform ingestion", extractedFrom=SESSION))
-O_CELERY = rec("celery", sdk.create_object("Celery", "tool", extractedFrom=SESSION))
-O_TEMPORAL = rec("temporal", sdk.create_object("Temporal", "tool", extractedFrom=SESSION))
+O_CELERY = rec("celery", sdk._create_object("Celery", "tool", extractedFrom=SESSION))
+O_TEMPORAL = rec("temporal", sdk._create_object("Temporal", "tool", extractedFrom=SESSION))
 
 # ---- decision + parts -------------------------------------------------------
-DECISION = rec("decision", sdk.create_point(
+DECISION = rec("decision", sdk._create_point(
     "decision",
     ("Approve moving the ingestion workers from Celery to Temporal "
      "(requested 2026-09-20 by the platform team; approval required by 2026-10-15)."),
@@ -57,7 +57,7 @@ DECISION = rec("decision", sdk.create_point(
     extractedFrom=SESSION,
 ))
 
-OPTION = rec("option", sdk.create_point(
+OPTION = rec("option", sdk._create_point(
     "option",
     "Migrate the platform team's ingestion workers from Celery to Temporal.",
     status="draft",
@@ -67,7 +67,7 @@ OPTION = rec("option", sdk.create_point(
     extractedFrom=SESSION,
 ))
 
-CRIT_FREEZE = rec("criterion_freeze", sdk.create_point(
+CRIT_FREEZE = rec("criterion_freeze", sdk._create_point(
     "criterion",
     "Hard constraint: the Celery->Temporal migration must complete before the Q1 freeze on 2027-01-05.",
     status="draft",
@@ -77,7 +77,7 @@ CRIT_FREEZE = rec("criterion_freeze", sdk.create_point(
     extractedFrom=SESSION,
 ))
 
-CRIT_APPROVAL = rec("criterion_approval", sdk.create_point(
+CRIT_APPROVAL = rec("criterion_approval", sdk._create_point(
     "criterion",
     "Hard constraint: if the migration is not approved by 2026-10-15 the migration window is missed.",
     status="draft",
@@ -88,7 +88,7 @@ CRIT_APPROVAL = rec("criterion_approval", sdk.create_point(
     extractedFrom=SESSION,
 ))
 
-COST = rec("cost_estimate", sdk.create_point(
+COST = rec("cost_estimate", sdk._create_point(
     "evidence",
     "The Celery->Temporal migration is estimated to cost approximately 3 engineer-weeks.",
     status="draft",
@@ -99,7 +99,7 @@ COST = rec("cost_estimate", sdk.create_point(
     extractedFrom=SESSION,
 ))
 
-GOAL = rec("latency_target", sdk.create_point(
+GOAL = rec("latency_target", sdk._create_point(
     "target",
     "Platform team goal: sub-5-minute end-to-end ingestion latency by 2027-03-31.",
     targetDate=TARGET_DATE,
@@ -111,7 +111,7 @@ GOAL = rec("latency_target", sdk.create_point(
 ))
 
 # ---- events (about-wiring goes through create_event's kwargs) ---------------
-E_REQUEST = rec("request_event", sdk.create_event(
+E_REQUEST = rec("request_event", sdk._create_event(
     "Decision request raised: approve Celery->Temporal migration for ingestion workers",
     "occurrence",
     startedAt=REQ_DATE,
@@ -126,7 +126,7 @@ E_REQUEST = rec("request_event", sdk.create_event(
     extractedFrom=SESSION,
 ))
 
-E_FREEZE = rec("freeze_event", sdk.create_event(
+E_FREEZE = rec("freeze_event", sdk._create_event(
     "Q1 freeze begins",
     "milestone",
     startedAt=FREEZE_DATE,
@@ -153,7 +153,7 @@ edge("references", CRIT_FREEZE, E_FREEZE) # the constraint is anchored to the fr
 edge("references", GOAL, E_REQUEST)       # the latency goal was stated in this request
 
 # ---- epistemic layer: the option is the proposed means to the latency target -
-op = sdk.create_operator(
+op = sdk._create_operator(
     "IMPL",
     source_id=OPTION,
     target_ids=[GOAL],

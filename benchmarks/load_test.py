@@ -77,7 +77,7 @@ def _seed_graph(sdk, *, namespace: str) -> None:
     """Write a deterministic set of points so the search legs have work."""
     for i, text in enumerate(CORPUS_TEXTS):
         pid = f"lme:loadtest:{namespace}:p{i}"
-        sdk.create_point(
+        sdk._create_point(
             id=pid,
             content=text,
             kind="statement",
@@ -91,7 +91,7 @@ def _run_one(sdk, query: str) -> float:
     t0 = time.monotonic()
     # #12297: a LATENCY probe against a recorded baseline — the fused rerank
     # would add its own cost and re-pick the page at limit=10.
-    sdk.tortoise_fts_query(query, limit=10, _rerank_candidates=False)
+    sdk._tortoise_fts_query(query, limit=10, _rerank_candidates=False)
     return (time.monotonic() - t0) * 1000.0
 
 

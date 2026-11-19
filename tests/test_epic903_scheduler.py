@@ -179,8 +179,8 @@ class TestDe2e2StaleFirstScheduler:
         c1 = _make_claim(sdk, "allnull claim 1")["id"]
         c2 = _make_claim(sdk, "allnull claim 2")["id"]
         c3 = _make_claim(sdk, "allnull claim 3")["id"]
-        sdk.create_operator("IMPL", c1, [c2])
-        sdk.create_operator("IMPL", c2, [c3])
+        sdk._create_operator("IMPL", c1, [c2])
+        sdk._create_operator("IMPL", c2, [c3])
         iso = _make_claim(sdk, "allnull isolated")["id"]
         sdk._dirty_roots.clear()
         random.seed(FIXED_SEED)
@@ -307,7 +307,7 @@ class TestBudgetBoundaries:
         targets = [_make_claim(sdk, f"cap target {i}")["id"]
                    for i in range(201)]
         for t in targets:
-            sdk.create_operator("IMPL", src, [t])
+            sdk._create_operator("IMPL", src, [t])
         sdk._dirty_roots.clear()
         random.seed(FIXED_SEED)
         r = sdk._get_dreamer().dream_window(budget=200)

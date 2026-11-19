@@ -729,8 +729,8 @@ def test_402_at_document_cap_points_gate_would_not_fire(
     # 2 non-episodic points → OVER the points cap (max_points=1) — the
     # points gate WOULD 402, but the docs job must not use it.
     sdk = _team_sdk(client)
-    sdk.create_point("statement", "claim one")
-    sdk.create_point("statement", "claim two")
+    sdk._create_point("statement", "claim one")
+    sdk._create_point("statement", "claim two")
     sdk.close()
 
     r = client.tc.post("/v1/index/docs", json={"org": "acme"})

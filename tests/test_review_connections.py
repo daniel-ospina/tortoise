@@ -65,13 +65,13 @@ def _edge_prune(entries, issue=None):
 def test_add_surfaces_missing_connection(sdk_factory, tmp_path):
     """Related-but-unconnected pair is suggested; already-connected pair is NOT."""
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "kubernetes rollout plan")
-    p2 = sdk.create_point("statement", "kubernetes rollout plan v2")
-    p3 = sdk.create_point("statement", "kubernetes deployment guide")
+    p1 = sdk._create_point("statement", "kubernetes rollout plan")
+    p2 = sdk._create_point("statement", "kubernetes rollout plan v2")
+    p3 = sdk._create_point("statement", "kubernetes deployment guide")
     # p1-p2 are ALREADY connected (shared IMPL operator); p1-p3 are not.
-    sdk.create_operator("IMPL", p1["id"], [p2["id"]], label="supports")
+    sdk._create_operator("IMPL", p1["id"], [p2["id"]], label="supports")
 
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({(p1["id"], p2["id"]): 0.9, (p1["id"], p3["id"]): 0.8}),
     )
@@ -91,20 +91,20 @@ def test_add_surfaces_missing_connection(sdk_factory, tmp_path):
 def test_add_does_not_suggest_connected_pairs(sdk_factory, tmp_path):
     """Already-connected pairs are never suggested."""
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "the cat sat on the mat")
-    p2 = sdk.create_point("statement", "the cat sat on the mat")
-    sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+    p1 = sdk._create_point("statement", "the cat sat on the mat")
+    p2 = sdk._create_point("statement", "the cat sat on the mat")
+    sdk._create_operator("IMPL", p1["id"], [p2["id"]])
     # Also connect via a direct (operator-less) edge, reification rule
     # (ontology v3.5 §8) — direct edges must count as connected too.
-    p3 = sdk.create_point("statement", "the cat sat on the mat")
+    p3 = sdk._create_point("statement", "the cat sat on the mat")
     sdk._get_proj().g.query(
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) CREATE (a)-[:IMPL]->(b)",
         params={"a": p1["id"], "b": p3["id"]},
     )
     # p2-p3: connect via a shared operator too so EVERY pair is connected.
-    sdk.create_operator("IMPL", p2["id"], [p3["id"]])
+    sdk._create_operator("IMPL", p2["id"], [p3["id"]])
 
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 0.95,
@@ -127,13 +127,13 @@ def test_add_excludes_same_source_pairs(sdk_factory, tmp_path):
     """
     sdk = sdk_factory(tmp_path)
     doc = "doc://same-corpus.md"
-    p1 = sdk.create_point("statement", "deployment section intro",
+    p1 = sdk._create_point("statement", "deployment section intro",
                           extractedFrom=doc)
-    p2 = sdk.create_point("statement", "deployment section details",
+    p2 = sdk._create_point("statement", "deployment section details",
                           extractedFrom=doc)
-    p3 = sdk.create_point("statement", "deployment runbook elsewhere",
+    p3 = sdk._create_point("statement", "deployment runbook elsewhere",
                           extractedFrom="doc://other-corpus.md")
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 1.0,   # same source — the HIGHEST score
@@ -163,13 +163,13 @@ def test_add_keeps_pairs_that_share_only_a_session_source(
     """
     sdk = sdk_factory(tmp_path)
     sess = "session:s1"
-    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+    p1 = sdk._create_point("statement", "kubernetes rollout plan",
                           extractedFrom=sess)
-    p2 = sdk.create_point("statement", "kubernetes deployment guide",
+    p2 = sdk._create_point("statement", "kubernetes deployment guide",
                           extractedFrom=sess)
-    p3 = sdk.create_point("statement", "postgres vacuum tuning",
+    p3 = sdk._create_point("statement", "postgres vacuum tuning",
                           extractedFrom="doc://ops.md")
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 0.9,  # same session — DIFFERENT documents
@@ -196,13 +196,13 @@ def test_add_document_source_still_excludes_a_session_tagged_pair(
     """
     sdk = sdk_factory(tmp_path)
     doc = "doc://mined.md"
-    p1 = sdk.create_point("statement", "deployment section intro",
+    p1 = sdk._create_point("statement", "deployment section intro",
                           extractedFrom=["session:s1", doc])
-    p2 = sdk.create_point("statement", "deployment section details",
+    p2 = sdk._create_point("statement", "deployment section details",
                           extractedFrom=["session:s1", doc])
-    p3 = sdk.create_point("statement", "deployment runbook elsewhere",
+    p3 = sdk._create_point("statement", "deployment runbook elsewhere",
                           extractedFrom=["session:s1", "doc://other.md"])
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 1.0,  # same document — must be excluded
@@ -230,15 +230,15 @@ def test_add_tolerates_a_list_valued_source_url(sdk_factory, tmp_path):
     fail OPEN — the pair is still suggested.
     """
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "kubernetes rollout plan")
-    p2 = sdk.create_point("statement", "kubernetes deployment guide")
+    p1 = sdk._create_point("statement", "kubernetes rollout plan")
+    p2 = sdk._create_point("statement", "kubernetes deployment guide")
     sdk._get_proj().g.query(
         "MERGE (s:Source {url: $url}) "
         "WITH s MATCH (n:Point) WHERE n.id IN $ids "
         "MERGE (n)-[:extractedFrom]->(s)",
         params={"url": ["doc://a.md", "doc://b.md"],
                 "ids": [p1["id"], p2["id"]]})
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({(p1["id"], p2["id"]): 0.9}),
     )
@@ -270,13 +270,13 @@ def test_add_excludes_pairs_from_one_corpus_permalink_file(
     stop excluding them.
     """
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "deployment section intro")
-    p2 = sdk.create_point("statement", "deployment section details")
-    p3 = sdk.create_point("statement", "deployment runbook elsewhere")
+    p1 = sdk._create_point("statement", "deployment section intro")
+    p2 = sdk._create_point("statement", "deployment section details")
+    p3 = sdk._create_point("statement", "deployment runbook elsewhere")
     permalink = "corpus://ops/docs/transcript-notes.md"
     _link_to_source(sdk, [p1, p2], permalink, sourceKind="agentSession")
     _link_to_source(sdk, [p3], "doc://other.md", sourceKind="document")
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 1.0,   # one file — must be excluded
@@ -301,13 +301,13 @@ def test_add_excludes_pairs_from_one_episodic_transcript_file(
     sections of one transcript from each other.
     """
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "deployment section intro")
-    p2 = sdk.create_point("statement", "deployment section details")
+    p1 = sdk._create_point("statement", "deployment section intro")
+    p2 = sdk._create_point("statement", "deployment section details")
     doc = "doc_aa11"
     _link_to_source(sdk, [p1, p2], doc,
                     sourceKind="document", documentKind="transcript",
                     is_episodic=True)
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({(p1["id"], p2["id"]): 1.0}),
     )
@@ -331,12 +331,12 @@ def test_add_keeps_pairs_that_share_only_a_legacy_basename_session_source(
     exclusion was corrected for, on the pre-#4005 population.
     """
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "kubernetes rollout plan")
-    p2 = sdk.create_point("statement", "kubernetes deployment guide")
-    p3 = sdk.create_point("statement", "postgres vacuum tuning")
+    p1 = sdk._create_point("statement", "kubernetes rollout plan")
+    p2 = sdk._create_point("statement", "kubernetes deployment guide")
+    p3 = sdk._create_point("statement", "postgres vacuum tuning")
     _link_to_source(sdk, [p1, p2], "session.md", sourceKind="agentSession")
     _link_to_source(sdk, [p3], "doc://ops.md", sourceKind="document")
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 0.9,  # one legacy session — DIFFERENT docs
@@ -361,12 +361,12 @@ def test_add_excludes_pairs_from_one_bare_filename_document_source(
     own (an indexer/caller can name a file ``readme.md``).
     """
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "deployment section intro")
-    p2 = sdk.create_point("statement", "deployment section details")
-    p3 = sdk.create_point("statement", "deployment runbook elsewhere")
+    p1 = sdk._create_point("statement", "deployment section intro")
+    p2 = sdk._create_point("statement", "deployment section details")
+    p3 = sdk._create_point("statement", "deployment runbook elsewhere")
     _link_to_source(sdk, [p1, p2], "readme.md", sourceKind="document")
     _link_to_source(sdk, [p3], "doc://other.md", sourceKind="document")
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 1.0,   # one bare-filename document
@@ -387,10 +387,10 @@ def test_add_one_sided_source_is_not_same_source(sdk_factory, tmp_path):
     a suggestion).
     """
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+    p1 = sdk._create_point("statement", "kubernetes rollout plan",
                           extractedFrom="doc://a.md")
-    p2 = sdk.create_point("statement", "kubernetes deployment guide")
-    result = sdk.review_connections(
+    p2 = sdk._create_point("statement", "kubernetes deployment guide")
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({(p1["id"], p2["id"]): 0.9}),
     )
@@ -411,17 +411,17 @@ def test_add_scoped_pool_keeps_the_source_exclusion(
     """
     sdk = sdk_factory(tmp_path)
     doc = "doc://scoped.md"
-    p1 = sdk.create_point("statement", "kubernetes rollout plan",
+    p1 = sdk._create_point("statement", "kubernetes rollout plan",
                           extractedFrom=doc)
-    p2 = sdk.create_point("statement", "kubernetes rollout details",
+    p2 = sdk._create_point("statement", "kubernetes rollout details",
                           extractedFrom=doc)
-    p3 = sdk.create_point("statement", "kubernetes runbook elsewhere",
+    p3 = sdk._create_point("statement", "kubernetes runbook elsewhere",
                           extractedFrom="doc://other.md")
     monkeypatch.setattr(
-        sdk, "tortoise_fts_query",
+        sdk, "_tortoise_fts_query",
         lambda *a, **k: [{"id": p["id"], "scores": {"rrf": 1.0}}
                          for p in (p1, p2, p3)])
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         scope="kubernetes deployment",
         similarity_fn=_sim({
@@ -439,9 +439,9 @@ def test_add_scoped_pool_keeps_the_source_exclusion(
 def test_add_below_threshold_excluded(sdk_factory, tmp_path):
     """Pairs below the similarity threshold are not suggested."""
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "alpha")
-    p2 = sdk.create_point("statement", "beta")
-    result = sdk.review_connections(
+    p1 = sdk._create_point("statement", "alpha")
+    p2 = sdk._create_point("statement", "beta")
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({(p1["id"], p2["id"]): 0.3}),  # < default 0.72
     )
@@ -453,9 +453,9 @@ def test_add_default_threshold_boundary(sdk_factory, tmp_path):
     0.72+) IS suggested under the default threshold 0.72 (#1349 T14 — was
     0.45 inside the MiniLM band 0.35-0.51 under the old 0.40 default)."""
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "alpha")
-    p2 = sdk.create_point("statement", "beta")
-    result = sdk.review_connections(
+    p1 = sdk._create_point("statement", "alpha")
+    p2 = sdk._create_point("statement", "beta")
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({(p1["id"], p2["id"]): 0.78}),
     )
@@ -466,10 +466,10 @@ def test_add_default_threshold_boundary(sdk_factory, tmp_path):
 def test_add_surfaces_iml_only_for_similar_unconnected(sdk_factory, tmp_path):
     """Every suggestion carries suggested_relation IMPL + a reason."""
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "alpha")
-    p2 = sdk.create_point("statement", "beta")
-    p3 = sdk.create_point("statement", "gamma")
-    result = sdk.review_connections(
+    p1 = sdk._create_point("statement", "alpha")
+    p2 = sdk._create_point("statement", "beta")
+    p3 = sdk._create_point("statement", "gamma")
+    result = sdk._review_connections(
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 0.9,
@@ -497,20 +497,20 @@ def test_add_scope_topic_narrows_pool(sdk_factory, tmp_path, monkeypatch):
     below is 0.9 for every pair, so only the pool can exclude the croissant.
     """
     sdk = sdk_factory(tmp_path)
-    k1 = sdk.create_point("statement", "kubernetes rollout plan")
-    k2 = sdk.create_point("statement", "kubernetes deployment pipeline")
-    off = sdk.create_point("statement", "croissant bakery menu")
+    k1 = sdk._create_point("statement", "kubernetes rollout plan")
+    k2 = sdk._create_point("statement", "kubernetes deployment pipeline")
+    off = sdk._create_point("statement", "croissant bakery menu")
     # Retrieval seam: only the two in-scope points, in the PRODUCTION result
     # shape (tortoise_fts_query returns scores.rrf via SearchScores). A
     # positive score is required — _review_pool drops results whose score <= 0.
     monkeypatch.setattr(
-        sdk, "tortoise_fts_query",
+        sdk, "_tortoise_fts_query",
         lambda *a, **k: [{"id": k1["id"], "scores": {"rrf": 1.0}},
                          {"id": k2["id"], "scores": {"rrf": 1.0}}])
     # Unscoped, similarity says EVERYTHING is related — but scoped to the
     # kubernetes topic, the croissant point is outside the pool and must not
     # appear in any suggestion.
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="add",
         scope="kubernetes deployment rollout",
         similarity_fn=_sim({
@@ -530,11 +530,11 @@ def test_add_invalid_mode_and_limits(sdk_factory, tmp_path):
     """Invalid mode raises; add_limit caps suggestions."""
     sdk = sdk_factory(tmp_path)
     with pytest.raises(ValueError, match="mode"):
-        sdk.review_connections(mode="bogus")
-    p1 = sdk.create_point("statement", "alpha")
-    p2 = sdk.create_point("statement", "beta")
-    p3 = sdk.create_point("statement", "gamma")
-    result = sdk.review_connections(
+        sdk._review_connections(mode="bogus")
+    p1 = sdk._create_point("statement", "alpha")
+    p2 = sdk._create_point("statement", "beta")
+    p3 = sdk._create_point("statement", "gamma")
+    result = sdk._review_connections(
         mode="add",
         add_limit=1,
         similarity_fn=_sim({
@@ -552,12 +552,12 @@ def test_add_invalid_mode_and_limits(sdk_factory, tmp_path):
 def test_prune_flags_stale_retracted(sdk_factory, tmp_path):
     """Edge to a retracted point is stale with suggested_action prune."""
     sdk = sdk_factory(tmp_path)
-    src = sdk.create_point("statement", "live source claim")
-    victim = sdk.create_point("statement", "soon-to-be-retracted")
-    sdk.create_operator("IMPL", src["id"], [victim["id"]])
-    sdk.retract_point(victim["id"])
+    src = sdk._create_point("statement", "live source claim")
+    victim = sdk._create_point("statement", "soon-to-be-retracted")
+    sdk._create_operator("IMPL", src["id"], [victim["id"]])
+    sdk._retract_point(victim["id"])
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     stale = _edge_prune(result["prune"], "stale")
     assert len(stale) == 1, f"expected 1 stale entry, got {result['prune']}"
     e = stale[0]
@@ -572,17 +572,17 @@ def test_prune_flags_stale_superseded_repoint(sdk_factory, tmp_path):
     """Edge to a superseded point is stale with suggested_action re-point
     (successor found via CORRECTS)."""
     sdk = sdk_factory(tmp_path)
-    src = sdk.create_point("statement", "live source claim")
-    old = sdk.create_point("statement", "superseded claim")
-    replacement = sdk.create_point("statement", "replacement claim")
-    sdk.create_operator("IMPL", src["id"], [old["id"]])
-    sdk.supersede_point(old["id"], replacement["id"])
+    src = sdk._create_point("statement", "live source claim")
+    old = sdk._create_point("statement", "superseded claim")
+    replacement = sdk._create_point("statement", "replacement claim")
+    sdk._create_operator("IMPL", src["id"], [old["id"]])
+    sdk._supersede_point(old["id"], replacement["id"])
     # supersede TRANSFERS the operator edge to the replacement — so the old
     # point is clean. A NEW edge to the superseded old point is the stale
     # connection the reviewer must flag.
-    sdk.create_operator("IMPL", src["id"], [old["id"]])
+    sdk._create_operator("IMPL", src["id"], [old["id"]])
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     stale = _edge_prune(result["prune"], "stale")
     hits = [e for e in stale if e["to"] == old["id"]]
     assert len(hits) == 1, f"expected 1 stale entry to superseded point, got {stale}"
@@ -595,9 +595,9 @@ def test_prune_flags_contested_high_variance(sdk_factory, tmp_path):
     """Edge incident to a high-variance claim is contested; low-variance
     claims are NOT flagged."""
     sdk = sdk_factory(tmp_path)
-    a = sdk.create_point("statement", "contested claim")
-    b = sdk.create_point("statement", "its supported claim")
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    a = sdk._create_point("statement", "contested claim")
+    b = sdk._create_point("statement", "its supported claim")
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
     # Deterministic EP params (no EP run): Beta(1,2) → variance 2/36 ≈ 0.0556
     # > default variance_threshold 0.04 → contested.
     sdk._get_proj().g.query(
@@ -605,15 +605,15 @@ def test_prune_flags_contested_high_variance(sdk_factory, tmp_path):
         params={"id": a["id"]},
     )
     # Control pair: Beta(10,1) → variance ≈ 0.0069 < 0.04 → NOT contested.
-    c = sdk.create_point("statement", "calm claim")
-    d = sdk.create_point("statement", "its supported claim")
-    sdk.create_operator("IMPL", c["id"], [d["id"]])
+    c = sdk._create_point("statement", "calm claim")
+    d = sdk._create_point("statement", "its supported claim")
+    sdk._create_operator("IMPL", c["id"], [d["id"]])
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.ep_alpha=10.0, n.ep_beta=1.0",
         params={"id": c["id"]},
     )
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     contested = _edge_prune(result["prune"], "contested")
     assert len(contested) == 1, f"expected exactly 1 contested entry, got {result['prune']}"
     e = contested[0]
@@ -629,17 +629,17 @@ def test_prune_flags_contested_incoming_nand(sdk_factory, tmp_path):
     contested (derived `challenged` condition, ontology §5 — NAND on a LIVE
     point) even at low variance."""
     sdk = sdk_factory(tmp_path)
-    x = sdk.create_point("statement", "attacked claim")
-    y = sdk.create_point("statement", "attacker claim")
-    sdk.update_point(x["id"], status="live")  # challenged requires LIVE
-    sdk.create_operator("NAND", y["id"], [x["id"]])
+    x = sdk._create_point("statement", "attacked claim")
+    y = sdk._create_point("statement", "attacker claim")
+    sdk._update_point(x["id"], status="live")  # challenged requires LIVE
+    sdk._create_operator("NAND", y["id"], [x["id"]])
     # Control pair: IMPL-only, uncalibrated → neither contested nor
     # contradictory.
-    c = sdk.create_point("statement", "calm claim")
-    d = sdk.create_point("statement", "its supported claim")
-    sdk.create_operator("IMPL", c["id"], [d["id"]])
+    c = sdk._create_point("statement", "calm claim")
+    d = sdk._create_point("statement", "its supported claim")
+    sdk._create_operator("IMPL", c["id"], [d["id"]])
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     contested = _edge_prune(result["prune"], "contested")
     # The NAND links attacker→attacked; BOTH endpoints are live and carry
     # the incoming NAND edge (operator node fans out to both) → both are
@@ -660,10 +660,10 @@ def test_prune_nand_on_draft_not_contested(sdk_factory, tmp_path):
     live) — the draft victim is never the contested endpoint. (The live
     attacker y is challenged by its own NAND fan-out — that IS flagged.)"""
     sdk = sdk_factory(tmp_path)
-    x = sdk.create_point("statement", "draft victim")  # stays draft
-    y = sdk.create_point("statement", "attacker claim")  # promoted to live
-    sdk.create_operator("NAND", y["id"], [x["id"]])
-    result = sdk.review_connections(mode="prune")
+    x = sdk._create_point("statement", "draft victim")  # stays draft
+    y = sdk._create_point("statement", "attacker claim")  # promoted to live
+    sdk._create_operator("NAND", y["id"], [x["id"]])
+    result = sdk._review_connections(mode="prune")
     contested = _edge_prune(result["prune"], "contested")
     assert len(contested) == 1
     assert contested[0]["detail"]["contested_endpoint"] == y["id"]
@@ -674,13 +674,13 @@ def test_prune_flags_stale_outdated_flag(sdk_factory, tmp_path):
     """Legacy invalidate (outdated=true, status stays 'live') is reported
     stale with status 'outdated' (the signal that made it stale)."""
     sdk = sdk_factory(tmp_path)
-    src = sdk.create_point("statement", "live source claim")
-    victim = sdk.create_point("statement", "old claim")
-    replacement = sdk.create_point("statement", "new claim")
-    sdk.create_operator("IMPL", src["id"], [victim["id"]])
-    sdk.invalidate_point(victim["id"], replacement["id"])  # outdated=true, status stays live
+    src = sdk._create_point("statement", "live source claim")
+    victim = sdk._create_point("statement", "old claim")
+    replacement = sdk._create_point("statement", "new claim")
+    sdk._create_operator("IMPL", src["id"], [victim["id"]])
+    sdk._invalidate_point(victim["id"], replacement["id"])  # outdated=true, status stays live
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     stale = _edge_prune(result["prune"], "stale")
     assert len(stale) == 1
     e = stale[0]
@@ -707,15 +707,15 @@ def test_prune_flags_a_stale_edge_for_every_canonical_stale_status(
     (``live.LEGACY_NON_CURRENT_STATUS_VALUES``).
     """
     sdk = sdk_factory(tmp_path)
-    src = sdk.create_point("statement", "live source claim")
-    victim = sdk.create_point("statement", f"a {status} claim")
-    sdk.create_operator("IMPL", src["id"], [victim["id"]])
+    src = sdk._create_point("statement", "live source claim")
+    victim = sdk._create_point("statement", f"a {status} claim")
+    sdk._create_operator("IMPL", src["id"], [victim["id"]])
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status=$status",
         params={"id": victim["id"], "status": status},
     )
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     stale = _edge_prune(result["prune"], "stale")
     hits = [e for e in stale if e["to"] == victim["id"]]
     assert len(hits) == 1, (
@@ -732,10 +732,10 @@ def test_prune_legacy_operator_without_idx(sdk_factory, tmp_path):
     are still reviewed — all inputs degrade to unordered pairs (#913 review
     round 1: dict-keyed-by-None collapsed them to nothing)."""
     sdk = sdk_factory(tmp_path)
-    src = sdk.create_point("statement", "legacy source")
-    t1 = sdk.create_point("statement", "legacy target 1")
-    t2 = sdk.create_point("statement", "legacy target 2")
-    sdk.retract_point(t2["id"])
+    src = sdk._create_point("statement", "legacy source")
+    t1 = sdk._create_point("statement", "legacy target 1")
+    t2 = sdk._create_point("statement", "legacy target 2")
+    sdk._retract_point(t2["id"])
     # Raw-write a legacy operator node with IMPL edges but NO idx property.
     proj = sdk._get_proj()
     proj.g.query(
@@ -748,7 +748,7 @@ def test_prune_legacy_operator_without_idx(sdk_factory, tmp_path):
             params={"pid": pid},
         )
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     stale = _edge_prune(result["prune"], "stale")
     # t2 is retracted → every pair involving t2 is stale (src-t2 and t1-t2).
     hits = [e for e in stale if t2["id"] in (e["from"], e["to"])]
@@ -762,14 +762,14 @@ def test_prune_stale_prefers_successor_endpoint(sdk_factory, tmp_path):
     endpoint WITH a CORRECTS successor (action re-point), not the first
     stale endpoint (Qwen gate, PR #933)."""
     sdk = sdk_factory(tmp_path)
-    old_a = sdk.create_point("statement", "retracted claim")   # no successor
-    old_b = sdk.create_point("statement", "superseded claim")  # successor
-    repl = sdk.create_point("statement", "replacement claim")
-    sdk.retract_point(old_a["id"])
-    sdk.supersede_point(old_b["id"], repl["id"])
-    sdk.create_operator("IMPL", old_a["id"], [old_b["id"]])
+    old_a = sdk._create_point("statement", "retracted claim")   # no successor
+    old_b = sdk._create_point("statement", "superseded claim")  # successor
+    repl = sdk._create_point("statement", "replacement claim")
+    sdk._retract_point(old_a["id"])
+    sdk._supersede_point(old_b["id"], repl["id"])
+    sdk._create_operator("IMPL", old_a["id"], [old_b["id"]])
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     stale = _edge_prune(result["prune"], "stale")
     hit = [e for e in stale
            if {e["from"], e["to"]} == {old_a["id"], old_b["id"]}]
@@ -794,13 +794,13 @@ def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path, monkeypatch
     removed (the whole-graph flag list would return the stale entry).
     """
     sdk = sdk_factory(tmp_path)
-    src = sdk.create_point("statement", "live source claim")
-    victim = sdk.create_point("statement", "doomed claim")
-    sdk.create_operator("IMPL", src["id"], [victim["id"]])
-    sdk.retract_point(victim["id"])
-    monkeypatch.setattr(sdk, "tortoise_fts_query", lambda *a, **k: [])
+    src = sdk._create_point("statement", "live source claim")
+    victim = sdk._create_point("statement", "doomed claim")
+    sdk._create_operator("IMPL", src["id"], [victim["id"]])
+    sdk._retract_point(victim["id"])
+    monkeypatch.setattr(sdk, "_tortoise_fts_query", lambda *a, **k: [])
 
-    result = sdk.review_connections(mode="prune", scope="zzz-no-such-topic-xyz")
+    result = sdk._review_connections(mode="prune", scope="zzz-no-such-topic-xyz")
     assert result["prune"] == []
 
 
@@ -809,16 +809,16 @@ def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path, monkeypatch
 def test_prune_flags_contradictory_impl_nand(sdk_factory, tmp_path):
     """A pair linked by BOTH an IMPL and a NAND operator is contradictory."""
     sdk = sdk_factory(tmp_path)
-    a = sdk.create_point("statement", "the deployment succeeded")
-    b = sdk.create_point("statement", "the deployment failed")
-    sdk.create_operator("IMPL", a["id"], [b["id"]], label="supports")
+    a = sdk._create_point("statement", "the deployment succeeded")
+    b = sdk._create_point("statement", "the deployment failed")
+    sdk._create_operator("IMPL", a["id"], [b["id"]], label="supports")
     legacy_nand_operator(sdk, a["id"], b["id"], label="opposes")
     # Control pair: IMPL-only → NOT contradictory.
-    c = sdk.create_point("statement", "calm claim")
-    d = sdk.create_point("statement", "its supported claim")
-    sdk.create_operator("IMPL", c["id"], [d["id"]])
+    c = sdk._create_point("statement", "calm claim")
+    d = sdk._create_point("statement", "its supported claim")
+    sdk._create_operator("IMPL", c["id"], [d["id"]])
 
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     contradictory = _edge_prune(result["prune"], "contradictory")
     assert len(contradictory) == 2, \
         f"expected 2 contradictory entries (IMPL + NAND), got {result['prune']}"
@@ -835,8 +835,8 @@ def test_prune_flags_contradictory_impl_nand(sdk_factory, tmp_path):
 def test_prune_direct_edges_flagged(sdk_factory, tmp_path):
     """Operator-less direct edges (reification rule) are reviewed too."""
     sdk = sdk_factory(tmp_path)
-    a = sdk.create_point("statement", "alpha")
-    b = sdk.create_point("statement", "beta")
+    a = sdk._create_point("statement", "alpha")
+    b = sdk._create_point("statement", "beta")
     sdk._get_proj().g.query(
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) CREATE (a)-[:NAND]->(b)",
         params={"a": a["id"], "b": b["id"]},
@@ -845,7 +845,7 @@ def test_prune_direct_edges_flagged(sdk_factory, tmp_path):
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) CREATE (a)-[:IMPL]->(b)",
         params={"a": a["id"], "b": b["id"]},
     )
-    result = sdk.review_connections(mode="prune")
+    result = sdk._review_connections(mode="prune")
     contradictory = _edge_prune(result["prune"], "contradictory")
     assert len(contradictory) == 2
     assert {e["relation"] for e in contradictory} == {"IMPL", "NAND"}
@@ -856,12 +856,12 @@ def test_prune_direct_edges_flagged(sdk_factory, tmp_path):
 def test_prune_limit_caps(sdk_factory, tmp_path):
     """prune_limit caps the number of flagged entries."""
     sdk = sdk_factory(tmp_path)
-    src = sdk.create_point("statement", "src")
+    src = sdk._create_point("statement", "src")
     for i in range(3):
-        v = sdk.create_point("statement", f"victim {i}")
-        sdk.create_operator("IMPL", src["id"], [v["id"]])
-        sdk.retract_point(v["id"])
-    result = sdk.review_connections(mode="prune", prune_limit=2)
+        v = sdk._create_point("statement", f"victim {i}")
+        sdk._create_operator("IMPL", src["id"], [v["id"]])
+        sdk._retract_point(v["id"])
+    result = sdk._review_connections(mode="prune", prune_limit=2)
     assert len(result["prune"]) == 2
     assert all(e["issue"] == "stale" for e in result["prune"])
 
@@ -872,15 +872,15 @@ def test_both_returns_add_and_prune(sdk_factory, tmp_path):
     """mode=both returns non-empty add AND prune sections."""
     sdk = sdk_factory(tmp_path)
     # add-side: related-but-unconnected pair
-    p1 = sdk.create_point("statement", "kubernetes rollout plan")
-    p2 = sdk.create_point("statement", "kubernetes deployment guide")
+    p1 = sdk._create_point("statement", "kubernetes rollout plan")
+    p2 = sdk._create_point("statement", "kubernetes deployment guide")
     # prune-side: stale edge to a retracted point
-    src = sdk.create_point("statement", "live source claim")
-    victim = sdk.create_point("statement", "doomed claim")
-    sdk.create_operator("IMPL", src["id"], [victim["id"]])
-    sdk.retract_point(victim["id"])
+    src = sdk._create_point("statement", "live source claim")
+    victim = sdk._create_point("statement", "doomed claim")
+    sdk._create_operator("IMPL", src["id"], [victim["id"]])
+    sdk._retract_point(victim["id"])
 
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="both",
         similarity_fn=_sim({(p1["id"], p2["id"]): 0.85}),
     )
@@ -895,12 +895,12 @@ def test_review_only_no_mutation(sdk_factory, tmp_path):
     """review_connections is READ-ONLY — the graph is byte-identical after
     both modes run (nodes, edges, properties, event log)."""
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "kubernetes rollout plan")
-    p2 = sdk.create_point("statement", "kubernetes deployment guide")
-    src = sdk.create_point("statement", "live source claim")
-    victim = sdk.create_point("statement", "doomed claim")
-    sdk.create_operator("IMPL", src["id"], [victim["id"]])
-    sdk.retract_point(victim["id"])
+    p1 = sdk._create_point("statement", "kubernetes rollout plan")
+    p2 = sdk._create_point("statement", "kubernetes deployment guide")
+    src = sdk._create_point("statement", "live source claim")
+    victim = sdk._create_point("statement", "doomed claim")
+    sdk._create_operator("IMPL", src["id"], [victim["id"]])
+    sdk._retract_point(victim["id"])
 
     def snapshot():
         proj = sdk._get_proj()
@@ -917,7 +917,7 @@ def test_review_only_no_mutation(sdk_factory, tmp_path):
         return {"nodes": nodes, "rels": rels}
 
     before = snapshot()
-    result = sdk.review_connections(
+    result = sdk._review_connections(
         mode="both",
         similarity_fn=_sim({(p1["id"], p2["id"]): 0.85}),
     )
@@ -956,7 +956,7 @@ def test_registry_entry_readonly_and_sdk_method(sdk_factory, tmp_path):
 
     # SDK surface: the method exists and returns the documented shape.
     sdk = sdk_factory(tmp_path)
-    assert callable(sdk.review_connections)
+    assert callable(sdk._review_connections)
 
 
 def test_mcp_description_states_the_same_document_exclusion():

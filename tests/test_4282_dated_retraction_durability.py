@@ -73,7 +73,7 @@ def dated(tmp_path):
     events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "dated.db"),
                       event_log_path=str(events / "events.jsonl"))
-    pid = sdk.create_point("statement", "a claim that stopped holding on a date")["id"]
+    pid = sdk._create_point("statement", "a claim that stopped holding on a date")["id"]
     sdk.update_knowledge(pid, valid_until=INSTANT)
     yield events, sdk, pid
     sdk.close()
@@ -168,8 +168,8 @@ def test_an_undated_retraction_is_still_clean_and_states_no_end(dated):
     symmetric-absent rather than a `None` on one side and a missing key on the other.
     """
     events, sdk, _pid = dated
-    bare = sdk.create_point("statement", "a claim withdrawn with no date")["id"]
-    sdk.retract_point(bare)
+    bare = sdk._create_point("statement", "a claim withdrawn with no date")["id"]
+    sdk._retract_point(bare)
 
     node = _node(sdk, bare)
     assert node["status"] == "retracted", node
@@ -203,7 +203,7 @@ def test_an_end_unknown_spelling_survives_the_gate_and_the_rebuild(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "end-unknown.db"),
                       event_log_path=str(events / "events.jsonl"))
     try:
-        pid = sdk.create_point("statement", "a claim that ended, undatable")["id"]
+        pid = sdk._create_point("statement", "a claim that ended, undatable")["id"]
         # The documented public door (row 22): retraction is a temporal FIELD.
         sdk.update_knowledge(pid, valid_until="")
 
@@ -257,7 +257,7 @@ def test_an_end_the_store_cannot_hold_exactly_never_becomes_a_divergence(tmp_pat
     sdk = TortoiseSDK(str(tmp_path / "unstorable.db"),
                       event_log_path=str(events / "events.jsonl"))
     try:
-        pid = sdk.create_point("statement", "a claim ending at an unholdable instant")["id"]
+        pid = sdk._create_point("statement", "a claim ending at an unholdable instant")["id"]
         sdk.update_knowledge(pid, valid_until="a\x00b")
 
         live = _node(sdk, pid)

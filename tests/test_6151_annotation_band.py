@@ -466,9 +466,9 @@ def test_the_band_is_read_from_the_graph(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", _LIVE_URI)
     sdk = SDK(db_path=None, namespace=f"test_ann6151_{uuid.uuid4().hex[:8]}")
     try:
-        src = sdk.create_point("statement", "source", status="live", dedup=False)
-        tgt = sdk.create_point("statement", "claim", status="live", dedup=False)
-        op = sdk.create_operator("IMPL", src["id"], [tgt["id"]])
+        src = sdk._create_point("statement", "source", status="live", dedup=False)
+        tgt = sdk._create_point("statement", "claim", status="live", dedup=False)
+        op = sdk._create_operator("IMPL", src["id"], [tgt["id"]])
         proj = sdk._get_proj()
 
         unrated = compute_operator_weight(proj, op["id"])
@@ -477,19 +477,19 @@ def test_the_band_is_read_from_the_graph(monkeypatch):
             "default is moving the weight without any stated intention"
         )
 
-        sdk.annotate_operator(op["id"], bias=0.0, precision=1.0, consistency=1.0, directness=1.0)
+        sdk._annotate_operator(op["id"], bias=0.0, precision=1.0, consistency=1.0, directness=1.0)
         best = compute_operator_weight(proj, op["id"])
         assert best == pytest.approx(2.0), (
             f"a perfectly rated IMPL operator reads {best}, not 2.0 — the graph "
             "rating is not reaching the weight"
         )
 
-        sdk.annotate_operator(op["id"], bias=1.0, precision=0.0, consistency=0.0, directness=0.0)
+        sdk._annotate_operator(op["id"], bias=1.0, precision=0.0, consistency=0.0, directness=0.0)
         worst = compute_operator_weight(proj, op["id"])
         assert worst == pytest.approx(0.5), f"a worst-rated operator reads {worst}, not 0.5"
 
         # The live-graph case, as measured: bias 0.1 and 0.9 on the other three.
-        sdk.annotate_operator(op["id"], bias=0.1, precision=0.9, consistency=0.9, directness=0.9)
+        sdk._annotate_operator(op["id"], bias=0.1, precision=0.9, consistency=0.9, directness=0.9)
         live_like = compute_operator_weight(proj, op["id"])
         assert live_like == pytest.approx(1.741101, abs=1e-6), (
             f"the reading measured on the live graph gives {live_like}, not "
@@ -521,14 +521,14 @@ def test_a_malformed_stored_value_cannot_abort_the_reader(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", _LIVE_URI)
     sdk = SDK(db_path=None, namespace=f"test_ann6151_bad_{uuid.uuid4().hex[:8]}")
     try:
-        src = sdk.create_point("statement", "source", status="live", dedup=False)
-        tgt = sdk.create_point("statement", "claim", status="live", dedup=False)
-        op = sdk.create_operator("IMPL", src["id"], [tgt["id"]])
+        src = sdk._create_point("statement", "source", status="live", dedup=False)
+        tgt = sdk._create_point("statement", "claim", status="live", dedup=False)
+        op = sdk._create_operator("IMPL", src["id"], [tgt["id"]])
         proj = sdk._get_proj()
 
         # 1. A non-numeric annotation dimension, written through the generic
         #    entity surface exactly as an agent could.
-        sdk.update_point(op["id"], annotator_bias="oops")
+        sdk._update_point(op["id"], annotator_bias="oops")
         got = compute_operator_weight(proj, op["id"])
         assert 0.1 <= got <= 10.0, f"malformed annotation dim gave {got}, outside [0.1, 10.0]"
         assert got == 1.0, (
@@ -537,19 +537,19 @@ def test_a_malformed_stored_value_cannot_abort_the_reader(monkeypatch):
         )
 
         # 2. An out-of-range dimension that passed through the same surface.
-        sdk.update_point(op["id"], annotator_bias=3.0)
+        sdk._update_point(op["id"], annotator_bias=3.0)
         got = compute_operator_weight(proj, op["id"])
         assert 0.5 <= got <= 2.0, (
             f"an out-of-range dim gave {got}, escaping the documented annotation band"
         )
-        sdk.update_point(op["id"], annotator_bias=0.5)
+        sdk._update_point(op["id"], annotator_bias=0.5)
 
         # 3. A non-numeric mitigation strength: the same hazard, on the other
         #    mechanism, reached through the documented mitigate path.
-        mit = sdk.mitigate_operator(op["id"], "some reason", strength=0.25)
+        mit = sdk._mitigate_operator(op["id"], "some reason", strength=0.25)
         mit_id = mit.get("id") or mit.get("mitigation_id")
         assert mit_id, f"mitigate_operator returned no id: {mit}"
-        sdk.update_point(mit_id, mitigation_strength="oops")
+        sdk._update_point(mit_id, mitigation_strength="oops")
         got = compute_operator_weight(proj, op["id"])
         assert 0.1 <= got <= 10.0, f"malformed mitigation strength gave {got}"
 
@@ -558,7 +558,7 @@ def test_a_malformed_stored_value_cannot_abort_the_reader(monkeypatch):
         #    even on a raw Cypher parameter), but a string is persisted unvalidated
         #    and converts to NaN. It matters because `max([nan, 0.25])` is `nan`,
         #    so ONE such row would return NaN as the weight of the whole operator.
-        sdk.update_point(mit_id, mitigation_strength="nan")
+        sdk._update_point(mit_id, mitigation_strength="nan")
         got = compute_operator_weight(proj, op["id"])
         assert got == got, (
             f"a NaN mitigation strength made the weight NaN ({got}) — one "
@@ -571,9 +571,9 @@ def test_a_malformed_stored_value_cannot_abort_the_reader(monkeypatch):
         #    promises that, and dropping it would silently turn a maximum-damping
         #    `inf` into the milder fallback. This is the behaviour a NaN-only
         #    filter preserves and an isfinite filter does not.
-        sdk.update_point(mit_id, mitigation_strength="inf")
+        sdk._update_point(mit_id, mitigation_strength="inf")
         damped_hard = compute_operator_weight(proj, op["id"])
-        sdk.update_point(mit_id, mitigation_strength="-inf")
+        sdk._update_point(mit_id, mitigation_strength="-inf")
         damped_soft = compute_operator_weight(proj, op["id"])
         assert damped_hard < damped_soft, (
             f"an infinite strength ({damped_hard}) did not damp harder than a "
@@ -599,20 +599,20 @@ def test_recall_state_survives_the_same_malformed_values(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", _LIVE_URI)
     sdk = SDK(db_path=None, namespace=f"test_ann6151_state_{uuid.uuid4().hex[:8]}")
     try:
-        src = sdk.create_point("decision", "a source claim", status="live", dedup=False)
-        tgt = sdk.create_point("decision", "a target claim", status="live", dedup=False)
-        op = sdk.create_operator("IMPL", src["id"], [tgt["id"]])
-        mit = sdk.mitigate_operator(op["id"], "some reason", strength=0.25)
+        src = sdk._create_point("decision", "a source claim", status="live", dedup=False)
+        tgt = sdk._create_point("decision", "a target claim", status="live", dedup=False)
+        op = sdk._create_operator("IMPL", src["id"], [tgt["id"]])
+        mit = sdk._mitigate_operator(op["id"], "some reason", strength=0.25)
         mit_id = mit.get("id") or mit.get("mitigation_id")
 
         # Baseline: the state view works before anything is corrupted.
-        sdk.recall_state("source claim")
+        sdk._recall_state("source claim")
 
-        sdk.update_point(op["id"], annotator_precision="oops")
-        sdk.recall_state("source claim")  # must not raise
+        sdk._update_point(op["id"], annotator_precision="oops")
+        sdk._recall_state("source claim")  # must not raise
 
-        sdk.update_point(mit_id, mitigation_strength="oops")
-        state = sdk.recall_state("source claim")  # must not raise
+        sdk._update_point(mit_id, mitigation_strength="oops")
+        state = sdk._recall_state("source claim")  # must not raise
         assert state is not None
 
         # And the degraded values really are present, so the reader did not

@@ -173,7 +173,7 @@ class TestComputeSessionEmbedding:
 class TestIndexTimeEmbedding:
     def _ingest(self, sdk, directory, body):
         _write_session_md(directory, "sess1.md", body)
-        return sdk.ingest_corpus(directory, eventKind="AgentSession",
+        return sdk._ingest_corpus(directory, eventKind="AgentSession",
                                  extract_metadata=False)
 
     def test_embedding_stored_when_model_available(self):

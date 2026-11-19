@@ -84,7 +84,7 @@ def _make_point(sdk: TortoiseSDK, content: str, kind: str = "statement", *,
     so a rebuild is self-healing (issue Indicator 2 / criterion (d) pins
     that).
     """
-    pid = sdk.create_point(kind, content)["id"]
+    pid = sdk._create_point(kind, content)["id"]
     sets, params = [], {"id": pid}
     if status is not None:
         sets.append("n.status = $status")
@@ -212,7 +212,7 @@ class TestIngestGuardAfterRebuild:
         terminal = sdk._find_terminal_dedup_hit(content, "statement")
         assert terminal is not None, (
             "#2971: the terminal dedup predicate must still match this point")
-        before = sdk.get_point(terminal)
+        before = sdk._get_point(terminal)
         bundle = {
             "points": [
                 {"ref": "pTerm", "kind": "statement", "content": content},
@@ -225,8 +225,8 @@ class TestIngestGuardAfterRebuild:
         viols = sdk._validate_bundle(bundle)
         assert any("#9819" in v["message"] for v in viols), viols
         with pytest.raises(BundleValidationError, match="dedup hit"):
-            sdk.ingest(bundle)
-        after = sdk.get_point(terminal)
+            sdk._ingest(bundle)
+        after = sdk._get_point(terminal)
         assert after.get("batch_id") is None, (
             "the content fold stamped the terminal point (#9819)")
         assert after.get("updatedAt") == before.get("updatedAt"), (
@@ -249,8 +249,8 @@ class TestIngestGuardAfterRebuild:
                           event_log_path=str(events / "events.jsonl"))
         try:
             content = "the retracted claim"
-            pid = sdk.create_point("statement", content)["id"]
-            sdk.retract_point(pid)
+            pid = sdk._create_point("statement", content)["id"]
+            sdk._retract_point(pid)
             g = sdk._get_proj().g
             assert g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content_hash",
@@ -286,8 +286,8 @@ class TestIngestGuardAfterRebuild:
                           event_log_path=str(events / "events.jsonl"))
         try:
             content = "the hash-less retracted claim"
-            pid = sdk.create_point("statement", content)["id"]
-            sdk.retract_point(pid)
+            pid = sdk._create_point("statement", content)["id"]
+            sdk._retract_point(pid)
 
             sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
@@ -323,9 +323,9 @@ class TestIngestGuardAfterRebuild:
                           event_log_path=str(events / "events.jsonl"))
         try:
             content = "the superseded claim"
-            old_id = sdk.create_point("statement", content)["id"]
-            new_id = sdk.create_point("statement", "its successor")["id"]
-            sdk.supersede_point(old_id, new_id)
+            old_id = sdk._create_point("statement", content)["id"]
+            new_id = sdk._create_point("statement", "its successor")["id"]
+            sdk._supersede_point(old_id, new_id)
 
             # Premise: the canonical pair — status AND flag together, which is
             # precisely the state the old AND-of-two-conjuncts filter missed.
@@ -367,9 +367,9 @@ class TestIngestGuardAfterRebuild:
                           event_log_path=str(events / "events.jsonl"))
         try:
             content = "the invalidated live claim"
-            old_id = sdk.create_point("statement", content)["id"]
-            new_id = sdk.create_point("statement", "its correction")["id"]
-            sdk.invalidate_point(old_id, new_id)
+            old_id = sdk._create_point("statement", content)["id"]
+            new_id = sdk._create_point("statement", "its correction")["id"]
+            sdk._invalidate_point(old_id, new_id)
 
             # Premise: status UNTOUCHED (still live) and ONLY the flag set.
             row = sdk._get_proj().g.query(
@@ -400,7 +400,7 @@ class TestIngestGuardAfterRebuild:
         sdk = TortoiseSDK(str(tmp_path / "live.db"))
         try:
             content = "a perfectly live claim"
-            sdk.create_point("statement", content)
+            sdk._create_point("statement", content)
             assert sdk._find_terminal_dedup_hit(content, "statement") is None, (
                 "a live point must not be a terminal dedup hit")
             bundle = {
@@ -411,7 +411,7 @@ class TestIngestGuardAfterRebuild:
                 "connections": [{"from": "pLive", "to": "pB",
                                  "operator": "IMPL"}],
             }
-            sdk.ingest(bundle)  # must NOT raise
+            sdk._ingest(bundle)  # must NOT raise
         finally:
             sdk.close()
 

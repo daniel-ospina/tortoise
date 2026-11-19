@@ -77,7 +77,7 @@ def fresh_sdk():
 
 def tier_source(sdk, url: str, tier: str, source_date: str = FRESH) -> str:
     """Create a Point extracted from a tiered Source. Returns point id."""
-    p = sdk.create_point("statement", f"claim from {url}", extractedFrom=url, status="live")
+    p = sdk._create_point("statement", f"claim from {url}", extractedFrom=url, status="live")
     sdk._get_proj().g.query(
         "MATCH (s:Source {url:$url}) SET s.credibilityTier = $t, s.sourceDate = $sd, "
         "s.ingestedAt = $sd",
@@ -96,16 +96,16 @@ def link_tiered_source(sdk, pid: str, url: str, tier: str) -> None:
 
 
 def inherited_alpha(sdk, pid: str) -> float | None:
-    return sdk.get_point(pid).get("ep_alpha")
+    return sdk._get_point(pid).get("ep_alpha")
 
 
 def make_point(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict:
-    return sdk.create_point(kind, content, status="live")  # #780 default excludes drafts
+    return sdk._create_point(kind, content, status="live")  # #780 default excludes drafts
 
 
 def make_operator(sdk: TortoiseSDK, source_id: str, target_id: str,
                   op_type: str = "IMPL", direction: str = "bidirectional") -> dict:
-    return sdk.create_operator(op_type, source_id, [target_id], direction=direction)
+    return sdk._create_operator(op_type, source_id, [target_id], direction=direction)
 
 
 def calibrate_neutral(sdk: TortoiseSDK, pid: str) -> None:
@@ -115,7 +115,7 @@ def calibrate_neutral(sdk: TortoiseSDK, pid: str) -> None:
     source (sourced points self-calibrate via _apply_source_inheritance
     before the gate; backfilling them 'explicit' would freeze inheritance,
     and 'inherited' gets reverted when no source edge exists)."""
-    sdk.set_point_baseline(pid, 1, 1)
+    sdk._set_point_baseline(pid, 1, 1)
 
 
 def build_scenario_a(sdk) -> tuple[str, str]:
@@ -158,7 +158,7 @@ def run_ep(sdk: TortoiseSDK, seed: int = 42, anchors: list[str] | None = None,
         kwargs["max_hops"] = 2
     if require_calibration is not None:
         kwargs["require_calibration"] = require_calibration
-    return sdk.compute_confidence(**kwargs)
+    return sdk._compute_confidence(**kwargs)
 
 
 def get_conf(result: dict, node_id: str) -> float:
@@ -398,7 +398,7 @@ class TestT2aEdgeCases:
     def test_no_source_no_baseline(self):
         """Point with no extractedFrom never gets an inherited baseline."""
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "orphan point")
+            p = sdk._create_point("statement", "orphan point")
             sdk._apply_source_inheritance(recency_decay=1.0)
             assert inherited_alpha(sdk, p["id"]) is None
 
@@ -454,7 +454,7 @@ class TestSituation7_AddRemoveIdempotent:
             assert inherited_alpha(sdk, a_id) is None  # graph read is clean
             calibrate_neutral(sdk, a_id)  # revert cleared the baseline — re-neutral
             # EP path must also see the revert — no stale prior:
-            res = sdk.compute_confidence(recency_decay=1.0, anchors=[a_id], max_hops=2)
+            res = sdk._compute_confidence(recency_decay=1.0, anchors=[a_id], max_hops=2)
             conf = get_conf(res, a_id)
             # #652 regression property: after revert the point carries NO
             # evidence — its confidence must reflect operator coupling only,
@@ -661,15 +661,15 @@ class TestSituation9_Mitigation_Audit:
         with tempfile.TemporaryDirectory(prefix="tt_341_") as td:
             sdk = TortoiseSDK(os.path.join(td, "test.db"))
             try:
-                a = sdk.create_point("statement", "A")
-                b = sdk.create_point("statement", "B")
-                op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+                a = sdk._create_point("statement", "A")
+                b = sdk._create_point("statement", "B")
+                op = sdk._create_operator("IMPL", a["id"], [b["id"]])
                 # plain operator -> w == 1.0 (no input operator)
                 w_plain = weights_mod.compute_operator_weight(sdk._get_proj(), op["id"])
                 assert w_plain == pytest.approx(1.0, rel=1e-9)
                 # operator targeting an operator -> w == 2.0 for IMPL;
                 # NAND base 8.0 (#855) × 2.0 mitigation = 16 → clamped 10.0
-                op2 = sdk.create_operator("NAND", a["id"], [op["id"]])
+                op2 = sdk._create_operator("NAND", a["id"], [op["id"]])
                 w_mit = weights_mod.compute_operator_weight(sdk._get_proj(), op2["id"])
                 assert w_mit == pytest.approx(10.0, rel=1e-9)
             finally:

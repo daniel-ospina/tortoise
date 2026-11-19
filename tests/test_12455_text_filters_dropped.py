@@ -556,7 +556,7 @@ def test_the_stub_declares_no_var_keyword_and_only_real_knobs() -> None:
     """
     from tortoise.sdk import TortoiseSDK
 
-    real = set(inspect.signature(TortoiseSDK.tortoise_fts_query).parameters)
+    real = set(inspect.signature(TortoiseSDK._tortoise_fts_query).parameters)
     stub = inspect.signature(_StubSDK.tortoise_fts_query).parameters
     wildcard = [p.name for p in stub.values()
                 if p.kind is inspect.Parameter.VAR_KEYWORD]

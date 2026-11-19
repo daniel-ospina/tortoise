@@ -26,15 +26,15 @@ NOTE_TITLE = "Appointment note: Marta Reyes, Northwind Logistics (2026-09-08)"
 
 
 def sub(name: str, kind: str, **props) -> str:
-    return sdk.create_subject(name, kind, dedup=True, **props)["id"]
+    return sdk._create_subject(name, kind, dedup=True, **props)["id"]
 
 
 def obj(name: str, kind: str, **props) -> str:
-    return sdk.create_object(name, kind, dedup=True, **props)["id"]
+    return sdk._create_object(name, kind, dedup=True, **props)["id"]
 
 
 def point(content: str, key: str, **props) -> str:
-    return sdk.create_point(
+    return sdk._create_point(
         "statement", content, dedup=True, key=f"{K}:{key}", **props
     )["id"]
 
@@ -59,7 +59,7 @@ ceo_role = obj("CEO at Northwind Logistics", "role")
 vp_fin_role = obj("VP Finance at Halcyon Group", "role", tenure="prior")
 
 # --- Event: the dated appointment -------------------------------------------
-event = sdk.create_event(
+event = sdk._create_event(
     "Marta Reyes joins Northwind Logistics as CFO",
     "employmentStart",
     date=NOTE_DATE,
@@ -121,7 +121,7 @@ edges = [
 ]
 
 for relation, from_id, to_id in edges:
-    res = sdk.create_edge(relation, from_id, to_id)
+    res = sdk._create_edge(relation, from_id, to_id)
     print(f"EDGE {relation:16s} {res.get('created')!s:5s} {from_id} -> {to_id}")
 
 print("IDS", {"source": src, "subject_marta": marta, "subject_tobias": tobias,

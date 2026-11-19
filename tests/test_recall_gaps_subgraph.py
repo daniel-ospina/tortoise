@@ -237,13 +237,13 @@ def _build_gaps_golden_graph(sdk):
     (iv) ``other``: pure support target — has incoming IMPL but no outgoing
     load — not a gap.
     Returns dict of {role: point_id}."""
-    ev = [sdk.create_point("evidence", f"gaps golden evidence {i}") for i in range(3)]
-    gap = sdk.create_point("statement", "zephyr q3 launch is load-bearing gap")
-    other = sdk.create_point("statement", "zephyr launch derivative requirement")
-    well = sdk.create_point("statement", "zephyr supply chain resolved well-supported")
-    isolated = sdk.create_point("statement", "nova engine coolant spec is q3 target")
+    ev = [sdk._create_point("evidence", f"gaps golden evidence {i}") for i in range(3)]
+    gap = sdk._create_point("statement", "zephyr q3 launch is load-bearing gap")
+    other = sdk._create_point("statement", "zephyr launch derivative requirement")
+    well = sdk._create_point("statement", "zephyr supply chain resolved well-supported")
+    isolated = sdk._create_point("statement", "nova engine coolant spec is q3 target")
     # gap is load-bearing: it supports `other` (operator-mediated).
-    sdk.create_operator("IMPL", gap["id"], [other["id"]])
+    sdk._create_operator("IMPL", gap["id"], [other["id"]])
     # well is equally load-bearing (supports `other` directly via reification
     # rule — operator-less IMPL edge) BUT well-supported: 3 incoming IMPL
     # operators + a Source.
@@ -252,7 +252,7 @@ def _build_gaps_golden_graph(sdk):
         params={"s": well["id"], "t": other["id"]},
     )
     for e in ev:
-        sdk.create_operator("IMPL", e["id"], [well["id"]])
+        sdk._create_operator("IMPL", e["id"], [well["id"]])
     _link_source(sdk, well["id"], "https://example.com/supply-chain")
     _set_posterior(sdk, well["id"], 10.0, 1.0)
     return {"gap": gap["id"], "well": well["id"],
@@ -266,7 +266,7 @@ def test_gaps_golden_set_integration():
     sdk = _fresh_sdk()
     try:
         g = _build_gaps_golden_graph(sdk)
-        results = sdk.recall_gaps(kind="statement", limit=20)
+        results = sdk._recall_gaps(kind="statement", limit=20)
         ids = [r["id"] for r in results]
         assert g["gap"] in ids, "load-bearing unsourced claim must be returned"
         assert g["well"] not in ids, "well-supported claim must NOT be returned"
@@ -294,17 +294,17 @@ def test_gaps_draft_recalled_after_live_uncomputed_end_to_end():
     score is the higher of the two."""
     sdk = _fresh_sdk()
     try:
-        other = sdk.create_point("statement", "zephyr launch derivative requirement")
-        live_gap = sdk.create_point("statement", "zephyr q3 launch load-bearing live gap")
-        draft_gap = sdk.create_point(
+        other = sdk._create_point("statement", "zephyr launch derivative requirement")
+        live_gap = sdk._create_point("statement", "zephyr q3 launch load-bearing live gap")
+        draft_gap = sdk._create_point(
             "statement", "zephyr q3 launch load-bearing draft gap", status="draft")
         # live_gap: load 1, support 1 (the draft's operator targets it).
         # draft_gap: load 2, support 0 — it out-SCORES the live gap (2.0 > 0.5).
-        sdk.create_operator("IMPL", live_gap["id"], [other["id"]])
-        sdk.create_operator("IMPL", draft_gap["id"], [live_gap["id"]])
-        sdk.create_operator("IMPL", draft_gap["id"], [other["id"]])
+        sdk._create_operator("IMPL", live_gap["id"], [other["id"]])
+        sdk._create_operator("IMPL", draft_gap["id"], [live_gap["id"]])
+        sdk._create_operator("IMPL", draft_gap["id"], [other["id"]])
 
-        results = sdk.recall_gaps(kind="statement", limit=20)
+        results = sdk._recall_gaps(kind="statement", limit=20)
         ids = [r["id"] for r in results]
         by_id = {r["id"]: r for r in results}
         assert live_gap["id"] in ids and draft_gap["id"] in ids
@@ -343,13 +343,13 @@ def test_gaps_reification_rule_direct_edges():
     sdk = _fresh_sdk()
     try:
         proj = sdk._get_proj()
-        src = sdk.create_point("statement", "direct source claim")
-        dst = sdk.create_point("statement", "direct target claim")
+        src = sdk._create_point("statement", "direct source claim")
+        dst = sdk._create_point("statement", "direct target claim")
         proj.g.query(
             "MATCH (a:Point {id:$s}), (b:Point {id:$t}) CREATE (a)-[:IMPL]->(b)",
             params={"s": src["id"], "t": dst["id"]},
         )
-        results = sdk.recall_gaps(kind="statement", limit=20)
+        results = sdk._recall_gaps(kind="statement", limit=20)
         by_id = {r["id"]: r for r in results}
         assert src["id"] in by_id
         rr = by_id[src["id"]]["gaps_ranking"]
@@ -368,14 +368,14 @@ def test_gaps_mixed_edges_count_twice():
     sdk = _fresh_sdk()
     try:
         proj = sdk._get_proj()
-        a = sdk.create_point("statement", "mixed load claim")
-        c = sdk.create_point("statement", "mixed load target")
-        sdk.create_operator("IMPL", a["id"], [c["id"]])          # op idx=0
+        a = sdk._create_point("statement", "mixed load claim")
+        c = sdk._create_point("statement", "mixed load target")
+        sdk._create_operator("IMPL", a["id"], [c["id"]])          # op idx=0
         proj.g.query(
             "MATCH (x:Point {id:$s}), (y:Point {id:$t}) CREATE (x)-[:IMPL]->(y)",
             params={"s": a["id"], "t": c["id"]},
         )                                                            # direct
-        results = sdk.recall_gaps(kind="statement", limit=20)
+        results = sdk._recall_gaps(kind="statement", limit=20)
         rr = next(r for r in results if r["id"] == a["id"])["gaps_ranking"]
         assert rr["outgoing_impl"] == 2 and rr["load"] == 2
         assert rr["score"] == pytest.approx(2.0)
@@ -389,9 +389,9 @@ def test_gaps_direct_nand_incoming_surfaced():
     sdk = _fresh_sdk()
     try:
         proj = sdk._get_proj()
-        a = sdk.create_point("statement", "directly attacked claim")
-        b = sdk.create_point("statement", "direct attacker")
-        c = sdk.create_point("statement", "load target")
+        a = sdk._create_point("statement", "directly attacked claim")
+        b = sdk._create_point("statement", "direct attacker")
+        c = sdk._create_point("statement", "load target")
         # a is load-bearing (supports c) AND directly NANDed by b.
         proj.g.query(
             "MATCH (x:Point {id:$s}), (y:Point {id:$t}) CREATE (x)-[:IMPL]->(y)",
@@ -401,7 +401,7 @@ def test_gaps_direct_nand_incoming_surfaced():
             "MATCH (x:Point {id:$s}), (y:Point {id:$t}) CREATE (x)-[:NAND]->(y)",
             params={"s": b["id"], "t": a["id"]},
         )
-        results = sdk.recall_gaps(kind="statement", limit=20)
+        results = sdk._recall_gaps(kind="statement", limit=20)
         rr = next(r for r in results if r["id"] == a["id"])["gaps_ranking"]
         assert rr["incoming_nand"] == 1
         assert rr["support"] == 0  # NAND never counts as support
@@ -416,7 +416,7 @@ def test_gaps_topic_scope_uses_hybrid_pool():
     sdk = _fresh_sdk()
     try:
         g = _build_gaps_golden_graph(sdk)
-        sdk.tortoise_fts_query = lambda q, **kw: [
+        sdk._tortoise_fts_query = lambda q, **kw: [
             {"id": g["gap"], "content": "zephyr q3 launch is load-bearing gap",
              "point_kind": "statement", "scores": {"rrf": 0.05}},
             {"id": g["well"], "content": "zephyr supply chain resolved well-supported",
@@ -430,7 +430,7 @@ def test_gaps_topic_scope_uses_hybrid_pool():
             "CREATE (o:Point {id:'op-1', is_operator:true, op_type:'IMPL'}) RETURN o.id",
         ).result_set
         assert op, "operator fixture must be created"
-        results = sdk.recall_gaps("zephyr", kind="statement", limit=20)
+        results = sdk._recall_gaps("zephyr", kind="statement", limit=20)
         ids = [r["id"] for r in results]
         assert "op-1" not in ids
         assert g["gap"] in ids and g["well"] not in ids
@@ -442,13 +442,13 @@ def test_gaps_requires_pool_definition():
     sdk = _fresh_sdk()
     try:
         with pytest.raises(ValueError):
-            sdk.recall_gaps(limit=10)  # no query, no kind
+            sdk._recall_gaps(limit=10)  # no query, no kind
         with pytest.raises(ValueError):
-            sdk.recall_gaps(kind="statement", min_load=-1)
+            sdk._recall_gaps(kind="statement", min_load=-1)
         with pytest.raises(ValueError):
-            sdk.recall_gaps(kind="statement", max_support=-1)
+            sdk._recall_gaps(kind="statement", max_support=-1)
         with pytest.raises(ValueError):
-            sdk.recall_gaps(kind="statement", limit=0)
+            sdk._recall_gaps(kind="statement", limit=0)
     finally:
         sdk.close()
 
@@ -461,9 +461,9 @@ def test_gaps_superseded_excluded_by_default():
             "MATCH (n:Point {id:$id}) SET n.status = 'superseded'",
             params={"id": g["gap"]},
         )
-        default_ids = {r["id"] for r in sdk.recall_gaps(kind="statement", limit=20)}
+        default_ids = {r["id"] for r in sdk._recall_gaps(kind="statement", limit=20)}
         assert g["gap"] not in default_ids
-        inc = {r["id"] for r in sdk.recall_gaps(
+        inc = {r["id"] for r in sdk._recall_gaps(
             kind="statement", limit=20, include_superseded=True)}
         assert g["gap"] in inc
     finally:
@@ -477,11 +477,11 @@ def _build_subgraph_graph(sdk):
     zephyr cluster: claim1 --IMPL--> claim2 (operator-mediated), both
     aboutObject→zephyr, claim1 extractedFrom→source.
     atlas island: claim3 (unrelated — must NOT appear)."""
-    c1 = sdk.create_point("statement", "zephyr supports orbital refueling")
-    c2 = sdk.create_point("statement", "zephyr supports crew rotation")
-    c3 = sdk.create_point("statement", "atlas launcher reuses vega avionics")
-    sdk.create_operator("IMPL", c1["id"], [c2["id"]])
-    obj = sdk.create_object("zephyr", "product")
+    c1 = sdk._create_point("statement", "zephyr supports orbital refueling")
+    c2 = sdk._create_point("statement", "zephyr supports crew rotation")
+    c3 = sdk._create_point("statement", "atlas launcher reuses vega avionics")
+    sdk._create_operator("IMPL", c1["id"], [c2["id"]])
+    obj = sdk._create_object("zephyr", "product")
     proj = sdk._get_proj()
     proj.create_about_edge(c1["id"], obj["id"], "aboutObject")
     proj.create_about_edge(c2["id"], obj["id"], "aboutObject")
@@ -497,7 +497,7 @@ def test_subgraph_completeness_over_precision():
     sdk = _fresh_sdk()
     try:
         g = _build_subgraph_graph(sdk)
-        res = sdk.recall_subgraph(g["c1"], depth=2, completeness="full")
+        res = sdk._recall_subgraph(g["c1"], depth=2, completeness="full")
         node_ids = {n["id"] for n in res["nodes"]}
         assert g["c1"] in node_ids and g["c2"] in node_ids
         assert g["obj"] in node_ids
@@ -525,10 +525,10 @@ def test_subgraph_depth_bounds_expansion():
     sdk = _fresh_sdk()
     try:
         g = _build_subgraph_graph(sdk)
-        d1 = sdk.recall_subgraph(g["c1"], depth=1)
+        d1 = sdk._recall_subgraph(g["c1"], depth=1)
         ids1 = {n["id"] for n in d1["nodes"]}
         assert g["c2"] not in ids1  # operator-mediated IMPL needs hop 2
-        d2 = sdk.recall_subgraph(g["c1"], depth=2)
+        d2 = sdk._recall_subgraph(g["c1"], depth=2)
         ids2 = {n["id"] for n in d2["nodes"]}
         assert g["c2"] in ids2
     finally:
@@ -541,7 +541,7 @@ def test_subgraph_completeness_core():
     sdk = _fresh_sdk()
     try:
         g = _build_subgraph_graph(sdk)
-        res = sdk.recall_subgraph(g["c1"], depth=2, completeness="core")
+        res = sdk._recall_subgraph(g["c1"], depth=2, completeness="core")
         assert all(e["type"] in ("IMPL", "NAND") for e in res["edges"])
         assert not any(n.get("type") == "object" for n in res["nodes"])
         assert not any(n.get("type") == "source" for n in res["nodes"])
@@ -558,11 +558,11 @@ def test_subgraph_seed_by_topic_text():
     sdk = _fresh_sdk()
     try:
         g = _build_subgraph_graph(sdk)
-        sdk.tortoise_fts_query = lambda q, **kw: [
+        sdk._tortoise_fts_query = lambda q, **kw: [
             {"id": g["c1"], "content": "zephyr supports orbital refueling",
              "point_kind": "statement", "scores": {"rrf": 0.05}},
         ]
-        res = sdk.recall_subgraph("zephyr orbital refueling", depth=2)
+        res = sdk._recall_subgraph("zephyr orbital refueling", depth=2)
         assert g["c1"] in {n["id"] for n in res["nodes"]}
         assert g["obj"] in {n["id"] for n in res["nodes"]}
         assert res["stats"]["node_count"] >= 3
@@ -573,19 +573,19 @@ def test_subgraph_seed_by_topic_text():
 def test_subgraph_unresolvable_seed_returns_empty():
     sdk = _fresh_sdk()
     try:
-        res = sdk.recall_subgraph("no-such-id-anywhere")
+        res = sdk._recall_subgraph("no-such-id-anywhere")
         assert res["nodes"] == [] and res["edges"] == []
         assert res["stats"]["node_count"] == 0
         assert res["stats"]["depth"] == 0
         with pytest.raises(ValueError):
-            sdk.recall_subgraph("")
+            sdk._recall_subgraph("")
         # Bounds validated even when the seed does not resolve (P2).
         with pytest.raises(ValueError):
-            sdk.recall_subgraph("no-such-id-anywhere", depth=6)
+            sdk._recall_subgraph("no-such-id-anywhere", depth=6)
         with pytest.raises(ValueError):
-            sdk.recall_subgraph("no-such-id-anywhere", completeness="bogus")
+            sdk._recall_subgraph("no-such-id-anywhere", completeness="bogus")
         with pytest.raises(ValueError):
-            sdk.recall_subgraph("no-such-id-anywhere", max_nodes=5)
+            sdk._recall_subgraph("no-such-id-anywhere", max_nodes=5)
     finally:
         sdk.close()
 
@@ -596,15 +596,15 @@ def test_subgraph_max_nodes_truncation():
     sdk = _fresh_sdk()
     try:
         proj = sdk._get_proj()  # noqa: F841
-        hub = sdk.create_point("statement", "hub claim")
+        hub = sdk._create_point("statement", "hub claim")
         for i in range(8):
-            leaf = sdk.create_point("statement", f"leaf claim {i}")
-            sdk.create_operator("IMPL", hub["id"], [leaf["id"]])
-        res = sdk.recall_subgraph(hub["id"], depth=2, max_nodes=10)
+            leaf = sdk._create_point("statement", f"leaf claim {i}")
+            sdk._create_operator("IMPL", hub["id"], [leaf["id"]])
+        res = sdk._recall_subgraph(hub["id"], depth=2, max_nodes=10)
         assert res["stats"]["truncated"] is True
         assert res["stats"]["node_count"] <= 10
         # A comfortable cap gets everything (hub + 8 leaves + 8 ops).
-        res2 = sdk.recall_subgraph(hub["id"], depth=2, max_nodes=50)
+        res2 = sdk._recall_subgraph(hub["id"], depth=2, max_nodes=50)
         assert res2["stats"]["truncated"] is False
         assert res2["stats"]["node_count"] == 17
     finally:
@@ -698,10 +698,10 @@ def test_tortoise_recall_gaps_preset_limit_is_20():
     mcp_mod.sdk = sdk
     try:
         # 12 load-bearing-unsupported claims (each supports a shared target).
-        target = sdk.create_point("statement", "shared load target")
+        target = sdk._create_point("statement", "shared load target")
         for i in range(12):
-            c = sdk.create_point("statement", f"gap claim {i} unsupported")
-            sdk.create_operator("IMPL", c["id"], [target["id"]])
+            c = sdk._create_point("statement", f"gap claim {i} unsupported")
+            sdk._create_operator("IMPL", c["id"], [target["id"]])
         r = tortoise_recall(mode="gaps", kind="statement")
         assert r["mode"] == "gaps"
         assert len(r["results"]) == 12, "gaps preset must not truncate at 10"

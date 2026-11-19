@@ -303,7 +303,7 @@ def test_vector_arm_never_calls_tortoise_fts_query(tmp_path, monkeypatch, fake_e
     def _boom(*a, **k):
         raise AssertionError("tortoise_fts_query must not be called by the vector arm")
 
-    monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", _boom)
+    monkeypatch.setattr(TortoiseSDK, "_tortoise_fts_query", _boom)
     sdk = _fresh_sdk(tmp_path)
     try:
         q = _mini()[0]

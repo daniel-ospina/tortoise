@@ -67,7 +67,7 @@ class TestDe2e5:
         corpus = tmp_path / "corpus"
         corpus.mkdir()
         (corpus / "session.md").write_text(SESSION_MD)
-        res = sdk.ingest_corpus(str(corpus), eventKind="AgentSession")
+        res = sdk._ingest_corpus(str(corpus), eventKind="AgentSession")
         assert res.get("ingested", 0) >= 1 or res.get("updated", 0) >= 1, res
         # The session Event exists with aboutObject edges to issue Objects.
         rows = sdk._get_proj().g.query(
@@ -83,8 +83,8 @@ class TestDe2e5:
         """DE2E-5 spec: the session Event `uses` the artifact Object — the
         canonical writer is file_human_approval (create_edge(event, artifact,
         'uses'), design #421)."""
-        claim = sdk.create_point("statement", "claim under approval", status="live")
-        sdk.create_subject("alice")
+        claim = sdk._create_point("statement", "claim under approval", status="live")
+        sdk._create_subject("alice")
         artifact = sdk.create_entity("document", "doc-1",
                                      documentKind="plan", objectKind="document")
         sdk.record_decision(approver_id="alice",
@@ -105,8 +105,8 @@ class TestDe2e5:
         #25 case mismatch — the confidence term is currently dead for
         production events; tracked, not introduced by this PR)."""
         proj = sdk._get_proj()
-        claim = sdk.create_point("statement", "claim under approval", status="live")
-        sdk.create_subject("alice")
+        claim = sdk._create_point("statement", "claim under approval", status="live")
+        sdk._create_subject("alice")
         artifact = sdk.create_entity("document", "doc-1",
                                      documentKind="plan", objectKind="document")
         artifact_id = artifact["node"]["id"]
@@ -124,10 +124,10 @@ class TestDe2e5:
         without aboutObject edges (observable baseline)."""
         proj = sdk._get_proj()
         # Baseline session: no aboutObject.
-        e1 = sdk.create_event("base session", "AgentSession",
+        e1 = sdk._create_event("base session", "AgentSession",
                               startedAt="2026-08-01T00:00:00Z")
         # AboutObject session: wired to an issue Object.
-        e2 = sdk.create_event("about session", "AgentSession",
+        e2 = sdk._create_event("about session", "AgentSession",
                               startedAt="2026-08-01T00:00:00Z")
         oid = "issue_abc12345"
         proj.g.query(
@@ -160,9 +160,9 @@ class TestDe2e5:
         """Negative variant: ONLY a Point-origin aboutObject edge — the
         session boost must stay at the baseline (Event-anchored rewrite)."""
         proj = sdk._get_proj()
-        e = sdk.create_event("point-origin session", "AgentSession",
+        e = sdk._create_event("point-origin session", "AgentSession",
                              startedAt="2026-08-01T00:00:00Z")
-        p = sdk.create_point("statement", "we decided on 16379", status="live")
+        p = sdk._create_point("statement", "we decided on 16379", status="live")
         oid = "issue_xyz98765"
         proj.g.query(
             "MERGE (o:Object {id:$oid}) SET o.name='tortoise#999', "

@@ -637,7 +637,7 @@ def test_parse_error_never_retried(tmp_path, monkeypatch):
     NOT retried — exactly one attempt, the exception propagates unchanged
     (never a WriteStageRetriesExhausted sentinel), and the writes that
     completed before the failure persist."""
-    real_create = TortoiseSDK.create_point
+    real_create = TortoiseSDK._create_point
     calls = {"n": 0}
     fail_id = "lme:retry_q_001:s0:t1"
 
@@ -649,7 +649,7 @@ def test_parse_error_never_retried(tmp_path, monkeypatch):
                            **props)
 
     sdk = _fresh_sdk(tmp_path)
-    monkeypatch.setattr(TortoiseSDK, "create_point", _parse_fail)
+    monkeypatch.setattr(TortoiseSDK, "_create_point", _parse_fail)
     try:
         with pytest.raises(ValueError, match="parse: bad point payload"):
             ingest_haystack_v2(sdk, _v2_question(), object())

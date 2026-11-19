@@ -185,9 +185,9 @@ def sdk():
 
 def _quoted_point(sdk) -> str:
     """A point whose ONLY record of the original wording is its ``quote``."""
-    pid = sdk.create_point(
+    pid = sdk._create_point(
         "statement", PARAPHRASE, quote=VERBATIM, source_turn_id=1)["id"]
-    sdk.create_point("statement", DECOY)
+    sdk._create_point("statement", DECOY)
     return pid
 
 
@@ -588,11 +588,11 @@ def test_an_array_valued_quote_is_stored_flat_and_both_legs_find_it(sdk) -> None
     stores ``typeof = 'List'``, the FTS assertion returns [] while the BM25 one
     still hits — the measured disagreement.
     """
-    sdk.create_point("statement", DECOY)
-    pid = sdk.create_point(
+    sdk._create_point("statement", DECOY)
+    pid = sdk._create_point(
         "statement", PARAPHRASE,
         quote=[VERBATIM, "a second utterance"], source_turn_id=1)["id"]
-    scalar_pid = sdk.create_point(
+    scalar_pid = sdk._create_point(
         "statement", f"{DECOY} two", quote=VERBATIM, source_turn_id=2)["id"]
     g = sdk._get_proj().g
 
@@ -637,7 +637,7 @@ def test_a_pre_existing_array_quote_is_flattened_by_the_sweep(sdk) -> None:
     takes the "nothing owed" branch, the node keeps ``typeof = 'List'`` and the
     FTS query never matches it.
     """
-    pid = sdk.create_point(
+    pid = sdk._create_point(
         "statement", PARAPHRASE, quote=VERBATIM, source_turn_id=1)["id"]
     proj = sdk._get_proj()
     g = proj.g

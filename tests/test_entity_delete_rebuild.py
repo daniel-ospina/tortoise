@@ -139,7 +139,7 @@ class TestDeleteSurvivesRebuild:
         ``tortoise_delete_entity`` path)."""
         sdk, events = env
         proj = sdk._get_proj()
-        pid = sdk.create_point("statement", "delete-me-point")["id"]
+        pid = sdk._create_point("statement", "delete-me-point")["id"]
         assert _point(proj, pid)
 
         assert sdk._delete_entity(pid) is True
@@ -282,12 +282,12 @@ class TestRebuildFidelity:
         sdk, events = env
         proj = sdk._get_proj()
         pid = ulid()
-        assert sdk.create_point("statement", "first-incarnation",
+        assert sdk._create_point("statement", "first-incarnation",
                                 id=pid)["id"] == pid
         assert _point(proj, pid)
         assert sdk._delete_entity(pid) is True
         assert not _point(proj, pid)
-        sdk.create_point("statement", "second-incarnation", id=pid)
+        sdk._create_point("statement", "second-incarnation", id=pid)
         assert _point(proj, pid)
 
         proj.rebuild_all(str(events), confirm_destructive=True)
@@ -306,9 +306,9 @@ class TestRebuildFidelity:
         the re-creation is journaled directly (raw-producer id reuse)."""
         sdk, events = env
         proj = sdk._get_proj()
-        src = sdk.create_point("statement", "op-source")["id"]
-        tgt = sdk.create_point("statement", "op-target")["id"]
-        oid = sdk.create_operator("IMPL", src, [tgt])["id"]
+        src = sdk._create_point("statement", "op-source")["id"]
+        tgt = sdk._create_point("statement", "op-target")["id"]
+        oid = sdk._create_operator("IMPL", src, [tgt])["id"]
         assert _point(proj, oid)
         assert sdk._delete_entity(oid) is True
         assert not _point(proj, oid)
@@ -412,9 +412,9 @@ def _ids(proj, cypher: str, **params):
 
 
 def _operator(sdk):
-    src = sdk.create_point("statement", "op-source")["id"]
-    tgt = sdk.create_point("statement", "op-target")["id"]
-    return sdk.create_operator("IMPL", src, [tgt])["id"]
+    src = sdk._create_point("statement", "op-source")["id"]
+    tgt = sdk._create_point("statement", "op-target")["id"]
+    return sdk._create_operator("IMPL", src, [tgt])["id"]
 
 
 class TestIdentityIsKindPlusId:
@@ -442,7 +442,7 @@ class TestIdentityIsKindPlusId:
         assert not _subject(proj, name)
 
         # Foreign kind re-uses the SAME non-namespaced id, AFTER the delete.
-        sdk.create_point("statement", "collide-point", id=sid)
+        sdk._create_point("statement", "collide-point", id=sid)
         assert _point(proj, sid)
 
         proj.rebuild_all(str(events), confirm_destructive=True)
@@ -466,7 +466,7 @@ class TestIdentityIsKindPlusId:
         assert sdk._delete_entity(url) is True
         assert not _ids(proj, "MATCH (s:Source {id:$i}) RETURN s.id", i=url)
 
-        sdk.create_point("statement", "collide-point", id=url)
+        sdk._create_point("statement", "collide-point", id=url)
         assert _point(proj, url)
 
         proj.rebuild_all(str(events), confirm_destructive=True)
@@ -489,7 +489,7 @@ class TestIdentityIsKindPlusId:
         proj = sdk._get_proj()
         url = "https://collide.test/3860-dispatch"
         sdk.register_source(url, "document")
-        pid = sdk.create_point("statement", "collide-point", id=url)["id"]
+        pid = sdk._create_point("statement", "collide-point", id=url)["id"]
         assert _point(proj, pid), "seed Point must exist live"
 
         # The Source delete is journaled AFTER the Point exists, so the
@@ -529,7 +529,7 @@ class TestIdentityIsKindPlusId:
         delete, so the delete still survives and nothing is injected."""
         sdk, events = env
         proj = sdk._get_proj()
-        pid = sdk.create_point("statement", "hostile-label")["id"]
+        pid = sdk._create_point("statement", "hostile-label")["id"]
         assert _point(proj, pid)
 
         with open(events / "events.jsonl", "a") as fh:
@@ -565,8 +565,8 @@ def test_foreign_kind_delete_does_not_advance_point_annotator_boundary(env):
     sdk, events = env
     proj = sdk._get_proj()
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
-    pre = {k: (sdk.get_point(op) or {}).get(k) for k in dims}
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    pre = {k: (sdk._get_point(op) or {}).get(k) for k in dims}
     assert all(v is not None for v in pre.values())
 
     records = _journal(events)
@@ -590,7 +590,7 @@ def test_foreign_kind_delete_does_not_advance_point_annotator_boundary(env):
         }) + "\n")
 
     proj.rebuild_all(str(events), confirm_destructive=True)
-    rebuilt = {k: (sdk.get_point(op) or {}).get(k) for k in dims}
+    rebuilt = {k: (sdk._get_point(op) or {}).get(k) for k in dims}
     assert rebuilt == pre, (
         "a foreign-kind (Subject) delete advanced the POINT annotator "
         "boundary and dropped a live-valid annotation — #3860")

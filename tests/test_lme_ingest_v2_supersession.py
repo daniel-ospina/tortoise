@@ -570,9 +570,9 @@ def test_ingest_retroactive_supersession_warns_and_skips(sdk_factory):
 
     old_content, new_content = "gym at 6pm", "gym at 5pm"
     old_id, new_id = _pid(old_content), _pid(new_content)
-    sdk.create_point("statement", old_content, id=old_id,
+    sdk._create_point("statement", old_content, id=old_id,
                      validFrom="2026-06-10")
-    sdk.create_point("statement", new_content, id=new_id,
+    sdk._create_point("statement", new_content, id=new_id,
                      validFrom="2026-06-01")
     proj = sdk._get_proj()
 

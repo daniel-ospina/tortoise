@@ -42,7 +42,7 @@ def reg_sdk(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     sdk = TortoiseSDK(db, namespace="registry")
     # Create a team with known tier
-    team = sdk.org_create(name="meter-test")
+    team = sdk._org_create(name="meter-test")
     tid = team["id"]
     # Stamp tier on the Team node (pro = overage-eligible)
     sdk._get_registry().query(
@@ -132,8 +132,8 @@ class TestRecordWriteOps:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         sdk = TortoiseSDK(db, namespace="registry")
-        t1 = sdk.org_create(name="team-a")
-        t2 = sdk.org_create(name="team-b")
+        t1 = sdk._org_create(name="team-a")
+        t2 = sdk._org_create(name="team-b")
         sdk._get_registry().query(
             "MATCH (t:Team {id: $tid}) SET t.tier = 'pro'",
             params={"tid": t1["id"]},
@@ -463,7 +463,7 @@ class TestGetCurrentUsage:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         sdk = TortoiseSDK(db, namespace="registry")
-        team = sdk.org_create(name="fresh-team")
+        team = sdk._org_create(name="fresh-team")
         sdk._get_registry().query(
             "MATCH (t:Team {id: $tid}) SET t.tier = 'free'",
             params={"tid": team["id"]},
@@ -537,7 +537,7 @@ class TestGetCurrentUsage:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         sdk = TortoiseSDK(db, namespace="registry")
-        team = sdk.org_create(name="free-team")
+        team = sdk._org_create(name="free-team")
         sdk._get_registry().query(
             "MATCH (t:Team {id: $tid}) SET t.tier = 'free'",
             params={"tid": team["id"]},

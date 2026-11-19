@@ -97,11 +97,11 @@ def test_audit_ingest_exact_stamped_set(sdk):
     created and stamped with the bundle's batch_id — the operator-less direct
     edge this test previously asserted is gone.
     """
-    res = sdk.ingest(_full_bundle())
+    res = sdk._ingest(_full_bundle())
     bid = res["batch_id"]
     assert bid and len(bid) == 26
 
-    audit = sdk.list_batch(bid)
+    audit = sdk._list_batch(bid)
     assert audit["batch_id"] == bid
     assert audit["counts"]["points"] == 3, audit
     assert audit["counts"]["direct_edges"] == 0, audit
@@ -130,7 +130,7 @@ def test_audit_entities_sources_out_of_stamp_scope(sdk):
     batch_id) is a DOCUMENTED interim gap (the global _sanitize_props
     batch_id rejection is the A4-gated final sub-step after #785 adopts the
     shared helper) — pinned here so the contract wording matches reality."""
-    res = sdk.ingest(_full_bundle())
+    res = sdk._ingest(_full_bundle())
     bid = res["batch_id"]
     # the source and subject nodes exist but carry no batch_id (ingest path)
     assert _count(sdk, "MATCH (s:Source) RETURN count(s)") == 1
@@ -139,17 +139,17 @@ def test_audit_entities_sources_out_of_stamp_scope(sdk):
                   {"bid": bid}) == 0
     assert _count(sdk, "MATCH (n:Subject {batch_id:$bid}) RETURN count(n)",
                   {"bid": bid}) == 0
-    audit = sdk.list_batch(bid)
+    audit = sdk._list_batch(bid)
     assert all("url" not in p for p in audit["points"])
     # DOCUMENTED interim gap (A4-gated sub-step): the raw-SDK surface can
     # still stamp an entity via props passthrough — the audit does NOT
     # return it (out of Point scope); pinned so a future _sanitize_props
     # rejection (post-#785) flips this assertion intentionally
-    subj = sdk.create_subject("Doc-stamped entity", batch_id=bid)
+    subj = sdk._create_subject("Doc-stamped entity", batch_id=bid)
     rows = _query(sdk, "MATCH (n:Subject {id:$id}) RETURN n.batch_id",
                   {"id": subj["id"]})
     assert rows and rows[0][0] == bid
-    assert all(p["id"] != subj["id"] for p in sdk.list_batch(bid)["points"]), \
+    assert all(p["id"] != subj["id"] for p in sdk._list_batch(bid)["points"]), \
         "entities are outside the Point-scoped audit"
 
 def test_audit_crash_retry_shares_one_batch_id(sdk):
@@ -157,12 +157,12 @@ def test_audit_crash_retry_shares_one_batch_id(sdk):
     the SAME content-derived batch_id and the audit returns the SAME stamped
     set (the dedup-hit acquires/adopts — E2E-10 row 14 — never a second
     set)."""
-    res1 = sdk.ingest(_full_bundle())
-    res2 = sdk.ingest(_full_bundle())
+    res1 = sdk._ingest(_full_bundle())
+    res2 = sdk._ingest(_full_bundle())
     assert res1["batch_id"] == res2["batch_id"]
     assert res2["created"]["points"] == 0 and res2["deduped"]["points"] == 2
-    a1 = sdk.list_batch(res1["batch_id"])
-    a2 = sdk.list_batch(res2["batch_id"])
+    a1 = sdk._list_batch(res1["batch_id"])
+    a2 = sdk._list_batch(res2["batch_id"])
     assert {p["id"] for p in a1["points"]} == {p["id"] for p in a2["points"]}
     assert a1["counts"] == a2["counts"] == {"points": 3, "direct_edges": 0}
 
@@ -172,15 +172,15 @@ def test_audit_direct_edge_batch_stamp(sdk):
     SDK's batch_id param carries the stamp ON THE EDGE and is returned by
     the audit (post-A3 #1053 the ingest routing also produces direct edges —
     the audit surface reads whatever is stamped)."""
-    p1 = sdk.create_point("claim", "A implies B.", status="live")
-    p2 = sdk.create_point("claim", "B.", status="live")
+    p1 = sdk._create_point("claim", "A implies B.", status="live")
+    p2 = sdk._create_point("claim", "B.", status="live")
     from tortoise.canonical import derive_batch_id
     bid = derive_batch_id({"points": [
         {"ref": "p1", "kind": "claim", "content": "A implies B."},
         {"ref": "p2", "kind": "claim", "content": "B."},
     ], "entities": [], "sources": [], "connections": []})
-    sdk.create_direct_edge("IMPL", p1["id"], p2["id"], batch_id=bid)
-    audit = sdk.list_batch(bid)
+    sdk._create_direct_edge("IMPL", p1["id"], p2["id"], batch_id=bid)
+    audit = sdk._list_batch(bid)
     assert audit["counts"]["direct_edges"] == 1, audit
     edge = audit["direct_edges"][0]
     assert edge["direct_edge"] == "IMPL"
@@ -188,7 +188,7 @@ def test_audit_direct_edge_batch_stamp(sdk):
     assert edge["direction"] == "bidirectional"  # IMPL default
     # P2-2: an EDGE-ONLY batch (no stamped points) is discoverable — the
     # transport-death recovery path must not lose it
-    batches = sdk.list_batches()
+    batches = sdk._list_batches()
     found = [b for b in batches if b["batch_id"] == bid]
     assert found and found[0]["points"] == 0 and found[0]["direct_edges"] == 1, \
         f"edge-only batch must be discoverable: {batches}"
@@ -202,15 +202,15 @@ def test_audit_post_supersede_boundary(sdk):
     edge incident to the superseded point KEEPS its originating batch_id
     (E2E-11.6 — the 2a-DIRECT edge transfer preserves edge attributes; the
     post-rebuild half is the A10 pass-2b journal replay, not yet landed)."""
-    res = sdk.ingest(_full_bundle())
+    res = sdk._ingest(_full_bundle())
     bid = res["batch_id"]
     original = res["ids"]["points"][0]
     other = res["ids"]["points"][1]
-    editorial = sdk.create_point("claim", "Editorial replacement.")["id"]
+    editorial = sdk._create_point("claim", "Editorial replacement.")["id"]
     # a direct edge incident to the superseded point, stamped with the batch
-    sdk.create_direct_edge("IMPL", original, other, batch_id=bid)
-    sdk.supersede_point(original, editorial)
-    audit = sdk.list_batch(bid)
+    sdk._create_direct_edge("IMPL", original, other, batch_id=bid)
+    sdk._supersede_point(original, editorial)
+    audit = sdk._list_batch(bid)
     audit_ids = {p["id"] for p in audit["points"]}
     assert original in audit_ids, "the superseded original keeps its batch"
     assert editorial not in audit_ids, \
@@ -236,12 +236,12 @@ def test_audit_post_rebuild_completeness(tmp_path):
     sdk = TortoiseSDK(os.path.join(str(tmp_path), "audit.db"),
                       event_log_path=events)
     try:
-        res = sdk.ingest(_full_bundle())
+        res = sdk._ingest(_full_bundle())
         bid = res["batch_id"]
-        before = {p["id"] for p in sdk.list_batch(bid)["points"]}
+        before = {p["id"] for p in sdk._list_batch(bid)["points"]}
         assert len(before) == 3  # 2 statements + the reified IMPL operator
         sdk._get_proj().rebuild_all(str(events_dir), confirm_destructive=True)
-        after = {p["id"] for p in sdk.list_batch(bid)["points"]}
+        after = {p["id"] for p in sdk._list_batch(bid)["points"]}
         assert after == before, \
             f"list_batch must survive rebuild_all: {before} vs {after}"
     finally:
@@ -251,11 +251,11 @@ def test_audit_post_rebuild_completeness(tmp_path):
 def test_audit_batch_discovery(sdk):
     """A13 indicator 4: batch discovery — list_batches returns the recent
     distinct batch_ids with correct point counts, newest first."""
-    res1 = sdk.ingest(_full_bundle())
-    res2 = sdk.ingest({"points": [
+    res1 = sdk._ingest(_full_bundle())
+    res2 = sdk._ingest({"points": [
         {"ref": "q1", "kind": "claim", "content": "A second bundle."}],
         "entities": [], "sources": [], "connections": []})
-    batches = sdk.list_batches()
+    batches = sdk._list_batches()
     b2 = [b for b in batches if b["batch_id"] == res2["batch_id"]]
     b1 = [b for b in batches if b["batch_id"] == res1["batch_id"]]
     assert b2 and b2[0]["points"] == 1, b2
@@ -265,7 +265,7 @@ def test_audit_batch_discovery(sdk):
     ids = [b["batch_id"] for b in batches]
     assert ids.index(res2["batch_id"]) < ids.index(res1["batch_id"])
     # limit works
-    assert len(sdk.list_batches(limit=1)) == 1
+    assert len(sdk._list_batches(limit=1)) == 1
 
 
 # ── MCP mirror ───────────────────────────────────────────────────────
@@ -282,7 +282,7 @@ def test_audit_mcp_mirror(sdk, monkeypatch):
     orig = mcp_mod._get_org_sdk
     mcp_mod._get_org_sdk = lambda: sdk
     try:
-        res = sdk.ingest(_full_bundle())
+        res = sdk._ingest(_full_bundle())
         bid = res["batch_id"]
         audit = mcp_mod.tortoise_list_batch(bid)
         assert audit["batch_id"] == bid

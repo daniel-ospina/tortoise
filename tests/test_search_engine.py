@@ -245,7 +245,7 @@ def test_vector_trace_empty_results_when_embedded_but_excluded(tmp_path):
     _embedder_or_skip()
     sdk = _trace_sdk(tmp_path)
     try:
-        sdk.create_point("statement", "hello world", id="p1",
+        sdk._create_point("statement", "hello world", id="p1",
                          status="retracted")
         trace: list[dict] = []
         # ⛔ #11824 S0 stores the declared synonym `retracted` canonically as
@@ -269,7 +269,7 @@ def test_vector_trace_ok_on_healthy_graph(tmp_path):
     _embedder_or_skip()
     sdk = _trace_sdk(tmp_path)
     try:
-        sdk.create_point("statement", "hello world", id="p1")
+        sdk._create_point("statement", "hello world", id="p1")
         trace: list[dict] = []
         hits = run_vector_query(sdk._get_proj().g, [0.0] * 384, limit=5,
                                 leg_trace=trace)
@@ -299,7 +299,7 @@ def test_vector_trace_wrong_dim_node_no_longer_kills_the_leg(tmp_path):
     _embedder_or_skip()
     sdk = _trace_sdk(tmp_path)
     try:
-        sdk.create_point("statement", "healthy vecf32 point", id="healthy")
+        sdk._create_point("statement", "healthy vecf32 point", id="healthy")
         sdk._get_proj().g.query(
             "CREATE (p:Point {id:'poisoned', content:'board game', "
             "pointKind:'statement', embedding:[0.1, 0.2]})")
@@ -411,7 +411,7 @@ def test_sdk_document_search_returns_metadata():
         results = []
         doc = None
         for attempt in range(3):
-            results = sdk.tortoise_fts_query("licensing", entity_type="document")
+            results = sdk._tortoise_fts_query("licensing", entity_type="document")
             doc = next((r for r in results if r.get("id") == "test-sdk-doc"), None)
             if doc is not None:
                 break
@@ -438,14 +438,14 @@ class TestTortoiseFtsQueryLimit:
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK()
         with pytest.raises(ValueError, match="limit must be 1-10000"):
-            sdk.tortoise_fts_query("test", limit=10001)
+            sdk._tortoise_fts_query("test", limit=10001)
 
     def test_limit_0_raises_value_error(self):
         """limit=0 (below floor) still raises."""
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK()
         with pytest.raises(ValueError, match="limit must be 1-10000"):
-            sdk.tortoise_fts_query("test", limit=0)
+            sdk._tortoise_fts_query("test", limit=0)
 
     def test_limit_10000_allowed_no_value_error(self):
         """limit=10000 is allowed — validation passes.
@@ -456,7 +456,7 @@ class TestTortoiseFtsQueryLimit:
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK()
         try:
-            sdk.tortoise_fts_query("test", limit=10000)
+            sdk._tortoise_fts_query("test", limit=10000)
         except ValueError:
             pytest.fail("limit=10000 should not raise ValueError")
         except Exception:
@@ -467,7 +467,7 @@ class TestTortoiseFtsQueryLimit:
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK()
         try:
-            sdk.tortoise_fts_query("test", limit=10)
+            sdk._tortoise_fts_query("test", limit=10)
         except ValueError:
             pytest.fail("default limit=10 should not raise ValueError")
         except Exception:
@@ -556,7 +556,7 @@ class TestR2OrUnionAndSearchKeys:
             else:
                 os.environ["TORTOISE_DB_URI"] = _old_uri
         sdk._proj = proj
-        sdk.create_point("statement", "my 5K best is 27:12", id="flat-pb",
+        sdk._create_point("statement", "my 5K best is 27:12", id="flat-pb",
                          search_keys=["personal best", "27:12"])
         rows = proj.g.query(
             "MATCH (n:Point {id:'flat-pb'}) RETURN n.search_keys").result_set
@@ -1036,7 +1036,7 @@ class TestFusionWeightsProductionDefault:
         monkeypatch.delenv("TORTOISE_FUSION_WEIGHTS", raising=False)
         sdk = TortoiseSDK()
         sdk._proj = _FakeProj2()
-        sdk.tortoise_fts_query("test query", limit=10)
+        sdk._tortoise_fts_query("test query", limit=10)
         weights = captured.get("weights") or {}
         assert weights.get("vector") == 1.5, (
             f"production default must weight vector 1.5, got {weights}")
@@ -1051,7 +1051,7 @@ class TestFusionWeightsProductionDefault:
         monkeypatch.setenv("TORTOISE_FUSION_WEIGHTS", '{"vector": 2.0}')
         sdk = TortoiseSDK()
         sdk._proj = _FakeProj2()
-        sdk.tortoise_fts_query("test query", limit=10)
+        sdk._tortoise_fts_query("test query", limit=10)
         weights = captured.get("weights") or {}
         # The override sets the dense weight; the lexical entry is the arm's
         # resolved default (#8488), clamped to min(1.0, dense) — see

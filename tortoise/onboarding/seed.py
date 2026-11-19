@@ -382,7 +382,7 @@ def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
     user_subject, person_created, person_normalized = _write_anchor(
         sdk, name=person_name, kind=PERSON_ANCHOR_KIND, refs=person_refs,
         classification=person_class)
-    member_of = sdk.create_edge(MEMBER_OF_RELATION,
+    member_of = sdk._create_edge(MEMBER_OF_RELATION,
                                 user_subject["id"], org_subject["id"])
     report.update({
         "user_subject": user_subject,
@@ -447,9 +447,9 @@ def _write_anchor(sdk: Any, *, name: str, kind: str,
     existing = (classification or {}).get("subject")
     if existing is not None and existing.get("subjectKind") != kind:
         # legacy free-string kind on OUR anchor → canonical kind on MATCH
-        return (dict(sdk.create_subject(name, subjectKind=kind, **refs)),
+        return (dict(sdk._create_subject(name, subjectKind=kind, **refs)),
                 False, True)
     if existing is not None and not refs:
         return (dict(existing), False, False)
-    node = dict(sdk.create_subject(name, subjectKind=kind, **refs))
+    node = dict(sdk._create_subject(name, subjectKind=kind, **refs))
     return node, created, normalized

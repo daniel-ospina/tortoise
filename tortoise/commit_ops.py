@@ -504,7 +504,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             # (whose ``mitigate_operator`` is itself idempotent).
             continue
         try:
-            result = sdk.create_operator(
+            result = sdk._create_operator(
                 op_type, src, [dst],
                 direction=_op_attr(op, "direction") or "unidirectional",
                 promote_source=False,
@@ -586,7 +586,7 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             # resolved (#4716 review P2). Fall back to the raw ref.
             reason = str(src)
         try:
-            sdk.mitigate_operator(op_id, reason=reason,
+            sdk._mitigate_operator(op_id, reason=reason,
                                   strength=_op_attr(op, "strength") or 0.5)
         except UnaddressableClaimError as e:
             # #9754 (owner prescription, option 1): one unaddressable
