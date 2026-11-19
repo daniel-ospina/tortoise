@@ -3261,11 +3261,21 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurs **once**.
     # A row recorded as "found by its pinned text" must name text that actually finds
     # it, or the record does not reproduce the address it explains.
+    # ⛔ #13767's own review pass narrowed the last two `sdk.py` rows, each of which
+    # was recorded with a locator that could NOT fail and so proved nothing:
+    # `55807`→`55918` stored the bare `SET n += $props` (occurs **40×** in `sdk.py`,
+    # 25 of them in comments) instead of the per-label write it was actually found
+    # by — which occurs **once**; and `22593-22768` recorded `None` for its end
+    # although the end is a number this change moved, so an insert INSIDE
+    # `update_knowledge` left the cited end naming nothing and both guards green.
+    # Both re-derived at `ef0abcb` by the texts pinned below.
     ("sdk.py", 55317, 55319): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55469, 55478): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22593, 22768): ("def update_knowledge(", None),
-    ("sdk.py", 55918, 55918): ("SET n += $props", None),
+    ("sdk.py", 22593, 22768): (
+        "def update_knowledge(", "return self._update_entity_any(id, **props)"),
+    ("sdk.py", 55918, 55918): (
+        "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 
 
