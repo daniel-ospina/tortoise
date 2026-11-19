@@ -242,9 +242,10 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     block alone (unioning it would re-admit the very shadow Python says wins), and EXCEPT a
     DESTRUCTURING target, where the reading that preceded this PR ignored the target entirely
     and therefore kept a binding the assignment overwrites: `A, b = object, A` … `A(app)` is not
-    a site here and WAS one there, because `A` is `object`. That is a false BLOCK `main` emits
-    and this head does not — measured, and pinned so the element-wise reading cannot decay back
-    into "ignore the target".
+    a site here and WAS one under the reader that preceded `#13585`, because `A` is `object`.
+    That is a false BLOCK the PRE-`#13585` reader emitted — `main` carries the element-wise
+    pairing too and answers `[]`, so it is not a main regression — and it is pinned so the
+    element-wise reading cannot decay back into "ignore the target".
 
     ⛔ EVERY BINDING IS REPLAYED INTO THE BLOCK THAT OWNS IT, AND A CALL IS RESOLVED THROUGH THE
     WHOLE CHAIN (`#13585 review` P3). A FLAT replay cannot say which block a binding belongs to,
@@ -522,9 +523,9 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         DESTRUCTURING assignment binds element by element — `A, b = A, object` binds `A` to the
         adapter — but `_dotted` answers only a dotted EXPRESSION, so a `Tuple` value was `None`
         and every name in the target was recorded `SHADOWED`. That lost the alias, so
-        `A, b = A, object` … `A(app)` reported `[]` at the head while `main` — which skipped
-        every non-`Name` target and therefore never dropped the import binding — reported the
-        site. Same false PASS as the store arm, one level down: the pin's headline claim goes
+        `A, b = A, object` … `A(app)` reported `[]` at the pre-fix head. `main` answers `[3]`
+        as well — it carries this same pairing — so this is a pre-existing false PASS the fix
+        closes, not a regression against `main`. Same false PASS as the store arm, one level down: the pin's headline claim goes
         green over a module that really wires the adapter.
 
         So pair a destructuring target with a destructuring value whenever the arity matches
@@ -540,8 +541,8 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         that lost sites: `A, b = build_pair()` … `A(app)` is a wiring the pre-`#13585` reader
         reported and the `SHADOWED` fallback dropped. Making NO claim leaves any earlier binding
         in force (the name is still recorded as a block-local by `_note_binding`, so it does not
-        leak an enclosing block's meaning), which is both what `main` did for every non-`Name`
-        target and the only option that can neither invent a site nor lose one.
+        leak an enclosing block's meaning), which is what the PRE-`#13585` reader did for every
+        non-`Name` target and the only option that can neither invent a site nor lose one.
         """
         if isinstance(target, ast.Name):
             return [(target.id, value)]
@@ -1749,12 +1750,13 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # ⛔ THE VALUE SIDE OF THE SAME FIX (`#13585` P2, measured after the store rows above).
     # `_dotted` answers only a dotted EXPRESSION, so a DESTRUCTURING value read as `None` and
     # every name in the target was bound `SHADOWED` — the alias was lost, and a module that
-    # really wires the adapter through `A, b = A, object` reported `[]`. `main` reported the
-    # site (it skipped every non-`Name` target, so it never dropped the import binding), which
-    # makes this a REGRESSION in the false-PASS direction, and the mirror row below is the
-    # polar control: on `main` it ALSO reported a site, and that report was wrong — `A` is
-    # `object` there. Element-wise pairing answers both directions; ignoring the target, which
-    # is what `main` did, answers neither.
+    # really wires the adapter through `A, b = A, object` reported `[]`. That is a false PASS in
+    # the direction this reader exists to prevent, and `main` answers `[3]` too (it carries the
+    # same pairing), so it is a pre-existing gap this fixes rather than a regression. The mirror
+    # row below is the polar control: `A, b = object, A` is `[]` on `main` as well, and the
+    # runtime there is a `TypeError`, so the empty answer is correct on both readings.
+    # Element-wise pairing answers both directions; ignoring the target, which is what the
+    # PRE-`#13585` reader did, answers neither.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "A, b = A, object\n"
@@ -1783,7 +1785,8 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A, b = object, A\n"
         "A(app)\n"
     ) == [], ("`A, b = object, A` reads as a site — element-wise pairing must place the value "
-              "where it BELONGS, not report every destructuring (this reported a site on `main`)")
+              "where it BELONGS, not report every destructuring (the pre-`#13585` reader "
+              "reported a site here; `main` and this head both answer `[]`)")
     # ⛔ AN UNPAIRABLE DESTRUCTURING MAKES NO CLAIM (`_binding_pairs`'s `return []`). `A` IS in
     # the target here — that is the whole point: the value is a CALL, so the pair is
     # undeterminable and the reader must leave the import binding in force rather than claim
@@ -1860,8 +1863,8 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # ⛔ BOTH LIMBS OF THE REDIRECT ARE PINNED (`#13585 review e9867da8` P3#2). The value side
     # lives in TWO functions, and reverting the second one reded NOTHING: an import binding
     # written through `global`/`nonlocal` lost its value and the call it creates dropped out of
-    # the report with all 47 rows green — the "call site reverted, every row green" class this
-    # file exists to remove.
+    # the report with the whole 45-test suite green — the "call site reverted, every row green"
+    # class this file exists to remove.
     assert _adapter_instantiation_sites(
         "def install():\n"
         "    global A\n"
