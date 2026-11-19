@@ -1097,6 +1097,38 @@ def test_an_unmeasurable_tortoise_set_is_not_rendered_as_empty():
         "cannot tell `origin/main` is absent from a failed read of any other kind")
 
 
+def test_the_tortoise_set_text_ban_reads_the_bundle_documents():
+    """The shape ban must have a CALLER, or it enforces nothing (#13802 review, round 8, P1).
+
+    `_TORTOISE_SET_DIRECTION_CLAIM` was measured with exactly two call sites: its own
+    definition and the witness test over synthetic strings. No document text was ever passed
+    to it, so the class it declares was guarded by nothing — the inert-enforcer defect this
+    PR keeps naming, inside the arm written to remove it. Meanwhile `05-verify.md` shipped a
+    membership answer the ban would refuse and every live arm returned nothing for it.
+
+    This test is that caller: every `#7949` bundle document is read and matched. A hit is a
+    head-bound answer about the `-- tortoise/` set in a document being merged, and the fix is
+    the bundle's own rule — state the COMMAND, never the answer. A sentence that NAMES the
+    head it is about (a sha, or a `#PR`) is allowed by `_HeadBoundBan`, which is what keeps
+    historical and refuted-quote passages readable.
+    """
+    bundle = sorted((DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone").glob("*.md"))
+    bundle += sorted((DOCS / "evidence" / "7949-capstone").glob("*.md"))
+    assert len(bundle) >= 10, (
+        f"the glob found {len(bundle)} bundle documents — the ban is reading almost nothing, "
+        "so its silence would prove nothing")
+    _hits: list[str] = []
+    for _path in bundle:
+        _text = _path.read_text(encoding="utf-8")
+        for _m in _TORTOISE_SET_DIRECTION_CLAIM.finditer(_text):
+            _hits.append(f"{_path.name}: {_text[max(0, _m.start() - 60):_m.end()]!r}")
+    assert not _hits, (
+        "a bundle document types an answer about the `-- tortoise/` set, which is HEAD-BOUND "
+        f"and must be read from the command at the head being merged: {_hits}. State "
+        "`git diff --name-only origin/main...HEAD -- tortoise/` (or name the head the "
+        "reading was taken at) and delete the answer (#13802 review, rounds 7 and 8)")
+
+
 def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     """⛔ Refuse a typed answer to the `-- tortoise/` command in the REFUTED direction.
 
@@ -1505,7 +1537,9 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
         grep -o 'sdk[.]py:[0-9]*' docs/00_index.md
         -> the SAME pair on both sides (`:21715`, `:28178`)
         git show e679d22286:tortoise/sdk.py | cmp - tortoise/sdk.py
-        -> identical, so `#13724`'s move is already on the branch's base
+        -> DIFFERS at line 45175, so the two blobs are NOT identical — the claim that
+           `cmp` prints nothing (round 8, P1) was FALSE. What carries the refutation is
+           the RANGE: `:21715` and `:28178` both sit before 45175
 
     ⛔ Whether the file is in the residual at the head you merge is
     `git diff --name-only origin/main...HEAD -- docs/00_index.md` and
@@ -1946,7 +1980,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # literal, `none`/`zero`, a counted FILE set (`holds exactly four files`), a named path
     # after an unlisted verb (`answers with `tortoise/x.py``), and the diff-side paraphrase
     # of the comment-only claim (`is this diff's own comment-only edits`).
-    r"|`?\[\]`?|none|None|zero|ZERO"
+    r"|`?\[\]`?|none|None|zero|ZERO|nothing|Nothing"
     # ⛔ AND THE `an empty list` / `single` / BARE-DIGIT tails (#13802 review, round 7, P1 —
     # each measured GREEN here while the detector read it; for the DEICTIC and `set` anchors
     # this ban is the ONLY layer, because the detector anchors on a command token)
@@ -2370,9 +2404,10 @@ _INDEX_REPOINT_CLAIMS = (
     "this repair re-pointed that cite once more",
     # ⛔ The two the list above missed while the merged head still carried them
     # (#13746 review, round 3, finding 4): both say the capstone row's cite move is
-    # THIS repair's, and the tree refutes both — `git show e679d22286:tortoise/sdk.py
-    # | cmp - tortoise/sdk.py` prints nothing, so `#13724`'s move is already on the
-    # branch's base, and the live three-dot diff adds no `sdk.py:<n>` token.
+    # THIS repair's, and the tree refutes both — ⛔ and `cmp` does NOT print nothing
+    # (round 8, P1, MEASURED): it differs at line 45175. What carries the refutation is
+    # the RANGE, not a whole-file identity: `:21715` and `:28178` both sit before 45175,
+    # and the live three-dot diff adds no `sdk.py:<n>` token.
     "and THAT shift is this repair",
     "this repair re-pointed it once more",
     # ⛔ The two BARE spellings `_ATTRIBUTION_PHRASES` above carried with no counterpart
