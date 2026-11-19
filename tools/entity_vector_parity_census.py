@@ -348,9 +348,16 @@ def read_graph_vector_keys(g: Any, label: str, key_prop: str) -> dict:
 #: operator box; worse, a full fetch whose result was silently short would look like a
 #: record that holds FEWER vectors, which is the refusal direction, and one whose result
 #: was silently *reordered* would look like nothing at all.
+#: ⛔ THE TWO AGGREGATES ARE **ALIASED**, and that is not cosmetic. PostgreSQL names an
+#: unaliased aggregate expression ``count``, so without ``AS`` BOTH columns arrive as
+#: ``count`` — `_RECORD_AGGREGATE_COLUMNS` then never matches, and EVERY real run refuses
+#: with "the record schema this census depends on has moved", a false diagnosis pointing
+#: an operator at a schema that did not move. Line 344 of the previous version shipped it
+#: and no test saw it, because the fake cursor answered with the names the code wanted.
 _RECORD_AGGREGATE_SQL = (
-    "SELECT count(*) FILTER (WHERE embedding_vec IS NOT NULL), "
+    "SELECT count(*) FILTER (WHERE embedding_vec IS NOT NULL) AS record_readable, "
     "       count(*) FILTER (WHERE embedding_vec IS NULL AND embedding IS NOT NULL) "
+    "       AS record_unreadable "
     "FROM public.{table} WHERE org_id = %s AND graph_id = %s"
 )
 

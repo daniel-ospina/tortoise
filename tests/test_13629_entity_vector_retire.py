@@ -33,6 +33,7 @@ that fails OPEN the day someone deletes a branch.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -93,6 +94,12 @@ class FakeGraph:
         #: Every REMOVE that actually reached the store, with its params — so a test can
         #: assert WHICH keys were removed, not merely how many.
         self.removal_calls: list[tuple[str, dict]] = []
+        #: How many times the key-set page read ran, per label. `execute` makes exactly
+        #: TWO (the live parity re-check and the digest comparison); a THIRD is the
+        #: removal computing its own set — the set nobody approved.
+        self.keyset_reads: dict[str, int] = {}
+        #: A hook the failure test uses to make a REMOVE raise.
+        self.fail_removal = False
 
     # ── seeding ────────────────────────────────────────────────────────────
     def add(self, label, key, has_embedding=True):
@@ -117,6 +124,8 @@ class FakeGraph:
         label = _LABEL_RE.search(cypher).group(1)
         if "REMOVE n.embedding" in cypher:
             assert write, "a REMOVE must never travel the read-only verb"
+            if self.fail_removal:
+                raise RuntimeError("simulated store failure")
             self.removal_calls.append((cypher, dict(params or {})))
             keys = set((params or {}).get("keys") or ())
             hit = 0
@@ -130,6 +139,7 @@ class FakeGraph:
             return [[sum(1 for n in self.nodes[label] if n.has_embedding)]]
         if "ORDER BY id(n)" in cypher:
             assert not write, "the census page read must be read-only"
+            self.keyset_reads[label] = self.keyset_reads.get(label, 0) + 1
             cursor = int((params or {}).get("cursor") or 0)
             batch = int((params or {}).get("batch") or 0)
             live = sorted(
@@ -473,6 +483,22 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
     # a strip its own refusal claims to prevent. Mutation: drop `_register_writers` from
     # `_writers_for` and this assertion (plus four other tests) reds.
     assert "_update_entity" in reason
+
+
+def test_a_comment_mentioning_the_gate_is_not_a_gate(tmp_path, monkeypatch):
+    """⛔ F3's real fold: the witness is a CALL, and `entities.py` is the tree under test.
+
+    The two gate tests above drive fake modules; this one pins the REAL module, because the
+    only way to know the check can read `entities.py` at all is to point it there. On this
+    tree the folds do not consult the gate, so the answer must be "still emits" AND the
+    reason must name `entities.py` — if the AST walk silently failed to find the fold, an
+    "ABSENT" reason would pass a weaker assertion.
+    """
+    gated, why = strip._writer_consults_gate(
+        "tortoise.projection.entities", "_upsert_event")
+    assert gated is False
+    assert "tortoise.projection.entities::_upsert_event" in why
+    assert "without CALLING" in why
 
 
 def _fake_writer_module(tmp_path, monkeypatch, body, name="fake_writer_13629"):
@@ -1038,6 +1064,27 @@ def test_the_record_leg_is_bounded_to_the_graph_keys_and_never_counts_a_NULL_vec
     assert "count(*)" in cursor.executed[0][0]
 
 
+def test_the_record_aggregate_read_NAMES_its_own_columns():
+    """⛔ F1, AS A SHAPE PIN THAT CANNOT AGREE WITH A FAKE.
+
+    PostgreSQL names an unaliased aggregate ``count``, so a statement written without
+    ``AS`` returns TWO columns called ``count`` — and `_RECORD_AGGREGATE_COLUMNS` then
+    never matches, making EVERY real run exit 3 with "the record schema this census
+    depends on has moved", which points an operator at a schema that did not move.
+
+    The fake cursor answers with whatever names it is given, so it cannot catch this: the
+    only witness is the SQL TEXT. Mutation: remove either ``AS`` and this test reds while
+    every other record-leg test stays green.
+    """
+    for table in ("object", "subject", "event", "source"):
+        sql = parity._RECORD_AGGREGATE_SQL.format(table=table)
+        for column in parity._RECORD_AGGREGATE_COLUMNS:
+            assert f"AS {column}" in sql, f"{table}: {column} is not named in the aggregate"
+        # …and no bare aggregate survives as an unnamed projection.
+        assert sql.count("AS record_readable") == 1
+        assert sql.count("AS record_unreadable") == 1
+
+
 def test_the_record_leg_refuses_a_schema_that_moved(monkeypatch):
     """A missing column is a REFUSAL, never an empty comparison that certifies."""
     cursor, _conn = _install_record(monkeypatch, aggregate=(0, 0), rows=[])
@@ -1192,8 +1239,11 @@ def test_the_digest_cannot_collide_on_a_key_containing_its_separator():
     single = strip.digest([("Object", "a\nSubject\tb")])
     pair = strip.digest([("Object", "a"), ("Subject", "b")])
     assert single != pair
-    # Length framing also keeps the tab-separated reading of a NORMAL set unchanged.
-    assert strip.digest([("Object", "obj-1")]) == strip.digest([("Object", "obj-1")])
+    # Length framing also keeps the tab-separated reading of a NORMAL set unchanged —
+    # pinned against a LITERAL, because comparing the function with itself (the previous
+    # version of this line) is green under the pre-fix `label\tkey` join too.
+    assert strip.digest([("Object", "obj-1")]) == \
+        "sha256:" + hashlib.sha256(b"6:Object5:obj-1").hexdigest()
 
 
 # ── the post-write verdict is fail-closed ──────────────────────────────────
@@ -1329,6 +1379,132 @@ def test_an_unimportable_stripper_is_not_read_as_a_caller_opt_out(monkeypatch):
     ready, reason = gate("Object")
     assert ready is False
     assert "not importable" in reason and "ImportError" in reason
+
+
+def test_the_removal_never_re_reads_a_key_set_it_is_about_to_strip(stores, monkeypatch):
+    """⛔ F4.1 — a READ-ORDER witness, because a set comparison cannot discriminate.
+
+    In a fixture where live == plan, a fresh read returns the identical keys, so
+    `removal_calls` is byte-identical whether the removal uses the plan's keys or re-reads
+    the table — that is why the previous assertion could not fail.
+
+    The order is what differs. `execute` reads the key set twice per label, BOTH before any
+    removal: the live parity re-check and the digest comparison. So a page read for label X
+    that happens AFTER another label has been stripped, and BEFORE X's own `REMOVE`, exists
+    only if the removal is computing its own set. Post-removal residual reads are for
+    labels already stripped, so they cannot trigger this.
+
+    Mutation: revert `keys = sorted(row.get("keys") or ())` to a `read_graph_vector_keys`
+    call and the SECOND label trips this witness.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    for key in ("obj-1", "obj-2"):
+        graph.add("Object", key)
+        record.holds("object", key)
+    for key in ("sub-1", "sub-2"):
+        graph.add("Subject", key)
+        record.holds("subject", key)
+
+    removed: set[str] = set()
+    reads_after_a_removal: list[tuple[str, str]] = []
+    original = graph._answer
+
+    def _watched(cypher, params, *, write):
+        label = _LABEL_RE.search(cypher).group(1)
+        if not write and "ORDER BY id(n)" in cypher and removed and label not in removed:
+            reads_after_a_removal.append((sorted(removed)[0], label))
+        if write and "REMOVE n.embedding" in cypher:
+            removed.add(label)
+        return original(cypher, params, write=write)
+
+    graph._answer = _watched          # type: ignore[method-assign]
+    plan = _plan(graph, labels=["Object", "Subject"], batch=1)
+    result = _execute(graph, plan, batch=1)
+
+    assert reads_after_a_removal == [], reads_after_a_removal
+    assert result["removed"] == 4
+    # …and both labels really were stripped, so the witness above ran over a real removal.
+    assert graph.vector_keys("Object") == set()
+    assert graph.vector_keys("Subject") == set()
+
+
+def test_a_removal_that_raises_is_exit_SIX_not_the_generic_refusal(stores, monkeypatch):
+    """⛔ F4.2 — the difference exit 6 exists for, now driven.
+
+    Exit 2 promises "refused, nothing written", which a caller may treat as safe to retry.
+    A removal statement that raises MID-RUN has already stripped earlier batches, so the
+    only correct next action is a re-plan. Mutations that red this: `REFUSE_WRITE_FAILED →
+    REFUSE_GRAPH_ONLY` in `execute`, or `return 6 → return 2` in the mapping.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    for key in ("obj-1", "obj-2", "obj-3"):
+        graph.add("Object", key)
+        record.holds("object", key)
+    plan = _plan(graph, labels=["Object"], batch=1)
+
+    graph.fail_removal = True
+    with pytest.raises(strip.Refusal) as excinfo:
+        _execute(graph, plan, batch=1)
+    assert excinfo.value.token == strip.REFUSE_WRITE_FAILED
+    # …and the message says the graph is PART-STRIPPED, because that is the fact a caller
+    # must not read as "nothing happened".
+    assert "ALREADY STRIPPED" in str(excinfo.value)
+
+    # The mapping is a table, so the two promises cannot drift apart.
+    assert strip.refusal_exit_code(strip.REFUSE_WRITE_FAILED) == 6
+    assert strip.refusal_exit_code(strip.REFUSE_GRAPH_ONLY) == 2
+    assert strip.refusal_exit_code(strip.REFUSE_PLAN_STALE) == 2
+
+
+def test_census_main_separates_parity_from_the_strip_precondition(monkeypatch,
+                                                                 capfd):
+    """⛔ F4.3 — `--require-parity` and `--require-ready` are two questions.
+
+    The previous code answered `--require-parity` from `report["ready"]`, so a run whose
+    PARITY held but whose write gate was open exited 4 under a flag named "parity" —
+    sending an operator to hunt a missing record copy that is present. Both flags and the
+    NARROWED arm are pinned here because no test called `parity.main` at all.
+    """
+    report = {
+        "at": "now", "labels": [], "keys_by_label": {},
+        "parity": True, "ready": False, "blocked_reason": "write gate open",
+        "population": ["Object", "Subject", "Event", "Source"],
+        "declared_population": ["Object", "Subject", "Event", "Source"],
+        "narrowed": False, "graph_page_size": 10,
+    }
+    monkeypatch.setattr(parity, "census", lambda **kwargs: dict(report))
+    monkeypatch.setattr(parity, "render", lambda *a, **k: "")
+    monkeypatch.setattr(parity, "_write_gate", lambda: None)
+
+    class _Proj:
+        g = None
+
+    # `FalkorProjection` is imported INSIDE `main`, so the seam is the projection module.
+    import tortoise.projection as projection
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        type("P", (), {"from_uri": staticmethod(lambda *a, **k: _Proj()),
+                                       "__init__": lambda self, *a, **k: None}))
+    # …and the graph-target helpers come from `turn_parity_census` (`census_mod`).
+    monkeypatch.setattr(parity.census_mod, "resolve_graph_name", lambda *a, **k: "g")
+    monkeypatch.setattr(parity.census_mod, "_refuse_unless_graph_present",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(parity.census_mod, "empty_graph_target_flag", lambda *a, **k: None)
+
+    base = ["--uri", "docker://h/g", "--record-dsn", "postgresql://x",
+            "--org-id", "o", "--graph-id", "g"]
+    # Parity holds ⇒ --require-parity is satisfied even though the gate is open.
+    assert parity.main([*base, "--require-parity"]) == 0
+    # …and --require-ready is not.
+    assert parity.main([*base, "--require-ready"]) == 4
+    # A NARROWED run cannot satisfy either flag, and says why.
+    narrowed = dict(report, population=["Object"], narrowed=True)
+    monkeypatch.setattr(parity, "census", lambda **kwargs: dict(narrowed))
+    assert parity.main([*base, "--require-parity"]) == 4
+    err = capfd.readouterr().err
+    assert "NARROWED" in err and "Subject" in err
 
 
 # ── the refusals are a closed, published set ────────────────────────────────

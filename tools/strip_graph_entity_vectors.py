@@ -922,6 +922,19 @@ def result_exit_code(result: dict) -> int:
     return 0
 
 
+#: The exit status for a refusal. ⛔ ONE table, because the two codes promise DIFFERENT
+#: things and a caller routes on the difference: 2 says "nothing was written, safe to
+#: retry with a fixed plan"; 6 says "part of the graph is already stripped, re-plan before
+#: anything else". Folding them would tell a caller that a half-finished retirement is a
+#: no-op.
+_REFUSAL_EXIT = {REFUSE_WRITE_FAILED: 6}
+
+
+def refusal_exit_code(token: str) -> int:
+    """``2`` for a refusal before any write, ``6`` once a batch has landed."""
+    return _REFUSAL_EXIT.get(token, 2)
+
+
 def _require_tokens(args: Any) -> dict:
     """The two token preconditions, checked BEFORE any store is opened.
 
@@ -1072,11 +1085,9 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(
             f"strip_graph_entity_vectors: {exc.token} — {exc}\n")
         # ⛔ EXIT 6 IS "PART-STRIPPED", and it is a DIFFERENT code from exit 2 on
-        # purpose. Exit 2 promises "refused, nothing written", which a caller may treat
-        # as safe-to-retry; a mid-strip failure has already removed some nodes, and the
-        # only correct next action is to re-plan. One code for both would misroute the
-        # state that most needs a human.
-        return 6 if exc.token == REFUSE_WRITE_FAILED else 2
+        # purpose. See `refusal_exit_code` — the mapping lives in one table so the two
+        # promises cannot drift apart.
+        return refusal_exit_code(exc.token)
     except CensusError as exc:
         sys.stderr.write(f"strip_graph_entity_vectors: REFUSED — {exc}\n")
         return 3
