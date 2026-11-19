@@ -1099,15 +1099,32 @@ class TestTheWiringTheReviewFixed:
             "`return 0` (or a _exit_code call nested in a branch) reports success "
             "for a blocked run on the --out path"
         )
-        bare = [n for n in ast.walk(run) if isinstance(n, ast.Return) and n.value is not None]
-        consts = [
-            n for n in bare if isinstance(n.value, ast.Constant) and isinstance(n.value.value, int)
-        ]
-        assert not consts, (
-            "run_measurement still returns a literal int at "
-            f"line(s) {[n.lineno for n in consts]} — every exit must route "
-            "through _exit_code so a blocked arm cannot report 0"
+        # ⛔ AND IT MUST PASS `blocked`, NOT ITS LOOKALIKE. `run_measurement`
+        # holds TWO near-identical locals (`record_blocked` from the DSN/tenant
+        # gates, `blocked` from the cohort/id gates). `_exit_code(record_blocked)`
+        # is green on every assertion above AND returns 0 on the only block path
+        # a real run reaches (`record_population_absent` never touches
+        # `record_blocked`) — the P0 this pin exists to close, restored.
+        arg = last.value.args[0] if last.value.args else None
+        assert isinstance(arg, ast.Name), ast.dump(arg)[:120]
+        assert arg.id == "blocked", (
+            f"the final exit must be `_exit_code(blocked)`, not "
+            f"`_exit_code({getattr(arg, 'id', '?')})` — `record_blocked` is None on "
+            "the cohort/id block path, so that spelling reports success for an "
+            "incomplete run"
         )
+        # ⛔ ONE RETURN. An early `return _exit_code(record_blocked)` in a branch
+        # would leave `body[-1]` correct while adding a second, wrong exit.
+        returns = [n for n in ast.walk(run) if isinstance(n, ast.Return)]
+        assert len(returns) == 1, (
+            "run_measurement must have exactly one `return`, found "
+            f"{[(n.lineno, ast.unparse(n)[:40]) for n in returns]}"
+        )
+        assert not [
+            n
+            for n in returns
+            if isinstance(n.value, ast.Constant) and isinstance(n.value.value, int)
+        ], "run_measurement still returns a literal int — every exit must route through _exit_code"
 
     def test_both_bars_bind_so_a_smaller_population_cannot_loosen_the_gate(self, tool_mod):
         """⛔ A run that built FEWER claims gets a LARGER observed bar.
@@ -1128,6 +1145,42 @@ class TestTheWiringTheReviewFixed:
         assert tool_mod.classify(cmp) == "UNRESOLVED"
         cmp["delta_pp"] = 5.50  # above BOTH
         assert tool_mod.classify(cmp) == "GAIN"
+
+    def test_the_artifact_quotes_THE_SAME_BAR_the_verdict_used(self, tool_mod):
+        """⛔ ONE definition of the deciding bar, and the artifact must read it.
+
+        `detectable_pp_gated` was hard-wired to `detectable_pp_preregistered`
+        while `classify` gated on `max(...)`. In the undersized range
+        (`600 <= built_n < 786`, reachable from the documented recipe) the
+        OBSERVED bar is the larger one, so a reader quoting the field concluded
+        GAIN where the label said UNRESOLVED — the misreport the field exists to
+        prevent. It was also unpinned: replacing it with `0.0` left the suite
+        green.
+        """
+        for observed, preregistered, expected in (
+            (5.12, 4.47, 5.12),  # undersized run: the OBSERVED bar decides
+            (3.23, 4.47, 4.47),  # oversized run: the PRE-REGISTERED bar decides
+            (4.47, None, 4.47),
+            (None, 4.47, 4.47),
+        ):
+            cmp = {
+                "delta_pp": 4.80,
+                "mcnemar_p_two_sided": 1e-9,
+                "detectable_pp": observed,
+                "detectable_pp_preregistered": preregistered,
+                "found_deep_delta_pp": 0.0,
+            }
+            assert tool_mod.gated_bar_pp(cmp) == expected, (observed, preregistered)
+        assert (
+            tool_mod.gated_bar_pp({"detectable_pp": None, "detectable_pp_preregistered": None})
+            is None
+        )
+        # …and the artifact field is not a second spelling of it.
+        src = TOOL.read_text()
+        assert '"detectable_pp_gated": gated_bar_pp(cmp)' in src, (
+            "detectable_pp_gated must be computed by gated_bar_pp, the SAME "
+            "function classify gates on — a literal here is a second answer"
+        )
 
 
 # ── 5c. THE DOCUMENTED RUN PATH, DRIVEN END TO END ────────────────────────

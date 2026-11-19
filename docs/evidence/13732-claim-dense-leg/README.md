@@ -38,7 +38,7 @@ numbers.
 
 ## 1. The pre-registered statistic
 
-`measurement.n` = **786** — M2's built claim population (`--points 900` → 786 built; the funnel is
+`populations.point.nodes` = **786** — M2's built claim population (`--points 900` → 786 built; the funnel is
 in that record). Primary k = **3**, the production capture prior's width (`extractor_v2._fts_rows`).
 Test: **exact two-sided McNemar / binomial on the discordant pairs only**, imported from
 `tools/m3_fts_leg_recall.py::_binom_two_sided` so the tree keeps one paired statistic.
@@ -92,7 +92,7 @@ carried a vector. ⛔ But "no `embedding` key" is not why: `_upsert_point_props`
 `content` whenever the payload owns no `embedding` key —
 `tortoise/projection/entities.py:2968-2976`, `elif not op and p.get("content"):
 encode_for_row(p.get("content", ""), self.required_embedding_dim)` — and the tree says so about
-itself at `tortoise/record_writer.py:1809`: *"the graph fold derives it and writes it straight onto
+itself at `tortoise/record_writer.py:1815`: *"the graph fold derives it and writes it straight onto
 the node, #7845"*. On a box **with** an installable embedder M2's exact payload would therefore have
 carried vectors. It did not because that box had none, `encode_for_row` raised, and the surrounding
 `except Exception: pass` swallowed it. A first cut of this bundle stated the opposite ("could not have
