@@ -303,13 +303,25 @@ def test_the_record_states_the_near_duplicate_rule_the_tool_ran(artifact):
     #: (measured, round-29 review). `_phrase_mentions` is whitespace-tolerant and
     #: digit-bounded; `_negates` reads polarity where spaces and `\b` survive.
     block_raw = _block(raw, "frozen in the tool")
-    #: `**bold**` sits BETWEEN words (`drop a **leading article**`), and `_phrase_mentions`
-    #: needs whitespace between them, so the markup is stripped for the phrase checks —
-    #: the pin is about the WORDS, and every message still quotes the raw block.
-    block_plain = block_raw.replace("**", "")
-    assert _phrase_mentions(
-        block_plain, "fold case + whitespace + the separator class"), (
+    #: `**bold**` sits BETWEEN words (`drop a **leading article**`) and this README also
+    #: backticks code-ish tokens, so the MARKUP is stripped for the phrase checks — the
+    #: pin is about the WORDS, and every message still quotes the raw block. Stripping
+    #: `**` only was a literalism trap: a content-identical backticked copy REDded
+    #: (`drop a `leading` article`, `fold `case``) — measured.
+    block_plain = block_raw.replace("**", "").replace("`", "")
+    #: The connector between the fold's inputs is PROSE, not code: `+`, `,`, `and` and
+    #: `;` all state the same rule, so a copy-edit that swaps them must not red. The
+    #: first cut pinned the literal `+` and REDded `fold case, whitespace and the
+    #: separator class` — a false red, which `_phrase_re`'s docstring calls "as bad as a
+    #: false pass".
+    fold_connector = r"\s*(?:\+|,|;|and)\s*"
+    fold_clause = fold_connector.join(_phrase_re(part) for part in (
+        "fold case", "whitespace", "the separator class"))
+    assert re.search(fold_clause, block_plain), (
         f"§3a no longer states the fold's inputs as a clause: {block_raw!r}")
+    assert not _negates(block_plain, "fold case"), (
+        f"§3a NEGATES its own fold clause behind a privative, which states the "
+        f"opposite of the artifact's key ({rule['key']!r}): {block_raw!r}")
     #: …and the two are tied BOTH WAYS to the artifact's key, so the prose and the
     #: record cannot drift apart in either direction: a `key` that drops `ws` while
     #: §3a still states whitespace is as wrong as the reverse. Measured: dropping
@@ -2388,8 +2400,16 @@ def _negates(text: str, phrase: str) -> bool:
     window 0, so the tight window the false-red note protects is NOT widened.
     """
     phrase_re = _phrase_re(phrase)
+    #: The gap is PUNCTUATION-TOLERANT (#13680 round-30 review). The first cut required
+    #: `\s+` straight after the privative, so a comma, an em-dash or a parenthesis —
+    #: `never, ever drop a leading article`, `never — under any circumstances — drop …`,
+    #: `(we do not, as a rule, drop …)` — put the word INSIDE the documented three-word
+    #: window and still read as un-negated (measured GREEN). A false pass on the only
+    #: polarity net the rerank and write-path clauses have, so the separator class now
+    #: admits punctuation on both sides of each intervening word.
+    sep = r"[\s,;:\u2014\u2013-]+"
     for privative in _PRIVATIVES:
-        if re.search(rf"{privative}\s+(?:\w+\s+){{0,3}}{phrase_re}", text):
+        if re.search(rf"{privative}{sep}(?:\w+{sep}){{0,3}}{phrase_re}", text):
             return True
     return False
 
@@ -2568,10 +2588,20 @@ def test_the_readme_quotes_the_mint_rates_the_artifact_holds(artifact):
     #: …and the whole-ledger `norm_only` arm, whose `minted` was equally unread:
     #: `norm_only.minted 411 -> 500` stayed GREEN while the arm still published
     #: `rate: 1.0` over `pairs: 411`.
-    assert mint["norm_only"]["minted"] == mint["pairs"], (
-        f"the frozen-matcher arm mints {mint['norm_only']['minted']} of "
-        f"{mint['pairs']} pairs — its published rate "
+    #: The identity is `minted == pairs - attached`, the same relation the shipped arm
+    #: states above (#13680 round-30 review). `minted == pairs` only IMPLIES it while
+    #: `attached == 0`, so a coordinated edit — `norm_only.attached 0 -> 7` with the
+    #: README row moved to match — published 411 minted of 411 pairs with 7 attached and
+    #: stayed GREEN.
+    assert mint["norm_only"]["minted"] == (
+        mint["pairs"] - mint["norm_only"]["attached"]), (
+        f"the frozen-matcher ledger does not add up: {mint['pairs']} pairs minus "
+        f"{mint['norm_only']['attached']} attached is not "
+        f"{mint['norm_only']['minted']} minted — its published rate "
         f"{mint['norm_only']['rate']} is that quotient")
+    assert mint["norm_only"]["attached"] == 0, (
+        f"the frozen matcher attaches {mint['norm_only']['attached']} rows — the "
+        f"arm's whole claim is that it attaches nothing")
     assert mint["norm_only"]["rate"] == pytest.approx(
         round(mint["norm_only"]["minted"] / mint["pairs"], 4), abs=5e-5), (
         f"the frozen-matcher rate {mint['norm_only']['rate']} is not "
