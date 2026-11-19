@@ -149,11 +149,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #       is the first. Pinning the environment EMPTY is what makes the URI arm
     #       LIVE (`_uri_refusal("")` refuses), so the test's reason assertion can
     #       tell the two adjacent arms apart — measured with the door guard
-    #       neutralised: `1 failed`, and the message it carries is the URI arm's
-    #       ("returned 3 for a reason other than the door guard"). With a USABLE
-    #       ambient URI instead the URI arm cannot answer at all (`_uri_refusal`
-    #       returns None for docker/redis/rediss), so a deleted door guard would
-    #       surface as a connection-layer error rather than as a refusal.
+    #       neutralised: `1 failed`, the assertion reporting that the refusal that
+    #       fired was NOT the door arm's (it quotes the URI arm's `REFUSED: no live
+    #       FalkorDB in TORTOISE_DB_URI …`). With an accepted ambient URI instead the
+    #       URI arm cannot answer at all (`_uri_refusal` returns None for
+    #       docker/redis/rediss), so a deleted door guard reaches
+    #       `FalkorProjection.from_uri` instead of refusing — a connection-layer error
+    #       where the host is unreachable, and a full measurement against the LIVE
+    #       server where it is up — which is precisely what pinning the environment
+    #       empty prevents.
     #   (2) `setenv rediss://`: proves execution reaches `FalkorProjection.from_uri`
     #       at all — the assertion is the raised sentinel, not a message.
     #   (3) `setenv postgres://`: pins `run()`'s half of the URI guard. `_uri_refusal`
@@ -171,8 +175,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #       refuses the same scheme set and raises `ValueError` (measured:
     #       `resolve_db_endpoint` raises for `postgres://host/db` and for `""`), so the
     #       run dies either way; the row buys the actionable refusal, not the block.
-    # Every site uses `monkeypatch`, so no lane state leaks, and none of them
-    # constructs anything: the ports are stubbed above the driver.
+    # Every site uses `monkeypatch`, so no lane state leaks. What keeps each off a
+    # real store is per-site, not a shared "ports are stubbed" property: all three
+    # stub `_user_door_binding`; the door test returns at the door arm, the
+    # `rediss://` one stubs `FalkorProjection` and stops at its sentinel, and the
+    # `postgres://` one constructs nothing because the URI guard returns 3 BEFORE
+    # `from_uri` is called.
     # ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored to THIS row's three spellings:
     # `_is_declared` matches each censused line on its own, so these three spellings are
     # all the row authorizes and any FUTURE site in the same file reds until it is
