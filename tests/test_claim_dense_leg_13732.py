@@ -2129,7 +2129,7 @@ class TestGraphMembership:
         # false-REDDENED). Prose cannot be pinned this way (`#13745` reviews
         # rounds 6-7), and a pin that refuses a correct edit is a trap for the next
         # fixer, so the claim it was reaching for is asserted where it lives — on
-        # the SEED (see `test_the_seed_cannot_leave_a_row_unwritten` below): the
+        # the SEED (see `test_the_seed_writes_a_row_for_EVERY_entry` above): the
         # list is complete BECAUSE the seed writes every row and raises on failure.
         # This negative assertion stays only for the exact regressions we have
         # already shipped.
