@@ -246,6 +246,13 @@ PAIRS: tuple[tuple[str, str, str], ...] = (
 #: two rows as duplicates is not linking them.
 NEARDUP_RULE = "neardup-v1"
 NEARDUP_JACCARD = 0.8
+#: The machine-readable DESCRIPTION of the key the rule computes, written into the
+#: artifact beside the version and the threshold. Named here rather than inlined at
+#: the writer so the pin can derive it from the tool instead of copying the record's
+#: own string back (round 27: `measurement.json -> neardup_rule.key` was read by
+#: nothing, so it could become "exact string only" with the suite green at 55
+#: passed, while §3a's rates are the one section a reader cannot re-derive).
+NEARDUP_KEY_NOTE = "case+ws+separator fold, leading article dropped"
 _LEADING_ARTICLE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
 _TOK = re.compile(r"[a-z0-9]+")
 
@@ -1128,7 +1135,7 @@ def run(args: argparse.Namespace) -> int:
             "ks": list(KS),
             "neardup_rule": {"version": NEARDUP_RULE,
                              "jaccard_threshold": NEARDUP_JACCARD,
-                             "key": "case+ws+separator fold, leading article dropped"},
+                             "key": NEARDUP_KEY_NOTE},
             "user_door": user_door,
             "arms": arms,
             "paired": pairs,
