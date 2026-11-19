@@ -35,8 +35,11 @@ tool prints now: the population-scoped figure is that run's `existing=14,628` le
 an `embedding IS NOT NULL` count (`_buckets`, `matched − missing`), so a matched row
 whose generated `embedding_vec` the converter refused is inside `existing` and OUTSIDE
 `record_vectors`. The summary line quoted above omits `unread`, so no narrowed figure is
-quotable from it; the ~22.3k difference between the two READINGS of `record=` is
-`record_only` (readable rows this graph holds no `:Point` for). The
+quotable from it. `record_only` is `36,942` MINUS the narrowed `record_vectors`, i.e.
+`22,314` PLUS `unread` — so the ~22.3k gap between `record=` and `existing` UNDERSTATES
+`record_only` by exactly `unread` (it is `record_only` only when `unread` is 0, which this
+line does not establish). `record_only` is the readable rows this graph holds no `:Point`
+for. The
 paragraph's refutation does not depend on either reading of `record=` — `fillable=0` and
 `unmatched=16,982` are what refute the "~9,106 graph-only" inference, and neither moved.
 `:Point` is still in this tool's DEFAULT population, because the
