@@ -846,8 +846,23 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
             # reach it: a zero record against a non-zero graph is a genuine
             # shortfall, and an unmeasurable side is ``None`` above, never ``0``.
             trivial = verified and record_vectors == 0 and graph_vectors == 0
-            reason = (f"the record holds {record_vectors} vector(s) for "
-                      f"{label}, the graph serves {graph_vectors}")
+            # ⛔ THE COUNT IS A MEASUREMENT, AND THE PROSE SAYS SO (#13812 review P2).
+            # `reason` outlives the instant it describes: a VERIFIED verdict is
+            # served from `_cached_coverage` stickily for the life of the process
+            # (`#13799`), and an UNVERIFIED one for `COVERAGE_TTL_SECONDS`. Every
+            # consumer renders this string LATER — the TRIVIALLY trace line, the
+            # unverified DECLINE line and its `RecordVectorDeclined` text,
+            # `tools/claim_dense_leg_13732.py`'s `coverage_unverified` refusal (which
+            # lands in that run's artifact and on stderr), and
+            # `Coverage.as_dict()`, which a caller may render — so a present-tense
+            # "the record holds N, the graph serves M" is read as a
+            # claim about NOW while the read answering with it may return rows the
+            # count never saw (the normal fresh-tenant lifecycle: measure 0/0,
+            # then write). Past tense plus "measured" dates the number, which is
+            # what the TRIVIALLY trace's own measurement-time framing
+            # (`searcher()`'s `if verdict.trivial` block) already promises.
+            reason = (f"the count measured {record_vectors} vector(s) in the "
+                      f"record for {label} against {graph_vectors} in the graph")
             if trivial:
                 reason += (
                     " — BOTH SIDES ARE EMPTY, so this verification is TRIVIAL: the "
