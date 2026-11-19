@@ -883,15 +883,21 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
     empty `rows` cannot carry that claim on its own: `run_vector_query` returns
     ``[]`` from the SERVED path (`mechanism=pgvector`, `reason=empty_results`,
     `degraded=False` — `search_engine.py:4176-4178`) AND from a DECLINE whose
-    fallback leg failed (`search_engine.py:4153-4156`: `mechanism=pgvector`,
+    fallback leg failed (`search_engine.py:4153-4155`: `mechanism=pgvector`,
     `reason=query_failed`, `degraded=True`, `return []`). A mutant that raises
     `RecordVectorDeclined` *after* the marker's debug line therefore keeps
     `rows == []` and both caplog assertions green — the half of #13798's mandate
     that says the marker must not turn a serve into a refusal was asserted in prose
-    and pinned by nothing. The trace
-    is the evidence that separates them, and this file already reads it that way
-    for the non-trivial case (`test_a_contracted_empty_answer_is_the_answer`,
-    `:441-445`).
+    and pinned by nothing. The trace is the evidence that separates them, and this
+    file already reads it that way for the non-trivial case
+    (`test_a_contracted_empty_answer_is_the_answer`, `:445-449`).
+
+    ⛔ THE FOUR ASSERTIONS ARE COMPLEMENTARY, NOT REDUNDANT — measured, and the
+    distinction matters to whoever reproduces the mutation. `graph.queries == []`
+    catches the decline that ESCAPES the leg (the graph is then asked to answer,
+    which is the forbidden outcome); an in-leg decline does not ask the graph at
+    all, and is caught instead by `degraded is False` / `reason == "empty_results"`,
+    which read the `query_failed` trace. Neither pair alone catches both shapes.
     """
     import logging
 
