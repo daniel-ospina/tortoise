@@ -97,11 +97,11 @@ def sdk(tmp_path):
 
 
 def _object(s, status="live") -> str:
-    return s.create_object(name=f"obj-{status}-{len(status)}", status=status)["id"]
+    return s._create_object(name=f"obj-{status}-{len(status)}", status=status)["id"]
 
 
 def _subject(s, status="live") -> str:
-    return s.create_subject(name=f"subj-{status}-{len(status)}", status=status)["id"]
+    return s._create_subject(name=f"subj-{status}-{len(status)}", status=status)["id"]
 
 
 def _stored(s, node_id) -> dict:
@@ -181,7 +181,7 @@ def test_a_two_status_bag_cannot_smuggle_a_word_past_the_CREATE_door(sdk):
     — ``_status_write_is_ambiguous``, the same helper and the same rule the write
     door uses. Deleting the refusal reds this pin.
     """
-    for t, make in (("object", sdk.create_object), ("subject", sdk.create_subject)):
+    for t, make in (("object", sdk._create_object), ("subject", sdk._create_subject)):
         name = f"f1-{t}"
         with pytest.raises(ValueError, match="CONFLICTING status write"):
             make(name, props={_K("zzz"): None, "status": "in_progress"})
@@ -204,7 +204,7 @@ def test_the_delete_sentinel_still_works_on_the_CREATE_door(sdk):
     stays a legal create. Without this pin, "refuse every bag with a ``None``"
     would pass the test above while breaking a documented write.
     """
-    for make in (sdk.create_object, sdk.create_subject):
+    for make in (sdk._create_object, sdk._create_subject):
         node = make("f1-delete-sentinel", props={"status": None})
         node_id = node.get("id") or node["node"]["id"]
         assert _stored(sdk, node_id).get("status") in (None, ""), (
@@ -1141,7 +1141,7 @@ def test_a_point_with_an_object_word_is_refused_by_the_point_vocabulary(sdk):
     more (it is a stage id). The invariant worth keeping is that the Point arm
     still validates FIRST and still refuses, so nothing leaks onto it.
     """
-    pid = sdk.create_point("statement", "pt", dedup=False)["id"]
+    pid = sdk._create_point("statement", "pt", dedup=False)["id"]
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(pid, status="completed")
     message = str(exc.value)
@@ -1161,7 +1161,7 @@ def test_a_point_keeps_its_declared_transitions(sdk):
     legacy terminal row (`retracted`, `outdated`, `archived`) is `frozenset()` —
     so nothing leaves a dead Point, which the second half pins.
     """
-    pid = sdk.create_point("statement", "pt-live", dedup=False)["id"]
+    pid = sdk._create_point("statement", "pt-live", dedup=False)["id"]
     sdk.update_knowledge(pid, status="retracted")
     assert _stored(sdk, pid)["status"] == DEAD_WORD
     with pytest.raises(ValueError):

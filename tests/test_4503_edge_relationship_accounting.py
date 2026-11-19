@@ -127,7 +127,7 @@ def _direct_impl_edge(sdk: TortoiseSDK, a: str, b: str) -> None:
 
 def _claims(sdk: TortoiseSDK, n: int = 3) -> list[str]:
     return [
-        sdk.create_point("statement", f"claim {i}", dedup=False,
+        sdk._create_point("statement", f"claim {i}", dedup=False,
                          status="live")["id"]
         for i in range(n)
     ]
@@ -356,7 +356,7 @@ def test_rebuild_all_restores_the_edge_message_state(journaled_sdk):
     sdk, events = journaled_sdk
     ids = _claims(sdk, 3)
     for a, b in itertools.pairwise(ids):
-        sdk.create_operator("IMPL", a, [b])
+        sdk._create_operator("IMPL", a, [b])
     _seed_evidence(sdk, ids[-1], 8.0, 2.0)
     _run_ep(sdk, ids, emit=sdk._emit_event)
 
@@ -398,7 +398,7 @@ def test_rebuild_all_keeps_edge_messages_and_node_belief(
     # the EDGE — which is what makes the assertion about its PROPERTY meaningful
     # rather than an assertion that a missing edge is missing.
     for a, b in itertools.pairwise(ids):
-        sdk.create_operator("IMPL", a, [b])
+        sdk._create_operator("IMPL", a, [b])
 
     _seed_evidence(sdk, ids[-1], 8.0, 2.0)
     _run_ep(sdk, ids, emit=sdk._emit_event)
@@ -467,7 +467,7 @@ def test_rebuild_all_does_not_resurrect_cleared_edge_messages(journaled_sdk):
     sdk, events = journaled_sdk
     ids = _claims(sdk, 3)
     for a, b in itertools.pairwise(ids):
-        sdk.create_operator("IMPL", a, [b])
+        sdk._create_operator("IMPL", a, [b])
     _seed_evidence(sdk, ids[-1], 8.0, 2.0)
     _run_ep(sdk, ids, emit=sdk._emit_event)
 
@@ -516,7 +516,7 @@ def test_rebuild_replays_touching_and_neighbourhood_clears(journaled_sdk):
     sdk, events = journaled_sdk
     ids = _claims(sdk, 3)
     for a, b in itertools.pairwise(ids):
-        sdk.create_operator("IMPL", a, [b])
+        sdk._create_operator("IMPL", a, [b])
     _seed_evidence(sdk, ids[-1], 8.0, 2.0)
     _run_ep(sdk, ids, emit=sdk._emit_event)
 
@@ -564,7 +564,7 @@ def test_rebuild_reports_drop_for_a_post_upgrade_journal(
     sdk, events = journaled_sdk
     ids = _claims(sdk, 3)
     for a, b in itertools.pairwise(ids):
-        sdk.create_operator("IMPL", a, [b])
+        sdk._create_operator("IMPL", a, [b])
     _seed_evidence(sdk, ids[-1], 8.0, 2.0)
     _run_ep(sdk, ids, emit=sdk._emit_event)   # journals EdgeMessageChanged
 
@@ -736,7 +736,7 @@ def test_census_cli_passes_its_own_graph_to_the_cap_count(tmp_path, monkeypatch,
 
     seeded = TortoiseSDK(str(db))
     for i in range(3):
-        seeded.create_point("statement", f"claim {i}", dedup=False,
+        seeded._create_point("statement", f"claim {i}", dedup=False,
                             status="live")
     seeded.close()
 

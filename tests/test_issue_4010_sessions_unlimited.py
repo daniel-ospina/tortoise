@@ -167,7 +167,7 @@ class TestResolvedLimitsContract:
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         reg = TortoiseSDK(db_path, namespace="registry")
         try:
-            team = reg.org_create(f"contract-{os.urandom(4).hex()}")
+            team = reg._org_create(f"contract-{os.urandom(4).hex()}")
             limits = resolve_org_limits(team["id"])
             missing = [k for k in _RESOURCE_LIMIT_KEYS.values()
                        if k not in limits]
@@ -203,7 +203,7 @@ class TestStoredValueIsNotHonoured:
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         reg = TortoiseSDK(db_path, namespace="registry")
         try:
-            team = reg.org_create(f"stored-{os.urandom(4).hex()}")
+            team = reg._org_create(f"stored-{os.urandom(4).hex()}")
             tid = team["id"]
             reg._get_registry().query(
                 "MATCH (t:Team {id:$id}) SET t.max_sessions = $ms",
@@ -267,8 +267,8 @@ class TestStoredValuesCleared:
         try:
             reg = sdk._get_registry()
             for i in range(2):
-                team = sdk.org_create(f"clear-{i}-{os.urandom(4).hex()}")
-                reg.query(
+                team = sdk._org_create(f"clear-{i}-{os.urandom(4).hex()}")
+                reg._query(
                     "MATCH (t:Team {id:$id}) SET t.max_sessions = $ms",
                     params={"id": team["id"], "ms": LEGACY_CAP},
                 )
@@ -280,14 +280,14 @@ class TestStoredValuesCleared:
             assert len(dry["teams"]) == 2, dry["teams"]
             assert all(v == LEGACY_CAP for _, v in dry["teams"])
             # nothing written yet
-            assert reg.query(
+            assert reg._query(
                 "MATCH (t:Team) WHERE t.max_sessions IS NOT NULL "
                 "RETURN count(t)").result_set[0][0] == 2
             # the sweep clears them and names each row
             sweep = clear_stored_max_sessions(reg)
             assert sweep["found"] == 2 and sweep["cleared"] == 2
             assert all(v == LEGACY_CAP for _, v in sweep["teams"])
-            assert reg.query(
+            assert reg._query(
                 "MATCH (t:Team) WHERE t.max_sessions IS NOT NULL "
                 "RETURN count(t)").result_set[0][0] == 0
             # idempotent: a second run finds nothing
@@ -321,7 +321,7 @@ def hosted_org_past_cap(monkeypatch):
             reg = TortoiseSDK(db_path, namespace="registry")
             tenant = None
             try:
-                team = reg.org_create(f"cap-{os.urandom(4).hex()}")
+                team = reg._org_create(f"cap-{os.urandom(4).hex()}")
                 tid = team["id"]
                 # The registry auth lane resolves :APIKey nodes (lookup_hash
                 # prefix scan) — mint one whose plaintext this test holds.

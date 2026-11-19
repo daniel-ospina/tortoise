@@ -1183,7 +1183,7 @@ def _drive_door(sdk, door: str, prop: str, value: str) -> dict:
     the FOURTH mandated door is exercised directly and not only via an alias.
     """
     if door == "point":
-        return sdk.create_point(value, "point for the #5475 door probe")
+        return sdk._create_point(value, "point for the #5475 door probe")
     if door == "entity":
         return sdk.create_entity("object", f"probe-{value}", **{prop: value})["node"]
     return getattr(sdk, f"create_{door}")(f"probe-{value}", **{prop: value})
@@ -1350,7 +1350,7 @@ class TestSdkWriteDoorsRefuseUnapprovedPacks5475:
         _seed_install(sdk, DEV)
         before = graph_installed_namespaces(sdk)
         with pytest.raises(ValueError, match="documentKind"):
-            sdk.create_document("a contract", "legal:contract")
+            sdk._create_document("a contract", "legal:contract")
         assert graph_installed_namespaces(sdk) == before
 
     def test_bare_attributable_event_kind_is_constrained_too(self, sdk):
@@ -1373,7 +1373,7 @@ class TestSdkWriteDoorsRefuseUnapprovedPacks5475:
         _seed_install(sdk, DEV)
         before = graph_installed_namespaces(sdk)
         with pytest.raises(ValueError) as excinfo:
-            sdk.create_event("bare rule", "ruleRevised")
+            sdk._create_event("bare rule", "ruleRevised")
         assert "agent-ops" in str(excinfo.value)
         assert graph_installed_namespaces(sdk) == before, (
             "the bare spelling must not attribute a pack into the set either")
@@ -1391,7 +1391,7 @@ class TestSdkWriteDoorsRefuseUnapprovedPacks5475:
         assert owners == frozenset({"agent-ops"})
         _seed_install(sdk, DEV)
         _seed_install(sdk, "agent-ops")
-        assert sdk.create_event("bare rule ok", "ruleRevised")
+        assert sdk._create_event("bare rule ok", "ruleRevised")
 
 
 class TestMCPEntityDoors5475:
@@ -1563,7 +1563,7 @@ class TestSdkKindLegsTheDoorsDoNotName5475:
         _seed_install(sdk, DEV)
         before = graph_installed_namespaces(sdk)
         with pytest.raises(ValueError, match="objectKind"):
-            sdk.create_point("statement", "point carrying a foreign objectKind",
+            sdk._create_point("statement", "point carrying a foreign objectKind",
                              objectKind=MARKETING_OBJECT)
         assert graph_installed_namespaces(sdk) == before
 
@@ -1583,7 +1583,7 @@ class TestSdkKindLegsTheDoorsDoNotName5475:
         _seed_install(sdk, DEV)
         before = graph_installed_namespaces(sdk)
         with pytest.raises(ValueError, match="objectKind"):
-            sdk.create_event("ev with uses", "dev:deployment",
+            sdk._create_event("ev with uses", "dev:deployment",
                              uses=[{"name": "campaignX",
                                     "kind": MARKETING_OBJECT}])
         assert graph_installed_namespaces(sdk) == before
@@ -1598,7 +1598,7 @@ class TestSdkKindLegsTheDoorsDoNotName5475:
         REACHABLE: ``dev`` is installed. PASSES pre-fix by design.
         """
         _seed_install(sdk, DEV)
-        assert sdk.create_event("ev ok", "dev:deployment",
+        assert sdk._create_event("ev ok", "dev:deployment",
                                 uses=[{"name": "epicOne", "kind": "dev:epic"}])
 
     def test_no_catalog_pack_namespace_is_core(self):
@@ -1672,12 +1672,12 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
         the point exists before the update, so the only write is the update.
         """
         _seed_install(sdk, DEV)
-        point = sdk.create_point("statement", "an update-door probe")
+        point = sdk._create_point("statement", "an update-door probe")
         before = graph_installed_namespaces(sdk)
         assert before == frozenset({DEV}), "fixture: a dev-only graph"
 
         with pytest.raises(ValueError) as excinfo:
-            sdk.update_point(point["id"], pointKind=MARKETING_POINT)
+            sdk._update_point(point["id"], pointKind=MARKETING_POINT)
 
         assert MARKETING in str(excinfo.value)
         assert graph_installed_namespaces(sdk) == before, (
@@ -1699,7 +1699,7 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
         (``_KIND_PROP_KEYS``), and the target node exists first.
         """
         _seed_install(sdk, DEV)
-        node = sdk.create_object(f"update-door-{prop}", objectKind="other")
+        node = sdk._create_object(f"update-door-{prop}", objectKind="other")
         before = graph_installed_namespaces(sdk)
         assert before == frozenset({DEV}), "fixture: a dev-only graph"
 
@@ -1718,7 +1718,7 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
         ``subjectKind`` is not, so a first-only check would pass.
         """
         _seed_install(sdk, DEV)
-        node = sdk.create_object("update-door-batch", objectKind="other")
+        node = sdk._create_object("update-door-batch", objectKind="other")
         before = graph_installed_namespaces(sdk)
         with pytest.raises(ValueError) as excinfo:
             sdk.update_knowledge(node["id"], objectKind="dev:epic",
@@ -1735,9 +1735,9 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
         admissible — the refusal above is about membership, not spelling.
         """
         _seed_install(sdk, DEV)
-        point = sdk.create_point("statement", "a keep-writable probe")
-        sdk.update_point(point["id"], pointKind=DEV_POINT)
-        sdk.update_point(point["id"], pointKind="statement")
+        point = sdk._create_point("statement", "a keep-writable probe")
+        sdk._update_point(point["id"], pointKind=DEV_POINT)
+        sdk._update_point(point["id"], pointKind="statement")
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
     def test_no_records_graph_keeps_updating_any_pack_kind(self, sdk):
@@ -1752,9 +1752,9 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
         refusal (reported by the #5475 review of this diff).
         """
         assert graph_installed_namespaces(sdk) is None
-        point = sdk.create_point("statement", "an ungated update probe")
-        sdk.update_point(point["id"], pointKind=MARKETING_POINT)
-        stored = sdk.get_point(point["id"])
+        point = sdk._create_point("statement", "an ungated update probe")
+        sdk._update_point(point["id"], pointKind=MARKETING_POINT)
+        stored = sdk._get_point(point["id"])
         assert stored.get("pointKind") == MARKETING_POINT, (
             "the ungated (no-records) arm must actually WRITE, not merely "
             "avoid raising")
@@ -1779,12 +1779,12 @@ class TestUpdateDoorsRefuseUnapprovedPacks5475:
             "MERGE (n:Object {id: 'l7-update-historical'}) "
             f"SET n.objectKind = '{MARKETING_OBJECT}'")
         assert graph_installed_namespaces(sdk) == frozenset({DEV, MARKETING})
-        point = sdk.create_point("statement", "a historical-namespace probe")
-        sdk.update_point(point["id"], pointKind=MARKETING_POINT)
-        node = sdk.create_object("historical-namespace object",
+        point = sdk._create_point("statement", "a historical-namespace probe")
+        sdk._update_point(point["id"], pointKind=MARKETING_POINT)
+        node = sdk._create_object("historical-namespace object",
                                  objectKind="other")
         sdk.update_knowledge(node["id"], objectKind=MARKETING_OBJECT)
-        assert sdk.get_point(point["id"]).get("pointKind") == MARKETING_POINT
+        assert sdk._get_point(point["id"]).get("pointKind") == MARKETING_POINT
 
 
 class TestJournalSeamRefusesUnapprovedPacks5475:
@@ -2109,12 +2109,12 @@ class TestSecondWritersOfAKindProperty5475:
         so the ``ON CREATE`` branch really mints the node.
         """
         _seed_install(sdk, DEV)
-        target = sdk.create_object("link target", objectKind="other")
+        target = sdk._create_object("link target", objectKind="other")
         before = graph_installed_namespaces(sdk)
         assert before == frozenset({DEV}), "fixture: a dev-only graph"
 
         with pytest.raises(ValueError) as excinfo:
-            sdk.link_source_to_entity(
+            sdk._link_source_to_entity(
                 "https://example.test/a-source", target["id"], "Object",
                 source_kind=MARKETING_OBJECT)
 
@@ -2135,10 +2135,10 @@ class TestSecondWritersOfAKindProperty5475:
         pack — both real call shapes are exercised.
         """
         _seed_install(sdk, DEV)
-        target = sdk.create_object("link target 2", objectKind="other")
-        sdk.link_source_to_entity("https://example.test/bare-kind", target["id"],
+        target = sdk._create_object("link target 2", objectKind="other")
+        sdk._link_source_to_entity("https://example.test/bare-kind", target["id"],
                                   "Object")  # default source_kind="document"
-        sdk.link_source_to_entity("https://example.test/dev-kind", target["id"],
+        sdk._link_source_to_entity("https://example.test/dev-kind", target["id"],
                                   "Object", source_kind="dev:epic")
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
@@ -2235,7 +2235,7 @@ class TestIngestCorpusEventKind5475:
         (corpus / "a.md").write_text("# a session\n\nbody\n")
         before = graph_installed_namespaces(sdk)
         with pytest.raises(ValueError) as excinfo:
-            sdk.ingest_corpus(str(corpus), eventKind=MARKETING_OBJECT)
+            sdk._ingest_corpus(str(corpus), eventKind=MARKETING_OBJECT)
         assert MARKETING in str(excinfo.value)
         assert graph_installed_namespaces(sdk) == before
 

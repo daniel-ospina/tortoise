@@ -72,14 +72,14 @@ def test_verify_at_scope_promote_then_compute_calibrated(tmp_path) -> None:
         anchors = [m.id for m in mems if m.kind == "claim"][:2]
         assert anchors, "no claim anchors on the ingest-lane store"
         try:
-            pristine = sdk.compute_confidence(factors=None, anchors=anchors)
+            pristine = sdk._compute_confidence(factors=None, anchors=anchors)
         except CalibrationError as e:  # product gap → fail loudly, not flip
             pytest.fail(f"verify-at-scope: gate refused a calibrated store: {e}")
         assert not (pristine.get("confidences") or {}), (
             "pristine seed_mode store must have NO affected set (no operator "
             f"edges yet); got diagnostic={pristine.get('diagnostic')}")
         # Calibrated store (no live uncalibrated evidence):
-        summary = sdk.calibrate_summary()
+        summary = sdk._calibrate_summary()
         uncal = [s for s in summary if not s.get("calibrated")
                  and s.get("pointKind") in ("statement", "evidence")
                  and s.get("status") != "draft"]
@@ -89,7 +89,7 @@ def test_verify_at_scope_promote_then_compute_calibrated(tmp_path) -> None:
             AgentContext(scenario=store._scenario, episode_seed=0,
                          user_message="go", prior_memories=tuple(mems)),
             Memory(id="e1", content="finding", kind="nand"))
-        wired = sdk.compute_confidence(factors=None, anchors=anchors[:1])
+        wired = sdk._compute_confidence(factors=None, anchors=anchors[:1])
         conf = wired.get("confidences") or {}
         assert conf, (f"wired store produced no confidences: "
                       f"{wired.get('diagnostic')}")
@@ -113,15 +113,15 @@ def test_promote_semantics_seed_points_and_operators(tmp_path) -> None:
         assert mems
         # All retrievable claim points are LIVE (promoted from the seed).
         for m in mems:
-            pt = sdk.get_point(m.id)
+            pt = sdk._get_point(m.id)
             assert pt.get("status") == "live", pt.get("status")
         # Build one real operator and assert direct promotion is blocked
         # (operator promotion is a product-level refusal, not a silent skip).
         if len(mems) < 2:
             pytest.skip("ct-001 seed must surface ≥2 memories for an operator")
-        op = sdk.create_operator("IMPL", mems[0].id, [mems[1].id])
+        op = sdk._create_operator("IMPL", mems[0].id, [mems[1].id])
         oid = op.get("id")
-        pr = sdk.promote_point(oid)
+        pr = sdk._promote_point(oid)
         assert pr.get("blocked") is True
         assert pr.get("reason") == "is_operator"
     finally:
@@ -167,7 +167,7 @@ def test_seed_props_present_on_ingest_lane(tmp_path) -> None:
         sdk = store._arm._sdk(store._scenario)
         mems = store.retrieve("")
         assert mems
-        pt = sdk.get_point(mems[0].id)
+        pt = sdk._get_point(mems[0].id)
         assert pt.get("seed") is True
         assert pt.get("source_harness") == "battery"
         assert pt.get("source_session") == _CT

@@ -56,7 +56,7 @@ note(
     "create_source", "research", "the paper is the document every claim derives from",
 )
 
-subj = sdk.create_subject(
+subj = sdk._create_subject(
     "Lewis et al. (2020)",
     subjectKind="authorGroup",
     role="authors of arXiv:2005.11401",
@@ -66,7 +66,7 @@ note("Lewis et al. (2020) — the paper's authors",
      "create_subject", "authorGroup", "who asserts the finding")
 
 # ------------------------------------------------------------------- objects
-rag = sdk.create_object(
+rag = sdk._create_object(
     "Retrieval-Augmented Generation (RAG)",
     objectKind="architecture",
     description=(
@@ -78,7 +78,7 @@ RAG = nid(rag)
 note("Retrieval-Augmented Generation (RAG) — retriever + generator, jointly fine-tuned",
      "create_object", "architecture", "the model being evaluated, and the subject of the necessity claim")
 
-base = sdk.create_object(
+base = sdk._create_object(
     "Parametric-only seq2seq baseline",
     objectKind="architecture",
     description="Seq2seq model with no retrieval component; the comparison baseline.",
@@ -87,7 +87,7 @@ BASE = nid(base)
 note("Parametric-only seq2seq baseline — the comparison condition",
      "create_object", "architecture", "the 44.2% delta is measured against this")
 
-nq = sdk.create_object(
+nq = sdk._create_object(
     "Natural Questions (NQ)",
     objectKind="asset",
     description="Question-answering benchmark used as the evaluation set.",
@@ -99,7 +99,7 @@ note("Natural Questions (NQ) — the evaluation benchmark",
 
 # -------------------------------------------------------------------- points
 def point(kind, content, why, **props):
-    res = sdk.create_point(kind, content, dedup=True, extractedFrom=[S], **props)
+    res = sdk._create_point(kind, content, dedup=True, extractedFrom=[S], **props)
     if res.get("advisories"):
         print("ADVISORY", res["advisories"], file=sys.stderr)
     note(content, "create_point", kind, why)
@@ -145,7 +145,7 @@ P_SINGLE_ABLATION = point(
 )
 
 # -------------------------------------------------------------------- events
-ev = sdk.create_event(
+ev = sdk._create_event(
     "Ingest: Lewis et al. (2020) RAG — 44.2% Exact Match gain on Natural Questions "
     "vs a parametric-only seq2seq baseline, unstable under a frozen retriever; "
     "joint fine-tuning argued necessary from a single ablation",
@@ -162,7 +162,7 @@ note(
 
 # --------------------------------------------------------------- structural
 def edge(relation, frm, to, label):
-    res = sdk.create_edge(relation, frm, to)
+    res = sdk._create_edge(relation, frm, to)
     log["edges"].append({"relation": relation, "from": label, "to": to,
                          "created": res.get("created")})
     if not res.get("created"):
@@ -182,7 +182,7 @@ edge("aboutObject", P_UNSTABLE, RAG, "point:unstable")
 edge("aboutObject", P_NECESSARY, RAG, "point:necessary")
 
 # ---------------------------------------------------------------- epistemic
-op = sdk.create_operator(
+op = sdk._create_operator(
     "IMPL",
     source_id=P_UNSTABLE,
     target_ids=[P_NECESSARY],
@@ -197,7 +197,7 @@ note(
     "create_operator", "IMPL", "the paper's inference chain, isolated as an attackable bridge",
 )
 
-mit = sdk.mitigate_operator(
+mit = sdk._mitigate_operator(
     OP,
     reason=(
         "The instability-to-necessity inference rests on a single ablation; the "

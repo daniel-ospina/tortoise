@@ -3052,7 +3052,7 @@ def test_resolver_docker_embedder_on_unresolved_keeps_legacy(
     # PRECONDITION: the hybrid leg is genuinely live — its semantic half DOES
     # return Objects for a term that names none. Without this the test could
     # pass vacuously on a lane where leg 2 happens to be sparse.
-    raw = _docker_sdk.tortoise_fts_query(
+    raw = _docker_sdk._tortoise_fts_query(
         "the teleporting exercise bike", entity_type="object", limit=8,
         include_terminal=True) or []
     assert raw, ("embedder-on lane did not exercise the hybrid leg — the "
@@ -3106,7 +3106,7 @@ def test_resolver_docker_embedder_on_name_match_survives_vector_crowd(
     term = "please locate the zorblax4 widgetfoo4 somewhere near the garage"
     # PRECONDITION: the hybrid leg is live AND its top-`limit` is entirely
     # vector crowd — the window that swallowed the name match.
-    raw = _docker_sdk.tortoise_fts_query(
+    raw = _docker_sdk._tortoise_fts_query(
         term, entity_type="object", limit=8, include_terminal=True) or []
     assert raw, ("embedder-on lane did not exercise the hybrid leg — the "
                  "precondition of the #3223 crowding")
@@ -5042,7 +5042,7 @@ def _ago_window_fixture(sdk, monkeypatch):
     for pid, sess, when in (("pw-a", "sess-w-a", "2026-08-10"),
                             ("pw-b", "sess-w-b", "2026-09-01"),
                             ("pw-c", "sess-w-c", "2026-07-01")):
-        sdk.create_point("statement", f"windowed marker {pid}", id=pid,
+        sdk._create_point("statement", f"windowed marker {pid}", id=pid,
                          session_id=sess, is_episodic=True, status="draft",
                          when=when, createdAt=when)
 

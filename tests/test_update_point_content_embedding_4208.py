@@ -87,12 +87,12 @@ def test_content_edit_recomputes_the_derived_vector(sup):
     """FAILS BEFORE: the node keeps ``vec('original')`` beside content
     ``'replacement'`` (the dense leg ranks it by text no longer on it)."""
     _events_dir, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     before = _vector(sdk, pid)
     assert before == _embed_a("original")
 
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content="replacement")
+        sdk._update_point(pid, content="replacement")
 
     after = _vector(sdk, pid)
     assert after != before, "the stale pre-edit vector survived the content edit"
@@ -100,7 +100,7 @@ def test_content_edit_recomputes_the_derived_vector(sup):
         "the vector must be re-encoded from the NEW content"
     )
     # ...and it moves together with the already-recomputed derived hash (#1904).
-    assert sdk.get_point(pid)["content_hash"] == hashlib.sha256(
+    assert sdk._get_point(pid)["content_hash"] == hashlib.sha256(
         b"replacement").hexdigest()
 
 
@@ -111,9 +111,9 @@ def test_the_revised_vector_is_the_revise_replays_value(sup):
     this fix the live node held the creation vector, so live != rebuild.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content="replacement")
+        sdk._update_point(pid, content="replacement")
     live = _vector(sdk, pid)
 
     with mock.patch(_EMBED_PATCH, _embed_a):
@@ -132,19 +132,19 @@ def test_content_edit_with_the_embedder_down_wipes_the_stale_vector(sup):
     (#19), rather than preserving `vec('original')`.
     """
     _events_dir, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     assert _vector(sdk, pid) is not None
 
     def _down(*_a, **_k):
         raise RuntimeError("embedder unavailable (simulated)")
 
     with mock.patch(_EMBED_PATCH, _down):
-        sdk.update_point(pid, content="replacement")  # must not raise
+        sdk._update_point(pid, content="replacement")  # must not raise
 
     assert _vector(sdk, pid) is None, (
         "an unavailable embedder must fail CLOSED (wipe), never keep vec(old)"
     )
-    assert sdk.get_point(pid)["content"] == "replacement"
+    assert sdk._get_point(pid)["content"] == "replacement"
 
 
 # ── the record shape (derived, like content_hash) ────────────────────────
@@ -159,9 +159,9 @@ def test_the_derived_vector_is_not_journalled(sup):
     record — see `test_journal_embedding_5004.py`.)
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content="replacement")
+        sdk._update_point(pid, content="replacement")
 
     revises = [e for e in _events(events) if e.get("type") == "PointRevised"]
     assert revises, "expected a PointRevised record"
@@ -183,9 +183,9 @@ def test_a_healthy_content_edit_is_not_a_consistency_divergence(sup):
     is the companion to the `consistency.py` fold change.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content="replacement")
+        sdk._update_point(pid, content="replacement")
 
     from tortoise.consistency import check_consistency
     r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
@@ -204,9 +204,9 @@ def test_a_caller_supplied_vector_is_not_recomputed(sup):
     decision.
     """
     _events_dir, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     caller_vec = [0.2] * _DIM
-    sdk.update_point(pid, embedding=caller_vec)
+    sdk._update_point(pid, embedding=caller_vec)
     assert _vector(sdk, pid) == caller_vec
 
 
@@ -230,10 +230,10 @@ def test_a_caller_vector_with_a_content_edit_is_a_consistency_divergence(sup):
     content, so the pop can never fire there).
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     caller_vec = [0.9] * _DIM
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content="replacement", embedding=caller_vec)
+        sdk._update_point(pid, content="replacement", embedding=caller_vec)
     assert _vector(sdk, pid) == caller_vec, (
         "premise: the caller's vector is the live value"
     )
@@ -279,10 +279,10 @@ def test_a_derived_edit_clears_a_stale_verbatim_marker(sup):
     derived content edit — the exact sequence in the finding.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
-    sdk.update_point(pid, embedding=[0.9] * _DIM)
+    pid = sdk._create_point("statement", "original").get("id")
+    sdk._update_point(pid, embedding=[0.9] * _DIM)
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content="replacement")
+        sdk._update_point(pid, content="replacement")
 
     def _props() -> dict:
         return sdk._get_proj().g.query(
@@ -313,7 +313,7 @@ def test_the_consolidated_update_route_recomputes_too(sup):
     one test on the consolidated entry point pins the reachable surface.
     """
     _events_dir, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update(pid, content="replacement")
+        sdk._update(pid, content="replacement")
     assert _vector(sdk, pid) == _embed_a("replacement")

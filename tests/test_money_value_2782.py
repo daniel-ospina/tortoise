@@ -403,7 +403,7 @@ class TestCommitContractStaysClosedByDesign:
 class TestEntityRoundTrip:
     def test_object_carries_and_returns_money_fields(self, journaled_sdk):
         sdk, _events = journaled_sdk
-        created = sdk.create_object(
+        created = sdk._create_object(
             "Tranche A", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                           verbatim="R$ 250.000,00"))
@@ -422,7 +422,7 @@ class TestEntityRoundTrip:
 
     def test_event_carries_and_returns_money_fields(self, journaled_sdk):
         sdk, _events = journaled_sdk
-        sdk.create_event(
+        sdk._create_event(
             "Disbursement 1", "venture:disbursement",
             **money_props(RELEASED_MINOR, "BRL", minor_unit_exponent=2,
                           verbatim="R$ 187.500,00"))
@@ -436,11 +436,11 @@ class TestEntityRoundTrip:
         objects/events carry the same open-set prop lane as the other
         non-Point labels (the #2795/#2958 durability contract)."""
         sdk, events = journaled_sdk
-        sdk.create_object(
+        sdk._create_object(
             "Tranche R", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                           verbatim="R$ 250.000,00"))
-        sdk.create_event(
+        sdk._create_event(
             "Disbursement R", "venture:disbursement",
             **money_props(RELEASED_MINOR, "BRL", minor_unit_exponent=2,
                           verbatim="R$ 187.500,00"))
@@ -498,7 +498,7 @@ class TestPointLane:
         import logging
 
         sdk, events = journaled_sdk
-        sdk.create_point(
+        sdk._create_point(
             "statement", "tranche one is R$ 250.000,00",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                           verbatim="R$ 250.000,00"))
@@ -528,7 +528,7 @@ class TestPointLane:
         import logging
 
         sdk, events = journaled_sdk
-        sdk.create_point("statement", "a claim with a stray prop",
+        sdk._create_point("statement", "a claim with a stray prop",
                          frobnicator_level=7)
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
@@ -546,12 +546,12 @@ class TestTrancheReleaseScenario:
         committed on the Tranche Object, released across Disbursement
         Objects; the sum and the ratio decide the unlock."""
         sdk, _events = journaled_sdk
-        sdk.create_object(
+        sdk._create_object(
             "Tranche 1", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                           verbatim="R$ 250.000,00"))
         for i, amt in enumerate([10_000_000, 8_750_000], start=1):
-            sdk.create_event(
+            sdk._create_event(
                 f"Disbursement 1.{i}", "venture:disbursement",
                 **money_props(amt, "BRL", minor_unit_exponent=2,
                               verbatim=f"R$ {amt}"))
@@ -637,7 +637,7 @@ class TestWriteBoundary:
             self, journaled_sdk, label, props):
         sdk, _events = journaled_sdk
         with pytest.raises(ValueError) as exc:
-            sdk.create_object(f"Tranche {label}", "venture:tranche", **props)
+            sdk._create_object(f"Tranche {label}", "venture:tranche", **props)
         # the refusal names the write boundary and the field at fault — a
         # caller cannot act on "invalid input"
         assert "write boundary" in str(exc.value), str(exc.value)
@@ -663,7 +663,7 @@ class TestWriteBoundary:
     def test_the_point_door_is_covered_too(self, journaled_sdk):
         sdk, _events = journaled_sdk
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.create_point("statement", "tranche one is 250000 BRL",
+            sdk._create_point("statement", "tranche one is 250000 BRL",
                              amountMinor=COMMITTED_MINOR)
 
     def test_an_update_cannot_install_a_malformed_value_either(
@@ -686,7 +686,7 @@ class TestWriteBoundary:
             (`test_a_one_sided_update_cannot_strip_a_well_formed_value`).
         """
         sdk, _events = journaled_sdk
-        bare = sdk.create_object("Tranche bare", "venture:tranche")
+        bare = sdk._create_object("Tranche bare", "venture:tranche")
         with pytest.raises(ValueError, match="write boundary"):
             sdk.update_knowledge(bare["id"], currency="BRL")
         assert read_money_value(sdk.get_entity(bare["id"])) is None
@@ -710,10 +710,10 @@ class TestWriteBoundary:
         value = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                             verbatim="R$ 250.000,00")
         if door == "update_knowledge":
-            created = sdk.create_object("Tranche one-sided",
+            created = sdk._create_object("Tranche one-sided",
                                         "venture:tranche", **value)
         else:
-            created = sdk.create_point("statement",
+            created = sdk._create_point("statement",
                                        "tranche one is 250000 BRL", **value)
         with pytest.raises(ValueError, match="write boundary"):
             getattr(sdk, door)(created["id"], **update)
@@ -730,7 +730,7 @@ class TestWriteBoundary:
         currency and exponent — and a bag-shaped gate REFUSED it, a false block
         on an ordinary edit (measured at #11836)."""
         sdk, _events = journaled_sdk
-        created = sdk.create_object(
+        created = sdk._create_object(
             "Tranche partial", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))
         sdk.update_knowledge(created["id"], amountMinor=RELEASED_MINOR)
@@ -758,7 +758,7 @@ class TestWriteBoundary:
         node is simply not a money carrier), so the gate must not turn a
         deliberate delete into an error."""
         sdk, _events = journaled_sdk
-        created = sdk.create_object(
+        created = sdk._create_object(
             "Tranche cleared", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))
         sdk.update_knowledge(created["id"], amountMinor=None, currency=None,
@@ -775,14 +775,14 @@ class TestWriteBoundary:
         sdk, _events = journaled_sdk
         value = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2)
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.create_object("Tranche bad verbatim", "venture:tranche",
+            sdk._create_object("Tranche bad verbatim", "venture:tranche",
                               verbatim=123, **value)
-        created = sdk.create_object("Tranche cited", "venture:tranche",
+        created = sdk._create_object("Tranche cited", "venture:tranche",
                                     **value)
         with pytest.raises(ValueError, match="write boundary"):
             sdk.update_knowledge(created["id"], verbatim="")
         # no money in the bag: `verbatim` alone is an ordinary prop, untouched
-        note = sdk.create_object("Note verbatim", "venture:note",
+        note = sdk._create_object("Note verbatim", "venture:note",
                                  verbatim="quoted text")
         assert sdk.get_entity(note["id"])["verbatim"] == "quoted text"
 
@@ -814,7 +814,7 @@ class TestWriteBoundary:
         value = {VERBATIM: "some quoted text",
                  AS_OF: "2026-06-30",
                  MINOR_UNIT_EXPONENT: 2}[prop]
-        created = sdk.create_object(f"Object with {prop}", "venture:note",
+        created = sdk._create_object(f"Object with {prop}", "venture:note",
                                     **{prop: value})
         assert sdk.get_entity(created["id"])[prop] == value
 
@@ -824,12 +824,12 @@ class TestWriteBoundary:
         requirement rides stays answerable because the unreadable member cannot
         be written."""
         sdk, _events = journaled_sdk
-        sdk.create_object("Tranche P", "venture:tranche",
+        sdk._create_object("Tranche P", "venture:tranche",
                           **money_props(COMMITTED_MINOR, "BRL",
                                         minor_unit_exponent=2,
                                         verbatim="R$ 250.000,00"))
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.create_object("Tranche bad", "venture:tranche",
+            sdk._create_object("Tranche bad", "venture:tranche",
                               amountMinor=RELEASED_MINOR)  # no currency
         rows = sdk._get_proj().g.query(
             "MATCH (n) WHERE n.amountMinor IS NOT NULL "
@@ -852,11 +852,11 @@ UPDATE_DOORS = ("update_knowledge", "update_point")
 def _create_money_carrier(sdk, door: str, name: str = "Tranche U") -> str:
     """A well-formed money carrier, addressed by the verb ``door`` updates."""
     if door == "update_point":
-        return sdk.create_point(
+        return sdk._create_point(
             "statement", "one tranche is 250000 BRL",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                           verbatim="R$ 250.000,00"))["id"]
-    return sdk.create_object(
+    return sdk._create_object(
         name, "venture:tranche",
         **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                       verbatim="R$ 250.000,00"))["id"]
@@ -1024,12 +1024,12 @@ class TestUpdateDoorCannotDeleteOrMisScale:
         stored value is what decides.
         """
         sdk, _events = journaled_sdk
-        first = sdk.create_point("statement", "curtains are blue",
+        first = sdk._create_point("statement", "curtains are blue",
                                  dedup=True, minorUnitExponent=2)
-        again = sdk.create_point("statement", "curtains are blue",
+        again = sdk._create_point("statement", "curtains are blue",
                                  dedup=True, minorUnitExponent=2)
         assert again["id"] == first["id"], "the second call must dedup onto the first"
-        assert sdk.get_point(first["id"])[MINOR_UNIT_EXPONENT] == 2
+        assert sdk._get_point(first["id"])[MINOR_UNIT_EXPONENT] == 2
 
     def test_a_dedup_re_run_cannot_mis_scale_an_existing_money_point(
             self, journaled_sdk):
@@ -1045,11 +1045,11 @@ class TestUpdateDoorCannotDeleteOrMisScale:
         this test fails on the `pytest.raises`.
         """
         sdk, _events = journaled_sdk
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "statement", "tranche one is 250000 BRL",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))["id"]
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.create_point("statement", "tranche one is 250000 BRL",
+            sdk._create_point("statement", "tranche one is 250000 BRL",
                              dedup=True, minorUnitExponent=0)
         assert _money_node(sdk, pid) == {
             AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
@@ -1144,7 +1144,7 @@ class TestALegacyOptionalMemberDoesNotBrickTheRow:
         in the tree reads it, and the write path no longer emits it.
         """
         sdk, _events = journaled_sdk
-        created = sdk.create_object(
+        created = sdk._create_object(
             "Tranche with a stray date", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2),
             asOf="Q3 2026")
@@ -1159,14 +1159,14 @@ class TestALegacyOptionalMemberDoesNotBrickTheRow:
         ``verbatim`` is not a string; a re-run naming the same money must not
         raise, or re-ingest stops being idempotent for that row."""
         sdk, _events = journaled_sdk
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "statement", "tranche one is 250000 BRL",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))["id"]
         sdk._get_proj().g.query(
             "MATCH (n {id:$id}) SET n.verbatim = $verbatim",
             params={"id": pid, "verbatim": 123},
         )
-        twice = sdk.create_point(
+        twice = sdk._create_point(
             "statement", "tranche one is 250000 BRL", dedup=True,
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))
         assert twice["id"] == pid
@@ -1263,7 +1263,7 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
 
         sdk, _events = journaled_sdk
         g = sdk._get_proj().g
-        object_id = sdk.create_object("carrier 11836", "venture:tranche")["id"]
+        object_id = sdk._create_object("carrier 11836", "venture:tranche")["id"]
         real = sdk_mod._entity_identity_probes
         monkeypatch.setattr(
             sdk_mod, "_entity_identity_probes",
@@ -1924,7 +1924,7 @@ class TestKnownResidualCreateDoorOnMatch:
         sdk, _events = journaled_sdk
         node_id = _create_money_carrier(sdk, "update_entity")
         # same name ⇒ the same id ⇒ the MERGE's ON MATCH arm
-        sdk.create_object("Tranche U", "venture:tranche",
+        sdk._create_object("Tranche U", "venture:tranche",
                           minorUnitExponent=9)
         assert _money_node(sdk, node_id)[MINOR_UNIT_EXPONENT] == 9
         with pytest.raises(MoneyValueError):
@@ -1960,9 +1960,9 @@ class TestCreateDedupFoldIsIdempotent:
 
     def test_a_lone_exponent_does_not_make_the_retry_raise(self, journaled_sdk):
         sdk, _events = journaled_sdk
-        first = sdk.create_point("statement", self.CONTENT, dedup=True,
+        first = sdk._create_point("statement", self.CONTENT, dedup=True,
                                  minorUnitExponent=2)
-        second = sdk.create_point("statement", self.CONTENT, dedup=True,
+        second = sdk._create_point("statement", self.CONTENT, dedup=True,
                                   minorUnitExponent=2)
         assert second["id"] == first["id"], "the retry minted a second point"
         # the retry is admitted AND still carries the create leg's value: the
@@ -1978,11 +1978,11 @@ class TestCreateDedupFoldIsIdempotent:
         """A CREATE does not DELETE: the retry of an idempotent create must
         leave the value the first run wrote exactly as it was."""
         sdk, _events = journaled_sdk
-        created = sdk.create_point(
+        created = sdk._create_point(
             "statement", self.CONTENT, dedup=True,
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
                           verbatim="R$ 250.000,00"))
-        retried = sdk.create_point("statement", self.CONTENT, dedup=True,
+        retried = sdk._create_point("statement", self.CONTENT, dedup=True,
                                    **{field: None})
         assert retried["id"] == created["id"]
         row = _point_row(sdk, self.CONTENT)
@@ -1998,10 +1998,10 @@ class TestCreateDedupFoldIsIdempotent:
         """The positive control: the fold still WRITES money — a fix that made
         the retry silently drop the bag would pass the two tests above."""
         sdk, _events = journaled_sdk
-        sdk.create_point("statement", self.CONTENT, dedup=True,
+        sdk._create_point("statement", self.CONTENT, dedup=True,
                          **money_props(COMMITTED_MINOR, "BRL",
                                        minor_unit_exponent=2))
-        sdk.create_point("statement", self.CONTENT, dedup=True,
+        sdk._create_point("statement", self.CONTENT, dedup=True,
                          **money_props(RELEASED_MINOR, "BRL",
                                        minor_unit_exponent=2))
         assert _point_row(sdk, self.CONTENT)[AMOUNT_MINOR] == RELEASED_MINOR

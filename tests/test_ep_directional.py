@@ -66,14 +66,14 @@ def make_point(sdk, content, kind="statement"):
     # points; this file was missed. Target conclusions (C1/C2) are never
     # operator sources, so they were never auto-promoted to live — mark
     # explicitly.
-    return sdk.create_point(kind, content, status="live")
+    return sdk._create_point(kind, content, status="live")
 
 
 def make_operator(sdk, source_id, target_id, op_type="IMPL", direction=None):
     kwargs = {}
     if direction is not None:
         kwargs["direction"] = direction
-    return sdk.create_operator(op_type, source_id, [target_id], **kwargs)
+    return sdk._create_operator(op_type, source_id, [target_id], **kwargs)
 
 
 def run_ep(sdk):
@@ -129,22 +129,22 @@ class TestE019DirectionalCascade:
     def add_nand(self, sdk, point_id):
         """Invalidate A with a strong NAND contradiction."""
         nand = make_point(sdk, "NAND contradiction source")
-        sdk.set_point_baseline(nand["id"], 10, 1)  # Strong NAND source (T0)
+        sdk._set_point_baseline(nand["id"], 10, 1)  # Strong NAND source (T0)
         make_operator(sdk, nand["id"], point_id, "NAND")
 
     def add_anchors(self, sdk, c2_id, count, tier):
         """Add independent IMPL sources to C2."""
         for i in range(count):
             anchor = make_point(sdk, f"Anchor {i+1} ({tier})")
-            sdk.set_point_baseline(anchor["id"], *TIER_MAP[tier])
+            sdk._set_point_baseline(anchor["id"], *TIER_MAP[tier])
             make_operator(sdk, anchor["id"], c2_id, "IMPL")
 
     def measure_drop(self, sdk, a_id, b_id, c2_id, shared_ids,
                      b_tier, direction="bidirectional"):
         """Run EP, get baseline, NAND A, run EP again, return drops."""
         # Set source evidence
-        sdk.set_point_baseline(a_id, *TIER_MAP["T0"])
-        sdk.set_point_baseline(b_id, *TIER_MAP[b_tier])
+        sdk._set_point_baseline(a_id, *TIER_MAP["T0"])
+        sdk._set_point_baseline(b_id, *TIER_MAP[b_tier])
 
         # Baseline EP
         result_before = run_ep(sdk)
@@ -176,8 +176,8 @@ class TestE019DirectionalCascade:
         sdk = fresh_sdk()
         a_id, b_id, c2_id, shared_ids = self.build_shared_conclusion_graph(sdk)
         # A gets T4 (weak), NAND gets T0 (strong) — A should drop
-        sdk.set_point_baseline(a_id, *TIER_MAP["T4"])
-        sdk.set_point_baseline(b_id, *TIER_MAP["T0"])
+        sdk._set_point_baseline(a_id, *TIER_MAP["T4"])
+        sdk._set_point_baseline(b_id, *TIER_MAP["T0"])
 
         result_before = run_ep(sdk)
         self.add_nand(sdk, a_id)
@@ -377,7 +377,7 @@ def test_rerun_stability_immutable_baselines():
     sdk = fresh_sdk()
     a = make_point(sdk, "A"); c1 = make_point(sdk, "C1")  # noqa: E702
     make_operator(sdk, a["id"], c1["id"], "IMPL")
-    sdk.set_point_baseline(a["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(a["id"], *TIER_MAP["T0"])
     r1 = run_ep(sdk); c1_run1 = get_conf(r1, c1["id"])  # noqa: E702
     r2 = run_ep(sdk); c1_run2 = get_conf(r2, c1["id"])  # noqa: E702
     r3 = run_ep(sdk); c1_run3 = get_conf(r3, c1["id"])  # noqa: E702
@@ -392,8 +392,8 @@ def test_baseline_prior_preserved_posterior_observable():
     sdk = fresh_sdk()
     a = make_point(sdk, "A"); c1 = make_point(sdk, "C1")  # noqa: E702
     make_operator(sdk, a["id"], c1["id"], "IMPL")
-    sdk.set_point_baseline(a["id"], *TIER_MAP["T0"])  # 10/1 → prior mean 0.9091
-    nand = make_point(sdk, "NAND"); sdk.set_point_baseline(nand["id"], 10, 1)  # noqa: E702
+    sdk._set_point_baseline(a["id"], *TIER_MAP["T0"])  # 10/1 → prior mean 0.9091
+    nand = make_point(sdk, "NAND"); sdk._set_point_baseline(nand["id"], 10, 1)  # noqa: E702
     make_operator(sdk, nand["id"], a["id"], "NAND")
     proj = sdk._get_proj()
     rows = proj.g.query("MATCH (o:Point) WHERE o.is_operator = true RETURN o.id").result_set
@@ -402,7 +402,7 @@ def test_baseline_prior_preserved_posterior_observable():
     from tortoise.ep import TortoiseEP
     ep = TortoiseEP(proj, damping=0.5, n_quad=12, max_iter=50, tol=1e-3, evidence=evidence)
     ep.run([r[0] for r in rows], max_hops=2)
-    pt = sdk.get_point(a["id"])
+    pt = sdk._get_point(a["id"])
     # prior preserved
     assert pt["ep_alpha"] == 10 and pt["ep_beta"] == 1, \
         f"baseline prior overwritten: {pt['ep_alpha']}/{pt['ep_beta']}"
@@ -446,8 +446,8 @@ def test_cascade_magnitude_and_nary_conservation_regression():
     make_operator(sdk, b["id"], c1["id"], "IMPL")
     make_operator(sdk, b["id"], c2["id"], "IMPL")
     for pt in (a, b):
-        sdk.set_point_baseline(pt["id"], *TIER_MAP["T4"])
-    nand = make_point(sdk, "NAND"); sdk.set_point_baseline(nand["id"], *TIER_MAP["T0"])  # noqa: E702
+        sdk._set_point_baseline(pt["id"], *TIER_MAP["T4"])
+    nand = make_point(sdk, "NAND"); sdk._set_point_baseline(nand["id"], *TIER_MAP["T0"])  # noqa: E702
     make_operator(sdk, nand["id"], a["id"], "NAND")
 
     r = run_ep(sdk)

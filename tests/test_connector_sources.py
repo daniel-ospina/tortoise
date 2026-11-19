@@ -498,7 +498,7 @@ class TestEPNeutrality:
         with fresh_sdk() as sdk:
             proj = sdk._get_proj()
             # Control: a T4-tiered point (alpha = 1.1 at decay 1.0)
-            p_tiered = sdk.create_point("statement", "tiered claim",
+            p_tiered = sdk._create_point("statement", "tiered claim",
                                         extractedFrom="https://t4.example")
             proj.g.query(
                 "MATCH (s:Source {url:$u}) SET s.credibilityTier = 'T4', "
@@ -506,7 +506,7 @@ class TestEPNeutrality:
                 params={"u": "https://t4.example", "d": FRESH},
             )
             sdk._apply_source_inheritance(recency_decay=1.0)
-            alpha_before = sdk.get_point(p_tiered["id"]).get("ep_alpha")
+            alpha_before = sdk._get_point(p_tiered["id"]).get("ep_alpha")
             assert alpha_before == pytest.approx(1.1, rel=1e-9)
 
             # Now materialize connector sources (all kinds neutral)
@@ -514,20 +514,20 @@ class TestEPNeutrality:
                        linear_cycle_event(), slack_event()):
                 proj.apply(ev)
             sdk._apply_source_inheritance(recency_decay=1.0)
-            alpha_after = sdk.get_point(p_tiered["id"]).get("ep_alpha")
+            alpha_after = sdk._get_point(p_tiered["id"]).get("ep_alpha")
             assert alpha_after == pytest.approx(alpha_before, rel=1e-9)
 
             # A point extracted from a neutral connector Source inherits
             # nothing — ep_alpha stays UNSET (None), exactly like any untiered
             # source: github_issue resolves to a None tier (SOURCE_KIND_DEFAULTS
             # explicit neutral), so the connector Source adds zero EP weight.
-            p_conn = sdk.create_point("statement", "connector-backed claim",
+            p_conn = sdk._create_point("statement", "connector-backed claim",
                                       extractedFrom=GH_URL)
-            p_plain = sdk.create_point("statement", "plain untiered claim",
+            p_plain = sdk._create_point("statement", "plain untiered claim",
                                        extractedFrom="https://plain.example")
             sdk._apply_source_inheritance(recency_decay=1.0)
-            assert sdk.get_point(p_conn["id"]).get("ep_alpha") is None
-            assert sdk.get_point(p_plain["id"]).get("ep_alpha") is None
+            assert sdk._get_point(p_conn["id"]).get("ep_alpha") is None
+            assert sdk._get_point(p_plain["id"]).get("ep_alpha") is None
 
 
 # ═══════════════════════════════════════════════════════════════════════

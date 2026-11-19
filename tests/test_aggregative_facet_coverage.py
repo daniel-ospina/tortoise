@@ -121,23 +121,23 @@ def seeded_sdk(monkeypatch):
         proj = sdk._get_proj()
         sdk.create_entity("object", ENTITY_ANCHOR, objectKind="core:other",
                           is_episodic=True)
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             "the road bike repairs cost 120 dollars at the bike shop "
             "last month and included new brake pads",
             id=A_ID, session_id=A_SESSION, status="draft")
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             "the road bike repairs cost another 80 dollars for new "
             "wheels and a chain",
             id=B_ID, session_id=B_SESSION, status="draft")
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             "on saturday morning the weather was sunny so i went for a "
             "long walk along the river instead",
             id=C_ID, session_id=C_SESSION, status="draft")
         for i in range(12):
-            sdk.create_point(
+            sdk._create_point(
                 "statement",
                 f"{DISTRACTOR_TOPIC} number {i}",
                 id=f"p2521dist{i}", session_id=f"dist2521{i}",

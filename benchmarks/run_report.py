@@ -319,7 +319,7 @@ def _sdk_e2e(sdk, qi: dict, elevated: int | None, *, pool_size: int | None = Non
         # leg so the E2E depth MATCHES the retrieval arms (--depth desync fix,
         # code-review P2). Default None → SDK's own str_limit (env floor or
         # historical limit*2), preserving the #316 baseline for default runs.
-        rows = sdk.tortoise_fts_query(
+        rows = sdk._tortoise_fts_query(
             query=qi.get("query"), kind=qi.get("kind"), limit=10,
             pool_size=pool_size,
             _elevated_timeout_ms=int(elevated) if elevated is not None else None,
@@ -717,7 +717,7 @@ def _run_with_sdk(args, sdk) -> dict:
             c0 = time.perf_counter()
             # #1348: cold-start e2e at the same retrieval depth as the measured
             # arms (pool_size=arm_limit) so the cold figure is not desynced.
-            sdk.tortoise_fts_query(
+            sdk._tortoise_fts_query(
                 query=picks[0].get("query"), kind=picks[0].get("kind"), limit=10,
                 pool_size=arm_limit,
                 _rerank_candidates=False)  # #12297: same recorded baseline

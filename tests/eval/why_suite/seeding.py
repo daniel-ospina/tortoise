@@ -71,16 +71,16 @@ def _assert_means_differ(proj, option_a: str, option_b: str, topic: str) -> None
 
 
 def _create_point(sdk, kind: str, content: str) -> str:
-    res = sdk.create_point(kind, content)
+    res = sdk._create_point(kind, content)
     return res["id"]
 
 
 def _imply(sdk, source_id: str, target_id: str) -> None:
-    sdk.create_operator("IMPL", source_id, [target_id])
+    sdk._create_operator("IMPL", source_id, [target_id])
 
 
 def _nand(sdk, source_id: str, target_id: str) -> None:
-    sdk.create_operator("NAND", source_id, [target_id])
+    sdk._create_operator("NAND", source_id, [target_id])
 
 
 # ── Per-family planters (mirror the W4-a _plant_* helpers) ─────────────────
@@ -111,11 +111,11 @@ def _plant_decision_roles(sdk, proj, topic: str) -> dict[str, str]:
     option_b = _create_point(sdk, "option", f"{topic} alternative two")
     counter = _create_point(sdk, "statement", f"{topic} decision counterargument")
     _imply(sdk, support, decision)
-    op1 = sdk.create_operator("IMPL", decision, [option_a])
-    op2 = sdk.create_operator("IMPL", decision, [option_b])
+    op1 = sdk._create_operator("IMPL", decision, [option_a])
+    op2 = sdk._create_operator("IMPL", decision, [option_b])
     _nand(sdk, counter, decision)
-    sdk.mitigate_operator(op1["id"], "QA gate + staged rollout")
-    sdk.mitigate_operator(op2["id"], "communicate the delay")
+    sdk._mitigate_operator(op1["id"], "QA gate + staged rollout")
+    sdk._mitigate_operator(op2["id"], "communicate the delay")
     _set_posterior(proj, decision, 2.0, 2.0)
     _set_posterior(proj, option_a, 4.0, 1.0)  # mean 0.8 — the EP favorite
     _set_posterior(proj, option_b, 5.0, 2.0)  # mean ~0.714

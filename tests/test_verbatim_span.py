@@ -110,13 +110,13 @@ def test_sdk_create_point_rejects_a_span_that_is_not_an_address(sdk, kw):
     hold here or a node can be written holding the very state the contract
     declares impossible (#5007 review P2)."""
     with pytest.raises(ValueError):
-        sdk.create_point("statement", "p99 was 480 ms", **kw)
+        sdk._create_point("statement", "p99 was 480 ms", **kw)
 
 
 def test_sdk_update_point_rejects_a_half_span(sdk):
-    pid = sdk.create_point("statement", "p99 was 480 ms")["id"]
+    pid = sdk._create_point("statement", "p99 was 480 ms")["id"]
     with pytest.raises(ValueError):
-        sdk.update_point(pid, span_start=7)
+        sdk._update_point(pid, span_start=7)
     # ...and the node is untouched by the refused write.
     rows = sdk._get_proj().g.query(
         "MATCH (p:Point {id:$id}) RETURN p.span_start, p.span_end",
@@ -126,8 +126,8 @@ def test_sdk_update_point_rejects_a_half_span(sdk):
 
 
 def test_update_point_carries_a_valid_span_to_the_node(sdk):
-    pid = sdk.create_point("statement", "p99 was 480 ms")["id"]
-    sdk.update_point(pid, span_start=7, span_end=30)
+    pid = sdk._create_point("statement", "p99 was 480 ms")["id"]
+    sdk._update_point(pid, span_start=7, span_end=30)
     rows = sdk._get_proj().g.query(
         "MATCH (p:Point {id:$id}) RETURN p.span_start, p.span_end",
         params={"id": pid},
@@ -149,7 +149,7 @@ def test_update_entity_rejects_a_span_that_is_not_an_address(sdk, kw):
     (`tortoise_update_entity`) and its Point branch writes caller props
     straight through `SET n += $p`. The model and `create_point`/`update_point`
     checks did not cover it, so a tenant could still persist a half span."""
-    pid = sdk.create_point("statement", "p99 was 480 ms")["id"]
+    pid = sdk._create_point("statement", "p99 was 480 ms")["id"]
     with pytest.raises(ValueError):
         sdk._update_entity(pid, **kw)
     assert _span_on_node(sdk, pid) == [None, None]
@@ -160,7 +160,7 @@ def test_update_entity_rejects_a_span_that_is_not_an_address(sdk, kw):
 
 def test_span_round_trips_through_create_point(sdk):
     """The pointer reaches the NODE, not just the contract."""
-    pid = sdk.create_point(
+    pid = sdk._create_point(
         "statement", "p99 was 480 ms", quote=RAW[:20],
         source_turn_id=4, span_start=7, span_end=30,
     )["id"]
@@ -185,9 +185,9 @@ def test_span_is_a_pointer_not_a_payload(sdk):
     point and its span-less TWIN differ by exactly the two offsets: the span
     introduces no new text prop.
     """
-    plain = sdk.create_point("statement", "p99 was 480 ms",
+    plain = sdk._create_point("statement", "p99 was 480 ms",
                              source_turn_id=4)["id"]
-    pid = sdk.create_point(
+    pid = sdk._create_point(
         "statement", "p99 was 480 ms", source_turn_id=4,
         span_start=7, span_end=30,
     )["id"]
@@ -213,7 +213,7 @@ def test_span_is_a_pointer_not_a_payload(sdk):
 
 
 def test_span_does_not_break_a_spanless_point(sdk):
-    pid = sdk.create_point("statement", "no span here")["id"]
+    pid = sdk._create_point("statement", "no span here")["id"]
     rows = sdk._get_proj().g.query(
         "MATCH (p:Point {id:$id}) RETURN p.span_start, p.span_end",
         params={"id": pid},
@@ -226,7 +226,7 @@ def test_capture_read_back_returns_the_span(sdk):
     span the node stores must also come back — otherwise the reply advertises a
     node that does not hold it (the #2813/#2949 class). Fails on the
     pre-change code: the field is absent from the derived RETURN clause."""
-    pid = sdk.create_point(
+    pid = sdk._create_point(
         "statement", "p99 was 480 ms", source_turn_id=4,
         span_start=7, span_end=30,
     )["id"]
@@ -327,7 +327,7 @@ def test_commit_path_supersede_carries_the_span_to_the_node(sdk):
     pid = "pt_" + content_hash("commit-path-supersede")
     # The supersede branch calls `supersede_point(existing_id, new_id)`, so the
     # PRIOR node has to exist in the graph, not just in the reconcile state.
-    sdk.create_point("statement", "an older statement", id=pid,
+    sdk._create_point("statement", "an older statement", id=pid,
                      status="live")
     state = GraphState(points={pid: "an older statement"})
     plan = _run_commit(sdk, _commit_payload(pid), state)

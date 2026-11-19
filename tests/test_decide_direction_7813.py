@@ -257,9 +257,9 @@ def test_explicit_none_guard_stays_reachable():
     sdk._db_uri = uri
     sdk._proj = None  # force re-init against the isolated test graph
     try:
-        a = sdk.create_point("statement", "a", status="live")
-        b = sdk.create_point("statement", "b", status="live")
-        op = sdk.create_operator("NAND", a["id"], [b["id"]], direction=None)
+        a = sdk._create_point("statement", "a", status="live")
+        b = sdk._create_point("statement", "b", status="live")
+        op = sdk._create_operator("NAND", a["id"], [b["id"]], direction=None)
         proj = sdk._get_proj()
         stored = proj.g.query(
             "MATCH (o:Point {id:$id}) RETURN o.direction",

@@ -174,7 +174,7 @@ def test_create_does_not_block_on_a_cold_embedder(cold_embedder, sdk):
     t0 = time.perf_counter()
     ids = []
     for i in range(2):
-        node = sdk.create_subject(f"cold-window-{i}-{time.time_ns()}",
+        node = sdk._create_subject(f"cold-window-{i}-{time.time_ns()}",
                                  subjectKind="naturalPerson")
         ids.append(node.get("id"))
     elapsed = time.perf_counter() - t0
@@ -199,7 +199,7 @@ def test_the_cold_window_row_is_written_without_a_vector(cold_embedder, sdk):
     it. That is the degrade ``encode_for_row`` already documents for ``None``
     (and #5008's gate produces by policy) — not a new one.
     """
-    node = sdk.create_subject(f"cold-novector-{time.time_ns()}",
+    node = sdk._create_subject(f"cold-novector-{time.time_ns()}",
                              subjectKind="naturalPerson")
     stored = sdk._get_proj().g.query(
         "MATCH (s:Subject {id:$id}) RETURN s.embedding IS NOT NULL",
@@ -220,7 +220,7 @@ def test_the_warm_path_still_embeds(sdk, monkeypatch):
             EmbeddingModel.warm_up()          # the load completes immediately
         assert EmbeddingModel.loaded(), "precondition: the embedder is warm"
 
-        node = sdk.create_subject(f"warm-vector-{time.time_ns()}",
+        node = sdk._create_subject(f"warm-vector-{time.time_ns()}",
                                  subjectKind="naturalPerson")
         stored = sdk._get_proj().g.query(
             "MATCH (s:Subject {id:$id}) RETURN s.embedding IS NOT NULL",
@@ -406,15 +406,15 @@ def test_encode_for_row_is_the_seam_that_carries_the_bound(cold_embedder):
 #: is about the ROW the fold wrote and not about a folded event dictionary.
 _DOOR_CASES: tuple[tuple[str, object, str, str], ...] = (
     ("object",
-     lambda sdk: sdk.create_object(f"cold-door-object-{time.time_ns()}",
+     lambda sdk: sdk._create_object(f"cold-door-object-{time.time_ns()}",
                                    objectKind="other"),
      "Object", "id"),
     ("document",
-     lambda sdk: sdk.create_document(f"cold-door-doc-{time.time_ns()}",
+     lambda sdk: sdk._create_document(f"cold-door-doc-{time.time_ns()}",
                                      documentKind="report"),
      "Source", "url"),
     ("event",
-     lambda sdk: sdk.create_event(f"cold-door-event-{time.time_ns()}",
+     lambda sdk: sdk._create_event(f"cold-door-event-{time.time_ns()}",
                                   eventKind="occurrence"),
      "Event", "id"),
 )

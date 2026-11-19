@@ -156,7 +156,7 @@ def test_write_knowledge_batch_delegates_to_ingest():
         seen.update(bundle=bundle, granularity=granularity, policy=promotion_policy)
         return {"ok": True}
 
-    sdk.ingest = fake_ingest
+    sdk._ingest = fake_ingest
     out = sdk.write_knowledge_batch({"points": []}, "row", promotion_policy="strict")
 
     assert out == {"ok": True}
@@ -165,13 +165,13 @@ def test_write_knowledge_batch_delegates_to_ingest():
 
 def test_adjust_relationship_delegates_to_annotate_operator():
     sdk = _sdk()
-    sdk.get_point = lambda point_id: {
+    sdk._get_point = lambda point_id: {
         "id": point_id, "is_operator": True,
         "annotator_bias": 0.2, "annotator_precision": 0.3,
         "annotator_consistency": 0.4, "annotator_directness": 0.6,
     }
     seen = {}
-    sdk.annotate_operator = lambda pid, **kw: seen.update(id=pid, **kw) or {"annotated": True}
+    sdk._annotate_operator = lambda pid, **kw: seen.update(id=pid, **kw) or {"annotated": True}
 
     out = sdk.adjust_relationship("op_1", consistency=0.9)
 
@@ -186,8 +186,8 @@ def test_adjust_relationship_delegates_to_annotate_operator():
 def test_adjust_relationship_refuses_when_the_current_annotation_is_unreadable():
     """A residency marker is TRUTHY but carries no node — defaulting would corrupt it."""
     sdk = _sdk()
-    sdk.get_point = lambda point_id: {"residency": "not-hot"}
-    sdk.annotate_operator = lambda *a, **kw: pytest.fail("must not write over an unknown")
+    sdk._get_point = lambda point_id: {"residency": "not-hot"}
+    sdk._annotate_operator = lambda *a, **kw: pytest.fail("must not write over an unknown")
 
     with pytest.raises(ValueError, match="could not be read back"):
         sdk.adjust_relationship("op_1", bias=0.1)
@@ -196,7 +196,7 @@ def test_adjust_relationship_refuses_when_the_current_annotation_is_unreadable()
 def test_refresh_confidence_scope_changed_is_the_dirty_root_path():
     sdk = _sdk()
     seen = {}
-    sdk.compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
+    sdk._compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
 
     sdk.refresh_confidence()
 
@@ -217,7 +217,7 @@ def test_refresh_confidence_scope_graph_passes_every_claim_as_an_anchor():
 
     seen = {}
     sdk.list_knowledge = fake_list
-    sdk.compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
+    sdk._compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
 
     sdk.refresh_confidence("graph")
 
@@ -227,7 +227,7 @@ def test_refresh_confidence_scope_graph_passes_every_claim_as_an_anchor():
 
 def test_refresh_confidence_refuses_an_unknown_scope():
     sdk = _sdk()
-    sdk.compute_confidence = lambda **kw: pytest.fail("must not choose a scope for the caller")
+    sdk._compute_confidence = lambda **kw: pytest.fail("must not choose a scope for the caller")
 
     with pytest.raises(ValueError, match="Unknown confidence scope"):
         sdk.refresh_confidence("everything")
@@ -308,7 +308,7 @@ def test_refresh_confidence_scope_graph_walks_the_CLAIM_population_not_every_poi
         return {"results": [{"id": "c1"}], "hasMore": False}
 
     sdk.list_knowledge = fake_list
-    sdk.compute_confidence = lambda **kw: {"converged": True}
+    sdk._compute_confidence = lambda **kw: {"converged": True}
 
     sdk.refresh_confidence("graph")
 
@@ -328,7 +328,7 @@ def test_refresh_confidence_scope_graph_answers_an_empty_graph_instead_of_re_sco
     sdk = _sdk()
     sdk.list_knowledge = lambda **kw: {"results": [], "hasMore": False}
     seen = {}
-    sdk.compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
+    sdk._compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
 
     sdk.refresh_confidence("graph")
 

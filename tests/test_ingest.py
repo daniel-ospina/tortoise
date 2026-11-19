@@ -1389,7 +1389,7 @@ def _legacy_ingest_session(tmp_path, monkeypatch, content: str,
         monkeypatch.setenv(k, v)
     sdk = TortoiseSDK(db_path or os.path.join(str(tmp_path), "sc4.db"))
     try:
-        report = sdk.ingest_corpus(str(corpus), eventKind="AgentSession",
+        report = sdk._ingest_corpus(str(corpus), eventKind="AgentSession",
                                    extract_metadata=True)
         return sdk, report
     except Exception:
@@ -1418,7 +1418,7 @@ def test_sc4_indexed_session_keeps_issue_object_edges(tmp_path, monkeypatch):
     (corpus / "s.md").write_text(SESSION_WITH_ISSUES)
     sdk = TortoiseSDK(os.path.join(str(tmp_path), "sc4.db"))
     try:
-        report = sdk.ingest_corpus(str(corpus), eventKind="AgentSession",
+        report = sdk._ingest_corpus(str(corpus), eventKind="AgentSession",
                                    extract_metadata=False)
         assert report.get("ingested", 0) >= 1, report
         g = sdk._get_proj().g
@@ -1460,7 +1460,7 @@ def test_sc4_no_network_legacy_branch_still_embeds(tmp_path, monkeypatch):
     monkeypatch.setattr(si_mod, "compute_session_embedding", _spy)
     sdk = TortoiseSDK(os.path.join(str(tmp_path), "sc4.db"))
     try:
-        report = sdk.ingest_corpus(str(corpus), eventKind="AgentSession",
+        report = sdk._ingest_corpus(str(corpus), eventKind="AgentSession",
                                    extract_metadata=True)
         assert report.get("ingested", 0) >= 1, report
         # the LEGACY branch embeds EVEN under the var (boundary-scoped honor)
@@ -1616,7 +1616,7 @@ def test_sc4_deprecation_markers_present():
         "destination resolves nowhere")
 
     # the divergence is RECORDED (the flag semantics differ between paths)
-    doc = inspect.getdoc(TortoiseSDK.ingest_corpus) or ""
+    doc = inspect.getdoc(TortoiseSDK._ingest_corpus) or ""
     assert "extract_metadata" in doc and "divergence" in doc.lower(), \
         "ingest_corpus must record the extract_metadata flag-semantics divergence"
 

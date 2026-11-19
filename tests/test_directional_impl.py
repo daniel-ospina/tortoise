@@ -134,14 +134,14 @@ def make_point(sdk, content, kind="statement"):
     # it was draft from #943). Mirror of the #1000/#1004 sweep applied to
     # test_ep_directional (#1382) — target conclusions here are never
     # operator sources, so mark live explicitly.
-    return sdk.create_point(kind, content, status="live")
+    return sdk._create_point(kind, content, status="live")
 
 
 def make_operator(sdk, source_id, target_id, op_type="IMPL", label=None, direction=None):
     kwargs = {"label": label}
     if direction is not None:
         kwargs["direction"] = direction
-    return sdk.create_operator(op_type, source_id, [target_id], **kwargs)
+    return sdk._create_operator(op_type, source_id, [target_id], **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -174,8 +174,8 @@ def test_impl_directional_refuted_conclusion():
     defeater_c = make_point(sdk, "Defeater C: evidence contradicting B")
 
     # Set baselines
-    sdk.set_point_baseline(premise_a["id"], *TIER_MAP["T0"])
-    sdk.set_point_baseline(defeater_c["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(premise_a["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(defeater_c["id"], *TIER_MAP["T0"])
     # conclusion B gets no baseline (starts at uniform)
 
     # Create operators (IMPL is unidirectional — explicit flag)
@@ -252,7 +252,7 @@ def test_haspart_bidirectional():
     part = make_point(sdk, "Part: a sub-component of the whole")
 
     # Set whole to strong evidence, part starts at baseline
-    sdk.set_point_baseline(whole["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(whole["id"], *TIER_MAP["T0"])
 
     # Create hasPart operator
     op = make_operator(sdk, whole["id"], part["id"], "IMPL", label="hasPart")
@@ -325,8 +325,8 @@ def test_haspart_nand_affects_whole():
     part = make_point(sdk, "Part: sub-component")
     defeater = make_point(sdk, "Defeater: part is broken")
 
-    sdk.set_point_baseline(whole["id"], *TIER_MAP["T0"])
-    sdk.set_point_baseline(defeater["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(whole["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(defeater["id"], *TIER_MAP["T0"])
 
     op_haspart = make_operator(sdk, whole["id"], part["id"], "IMPL", label="hasPart")
     op_nand = make_operator(sdk, defeater["id"], part["id"], "NAND")  # noqa: F841
@@ -395,8 +395,8 @@ def test_nand_symmetric():
     claim_a = make_point(sdk, "Claim A: position X is correct")
     claim_b = make_point(sdk, "Claim B: position X is wrong")
 
-    sdk.set_point_baseline(claim_a["id"], *TIER_MAP["T0"])
-    sdk.set_point_baseline(claim_b["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(claim_a["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(claim_b["id"], *TIER_MAP["T0"])
 
     op = make_operator(sdk, claim_a["id"], claim_b["id"], "NAND")  # noqa: F841
 
@@ -461,8 +461,8 @@ def test_addresses_directional():
     feature = make_point(sdk, "Feature F: CSV export feature")
     defeater = make_point(sdk, "Defeater D: CSV export has critical security bug")
 
-    sdk.set_point_baseline(need["id"], *TIER_MAP["T0"])
-    sdk.set_point_baseline(defeater["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(need["id"], *TIER_MAP["T0"])
+    sdk._set_point_baseline(defeater["id"], *TIER_MAP["T0"])
 
     op_addr = make_operator(sdk, need["id"], feature["id"], "IMPL", label="addresses", direction="unidirectional")
     op_nand = make_operator(sdk, defeater["id"], feature["id"], "NAND")  # noqa: F841

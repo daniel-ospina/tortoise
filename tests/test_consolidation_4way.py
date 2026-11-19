@@ -1038,7 +1038,7 @@ class TestS3BatchEnrichment:
         sdk = TortoiseSDK(db)
         try:
             sdk.create_entity("object", "gym", objectKind="core:place")
-            sdk.create_point("statement", "gym at 6pm", id="pt1",
+            sdk._create_point("statement", "gym at 6pm", id="pt1",
                              status="draft")
             sdk._get_proj().g.query(
                 "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "

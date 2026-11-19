@@ -156,11 +156,11 @@ def test_content_edit_leaves_a_readable_typed_vector(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "derived.db"))
         try:
-            pid = sdk.create_point("statement", _ORIGINAL)["id"]
+            pid = sdk._create_point("statement", _ORIGINAL)["id"]
             assert _typeof(sdk, pid) == "Vectorf32", (
                 "premise: create_point stores a typed vector")
 
-            sdk.update_point(pid, content=_REPLACEMENT)  # THE live content edit
+            sdk._update_point(pid, content=_REPLACEMENT)  # THE live content edit
 
             # (1) the type must not flip to a plain Cypher List
             assert _typeof(sdk, pid) == "Vectorf32", (
@@ -209,8 +209,8 @@ def test_the_consolidated_update_route_is_fixed_too(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "consolidated.db"))
         try:
-            pid = sdk.create_point("statement", _ORIGINAL)["id"]
-            sdk.update(pid, content=_REPLACEMENT)
+            pid = sdk._create_point("statement", _ORIGINAL)["id"]
+            sdk._update(pid, content=_REPLACEMENT)
             assert _typeof(sdk, pid) == "Vectorf32"
             stored = _stored(sdk, pid)
             assert stored is not None
@@ -248,9 +248,9 @@ def test_the_object_arm_content_edit_is_typed(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "object_arm.db"))
         try:
-            pid = sdk.create_point("statement", _ORIGINAL)["id"]
+            pid = sdk._create_point("statement", _ORIGINAL)["id"]
             _mint_object_node(sdk, pid)
-            sdk.update_point(pid, content=_REPLACEMENT)
+            sdk._update_point(pid, content=_REPLACEMENT)
             assert _typeof(sdk, pid) == "Vectorf32"
             stored = _stored(sdk, pid)
             assert stored is not None
@@ -271,10 +271,10 @@ def test_the_object_status_promote_arm_content_edit_is_typed(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "object_status_arm.db"))
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "statement", _ORIGINAL, status="draft")["id"]
             _mint_object_node(sdk, pid)
-            sdk.update_point(pid, status="live", content=_REPLACEMENT)
+            sdk._update_point(pid, status="live", content=_REPLACEMENT)
             assert _typeof(sdk, pid) == "Vectorf32"
             stored = _stored(sdk, pid)
             assert stored is not None
@@ -295,9 +295,9 @@ def test_the_status_promote_arm_content_edit_is_typed(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "status_arm.db"))
         try:
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "statement", _ORIGINAL, status="draft")["id"]
-            sdk.update_point(pid, status="live", content=_REPLACEMENT)
+            sdk._update_point(pid, status="live", content=_REPLACEMENT)
             assert _typeof(sdk, pid) == "Vectorf32"
             stored = _stored(sdk, pid)
             assert stored is not None
@@ -324,8 +324,8 @@ def test_a_caller_supplied_vector_stays_verbatim(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "caller.db"))
         try:
-            pid = sdk.create_point("statement", _ORIGINAL)["id"]
-            sdk.update_point(pid, embedding=caller_vec)
+            pid = sdk._create_point("statement", _ORIGINAL)["id"]
+            sdk._update_point(pid, embedding=caller_vec)
             stored = _stored(sdk, pid)
             assert stored is not None
             assert stored[0] == caller_value, (

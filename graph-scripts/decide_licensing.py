@@ -169,7 +169,7 @@ point_ids = {}
 for pid, content in all_points.items():
     try:
         kind = "criterion" if pid.startswith("crit:") else ("option" if pid.startswith("opt:") else "evidence")
-        p = sdk.create_point(kind, content, context=ctx, status="live")
+        p = sdk._create_point(kind, content, context=ctx, status="live")
         point_ids[pid] = p["id"]
         print(f"  ✓ {pid} → {p['id']}")
     except Exception as e:
@@ -178,14 +178,14 @@ for pid, content in all_points.items():
 # ── Create operators (edges) ──
 for src, op_type, tgt in edges:
     try:
-        sdk.create_operator(op_type, point_ids[src], [point_ids[tgt]])
+        sdk._create_operator(op_type, point_ids[src], [point_ids[tgt]])
         print(f"  ✓ {src} --{op_type}--> {tgt}")
     except Exception as e:
         print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
 
 # ── Compute confidence per option ──
 try:
-    result = sdk.compute_confidence()
+    result = sdk._compute_confidence()
     print(f"\n✓ EP computed: {result['iterations']} iterations, converged={result['converged']}")
     confs = result.get("confidences", {})
     opt_conf = {}
@@ -201,7 +201,7 @@ except Exception as e:
 
 # ── Verify structure ──
 try:
-    result = sdk.check_structure()
+    result = sdk._check_structure()
     issues = [i for i in result if "licensing" in str(i.get("id", "")) or "licensing" in str(i.get("message", ""))]
     print(f"\n✓ Structure check: {len(result)} issues total, {len(issues)} licensing-related")
 except Exception as e:

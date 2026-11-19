@@ -110,11 +110,11 @@ def edge_sdk(tmp_path):
 
 def _world(sdk, *, source: bool = False):
     """Two points, a subject, an object and an event — one of each label."""
-    p1 = sdk.create_point("claim", "class 4 one", pointKind="statement")
-    p2 = sdk.create_point("claim", "class 4 two", pointKind="statement")
-    subj = sdk.create_subject("class4-owner")
-    obj = sdk.create_object("class4-object")
-    ev = sdk.create_event("class4-event", eventKind="decision")
+    p1 = sdk._create_point("claim", "class 4 one", pointKind="statement")
+    p2 = sdk._create_point("claim", "class 4 two", pointKind="statement")
+    subj = sdk._create_subject("class4-owner")
+    obj = sdk._create_object("class4-object")
+    ev = sdk._create_event("class4-event", eventKind="decision")
     if source:
         sdk.register_source("https://class4.test/src", sourceKind="document")
     return {
@@ -133,7 +133,7 @@ def test_create_edge_journals_the_edge_it_wrote(edge_sdk):
     """`create_edge` — the generic mint — journals the edge (class 4's core)."""
     sdk, journal = edge_sdk
     ids = _world(sdk)
-    assert sdk.create_edge("ownedBy", ids["p1"], ids["subject"])["created"] is True
+    assert sdk._create_edge("ownedBy", ids["p1"], ids["subject"])["created"] is True
 
     [rec] = _direct_edges(journal)
     assert rec["edge_type"] == "ownedBy"
@@ -185,7 +185,7 @@ def test_the_descriptor_is_the_canonical_flat_shape(edge_sdk):
     """
     sdk, journal = edge_sdk
     ids = _world(sdk)
-    sdk.create_edge("dependsOn", ids["p1"], ids["p2"])
+    sdk._create_edge("dependsOn", ids["p1"], ids["p2"])
 
     [rec] = _direct_edges(journal)
     assert set(rec) == {
@@ -206,8 +206,8 @@ def test_a_projection_with_no_journal_handle_emits_nothing(tmp_path):
     try:
         proj = sdk._get_proj()
         assert proj._structural_edge_recorder is None
-        p1 = sdk.create_point("claim", "bare one", pointKind="statement")
-        p2 = sdk.create_point("claim", "bare two", pointKind="statement")
+        p1 = sdk._create_point("claim", "bare one", pointKind="statement")
+        p2 = sdk._create_point("claim", "bare two", pointKind="statement")
         assert proj.create_edge(p1["id"], p2["id"], "related") is True
     finally:
         sdk.close()
@@ -222,7 +222,7 @@ def test_a_self_edge_is_never_journaled_and_says_so(edge_sdk, caplog):
     sdk, journal = edge_sdk
     ids = _world(sdk)
     caplog.set_level("WARNING")
-    sdk.create_edge("related", ids["p1"], ids["p1"])
+    sdk._create_edge("related", ids["p1"], ids["p1"])
     assert _direct_edges(journal) == []
     assert any("SELF-EDGE" in r.message for r in caplog.records), \
         [r.message for r in caplog.records]
@@ -253,7 +253,7 @@ def test_a_source_endpoint_is_declined_and_reported(edge_sdk):
     sdk, journal = edge_sdk
     ids = _world(sdk, source=True)
     with collect_identity_skips() as skips:
-        assert sdk.create_edge(
+        assert sdk._create_edge(
             "references", "https://class4.test/src",
             ids["object"])["created"] is True
 
@@ -290,8 +290,8 @@ def test_every_declined_write_is_counted_not_just_logged(edge_sdk):
     sdk, _journal = edge_sdk
     ids = _world(sdk, source=True)
     with collect_identity_skips() as skips:
-        sdk.create_edge("references", "https://class4.test/src", ids["object"])
-        sdk.create_edge("references", "https://class4.test/src", ids["p2"])
+        sdk._create_edge("references", "https://class4.test/src", ids["object"])
+        sdk._create_edge("references", "https://class4.test/src", ids["p2"])
     reported = [s for s in skips if "structural edge" in s.what]
     assert len(reported) == 2, [s.what for s in reported]
 
@@ -422,7 +422,7 @@ def test_an_aboutDocument_at_a_source_target_is_declined_per_write_not_per_rel(
 
     sdk, journal = edge_sdk
     ids = _world(sdk, source=True)
-    doc = sdk.create_document("class4-doc", documentKind="page")
+    doc = sdk._create_document("class4-doc", documentKind="page")
     doc_id = doc.get("url") or doc.get("id")
     with collect_identity_skips() as skips:
         assert sdk._get_proj().create_about_edge(
@@ -475,7 +475,7 @@ def test_the_journal_rebuild_restores_the_class_4_topology(edge_sdk, tmp_path):
         ("hasPart", ids["p1"], ids["p2"]),
         ("references", ids["p1"], ids["object"]),
     ):
-        assert sdk.create_edge(rel, src, tgt)["created"] is True, rel
+        assert sdk._create_edge(rel, src, tgt)["created"] is True, rel
     recovered = sdk._get_proj()
     # the journal was written by THIS sdk; rebuild from a wiped graph
     report = recovered.rebuild_all(str(tmp_path), confirm_destructive=True)
@@ -564,8 +564,8 @@ def test_a_supersede_does_not_drop_a_structural_edge_the_live_graph_kept(edge_sd
     ids = _world(sdk)
     proj = sdk._get_proj()
     assert proj.create_edge(ids["p1"], ids["p2"], "dependsOn") is True
-    successor = sdk.create_point("claim", "class 4 successor", pointKind="statement")
-    sdk.supersede_point(ids["p1"], successor["id"])
+    successor = sdk._create_point("claim", "class 4 successor", pointKind="statement")
+    sdk._supersede_point(ids["p1"], successor["id"])
 
     def outgoing(pid: str) -> set[str]:
         return {row[0] for row in proj.g.query(
@@ -591,8 +591,8 @@ def test_a_supersede_does_not_drop_an_INCOMING_structural_edge(edge_sdk):
     ids = _world(sdk)
     proj = sdk._get_proj()
     assert proj.create_about_edge(ids["event"], ids["p1"], "aboutPoint") is True
-    successor = sdk.create_point("claim", "incoming successor", pointKind="statement")
-    sdk.supersede_point(ids["p1"], successor["id"])
+    successor = sdk._create_point("claim", "incoming successor", pointKind="statement")
+    sdk._supersede_point(ids["p1"], successor["id"])
 
     def incoming(pid: str) -> set[str]:
         return {row[0] for row in proj.g.query(
@@ -620,8 +620,8 @@ def test_an_edge_minted_AT_a_superseded_point_is_replayed(edge_sdk):
     sdk, _journal = edge_sdk
     ids = _world(sdk)
     proj = sdk._get_proj()
-    successor = sdk.create_point("claim", "post-supersede successor", pointKind="statement")
-    sdk.supersede_point(ids["p1"], successor["id"])
+    successor = sdk._create_point("claim", "post-supersede successor", pointKind="statement")
+    sdk._supersede_point(ids["p1"], successor["id"])
     # ⚠️ A MOVED rel (`aboutSubject`, in `SUPERSEDE_TRANSFERRED_RELS`), NOT a rel a
     # supersede never touches: an unmoved rel returns before the ordering arm runs,
     # so the leg would pass with the arm deleted and pin nothing (measured).
@@ -654,9 +654,9 @@ def test_a_reasserted_edge_survives_the_repoint_delete_leg(edge_sdk):
     sdk, _journal = edge_sdk
     ids = _world(sdk)
     proj = sdk._get_proj()
-    successor = sdk.create_point("claim", "reassert successor", pointKind="statement")
+    successor = sdk._create_point("claim", "reassert successor", pointKind="statement")
     assert proj.create_edge(ids["p1"], ids["subject"], "aboutSubject") is True
-    sdk.supersede_point(ids["p1"], successor["id"])
+    sdk._supersede_point(ids["p1"], successor["id"])
     assert proj.create_edge(ids["p1"], ids["subject"], "aboutSubject") is True
 
     def outgoing(pid: str) -> set[str]:
@@ -692,7 +692,7 @@ def test_a_reasserted_edge_to_the_SUCCESSOR_survives_the_delete_only_leg(edge_sd
     # `aboutPoint` between two Points: the supersede below makes p2 the successor
     # and the edge already terminates there, which is the delete_only shape.
     proj.create_about_edge(ids["p1"], ids["p2"], "aboutPoint")
-    sdk.supersede_point(ids["p1"], ids["p2"])
+    sdk._supersede_point(ids["p1"], ids["p2"])
     proj.create_about_edge(ids["p1"], ids["p2"], "aboutPoint")
 
     def outgoing(pid: str) -> set[str]:

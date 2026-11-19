@@ -407,8 +407,8 @@ def test_transcript_seed_without_a_date_records_no_time(sdk):
     assert sessions and all(r[1] is None for r in sessions), sessions
     turns = proj.g.query("MATCH (t:Point) RETURN t.createdAt").result_set
     assert turns and all(r[0] is None for r in turns), turns
-    hits = sdk.tortoise_fts_query("smoker", limit=40, include_terminal=True)
-    ann = sdk.annotate_ask_hits(hits)
+    hits = sdk._tortoise_fts_query("smoker", limit=40, include_terminal=True)
+    ann = sdk._annotate_ask_hits(hits)
     assert ann and all(not h.get("session_date") for h in ann), ann
     assert "(session date" not in render_context(ann)
 

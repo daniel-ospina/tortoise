@@ -320,7 +320,7 @@ def sdk(sdk_factory):
 
 
 def _mk_point(sdk, content: str, *, status: str | None = None, **props) -> str:
-    pid = sdk.create_point("statement", content)["id"]
+    pid = sdk._create_point("statement", content)["id"]
     sets, params = [], {"id": pid}
     if status is not None:
         sets.append("n.status=$st")

@@ -120,7 +120,7 @@ def test_n1_sdk_exposes_no_ask_entry_point():
     assert not hasattr(sdk_mod, "_ask_reader_cache")
     assert not hasattr(sdk_mod, "_LockedReader")
     # Anti-over-removal: the hit annotator is KEPT (assembly.py uses it).
-    assert hasattr(TortoiseSDK, "annotate_ask_hits")
+    assert hasattr(TortoiseSDK, "_annotate_ask_hits")
 
 
 def test_n1_eval_lane_entry_is_callable_and_returns_the_13_field_shape(monkeypatch):

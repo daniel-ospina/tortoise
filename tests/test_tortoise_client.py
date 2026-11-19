@@ -106,13 +106,13 @@ class TestQueryPriorResearch:
 
     def test_returns_existing_claims_by_kind(self):
         sdk = _fresh_sdk()
-        sdk.create_point(
+        sdk._create_point(
             "competitor-analysis", "El Dato competes with OpenTable", authoredBy="research-skill"
         )
-        sdk.create_point(
+        sdk._create_point(
             "competitor-analysis", "Competitor X has 20% market share", authoredBy="research-skill"
         )
-        sdk.create_point("statement", "Unrelated claim", authoredBy="other")
+        sdk._create_point("statement", "Unrelated claim", authoredBy="other")
         sdk.close()
 
         results = tortoise_client.query_prior_research("competitor-analysis")
@@ -124,7 +124,7 @@ class TestQueryPriorResearch:
 
     def test_returns_claims_by_kind_match(self):
         sdk = _fresh_sdk()
-        sdk.create_point("decision", "Deploy FalkorDB in production", authoredBy="research-skill")
+        sdk._create_point("decision", "Deploy FalkorDB in production", authoredBy="research-skill")
         sdk.close()
 
         results = tortoise_client.query_prior_research("decision")
@@ -133,7 +133,7 @@ class TestQueryPriorResearch:
 
     def test_empty_when_no_match(self):
         sdk = _fresh_sdk()
-        sdk.create_point("statement", "Something else", authoredBy="test")
+        sdk._create_point("statement", "Something else", authoredBy="test")
         sdk.close()
 
         results = tortoise_client.query_prior_research("nonexistent-domain")
@@ -231,13 +231,13 @@ class TestVisionPoints:
 
     def test_query_visions_filters_by_kind(self):
         sdk = _fresh_sdk()
-        sdk.create_point(
+        sdk._create_point(
             "vision",
             "El Dato will be the OS for restaurant discovery",
             authoredBy="define-vision-skill",
             confidence=0.6,
         )
-        sdk.create_point("statement", "Not a vision", authoredBy="test")
+        sdk._create_point("statement", "Not a vision", authoredBy="test")
         sdk.close()
 
         results = tortoise_client.query_existing_visions()
@@ -247,8 +247,8 @@ class TestVisionPoints:
 
     def test_query_visions_all(self):
         sdk = _fresh_sdk()
-        sdk.create_point("vision", "Vision A", authoredBy="test")
-        sdk.create_point("vision", "Vision B", authoredBy="test")
+        sdk._create_point("vision", "Vision A", authoredBy="test")
+        sdk._create_point("vision", "Vision B", authoredBy="test")
         sdk.close()
 
         results = tortoise_client.query_existing_visions()

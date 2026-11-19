@@ -42,7 +42,7 @@ def _pt(sdk, tag, valid_from):
     skip would be a dangling-successor skip, not the #4021 refusal).
     """
     content = f"5365 {tag}"
-    return sdk.create_point("statement", content, id=f"pt_{content_hash(content)}",
+    return sdk._create_point("statement", content, id=f"pt_{content_hash(content)}",
                             validFrom=valid_from)
 
 
@@ -161,9 +161,9 @@ def test_apply_supersessions_dead_sibling_makes_the_ref_a_noop(sdk):
     proj.g.query(
         "CREATE (n:Point {id:$id, content:'dupsib dead sibling', "
         "pointKind:'statement', status:'retracted'})", params={"id": old_id})
-    sdk.create_point("statement", content, id=old_id, status="live",
+    sdk._create_point("statement", content, id=old_id, status="live",
                      validFrom="2026-06-01")
-    sdk.create_point("statement", content + " new", id=new_id,
+    sdk._create_point("statement", content + " new", id=new_id,
                      status="live", validFrom="2026-06-10")
     dup_states = [s for s in proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids "
@@ -262,12 +262,12 @@ def test_promote_point_skips_a_temporal_target_with_a_dead_sibling(sdk):
     # The premise, asserted rather than assumed: a first-row-only read sees the
     # LIVE sibling.
     assert not is_terminal_status(rows[0][0], bool(rows[0][1])), rows
-    draft = sdk.create_point(
+    draft = sdk._create_point(
         "statement", "draft candidate", status="draft",
         temporal_candidate=True, temporal_reviewed="merge",
         temporal_target_ids=[tgt])["id"]
 
-    result = sdk.promote_point(draft)
+    result = sdk._promote_point(draft)
 
     assert result["promoted"] is True, result
     assert "temporal_wired" not in result, result

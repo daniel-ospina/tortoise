@@ -238,7 +238,7 @@ class TestModeIsomorphism:
     BUNDLE = None  # set at class level below (needs no instance state)
 
     def _seed_live_point(self, sdk):
-        sdk.create_point("statement", "Pre-existing live anchor L.",
+        sdk._create_point("statement", "Pre-existing live anchor L.",
                          status="live")
 
     def _ingest_pair(self, policy: str):
@@ -250,9 +250,9 @@ class TestModeIsomorphism:
             self._seed_live_point(g1)
             self._seed_live_point(g2)
             bundle = json.loads(json.dumps(_canonical_bundle()))
-            r_bulk = g1.ingest(bundle, granularity="bulk",
+            r_bulk = g1._ingest(bundle, granularity="bulk",
                                promotion_policy=policy)
-            r_gran = g2.ingest(bundle, granularity="granular",
+            r_gran = g2._ingest(bundle, granularity="granular",
                                promotion_policy=policy)
             sig_bulk = _graph_signature(g1)
             sig_gran = _graph_signature(g2)
@@ -372,7 +372,7 @@ class TestModeIsomorphism:
         """
         g = _fresh_sdk()
         try:
-            g.ingest(json.loads(json.dumps(_canonical_bundle())),
+            g._ingest(json.loads(json.dumps(_canonical_bundle())),
                      granularity="bulk", promotion_policy="gated")
             url = "https://example.com/rust-report"
             ent = g.get_entity(url)
@@ -397,7 +397,7 @@ class TestInvalidModeValue:
     def test_sdk_invalid_granularity_raises_naming_valid_values(self, sdk):
         for bad in ("anything-else", "atomic", "chunky"):
             with pytest.raises(ValueError, match="granularity") as exc:
-                sdk.ingest({"points": []}, granularity=bad)
+                sdk._ingest({"points": []}, granularity=bad)
             msg = str(exc.value)
             assert "granularity" in msg
             assert "bulk" in msg and "granular" in msg
@@ -446,7 +446,7 @@ class TestGranularInvalidItem:
             db = _fresh_sdk()
             try:
                 with pytest.raises(BundleValidationError) as exc:
-                    db.ingest(json.loads(json.dumps(self.INVALID_BUNDLE)),
+                    db._ingest(json.loads(json.dumps(self.INVALID_BUNDLE)),
                               granularity=mode)
                 violations_by_mode[mode] = exc.value.violations
                 # zero mutations — no points, no operators, no edges
@@ -644,9 +644,9 @@ class TestGranularResultsKeyForKey:
         # A3 and E2E-15(q).
         sdk = _fresh_sdk()
         try:
-            pa = sdk.create_point("claim", "A implies B.")["id"]
-            pb = sdk.create_point("claim", "B.")["id"]
-            r = sdk.create_direct_edge("IMPL", pa, pb)
+            pa = sdk._create_point("claim", "A implies B.")["id"]
+            pb = sdk._create_point("claim", "B.")["id"]
+            r = sdk._create_direct_edge("IMPL", pa, pb)
             assert set(r.keys()) == {"direct_edge", "from", "to",
                                      "created", "deduped"}
             assert r["direct_edge"] == "IMPL"
@@ -663,7 +663,7 @@ class TestGranularResultsKeyForKey:
                                "RETURN count(o)") == 0
             # idempotent re-submission → deduped flag flips on the SAME key
             # set (created→False, deduped→True)
-            r2 = sdk.create_direct_edge("IMPL", pa, pb)
+            r2 = sdk._create_direct_edge("IMPL", pa, pb)
             assert set(r2.keys()) == {"direct_edge", "from", "to",
                                       "created", "deduped"}
             assert r2["created"] is False and r2["deduped"] is True
@@ -688,7 +688,7 @@ class TestBatchIdCanonicalization:
     def _batch_id_on_fresh(self, bundle, granularity="bulk"):
         db = _fresh_sdk()
         try:
-            res = db.ingest(json.loads(json.dumps(bundle)),
+            res = db._ingest(json.loads(json.dumps(bundle)),
                             granularity=granularity)
             return res["batch_id"]
         finally:
@@ -798,7 +798,7 @@ class TestEmptyBundle:
             for policy in ("gated", "auto"):
                 db = _fresh_sdk()
                 try:
-                    res = db.ingest(json.loads(json.dumps(self.EMPTY)),
+                    res = db._ingest(json.loads(json.dumps(self.EMPTY)),
                                     granularity=granularity,
                                     promotion_policy=policy)
                 finally:
@@ -829,14 +829,14 @@ class TestEmptyBundle:
     def test_empty_bundle_batch_id_deterministic_and_identical_reingest(self):
         db = _fresh_sdk()
         try:
-            b1 = db.ingest(json.loads(json.dumps(self.EMPTY)))["batch_id"]
-            b2 = db.ingest(json.loads(json.dumps(self.EMPTY)))["batch_id"]
+            b1 = db._ingest(json.loads(json.dumps(self.EMPTY)))["batch_id"]
+            b2 = db._ingest(json.loads(json.dumps(self.EMPTY)))["batch_id"]
             # re-ingest of the SAME empty bundle → IDENTICAL batch_id
             assert b1 == b2
             # and identical across granularity modes on a fresh graph
             db2 = _fresh_sdk()
             try:
-                b_gran = db2.ingest(json.loads(json.dumps(self.EMPTY)),
+                b_gran = db2._ingest(json.loads(json.dumps(self.EMPTY)),
                                     granularity="granular")["batch_id"]
             finally:
                 db2.close()

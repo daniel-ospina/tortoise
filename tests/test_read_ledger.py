@@ -540,9 +540,9 @@ class TestTheReadFunnel:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            created = sdk.create_point("statement", "alpha beta gamma waves")
+            created = sdk._create_point("statement", "alpha beta gamma waves")
             read_ledger.record_stock("Point", created["id"], nbytes=1672)
-            rows = sdk.tortoise_fts_query("alpha", limit=5)
+            rows = sdk._tortoise_fts_query("alpha", limit=5)
             assert rows
             folded = fold(ledger)
             assert folded.stock_keys == 1
@@ -557,8 +557,8 @@ class TestTheReadFunnel:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
-            rows = sdk.tortoise_fts_query("alpha", limit=5)
+            sdk._create_point("statement", "alpha beta gamma waves")
+            rows = sdk._tortoise_fts_query("alpha", limit=5)
             assert rows
             assert not ledger.exists(), "off means off — not one line is written"
         finally:
@@ -571,11 +571,11 @@ class TestTheReadFunnel:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             monkeypatch.delenv(LEDGER_FLAG_ENV, raising=False)
-            off = sdk.tortoise_fts_query("alpha", limit=5)
+            off = sdk._tortoise_fts_query("alpha", limit=5)
             monkeypatch.setenv(LEDGER_FLAG_ENV, "1")
-            on = sdk.tortoise_fts_query("alpha", limit=5)
+            on = sdk._tortoise_fts_query("alpha", limit=5)
             # The WHOLE row, not two fields: a hook that added, dropped or
             # mutated any key would still pass an id/content comparison, and the
             # claim this test names is byte-identity.

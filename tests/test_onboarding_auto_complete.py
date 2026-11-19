@@ -498,7 +498,7 @@ class TestCallSiteObservation:
         def _normalized(kind, content, **kwargs):
             return {"id": "p-2", "pointKind": (kind or "").strip().lower(),
                     "content": content}
-        sdk.create_point = _normalized
+        sdk._create_point = _normalized
         res = mcp.tortoise_create_point(" Decision ", "choose")
         assert "error" not in res, res
         assert recorded == [{"decision_observed": True}]
@@ -521,7 +521,7 @@ class TestCallSiteObservation:
 
         def boom(*a, **k):
             raise RuntimeError("synthetic write failure")
-        mcp._get_org_sdk().create_point = boom
+        mcp._get_org_sdk()._create_point = boom
         res = mcp.tortoise_create_point("decision", "irrelevant")
         assert "error" in res, res
         assert recorded == []
@@ -646,7 +646,7 @@ class TestDecideProtocolKinds:
         recorded: list[dict] = []
         monkeypatch.setattr(mcp, "_maybe_onboarding_auto_complete",
                             lambda **kw: recorded.append(dict(kw)))
-        sdk.create_point = lambda kind, content, **kw: "ok"
+        sdk._create_point = lambda kind, content, **kw: "ok"
         res = mcp.tortoise_create_point("option", "Option A")
         assert res == "ok", res
         assert recorded == [{"decision_observed": True}]
@@ -668,10 +668,10 @@ class TestDecideProtocolKinds:
             return _f
 
         # asked for an option, the store recorded something else → no decision
-        sdk.create_point = _persisting("statement")
+        sdk._create_point = _persisting("statement")
         assert "error" not in mcp.tortoise_create_point("option", "asked")
         # asked for a plain kind, the store recorded an option → a decision
-        sdk.create_point = _persisting("option")
+        sdk._create_point = _persisting("option")
         assert "error" not in mcp.tortoise_create_point("statement", "asked")
         assert recorded == [{"decision_observed": False},
                             {"decision_observed": True}]

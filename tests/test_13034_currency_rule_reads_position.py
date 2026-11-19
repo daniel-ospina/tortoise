@@ -204,7 +204,7 @@ class TestTheCypherTwinReadsBothAxes:
         sdk = _fresh_sdk()
         try:
             g = sdk._get_proj().g
-            oid = sdk.create_object(f"combo-{uuid.uuid4().hex[:8]}")["id"]
+            oid = sdk._create_object(f"combo-{uuid.uuid4().hex[:8]}")["id"]
             g.query(
                 "MATCH (n:Object {id:$id}) SET n.status = $st, "
                 "n.outdated = $od, n.isClosed = $ic, n.pipelineSlot = $slot",
@@ -247,7 +247,7 @@ class TestAClosedObjectIsNeverCurrent:
         try:
             g = sdk._get_proj().g
             name = f"closed-only-deal-{uuid.uuid4().hex[:8]}"
-            oid = sdk.create_object(name)["id"]
+            oid = sdk._create_object(name)["id"]
             assert oid in [r[0] for r in run_fts_query(
                 g, name, entity_type="object")]
             assert resolve_entity_id_same_entity(g, "Object", name) == oid
@@ -277,7 +277,7 @@ class TestAClosedObjectIsNeverCurrent:
         sdk = _fresh_sdk()
         try:
             name = f"closed-only-byid-{uuid.uuid4().hex[:8]}"
-            oid = sdk.create_object(name)["id"]
+            oid = sdk._create_object(name)["id"]
             sdk.update_knowledge(oid, isClosed=True)
             got = sdk.get_entity(oid)
             assert got and got["id"] == oid
@@ -289,7 +289,7 @@ class TestAClosedObjectIsNeverCurrent:
         sdk = _fresh_sdk()
         try:
             name = f"closed-only-target-{uuid.uuid4().hex[:8]}"
-            oid = sdk.create_object(name)["id"]
+            oid = sdk._create_object(name)["id"]
             assert di._retirement(sdk.get_entity(oid)) is None, (
                 "a live target must not be retired before the fixture closes it")
             sdk.update_knowledge(oid, isClosed=True)
@@ -317,7 +317,7 @@ class TestAClosedObjectIsNeverCurrent:
         try:
             g = sdk._get_proj().g
             name = f"slot-terminal-deal-{uuid.uuid4().hex[:8]}"
-            oid = sdk.create_object(name)["id"]
+            oid = sdk._create_object(name)["id"]
             g.query(
                 "MATCH (n:Object {id:$id}) SET n.pipelineStageId = 'stg_done', "
                 "n.pipelineSlot = $slot, n.pipelineStageKey = 'core:deal'",
@@ -347,7 +347,7 @@ class TestAClosedObjectIsNeverCurrent:
         try:
             g = sdk._get_proj().g
             name = f"closed-active-slot-{uuid.uuid4().hex[:8]}"
-            oid = sdk.create_object(name)["id"]
+            oid = sdk._create_object(name)["id"]
             g.query(
                 "MATCH (n:Object {id:$id}) SET n.pipelineStageId = 'stg_won', "
                 "n.pipelineSlot = 'active', n.pipelineStageKey = 'core:deal', "
@@ -372,15 +372,15 @@ class TestAClosedObjectIsNeverCurrent:
         try:
             g = sdk._get_proj().g
             sfx = uuid.uuid4().hex[:8]
-            live_id = sdk.create_point(
+            live_id = sdk._create_point(
                 "statement", f"list-live-{sfx}", status="live")["id"]
-            closed_id = sdk.create_point(
+            closed_id = sdk._create_point(
                 "statement", f"list-closed-{sfx}", status="live")["id"]
-            superseded_id = sdk.create_point(
+            superseded_id = sdk._create_point(
                 "statement", f"list-sup-{sfx}", status="live")["id"]
-            succ = sdk.create_point("statement", f"list-succ-{sfx}",
+            succ = sdk._create_point("statement", f"list-succ-{sfx}",
                                     status="live")["id"]
-            sdk.supersede_point(superseded_id, succ)
+            sdk._supersede_point(superseded_id, succ)
             # list_points filters `n:Point`, so close a POINT to exercise the
             # route's own clause with the position axis (a Point carries no
             # pipeline; the marker is the generic-surface write).
@@ -426,17 +426,17 @@ class TestTheEpEvidenceSet:
         sdk = _fresh_sdk()
         try:
             sfx = uuid.uuid4().hex[:8]
-            claim = sdk.create_point("statement", f"ev-{sfx}",
+            claim = sdk._create_point("statement", f"ev-{sfx}",
                                      status="live")["id"]
-            sdk.set_point_baseline(claim, 8.0, 2.0)
-            succ = sdk.create_point("statement", f"ev-succ-{sfx}",
+            sdk._set_point_baseline(claim, 8.0, 2.0)
+            succ = sdk._create_point("statement", f"ev-succ-{sfx}",
                                     status="live")["id"]
             sdk._evidence = {}
             sdk._hydrate_evidence()
             assert claim in sdk._evidence, (
                 "the fixture must be hydrated BEFORE the supersede, or the "
                 "assertion below could pass for the wrong reason")
-            sdk.supersede_point(claim, succ)
+            sdk._supersede_point(claim, succ)
             sdk._evidence = {}
             sdk._hydrate_evidence()
             assert claim not in sdk._evidence, (
@@ -466,12 +466,12 @@ class TestTheEpEvidenceSet:
         try:
             g = sdk._get_proj().g
             sfx = uuid.uuid4().hex[:8]
-            source = sdk.create_point("statement", f"ep-src-{sfx}",
+            source = sdk._create_point("statement", f"ep-src-{sfx}",
                                       status="live")["id"]
-            sdk.set_point_baseline(source, 8.0, 2.0)
-            target = sdk.create_point("statement", f"ep-tgt-{sfx}",
+            sdk._set_point_baseline(source, 8.0, 2.0)
+            target = sdk._create_point("statement", f"ep-tgt-{sfx}",
                                       status="live")["id"]
-            op_id = sdk.create_operator(
+            op_id = sdk._create_operator(
                 "IMPL", source, [target], direction="unidirectional")["id"]
 
             def _belief(pid):
@@ -482,17 +482,17 @@ class TestTheEpEvidenceSet:
                     params={"id": pid}).result_set[0]
                 return [float(x) if x is not None else None for x in row]
 
-            sdk.compute_confidence(factors=[op_id], require_calibration=False)
+            sdk._compute_confidence(factors=[op_id], require_calibration=False)
             contributed = _belief(target)
             assert contributed[0] != contributed[1], (
                 "the fixture never reached a state where the live operator "
                 f"contributed (posterior {contributed})")
             assert contributed[2] != 0.5
 
-            succ = sdk.create_point("statement", f"ep-succ-{sfx}",
+            succ = sdk._create_point("statement", f"ep-succ-{sfx}",
                                     status="live")["id"]
-            sdk.supersede_point(source, succ)
-            sdk.compute_confidence(factors=[op_id], require_calibration=False)
+            sdk._supersede_point(source, succ)
+            sdk._compute_confidence(factors=[op_id], require_calibration=False)
             retired = _belief(target)
             # EP converges to a symmetric posterior rather than landing on it
             # exactly, so the symmetry is judged at the tolerance the run's own
@@ -575,12 +575,12 @@ class TestTheTopicNeighborhood:
             g = sdk._get_proj().g
             sfx = uuid.uuid4().hex[:8]
             topic = f"topicneighborhood{sfx}"
-            dead = sdk.create_point("statement", f"{topic} dead seed",
+            dead = sdk._create_point("statement", f"{topic} dead seed",
                                     status="live")["id"]
-            succ = sdk.create_point("statement", f"{topic} successor",
+            succ = sdk._create_point("statement", f"{topic} successor",
                                     status="live")["id"]
-            sdk.supersede_point(dead, succ)
-            live_pt = sdk.create_point("statement", f"{topic} live seed",
+            sdk._supersede_point(dead, succ)
+            live_pt = sdk._create_point("statement", f"{topic} live seed",
                                        status="live")["id"]
 
             seeded, _meta, _seed_count = _retrieve_topic_neighborhood(g, topic)

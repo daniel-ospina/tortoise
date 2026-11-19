@@ -664,14 +664,14 @@ def seed_graph(sdk, items: list[dict], distractors: list[dict]) -> dict:
         it["query_point_id"] = _point_id("q", it["item_id"])
         it["target_point_id"] = _point_id("t", it["item_id"])
     for it in items:
-        sdk.create_point("statement", it["query"],
+        sdk._create_point("statement", it["query"],
                          id=it["query_point_id"], session_id=it["query_session"],
                          search_keys=it["name"], status="draft")
-        sdk.create_point("statement", it["target_text"],
+        sdk._create_point("statement", it["target_text"],
                          id=it["target_point_id"], session_id=it["target_session"],
                          search_keys=it["target_keys"], status="draft")
     for i, d in enumerate(distractors):
-        sdk.create_point("statement", d["content"], id=_point_id("d", f"{i:06d}"),
+        sdk._create_point("statement", d["content"], id=_point_id("d", f"{i:06d}"),
                          session_id=d["session_id"], status="draft")
     # One batched edge write per item — the cross-session spine join the harvest
     # walks. MERGE, not CREATE, so a re-run onto a reused graph cannot double it.
@@ -807,7 +807,7 @@ def read_arm(sdk, items: list[dict], *, arm: str, expansion: bool,
         else:
             query = _sanitise_query_text(it["name"])
             target = it["object_id"]
-        rows = sdk.tortoise_fts_query(
+        rows = sdk._tortoise_fts_query(
             query, entity_type=arm, limit=read_limit,
             include_terminal=True, _record_reads=False,
             _valid_time_rerank=False,
@@ -1185,7 +1185,7 @@ def run(args: argparse.Namespace) -> int:
         seeded = seed_graph(sdk, items, distractors)
         _log("seeded", **seeded)
         # One warm read so the first measured query is not paying a cold cost.
-        sdk.tortoise_fts_query("warm", entity_type="point", limit=1,
+        sdk._tortoise_fts_query("warm", entity_type="point", limit=1,
                                include_terminal=True, _record_reads=False,
                                _valid_time_rerank=False,
                                _rerank_candidates=False)

@@ -56,7 +56,7 @@ def seeded_registry_sdk(tmp_path):
     """
     db_path = str(tmp_path / "reg.db")
     sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-    team = sdk.org_create("test-team")
+    team = sdk._org_create("test-team")
     key_info = sdk._apikey_create(team["id"], "test-fixture")
     return sdk, key_info["api_key"]  # (registry SDK, plaintext tt_ key)
 
@@ -182,13 +182,13 @@ class TestAuthPreLeak:
         tc, _ = mcp_client
         sdk, _ = seeded_registry_sdk
         reg = sdk._get_registry()
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) RETURN k.last_used_at",
         ).result_set
         assert rows and rows[0][0] is None  # fresh key: never used
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
         assert r.status_code == 200, r.text
-        rows = reg.query(
+        rows = reg._query(
             "MATCH (k:APIKey) RETURN k.last_used_at",
         ).result_set
         assert rows and rows[0][0] is not None  # write-through bumped it
@@ -225,7 +225,7 @@ class TestAuthPreLeak:
 
         db_path = str(tmp_path / "rev.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.org_create("rev-team")
+        team = reg_sdk._org_create("rev-team")
         key_info = reg_sdk._apikey_create(team["id"], "t")
         key = key_info["api_key"]
         headers = {"Authorization": f"Bearer {key}",
@@ -287,7 +287,7 @@ class TestAuthRetryAfterContract:
 
         db_path = str(tmp_path / "retry.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.org_create("retry-team")
+        team = reg_sdk._org_create("retry-team")
         key = reg_sdk._apikey_create(team["id"], "retry")["api_key"]
 
         made: list = []
@@ -546,7 +546,7 @@ class TestTortoiseHealthTruth:
         db = str(tmp_path / "health.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.org_create("health-truth-team")
+        team = reg._org_create("health-truth-team")
         key = reg._apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
@@ -585,7 +585,7 @@ class TestTortoiseHealthTruth:
         db = str(tmp_path / "health.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.org_create("health-truth-team")
+        team = reg._org_create("health-truth-team")
         # ⚠️ No cap is written here, deliberately. Review round 15 found the write
         # was aimed at `_get_proj().g` (a silent no-op — Team lives in the
         # REGISTRY graph), and re-aiming it does not make it honest: nothing in
@@ -661,9 +661,9 @@ class TestTeamIsolation:
 
         db_path = str(tmp_path / "iso.db")
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_a = sdk.org_create("tenant-a")
+        team_a = sdk._org_create("tenant-a")
         ka = sdk._apikey_create(team_a["id"], "t")["api_key"]
-        team_b = sdk.org_create("tenant-b")
+        team_b = sdk._org_create("tenant-b")
         kb = sdk._apikey_create(team_b["id"], "t")["api_key"]
 
         app = create_http_app(allowed_origins=[], _registry_sdk=sdk)
@@ -785,7 +785,7 @@ class TestComputeConfidenceHTTP:
         def _spy_sdk():
             sdk = object.__new__(TortoiseSDK)  # stub — handler only forwards
             orig_cc = lambda *a, **k: seen.update(max_hops=k.get("max_hops")) or {}  # noqa: E731
-            sdk.compute_confidence = orig_cc
+            sdk._compute_confidence = orig_cc
             return sdk
         monkeypatch.setattr(ms, "_get_org_sdk", _spy_sdk)
         monkeypatch.setattr(ms, "_parse", lambda x: x)
@@ -813,7 +813,7 @@ class TestRateLimit:
         # Fresh registry + app with rate limiting enabled
         db_path = str(tmp_path / "rl.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.org_create("rl-team")
+        team = reg_sdk._org_create("rl-team")
         key = reg_sdk._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg_sdk)
         tc = _mounted_test_client(app)
@@ -1068,7 +1068,7 @@ class TestOnboardingToolGating:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create(org_name)
+        team = reg._org_create(org_name)
         key = reg._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         return _mounted_test_client(app), key, team["id"]
@@ -1501,7 +1501,7 @@ class TestGraphBoundKeyTeamSurfaceReject:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create(name)
+        team = reg._org_create(name)
         reg._graph_create(team["id"], "default", kind="default")
         g = reg._graph_create(team["id"], "bound-g", kind="custom")
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
@@ -1963,7 +1963,7 @@ class TestQuotaEnforcement:
         monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "quota.db"))
         db = str(tmp_path / "quota.db")
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.org_create("quota-team")
+        team = reg._org_create("quota-team")
         key_info = reg._apikey_create(team["id"], "quota-fixture")
         yield reg, key_info["api_key"], team["id"], db
         reg.close()
@@ -2112,7 +2112,7 @@ class TestQuotaEnforcement:
     def test_cross_team_isolation(self, quota_client):
         """Team A at cap → blocked; team B below cap → succeeds (same DB)."""
         tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        team_b = reg_sdk.org_create("quota-team-b")
+        team_b = reg_sdk._org_create("quota-team-b")
         key_b = reg_sdk._apikey_create(team_b["id"], "quota-fixture-b")["api_key"]
         self._set_max_points(reg_sdk, tid, 0)  # team A at cap
 
@@ -2435,7 +2435,7 @@ class TestGraphSetRecordingHTTP:
         db = str(tmp_path / "rec.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.org_create("rec-http-team")
+        team = reg._org_create("rec-http-team")
         reg._graph_create(team["id"], "default", kind="default")
         key = reg._apikey_create(team["id"], "r")["api_key"]
 
@@ -2538,7 +2538,7 @@ class TestToolCallAdmissionBoundary:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create(name)
+        team = reg._org_create(name)
         key = reg._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
@@ -2821,7 +2821,7 @@ class TestToolCallAdmissionBoundary:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create("hidden-team")
+        team = reg._org_create("hidden-team")
         key = reg._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
@@ -3160,7 +3160,7 @@ class TestToolCallAdmissionBoundary:
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create("originteam")
+        team = reg._org_create("originteam")
         key = reg._apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               allowed_hosts=["mcp.premiselabs.co"],
@@ -3290,7 +3290,7 @@ class TestAgentEnableToolHolderRefusals:
         db = str(tmp_path / "holder.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.org_create("holder-team")
+        team = reg._org_create("holder-team")
         good = reg._apikey_create(team["id"], "holder")
         revoked = reg._apikey_create(team["id"], "holder")
         expired = reg._apikey_create(team["id"], "holder",

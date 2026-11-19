@@ -474,7 +474,7 @@ def test_a_real_capture_cannot_be_filed_under_the_reserved_namespace(tmp_path):
             "MATCH (s:Session) RETURN s.id").result_set
         assert written == [], written
         # ...and the read mirror agrees the namespace is not readable either
-        assert client.get_session(reserved) is None
+        assert client._get_session(reserved) is None
     finally:
         client.close()
 

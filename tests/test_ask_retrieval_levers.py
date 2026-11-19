@@ -121,10 +121,10 @@ def _ask_pipeline(sdk, question: str, *, keep_numeric: bool = False,
     # follows the ENV rather than this helper's token cap.
     byte_cap = resolve_byte_cap_from_caps(
         {"context_token_cap": 8000})
-    hits = sdk.tortoise_fts_query(
+    hits = sdk._tortoise_fts_query(
         question, limit=limit, pool_size=120, include_terminal=True,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf)
-    annotated = sdk.annotate_ask_hits(hits)
+    annotated = sdk._annotate_ask_hits(hits)
     # #4155: the lane's key verbatim — the mirror must not hold a stale copy.
     deduped = dedup_pool(
         annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
@@ -324,7 +324,7 @@ def test_gold_turn_in_pool_membership_embedded(qid):
         _seed(sdk, q)
         gold = _gold_turn_ids(q)
         assert gold, f"{qid}: no has_answer turns"
-        hits = sdk.tortoise_fts_query(
+        hits = sdk._tortoise_fts_query(
             q["question"], limit=120, pool_size=120,
             include_terminal=True, keep_numeric=True,
             search_keys_prf=True)
@@ -467,10 +467,10 @@ def test_ask_cap_attribution_5821():
     sdk = _fresh_sdk()
     try:
         _seed(sdk, q)
-        hits = sdk.tortoise_fts_query(
+        hits = sdk._tortoise_fts_query(
             q["question"], limit=120, pool_size=120, include_terminal=True,
             keep_numeric=True, search_keys_prf=True)
-        ann = sdk.annotate_ask_hits(hits)
+        ann = sdk._annotate_ask_hits(hits)
         assert ann, "retrieval returned nothing — the premise is broken"
         ded = dedup_pool(
             ann, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
@@ -652,8 +652,8 @@ def test_product_rerank_degrade_to_untouched_on_failure():
     sdk = _fresh_sdk()
     try:
         _seed(sdk, q)
-        hits = sdk.tortoise_fts_query(q["question"], limit=40, pool_size=120)
-        annotated = sdk.annotate_ask_hits(hits)
+        hits = sdk._tortoise_fts_query(q["question"], limit=40, pool_size=120)
+        annotated = sdk._annotate_ask_hits(hits)
         out, stats = ask_lane_rerank(
             q["question"], annotated, proj=sdk._get_proj(), top_k=40)
         assert out == annotated, "degrade-to-untouched must preserve order"

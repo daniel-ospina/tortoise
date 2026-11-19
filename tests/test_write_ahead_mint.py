@@ -126,7 +126,7 @@ def test_team_create_journals_before_the_teammeta_create(monkeypatch):
     rec = _Recorder()
     sdk = _fake_sdk(monkeypatch, rec)
 
-    res = sdk.org_create("wa_order")
+    res = sdk._org_create("wa_order")
 
     assert res["graph_name"] == "org_wa_order"
     assert rec.index(("journal", "org_wa_order")) < rec.index(("create", "org_wa_order")), (
@@ -145,7 +145,7 @@ def test_crash_between_journal_and_create_leaves_no_orphan(monkeypatch):
     sdk = _fake_sdk(monkeypatch, rec, crash_name="org_wa_crash")
 
     with pytest.raises(_ProcessKilled):
-        sdk.org_create("wa_crash")
+        sdk._org_create("wa_crash")
 
     assert ("journal", "org_wa_crash") in rec.events, (
         "write-ahead: the ownership line must already exist at the crash"
@@ -172,7 +172,7 @@ def test_create_landing_then_crash_still_owns_the_graph(monkeypatch):
     monkeypatch.setattr(sdk, "_graph_create", _kill)
 
     with pytest.raises(_ProcessKilled):
-        sdk.org_create("wa_after")
+        sdk._org_create("wa_after")
 
     assert ("journal", "org_wa_after") in rec.events
     assert ("create", "org_wa_after") in rec.events, (
@@ -274,8 +274,8 @@ def test_duplicate_journal_lines_converge_to_one_owner(monkeypatch, tmp_path):
     rec = _Recorder()
     sdk = _fake_sdk(monkeypatch, rec)
 
-    sdk.org_create("wa_replay")
-    sdk.org_create("wa_replay")  # retry / rebuild replays the same name
+    sdk._org_create("wa_replay")
+    sdk._org_create("wa_replay")  # retry / rebuild replays the same name
 
     journal_events = [e for e in rec.events if e == ("journal", "org_wa_replay")]
     assert len(journal_events) == 2, "retry re-journals the same name"

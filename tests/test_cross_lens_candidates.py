@@ -85,9 +85,9 @@ def _seed_two_streams(sdk, n: int = 1) -> list[str]:
     sdk.register_source(url="https://s2", sourceKind="T2")
     ids = []
     for _ in range(n):
-        ids.append(sdk.create_point(kind="statement", content="alpha one",
+        ids.append(sdk._create_point(kind="statement", content="alpha one",
                                     extractedFrom="https://s1")["id"])
-        ids.append(sdk.create_point(kind="statement", content="beta two",
+        ids.append(sdk._create_point(kind="statement", content="beta two",
                                     extractedFrom="https://s2")["id"])
     return ids
 
@@ -101,9 +101,9 @@ def _node_count(sdk) -> int:
 def test_candidate_shape_and_cross_lens(sdk):
     _seed_two_streams(sdk)
     # same-lens noise pair (both from s1, orthogonal to everything)
-    sdk.create_point(kind="statement", content="gamma three",
+    sdk._create_point(kind="statement", content="gamma three",
                      extractedFrom="https://s1")
-    res = sdk.get_cross_lens_candidates()
+    res = sdk._get_cross_lens_candidates()
     assert res["count"] == 1
     assert res["cap"] == 200
     assert res["truncated"] is False
@@ -129,11 +129,11 @@ def test_candidate_shape_and_cross_lens(sdk):
 
 def test_sorted_by_similarity_desc(sdk):
     _seed_two_streams(sdk)
-    sdk.create_point(kind="statement", content="theta five",
+    sdk._create_point(kind="statement", content="theta five",
                      extractedFrom="https://s1")
-    sdk.create_point(kind="statement", content="delta four",
+    sdk._create_point(kind="statement", content="delta four",
                      extractedFrom="https://s2")
-    res = sdk.get_cross_lens_candidates(threshold=0.3)
+    res = sdk._get_cross_lens_candidates(threshold=0.3)
     sims = [c["similarity"] for c in res["candidates"]]
     assert sims == sorted(sims, reverse=True)
 
@@ -143,7 +143,7 @@ def test_sorted_by_similarity_desc(sdk):
 def test_read_only_no_writes(sdk):
     _seed_two_streams(sdk, n=2)
     n_before = _node_count(sdk)
-    res = sdk.get_cross_lens_candidates()
+    res = sdk._get_cross_lens_candidates()
     assert res["count"] >= 1
     assert _node_count(sdk) == n_before, "candidate discovery must not write"
 
@@ -152,24 +152,24 @@ def test_read_only_no_writes(sdk):
 
 def test_routing_field_values(sdk):
     _seed_two_streams(sdk)
-    res = sdk.get_cross_lens_candidates(routing="relevance")
+    res = sdk._get_cross_lens_candidates(routing="relevance")
     assert res["routing"] == "relevance"
     assert all(c["routing"] == "relevance" for c in res["candidates"])
-    res2 = sdk.get_cross_lens_candidates(routing="truth")
+    res2 = sdk._get_cross_lens_candidates(routing="truth")
     assert res2["routing"] == "truth"
 
 
 def test_routing_invalid_raises(sdk):
     _seed_two_streams(sdk)
     with pytest.raises(ValueError, match="routing"):
-        sdk.get_cross_lens_candidates(routing="evidence")
+        sdk._get_cross_lens_candidates(routing="evidence")
 
 
 def test_threshold_filters(sdk):
     _seed_two_streams(sdk)
     # alpha-beta cosine 0.994 passes 0.99; fails 0.999
-    assert sdk.get_cross_lens_candidates(threshold=0.99)["count"] == 1
-    assert sdk.get_cross_lens_candidates(threshold=0.999)["count"] == 0
+    assert sdk._get_cross_lens_candidates(threshold=0.99)["count"] == 1
+    assert sdk._get_cross_lens_candidates(threshold=0.999)["count"] == 0
 
 
 # ── 4. cost cap (D4: <= 200/cycle, hard clamp) ────────────────────────
@@ -178,12 +178,12 @@ def test_cost_cap_hard_clamp(sdk):
     # 30 pairs of similar cross-source points -> 30*30 = 900 candidate
     # pairs before capping; requesting more than the cap must still clamp.
     _seed_two_streams(sdk, n=30)
-    res = sdk.get_cross_lens_candidates(max_candidates=10_000)
+    res = sdk._get_cross_lens_candidates(max_candidates=10_000)
     assert res["cap"] == 200
     assert res["count"] <= 200
     assert len(res["candidates"]) <= 200
     # lower requests are honored (not raised to the cap)
-    res2 = sdk.get_cross_lens_candidates(max_candidates=5)
+    res2 = sdk._get_cross_lens_candidates(max_candidates=5)
     assert res2["count"] <= 5
 
 
@@ -193,10 +193,10 @@ def test_cost_cap_truncated_flag(sdk):
     # default 20 is the cost-bound recall; same-source near-duplicates — the
     # D5-excluded territory — can crowd a small top-k), so the >200 pair
     # space is visible and the hard cap actually truncates.
-    res = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=100)
+    res = sdk._get_cross_lens_candidates(max_candidates=10_000, top_k=100)
     assert res["count"] == 200
     assert res["truncated"] is True
-    res_small = sdk.get_cross_lens_candidates(max_candidates=10_000, threshold=0.999)
+    res_small = sdk._get_cross_lens_candidates(max_candidates=10_000, threshold=0.999)
     assert res_small["count"] == 0
     assert res_small["truncated"] is False
 
@@ -209,15 +209,15 @@ def test_top_k_hard_clamp(sdk, monkeypatch):
     # 10_000 would (unclamped) pull the whole index per point; clamped to
     # 100 it still makes the full 60-point pool reachable — same result as
     # top_k=100, proving the clamp is applied and silent (no error).
-    res = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=10_000)
+    res = sdk._get_cross_lens_candidates(max_candidates=10_000, top_k=10_000)
     assert res["count"] == 200
     assert res["truncated"] is True
-    res2 = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=100)
+    res2 = sdk._get_cross_lens_candidates(max_candidates=10_000, top_k=100)
     assert res2["count"] == res["count"]
     # values at/below the clamp edge are honored, not lowered: top_k=1 must
     # shrink the result vs the top_k=100 run (low values flow through
     # end-to-end — the clamp is a cap, not a floor).
-    res3 = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=1)
+    res3 = sdk._get_cross_lens_candidates(max_candidates=10_000, top_k=1)
     assert res3["count"] < res["count"]
     # the limit actually handed to the vector index is the clamped top_k
     # (+1 for self-exclusion), never the raw agent-supplied value.
@@ -232,12 +232,12 @@ def test_top_k_hard_clamp(sdk, monkeypatch):
         return real(g, query_vec, limit=limit, is_embedded=is_embedded, **kwargs)
 
     monkeypatch.setattr(search_engine, "run_vector_query", spy)
-    sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=10_000)
+    sdk._get_cross_lens_candidates(max_candidates=10_000, top_k=10_000)
     assert limits, "run_vector_query was never called"
     assert max(limits) <= CROSS_LENS_ANN_TOP_K_MAX + 1
     # lower bound still validated
     with pytest.raises(ValueError, match="top_k"):
-        sdk.get_cross_lens_candidates(top_k=0)
+        sdk._get_cross_lens_candidates(top_k=0)
 
 
 # ── 5. tier gate (D3: registered sourceKind, any tier) ─────────────────
@@ -246,14 +246,14 @@ def test_registered_sourcekind_gate(sdk):
     sdk.register_source(url="https://s1", sourceKind="document")  # registered (neutral)
     sdk.register_source(url="https://s2", sourceKind="T2")        # registered tier form
     sdk.register_source(url="https://s3", sourceKind="custom_kind_xyz")  # NOT registered
-    pa = sdk.create_point(kind="statement", content="alpha one",
+    pa = sdk._create_point(kind="statement", content="alpha one",
                           extractedFrom="https://s1")["id"]
-    pb = sdk.create_point(kind="statement", content="beta two",
+    pb = sdk._create_point(kind="statement", content="beta two",
                           extractedFrom="https://s2")["id"]
-    pc = sdk.create_point(kind="statement", content="alpha one",
+    pc = sdk._create_point(kind="statement", content="alpha one",
                           extractedFrom="https://s3")["id"]
-    pd = sdk.create_point(kind="statement", content="beta two")  # no source
-    res = sdk.get_cross_lens_candidates()
+    pd = sdk._create_point(kind="statement", content="beta two")  # no source
+    res = sdk._get_cross_lens_candidates()
     assert res["count"] == 1  # only the registered-kind pair
     for c in res["candidates"]:
         assert c["src"] not in (pc, pd) and c["dst"] not in (pc, pd)
@@ -273,9 +273,9 @@ def test_registered_kinds_are_registry_keys(sdk):
 def test_dedup_vs_existing_operators(sdk):
     ids = _seed_two_streams(sdk)
     pa, pb = ids[0], ids[1]
-    assert sdk.get_cross_lens_candidates()["count"] == 1
-    sdk.create_operator("IMPL", source_id=pa, target_ids=[pb])
-    res = sdk.get_cross_lens_candidates()
+    assert sdk._get_cross_lens_candidates()["count"] == 1
+    sdk._create_operator("IMPL", source_id=pa, target_ids=[pb])
+    res = sdk._get_cross_lens_candidates()
     assert res["count"] == 0, "operator-connected pair must be deduped"
 
 
@@ -287,15 +287,15 @@ def test_two_cycle_cross_stream_e2e(sdk):
     streams produce candidates, with path-provenance on the payload."""
     # Cycle 1: only stream A ingested — nothing cross-lens to see.
     sdk.register_source(url="https://stream-a", sourceKind="document")
-    pa = sdk.create_point(kind="statement", content="alpha one",
+    pa = sdk._create_point(kind="statement", content="alpha one",
                           extractedFrom="https://stream-a")["id"]
-    res1 = sdk.get_cross_lens_candidates()
+    res1 = sdk._get_cross_lens_candidates()
     assert res1["count"] == 0
     # Cycle 2: stream B ingested separately — cross-stream candidates appear.
     sdk.register_source(url="https://stream-b", sourceKind="T1")
-    pb = sdk.create_point(kind="statement", content="beta two",
+    pb = sdk._create_point(kind="statement", content="beta two",
                           extractedFrom="https://stream-b")["id"]
-    res2 = sdk.get_cross_lens_candidates()
+    res2 = sdk._get_cross_lens_candidates()
     assert res2["count"] == 1
     c = res2["candidates"][0]
     assert {c["src"], c["dst"]} == {pa, pb}
@@ -307,18 +307,18 @@ def test_two_cycle_cross_stream_e2e(sdk):
 
 
 def test_empty_results_not_error(sdk):
-    res = sdk.get_cross_lens_candidates()  # empty graph
+    res = sdk._get_cross_lens_candidates()  # empty graph
     assert res == {"candidates": [], "count": 0, "cap": 200,
                    "truncated": False, "routing": "truth"}
 
 
 def test_single_stream_no_cross_lens(sdk):
     sdk.register_source(url="https://s1", sourceKind="document")
-    sdk.create_point(kind="statement", content="alpha one",
+    sdk._create_point(kind="statement", content="alpha one",
                      extractedFrom="https://s1")
-    sdk.create_point(kind="statement", content="beta two",
+    sdk._create_point(kind="statement", content="beta two",
                      extractedFrom="https://s1")
-    res = sdk.get_cross_lens_candidates()
+    res = sdk._get_cross_lens_candidates()
     assert res["count"] == 0, "same-source pairs are not cross-lens"
 
 
@@ -363,7 +363,7 @@ def test_mcp_handler_delegates(sdk, monkeypatch):
         return {"candidates": [], "count": 0, "cap": 200,
                 "truncated": False, "routing": kw.get("routing")}
 
-    monkeypatch.setattr(sdk, "get_cross_lens_candidates", fake_sdk_method)
+    monkeypatch.setattr(sdk, "_get_cross_lens_candidates", fake_sdk_method)
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates(
         threshold=0.5, max_candidates=50, routing="relevance", top_k=7)
@@ -388,7 +388,7 @@ def test_mcp_tool_integration(sdk, monkeypatch):
 
 def test_mcp_tool_error_surfaces(sdk, monkeypatch):
     from tortoise import mcp_server
-    monkeypatch.setattr(sdk, "get_cross_lens_candidates",
+    monkeypatch.setattr(sdk, "_get_cross_lens_candidates",
                         lambda **kw: (_ for _ in ()).throw(ValueError("boom")))
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates()

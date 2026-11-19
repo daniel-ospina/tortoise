@@ -296,13 +296,13 @@ def test_recall_state_accepts_and_forwards_leg_trace():
     is removed, the capability gate silently degrades to 'no trace' — this
     pins it without standing up a store."""
     import tortoise.sdk as sdk_mod
-    sig = inspect.signature(sdk_mod.TortoiseSDK.recall_state)
+    sig = inspect.signature(sdk_mod.TortoiseSDK._recall_state)
     assert "leg_trace" in sig.parameters, (
         "recall_state must accept leg_trace (#2985) — the battery capability "
         "gate has no other way to observe the retrieval legs")
     param = sig.parameters["leg_trace"]
     assert param.default is None, "default None keeps the read byte-identical"
-    src = inspect.getsource(sdk_mod.TortoiseSDK.recall_state)
+    src = inspect.getsource(sdk_mod.TortoiseSDK._recall_state)
     assert src.count("leg_trace=leg_trace") >= 1, (
         "recall_state must FORWARD leg_trace into tortoise_fts_query (#2985)")
 
