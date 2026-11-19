@@ -187,6 +187,34 @@ def test_a_failing_probe_still_keeps_the_reason():
     assert proj._probe_error is boom
 
 
+def test_the_sampling_helper_samples_every_quantity_in_one_pass():
+    """MUTANT: a helper that timed each callable in its OWN sequential block
+    would hand back the same-shaped medians while measuring the host's load
+    drift as if it were the statements' cost.
+
+    The live arms below compare their numbers AGAINST EACH OTHER (2k-vs-50k,
+    and probe-vs-control), so drift measured that way surfaces as a false RED
+    on a correct probe — the cost the interleaved pass exists to remove. That
+    A,B,C,A,B,C is what makes the comparison honest is therefore asserted
+    here, not merely described in the helper's docstring.
+    """
+    order: list[str] = []
+
+    def mk(name):
+        def fn():
+            order.append(name)
+        return fn
+
+    medians = _interleaved_medians(
+        mk("small"), mk("large"), mk("control"), samples=4)
+
+    assert order == ["small", "large", "control"] * 4, (
+        "the sampling pass did not interleave the timed quantities, so each "
+        f"one was measured in its own load window: {order!r}")
+    assert len(medians) == 3 and all(m >= 0.0 for m in medians), (
+        f"the helper must return one non-negative median per quantity: {medians!r}")
+
+
 # ── 3: the round-trip count of a real open ──────────────────────────────────
 
 _GRAPH = f"tortoise_test_13722_{uuid.uuid4().hex[:8]}"
@@ -246,8 +274,22 @@ def _live_uri():
 #:
 #: i.e. 5 protocol commands + 5 `GRAPH.QUERY` = 10, and a second open of the
 #: same graph costs the same 10 (measured, same enumeration). The bound is 12 so
-#: an engine that answers the vector procedure differently is not a red, while a
-#: whole new graph-wide statement per open still is.
+#: an engine that answers the vector procedure differently is not a red — that is
+#: TWO commands of slack; a THIRD net-new graph-wide statement per open (10 → 13)
+#: still is.
+#:
+#: ⛔ WHAT THIS ENUMERATION DOES NOT MEAN — THE OPEN IS NOT O(1). Command 8 is
+#: still GRAPH-PROPORTIONAL: `_ARRAY_FTS_PROP_PROBE` (`projection/__init__.py`) is
+#: `MATCH (n:Point) WHERE … RETURN 1 LIMIT 1`, so `LIMIT 1` bounds the ROW and not
+#: the work — the exact shape this change removes from `_probe_ok`. It is issued
+#: on the schema-current fast path (`_schema_is_current` →
+#: `_array_valued_fts_prop_exists`) and carries no aggregate, so the arm below
+#: cannot see it either. Review-measured at ~12 ms on a 50k-node graph on this
+#: lane's container. It is PRICED AND LEFT deliberately (removing it is a design
+#: decision — a write-maintained signal — and #5444/#5482 are both closed with
+#: neither removing the cost), exactly as the PR body states; this note exists so
+#: the bound cannot be misread as "a projection open does no graph-proportional
+#: work".
 _OPEN_ROUND_TRIPS_MAX = 12
 
 
@@ -332,8 +374,9 @@ _PRE_FIX = "MATCH (n) RETURN count(n) LIMIT 1"
 #: form (`growth <= 2.5 x control_growth`) would also pass a probe that scales
 #: WITH the graph but costs less than `count(n)` — a false PASS bought to avoid
 #: a false RED, and a false pass is the expensive error. The load sensitivity is
-#: answered at the SAMPLING instead: the two sizes are interleaved, so a load
-#: step lands on both halves of this ratio.
+#: answered at the SAMPLING instead: the two sizes — and the control below —
+#: are sampled in ONE interleaved pass, so a load step lands on every half of
+#: every ratio in this arm.
 _SCALING_BOUND = 2.5
 
 #: The control must be measurably slower than the probe. MEASURED at 50k:
@@ -345,48 +388,40 @@ _SCALING_BOUND = 2.5
 _CONTROL_RATIO = 2.0
 
 
-def _median_ms(fn, samples: int = 11) -> float:
-    """Median wall clock of *fn*.
+def _interleaved_medians(*fns, samples: int = 11) -> tuple[float, ...]:
+    """Medians of each callable in *fns*, sampled ALTERNATELY — one round each.
+
+    ⛔ WHY EVERY TIMED QUANTITY IN AN ARM GOES THROUGH THIS ONE SAMPLING PASS.
+    This lane shares its FalkorDB host with the rest of the fleet, and its load
+    drifts over tens of seconds. Two medians taken in SEQUENTIAL passes measure
+    that drift as much as the statements: a load step that arrives between them
+    inflates whichever half it lands on without anything in the product
+    changing (measured baseline 1.2x against a 2.5x bound, so a sustained ~2x
+    step was enough to red a correct probe). Interleaving puts every sample of
+    every quantity inside the same load window, so a drift lands on all of
+    them.
+
+    That matters for the CONTROL too, not only for the 2k-vs-50k pair: it is a
+    ratio against a second statement (`count(n)`), so a control block measured
+    after the interleaved pair can be deflated by a load DROP and red a correct
+    probe — a false red on a legitimate fix, which is the cost this exists to
+    remove.
 
     Medians over repeated samples, because one scheduler hiccup must not decide
-    a scaling claim — and both halves below are RATIOS of two such medians, so
-    they compare a run against itself rather than against a fixed number of
+    a scaling claim — and every arm below is a RATIO of two such medians, so it
+    compares a run against itself rather than against a fixed number of
     milliseconds that belongs to the host.
     """
     import statistics
     import time
 
-    timings = []
+    timings: list[list[float]] = [[] for _ in fns]
     for _ in range(samples):
-        t0 = time.perf_counter()
-        fn()
-        timings.append((time.perf_counter() - t0) * 1000.0)
-    return statistics.median(timings)
-
-
-def _interleaved_medians(fa, fb, samples: int = 11) -> tuple[float, float]:
-    """Medians of *fa* and *fb*, sampled ALTERNATELY — one pair per round.
-
-    Why not two `_median_ms` calls in sequence: this lane shares its FalkorDB
-    host with the rest of the fleet, and a load step that arrives between the
-    two *sequential* passes inflates the ratio without anything in the product
-    changing (measured baseline 1.2x against a 2.5x bound, so a sustained ~2x
-    step was enough to red a correct probe). Interleaving makes a drifting load
-    land on both sides of the ratio it is used in.
-    """
-    import statistics
-    import time
-
-    a: list[float] = []
-    b: list[float] = []
-    for _ in range(samples):
-        t0 = time.perf_counter()
-        fa()
-        a.append((time.perf_counter() - t0) * 1000.0)
-        t0 = time.perf_counter()
-        fb()
-        b.append((time.perf_counter() - t0) * 1000.0)
-    return statistics.median(a), statistics.median(b)
+        for fn, acc in zip(fns, timings):
+            t0 = time.perf_counter()
+            fn()
+            acc.append((time.perf_counter() - t0) * 1000.0)
+    return tuple(statistics.median(acc) for acc in timings)
 
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE,
@@ -409,7 +444,8 @@ def test_the_open_probe_is_flat_in_a_large_graph(_live_uri):
        sampled ALTERNATELY, so a load drift lands on both halves of the ratio.
     2. THE CONTROL — the probe vs the pre-fix statement itself on the 50k
        graph. This is the arm a revert reddens directly: the two samples become
-       the same statement and the ratio collapses to ~1.
+       the same statement and the ratio collapses to ~1. Sampled in the SAME
+       interleaved pass as (1), for the same reason.
     """
     from tortoise.projection import FalkorProjection
 
@@ -423,12 +459,15 @@ def test_the_open_probe_is_flat_in_a_large_graph(_live_uri):
     proj.g.query(f"UNWIND range(1, {_LARGE_NODES}) AS i "
                  "MERGE (:Point {id: 'rt13722_' + toString(i)})")
 
-    # Interleaved, so the host's load is the same on both halves of `growth`.
-    small_ms, large_ms = _interleaved_medians(small._probe_ok, proj._probe_ok)
-
-    # The control is read on the LARGE graph only, adjacent to `large_ms`: it is
-    # the statement the fix deletes, timed on the tree being measured.
-    control_ms = _median_ms(lambda: proj.g.query(_PRE_FIX))
+    # ALL THREE quantities in ONE interleaved pass, so the host's load is the
+    # same on every sample of every ratio below — the two halves of `growth`
+    # AND the two halves of the control ratio. The control is the statement the
+    # fix deletes, timed on the LARGE graph (the tree being measured).
+    small_ms, large_ms, control_ms = _interleaved_medians(
+        small._probe_ok,
+        proj._probe_ok,
+        lambda: proj.g.query(_PRE_FIX),
+    )
 
     growth = large_ms / max(small_ms, 1e-6)
     assert growth < _SCALING_BOUND, (
