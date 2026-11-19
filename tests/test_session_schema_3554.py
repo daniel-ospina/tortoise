@@ -3442,6 +3442,15 @@ _TOPICAL_APPROVAL_MENTION_WITH_AN_ARTICLE = (
 _APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN = (
     "> **v3.41 — Owner's approval of the exact changes** — given in-session, no comment "
     "cited.")
+# ⛔ THE SECOND LEAD-IN SHAPE THE BULLET NAMES, DRIVEN (review P2): the residual bullet
+# names BOTH `**v3.41 — Owner's approval …**` and `**1. Owner approval …**`, but only the
+# first had a fixture — the ordinal half was prose, so it could move in silence in a file
+# whose stated discipline is that every residual shape is driven. Measured at this head:
+# the ordinal form PASSES (fail-open) and `_opening_approval_label` returns None for it,
+# because the paragraph OPENS with `1.`, not with the bold run — the same reading as the
+# release-id lead-in above.
+_APPROVAL_RECORD_WITH_AN_ORDINAL_LEAD_IN = (
+    "> **1. Owner approval of the exact changes** — given in-session, no comment cited.")
 # ⛔ THE POINTER'S FORWARD FORM NAMING A CONTAINER (#13669 cycle 5): ``its own issue
 # tracker`` is a container, not a home, and is REFUSED — the stop-list binds only the
 # reversed form, so this cost is driven as a fixture rather than left to be discovered.
@@ -3511,9 +3520,15 @@ _NO_APPROVAL_RECORD_AFTER_A_HEADING_LINE = (
 # ⛔ AND A TABLE ROW, which is ONE OF THE BLOCK KINDS `_PARAGRAPH_START_RE` does not know
 # (review: measured PASS). ⛔ NOT "where `main` refused" (review P2): `origin/main`'s own
 # suite calls the arm on this exact fixture UNGUARDED (`tests/test_session_schema_3554.py:4020`
-# at `origin/main`), i.e. main pins it GREEN, and no earlier main could have refused it — the
-# arm itself does not exist before #13643. Declared in the residual list; pinned green
-# so the gap is measured. `docs/ONTOLOGY-CHANGELOG.md` writes no tables.
+# at `origin/main`), i.e. main pins it GREEN. ⛔ AND IT IS A REGRESSION FROM AN EARLIER main,
+# not a shape main never held — the first correction's own tail, "no earlier main could have
+# refused it — the arm itself does not exist before #13643", was FALSE (review P2, second
+# round, measured): the arm DOES exist from #13643 (`6d761643bc`), and `#13679`
+# (`d32a3adcef`, an ancestor of `origin/main`) REFUSES this very text. `#13684` turned it
+# green by making the detector the bold run that OPENS a paragraph — the row's paragraph
+# opens with `|`, so the label is never read. So this shape is a REGRESSION from that main,
+# named as one rather than excused as a shape main never had. Declared in the residual list;
+# pinned green so the gap is measured. `docs/ONTOLOGY-CHANGELOG.md` writes no tables.
 _APPROVAL_RECORD_IN_A_TABLE_ROW = (
     "> | **Owner approval of the exact changes** | given in-session, no comment cited |")
 # ⛔ "ONE OF", NOT "THE ONE" (review P3): a THEMATIC BREAK and a FENCED BLOCK are two more
@@ -3831,8 +3846,9 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
       - a LEAD-IN the bounded rule does not spell (``**v3.41 — Owner's approval …**``,
         ``**1. Owner approval …**``) is not read as a label and **PASSES** (fail-OPEN): the
         lead-in class is a short alphanumeric id or a bare dash, deliberately narrow so it
-        cannot swallow prose, and widening it towards ``.*`` is what makes it read — driven
-        by ``_APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN``;
+        cannot swallow prose, and widening it towards ``.*`` is what makes it read — BOTH
+        named shapes are driven, by ``_APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN`` and
+        ``_APPROVAL_RECORD_WITH_AN_ORDINAL_LEAD_IN``;
       - a label sentence whose first sentence is cut by an initial or by ``etc.`` before
         the citation (``… the owner (D. Ospina) ruled … comment `NNN```) is REFUSED —
         fail-closed, and it is the SHARED reader's split that cuts it
@@ -4210,19 +4226,34 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # Read from the PIN ITSELF, not re-implemented: the set is the accepted blocks that
     # PASS `_refuse_a_bare_or_disclaimed_citation`.
     carrying_the_demanded_form: list[str] = []
+    accepted_by_the_arm: list[str] = []
     for landed_block in landed_blocks:
         if not [paragraph for paragraph in _quoted_paragraphs(landed_block)
                 if _opening_approval_label(paragraph)]:
             continue
         accepted_version = _BLOCK_VERSION_RE.match(landed_block)
         assert accepted_version, "a labelled block must carry a readable version header"
-        if accepted_version.group(1) in refused_versions:
-            continue  # the two this arm refuses are not among the "accepted" six
+        # ⛔ SKIP BY CALLING THE ARM, NOT BY THE VERSION STRING (review P1): TWO distinct
+        # landed blocks carry `3.33` and only ONE of them is refused, so a
+        # `version in refused_versions` filter dropped the ACCEPTED one as well and this
+        # pin measured 5 of the 6 records its own docstring counts — measured: the sweep
+        # read ['3.38','3.37','3.36','3.34','3.32'] = 5 against 6 actually accepted. A pin
+        # whose stated denominator is not the one it measures is exactly the defect this
+        # sweep exists to end, so the population is asserted too, below.
+        try:
+            _refuse_an_approval_record_with_no_resolvable_home(landed_block)
+        except AssertionError:
+            continue  # one of the two the arm refuses — not an "accepted" record
+        accepted_by_the_arm.append(accepted_version.group(1))
         try:
             _refuse_a_bare_or_disclaimed_citation(landed_block)
         except AssertionError:
             continue
         carrying_the_demanded_form.append(accepted_version.group(1))
+    assert len(accepted_by_the_arm) == 6, (
+        "the docstring counts SIX accepted records (8 labelled, 2 refused by the arm); "
+        f"that DENOMINATOR changed, so the THREE-of-six claim no longer has its subject "
+        f"— read: {accepted_by_the_arm}")
     assert sorted(carrying_the_demanded_form) == ["3.34", "3.36", "3.38"], (
         "the docstring states the §4.3 pin's attributed form would refuse THREE of the six "
         "accepted records because only v3.38, v3.36 and v3.34 carry it; that set changed "
@@ -4349,9 +4380,12 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
         _APPROVAL_RECORD_WITH_A_LEADING_DETERMINER_AND_AN_ID)
     _refuse_an_approval_record_with_no_resolvable_home(
         _APPROVAL_RECORD_WITH_A_RELEASE_ID_LEAD_IN_AND_AN_ID)
-    # …and the BOUND of the lead-in rule is a measured residual, not a silent one.
+    # …and the BOUND of the lead-in rule is a measured residual, not a silent one — BOTH
+    # shapes the bullet names, so neither half rests on prose.
     _refuse_an_approval_record_with_no_resolvable_home(
         _APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN)
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_RECORD_WITH_AN_ORDINAL_LEAD_IN)
     # ⛔ AND THE MID-PARAGRAPH BOUNDARY, BOTH DIRECTIONS (merge reconciliation with `main`'s
     # #13679, whose paragraph-wide scan read these): a label that does not OPEN its
     # paragraph is out of scope to this reader, so both PASS. Pinned so a widening has to
