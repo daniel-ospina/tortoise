@@ -658,6 +658,24 @@ _TORTOISE_EMPTY_SPELLINGS = (
     # house style, so the gap is not hypothetical.
     "prints NO path at all",
     "the `tortoise/` set above is EMPTY",
+    # ⛔ AND THE ABBREVIATED-COMMAND FORMS (#13807 review round 4, finding 1, MEASURED). The
+    # two rows above still assumed the answer sat beside SOMETHING. Four more verdicts were
+    # live in the document with the command ABBREVIATED (`-- tortoise/`, `that command`) or
+    # omitted altogether, and every arm returned `[]` over them — while a claim that is
+    # FALSE at this head in the same abbreviated shape stayed GREEN (`at this head
+    # `-- tortoise/` returns ONE module` -> `14 passed`). These four were the live phrasings;
+    # they are retired by name for the same reason as every other row.
+    "returns NOTHING AT ALL",
+    "`-- tortoise/` returns NOTHING",
+    "that command returns nothing for all three",
+    "contributes no `tortoise/` path at all",
+    # ⛔ `"this diff carries no `tortoise/` path"` IS DELIBERATELY **NOT** A ROW, and the
+    # reason is a live counterexample rather than taste: that exact string still occurs in
+    # the document exactly once, as a QUOTED RETRACTION (“‘this diff carries no `tortoise/`
+    # path’ — which the `--refresh` above made FALSE”). Retiring it would red the document
+    # for retracting a falsehood, i.e. the over-block this ledger already documents. The
+    # clause that ASSERTED it was rewritten to a structural statement (`#12943` landed on
+    # `main`, so it sits on both sides of the merge) that needs no reading of the set at all.
 )
 #: Both directions, because a ban that covers one of them is the defect these lists record.
 _TORTOISE_RETIRED_SPELLINGS = (
@@ -703,6 +721,23 @@ def _census_membership_verdicts(doc: str) -> list[str]:
     inert? which sentence is a retraction?), and a heuristic that guesses wrong in the
     permissive direction is a FALSE PASS — the failure class this whole PR exists to close.
     Narrow, blunt and stated beats wide, clever and silently wrong.
+
+    ⛔ A SECOND OVER-BLOCK, FOUND IN ROUND 4 AND ALSO ACCEPTED (#13807 review round 4,
+    finding 3): a TRUE verdict ATTRIBUTED TO A NAMED HEAD — ``at `49dc839715`,
+    `git diff --name-only origin/main...HEAD -- tortoise/` prints NOTHING`` — is refused
+    too. That is uncomfortable, because the section's own rule is "a count names the head it
+    was read at" and this file REQUIRES a named head elsewhere (the `2584a86ec1` assert pins
+    exactly that). It is accepted anyway because the same ledger cannot tell an attributed
+    verdict from an unattributed one without parsing prose, and the sentence the rule wants
+    is one edit away: name the head AND state the command, which is what every surviving
+    clause in the section does. Stated here rather than left to be discovered as a bug.
+
+    ⛔ AND THE OPERATIVE BOUNDARY, STATED PLAINLY (#13807 review round 4, finding 1). The
+    answer-form matcher requires the FULL command string; this ledger now carries the
+    abbreviated forms that shipped (`-- tortoise/`, `that command`) as exact rows, but a
+    FUTURE re-wording onto a NEW phrasing — an abbreviated command this ledger has not seen
+    before — is not detected. The class is finite in both arms, and a guard may be narrow;
+    what it may not do is describe itself as complete.
     """
     return [spelling for spelling in _TORTOISE_RETIRED_SPELLINGS if spelling in doc]
 
@@ -875,7 +910,14 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
 
 
 class _Unmeasurable(RuntimeError):
-    """The `-- tortoise/` set could not be MEASURED here, so its direction is UNKNOWN."""
+    """A MEASURED reading could not be taken here, so its direction is UNKNOWN.
+
+    ⛔ IT NO LONGER DESCRIBES A `-- tortoise/` SET (#13807 review round 4, finding 2). The
+    census arm takes no measurement at all now, so nothing measures that set; the one
+    surviving reader is `_measured_index_word_diff`, over `docs/00_index.md`. The old
+    docstring named a mechanism this file no longer has, which is how a description rots
+    into a false claim about the code beside it.
+    """
 
 
 def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
@@ -1141,12 +1183,16 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
         "prints NO path at all",
         "the `tortoise/` set above is EMPTY",
+        "returns NOTHING AT ALL",
+        "`-- tortoise/` returns NOTHING",
+        "that command returns nothing for all three",
+        "contributes no `tortoise/` path at all",
     ) == _TORTOISE_EMPTY_SPELLINGS, (
         "the emptiness ledger changed — the mirror direction of the same head-bound claim, "
         "retired for the same reason — head-bound in both directions (#13807 review, F1). "
-        "The last two rows sit beside NO command because the live document stated the verdict "
-        "that way (#13807 review round 3, F1); they were the answers a command-scoped ban "
-        "still could not see.")
+        "The rows after the first three sit beside an ABBREVIATED command or none at all "
+        "(#13807 review round 3 F1, round 4 finding 1); they were the answers a "
+        "command-scoped ban could not see, and each was measured live in the document.")
     # ⛔ THE COMMAND ITSELF IS PINNED (#13807 review round 3, F2 — MEASURED). Both sides of
     # every `f"{_TORTOISE_CENSUS_CMD}…"` row render from this ONE constant, and the injection
     # loop iterates the tuples, so editing the constant re-renders ledger AND witnesses
@@ -1322,9 +1368,11 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
     not an inert extractor; and on the pre-fix document the three surviving spellings
     are present with `moved` empty, so the loop reds on the first one.
 
-    ⛔ AND IT SKIPS WHEN THE DIFF CANNOT BE TAKEN (#13795 review, finding 2): both legs
-    that shell out to `git diff origin/main...HEAD` report UNKNOWN on a failed read, so
-    the depth-1 `test` job skips this arm instead of reding a true claim.
+    ⛔ AND IT SKIPS WHEN THE DIFF CANNOT BE TAKEN (#13795 review, finding 2): the ONE leg
+    still shelling out to `git diff origin/main...HEAD` reports UNKNOWN on a failed read, so
+    the depth-1 `test` job skips this arm instead of reding a true claim. (It said "both
+    legs" until #13807 review round 4, finding 2: the `-- tortoise/` measurement it counted
+    as the second is GONE — this file's only `subprocess.run` call site is the one below.)
     """
     assert _added_cite_tokens("a [-sdk.py:21679-]{+sdk.py:21715+} b") == {"21715"}, (
         "_added_cite_tokens cannot read a word-diff patch that DOES move a cite, so the "
