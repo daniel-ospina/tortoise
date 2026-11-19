@@ -644,9 +644,17 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 #     be satisfied.
 #
 # Both are the SAME open question — which node kinds must carry a prior? —
-# which #9063 reserves to the owner (belief model). WIDENING EITHER TUPLE IS
-# THAT DECISION; they are single constants because the query is already
-# id-anchored and EP-predicated.
+# which #9063 raised and reserved to the owner (belief model), then closed
+# COMPLETED on 2026-10-20 WITHOUT deciding it. No open issue tracked it at the
+# time of writing (that is a tracker state, not a fact this comment can keep
+# true — filing one is a legitimate future), so silence here must not be read
+# as a decision. ⛔ `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 correction quotes the
+# PRE-#13675 wording of this sentence ("…which #9063 reserves to the owner…",
+# present tense, pinned to `sdk.py:646-647`); that text is no longer here, and
+# the changelog is owner-gated, so the quote stays historical rather than
+# silently disagreeing with this file.
+# WIDENING EITHER TUPLE IS THAT DECISION; they are single constants because
+# the query is already id-anchored and EP-predicated.
 _CALIBRATION_EVIDENCE_KINDS = ("statement", "observation", "hypothesis")
 _CALIBRATION_GATED_LABELS = ("Point",)
 
@@ -1103,7 +1111,7 @@ def _capture_redaction_warning(count: int) -> str:
     )
 
 
-def _record_vector_searcher(sdk=None, timeout_ms=None):
+def _record_vector_searcher(sdk=None, timeout_ms=None, projection=None):
     """The dense leg's POSTGRES searcher for THIS request — or ``None``.
 
     #11642 / #4051 V1. Two properties are the whole reason this is a function
@@ -1171,9 +1179,33 @@ def _record_vector_searcher(sdk=None, timeout_ms=None):
         from .record_vector import searcher
     except Exception:  # noqa: BLE001, RUF100 — an unimportable accelerator is "unarmed"
         return None
+    # ⛔ #13610: THE COVERAGE DENOMINATOR. `record_vector.searcher` gates the
+    # `object`/`subject` arm on a COUNT — does the record hold a vector for every
+    # vector-bearing node the graph has? — and only the caller holds a graph
+    # handle, so the count is supplied here as a bound method on the projection
+    # this read is already using (no new handle is opened, and the count is
+    # cached per tenant/label by `record_vector.coverage`, so this is asked at
+    # most once per TTL whatever the read rate).
+    # `None` (no projection in hand) is SAFE and it is not neutral: with no
+    # denominator the gated labels DECLINE and the graph branch keeps answering,
+    # which is a deployment left in double-storage rather than one served a short
+    # cohort. See `searcher`'s docstring on why an unwired caller gets none of
+    # this issue's benefit.
+    population = None
+    if projection is not None:
+        population = getattr(projection, "_label_vector_count", None)
+        if population is not None and timeout_ms is not None:
+            # ⛔ THE READ'S BUDGET REACHES THE DENOMINATOR TOO (#13610 review). The
+            # count is a full-label aggregate on `:Object`/`:Subject` — neither
+            # carries a graph vector index (`#4997`) — and it runs on the dense
+            # read path, so leaving it on the door's default is the 30x mismatch
+            # `#11691` closed for the record half of the same gate.
+            population = lambda label: projection._label_vector_count(  # noqa: E731
+                label, timeout_ms=timeout_ms)
     try:
         return searcher(carried=getattr(sdk, "_record_tenant", None),
-                        timeout_ms=timeout_ms)
+                        timeout_ms=timeout_ms,
+                        graph_population=population)
     except Exception:  # noqa: BLE001, RUF100 — never let the accelerator break a read
         _logger.debug("record dense searcher unavailable — using the graph",
                       exc_info=True)
@@ -16354,6 +16386,49 @@ class TortoiseSDK:
             _note_tenant_graph(cache_graph=_cache_graph,
                                org_id=org_id, graph_id=graph_id)
 
+    @contextlib.contextmanager
+    def _record_tenant_scope(self):
+        """Install this SDK's BY-VALUE record tenant for ONE graph write (#13610).
+
+        ⛔ WHY THIS EXISTS. `#13610` retires the graph copy of a derived vector once
+        the record proves it holds one — and the fold that writes that copy asks
+        `record_vector.mirror_required`, which resolves the tenant through
+        `record_writer.record_tenant_effective`. The READ half of the same request
+        already passes its tenant by value (`_record_vector_searcher`), but a FOLD
+        has no SDK handle: it runs inside `proj.apply`, below the door. On the
+        hosted REST lane — which enters no ambient scope by design (see
+        `_bind_record_tenant`) — an ambient-only resolution therefore answers "no
+        tenant" for every write, keeps the mirror for ever, and leaves the double
+        storage this issue exists to end in place on the lane built for
+        multi-tenancy, while the read half of the same request cuts over.
+
+        So the door installs what it holds as the AMBIENT carrier, for the length of
+        that one write, and both halves then resolve ONE tenant. It is the same
+        primitive the MCP lane installs per request (`use_record_tenant`), not a
+        second precedence: `record_tenant_effective(carried=…)` still wins over it
+        wherever a caller passes a value.
+
+        ⚠️ Scope, so this cannot become a silent data-mover: it wraps the graph
+        FOLD only, and only for an SDK that already bound a usable tenant. Nothing
+        bound (the MCP lane, a single-tenant process resolving by env, a plain
+        `TortoiseSDK(...)`) yields NO scope — the carriers stay exactly as they were
+        and `mirror_required` keeps its conservative True. A tenant shape the record
+        seam would refuse (`record_writer.is_usable_tenant`) is likewise left alone:
+        this helper must never be the reason a write changes.
+        """
+        try:
+            from .record_writer import is_usable_tenant, use_record_tenant
+
+            tenant = self._record_tenant
+            usable = is_usable_tenant(tenant)
+        except Exception:  # noqa: BLE001, RUF100 — unarmed is the safe answer
+            usable, tenant = False, None
+        if not usable:
+            yield
+            return
+        with use_record_tenant(*tenant):
+            yield
+
     def _cache_graph_name(self) -> str:
         """The cache graph this SDK WILL fold into — derived, never opened.
 
@@ -16606,7 +16681,7 @@ class TortoiseSDK:
         # journal-then-cache by construction; a `proj.apply` reached from
         # anywhere BUT these live doors (or a replay) is refused by
         # `FalkorProjection.apply`.
-        with _live_write_scope("chokepoint"):
+        with self._record_tenant_scope(), _live_write_scope("chokepoint"):
             proj.apply(event)
 
     def _event_raw_write_door(self, proj, statement: str, *,
@@ -37777,7 +37852,8 @@ class TortoiseSDK:
                                     # keeps the graph branch unchanged.
                                     # #11691: bound to this read's budget.
                                     pg_vector=_record_vector_searcher(
-                                        self, timeout_ms=_budget_ms),
+                                        self, timeout_ms=_budget_ms,
+                                        projection=proj),
                                     # #13108: the store's own measured index
                                     # inventory, so an unindexed label skips the
                                     # doomed queryNodes attempt (`None` = not
@@ -41519,12 +41595,25 @@ class TortoiseSDK:
                 labels = []
             if labels:
                 self._evidence.pop(claim_id, None)
+                # ⛔ This refusal used to tell the caller that non-Point priors "are the open
+                # belief-model decision in #9063". That pointer does not resolve: #9063 RAISED the
+                # question — which node kinds must carry a prior? — reserved it to the owner, and
+                # closed COMPLETED on 2026-10-20 WITHOUT deciding it (the same reading is recorded in
+                # `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 correction, #13641, and stated in the code at
+                # `_CALIBRATION_EVIDENCE_KINDS`). So a caller who followed it found a closed issue and
+                # no answer, and the question was tracked by no open issue at the time of
+                # writing (a tracker state is not a fact this comment can keep true).
+                # ⛔ The correction is recorded HERE and deliberately NOT in the message: a tracker
+                # state is not something a shipped string can keep true (the issue may be filed
+                # tomorrow), and the archaeology of what an earlier wording said is not a fact a
+                # caller can act on. The message states the design fact only. Pinned by
+                # `tests/test_13634_9063_pointer_resolves.py`.
                 raise ValueError(
                     f"set_point_baseline: {claim_id!r} is a :{labels[0]}, not a "
                     f":Point — nothing was written. Baselines are writable on "
-                    f":Point only (epistemic-entity priors are the open "
-                    f"belief-model decision in #9063), so the belief you "
-                    f"intended was never stored."
+                    f":Point only: there is no writer for a declared prior on a "
+                    f"non-Point, and whether one should exist is unsettled, so "
+                    f"the belief you intended was never stored."
                 )
             if not _unbindable:
                 # #9262: the probes found NOTHING by this id — a typo'd or
@@ -45607,6 +45696,10 @@ class TortoiseSDK:
             _recency_factors,
             _trace_entry,
             VECTOR_LEG_BUDGET_MS,
+            # #13674: the non-raising mirror of #2952 — "which legs did this
+            # read actually use" as a word, so a query DECLARES ``hybrid``
+            # instead of leaving it to be inferred from a missing marker.
+            declared_retrieval_kind as _declared_retrieval_kind,
         )
         # W4 (#2101): the additive why-layer enrichment (shared assembly —
         # DM-1; lazy import — why.py pulls search_engine helpers only).
@@ -45622,6 +45715,9 @@ class TortoiseSDK:
             STATUS_DEGRADED as _STATUS_DEGRADED,
             classify_leg_trace as _classify_leg_trace,
         )
+        # #13674: the non-raising mirror of #2952 — "which legs did this read
+        # actually use" as a word. Taken from the SAME ``search_engine`` import
+        # above (one module, one import edge), not a second lazy import.
         # #7952 (§17.2 / §17.3): the COMPLETENESS MARKER's ONE home. The read
         # path CONSUMES it and mints no verdict of its own, exactly as it does
         # for the status vocabulary above — and `not-hot` is never a term of
@@ -45769,6 +45865,19 @@ class TortoiseSDK:
                         status, marker, record_consulted=False)
                     read_status_out[_RESIDENCY_FIELD] = marker
                 read_status_out["status"] = status
+                # #13674: DECLARE THE LEG THE READ ACTUALLY USED.
+                # ``status`` answers "did the store answer, and did anything
+                # degrade"; it cannot say whether the DENSE leg contributed —
+                # a healthy keyword-only read and a hybrid read share it. This
+                # key is #2952's mirror: with the embedder loaded and the vector
+                # leg healthy the read declares ``hybrid``, and when the dense
+                # leg did not contribute it says ``keyword_only`` instead of
+                # leaving the caller to infer it. Additive on the caller-owned
+                # sink, computed from the SAME predicates ``require_hybrid_read``
+                # uses (``search_engine.declared_retrieval_kind``), so a
+                # ``read_status_out=None`` caller is byte-identical.
+                read_status_out["retrieval"] = _declared_retrieval_kind(
+                    status_trace)
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
             if (
@@ -46365,7 +46474,8 @@ class TortoiseSDK:
             # would find no tenant and take the graph branch on EVERY request
             # while reporting nothing. `None` (no record DSN, or no tenant
             # installed) keeps the graph branches byte-identically.
-            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms),
+            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms,
+                                              projection=proj),
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -48770,7 +48880,8 @@ class TortoiseSDK:
                 # #11691: bound to THIS pass's budget, the same `timeout_ms` the
                 # graph branches just above get — otherwise the record leg would
                 # still be on the door's 15 s inside a 500 ms read.
-                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms),
+                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms,
+                                                  projection=proj),
                 # ONE dense slot, ONE tally: the shipped leg already counted it
                 # (the #8488 arm's ``meter=False`` precedent — the trace still
                 # records the second pass, so a measurement can see it ran).
@@ -52516,7 +52627,7 @@ class TortoiseSDK:
         # declares itself here rather than silently bypassing the gate. The
         # deviation itself is unchanged and still recorded at the module-top
         # contract.
-        with _live_write_scope("create_entity"):
+        with self._record_tenant_scope(), _live_write_scope("create_entity"):
             apply_result = proj.apply(event)
         if label == "Event":
             # #2061: journal EventRecorded so SDK-created Events survive

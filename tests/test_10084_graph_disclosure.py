@@ -24,7 +24,14 @@ CONSTRUCTION, which is why no declared `outputSchema` is even consulted (the one
 write tool that declares a wrap envelope is `tortoise_delete_entity`,
 `result: object | boolean`; a merged key would in fact validate, but it would
 change the tool's own answer, and #8482 is about the `result` VALUE's type, not
-about extra keys). No tool, parameter or SDK method is
+about extra keys). ⛔ #11609 P6 retired that door forward into the kept
+`tortoise_delete` entry, so it is no longer ADVERTISED: the name still answers
+through the #3883 shim and still carries the envelope, but `tortoise_delete` —
+the container a migrating caller lands on — returns a plain dict with no wrap
+envelope at all. Measured at this head over `TOOL_REGISTRY` +
+`mcp.get_tool(name).output_schema`: no LIVE write tool declares
+`x-fastmcp-wrap-result`; the eleven that do are all reads. No tool, parameter or
+SDK method is
 added, renamed or removed.
 
 And what the tests refuse to allow: the disclosure must never widen the isolation
@@ -581,8 +588,10 @@ async def test_a_dry_run_is_disclosed_as_a_preview(monkeypatch):
 @pytest.mark.parametrize(("payload", "expected"), [
     # the bare shape a dict-returning preview tool produces
     ({"dry_run": True}, True),
-    # the `x-fastmcp-wrap-result` shape `tortoise_delete_entity` (the ONE write
-    # tool that declares a wrap envelope: `result: object | boolean`) advertises
+    # the `x-fastmcp-wrap-result` shape `tortoise_delete_entity` advertised (the
+    # ONE write tool that declared a wrap envelope: `result: object | boolean`)
+    # until #11609 P6 retired it; the name is still served through the #3883 shim
+    # and still carries the envelope, it is just no longer ADVERTISED
     ({"result": {"dry_run": True, "token": "t"}}, True),
     # ...and the shapes that must NOT read as a preview
     ({"result": True}, False),
@@ -593,7 +602,9 @@ async def test_a_dry_run_is_disclosed_as_a_preview(monkeypatch):
 ])
 def test_the_receipt_marker_is_read_in_both_envelope_shapes(payload, expected):
     """`tortoise_delete_entity` advertises `x-fastmcp-wrap-result` with
-    `result: object | boolean`; an unconfirmed delete sets no `dry_run` argument
+    `result: object | boolean` — retired in #11609 P6, still served through the
+    #3883 shim, so the shape is reachable even though `tools/list` no longer
+    carries the name; an unconfirmed delete sets no `dry_run` argument
     at all. The receipt branch is the only one that can label either, so both
     shapes are pinned — with the negatives that make it discriminating (`is True`,
     not truthiness). The `result`-as-ARRAY case below is a future-proofing
