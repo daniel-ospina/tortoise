@@ -847,8 +847,15 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
         decide whether to restart a machine mid-import.
 
         The invariant is TWO-SIDED — the snapshot's own docstring says reordering
-        *either* side restores the tear — so BOTH sides are pinned here. Swapping
-        the reader's two reads left every row green (measured, #13841 review).
+        *either* side restores the tear — so BOTH sides are pinned here, and the
+        reader's THREE field reads are pinned pairwise against the field the
+        writer publishes LAST. Swapping any reader read ahead of the THREAD read
+        left every row green (measured: the clock swap at #13841 review, and the
+        bound swap at #13841 round 5) — the same class of tear, and the reason the
+        bound is pinned explicitly rather than assumed covered by the clock
+        assertion. A reader that reads the BOUND first pairs a live NEW thread
+        with the PREVIOUS attempt's bound (or with `None` → the 300 s default),
+        which is the #13819 F3 misdirection back on the reclaim warning path.
 
         Pinned as an ORDER IN THE SOURCE, the same way
         `test_the_call_sits_before_the_topology_sentinel` pins `entrypoint.sh`: a
@@ -878,6 +885,7 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
         reader = inspect.getsource(EmbeddingModel.load_attempt_snapshot)
         read_thread = reader.index("thread = cls._load_attempt_thread")
         read_clock = reader.index("started = cls._load_started_at")
+        read_bound = reader.index("bound = cls._load_attempt_timeout_s")
         assert read_thread < read_clock, (
             "`load_attempt_snapshot()` reads the CLOCK before the THREAD — the "
             "writer publishes clock-then-thread, so a reader that reads in that "
@@ -885,6 +893,15 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
             "attempt's live thread: a `load_in_progress_s` far past the bound, "
             "i.e. a false ABANDONED verdict on a load that just started "
             "(#13841 review)"
+        )
+        assert read_thread < read_bound, (
+            "`load_attempt_snapshot()` reads the BOUND before the THREAD — the "
+            "writer publishes the bound FIRST, precisely so a lock-free reader "
+            "that can already see the thread sees that attempt's own bound. "
+            "Read in the other order, a reader preempted between the two reads "
+            "pairs a live NEW thread with the PREVIOUS attempt's bound (or with "
+            "None → the 300 s default), publishing the WRONG bound on the "
+            "reclaim warning: the #13819 F3 misdirection (#13841 review)"
         )
 
     def test_a_reset_drops_the_dead_attempts_bound_too(
