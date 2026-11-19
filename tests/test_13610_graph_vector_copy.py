@@ -32,6 +32,13 @@ WHAT THIS FILE PINS, and each item is a way the change could be defeated:
 5. **The wiring is pinned** (`test_every_searcher_construction_site_...`): an
    unwired caller silently gets double-storage for ever, which no test of the
    predicate would catch.
+6. **The NON-VACUITY marker** (`test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so`,
+   `#13798`): the gate is `record >= graph`, so `0 >= 0` verified an unseeded label
+   exactly like a backfilled one. `Coverage.trivial` marks the two-zero case, the
+   real-verification case is pinned NOT to carry it, and the unmeasurable arm is
+   pinned not to be swallowed by it. The marker is additive: every shipped consumer's
+   verdict is unchanged, which is pinned in
+   `test_a_trivial_verdict_is_still_a_verified_verdict_for_the_shipped_paths`.
 
 Run (embedded lane; the DB-free cases need no database, the two projection cases
 build their own by path)::
@@ -669,6 +676,224 @@ def test_a_verified_verdict_survives_its_ttl_but_an_unverified_one_does_not(
         "and never converge — no label would ever cut over, and nothing says so")
     assert len(counts) == 2, (
         f"the expired verdict was served instead of re-measured: counts={counts}")
+
+
+# ── 3b. the non-vacuity marker: `0 >= 0` is TRUE and is not EVIDENCE (#13798) ──
+
+
+def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
+    """⛔ THE TRIVIAL PASS, MARKED — this is the whole of #13798's defect.
+
+    `coverage` decides `record_vectors >= graph_vectors`, and `0 >= 0` is true: a
+    label that holds nothing in EITHER store reported the SAME `verified=True` as a
+    fully backfilled one, so *"the record caught up"* was a finding the count never
+    established. `tools/claim_dense_leg_13732.py` met it first — an unseeded
+    population PASSES this gate and is then served as `mechanism=pgvector,
+    reason=ok`.
+
+    ⛔ `verified` STAYS TRUE, deliberately: with nothing in either store the two
+    stores answer identically, so refusing would change deployment behaviour for a
+    harmless state. What changes is that the state is TELLABLE — the marker and the
+    reason both say the evidence was two zeroes.
+
+    ⛔ THIS CASE REDS IF THE MARKER IS DROPPED — `verdict.trivial is True` fails on
+    a `Coverage` without the field (and on one that always answers `False`), which
+    is the falsifier the issue asks for. Both entry forms of the graph count are
+    driven (supplied / supplier) so the marker cannot live on one branch only.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    record_vector.reset_coverage_cache()
+    scope = record_vector._Scope(*_SCOPE)
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: 0, raising=True)
+
+    supplied = record_vector.coverage("point", scope, graph_vectors=0)
+    assert supplied.verified is True, supplied.as_dict()
+    assert supplied.trivial is True, (
+        "a verified verdict from two zeroes was reported as an ordinary "
+        f"verification — 'the record caught up' on no evidence: {supplied.as_dict()}")
+    assert (supplied.record_vectors, supplied.graph_vectors) == (0, 0), supplied
+    assert "TRIVIAL" in supplied.reason and "EMPTY" in supplied.reason, (
+        f"the reason does not state the vacuity, so a reader who sees only the "
+        f"prose is told nothing: {supplied.reason!r}")
+    assert supplied.as_dict()["trivial"] is True, (
+        "the marker is not on the serialised verdict, so an artifact that records "
+        "`as_dict()` cannot tell a trivial pass from a catch-up")
+
+    # The SUPPLIER form is a different branch (asked on a cache miss) and must
+    # answer identically — a marker wired to one entry point is a marker the other
+    # one silently skips.
+    record_vector.reset_coverage_cache()
+    via_supplier = record_vector.coverage(
+        "point", scope, graph_population=lambda label: 0)
+    assert via_supplier.verified is True and via_supplier.trivial is True, (
+        f"the supplier form lost the marker: {via_supplier.as_dict()}")
+
+
+def test_a_real_verification_never_carries_the_trivial_marker(monkeypatch):
+    """The other direction: a satisfied count with a NON-EMPTY population.
+
+    Without this the marker could be `verified and True` or a hard-coded `True` and
+    the case above would still pass — the marker would then be on every verdict and
+    tell an operator nothing. Both shapes of a real contract are driven (an equal
+    count and a surplus) plus the shortfall, which is neither.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    scope = record_vector._Scope(*_SCOPE)
+
+    for record_vectors, graph_vectors, expected in (
+            (3, 3, True), (5, 3, True), (1, 1, True), (2, 3, False),
+            # ⛔ record > 0 WITH AN EMPTY GRAPH — the ONE shape that distinguishes
+            # the marker's `record_vectors == 0` clause from a `graph_vectors == 0`
+            # one (#13798 review B). Both sides zero is not the only way to have a
+            # zero in the comparison, and a mutant written as
+            # `trivial = verified and graph_vectors == 0` would label this
+            # SUBSTANTIVE verification TRIVIAL — a record that holds vectors against
+            # a graph that serves none (a cleared or restored-empty graph), which is
+            # exactly the catch-up the marker exists to let you tell apart. It is
+            # also reachable, so it is a case and not a hypothetical.
+            (5, 0, True)):
+        record_vector.reset_coverage_cache()
+        monkeypatch.setattr(record_vector, "_record_vector_count",
+                            lambda *a, _n=record_vectors, **k: _n, raising=True)
+        verdict = record_vector.coverage("point", scope,
+                                         graph_vectors=graph_vectors)
+        assert verdict.verified is expected, verdict.as_dict()
+        assert verdict.trivial is False, (
+            f"record={record_vectors}/graph={graph_vectors} was marked TRIVIAL — "
+            f"a non-empty comparison is exactly the evidence the marker exists to "
+            f"distinguish: {verdict.as_dict()}")
+        assert "TRIVIAL" not in verdict.reason, verdict.reason
+
+
+def test_the_trivial_marker_does_not_swallow_the_unmeasurable_arm(monkeypatch):
+    """⛔ THE ARM THE MARKER MUST NOT REACH.
+
+    An unmeasurable side is `None`, never `0` — *"an absence is not a verdict"* —
+    and reading it as a zero would let the marker turn a FAILED MEASUREMENT into a
+    harmless trivial pass. The dangerous shape is the mixed one: the graph supplies
+    a real `0` while the RECORD could not be counted, which is one zero away from
+    the trivial condition and must still be UNVERIFIED.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    scope = record_vector._Scope(*_SCOPE)
+
+    # (a) the graph's count could not be measured at all.
+    record_vector.reset_coverage_cache()
+    verdict = record_vector.coverage("point", scope, graph_vectors=None)
+    assert verdict.verified is False and verdict.trivial is False, verdict.as_dict()
+    assert verdict.record_vectors is None and verdict.graph_vectors is None
+
+    # (b) the graph says 0 and the RECORD could not be counted — one zero short of
+    #     the trivial condition, and still not a pass.
+    record_vector.reset_coverage_cache()
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: None, raising=True)
+    verdict = record_vector.coverage("point", scope, graph_vectors=0)
+    assert verdict.verified is False, (
+        "an unmeasurable record count verified coverage — the graph copy would be "
+        f"retired on a FAILED read: {verdict.as_dict()}")
+    assert verdict.trivial is False, (
+        f"the trivial marker swallowed the unmeasurable arm: {verdict.as_dict()}")
+    assert "TRIVIAL" not in verdict.reason, verdict.reason
+    assert record_vector.coverage_verified("point", scope) is False
+
+    # (c) a supplier that RAISES is the same unmeasured side, not a zero.
+    record_vector.reset_coverage_cache()
+
+    def _boom(_label: str) -> int:
+        raise RuntimeError("graph handle gone")
+
+    verdict = record_vector.coverage("point", scope, graph_population=_boom)
+    assert verdict.verified is False and verdict.trivial is False, verdict.as_dict()
+
+
+def test_a_trivial_verdict_is_still_a_verified_verdict_for_the_shipped_paths(
+        monkeypatch):
+    """⛔ ADDITIVE, PINNED: the marker changes NO shipped consumer's verdict.
+
+    The two-zero state is a real state, and the mandate on #13798 is explicit that
+    refusing it would change deployment behaviour for a harmless one. So the arms a
+    trivial verdict reaches must behave EXACTLY as before the marker:
+
+    * the READ gate (`searcher`'s `if not verdict.verified`) proceeds — both stores
+      answer the same empty cohort;
+    * the WRITE gate (`coverage_verified` -> `mirror_required`) still answers "the
+      record owns it", which is why this state is not a refusal;
+    * the CACHE still holds it stickily, which is the documented one-way contract
+      (`Coverage`'s fourth residual: a trivially-verified label inherits the
+      gain-case residual, so an operator must not read `trivial` as a backfill
+      certificate).
+    """
+    from tortoise.record_writer import use_record_tenant
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    record_vector.reset_coverage_cache()
+    scope = record_vector._Scope(*_SCOPE)
+    counts: list[int] = []
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: counts.append(1) or 0, raising=True)
+
+    verdict = record_vector.coverage("object", scope, graph_vectors=0)
+    assert verdict.trivial is True and verdict.verified is True, verdict.as_dict()
+    assert record_vector.coverage_verified("object", scope) is True
+    with use_record_tenant(*_SCOPE):
+        assert record_vector.mirror_required("object") is False, (
+            "the trivial verdict was turned into a refusal at the write gate — with "
+            "nothing in either store the two stores answer identically, so this "
+            "would change deployment behaviour for a harmless state (#13798)")
+
+    # Sticky, exactly like any other verified verdict: a second read takes NO count.
+    assert record_vector.coverage("object", scope, graph_vectors=0).trivial is True
+    assert len(counts) == 1, (
+        "the trivial verdict was re-measured — the cache contract moved, and the "
+        f"cost model with it: counts={counts}")
+
+    # The marker is DEFAULTED, so a `Coverage` built without it (every call site in
+    # this tree, plus any out-of-tree reader) is an ordinary non-trivial verdict.
+    assert record_vector.Coverage(
+        label="object", verified=True, record_vectors=4, graph_vectors=4,
+        reason="").trivial is False
+
+
+def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
+        monkeypatch, caplog):
+    """⛔ THE MARKER REACHES A TRACE, not only the object (#13798 review C).
+
+    `trivial` on the verdict, `as_dict()["trivial"]` and the reason string are real
+    data — but every SHIPPED consumer branches on `verdict.verified` alone, and the
+    serve gate logged its `reason` only in the DECLINE branch, which a verified
+    verdict never reaches. So on the tree before this case, a label holding nothing
+    in either store served an EMPTY cohort as `mechanism=pgvector, reason=ok` and
+    nothing in any trace told it apart from a backfilled label answering the same
+    read — the state #13798 exists to make tellable was tellable only to a reader
+    who already had the object in hand.
+
+    ⛔ REDS if the marker is dropped (always-False `trivial` -> the line is never
+    emitted), i.e. the same mutant as the zero-zero case, measured on the
+    OBSERVABILITY surface rather than on the object. And it changes NO decision: the
+    read still proceeds and still answers, because with both sides empty the two
+    stores answer identically.
+    """
+    import logging
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    _stub_record(monkeypatch, count=0, rows=[])
+
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows, _graph, _trace = _run(_searcher(0), entity_type="object")
+
+    assert rows == [], rows
+    assert "TRIVIALLY" in caplog.text, (
+        "a trivially-verified label served an empty cohort with nothing in the trace "
+        "saying why — `mechanism=pgvector, reason=ok` is then indistinguishable from "
+        f"a catch-up: {caplog.text!r}")
+    assert "BOTH SIDES ARE EMPTY" in caplog.text, (
+        f"the trace names the state but not its evidence: {caplog.text!r}")
 
 
 # ── 4b. the cost model: the counts are taken on a MISS, and only then ─────
