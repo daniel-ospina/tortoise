@@ -93,10 +93,11 @@ _RESOURCE = "cursor://tools.internal/v1"
 # The OTHER destination the origin assertion cannot see, and the reason `resource` is NOT the only
 # parameter that can name one: `redirect_uri` accepts this exact shape — `consent-bridge.ts:64`
 # `NATIVE_REDIRECT_SCHEMES = ["cursor"]`, accepted at `:244-248` — because the beta's only native
-# harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED value in
-# `_CROSS_HALF_URIS`, `:1417`). `cursor://…` carries no `http(s)://`, so it is invisible to the origin
-# assertion AND absent from the scheme-less `client.example/cb` tail row: a page that rendered it
-# passed every assertion in `_assert_refusal_page` GREEN (review of #13712, F1).
+# harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED value
+# in `_CROSS_HALF_URIS` at `:1465`, the accepted row at `:1475`). `cursor://…` carries no
+# `http(s)://`, so it is invisible to the origin assertion AND absent from the scheme-less
+# `client.example/cb` tail row: a page that rendered it passed every assertion in
+# `_assert_refusal_page` GREEN (review of #13712, F1).
 _NATIVE_REDIRECT = "cursor://sentinel.example/cb"
 
 # `scope` is unvalidated free text (`start.ts:135`), so the sentinel arm sends this instead of the
@@ -106,9 +107,18 @@ _NATIVE_REDIRECT = "cursor://sentinel.example/cb"
 # that does not exist (review of #13712, F2). A sentinel is absent for a reason no copy edit supplies.
 _SCOPE_SENTINEL = "scope-sentinel-mcp"
 
-# The ONE arm that presents what a `_PARAMS` arm cannot. `_PARAMS` stays the set EVERY arm presents
+# The params that carry what a `_PARAMS` arm cannot. `_PARAMS` stays the set EVERY arm presents
 # (widening it would change what every other arm proves), so the values that need to be distinctive —
-# both non-http destinations and the `scope` sentinel — are spread onto a copy by this arm instead.
+# both non-http destinations and the `scope` sentinel — ride on a copy of these instead.
+#
+# ⛔ ONE arm is enough, and that is a MEASURED property of the guard rather than an assumption: the
+# echoed-value tuple in `_assert_refusal_page` is checked against every arm's BODY, not against the
+# params that arm presented. So both refusal copies are covered — `FLOW_NOT_YOURS` by the ordinary
+# `_PARAMS` `403` arm — and a mutant that renders `cursor://sentinel.example/cb` into the `403` copy
+# REDS on that existing arm (`1 failed, 6 passed` on the pre-fix tree, measured 2026-11-19).
+# Review of #13712 F1 read the sentinel as body-scoped and asked for a second, `403`-shaped sentinel
+# arm; measured, it is not body-scoped and the hole did not exist, so this file adds no such arm —
+# it would be an arm whose coverage the tuple already had.
 _SENTINEL_PARAMS = dict(
     _PARAMS, resource=_RESOURCE, redirect_uri=_NATIVE_REDIRECT, scope=_SCOPE_SENTINEL)
 
@@ -830,6 +840,11 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     # party's log. These are the values a mutant can interpolate into the copy and still slip past
     # every assertion above — a new arm that presents a different key is pinned by adding it here
     # rather than by remembering to.
+    #
+    # ⛔ The tuple is checked against THIS arm's body, whatever params the arm presented — so every
+    # arm covers the copy it renders, and the page's TWO copies (`STORE_FAULT` / `FLOW_NOT_YOURS`,
+    # `consent-refusal.ts:108-130`) are both covered by the arms that render them. A value only one
+    # arm presents (a sentinel) is therefore still caught in the OTHER copy: no second arm is owed.
     #
     # ⛔ `redirect_uri` appears TWICE, and the split is load-bearing. The `_PARAMS` literal is pinned
     # only as its SCHEME-LESS tail (`client.example/cb`): the full `https://client.example/cb` is
@@ -1987,7 +2002,10 @@ _FOREIGN_OWNED_ROW = [{
     # the set EVERY arm presents, so widening it would change what every other arm proves.
     ("start_signed_in", {"storeThrows": True, "params": _SENTINEL_PARAMS},
      "consent_store_unavailable", 503),
-    # #10865 arm B — the `403`.
+    # #10865 arm B — the `403`. ONE arm suffices for both refusal copies: the echoed-value tuple is
+    # checked against the body this arm rendered, so the sentinel values above — which only the
+    # `503` sentinel arm PRESENTS — are still caught here if this copy ever interpolates them
+    # (measured: rendering `cursor://sentinel.example/cb` into `FLOW_NOT_YOURS` reds this arm).
     ("start_signed_in", {"seededAttempts": _FOREIGN_OWNED_ROW, "sessionUserId": "user-2",
                          "params": dict(_PARAMS, attempt_key="b-attempt-key")},
      "flow_not_yours", 403),
@@ -2113,6 +2131,13 @@ def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
         "`consentRefusalPage(...)` and keep the status (#10884/#10865)")
 
 
+# ⛔ The DENIAL this PR exists to keep out of the contract artifacts: "every hard failure is a
+# page" — the claim `start.ts` falsifies with its two surviving `json(...)` returns. Matched as the
+# three words in order with ANY markup or whitespace between them, so the re-introduction cannot
+# evade the guard by wrapping the phrase, emphasising it, or hyphenating it.
+_FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure")
+
+
 def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
     claim the route FALSIFIES — and pinning the DENIAL, not a wording, is what keeps it corrected.
@@ -2125,6 +2150,19 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     The files scanned are the ones a reader takes the CONTRACT from: the route, the page builder
     (added by this fold), and the bridge record. Test module docstrings are not scanned — the same
     sentence appears there legitimately, as the thing being narrowed.
+
+    ⛔ WHERE THE RED CAN ACTUALLY LAND — one corpus, not three. Only `consent-refusal.ts` carried
+    the phrase until this change; `start.ts` and `consent-identity-bridge.md` contain it NOWHERE at
+    head (`git grep -i 'every hard failure'`), so their rows are FORWARD-LOOKING: they hold the next
+    author who writes the absolute there, and neither can be the red for a revert of this hunk.
+    Three files scanned is not three catches, and this docstring must not be read as though it were.
+
+    ⛔ THE MATCH IS NOT ONE WHITESPACE-EXACT SPELLING. A prose absolute comes back in whatever shape
+    the edit takes: wrapped inside the phrase (`every hard` / `   * failure`), emphasised
+    (`every **hard** failure`), or hyphenated (`hard-failure`). Pinning the literal
+    `"every hard failure"` passed all three, so a guard for a false absolute was defeatable by a
+    line break (review of #13712, F3). `_FALSE_ABSOLUTE_RE` pins the DENIAL — those three words in
+    that order, in any markup — which is the claim, not a wording.
 
     Non-vacuous, and where the red actually lands: `origin/main`'s
     `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
@@ -2143,8 +2181,7 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
                                       "consent-identity-bridge.md").read_text(encoding="utf-8"),
     }
     for name, text in corpus.items():
-        lowered = text.lower()
-        assert "every hard failure" not in lowered, (
+        assert not _FALSE_ABSOLUTE_RE.search(text.lower()), (
             f"`{name}` claims EVERY HARD FAILURE is a page, and `start.ts` returns JSON from TWO "
             "places (the `400` caller error and the terminal `200` flow state — see "
             "`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`). Say every REFUSAL: the terminal `200` "
