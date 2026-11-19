@@ -2532,16 +2532,30 @@ def uri_fingerprint(uri: str) -> str:
     #    ⛔ AND `_host_port` ON THE TEXT BEFORE THE MARKER IS NOT SUFFICIENT ON ITS OWN,
     #    because it answers "could a query start here?", never "is the userinfo reading
     #    impossible?". `docker://admin:1234?x@prod:6379/g` has `admin:1234` before the `?`
-    #    — host `admin`, port `1234` — so the query reading was taken and the REAL host
-    #    after the `@` was discarded as query content: measured, prod and staging folded
-    #    onto `docker://admin:1234/g` and the userinfo itself was emitted into the plan a
-    #    human approves.
+    #    — host `admin`, port `1234` — and `docker://prod:6379?x@other:6379` is
+    #    character-for-character the same shape, so when a `host:port` ALSO follows an `@`
+    #    past the marker both readings are grammatical.
     #
-    #    So the discriminator is applied BOTH WAYS: the text before the marker must be a
-    #    `host[:port]`, AND no `host:port` may follow an `@` after the marker. When both
-    #    readings are grammatical the URI is REFUSED — the only answer that neither prints
-    #    the credential nor folds two targets — because a fingerprint is a comparison key
-    #    and an unresolvable key is not a key.
+    #    ⛔ WHAT THE TWO READINGS DO *NOT* DO, corrected here after measurement: they do
+    #    NOT fold two deployments, and the tail is NOT "the real host". The resolver reads
+    #    the authority with `urlsplit` (RFC 3986 §3.2 — it ends at the first `/`, `?` or
+    #    `#`), so `netloc == 'admin:1234'` and `FalkorProjection.from_uri` DIALS
+    #    `admin:1234`; the `@prod:6379` tail is query content the tool never connects to.
+    #    An earlier draft of this block claimed a production→staging fold and a leaked
+    #    userinfo for that shape. Both claims were FALSE.
+    #
+    #    The refusal stands for the reason that survives: when two grammatical readings
+    #    name different targets the KEY cannot be derived, and `docker://:pa/ss@host:6379/g`
+    #    is the same shape where the pre-marker text IS the credential. Refusing is the
+    #    only answer that holds both properties across the class.
+    #
+    #    ⛔ SCOPE, ACCURATELY: this refuses any query/fragment carrying an `@` whose tail is
+    #    a `host:port` (`?ssl=true&addr=user@master:6379` included) — a fail-closed cost
+    #    accepted because the URI cannot distinguish the readings, with percent-encoding as
+    #    the remedy. It is NOT every such input: an EMPTY pre-marker authority takes the
+    #    tail arm below, which is why that arm now refuses an empty authority of its own.
+    #    (The earlier "EVERY … 12,672 inputs" phrasing was wrong on both counts and pinned
+    #    to no artifact; no figure is claimed here because none was reproduced.)
     authority, _, path = rest.partition("/")
     marker = min((i for i in (authority.find("?"), authority.find("#")) if i >= 0),
                  default=len(authority))
@@ -2594,8 +2608,7 @@ def uri_fingerprint(uri: str) -> str:
                 "'?'/'#', and the two readings name different targets. A fingerprint is "
                 "compared to decide whether two deployments are the same, so it may not "
                 "be derived from an undecidable boundary. Percent-encode the credential "
-                "('?' → '%3F', '#' → '%23', '/' → '%2F') or pass the graph name out of "
-                "band with `--graph-name` so the target becomes parseable.")
+                "('?' → '%3F', '#' → '%23', '/' → '%2F') so the target becomes parseable.")
         # a GENUINE query/fragment: it is not target identity and can carry a credential
         # (`?api_key=…`), so it is dropped — from the authority AND from the path.
         host = head.split("@")[-1] if "@" in head else head
@@ -2603,6 +2616,24 @@ def uri_fingerprint(uri: str) -> str:
         # a password containing `?`/`#`: the userinfo runs to the LAST `@`, and whatever
         # follows it is the host — which must still be a real `host[:port]` for the
         # reading to be believable at all.
+        #
+        # ⛔ AN EMPTY PRE-MARKER AUTHORITY IS ITS OWN REFUSAL. `docker://?x@prod:6379` has
+        # `marker == 0`, so `_host_port(head)` is `None` and control reaches the tail arm,
+        # which took `prod:6379` as the host — while `urlsplit` puts the authority at `""`
+        # and the resolver DIALS `localhost:16379`. Measured: that fingerprint is identical
+        # to `docker://prod:6379`, so a plan certified against localhost passed
+        # `REFUSE_TARGET_DRIFT` when executed against prod. Same for
+        # `docker://#x@prod:6379` and `docker://:6379?x@prod:6379` (dials
+        # `localhost:6379`). An authority the marker cut to nothing names no target, so it
+        # cannot be fingerprinted.
+        if marker < len(authority) and _host_port(authority[:marker]) is None:
+            raise Refusal(
+                REFUSE_TARGET_UNPARSEABLE,
+                f"the graph target {scheme}://… cannot be fingerprinted: a '?'/'#' "
+                "terminates an authority that is empty or not a usable host[:port], so "
+                "the address this run would actually dial is not the one the URI names. "
+                "Pass a real host (or a bare --db-path) and percent-encode any "
+                "credential.")
         userinfo, _, tail = authority.rpartition("@")
         host = tail
         tail_marker = min((i for i in (host.find("?"), host.find("#")) if i >= 0),
@@ -2620,7 +2651,7 @@ def uri_fingerprint(uri: str) -> str:
                 "the last '@' and no host:port follows it, so the authority cannot be "
                 "separated from a credential without either printing it or dropping the "
                 "host. Percent-encode the credential ('/' → '%2F', '?' → '%3F', "
-                "'#' → '%23') or pass the graph name out of band with `--graph-name`.")
+                "'#' → '%23').")
     # ⛔ 2b. #2987'S SHAPE — A CREDENTIAL WITH NO `@` — MUST REFUSE TOO, and the docstring
     #    above cites that arm, so it has to exist here. `docker://:hunter2` (a copy-paste
     #    that dropped the `@host` tail), `docker://user:hunter2` and

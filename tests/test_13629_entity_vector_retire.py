@@ -1922,12 +1922,22 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     # the userinfo and is removed WITH it. Cutting the query first — the tidier-looking
     # order — truncated the credential at that character and emitted the remainder as the
     # HOST (`docker://:s3cret`), re-creating the exact #2983 leak this function cites.
-    assert strip.uri_fingerprint("docker://:s3cret#frag@host:6379/tortoise") == \
-        "docker://host:6379/tortoise"
-    assert strip.uri_fingerprint("docker://:s3cret?q@host:6379/tortoise") == \
-        "docker://host:6379/tortoise"
-    assert strip.uri_fingerprint("docker://:rot?ated@prod:6379/g") != \
-        strip.uri_fingerprint("docker://:rot?ated@staging:6379/g")
+    #
+    # ⛔ AND THESE REFUSE, because `urlsplit` terminates the authority at the `#`/`?`: the
+    # netloc is `:s3cret`, whose port cast fails, so neither address is one this tool could
+    # ever dial. A fingerprint naming `host:6379` there would name a deployment the resolver
+    # never connects to — the same rule that refuses `docker://?x@prod:6379`.
+    for undialable in ("docker://:s3cret#frag@host:6379/tortoise",
+                       "docker://:s3cret?q@host:6379/tortoise",
+                       # a `?` BEFORE the host leaves the netloc as `:rot`, whose port
+                       # cast fails — the same undialable class, not a "genuine query".
+                       "docker://:rot?ated@prod:6379/g",
+                       "docker://:rot?ated@staging:6379/g"):
+        with pytest.raises(strip.Refusal):
+            strip.uri_fingerprint(undialable)
+    # A `?` AFTER a real host is a genuine query: the authority is `host:6379`, the query is
+    # dropped, and the userinfo is gone. (Asserted above for the `:pw@host:6379?…` shape.)
+    assert strip.uri_fingerprint("docker://prod:6379?x@y/g") == "docker://prod:6379/g"
     # …and an `@` inside the QUERY is the ambiguous shape, refused rather than folded.
     with pytest.raises(strip.Refusal):
         strip.uri_fingerprint("docker://prod:6379/g?api_key=x@y")
@@ -1941,13 +1951,25 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     # `docker://:s3cret?xx@prod:6379/g` rendered `docker://:s3cret`, and prod/staging
     # folded onto `docker://:pa`. The authority window is therefore resolved BEFORE the
     # query is cut.
-    assert strip.uri_fingerprint("docker://:s3cret?xx@prod:6379/g") == \
-        "docker://prod:6379/g"
-    assert "s3cret" not in strip.uri_fingerprint("docker://:s3cret?xx@prod:6379/g")
-    assert "xx" not in strip.uri_fingerprint("docker://:s3cret?xx@prod:6379/g")
-    assert strip.uri_fingerprint("docker://:pa?ss@prod:6379/g") != \
-        strip.uri_fingerprint("docker://:pa?ss@staging:6379/g")
-    assert strip.uri_fingerprint("docker://:pw#x@prod:6379/g") == "docker://prod:6379/g"
+    #
+    # ⛔ BUT WHEN THE MARKER TERMINATES AN AUTHORITY THAT IS NOT A HOST, THE REFUSAL WINS.
+    # `urlsplit("docker://:s3cret?xx@prod:6379/g").netloc` is `":s3cret"` — the port cast
+    # fails, so this run could never dial that address, and returning `prod:6379/g` would
+    # name a deployment the tool never connects to. The same reason the empty-authority
+    # shapes (`docker://?x@prod:6379`) refuse: a fingerprint may not name a target the
+    # resolver would not dial.
+    for unaddressable in (
+        "docker://:s3cret?xx@prod:6379/g",
+        "docker://:pa?ss@prod:6379/g",
+        "docker://:pw#x@prod:6379/g",
+        "docker://?x@prod:6379",
+        "docker://#x@prod:6379",
+        "docker://:6379?x@prod:6379",
+    ):
+        with pytest.raises(strip.Refusal) as unaddr:
+            strip.uri_fingerprint(unaddressable)
+        assert unaddr.value.token == strip.REFUSE_TARGET_UNPARSEABLE
+        assert "s3cret" not in str(unaddr.value) and "xx" not in str(unaddr.value)
     # …and a query BEFORE a path (`host:6379?x@y/g`) resolves to its real host rather than
     # letting the query tail become one.
     # ⛔ BUT A QUERY TAIL THAT ITSELF LOOKS LIKE `host:port` IS NOT RESOLVED EITHER WAY —
@@ -1988,12 +2010,15 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
         "docker://prod:6379"
     assert "SECRETVALUE" not in strip.uri_fingerprint(
         "docker://:pw@prod:6379?api_key=SECRETVALUE")
-    # …including when the `?` is ALSO inside the password and a second one starts a real
-    # query: the userinfo runs to the last `@` and the query after the host is cut from
-    # the AUTHORITY (this is the only shape the authority-side cut is load-bearing for).
-    assert strip.uri_fingerprint("docker://:pa?ss@prod:6379?api_key=SECRET") == \
-        "docker://prod:6379"
-    assert "SECRET" not in strip.uri_fingerprint("docker://:pa?ss@prod:6379?api_key=SECRET")
+    # ⛔ WHEN THE FIRST `?` TERMINATES THE AUTHORITY TO NOTHING DIALABLE, THE REFUSAL WINS —
+    # even if a later `?` looks like a real query. `urlsplit` puts this netloc at `:pa`,
+    # whose port cast fails, so the tool could never connect to `prod:6379` and a
+    # fingerprint naming it would name a deployment this run does not dial.
+    for undialable in ("docker://:pa?ss@prod:6379?api_key=SECRET",
+                       "docker://?x@prod:6379",
+                       "docker://:6379?x@prod:6379"):
+        with pytest.raises(strip.Refusal):
+            strip.uri_fingerprint(undialable)
     assert strip.uri_fingerprint("docker://prod:6379#frag") == "docker://prod:6379"
     assert strip.uri_fingerprint("docker://h:6379?") == "docker://h:6379"
     # Case is not identity (RFC 3986 §6.2.2.1): a re-run in another case must not be
