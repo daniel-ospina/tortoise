@@ -1688,9 +1688,7 @@ class TestTheDocumentedRunPath:
         """
         tree = ast.parse(TOOL.read_text())
         seed = next(
-            n
-            for n in ast.walk(tree)
-            if isinstance(n, ast.FunctionDef) and n.name == "_seed_graph"
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_seed_graph"
         )
         # ⛔ A `try` is FINE when its handler re-raises (`except Exception as exc:
         # raise Refused(...) from exc` is this file's house style); what would
@@ -1712,9 +1710,7 @@ class TestTheDocumentedRunPath:
             node
             for node in ast.walk(seed)
             if isinstance(node, ast.Dict)
-            and any(
-                isinstance(k, ast.Constant) and k.value == "embedding" for k in node.keys
-            )
+            and any(isinstance(k, ast.Constant) and k.value == "embedding" for k in node.keys)
         ]
         assert payloads, (
             "the seed payload must always carry an explicit `embedding` — without "
@@ -1745,8 +1741,7 @@ class TestTheDocumentedRunPath:
             candidate
             for candidate in write_loops
             if any(
-                isinstance(node, ast.Call)
-                and "_upsert_point_props" in ast.unparse(node.func)
+                isinstance(node, ast.Call) and "_upsert_point_props" in ast.unparse(node.func)
                 for node in ast.walk(candidate)
             )
         ]
