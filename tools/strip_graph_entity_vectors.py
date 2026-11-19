@@ -320,19 +320,6 @@ def _function_bodies(source: str) -> dict[str, list]:
     return bodies
 
 
-def _gate_call(node) -> bool:
-    """Does this subtree contain a CALL to the gate? A call — not a name, not a string."""
-    import ast
-
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            callee = sub.func
-            name = getattr(callee, "id", None) or getattr(callee, "attr", None)
-            if name in _GATE_REFERENCES:
-                return True
-    return False
-
-
 def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     """Does this function ASK the gate — i.e. let its answer steer control flow?
 
@@ -347,10 +334,15 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     * **dead code** — ``if False: mirror_required(...)``.
 
     So a mention is not evidence and a call is not sufficient: the call must sit in a
-    position whose value DECIDES something: an ``if``/``while``/conditional-expression
-    TEST that is not a constant. That is the shape the real write-stop uses (`if
-    _derived_mirror_required("object"):` around the encode in `_upsert_object`), and it is
-    the ONLY position where the gate demonstrably prevents a write *inside the function*.
+    position whose value DECIDES the WRITE: an ``if`` (the only form walked — `while` and
+    conditional expressions are not accepted, and this docstring says so rather than
+    promising arms the code does not implement) whose test asks the gate about THIS label
+    and whose BODY contains the embedding store. That is exactly the shape `#13617`
+    implements — ``embedding = None; if _derived_mirror_required("subject"):
+    … embedding = derived_embedding.encode(...)``, an ENCODE GUARD with no ``return`` and
+    no ``raise``. Requiring an early exit, as an earlier version did, refused the only
+    write-stop that exists and made the gate unable to open on the fold that asks; a
+    `Return`/`Raise` body is still accepted as the alternative form.
 
     ⛔ AND IT MUST BE ASKED **ABOUT THIS LABEL**. `_update_entity` and `restore_graph` each
     store FIVE labels, so a gate call is not a fact about all of them: a partial write-stop
@@ -361,13 +353,18 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     STRING CONSTANT naming one of the label's own ``entity_types``; a computed argument is
     "still emits", because the tool cannot tell which label it asked about.
 
-    ⛔ AND THE TESTED BRANCH MUST EXIT. `if mirror_required("object"): _bump_counter()`
-    calls the gate, and the write then runs anyway; `if g(...) or True:` and
-    `while g(): break` are the same shape. The accepted form is an ``if`` whose test asks
-    the gate about this label and whose body RETURNS or RAISES — the early-exit write-stop
-    `#13617` actually uses (`if _derived_mirror_required("object"): return` /
-    `if not …: return`), where the guarded branch demonstrably skips the rest of the
-    function. Refusing the weaker shapes costs a refactor; accepting one costs the race.
+    ⛔ AND THE TESTED BRANCH MUST CONTAIN THE STORE. `if mirror_required("object"):
+    _bump_counter()` calls the gate and the write then runs anyway; `if g(...) or True:` is
+    a constant branch. The accepted form is an ``if`` whose test asks the gate about this
+    label and whose body touches ``embedding`` (or returns/raises) — so the guard sits on
+    the write itself, which is what `#13617` does.
+
+    ⛔ STATED RESIDUAL: a writer with TWO write sites, only one guarded, is not detectable
+    here — proving that needs data flow this check does not do. The requirement it CAN
+    enforce is "the gate guards a store of this label in this function", and a write-stop
+    that leaves a second site open is a defect in that write-stop. What the check refuses
+    is a gate call anywhere that is not guarding a store; what it cannot prove is that it
+    guards ALL of them.
 
     ⛔ A RETURNED VALUE IS NOT ACCEPTED, even when it is the gate's own answer.
     ``self._write(ev); return mirror_required("object")``, ``return (self._write(ev),
@@ -398,8 +395,30 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
             continue                          # `if False:` — dead, decides nothing
         if not _asks_about(sub.test, wanted):
             continue
+        # ⛔ THE GUARDED BODY MUST TOUCH THE STORE. An `if` that asks and then bumps a
+        # counter is not a write-stop; the store has to sit in the branch the answer
+        # controls. `Return`/`Raise` covers the early-exit form, `embedding` covers the
+        # encode-guard form `#13617` uses.
+        body = sub.body
         if any(isinstance(child, ast.Return | ast.Raise)
-               for child in ast.walk(sub) if child is not sub):
+               for statement in body for child in ast.walk(statement)):
+            return True
+        if any(_mentions_embedding(statement) for statement in body):
+            return True
+    return False
+
+
+def _mentions_embedding(node) -> bool:
+    """Does this statement reference the stored vector (name, attribute or Cypher text)?"""
+    import ast
+
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name | ast.Attribute):
+            text = sub.id if isinstance(sub, ast.Name) else sub.attr
+            if "embedding" in text:
+                return True
+        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                and "embedding" in sub.value:
             return True
     return False
 

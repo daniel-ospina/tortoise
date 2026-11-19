@@ -531,6 +531,18 @@ def _upsert_object(ev):
     return _write(ev)
 """
 
+#: ⛔ THE SHAPE `#13617` ACTUALLY IMPLEMENTS — an ENCODE GUARD with no `return`. The
+#: accepted form is "an `if` that asks about THIS label and whose body touches the store",
+#: and requiring an early exit instead (an earlier version did) refused the only write-stop
+#: that exists, which made the gate unable to open on the fold that asks.
+WRITER_ENCODE_GUARD = """
+def _upsert_object(ev):
+    embedding = None
+    if _derived_mirror_required("object"):
+        embedding = _encode(ev)
+    return _write(ev, embedding)
+"""
+
 WRITER_GATED = """
 def _upsert_object(ev):
     if _derived_mirror_required("object"):
