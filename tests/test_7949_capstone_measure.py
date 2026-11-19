@@ -16571,8 +16571,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
 
     # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while that file IS in this diff (four numeric
-    # re-points, none of them that pair) and the document's own row reads `sdk.py:28718`. A phrase-only assertion was green over that,
+    # re-point — `sdk.py:28559` → `:28592`", while that file is NOT in this diff at all
+    # (`git diff --name-only origin/main...HEAD -- …/04-plan.md` is EMPTY, measured at this
+    # head — its `2 2` numstat is two OTHER lines) and the document's own row reads
+    # `sdk.py:28718`. A phrase-only assertion was green over that,
     # re-landed, and was green again: that is the class this pin exists to close. No count
     # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
     # ⛔ NO COUNT IS ASSERTED, IN EITHER DIRECTION (#13750 review, cycle 3 — MEASURED).
