@@ -103,9 +103,11 @@ _POINTER = re.compile(
 #: named by `tortoise/hosted_api.py`'s `#13636` note, was being IMPORTED as a
 #: Python module because the then-extension-list did not name `mjs` — and such a
 #: list is only ever as complete as today's citations (`tests/` also carries
-#: `.jsonl`, `.sh`, `.c`, `.html`). A JS harness is not a module in any Python
-#: sense, so that assertion had no ground. The token is now classified as a FILE
-#: pointer and is LISTED, not asserted — see `_classify`.
+#: `.json` (159), `.mjs` (15), `.txt` (11), `.md` (10), `.jsonl` (8), `.ts` (2),
+#: `.yaml` (2), `.sh` (1), `.c` (1) — measured with
+#: `git ls-files tests | sed 's/.*\.//' | sort | uniq -c`). A JS harness is not a
+#: module in any Python sense, so that assertion had no ground. The token is now
+#: classified as a FILE pointer and is LISTED, not asserted — see `_classify`.
 #: ⛔ AND THE FIX MUST NOT FAIL OPEN. A first cut of this split classified a token
 #: as a FILE pointer whenever `tests/<written>.py` did NOT exist — which is
 #: exactly the population a RENAME produces, so the guard stopped catching the
@@ -220,9 +222,19 @@ def _classify(
     tree; production callers take the default.
     """
     tests_dir = TESTS_DIR if tests_dir is None else tests_dir
-    named = f"tests/{written}.{symbol}"
-    if symbol in _NOT_A_SYMBOL or (tests_dir / f"{written}.{symbol}").is_file():
-        return "file", named
+    # ⛔ BOTH spellings' written forms are checked, RELATIVE to `tests_dir` (which
+    # already IS the tests directory — prefixing `tests/` here doubles it and
+    # silently demotes every file pointer to SYMBOL, which is how this comment
+    # came to be written). A multi-segment dotted pointer
+    # (`tests.pkg.data.json`) names `tests/pkg/data.json`, which the flat form
+    # can never match — without the second conjunct such a token is classified
+    # SYMBOL and FALSE-REDS on a file that IS there.
+    rel_flat = f"{written}.{symbol}"
+    rel_nested = f"{written.replace('.', '/')}.{symbol}"
+    if symbol in _NOT_A_SYMBOL or (tests_dir / rel_flat).is_file():
+        return "file", f"tests/{rel_flat}"
+    if (tests_dir / rel_nested).is_file():
+        return "file", f"tests/{rel_nested}"
     return "symbol", f"tests.{written.replace('/', '.')}"
 
 
@@ -244,18 +256,19 @@ def _production_pointers(
     (`tests.x.json`, `tests.x.py`) is LISTED, and a dotted module pointer is
     imported and looked up — one rule, not two.
     """
-    #: ⚠️ WHAT THE SYNTHETIC TREES ADD, MEASURED — stated this precisely because
-    #: two earlier cuts of this note claimed the opposite and were refuted by the
-    #: tree. Of the four real SYMBOL pointers, ONE is dotted
-    #: (`tests.fake_control_plane.FakeControlPlane`) and THREE are slash-form
-    #: (`tests/_embedded._projection_host`, two in `tests/_http_fixtures`), so the
-    #: real tree DOES exercise the slash SYMBOL rule. It also already reaches the
-    #: slash FILE-side conjunct four times (`tests/sample_transcript.txt`,
-    #: `tests/_assembly_census.json` twice, and
-    #: `tests/test_middleware_host_consolidation.mjs` — pinned by the mjs test
-    #: above). What NO real token reaches is the DOTTED spelling's FILE routing
-    #: (the tree carries zero dotted file pointers) and the multi-segment dotted
-    #: shape. Those are what the synthetic cases and `test_both_spellings_...` pin.
+    #: ⚠️ WHAT THE SYNTHETIC TREES ADD, MEASURED. Of the four real SYMBOL
+    #: pointers, ONE is dotted (`tests.fake_control_plane.FakeControlPlane`) and
+    #: THREE are slash-form (`tests/_embedded._projection_host`, two in
+    #: `tests/_http_fixtures`), so the real tree DOES exercise the slash SYMBOL
+    #: rule. It also already reaches the slash FILE-side conjunct four times
+    #: (`tests/sample_transcript.txt`, `tests/_assembly_census.json` twice, and
+    #: `tests/test_middleware_host_consolidation.mjs` — pinned by
+    #: `test_the_file_pointer_split_is_what_makes_the_mjs_pointer_sane` BELOW).
+    #: What NO real token reaches is the DOTTED spelling's FILE routing (the tree
+    #: carries zero dotted file pointers) and the multi-segment dotted shape —
+    #: including its NESTED-FILE cell, which needs the slashed-path conjunct
+    #: `_classify` now also checks. Those are what the synthetic cases and
+    #: `test_both_spellings_...` pin.
     production_dir = PRODUCTION_DIR if production_dir is None else production_dir
     tests_dir = TESTS_DIR if tests_dir is None else tests_dir
     symbols: list[tuple[Path, str, str, str]] = []
@@ -343,11 +356,11 @@ def test_the_split_is_evidence_positive_so_a_renamed_module_still_reds(tmp_path:
 def test_the_split_covers_both_branches_at_this_head(tmp_path: Path):
     """Both branches of the PREDICATE, on a synthetic tree.
 
-    Measured split at this head: of the four real SYMBOL pointers, ONE is dotted
-    (`tests.fake_control_plane.FakeControlPlane`) and THREE are slash-form
-    (`tests/_embedded._projection_host`, and two in `tests/_http_fixtures`). So
-    the real tree does exercise the slash rule — but it never sends a FILE token
-    through the slash branch's POSITIVE side, which is what these cases pin.
+    The real tree exercises the slash SYMBOL rule (three of the four SYMBOL
+    pointers are slash-form) and reaches the slash FILE-side conjunct four
+    times — both measured, and listed in `_production_pointers`'s note. So what
+    these cases pin is the PREDICATE IN ISOLATION, on a tree this test owns,
+    not coverage the real tree lacks.
     """
     (tmp_path / "test_present.py").write_text("X = 1\n", encoding="utf-8")
     (tmp_path / "harness.mjs").write_text("// js\n", encoding="utf-8")
@@ -387,11 +400,14 @@ def test_both_spellings_reach_the_same_classifier_on_a_real_scan(tmp_path: Path)
     tests.mkdir()
     (tests / "harness.mjs").write_text("// js\n", encoding="utf-8")
     (tests / "test_present.py").write_text("X = 1\n", encoding="utf-8")
+    (tests / "pkg").mkdir()
+    (tests / "pkg" / "data.json").write_text("{}\n", encoding="utf-8")
     (prod / "probe.py").write_text(
         "`tests.harness.mjs` `tests.test_present.py` `tests.test_present.X`\n"
         "`tests.test_dotted_away.SomeSymbol`\n"
         "`tests/test_slash_away.SomeSymbol`\n"
-        "`tests.sub.mod.SomeSymbol`\n",
+        "`tests.sub.mod.SomeSymbol`\n"
+        "`tests.pkg.data.json`\n",
         encoding="utf-8",
     )
     syms, files = _production_pointers(production_dir=prod, tests_dir=tests)
@@ -422,6 +438,12 @@ def test_both_spellings_reach_the_same_classifier_on_a_real_scan(tmp_path: Path)
     # `tests/sub/mod.py` here, so it is a SYMBOL pointer — i.e. it would red.
     assert "tests.sub.mod" in sym_modules, (
         f"the multi-segment dotted pointer fell out of the scan: syms={sorted(sym_modules)}"
+    )
+    # a NESTED dotted FILE pointer names `tests/pkg/data.json`, so it must be
+    # LISTED — the flat (`tests/pkg.data.json`) form cannot see it, and treating
+    # it as a SYMBOL pointer false-reds on a file that is there
+    assert "tests/pkg/data.json" in file_targets, (
+        f"the nested dotted FILE pointer false-redded: files={sorted(file_targets)}"
     )
 
 
