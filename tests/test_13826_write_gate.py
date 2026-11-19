@@ -288,12 +288,62 @@ def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
     assert _prop(g, "(n:Source {id:'src-13826-b'})", "embedding") is None, (
         ":Source kept its vector with BOTH halves answering stop")
 
+    # (5) `:Event` is the FIFTH label and the one NO other arm reaches: its identity is
+    # `eventId`, so every arm above misses it — deleting only the `label == "Event"`
+    # branch left all four green (#13854 review, P2-1).
+    g.query("CREATE (e:Event {eventId: 'ev-13826-ue', eventKind: 'thing'})")
+    _gate_map(monkeypatch, {"object", "subject", "source", "document"})
+    sdk.update_knowledge("ev-13826-ue", embedding=list(VEC))
+    assert _prop(g, "(n:Event {eventId:'ev-13826-ue'})", "embedding") is None, (
+        "an `:Event` write kept a vector its own label's gate said was retired")
+    assert _prop(g, "(n:Event {eventId:'ev-13826-ue'})", "eventKind") == "thing", (
+        "the ROW write did not land on the stop arm")
+    g.query("CREATE (e:Event {eventId: 'ev-13826-ue-b', eventKind: 'thing'})")
+    _gate_map(monkeypatch, {"event"})
+    sdk.update_knowledge("ev-13826-ue-b", embedding=list(VEC))
+    assert _prop(g, "(n:Event {eventId:'ev-13826-ue-b'})", "embedding") is not None, (
+        "an `:Event` write lost its vector on its OWN label's KEEP answer — the ask is "
+        "per label, not per method")
+
     # …and a `:Point` is untouched in either direction (record truth, never derived).
     g.query("CREATE (p:Point {id: 'pt-13826', content: 'a claim'})")
     _gate(monkeypatch, False)
     sdk.update_knowledge("pt-13826", embedding=list(VEC))
     assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is not None, (
         "the gate was applied to a `:Point`, whose vector is record truth (#5004)")
+
+
+def test_update_entity_journals_the_gated_state(sdk, monkeypatch):
+    """The strip must SURVIVE a rebuild, so the journal cannot carry the vector.
+
+    ⛔ THE HALF THE STORE CANNOT SEE (#13854 review, P2-2). `_journal_entity_mutation`'s
+    `state` is what `rebuild_all` replays with `SET n += $state`, so a gated write that
+    journaled the CALLER's dict would re-add the vector on the next rebuild while every
+    store assertion in this file stayed green. Mutating the `state=` argument to
+    `_props_base` is exactly that mutant, and it reddened nothing before this case.
+    """
+    g = sdk._get_proj().g
+    g.query("CREATE (o:Object {id: 'obj-13826-j', name: 'widget'})")
+    captured: list[dict] = []
+    real = TortoiseSDK._journal_entity_mutation
+
+    def _capture(self, label, id_val, op, **kw):
+        captured.append({"label": label, "id": id_val, "op": op,
+                         "state": kw.get("state")})
+        return real(self, label, id_val, op, **kw)
+
+    monkeypatch.setattr(TortoiseSDK, "_journal_entity_mutation", _capture)
+    _gate_map(monkeypatch, {"subject", "event", "source", "document"})
+    sdk.update_knowledge("obj-13826-j", embedding=list(VEC), name="gadget")
+
+    rows = [r for r in captured if r["id"] == "obj-13826-j"]
+    assert rows, f"the update journaled nothing at all: {captured}"
+    state = rows[-1]["state"] or {}
+    assert "embedding" not in state, (
+        "the EntityMutated journal carried the RETIRED vector, so a rebuild re-adds it "
+        f"through `SET n += $state` — the strip does not survive: {state}")
+    assert state.get("name") == "gadget", (
+        f"the journal did not carry the key that DID land, so it replays nothing: {state}")
 
 
 # ── 5. the raw `:Event` write door ─────────────────────────────────────
@@ -567,6 +617,86 @@ def test_restore_graph_asks_the_gate(proj, monkeypatch):
     # ⛔ REPORTED, never silent: the count and the labels are part of the contract.
     assert result["retired_vectors"] == 1, result
     assert result["retired_vector_labels"] == ["Event"], result
+
+    # ⛔ ONE DUMP NODE PER GATED LABEL (#13854 review, P2-3/P2-4). The single `:Event`
+    # dump left three arms unfalsifiable: deleting the `Object` branch, deleting the
+    # `Subject` branch, or turning the `:Source` both-ask's `and not` into `or not`
+    # (retire on ONE half's answer) each reddened nothing.
+    _gate_map(monkeypatch, set())
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    kept = _dump(
+        {"dump_id": 2, "labels": ["Object"],
+         "props": {"id": "obj-13826-restore", "name": "w",
+                   "embedding": list(VEC)}},
+        {"dump_id": 3, "labels": ["Subject"],
+         "props": {"id": "sub-13826-restore", "name": "s",
+                   "embedding": list(VEC)}},
+    )
+    result = restore_graph(proj.g, kept)
+    assert _prop(proj.g, "(n:Object {id:'obj-13826-restore'})",
+                 "embedding") is None, "the restore re-created an `:Object`'s vector"
+    assert _prop(proj.g, "(n:Subject {id:'sub-13826-restore'})",
+                 "embedding") is None, "the restore re-created a `:Subject`'s vector"
+    assert _prop(proj.g, "(n:Object {id:'obj-13826-restore'})", "name") == "w", (
+        "the `:Object` node's other properties were not restored")
+    assert result["retired_vectors"] == 2, result
+    assert result["retired_vector_labels"] == ["Object", "Subject"], result
+
+    # (b) the OTHER direction per label: a label the gate KEEPS keeps its vector while
+    # its siblings are dropped — a mutant that pops unconditionally reddens here.
+    _gate_map(monkeypatch, {"object"})
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    mixed = _dump(
+        {"dump_id": 4, "labels": ["Object"],
+         "props": {"id": "obj-13826-keep", "name": "w2",
+                   "embedding": list(VEC)}},
+        {"dump_id": 5, "labels": ["Subject"],
+         "props": {"id": "sub-13826-drop", "name": "s2",
+                   "embedding": list(VEC)}},
+    )
+    result = restore_graph(proj.g, mixed)
+    assert _prop(proj.g, "(n:Object {id:'obj-13826-keep'})",
+                 "embedding") is not None, (
+        "the restore dropped an `:Object` vector the gate answered KEEP for")
+    assert _prop(proj.g, "(n:Subject {id:'sub-13826-drop'})",
+                 "embedding") is None, (
+        "the restore kept a `:Subject` vector the gate answered STOP for")
+    assert result["retired_vector_labels"] == ["Subject"], result
+
+    # (c) `:Source` drops only when BOTH halves answer stop. `document` KEEPs and
+    # `source` STOPs: an `or` would retire the node and lose the vector the record may
+    # not hold — the #11395 direction the both-ask exists to prevent.
+    _gate_map(monkeypatch, {"document"})
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    both = _dump({"dump_id": 6, "labels": ["Source"],
+                  "props": {"url": "https://example.com/restore-both-13826",
+                            "title": "both-ask", "embedding": list(VEC)}})
+    result = restore_graph(proj.g, both)
+    assert _prop(proj.g, "(n:Source {url:'https://example.com/restore-both-13826'})",
+                 "embedding") is not None, (
+        "the restore retired a `:Source` vector on ONE half's answer (`source` stop, "
+        "`document` keep) — the both-ask rule is what forbids that")
+    assert "retired_vectors" not in result, result
+    _gate_map(monkeypatch, {"source"})
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    both2 = _dump({"dump_id": 7, "labels": ["Source"],
+                   "props": {"url": "https://example.com/restore-both2-13826",
+                             "title": "both-ask-2", "embedding": list(VEC)}})
+    result = restore_graph(proj.g, both2)
+    assert _prop(proj.g, "(n:Source {url:'https://example.com/restore-both2-13826'})",
+                 "embedding") is not None, (
+        "the restore retired a `:Source` vector on the `source` half alone while "
+        "`document` was unverified")
+    _gate_map(monkeypatch, set())
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    both3 = _dump({"dump_id": 8, "labels": ["Source"],
+                   "props": {"url": "https://example.com/restore-both3-13826",
+                             "title": "both-ask-3", "embedding": list(VEC)}})
+    result = restore_graph(proj.g, both3)
+    assert _prop(proj.g, "(n:Source {url:'https://example.com/restore-both3-13826'})",
+                 "embedding") is None, (
+        "the restore kept a `:Source` vector with BOTH halves answering stop")
+    assert result["retired_vector_labels"] == ["Source"], result
 
 
 def test_restore_graph_with_no_tenant_keeps_every_vector(proj, monkeypatch):
