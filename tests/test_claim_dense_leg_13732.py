@@ -56,6 +56,7 @@ import ast
 import importlib.util
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -80,6 +81,45 @@ def tool_mod():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+class _JournalDouble:
+    """An `EventLog` that proves a position for every append, like the real one.
+
+    ``TORTOISE_RECORD_JOURNAL`` / ``--journal`` name a PATH, and the real
+    `EventLog` counts the journal to answer each append's ordinal. The seed only
+    needs the contract — append returns the record's 1-based position — so the
+    double counts its own appends, which makes "the record was handed the
+    journal's OWN position" (`seq`) an assertion instead of a guess.
+    """
+
+    durable = True
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+        self.positions: list[int] = []
+
+    def append(self, event: dict) -> int:
+        self.events.append(event)
+        self.positions.append(len(self.events))
+        return self.positions[-1]
+
+
+class _FoldDouble:
+    """The graph fold the chokepoint applies — records what it was handed."""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def apply(self, event: dict) -> None:
+        self.events.append(event)
+
+
+def _journal_double(monkeypatch) -> _JournalDouble:
+    """Install a journal double for `from tortoise.log import EventLog`."""
+    log = _JournalDouble()
+    monkeypatch.setattr("tortoise.log.EventLog", lambda _path: log)
+    return log
 
 
 # ── 1. the pre-registered statistic ────────────────────────────────────────
@@ -766,7 +806,12 @@ class TestRefusals:
         with pytest.raises(tool_mod.Refused) as ei:
             tool_mod.require_population_in_record(0, 786)
         assert ei.value.code == "record_population_absent"
-        assert "13210" in ei.value.message  # the backfill is named, not implied
+        # ⛔ THE REPAIR IS NAMED, NOT IMPLIED — and since #13830 the repair is the
+        # record's own FOLD, not a backfill this instrument never had: the
+        # population IS written through the journaled door, so a shortfall is a
+        # fold/ordering fact and `tools/record_runner.py apply` is what heals it.
+        assert "record_runner.py apply" in ei.value.message, ei.value.message
+        assert "--journal" in ei.value.message, ei.value.message
 
     def test_the_population_guard_refuses_a_PARTIAL_cohort(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
@@ -907,7 +952,7 @@ class TestRecordMembership:
         label-wide gate verified, and no assertion anywhere asked the second
         question. ⛔ AND A GUARD THAT GATES THE RUN IS THE OPPOSITE FAILURE
         (`#13734` review round 2): the population's ids reach the GRAPH only
-        (`_seed_graph` -> the apply-fold, no journal record), so a run-level
+        (`_seed_population` -> the apply-fold, no journal record), so a run-level
         refusal is unsatisfiable and blocks the two arms that need no record
         cohort. It must sit INSIDE the arms loop, where only `record_dense`
         consults it.
@@ -1037,25 +1082,31 @@ class TestRecordMembership:
 class TestTheArmsConstruction:
     """The pure helpers above are fed synthetic traces; these pin the CALLERS.
 
-    ⛔ Measured pre-fix: deleting `"embedding": list(vec)` from `_seed_graph`,
+    ⛔ Measured pre-fix: deleting `"embedding": list(vec)` from `_seed_population`,
     and flipping `if arm != ARM_LEXICAL:` to `if True:` (making the lexical arm
     silently the hybrid arm), each left the whole suite GREEN. Both are the
     difference between "three single-variable arms" and "three reads of the
     same arm", so the two assertions whose absence mattered most were missing.
     """
 
-    def test_seed_graph_writes_the_write_paths_own_vector(self, tool_mod, monkeypatch):
+    def test_seed_population_writes_the_write_paths_own_vector(self, tool_mod, monkeypatch, tmp_path):
         """⛔ THE SEEDED VECTOR MUST BE THE ONE PRODUCTION WRITES.
 
         Every write-side embedder in this tree goes through
         `embeddings.compute_embeddings`: it truncates to `EMBED_WORD_BUDGET`
         (512) words before encoding and returns `vec.tolist()`. Pre-fix,
-        `_seed_graph` called `model.encode(content)` and handed Cypher
+        the seed called `model.encode(content)` and handed the store
         `list(vec)` — untruncated text, and a list of `numpy.float32` scalars,
         a value type no production write produces. Both are pinned here through
         the REAL composition (only the model is doubled), so a revert reds on
-        either half: 600 words must reach the encoder as 512, and the props
+        either half: 600 words must reach the encoder as 512, and the payload
         value must be the encoder's `tolist()` (Python floats).
+
+        ⛔ AND IT IS READ OFF THE JOURNAL RECORD (#13830), not off a store call:
+        the payload that carries the vector is the one the CHOKEPOINT appends,
+        which is also the one the record projects and the graph folds. A test
+        that observed a direct `_upsert_point_props` call would pin a path this
+        tool no longer has.
         """
         import numpy as np
 
@@ -1071,51 +1122,163 @@ class TestTheArmsConstruction:
         monkeypatch.setattr(
             embeddings.EmbeddingModel, "get", classmethod(lambda cls, *a, **k: _Model())
         )
-
-        written = []
-
-        class _Proj:
-            def _upsert_point_props(self, props):
-                written.append(props)
+        log = _journal_double(monkeypatch)
+        folded = _FoldDouble()
 
         long_content = " ".join(f"w{i}" for i in range(600))
         population = [{"id": "pt-12186000000", "content": long_content}]
-        seeded = tool_mod._seed_graph(_Proj(), population)
+        seed = tool_mod._seed_population(
+            folded, population, journal_path=tmp_path / "j.jsonl"
+        )
 
-        assert seeded == 1
+        assert seed.written == 1
         assert len(seen["texts"][0].split()) == embeddings.EMBED_WORD_BUDGET, (
             "the seed encoded the UNTRUNCATED text — a composition no production write makes"
         )
-        embedding = written[0]["embedding"]
+        assert len(log.events) == 1, log.events
+        point = log.events[0]["point"]
+        assert log.events[0]["type"] == "PointAdded", log.events[0]
+        embedding = point["embedding"]
         assert embedding == pytest.approx([0.1, 0.2, 0.3]), embedding
         assert all(type(v) is float for v in embedding), (
-            f"the props value carries {[type(v).__name__ for v in embedding]} — `list(numpy_row)` "
+            f"the payload carries {[type(v).__name__ for v in embedding]} — `list(numpy_row)` "
             "is not the value type `compute_embeddings` returns"
         )
-        assert written[0]["content"] == long_content
+        assert point["content"] == long_content
+        # ⛔ THE GRAPH IS WRITTEN BY THE FOLD OF THE SAME RECORD, not by a second
+        # write: the fold double sees the very event that was appended.
+        assert folded.events == log.events, (
+            "the graph fold did not receive the journal record's own payload — the "
+            "two derived stores would then be fed by different values"
+        )
 
-    def test_seed_graph_refuses_a_row_it_could_not_embed(self, tool_mod):
+    def test_the_seed_projects_each_row_into_the_record_through_the_LIVE_door(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ THE RECORD HALF, ASSERTED WHERE IT HAPPENS (#13830).
+
+        The whole issue is that the population reached the graph and never the
+        record. So the seed must reach the record through
+        `record_writer.write_live_record` — the LIVE door the chokepoint calls —
+        with the journal's OWN proven position as `seq`. Pinned on the seam's
+        arguments rather than on a swallowed return, because a projection that
+        was never CALLED and one that was called and refused are different facts
+        and only the first is this test's subject.
+        """
+        from tortoise import record_writer
+
+        log = _journal_double(monkeypatch)
+        calls = []
+        applied = types.SimpleNamespace(applied=True, refusal=None, outcome="applied")
+
+        def _live(record, **kwargs):
+            calls.append({"record": record, **kwargs})
+            return applied
+
+        monkeypatch.setattr(record_writer, "write_live_record", _live)
+        population = [
+            {"id": "pt-12186000000", "content": "alpha"},
+            {"id": "pt-12186000001", "content": "beta"},
+        ]
+        seed = tool_mod._seed_population(
+            _FoldDouble(),
+            population,
+            journal_path=tmp_path / "j.jsonl",
+            tenant=("org-1", "graph-1"),
+            encode_many=lambda texts: [[0.5, 0.25] for _ in texts],
+        )
+        assert [c["seq"] for c in calls] == log.positions, (
+            "the record was not handed the journal's OWN positions — a replayed "
+            "journal and a live write would number the same record differently"
+        )
+        assert all(c["tenant"] == ("org-1", "graph-1") for c in calls), calls
+        assert all(c["durable"] is True for c in calls), calls
+        assert [c["record"] for c in calls] == log.events
+        assert seed.record_applied == 2 and seed.record_unprojected == 0, seed.as_dict()
+        assert seed.first_seq == 1 and seed.last_seq == 2, seed.as_dict()
+
+    def test_seed_population_refuses_a_row_it_could_not_embed(self, tool_mod, monkeypatch, tmp_path):
         """A `None` vector is a NAMED refusal, never a written hole."""
-        written = []
-
-        class _Proj:
-            def _upsert_point_props(self, props):
-                written.append(props)
-
+        log = _journal_double(monkeypatch)
+        folded = _FoldDouble()
         population = [
             {"id": "pt-12186000000", "content": "alpha"},
             {"id": "pt-12186000001", "content": "beta"},
         ]
         with pytest.raises(tool_mod.Refused) as ei:
-            tool_mod._seed_graph(_Proj(), population, encode_many=lambda texts: [[0.1], None])
+            tool_mod._seed_population(
+                _FoldDouble(),
+                population,
+                journal_path=tmp_path / "j.jsonl",
+                encode_many=lambda texts: [[0.1], None],
+            )
         assert ei.value.code == "seed_vectors_missing"
         assert "pt-12186000001" in ei.value.message, ei.value.message
-        assert written == [], "a partially-embedded population must not be seeded"
+        assert log.events == [], "a partially-embedded population must not be journaled"
+        assert folded.events == []
 
         with pytest.raises(tool_mod.Refused) as ei:
-            tool_mod._seed_graph(_Proj(), population, encode_many=lambda texts: [[0.1]])
+            tool_mod._seed_population(
+                _FoldDouble(),
+                population,
+                journal_path=tmp_path / "j.jsonl",
+                encode_many=lambda texts: [[0.1]],
+            )
         assert ei.value.code == "seed_vectors_missing"
-        assert written == []
+        assert log.events == []
+
+    def test_the_seed_carries_no_direct_write_of_either_store(self):
+        """⛔ THE ANTI-SECOND-WRITER PIN, AS CODE RATHER THAN AS PROSE (#13830).
+
+        The defect this fix removes was a DIRECT projection write
+        (`_upsert_point_props`) that emitted no journal record; the tempting
+        repair is a direct record write as well. Both are banned here: the seed
+        body must not call the fold's upsert directly, and must not import the
+        record writer's non-live entry points. It reaches both stores the one way
+        #13345 built — `live_write.write`.
+        """
+        tree = ast.parse(TOOL.read_text())
+        seed = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "_seed_population"
+        )
+        attrs = {
+            n.func.attr for n in ast.walk(seed)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+        assert "_upsert_point_props" not in attrs, (
+            "the seed writes the graph through the projection's apply-fold only — a "
+            "direct `_upsert_point_props` is the pre-#13830 path that emitted no "
+            "journal record, so the record could never receive the population"
+        )
+        chokepoint = [
+            n for n in ast.walk(seed)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "write"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "live_write"
+        ]
+        assert chokepoint, (
+            "the seed no longer calls the chokepoint — `live_write.write` is the ONE "
+            "door that appends, projects and folds in the documented order"
+        )
+        # …and it is handed the projection and the journal, or the fold/append half
+        # would silently be a no-op (both are keyword-only on the door).
+        passed = {k.arg for c in chokepoint for k in c.keywords}
+        assert {"log", "projection"} <= passed, passed
+        imported = {
+            (a.name or "" for a in n.names)
+            for n in ast.walk(seed)
+            if isinstance(n, ast.ImportFrom)
+        }
+        flat = set().union(*imported) if imported else set()
+        for banned in ("write_live_record", "write_records", "RecordWriter"):
+            assert banned not in flat, (
+                f"the seed imports `{banned}` directly — the record is fed by the "
+                f"chokepoint (`live_write.write`), never by a second spelling of "
+                f"the write path (#13345)"
+            )
 
     def test_the_lexical_arm_does_not_submit_the_dense_leg(self, tool_mod, monkeypatch):
         """`lexical` must read with NO embedder; the other arms must not patch."""
@@ -1147,6 +1310,140 @@ class TestTheArmsConstruction:
 
         # and the patch is restored, not left installed for a later arm
         assert embeddings.EmbeddingModel.get() == "A-MODEL"
+
+
+# ── 5d. THE JOURNALED DOOR: the declaration, and what the seed reports ─────
+
+
+class TestTheJournalDeclaration:
+    """#13830 — the population enters through the journal, so the journal is stated.
+
+    ⛔ Two spellings of the path is not a preference, it is the failure this class
+    refuses: `record_vector.journal_ready` compares the record's positions against
+    ``TORTOISE_RECORD_JOURNAL``, so a run that SEEDS one path while the record arm's
+    gate MEASURES another would report the tenant as behind (or ahead) on the
+    strength of a file the population is not in. `--journal` alone is enough to
+    write, which is why `run_measurement` declares it; two DIFFERENT names is an
+    operator error and is refused rather than resolved.
+    """
+
+    def test_no_journal_is_a_named_refusal(self, tool_mod, monkeypatch):
+        from tortoise import record_vector
+
+        monkeypatch.delenv(record_vector.RECORD_JOURNAL_ENV, raising=False)
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_journal("")
+        assert ei.value.code == "no_journal", ei.value.code
+        # the refusal names the door and the reason, not just the variable
+        assert "journaled door" in ei.value.message, ei.value.message
+
+    def test_the_env_declaration_is_used_when_the_flag_is_absent(self, tool_mod, monkeypatch, tmp_path):
+        from tortoise import record_vector
+
+        journal = tmp_path / "events.jsonl"
+        monkeypatch.setenv(record_vector.RECORD_JOURNAL_ENV, str(journal))
+        assert tool_mod.require_journal("") == journal
+
+    def test_the_flag_alone_is_used_and_declared(self, tool_mod, monkeypatch, tmp_path):
+        from tortoise import record_vector
+
+        monkeypatch.delenv(record_vector.RECORD_JOURNAL_ENV, raising=False)
+        journal = tmp_path / "events.jsonl"
+        assert tool_mod.require_journal(str(journal)) == journal
+
+    def test_two_DIFFERENT_declarations_are_refused_not_resolved(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        from tortoise import record_vector
+
+        monkeypatch.setenv(record_vector.RECORD_JOURNAL_ENV, str(tmp_path / "a.jsonl"))
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_journal(str(tmp_path / "b.jsonl"))
+        assert ei.value.code == "journal_conflict", ei.value.code
+        assert "a.jsonl" in ei.value.message and "b.jsonl" in ei.value.message, ei.value.message
+
+    def test_the_same_path_twice_is_not_a_conflict(self, tool_mod, monkeypatch, tmp_path):
+        from tortoise import record_vector
+
+        journal = tmp_path / "events.jsonl"
+        monkeypatch.setenv(record_vector.RECORD_JOURNAL_ENV, str(journal))
+        assert tool_mod.require_journal(str(journal)) == journal
+
+    def test_main_restores_the_declaration_it_made(self, tool_mod, monkeypatch):
+        """⛔ The declaration is the RUN's, not the process's (#13830).
+
+        `run_measurement` sets `TORTOISE_RECORD_JOURNAL` so the record arm's
+        readiness gate measures the journal this run seeded; leaving it set would
+        hand a library caller — and any test that calls `run_measurement` directly
+        — a path for a journal that process never wrote.
+        """
+        from tortoise import record_vector
+
+        monkeypatch.delenv(record_vector.RECORD_JOURNAL_ENV, raising=False)
+
+        def _run(_args):
+            os.environ[record_vector.RECORD_JOURNAL_ENV] = "/tmp/seeded.jsonl"
+            return 0
+
+        monkeypatch.setattr(tool_mod, "run_measurement", _run)
+        assert tool_mod.main(["--population", str(M2_N)]) == 0
+        assert record_vector.RECORD_JOURNAL_ENV not in os.environ
+
+    def test_a_prior_declaration_is_put_BACK_unchanged(self, tool_mod, monkeypatch):
+        from tortoise import record_vector
+
+        monkeypatch.setenv(record_vector.RECORD_JOURNAL_ENV, "/tmp/original.jsonl")
+
+        def _run(_args):
+            os.environ[record_vector.RECORD_JOURNAL_ENV] = "/tmp/seeded.jsonl"
+            return 3
+
+        monkeypatch.setattr(tool_mod, "run_measurement", _run)
+        assert tool_mod.main(["--population", str(M2_N)]) == 3
+        assert os.environ[record_vector.RECORD_JOURNAL_ENV] == "/tmp/original.jsonl"
+
+
+class TestTheSeedReport:
+    """What the seeding pass reports, and the repair it names when it must."""
+
+    def _report(self, tool_mod, **over):
+        base = dict(
+            journal="/tmp/j.jsonl",
+            written=2,
+            record_applied=2,
+            record_unprojected=0,
+            positions_unproven=0,
+            folded=2,
+            first_seq=1,
+            last_seq=2,
+        )
+        base.update(over)
+        return tool_mod.SeedReport(**base)
+
+    def test_a_clean_seed_names_no_repair(self, tool_mod):
+        payload = self._report(tool_mod).as_dict()
+        assert payload["record_applied"] == 2 and payload["record_unprojected"] == 0
+        assert "fold_command" not in payload, (
+            "a clean seed must not hand the operator a repair command — a warning "
+            "that always fires is a warning nobody reads"
+        )
+
+    def test_an_unprojected_write_names_the_folder_command(self, tool_mod):
+        payload = self._report(tool_mod, record_applied=1, record_unprojected=1).as_dict()
+        assert payload["fold_command"] == (
+            "uv run python tools/record_runner.py apply --journal /tmp/j.jsonl"
+        ), payload
+        assert "unprojected" in payload["note"], payload["note"]
+
+    def test_an_unproven_position_names_it_too(self, tool_mod):
+        """A record row with no journal_event row is UNPROJECTED to the read gate."""
+        payload = self._report(tool_mod, positions_unproven=2, first_seq=None, last_seq=None).as_dict()
+        assert "fold_command" in payload, payload
+        assert payload["positions_unproven"] == 2, payload
+
+    def test_the_report_states_the_door_it_used(self, tool_mod):
+        payload = self._report(tool_mod).as_dict()
+        assert "live_write.write" in payload["door"], payload["door"]
 
 
 # ── 5c. the call sites the review rounds fixed (wiring, not logic) ─────────
@@ -1215,6 +1512,22 @@ class TestTheWiringTheReviewFixed:
         assert min(reset) < min(arms), (
             "the eviction lands AFTER the arms — the shipped read path would then "
             "consume this population's denominator"
+        )
+        # ⛔ AND THE READINESS CACHE, FOR THE SAME REASON ONE STORE OVER (#13830).
+        # `journal_ready` memoises per (tenant, journal) for 30 s; a NOT-READY
+        # verdict taken BEFORE the seed would be reused by the arms and would send
+        # `record_dense` to the graph — this run refusing on its own earlier state.
+        ready = [
+            n.lineno
+            for n in ast.walk(run)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "reset_readiness_cache"
+        ]
+        assert ready, "the readiness verdict taken before the seed is never evicted"
+        assert max(cov) < min(ready) < min(arms), (
+            "the readiness cache must be evicted AFTER the seed (which is what makes "
+            "the tenant ready) and BEFORE the first arm"
         )
 
     def test_the_incomplete_run_exits_non_zero(self, tool_mod):
@@ -1404,7 +1717,7 @@ class _FakeGraph:
     prefix_unreadable: ClassVar[bool] = False
     # ⛔ AND AN UNOPENABLE GRAPH IS ITS OWN CASE (`#13745` review round 16). A
     # store that is DOWN fails the OPEN-TIME health probe inside `_get_proj()`,
-    # before `_seed_graph` is ever called — so the write guard cannot see it and
+    # before `_seed_population` is ever called — so the write guard cannot see it and
     # the run still reached `main()` as a traceback. `unreadable`/`down`/
     # `prefix_unreadable` all require a store that answered the open, so without
     # a knob of its own the guard that actually covers "the store is down" is
@@ -1471,7 +1784,7 @@ class TestTheDocumentedRunPath:
     sees.
 
     ⛔ THE ARMS ARE FAKED; THE WIRING IS THE SHIPPED ONE. `require_corpus`,
-    `require_embedder`, the record preconditions, `_seed_graph` and `_read_arm`
+    `require_embedder`, the record preconditions, `_seed_population` and `_read_arm`
     are stubs, so no store, corpus or embedder is needed — everything from the
     population build to the exit code is `run_measurement` as it ships.
     """
@@ -1498,6 +1811,8 @@ class TestTheDocumentedRunPath:
         prefix_unreadable: bool = False,
         seed_refused: str | None = None,
         graph_unopenable: bool = False,
+        population_in_record: int | None = None,
+        seed_unprojected: int = 0,
     ):
         self.coverage_kwargs = {}
         corpus = tmp_path / "corpus"
@@ -1537,11 +1852,17 @@ class TestTheDocumentedRunPath:
 
             monkeypatch.setattr("tortoise.record_vector.coverage", _coverage)
             monkeypatch.setattr("tortoise.record_vector.reset_coverage_cache", lambda: None)
-            monkeypatch.setattr(tool_mod, "record_population_vectors", lambda _ids, _scope, _dsn: 3)
+            monkeypatch.setattr(
+                tool_mod,
+                "record_population_vectors",
+                lambda _ids, _scope, _dsn: (
+                    3 if population_in_record is None else population_in_record
+                ),
+            )
         monkeypatch.setattr(tool_mod, "_git_head", lambda: "deadbeef")
         # ⛔ WHAT THE GRAPH "HOLDS" IS WRITTEN BY THE SEED STUB, NOT PRE-SET HERE.
         # Pre-setting it made the graph independent of whether the seed ran, so a
-        # count taken BEFORE `_seed_graph` — which on a first run blocks
+        # count taken BEFORE `_seed_population` — which on a first run blocks
         # `graph_dense` on every box — stayed green across the whole suite
         # (`#13745` review round 4, finding 1: the `stub the outcome` shape round 1
         # fixed for `graph_population_vectors`, reintroduced one level up).
@@ -1556,7 +1877,7 @@ class TestTheDocumentedRunPath:
         _FakeGraph.prefix_unreadable = prefix_unreadable
         _FakeSDK.unopenable = graph_unopenable
 
-        def _seed(_proj, pop):
+        def _seed(_proj, pop, *, journal_path=None, tenant=None):
             if seed_refused is not None:
                 # ⛔ A `Refused` FROM INSIDE THE SEED MUST SURVIVE THE WRITE
                 # GUARD. It is a `RuntimeError`, so the guard's broad
@@ -1572,9 +1893,29 @@ class TestTheDocumentedRunPath:
                 raise RuntimeError("no route to the graph")
             keep = len(pop) if seeded is None else seeded
             _FakeGraph.contents = {r["id"]: r["content"] for r in pop[:keep]}
-            return len(pop)
+            # ⛔ A `SeedReport`, NOT AN INT (#13830): the artifact publishes what
+            # the write path answered, so the stub must speak the real return
+            # shape or the run-path tests would be exercising a signature the
+            # shipped seed does not have.
+            return tool_mod.SeedReport(
+                journal=str(journal_path),
+                written=len(pop),
+                record_applied=len(pop) - seed_unprojected,
+                record_unprojected=seed_unprojected,
+                positions_unproven=0,
+                folded=len(pop),
+                first_seq=1,
+                last_seq=len(pop),
+            )
 
-        monkeypatch.setattr(tool_mod, "_seed_graph", _seed)
+        monkeypatch.setattr(tool_mod, "_seed_population", _seed)
+        # ⛔ THE JOURNAL IS DECLARED, NOT ASSUMED (#13830). `require_journal`
+        # refuses when neither `--journal` nor the env names one, and the run
+        # DECLARES the resolved path for the record arm's readiness gate — so
+        # `monkeypatch` owns the path here (and restores the environment after).
+        monkeypatch.setenv(
+            "TORTOISE_RECORD_JOURNAL", str(tmp_path / "journal" / "events.jsonl")
+        )
         monkeypatch.setattr(
             tool_mod,
             "_read_arm",
@@ -1603,6 +1944,7 @@ class TestTheDocumentedRunPath:
             deep=tool_mod.DEEP_LIMIT_DEFAULT,
             namespace="claimdense_test",
             graph="",
+            journal="",
             out=out,
         )
         return tool_mod.run_measurement(args)
@@ -1759,11 +2101,11 @@ class TestTheDocumentedRunPath:
         assert "summary" in artifact["arms"]["record_dense"], artifact["arms"]["record_dense"]
         assert rc == 3, rc
 
-    def test_the_seed_writes_a_row_for_EVERY_entry(self, tool_mod):
+    def test_the_seed_writes_a_row_for_EVERY_entry(self, tool_mod, monkeypatch, tmp_path):
         """BEHAVIOURAL — and complete where an AST pin provably cannot be.
 
         Three rounds tried to pin "the seed leaves no row unwritten" by inspecting
-        `_seed_graph`'s syntax, and every attempt was BOTH false-blocking (a
+        `_seed_population`'s syntax, and every attempt was BOTH false-blocking (a
         conditional `raise`, a re-raising `try`, a validation pre-pass all reddened)
         AND blind (a `contextlib.suppress`, a ternary write, a truncated iterable
         all passed) — `#13745` reviews rounds 7-9. Count the WRITES instead: every
@@ -1787,9 +2129,12 @@ class TestTheDocumentedRunPath:
         written: list[str] = []
 
         class _Proj:
-            def _upsert_point_props(self, props):
-                written.append(props["id"])
-                return (True, True, frozenset())
+            # ⛔ COUNTED AT THE FOLD (#13830): the chokepoint applies the same
+            # journal record the graph receives, so the fold is where every
+            # syntactic way of skipping a row shows up. A row that never reached
+            # the jamais-appended payload cannot reach `apply`.
+            def apply(self, event):
+                written.append(event["point"]["id"])
 
         # falsy content · production-shaped id · varying text length — one row each
         population = [
@@ -1797,9 +2142,13 @@ class TestTheDocumentedRunPath:
             {"id": "pt-12186-7f3a9c2e", "content": ""},
             {"id": "pt-000002", "content": "a production-shaped claim row, longer than the rest"},
         ]
+        _journal_double(monkeypatch)
         try:
-            count = tool_mod._seed_graph(
-                _Proj(), population, encode_many=lambda texts: [[0.1, 0.2] for _ in texts]
+            seed = tool_mod._seed_population(
+                _Proj(),
+                population,
+                journal_path=tmp_path / "journal" / "events.jsonl",
+                encode_many=lambda texts: [[0.1, 0.2] for _ in texts],
             )
         except tool_mod.Refused as exc:
             # ⛔ A REFUSAL IS NOT A CORRECT OUTCOME FOR THIS POPULATION (`#13745`
@@ -1807,12 +2156,12 @@ class TestTheDocumentedRunPath:
             # one fault it can actually observe: a seed that writes every row and
             # THEN refuses makes every run unmeasurable — the outcome this test
             # exists to catch, not to excuse. No legitimate refusal is reachable
-            # from here either: `_seed_graph`'s only refusals are
+            # from here either: `_seed_population`'s only refusals are
             # `seed_vectors_missing` (a length mismatch, or a `None` vector), and the
             # stub above answers a vector for every row. Those two genuine paths are
-            # pinned by `test_seed_graph_refuses_a_row_it_could_not_embed`.
+            # pinned by `test_seed_population_refuses_a_row_it_could_not_embed`.
             pytest.fail(f"a well-formed population must be seeded, not refused: {exc}")
-        # ⛔ SORTED, because a graph upsert has no order dependency (`#13745` review
+        # ⛔ SORTED, because a fold has no order dependency (`#13745` review
         # round 10, P2): comparing to the population's own order banned a legitimate
         # batching/reordering seed (`reversed(list(zip(…)))` → RED) while catching no
         # hole that the sorted form misses.
@@ -1820,35 +2169,42 @@ class TestTheDocumentedRunPath:
             "the seed must write one row per population entry — a skipped or "
             f"conditional write leaves a hole: {written}"
         )
-        # ⛔ NOT `count == len(population)` ALONE (`#13745` review round 10, P2):
-        # `_seed_graph` ends `return len(population)`, so that comparison is
-        # tautological with respect to the writes — a seed that wrote 1 of 3 rows
-        # still returns 3 — and it reads as a third independent check without being
-        # one. Tying it to `written` is what makes the returned count a claim about
-        # the rows rather than about the return statement.
-        assert count == len(written) == len(population), (count, written)
+        # ⛔ NOT `seed.written == len(population)` ALONE (`#13745` review round 10,
+        # P2): the report's count is a claim about the loop, so comparing it to the
+        # population would be tautological with respect to the writes — a seed that
+        # wrote 1 of 3 rows still reports 3. Tying it to the FOLD is what makes it a
+        # claim about the rows.
+        assert seed.written == len(written) == len(population), (seed.as_dict(), written)
 
-    def test_a_failed_seed_write_PROPAGATES(self, tool_mod):
-        """The other half: a failed upsert must end the run, not be swallowed.
+    def test_a_failed_seed_write_PROPAGATES(self, tool_mod, monkeypatch, tmp_path):
+        """The other half: a failed fold must end the run, not be swallowed.
 
         `graph_population_absent` names only the VECTOR-side causes because a row
         this run failed to write cannot survive to the guard — the failure leaves
-        `_seed_graph` as an exception. Wrapping the write in
+        `_seed_population` as an exception. Wrapping the write in
         `contextlib.suppress(Exception)` (this module's cleanup idiom) would make it
         a nameable cause again, which is why this is asserted as behaviour rather
         than as "no `Try` node exists" (`#13745` reviews rounds 7-9).
+
+        ⚠️ A fold failure is now reached through `live_write.write`'s own fold leg,
+        which deliberately does NOT catch (`live_write`'s own note: a RECORD fault
+        reports and continues, a FOLD fault propagates), so the exception still
+        reaches `run_measurement`'s guard.
         """
 
         class _Proj:
-            def _upsert_point_props(self, props):
-                if props["id"].endswith("000001"):
+            def apply(self, event):
+                if event["point"]["id"].endswith("000001"):
                     raise RuntimeError("the fold refused this row")
-                return (True, True, frozenset())
 
+        _journal_double(monkeypatch)
         population = [{"id": f"pt-{i:06d}", "content": f"claim {i}"} for i in range(3)]
         with pytest.raises(RuntimeError):
-            tool_mod._seed_graph(
-                _Proj(), population, encode_many=lambda texts: [[0.1, 0.2] for _ in texts]
+            tool_mod._seed_population(
+                _Proj(),
+                population,
+                journal_path=tmp_path / "journal" / "events.jsonl",
+                encode_many=lambda texts: [[0.1, 0.2] for _ in texts],
             )
 
     def test_a_DOWN_graph_is_a_named_refusal_not_a_traceback(self, tool_mod, monkeypatch, tmp_path):
@@ -1882,7 +2238,7 @@ class TestTheDocumentedRunPath:
 
         `_get_proj()` runs the OPEN-TIME health probe
         (`FalkorProjection.from_uri(..., skip_health_check=False)`), so a graph
-        that is simply down raises there — BEFORE `_seed_graph`, and therefore
+        that is simply down raises there — BEFORE `_seed_population`, and therefore
         outside the round-13 write guard, whose comment claimed to cover exactly
         this case while the probe eight lines above it stayed unguarded. `main()`
         catches only `Refused`, so the realistic dead-store run still produced
@@ -2086,6 +2442,56 @@ class TestTheDocumentedRunPath:
         ), blocked_notes[0]
         assert artifact["arms"]["record_dense"]["message"] == self.BLOCK_MESSAGE
 
+    def test_an_UNPROJECTED_seed_is_reported_and_the_arm_still_refuses(
+        self, tool_mod, monkeypatch, tmp_path, capsys
+    ):
+        """⛔ THE TWO HALVES OF #13830, IN ONE RUN.
+
+        The seed reports what the write path answered (`record_unprojected` and the
+        exact fold command) — and the id-scoped guard STILL blocks `record_dense`
+        when the record did not take the population. Neither half may be traded for
+        the other: a run that stayed silent would leave the operator with a blocked
+        arm and no repair, and a run that relaxed the guard would publish a figure
+        over ids the record does not hold — the `#5090` Q2 false PASS.
+        """
+        target = tmp_path / "unprojected.json"
+        rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            record_ok=True,
+            population_in_record=1,
+            seed_unprojected=2,
+        )
+        artifact = json.loads(target.read_text())
+        seed_block = artifact["seed"]
+        assert seed_block["record_unprojected"] == 2, seed_block
+        assert seed_block["fold_command"].startswith(
+            "uv run python tools/record_runner.py apply --journal"
+        ), seed_block
+        # the repair is on stderr too — an artifact read later is not a report
+        err = capsys.readouterr().err
+        assert "UNPROJECTED" in err and "record_runner.py apply" in err, err
+        # ⛔ AND THE ARM STILL REFUSES, BY NAME.
+        assert artifact["arms"]["record_dense"]["blocked"] == "record_population_absent"
+        assert "record_runner.py apply" in artifact["arms"]["record_dense"]["message"]
+        assert rc == 3, rc
+
+    def test_a_clean_seed_publishes_its_counts_and_no_repair(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        target = tmp_path / "clean.json"
+        rc = self._drive(
+            tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N, record_ok=True
+        )
+        artifact = json.loads(target.read_text())
+        assert artifact["seed"]["record_applied"] == 3, artifact["seed"]
+        assert "fold_command" not in artifact["seed"], artifact["seed"]
+        assert artifact["arms"]["record_dense"].get("blocked") is None, artifact["arms"]
+        assert rc == 0, rc
+
     def test_the_emitted_bar_fields_agree_with_the_emitted_note(
         self, tool_mod, monkeypatch, tmp_path
     ):
@@ -2196,7 +2602,7 @@ class TestContradictionTest:
         """A synonym must not be enough to seed the record from the harness.
 
         ⛔ Measured on the pre-fix pin (48 passed with these injected into
-        `_seed_graph`): `cur.execute("upsert into public.point (id,
+        `_seed_population`): `cur.execute("upsert into public.point (id,
         embedding_vec) values (%s, %s)", …)` and `merge into public.point …`.
         """
         literals = _code_string_literals(ast.parse(TOOL.read_text()))
@@ -2312,7 +2718,7 @@ class TestGraphMembership:
     by name as ``seed_vectors_missing`` before any write). What is reachable: a
     width mismatch (``#5004``), and a vector the fold refuses as unusable
     (``_writable_journalled_vector`` → ``None``). A row this run never wrote is
-    NOT a cause — ``_seed_graph`` upserts every row and raises on failure — it is
+    NOT a cause — ``_seed_population`` upserts every row and raises on failure — it is
     the DEFENSIVE case the text pairing would catch, which is why the pairing is
     kept. These cases red the mutants that make the graph guard prefix-wide,
     id-only, or blind to a row this run did not write — and the wiring pin reds
@@ -2404,7 +2810,7 @@ class TestGraphMembership:
         assert "785 of the 786" in ei.value.message, ei.value.message
         # ⛔ AND THE UNREACHABLE ONES ARE NOT NAMED. The seed payload always carries
         # an explicit `embedding` (so the fold never reaches its `encode_for_row`
-        # derive), `_seed_graph` upserts EVERY row before this guard and raises on
+        # derive), `_seed_population` upserts EVERY row before this guard and raises on
         # failure (so a missing row is not a cause either), and naming them sends
         # the operator to a dead end (`#13745` review rounds 5-6).
         assert "operator point" not in ei.value.message, ei.value.message

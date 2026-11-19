@@ -151,8 +151,8 @@ EMBED-gate refusal (`#5008`) and a swallowed encode failure are **unreachable on
 write). What IS reachable: an embedding-**width mismatch** (the fold warns and leaves the node's
 vector alone rather than write one the index cannot hold, `#5004`); and a vector the fold **refuses as
 unusable** (`_writable_journalled_vector` answers `None` for an empty, over-long, or
-non-finite/non-numeric value, so nothing is written). ⛔ **Nothing else:** `_seed_graph` upserts every
-population row before the guard runs and raises on failure, so `matched < n` means the VECTOR is
+non-finite/non-numeric value, so nothing is written). ⛔ **Nothing else:** the seed appends and folds
+every population row before the guard runs and raises on failure, so `matched < n` means the VECTOR is
 missing, never the row — the `--graph` case included, because the seed's own `MERGE` writes this run's
 text at every deterministic id it scores.
 
@@ -172,16 +172,17 @@ embedder** — the text test catches only a node whose text CHANGED, and this gu
 vector's VALUE or identity (it filters on `n.embedding IS NOT NULL` and returns `(id, content)`).
 That residual is closable without touching the store, which is worth saying because the earlier
 text of this paragraph implied it was not: `_upsert_point_props` already RETURNS whether the row's
-vector was written (`(embedding is not None, …)`, `projection/entities.py:3339`) and `_seed_graph`
-discards that value — capturing it per row makes the count exact, where a re-read cannot. Until
+vector was written (`(embedding is not None, …)`, `projection/entities.py:3339`) and the fold path
+the seed now uses discards that value — capturing it per row makes the count exact, where a re-read
+cannot. Until
 then this guard asserts the population **was written**, not that every vector was replaced.
 
 The guard gates the **`graph_dense` arm, not the run** — the same scope, for the same reason, as the
 record gate above (`#13745` review round 1, finding 2). A partly seeded graph does **not** degrade
 `lexical`: that arm forces `EmbeddingModel.get()` to `None` and the full-text index it reads is built
 from `n.content`, which the fold writes **unconditionally** — only the vector is held back. Nor does
-it degrade `record_dense`, which reads Postgres. (The content write is unconditional, and `_seed_graph`
-upserts every row before this guard and raises on failure, so a row this run did not write is a
+it degrade `record_dense`, which reads Postgres. (The content write is unconditional, and the seed
+appends/folds every row before this guard and raises on failure, so a row this run did not write is a
 defensive case rather than an ordinary one — the text half of the pairing exists to catch it, and it
 is why a `graph_population_absent` is still worth reading against the population's own rows.) So the
 graph cohort is a precondition of exactly one arm, and refusing the run over it would throw away
@@ -196,10 +197,12 @@ artifact carries both counts — `graph_vectors` (prefix-wide, now the **coverag
 and `graph_population_vectors` (id-and-text scoped) — because the first alone cannot tell a full seed
 from a partial one.
 
-So the truth about this instrument, stated plainly: **it embeds and writes the population to the
-GRAPH, and it REQUIRES — never writes — the record's matching cohort.** `#13210` is the backfill's
-tool, and the record is a journal fold with no side door; a second writer for its population is the
-one thing this file promised not to be.
+So the truth about this instrument, stated plainly — **as of #13830**: it embeds the population and
+writes it through **one journaled door** (`tortoise/live_write.py::write`: append the journal record
+→ project it into the record → fold the graph), so BOTH stores are fed from the same records by the
+same path. Before #13830 the seed was a direct projection write (`proj._upsert_point_props`) that
+emitted **no journal record**, so the population could reach the graph and never the record — the
+gap the next two notes are about, and the one #13830 closes without adding a second writer.
 
 ⛔ **The record's own preconditions gate the ARM too, not just the cohort.** `no_record_dsn`,
 `no_record_driver`, `record_leg_disarmed` and `no_tenant` are resolved BEFORE the graph is seeded
@@ -207,23 +210,25 @@ one thing this file promised not to be.
 `graph_dense` publish regardless. The artifact carries a `cleanup` block naming the graph a
 completed run leaves behind, because nothing drops it.
 
-⛔ **And this population's ids cannot reach the record by any backfill.** `_seed_graph` writes
-through `proj._upsert_point_props`, which is the apply-FOLD — it emits no journal record — while the
-record is a journal fold (`record_runner`). So `#13210` folding a journal cannot deliver a cohort
-that never entered the journal. The guard therefore gates the **`record_dense` arm**, not the run:
-the `lexical` and `graph_dense` arms need no record cohort and still publish, the `record_dense` arm
-is recorded as `BLOCKED[record_population_absent]` by name, and the run exits **3** so the artifact
-cannot be mistaken for the paired answer. A run that refused before its first arm published nothing
-while looking like a strict gate — that was this file's first cut of the guard, and it is the reason
-the scoping exists. Getting a `record_dense` number requires a population that IS in the record: one
-created through the journaled SDK door and folded with `record_runner`.
+⛔ **The seed is now the journaled door, and the guard is still the guard (#13830).**
+`_seed_population` writes each row with `live_write.write` — append, then record projection, then
+graph fold — so the population the `lexical`/`graph_dense` arms rank is the population the record
+holds. The **id-scoped guard is unchanged**: `record_population_vectors` counts the population's own
+ids in the record *before* the arm, so a write that was ATTEMPTED and a write that LANDED are still
+different facts. When they are not all there, the `record_dense` arm is recorded as
+`BLOCKED[record_population_absent]` by name and the run exits **3**, so the artifact cannot be
+mistaken for the paired answer. What changed is the DIAGNOSIS: a shortfall is now a fold/ordering
+fact (a refused projection, an append whose position could not be proven, an enumerated replay
+refused on a cut-over graph), and the repair is the record's own fold —
+`uv run python tools/record_runner.py apply --journal <path>` — which the artifact emits as
+`seed.fold_command` whenever a write came back unprojected.
 
 ## 4. Falsifiers, and where each one stands
 
 | falsifier the brief names | status |
 |---|---|
 | paired Δ on recall@3 **and** `found@deep` before/after | **not measured** — no corpus/embedder/record driver on this box; the instrument computes both and labels `TRADE` |
-| `leg_trace` showing `mechanism: pgvector` from the record | **not measured**; asserted structurally (`check_arm`) so a run that cannot show it refuses — including a leg that RAN and **DEGRADED** (`ran=True, degraded=True`, the engine's shape for a failed query), which `ran` alone cannot see |
+| `leg_trace` showing `mechanism: pgvector` from the record | **not measured**; asserted structurally (`check_arm`) so a run that cannot show it refuses — including a leg that RAN and **DEGRADED** (`ran=True, degraded=True`, the engine's shape for a failed query), which `ran` alone cannot see. ⛔ **The cohort it needs is now produced by the run** (#13830): the seed writes through the journaled door, so `record_dense` is measurable — the arm being measurable is NOT the arm having been measured |
 | detectable effect for n = 786 stated before the verdict | ✅ **done** — §1, committed and pinned |
 | a signal's own isolated delta, never bundled | ✅ by construction — the three arms are the isolation; the pre-registration forbids adding a signal to an arm |
 | `object`/`subject` still withheld (run the pinning test) | ⛔ **the named test does not exist in this tree.** `test_object_and_subject_still_have_no_record_served_dense_leg` was not found by `grep -rn` anywhere under `tests/`. The posture it names was **reversed by landed work**: `record_vector.LABEL_SERVED` carries `object` and `subject` since `#13422`/PR #13466, and `MIRROR_RETIRED_LABELS = {"object", "subject"}` is the set whose graph copy is retired. That is the owner's 2026-11-17 answer on `#13220` — *"if indexing improves search for Object/Subject/Event of course we want that … in Postgres and the search aligned with that"*. The brief's instruction is stale, and following it would have reversed a landed decision inside a measurement tool. What holds instead: **no graph vector index is created on any label** (V1, PR #11481), pinned structurally by `TestContradictionTest` |
@@ -261,17 +266,32 @@ half-configured one; the declaration only permits the pair to be consulted (#919
 any arm**. A first cut of this runbook exported only the declaration — following it was a guaranteed
 refusal.
 
-⛔ **STEP 3 CANNOT SUCCEED ON THIS TREE TODAY, AND THE MISSING STEP IS NAMED HERE RATHER THAN
-DISCOVERED AT THE END OF A WINDOW.** The instrument embeds and writes the population to the
-**GRAPH** only (`_seed_graph` → `_upsert_point_props`, a direct projection write that emits **no**
-journal record), while the record is fed **exclusively** by a journal fold —
-`tortoise/record_vector.py:247`: *"the record is a journal fold with NO backfill"* — folded by
-`tools/record_runner.py apply`. The population's ids are minted by the M2 harness
-(`pt-12186…`), and nothing else in the tree writes them. So `record_population_vectors` returns `0`
-on **every** tenant and step 3 refuses `record_population_absent`. For the `record_dense` arm to be
-measurable at all, the population must first be written through a **journaled** door and folded into
-the record — which this instrument deliberately does not do, and must not: the guard is the `#5090`
-Q2 false PASS this bundle exists to prevent.
+⛔ **STEP 3 NOW SEEDS THE RECORD ITSELF, THROUGH THE JOURNAL (#13830).** The instrument writes every
+population row with one call of the `#13345` chokepoint (`live_write.write`): the journal record is
+appended, then projected into the record on that write's own transaction, then folded into the
+graph. So the `record_dense` arm's cohort is produced by this run, through the ONE write path, and
+not seeded a second way — a parallel record seed would reintroduce exactly the dual-write defect the
+chokepoint exists to remove.
+
+⛔ **The journal is therefore a REQUIRED declaration** — `--journal` or
+`TORTOISE_RECORD_JOURNAL`, refused as `no_journal` when neither is set, refused as `journal_conflict`
+when the two name different paths. That path is what `record_vector.journal_ready` compares the
+tenant's projected positions against, so the journal this run writes has to be the journal the
+record's readiness gate measures. Point it at a **measurement tenant**: a run appends `n` journal
+records and writes `n` record rows, and the ids are deterministic, so a re-run upserts the rows and
+only grows the journal.
+
+⛔ **If a write comes back unprojected, the artifact says so and names the repair.** `seed` in the
+artifact carries `record_applied` / `record_unprojected` / `positions_unproven` and, when either of
+the last two is non-zero, `seed.fold_command` — the record's own fold over the journal this run
+wrote:
+
+```bash
+uv run python tools/record_runner.py apply --journal "$TORTOISE_RECORD_JOURNAL"
+```
+
+The run still measures the other two arms and still exits 3 with `record_dense` blocked by name; a
+re-run after the fold measures all three.
 
 ⛔ Do **not** write over `preregistration.json`; it is the record of what was declared before the
 numbers, and a re-run that edits it has no pre-registration at all.
