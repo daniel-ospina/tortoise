@@ -20,13 +20,21 @@ said ``queued``, pr-doctor said ``no idle lane``, the heartbeat said
 the reason lives one level UP from every per-commit reading: in the repo's
 QUEUE. This tool measures that level.
 
-SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
---------------------------------------------
+SEVEN STATES, DELIBERATELY NOT INTERCHANGEABLE
+---------------------------------------------
   ABSENT      per SHA — no check-run / no run exists at this head. Waiting
               cannot clear it (``tools/ci_verdict.py`` ``no-verdict``;
               ``tools/ci_check_repair.py`` ``UNTRIGGERED``).
   QUEUED      per SHA — a run EXISTS at the head and has no runner slot. Waiting
-              WILL clear it, once the queue drains (``ci_verdict`` ``in-flight``).
+              WILL clear it, once the queue drains (``ci_verdict`` ``in-flight``)
+              — ⛔ EXCEPT for the population #13825 measured: a run GitHub ACCEPTED
+              and NEVER DISPATCHED (no job record was ever created, its
+              ``updated_at`` has not moved for 90 minutes) is not waiting for
+              anything, so draining the queue cannot clear it. Those runs are
+              PROVED (zero job records, attempt 1, an unmoved stamp) and EXCLUDED
+              from the wait population this tool counts and ages; when nothing else
+              is waiting the queue reports ``PR-NEVER-DISPATCHED`` rather than
+              ``OK``.
   FLOOD       per REPO — the queue is dominated by one non-PR workflow while PR
               work is starved of slots. THIS tool's state, and the only one that
               no per-commit reading can produce.
@@ -132,6 +140,24 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               it. So the seam is this reading's REACH, not action availability:
               either way both reach the per-PR report (#9118 review, the late-stage
               blind spot).
+  PR-NEVER-DISPATCHED
+              per REPO — every PR-event run in the wait legs was PROVED never
+              dispatched (``total_count == 0`` under four conditions; see
+              `NEVER_DISPATCHED_MIN_AGE_SECONDS`), so there is NO live wait and
+              nothing for a runner slot to serve. It is deliberately NOT ``OK``:
+              ``OK`` is the one string the fleet samples as HEALTH, and it would
+              assert health about an unservable population with no lever from this
+              side (``/cancel`` answers "Cannot run a workflow run that is
+              completed" about a run that reads ``queued`` — tortoise#12906). It is
+              NOT ``PR-UNWITNESSED`` either: nothing was missed, a population was
+              measured. ``congests_pr`` is ``None`` IN THIS STATE, so no destructive
+              caller is authorised by it — that is a property of the VERDICT, not of
+              the exclusion (a ``PR-STARVED``/``FLOOD``/``PR-BACKLOGGED`` reading can
+              carry an exclusion AND authorise a cancel, measured: one proved run
+              beside one live 7 000 s waiter reads ``PR-STARVED`` with
+              ``congests_pr=True``) — and a CUT feed refuses the state outright (an
+              absence cannot be read off a leg whose OLDEST rows were dropped).
+              Exit 0, warned.
 
 The truncation note, MEASURED rather than assumed (it is what makes
 PR-UNWITNESSED necessary):
@@ -989,12 +1015,30 @@ class QueueHealth:
     def _never_dispatched_token(self) -> str:
         """Name the exclusion on the ONE string the fleet samples.
 
-        ⛔ ONLY WHEN POSITIVE, so every pre-#13825 reading renders byte-identically — and
-        the unproven complement is emitted beside it whenever a probe pass ran, because a
-        count with no denominator would let "budget-starved" read exactly like "measured
-        clear", which is the asymmetry this module refuses for `pr_running_unmeasured`.
+        ⛔ WHEN POSITIVE, OR WHEN A PROBE PASS RAN AND PROVED NOTHING (#13825 review
+        round 4 — this summary used to say "ONLY WHEN POSITIVE" while the body
+        deliberately emits a STANDALONE `never_dispatched_unproven=` token for the
+        all-abstained pass, which has no `never_dispatched=` count to sit beside). Every
+        pre-#13825 reading renders byte-identically, because the complements are `None`
+        unless a probe pass RAN — and the unproven complement is otherwise emitted
+        because a count with no denominator would let "budget-starved" read exactly like
+        "measured clear", the asymmetry this module refuses for `pr_running_unmeasured`.
         """
         if not self.pr_never_dispatched:
+            # ⛔ AN ABSTENTION WITH NOTHING PROVED IS STILL AN ABSTENTION (#13825 review
+            # round 3). Gating this on a POSITIVE count made the all-abstained pass
+            # print exactly the pre-#13825 line — measured: one eligible 18-day suspect
+            # with every probe unreadable rendered `CI: PR-STARVED(queued=1, …)` with no
+            # mention of it, so a permanently starving probe budget made the whole fix
+            # inert and invisible on the one string the fleet samples. The complements
+            # are `None` unless a probe pass RAN (`queue_probe_attempted`), which keeps
+            # every legacy/`classify`-built reading byte-identical.
+            if (self.pr_never_dispatched_unprobed is not None
+                    or self.pr_never_dispatched_unread is not None):
+                unproven = ((self.pr_never_dispatched_unprobed or 0)
+                            + (self.pr_never_dispatched_unread or 0))
+                if unproven:
+                    return f", never_dispatched_unproven={unproven}"
             return ""
         token = f", never_dispatched={self.pr_never_dispatched}"
         if self.pr_never_dispatched_unprobed is not None or \
@@ -1855,7 +1899,9 @@ def classify_queue(
     # abstentions that stopped it being larger are all named, and a store that could not
     # be read is named too (an unreadable history makes MORE runs waiters, which is safe,
     # but a reader must not have to infer that from a number that did not move).
-    if pr_never_dispatched or proof_warning:
+    if pr_never_dispatched or proof_warning or (
+            queue_probe_attempted
+            and (never_dispatched_unprobed or never_dispatched_unread)):
         nd_notes: list[str] = []
         if pr_never_dispatched:
             nd_notes.append(
@@ -2952,7 +2998,17 @@ def _save_queue_proofs(
     validation then has to catch.
     """
     payload = {"version": 1, "repo": repo, "proofs": list(proofs.values())}
-    tmp = f"{path}.tmp"
+    # ⛔ THE TEMP NAME IS PER-PROCESS (#13825 review round 3). A FIXED sibling
+    # (``{path}.tmp``) is atomic only for ONE writer: two processes sharing one state
+    # path — reachable on any box where both tools run against one exported
+    # `CI_QUEUE_HEALTH_STATE`, the shape the plan's own live verification used —
+    # interleave the SAME temp file and `os.replace` then publishes the merge.
+    # Reproduced with three writers: `JSONDecodeError: Extra data: line 1 column 60151`
+    # on the final file, i.e. the loader drops it as corrupt and that pass rewrites the
+    # store from its own set — losing the WHOLE accumulated population, which is the
+    # churn the 2 h store exists to prevent. The pid keeps each writer's bytes its own;
+    # the last `os.replace` wins, which is the intended (and fail-closed) outcome.
+    tmp = f"{path}.{os.getpid()}.tmp"
     try:
         parent = os.path.dirname(path)
         if parent:

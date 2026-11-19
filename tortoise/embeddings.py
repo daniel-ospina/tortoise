@@ -896,7 +896,8 @@ class EmbeddingModel:
     # cost, so every attempt on a cold box timed out — and each timeout used to
     # abandon an importer and start another.
     #
-    # 300.0 = 195.8 s x 1.53, i.e. 104.2 s (53 %) of headroom over the measured
+    # 300.0 ≈ 195.8 s x 1.53 (299.6, rounded to the declared bound), i.e. 104.2 s
+    # (53 %) of headroom over the measured
     # cold cost for the contention the same box shows while serving traffic (the
     # 39.3 s warm figure was IDLE; the intra-op pin stays 1, #10296, so a live
     # box has no spare thread). It is the same number the hosted lifespan
@@ -1104,13 +1105,23 @@ class EmbeddingModel:
         bound_s)`` (#13819 review F1).
 
         Every reader used to take its own reading of the thread. ``status()`` in
-        particular called :meth:`load_attempt_in_flight` and then
-        :meth:`load_attempt_elapsed_s` — which reads the thread a SECOND time —
-        so a loader that died between the two reads published
-        ``load_in_progress: true`` beside ``load_in_progress_s: null``: a pair no
-        state of the machine produces, on the very instrument #13674 exists to
-        make readable. Taking one snapshot makes the published fields one
-        reading, not two.
+        particular read it once for ``load_in_progress`` and then AGAIN (through
+        a helper) for ``load_in_progress_s``, so a loader that died between the
+        two reads published ``load_in_progress: true`` beside
+        ``load_in_progress_s: null``: a pair no state of the machine produces, on
+        the very instrument #13674 exists to make readable. This snapshot is the
+        ONLY reader, so the published fields are one reading, not two.
+
+        ⛔ It reads THREE class attributes (thread, start clock, bound) and takes
+        no lock (it must not: ``get()`` holds ``cls._lock`` for the whole load,
+        so a locked read here would park ``/health`` up to the bound). The reads
+        are therefore consistent only because the PUBLISHER writes them in the
+        FULL REVERSE order — ``_load_attempt_timeout_s``, then
+        ``_load_started_at``, then ``_load_attempt_thread`` (see ``__init__``) —
+        so a thread this function can see always already has its own start time
+        and its own bound. Reading the fields in the other order, dropping one
+        field from the writer's sequence, or reordering either side restores a
+        torn pair (a live thread beside the PREVIOUS attempt's clock or bound).
         """
         thread = cls._load_attempt_thread
         started = cls._load_started_at
@@ -1127,30 +1138,19 @@ class EmbeddingModel:
     def load_attempt_in_flight(cls) -> bool:
         """True while a load ATTEMPT's loader thread is still running (#13674).
 
-        This is the reclaim guard's read. It is deliberately about the THREAD,
-        not about ``_instance``: the whole defect is that the two disagree —
-        ``get()`` clears ``_instance`` on a timeout while the abandoned loader
-        keeps importing, so a retry saw "no instance" and allocated again.
+        The BOOLEAN view of :meth:`load_attempt_snapshot`. ⛔ NO production
+        caller: ``get()`` reads the snapshot itself, so this exists for the
+        suite's assertions and to keep the guard's predicate nameable — it is
+        about the THREAD, not about ``_instance``: the whole defect is that the
+        two disagree — ``get()`` clears ``_instance`` on a timeout while the
+        abandoned loader keeps importing, so a retry saw "no instance" and
+        allocated again.
+
+        ⛔ The reclaim guard does NOT call this: it takes one snapshot and uses
+        that for both its condition and the line it logs, so the two cannot
+        disagree about whether the attempt was alive.
         """
         return cls.load_attempt_snapshot()[0]
-
-    @classmethod
-    def load_attempt_elapsed_s(cls) -> float | None:
-        """Seconds the IN-FLIGHT load attempt has been running, else ``None``.
-
-        #13674's other half: ``load_in_progress`` says an attempt EXISTS, but a
-        bool cannot answer the question an operator actually has — *how far into
-        its bound is it?* An attempt at 4 s of 300 is early in a 156.5 s cold
-        import and worth waiting for; one at 290 s is about to be abandoned.
-        Without this the bound is only observable AFTER it fires, which is the
-        #1349 failure class.
-
-        ``_load_started_at`` is deliberately not read on its own: it survives the
-        attempt that wrote it, so a finished load would otherwise report a
-        growing "in-progress" time forever. The THREAD is the authority here,
-        exactly as it is for the reclaim guard (``load_attempt_in_flight``).
-        """
-        return cls.load_attempt_snapshot()[1]
 
     @classmethod
     def _describe_load_attempt(cls, snapshot: "tuple[bool, float | None, float] | None" = None) -> str:  # noqa: UP037
@@ -1746,9 +1746,11 @@ class EmbeddingModel:
         ⛔ ``load_timeout_s`` is the bound this PROCESS applies
         (``_LOAD_TIMEOUT_S``), NOT necessarily the bound the attempt in flight
         runs under: ``get(load_timeout=…)`` may override the latter, and
-        ``load_in_progress_s`` is then a fraction of a different bound. Compare
-        it against ``load_in_progress_s`` only on the shipped path, where the
-        pre-warm takes the default (#13819 review F3).
+        ``load_in_progress_s`` is then a fraction of a different bound — so
+        compare the elapsed against the bound the attempt ACTUALLY ran under,
+        not against this process-wide default (see ``_describe_load_attempt``).
+        On the shipped path the two are the same, because the pre-warm takes the
+        default (#13819 review F3, #13841 review).
         """
         instance = cls._instance
         model = instance._model if instance is not None else None
@@ -1821,12 +1823,24 @@ class EmbeddingModel:
         # `get()` (or the next reset+attempt in a fresh test) see "still
         # running" forever. Clear the whole attempt on a dead thread; keep it
         # while it is alive.
-        attempt = cls._load_attempt_thread
-        if attempt is None or not attempt.is_alive():
-            cls._load_attempt_thread = None
-            cls._load_attempt_abandoned = None
-            cls._load_started_at = None
-            cls._load_attempt_timeout_s = None
+        #
+        # ⛔ UNDER THE SAME LOCK the attempt is PUBLISHED under (`get()` holds
+        # it across the `cls(load_timeout=…)` call, i.e. across `__init__`'s
+        # write). Clearing outside it left a window in which a reset could read
+        # a thread published-but-not-yet-started (`is_alive()` False), drop the
+        # record, and leave a LIVE loader with no reference: the reclaim guard
+        # disarmed, and the block reporting `load_in_progress: false` while a
+        # loader runs — a silent FALSE NEGATIVE on the instrument #13674 exists
+        # to make truthful. (The torn `true`/`null` pair this snapshot also
+        # prevents is a different mechanism: the thread DYING between two
+        # separate reads, one for each published field.)
+        with cls._lock:
+            attempt = cls._load_attempt_thread
+            if attempt is None or not attempt.is_alive():
+                cls._load_attempt_thread = None
+                cls._load_attempt_abandoned = None
+                cls._load_started_at = None
+                cls._load_attempt_timeout_s = None
         cls._load_elapsed_s = None
         # #13224: re-arm the cold-write latch, so a test that resets the
         # embedder to observe a cold window gets its own line rather than
@@ -1917,12 +1931,28 @@ class EmbeddingModel:
         # and ``status()`` publishes it as ``load_in_progress``. Set on the
         # class BEFORE ``t.start()`` so the guard can never see a window where a
         # running thread is not yet recorded.
+        #
+        # ⛔ THE WRITE ORDER IS A FULL REVERSE OF THE READER'S, AND IT IS
+        # LOAD-BEARING (#13841 review). ``load_attempt_snapshot()`` is a
+        # LOCK-FREE reader — it may not take ``cls._lock``, because ``get()``
+        # holds that lock for the whole load and ``/health`` would then block up
+        # to the bound — and it reads ``_load_attempt_thread``, then
+        # ``_load_started_at``, then ``_load_attempt_timeout_s``. So the writer
+        # must publish bound → clock → thread: once a reader can see this
+        # attempt's thread, its own start time AND its own bound are already
+        # visible. Written the other way round, a reader preempted between its
+        # reads could pair a LIVE thread with the PREVIOUS attempt's start (a
+        # huge elapsed) or with ``None`` — publishing ``load_in_progress: true``
+        # beside ``load_in_progress_s: null`` — or with the previous attempt's
+        # bound (or ``None``, the 300 s default), the #13819 F3 misdirection. Do
+        # not reorder these lines without also reordering the reader;
+        # `test_the_attempts_clock_is_published_before_its_thread` reds.
+        # #13819 review F3: the bound THIS attempt runs under, so the reclaim
+        # warning quotes it rather than the class default.
+        type(self)._load_attempt_timeout_s = timeout
+        type(self)._load_started_at = _attempt_started_at
         type(self)._load_attempt_thread = t
         type(self)._load_attempt_abandoned = abandoned
-        type(self)._load_started_at = _attempt_started_at
-        # #13819 review F3: record the bound THIS attempt runs under, so the
-        # reclaim warning quotes it rather than the class default.
-        type(self)._load_attempt_timeout_s = timeout
         # #4055: stamp the attempt BEFORE the join so a wait-bound seam on the
         # event loop can see it while this thread blocks here, and clear it in
         # a ``finally`` so the stamp cannot outlive the join timeout. A

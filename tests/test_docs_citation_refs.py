@@ -555,11 +555,86 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     mutation is pinned as a witness below.
     """
     answers: list[tuple[str, bool]] = []
+    # ⛔ ONE LIMIT THIS CLASS DOES NOT COVER, STATED BECAUSE IT CANNOT BE INFERRED (#13831
+    # review): a HARD-WRAPPED answer is not detected — the window is cut at the first
+    # newline, so `prints only the\ntwo comment-only modules` and `returns\nnothing` are
+    # skipped. Pre-existing, and the live document does not wrap; it is named here so the
+    # closure claim above is read as "closed under formatting ON ONE LINE".
+    # ⛔ AND A SECOND LIMIT, measured by TWO review cycles on the SAME sentence family
+    # (#13845): a claim that names the command by PRONOUN — "the command this clause
+    # prescribes returns NOTHING AT ALL" — carries no command token, so no shape rule can
+    # reach it; and a command SHORTENED to a fragment is reachable only if the caller passes
+    # that fragment as `cmd`. Both are handled by the callers (the two literal tripwires in
+    # the claim list, and the second `_typed_answers_to_tortoise_cmd` call over
+    # `` `-- tortoise/` ``), NOT by this function — so this docstring states the boundary
+    # rather than implying the class is closed over every way a document can point at the
+    # command. The residual is a sentence that refers to the measurement without naming it
+    # at all; the live document states those as PAST TENSE with their head named, which is
+    # a convention kept by reading, not by an assertion (the label exemption that tried to
+    # enforce it mechanically was measured fail-open and false-blocking, and is deleted).
     for match in re.finditer(
             r"`?" + re.escape(cmd)
-            + r"`?[\s*]*(?:(?:still|now|actually|also)\s+)?"
+            + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
+        # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
+        # cycle 3, P1). The short form a caller may pass is a SUBSTRING of every longer
+        # `git diff … -- <pathspec>` invocation, so the tail of a sentence the writer fixed
+        # to explicit revs matched here and was graded against THIS head's measurement.
+        # That refused two TRUE, head-named sentences on an empty set — measured: `git diff
+        # --name-only origin/main...2a7f24e241 -- tortoise/` names exactly
+        # `tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` (true at any head),
+        # and `git diff --name-only e61694255a...2584a86ec1 -- tortoise/` prints FIVE paths
+        # there. Both passed only while this head happened to be non-empty, and both would
+        # have been REFUSED on a docs-only head — a false block on the guard whose job is to
+        # protect history, the one direction this file's docstring forbids.
+        # So an occurrence that is the PATHSPEC of a longer invocation is skipped: the
+        # writer named the revs, which is exactly what this document's own rule asks for,
+        # and this arm cannot fetch that head. A STANDALONE short-form claim is still graded
+        # (the witness below pins that half, so the skip cannot widen into silence), and a
+        # full `… origin/main...HEAD -- tortoise/` claim is still graded — by the caller's
+        # `cmd` pass, which is the spelling that names THIS head.
+        # RESIDUAL, stated: a standalone short-form claim about ANOTHER head is graded
+        # against this head, because nothing here reads which head a bare `-- tortoise/` is
+        # about. Such a claim has to carry its head in the full command form, which this rule
+        # then skips — which is why the live document spells its own history that way.
+        # The executed test is stated with the code below (a `git diff` with NO backtick and
+        # no sentence break between it and this occurrence); it was tightened twice after
+        # being measured fail-open, and each tightening's measurement is recorded there.
+        # ⛔ AND THE INVOCATION MUST NOT CROSS A SENTENCE BREAK (#13845 review, cycle 5,
+        # MEASURED): the first cut of this skip was `git\s+diff\b[^`\n]*$`, which matched
+        # ANY unbackticked `git diff` earlier on the same LINE, so
+        # `Some history here. We ran git diff earlier. `-- tortoise/` prints ONE path at this
+        # head.` returned `[]` and the arm went GREEN while the same claim with the prose
+        # changed returned an answer and RED — one dropped backtick defeated it.
+        # (Requiring the text to END with the `-- ` separator does not work: the separator is
+        # the START of this match, so it is never in `_before` — measured, the rule matched
+        # nothing and the true head-named history was refused again.)
+        # What separates a pathspec of a live invocation from a claim about one is that the
+        # invocation runs on: no sentence boundary (a `.` followed by whitespace) between
+        # `git diff` and the occurrence. `origin/main...2a7f24e241` has dots, but none
+        # followed by a space, which is exactly the discrimination wanted.
+        # ⛔ AND A BACKTICK BETWEEN THEM ENDS IT (#13845 review, cycle 6, MEASURED — this
+        # is the rule the first cut had and the sentence-break test replaced; BOTH are
+        # needed, and the measurements say why). The sentence-only test still skipped a
+        # claim that merely SHARED a sentence with another invocation:
+        #
+        #   "See `git diff origin/main...HEAD -- docs/` for the docs; `-- tortoise/` prints
+        #    the two COMMENT-ONLY modules at this head."            -> [] (skipped)  WRONG
+        #   "…`-- tortoise/` prints ONE path at this head" on the LIVE document (:134,
+        #    93 chars after a `-- docs/00_index.md` command, no `. ` between)  -> GREEN WRONG
+        #
+        # In both, a backtick sits between `git diff` and the occurrence: the first command's
+        # code span CLOSED, so this occurrence starts its own span and its own claim. Ten of
+        # the document's twenty-one `-- tortoise/` occurrences are that class. The true
+        # pathspec case (`(`git diff … -- tortoise/` names exactly …)`) has NO backtick
+        # between, because both sides are inside ONE span.
+        _before = doc[max(0, match.start() - 200):match.start()]
+        _invocation = re.search(r"git\s+diff\b", _before)
+        if _invocation:
+            _gap = _before[_invocation.start():]
+            if "`" not in _gap and not re.search(r"\.\s", _gap):
+                continue
         rest = doc[match.end():match.end() + 90]
         rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
         window = f"{match.group(1)} {rest}".strip()
@@ -1163,6 +1238,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     for _formatted_spelling in (
             "prints `two` paths",
             "**prints** the two COMMENT-ONLY modules",
+            "_prints_ the two comment-only modules",
+            "__prints__ the two comment-only modules",
+            "`prints` the two comment-only modules",
             "prints _two_ paths",
             "Prints two paths",
             "prints now only one path",
