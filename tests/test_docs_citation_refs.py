@@ -642,6 +642,7 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         _lower_bound = False
         _tautology = False
         _at_most = False
+        _nothing_but = False
         _before = None
         while _before != low:
             _before = low
@@ -689,6 +690,14 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         if re.match(r"(?:nothing\s+but\b|none\s+other\s+than\b)", low):
             # an emptiness WORD doing membership duty — `nothing but the two modules`
             claims_empty = False
+            # ⛔ AND A HEAD NEGATION DOES NOT INVERT IT (#13831 review, P2): this read is a
+            # MEMBERSHIP claim, but `not nothing but X` is not the claim's negation — both
+            # parse to membership (`not nothing` = something; `not only X` = X and possibly
+            # more). MEASURED: toggling it turned `prints not nothing but the two modules`
+            # into EMPTINESS (True) here while the merged base read False — a delta-introduced
+            # fail-open, since a false membership claim then passes green at the empty head
+            # this guard runs at.
+            _nothing_but = True
         else:
             # ⛔ QUANTIFIER FILLERS, AND A BACKTICKED PATH TOKEN (#13795 review, round 4).
             # The cut before this one matched a BARE `tortoise/` only, so the document's own
@@ -740,6 +749,16 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 r"(?:tortoise/|comment-only\b|non[- ]?empty\b"
                 r"|\d+\b(?!-based)|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b"
                 r"|nine\b|ten\b|both\b|single\b)", low)
+            # ⛔ THE `-based` BOUND APPLIES TO EVERY NUMERAL SPELLING (#13831 review, P2):
+            # the negative lookahead above only guards the DIGIT form, so `prints 0-based
+            # offsets` skipped while `prints one-based line numbers` stayed MEMBERSHIP — the
+            # comment's claim ("a numeral that computes an offset is not a member") holding
+            # for one spelling of the numeral. MEASURED at this head before the fix: `1-based`
+            # → `[]`, `one-based` → MEMBERSHIP; at an empty head the second is REFUSED, a
+            # false red for a sentence that asserts no direction. Checked on the MATCHED
+            # token, so it covers `one`…`ten` and `single` without restating the alternation.
+            if _member and low[_member.end():].startswith("-based"):
+                _member = None
             # ⛔ A ZERO NUMERAL IS EMPTINESS, FULL STOP (#13795 review, rounds 4 and 5):
             # `prints 0 paths`, `prints exactly zero paths`, `prints 0 files` and
             # `prints 0 lines` are all TRUE at an empty head. The first cut gated it on the
@@ -801,9 +820,10 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             else:
                 continue
         # ⛔ ANY HEAD NEGATION INVERTS THE HEAD TOKEN'S DIRECTION — including a negation
-        # the loop reached BEHIND a filler or a doubled form (`is still not empty`), and
-        # including `nothing but …` (`prints not nothing but the two modules`).
-        if negated:
+        # the loop reached BEHIND a filler or a doubled form (`is still not empty`). NOT
+        # for `nothing but …`: that read is membership and `not nothing but X` is not its
+        # negation (both parse to membership), so it keeps its direction (see above).
+        if negated and not _nothing_but:
             claims_empty = not claims_empty
         answers.append((window, claims_empty))
     return answers
@@ -1157,6 +1177,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             ("prints 0 or more files", None),
             ("prints no more than zero paths", True),
             ("prints no more than two paths", None),
+            ("prints one-based line numbers", None),
             ("prints no fewer than zero paths", None)):
         _edge_expect = [] if _edge_want is None else [(_edge_spelling, _edge_want)]
         assert _typed_answers_to_tortoise_cmd(
@@ -1241,6 +1262,20 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "negation, so a refuted claim in that format passes green, and "
             "`… contains nothing but the two modules` is read as EMPTINESS (#13728 "
             "review, round-2 P1)")
+    # ⛔ AND A NEGATION IN FRONT OF `nothing but …` DOES NOT INVERT IT (#13831 review, P2):
+    # both readings are MEMBERSHIP — `not nothing` = something, `not only X` = X and possibly
+    # more — so applying the head-negation toggle here turned a membership claim into
+    # EMPTINESS. MEASURED: this row read True at the head before the fix and False at the
+    # merged base; the false pass is the harmful direction at an empty head.
+    for _not_nothing_but in (
+            "prints not nothing but the two modules",
+            "prints not none other than the two modules"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_not_nothing_but}", _tortoise_cmd
+        ) == [(_not_nothing_but, False)], (
+            f"the shape detector types {_not_nothing_but!r} as EMPTINESS — a negated "
+            "`nothing but …` is still a MEMBERSHIP claim, so a refuted one passes green "
+            "(#13831 review, P2)")
     # ⛔ AND THE SAME STRIP FOR THE NON-WORD FORMS (#13831 review, P2): `is`, `->`, `→`, `=`
     # and `:` are listed answer FORMS, so a doubled form on one of them is the same class as
     # a doubled verb — and the docstring now says so. Each row below was SKIPPED before that
