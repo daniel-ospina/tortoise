@@ -504,14 +504,60 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
+_ANSWER_VERBS = (
+    r"prints|print|returns|return|yields|yield|carries|carry|lists|list|shows|show"
+    r"|names|name|contains|contain|includes|include|reports|report|gives|give|reads"
+    r"|read|has|have|->|→|is|=|:"
+)
+
+
+def _three_dot_base_state() -> str:
+    """Is `git diff origin/main...HEAD` a REAL branch residual in THIS clone?
+
+    Returns `"measurable"`, or the reason it is not: `"missing"` or `"degenerate"`.
+
+    ⛔ TWO DEPTH-1 STATES ARE NOT MEASUREMENTS, and conflating either with "prints nothing"
+    is the defect this gate exists for (#13795 review, finding 1; VGATE cycle 3):
+
+    * `"missing"` — `origin/main` does not resolve. The `pull_request` shape: checkout fetches
+      the PR's merge ref and creates no `refs/remotes/origin/main`, so the three-dot command
+      exits 128 with empty stdout.
+    * `"degenerate"` — `origin/main` resolves AT HEAD. The `push: branches: [main]` shape of
+      the SAME job: `refs/heads/main` is also written as `refs/remotes/origin/main`, so the
+      diff exits 0 and prints nothing because it compares main WITH ITSELF. The question the
+      arm asks ("what does this branch contribute?") has no answer when the branch IS the
+      base, and the literal `NOTHING` read off it is not a measurement.
+
+    Only a base that resolves to a DIFFERENT commit is `"measurable"`.
+    """
+    base = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+        cwd=REPO, capture_output=True, text=True, check=False)
+    if base.returncode != 0:
+        return "missing"
+    head = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+        cwd=REPO, capture_output=True, text=True, check=False)
+    if head.returncode == 0 and base.stdout.strip() == head.stdout.strip():
+        return "degenerate"
+    return "measurable"
+
+
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
 
-    The SHAPE is what is matched — the command, then an answer predicate (`prints`,
-    `returns`, `yields`, `->`, `→`, `is`, `=`), then the answer — because the guard's own
-    docstring claims it refuses ANY typed present-tense answer, and a literal list cannot
-    hold that promise (#13728 review, finding 4): `returns nothing` and `is empty at this
-    head` are one-word variations of the refused `prints NOTHING`.
+    The SHAPE is what is matched — the command, then one of the present-tense reporting
+    verbs in `_ANSWER_VERBS` (`prints`, `carries`, `lists`, `shows`, `names`, `is`, …),
+    then the answer.
+
+    ⛔ THIS IS A CLOSED SET, AND THE SET IS THE CONTRACT (#13795 review, finding 2). An
+    earlier cut of this docstring claimed it refused "ANY typed present-tense answer"
+    while matching a fixed list of spellings by name, so the very evasion the arm's own
+    comment named by hand — ``carries no `tortoise/` path at all`` — walked through GREEN,
+    and the one-word-rewording promise was false in BOTH docstrings. The verbs above are the
+    reporting vocabulary a document uses for a command's output; a synonym OUTSIDE this
+    tuple is not read, and no docstring here may claim otherwise. Widening the tuple is the
+    way to widen the contract.
 
     `claims_empty` says which DIRECTION the answer asserts. A negation (`is NOT empty`) is
     a MEMBERSHIP claim even though it contains the word `empty`, and a window that carries
@@ -521,8 +567,7 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     """
     answers: list[tuple[str, bool]] = []
     for match in re.finditer(
-            r"`?" + re.escape(cmd)
-            + r"`?[\s*]*(prints|returns|yields|->|→|is|=|:)", doc):
+            r"`?" + re.escape(cmd) + r"`?[\s*]*(" + _ANSWER_VERBS + r")(?![\w-])", doc):
         rest = doc[match.end():match.end() + 90]
         rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
         window = f"{match.group(1)} {rest}".strip()
@@ -575,9 +620,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           direction the MEASUREMENT refutes at this head: membership phrasings are refused
           when the command prints nothing, emptiness phrasings when it prints a path.
           The spellings measured FALSE are refused by name AND by SHAPE (the command
-          followed by `prints`/`returns`/`is`/`->` and an answer), so neither a frozen
-          sign nor a one-word re-wording can quietly restore a claim the tree refutes
-          (#13728 review, findings 1 and 4).
+          followed by one of the reporting verbs in `_ANSWER_VERBS` and an answer), so
+          neither a frozen sign nor a re-wording built from that verb list can quietly
+          restore a claim the tree refutes (#13728 review, findings 1 and 4; #13795
+          review, finding 2). ⛔ That list is a CLOSED set and is NOT "any re-wording": a
+          reporting verb outside `_ANSWER_VERBS` (`outputs`, `emits`, `produces`) is not
+          read at all — measured — so the contract is the tuple, never "ANY" and never
+          "any re-wording" (which is the false claim this docstring made before).
     """
     from tools.hosted_api_cite_census import _note_paths, _sweep, census
 
@@ -638,40 +687,124 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # the whole loop when the set was empty — so on an empty set it refused NOTHING,
     # including `... prints the two COMMENT-ONLY modules`, which is the FALSE claim at
     # exactly that head. (ii) The docstring above claimed "ANY typed present-tense answer"
-    # was refused while the code matched nine spellings by name, so `returns nothing`,
-    # `is empty at this head` and `carries no `tortoise/` path at all` all walked through
-    # GREEN. Both are the frozen-measurement defect: the guard must READ the measurement and
-    # then enforce the reading in BOTH directions, which is what the two arms below do —
-    # the named spellings, and a structural match for any re-wording of the same answer.
-    _tortoise_set = subprocess.run(
+    # was refused while the code matched a fixed list of spellings by name, so `returns
+    # nothing`, `is empty at this head` and `carries no `tortoise/` path at all` all walked
+    # through GREEN. Both are the frozen-measurement defect: the guard must READ the
+    # measurement and then enforce the reading in BOTH directions, which is what the two
+    # arms below do — the named spellings, and a structural match for a re-wording built
+    # from the reporting verbs in `_ANSWER_VERBS` (a CLOSED set — see that tuple, and
+    # #13795 review, finding 2).
+    #
+    # ⛔ THE MEASUREMENT IS GATED, NEVER ASSUMED (#13795 review, finding 1;
+    # VGATE cycle 3 for the two states below). This leg shells out to
+    # `git diff origin/main...HEAD`, and `config/ci-surfaces.yml` registers the file `core` +
+    # `tier1`, so it runs in the `test` job — whose checkout is a bare `actions/checkout@v4`,
+    # i.e. the default `fetch-depth: 1`. TWO distinct depth-1 states answer that command with
+    # an empty stdout, and NEITHER is a measurement of this branch's residual:
+    #
+    #   (i)  `origin/main` does not resolve — the `pull_request` shape. checkout fetches the
+    #        PR's merge ref and creates no `refs/remotes/origin/main`, so git exits 128 with
+    #        empty stdout. `.github/workflows/ci.yml` states this repo's own rule for a
+    #        depth-1 graph, about a different ancestry question and with the same exit shape:
+    #        "cannot answer that question at all — the object is usually absent (exit 128)".
+    #   (ii) `origin/main` resolves AT HEAD — the `push: branches: [main]` run of the SAME
+    #        job. The fetched ref is `refs/heads/main`, which checkout also writes as
+    #        `refs/remotes/origin/main`, so the three-dot diff EXITS 0 AND PRINTS NOTHING
+    #        because it compares main with itself. A degenerate read, not a residual: the
+    #        question "what does this branch contribute" has no answer when the branch IS the
+    #        base. Measured 2026-11-19 in a scratch clone with that refspec: exit 0, empty
+    #        output — while the same command in the PR shape exits 128.
+    #
+    # A FAILED or DEGENERATE read was previously indistinguishable from a successful read that
+    # found nothing: `_measured` rendered the literal `NOTHING`, from which this arm then
+    # asserted the EMPTINESS direction — so it refused the TRUE membership sentence and
+    # permitted the FALSE emptiness one, and the loop's emptiness half could never fire at all
+    # (`_claims_empty != bool([])` is `True` for every emptiness answer, whatever the document
+    # says).
+    #
+    # The repair is that an UNMEASURED read has its own state: SKIP, naming which of the two
+    # states it is. It is not a verdict, and it is never rendered as "the command prints
+    # NOTHING". Skipping rather than asserting is the repo's own convention for a question a
+    # depth-1 graph cannot answer (`tools/substrate_map_check.py` reports exit 2 / UNVERIFIED
+    # rather than blaming the document, #5086 review P1-1); asserting here would red the
+    # required `test` job on a correct document, which is a false block. The arm is live
+    # only where the three-dot diff can be TAKEN at all: a NON-shallow checkout (a local full
+    # clone, or `fetch-depth: 0`). A depth-1 clone of a side branch is still unmeasurable —
+    # measured: `origin/main` can resolve to a different commit there and the command still
+    # exits 128, `fatal: origin/main...HEAD: no merge base`, because a shallow clone carries no
+    # merge base to diff against. The census arms (a) and (b) above run BEFORE this point, so
+    # their verdict is unaffected either way.
+    _tortoise_proc = subprocess.run(
         ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
-        cwd=REPO, capture_output=True, text=True, check=False).stdout.split()
-    _measured = " ".join(_tortoise_set) if _tortoise_set else "NOTHING"
-    for _claim, _claim_is_empty in (
-            *((_c, True) for _c in (
-                f"neither is `{_tortoise_cmd}`",
-                f"{_tortoise_cmd}` -> empty",
-                f"{_tortoise_cmd}` prints NOTHING",
-            )),
-            *((_c, False) for _c in (
-                f"{_tortoise_cmd}` is NOT empty",
-                f"{_tortoise_cmd}` returns exactly those two",
-                f"{_tortoise_cmd}` prints the two COMMENT-ONLY modules",
-                f"{_tortoise_cmd}` prints exactly `tortoise/activation_scorecard.py`",
-                "the `tortoise/` set above is the two COMMENT-ONLY modules",
-                "which two `tortoise/` paths this diff carries",
-            )),
-    ):
-        # contradiction iff the claim's direction equals the measurement's (a member claim
-        # when the set is empty, or an emptiness claim when it is not).
-        assert _claim_is_empty != bool(_tortoise_set) or _claim not in doc, (
-            f"05-verify.md asserts {_claim!r} — an answer to `{_tortoise_cmd}` in the "
-            f"direction the tree refutes at this head, where that command prints "
-            f"{_measured}. A guard that pins a MEASUREMENT must not pin its SIGN either "
-            "(#13489 review, P1; #13750 review, cycle 1; #13728 review, P1)")
+        cwd=REPO, capture_output=True, text=True, check=False)
+    # ⛔ THE SKIP IS DEFERRED TO THE END OF THIS TEST, ON PURPOSE (#13795 review, finding 1,
+    # cycle 2 — MEASURED). The non-vacuity self-tests and the `2584a86ec1` head pin below do
+    # not read git at all, so a skip placed HERE silenced exactly the witnesses that survive in
+    # CI: with the membership branch deleted the arm FAILED locally and SKIPPED in the depth-1
+    # job, i.e. inert where it matters. Only the two measurement-fed loops are guarded; the
+    # git-free arms always run.
+    _base_state = _three_dot_base_state()
+    _measured_ok = _tortoise_proc.returncode == 0 and _base_state == "measurable"
+    _why = (_tortoise_proc.stderr or "").strip().splitlines()
+    _tortoise_set = _tortoise_proc.stdout.split() if _measured_ok else []
+    _measured = " ".join(_tortoise_set) if _tortoise_set else (
+        "NOTHING" if _measured_ok else "UNMEASURED")
+    if _measured_ok:
+        for _claim, _claim_is_empty in (
+                *((_c, True) for _c in (
+                    f"neither is `{_tortoise_cmd}`",
+                    f"{_tortoise_cmd}` -> empty",
+                    f"{_tortoise_cmd}` prints NOTHING",
+                )),
+                *((_c, False) for _c in (
+                    f"{_tortoise_cmd}` is NOT empty",
+                    f"{_tortoise_cmd}` returns exactly those two",
+                    f"{_tortoise_cmd}` prints the two COMMENT-ONLY modules",
+                    f"{_tortoise_cmd}` prints exactly `tortoise/activation_scorecard.py`",
+                    "the `tortoise/` set above is the two COMMENT-ONLY modules",
+                    "which two `tortoise/` paths this diff carries",
+                )),
+        ):
+            # contradiction iff the claim's direction equals the measurement's (a member claim
+            # when the set is empty, or an emptiness claim when it is not).
+            assert _claim_is_empty != bool(_tortoise_set) or _claim not in doc, (
+                f"05-verify.md asserts {_claim!r} — an answer to `{_tortoise_cmd}` in the "
+                f"direction the tree refutes at this head, where that command prints "
+                f"{_measured}. A guard that pins a MEASUREMENT must not pin its SIGN either "
+                "(#13489 review, P1; #13750 review, cycle 1; #13728 review, P1)")
     # NON-VACUITY (#13728 review, finding 4): the shape detector must SEE an answer in both
     # directions and must read a NEGATION as a membership claim, or the arm below is inert
     # and its silence proves nothing.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints the two COMMENT-ONLY modules",
+        _tortoise_cmd) == [("prints the two COMMENT-ONLY modules", False)], (
+            "the shape detector does not read a MEMBERSHIP answer as one, so the branch "
+            "that decides `claims_empty = False` is INERT and a false `prints the two "
+            "modules` claim would walk through green (#13728 review, finding 1 — measured: "
+            "deleting or inverting that branch reddened NO row before this assertion)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` carries no `tortoise/` path at all",
+        _tortoise_cmd) == [("carries no `tortoise/` path at all", True)], (
+            "the shape detector does not SEE `carries no `tortoise/` path at all` — the "
+            "exact evasion this arm's own comment names by hand — so the one-word-rewording "
+            "class this arm exists for is still unguarded (#13795 review, finding 2)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` names two `tortoise/` paths",
+        _tortoise_cmd) == [("names two `tortoise/` paths", False)], (
+            "the shape detector does not read a membership answer phrased with a reporting "
+            "verb OUTSIDE the original list, so a synonym is a free pass "
+            "(#13795 review, finding 2)")
+    # ⛔ THE VERB ALTERNATION MUST END ON A WORD BOUNDARY (#13795 review, cycle 2, finding
+    # 2). Without the `(?![\\w-])` lookahead the `is` alternative matches the PREFIX of any
+    # word that starts with it, minting a window out of text that is not an answer at all —
+    # `issues two `tortoise/` paths` came back as `('is sues two `tortoise/` paths', False)`,
+    # a MEMBERSHIP verdict fabricated from the wrong span, which on a correct document at an
+    # empty set is a false block. Measured: this assertion reds when the lookahead is removed.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` issues two `tortoise/` paths", _tortoise_cmd) == [], (
+            "the shape detector reads a NON-verb as one (the `is` alternative matching the "
+            "prefix of `issues`), so it fabricates a membership answer out of prose and can "
+            "refuse a correct document (#13795 review, cycle 2, finding 2)")
     assert _typed_answers_to_tortoise_cmd(
         f"`{_tortoise_cmd}` returns nothing", _tortoise_cmd) == [("returns nothing", True)], (
             "the shape detector does not see `returns nothing` as an EMPTINESS answer, so "
@@ -685,12 +818,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         f"`{_tortoise_cmd}` is the command that answers it", _tortoise_cmd) == [], (
             "the shape detector treats `is the command that answers it` as a typed answer, "
             "which would refuse the document's own pointer to the command")
-    for _answer, _claims_empty in _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd):
-        assert _claims_empty != bool(_tortoise_set), (
-            f"05-verify.md types {_answer!r} as the answer to `{_tortoise_cmd}`, which "
-            f"prints {_measured} at this head — a typed present-tense ANSWER to a head-bound "
-            "measurement, in the direction the measurement refutes (#13728 review, "
-            "finding 4)")
+    if _measured_ok:
+        for _answer, _claims_empty in _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd):
+            assert _claims_empty != bool(_tortoise_set), (
+                f"05-verify.md types {_answer!r} as the answer to `{_tortoise_cmd}`, which "
+                f"prints {_measured} at this head — a typed present-tense ANSWER to a "
+                "head-bound measurement, in the direction the measurement refutes "
+                "(#13728 review, finding 4)")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
@@ -707,13 +841,45 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "That count is the MERGE head's; name it beside the claim (`2584a86ec1`, with "
             "the merge-base command that prints its set) or the two module statements stay "
             "uncheckable (#13489 review, P1)")
+    # ⛔ THE DEFERRED GATE (#13795 review, finding 1). Reached only after every git-FREE arm
+    # above has run and asserted. A failure to MEASURE is never rendered as "the command
+    # prints NOTHING", and it is never a PASS: it is this skip, with the reason.
+    if not _measured_ok:
+        # ⛔ NAME THE STATE YOU MEASURED, never a guess (VGATE cycle 4, finding 2). An earlier
+        # cut of this message branched on "not degenerate", so a read that FAILED with the
+        # base resolvable (a shallow-disjoint clone: `fatal: origin/main...HEAD: no merge
+        # base`) was reported as "`origin/main` does not resolve here", contradicting the
+        # stderr printed beside it.
+        if _base_state == "degenerate":
+            _shape = ("exits 0 and prints nothing because `origin/main` IS this HEAD — a "
+                      "degenerate main-vs-main read, not a branch residual.")
+        elif _base_state == "missing":
+            _shape = (f"exited {_tortoise_proc.returncode} "
+                      f"({_why[0] if _why else 'no stderr'}) — `origin/main` does not "
+                      "resolve here, which is the `pull_request` shape of the depth-1 "
+                      "`test` job.")
+        else:
+            _shape = (f"exited {_tortoise_proc.returncode} "
+                      f"({_why[0] if _why else 'no stderr'}) even though `origin/main` "
+                      "DOES resolve to a different commit — a shallow-disjoint clone has "
+                      "no merge base to take the three-dot diff against.")
+        pytest.skip(
+            "the `-- tortoise/` set is UNMEASURED in this clone, not empty: "
+            "`git diff --name-only origin/main...HEAD -- tortoise/` " + _shape
+            + " The direction this arm enforces cannot be read here. Every git-free arm "
+            "above (the non-vacuity self-tests and the `2584a86ec1` head pin) RAN and "
+            "passed; only the two measurement-fed loops are unmeasured. A failure to "
+            "MEASURE is never rendered as 'the command prints NOTHING' (#13795 review, "
+            "finding 1); read these two loops where the three-dot diff can be taken.")
+
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
     """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21496`.
 
     `05-verify.md` stated, as the row's re-point at the head being merged, a pair the
     tree refutes at BOTH ends: neither `sdk.py:19449` nor `sdk.py:19485` occurs in
     `docs/00_index.md` at this head or on `main`, while the diff's actual re-point is
-    `sdk.py:21474` -> `:21496` (2-dot and 3-dot `--numstat` both `3 3`). It survived
+    `sdk.py:21474` -> `:21496` (2-dot and 3-dot `--numstat` both read `3 3` at the head
+    this was measured at — read them at the head you merge). It survived
     several review rounds for the same reason the census green did: the D5 arms in
     `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
     file-table section, so nothing read it.
@@ -779,8 +945,9 @@ _INDEX_REPOINT_CLAIMS = (
 def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff():
     """⛔ The doc said this diff's ONE `docs/00_index.md` line WAS a cite re-point.
 
-    It is not, and the command printed beside the claim refutes it: at this head
-    `git diff --numstat origin/main...HEAD -- docs/00_index.md` is `1 1`, while
+    It is not, and the command printed beside the claim refutes it: at the head this arm
+    was written for, `git diff --numstat origin/main...HEAD -- docs/00_index.md` read `1 1`,
+    while
     `git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` moves no
     `sdk.py:<n>` token in either direction (`grep -c 'sdk.py:21679' docs/00_index.md` ->
     `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both). The line it rewrites
@@ -805,7 +972,23 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
         ["git", "diff", "-U0", "--word-diff=plain", "origin/main...HEAD", "--",
          "docs/00_index.md"],
         cwd=REPO, capture_output=True, text=True, check=False)
-    moved = _added_cite_tokens(proc.stdout) if proc.returncode == 0 else set()
+    # ⛔ THE OTHER `origin/main...HEAD` READ IN THIS FILE, SAME DEFECT AND SAME GATE
+    # (#13795 review, finding 4-of-cycle-2; degenerate state added by VGATE cycle 3). This arm
+    # used to read `returncode == 0 else set()`, which renders a FAILED read as "the diff adds
+    # no cite" — and a depth-1 checkout is exactly where that read fails or degenerates (see
+    # `_three_dot_base_state`). It stays green today only because all five
+    # `_INDEX_REPOINT_CLAIMS` are absent from the document; the round one is re-worded back
+    # in, it reds on an unmeasured read.
+    if _three_dot_base_state() != "measurable" or proc.returncode != 0:
+        _index_why = (proc.stderr or "").strip().splitlines()
+        pytest.skip(
+            "the `docs/00_index.md` word-diff is UNMEASURED in this clone, not empty: "
+            "`git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` "
+            f"exited {proc.returncode} ({_index_why[0] if _index_why else 'no stderr'}) "
+            f"and the base state is {_three_dot_base_state()!r}. A failure to MEASURE is "
+            "never 'the diff adds no cite' (#13795 review, finding 1's class, applied to "
+            "this arm).")
+    moved = _added_cite_tokens(proc.stdout)
 
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
