@@ -262,9 +262,16 @@ def _label_hits() -> tuple[int, int, int]:
 _REAL_READ_TEXT = Path.read_text
 
 
-#: The code name of the ONE frame whose `Path.read_text` calls belong to
-#: `_label_hits`. Attribution is by frame, not by thread — see `_label_hits_reads`.
-_LABEL_HITS_FRAME = "_label_hits"
+#: The ONE code object whose `Path.read_text` calls belong to `_label_hits`.
+#: Attribution is by frame, not by thread — see `_label_hits_reads`.
+#:
+#: ⛔ Identified by CODE OBJECT, never by `f_code.co_name`: a name is a string, so a
+#: same-named function anywhere else in the process (a helper in another module, a
+#: local closure, a vendored copy) would have its reads attributed to `_label_hits`
+#: and red the population control on a file `_label_hits` never reads — the very
+#: false-RED class #13699 is. The name is still what `everything` reports, because a
+#: failure message a reader can follow matters more there than the identity does.
+_LABEL_HITS_CODE = _label_hits.__code__
 
 
 def _label_hits_reads(
@@ -319,12 +326,14 @@ def _label_hits_reads(
 
     def _spy(self, *args, **kwargs):
         try:
-            caller = sys._getframe(1).f_code.co_name
+            caller = sys._getframe(1).f_code
         except ValueError:  # pragma: no cover - a spy always has a caller frame
-            caller = "<no frame>"
+            caller = None
         if everything is not None:
-            everything.append((self, caller))
-        if caller == _LABEL_HITS_FRAME:
+            everything.append(
+                (self, caller.co_name if caller is not None else "<no frame>")
+            )
+        if caller is _LABEL_HITS_CODE:
             read.append(self)
         return _REAL_READ_TEXT(self, *args, **kwargs)
 
@@ -1442,7 +1451,7 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     a fixture, a `gc`-driven finalizer — thread scoping excludes nothing, the
     path is recorded as `_label_hits`'s own, and the required `test` job reds with
     no defect behind it. The file is `core`-registered
-    (`config/ci-surfaces.yml:8810`) and in `tier1` (`:10968`), and is in NEITHER
+    (`config/ci-surfaces.yml:8825`) and in `tier1` (`:10984`), and is in NEITHER
     `slow_files` nor `carve_out`, so it belongs to the FAST pool: it is packed
     into ONE of the `test (x)` shards (11 bins, `config/ci-surfaces.yml:63`) —
     `test (e)` in the run above — never the `slow`/`carve-out` legs. That red
@@ -1522,6 +1531,18 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> Non
     )
 
     def _widened(rel: str) -> list[Path]:
+        #: ⛔ Widened for `_label_hits`'s OWN call and for nothing else. If the
+        #: widening were unconditional, it would also be visible to the RECORDER —
+        #: so a recorder that derived its own view of the population
+        #: (`if self in set(_tracked_files_under(_TRACKED_DIR)): read.append(self)`,
+        #: or the same set precomputed beside the spy) would count `stray` as
+        #: tracked, record it, and pass this arm while silently dropping exactly
+        #: the reads the arm exists to make visible. Measured before this scoping:
+        #: that mutant passed 48/48. Scoped by FRAME, `_label_hits` sees `stray`
+        #: (so it really reads it) and a population-filtering recorder does not
+        #: (so it drops it and this arm REDS).
+        if sys._getframe(1).f_code is not _LABEL_HITS_CODE:
+            return real_population(rel)
         return [*real_population(rel), stray]
 
     #: Patch the NAME `_label_hits` resolves, for the recording only: the read of
