@@ -7977,6 +7977,28 @@ def _without_html_comments(markup: str) -> str:
     return re.sub(r"<!--.*", " ", markup, flags=re.S)
 
 
+def _live_markup(markup: str) -> str:
+    """`markup` with BOTH the HTML comments and the JS comments removed.
+
+    ⛔ Each stripper ALONE is half a stripper, and swapping between them is how
+    one false PASS kept reappearing (#13696 rounds 4-6):
+
+    - `_without_html_comments` keeps JS comments, so `// window.addEventListener(
+      'tortoise:consent', …)` satisfied a presence row;
+    - `_code_only` keeps HTML comments, so `<!-- <script> … </script> -->` did too
+      — and commenting a tag out is THE natural way to disable it, as this
+      file's own `_served` docstring says.
+
+    MEASURED (round 6): with only one of them applied, wrapping the page's whole
+    funnel `<script>` in `<!-- -->` left `test_the_three_funnel_events_are_named_
+    in_the_source` and `test_the_click_delegate_counts_the_entry_points_the_legend_
+    names` GREEN over a page that raised nothing. Composed, the same mutation
+    reds 5 rows. Use this for every page-level PRESENCE check; keep the single
+    helpers for the STRUCTURAL extraction of tags, where the tag is the subject.
+    """
+    return _code_only(_without_html_comments(markup))
+
+
 def _pricing_source_includes(html: str) -> list[str]:
     """The `src` of every `<script>` the browser PARSES, in source order.
 
@@ -9401,7 +9423,7 @@ class TestConsentSeam:
             "page-view capture waits for it, so with no emit every visit that "
             "does not re-decide consent is silently uncounted — clicks with no "
             "denominator (#13645)")
-        assert f"'{self.EVENT}'" in _code_only(_product_teams_html()), (
+        assert f"'{self.EVENT}'" in _live_markup(_product_teams_html()), (
             f"the niche page no longer listens for `{self.EVENT}` — its page "
             "view would then fire only when the decision happens mid-visit")
 
@@ -9544,7 +9566,7 @@ class TestConsentSeam:
         denominator. The legend above the handler would have kept describing
         the old behaviour with no red anywhere.
         """
-        code = _code_only(_product_teams_html())
+        code = _live_markup(_product_teams_html())
         assert '[data-cta], #pricing-section a[href^="/auth"]' in code, (
             "the click delegate no longer selects the funnel's `/auth` entry "
             "points: the tier cards' and the self-host block's links would "
@@ -9844,7 +9866,7 @@ class TestProductTeamsIdentity:
         # row green over a page whose `EVENTS` table was commented out — every
         # CTA click and the consent event then threw `ReferenceError` and the
         # experiment raised nothing, with no red anywhere (#13696 round 5, P1).
-        html = _code_only(_product_teams_html())
+        html = _live_markup(_product_teams_html())
         for event in PRODUCT_TEAMS_EVENTS:
             assert f"'{event}'" in html, (
                 f"the page never names the `{event}` event. The owner decision "
