@@ -203,8 +203,11 @@ that was ATTEMPTED proves nothing about one that LANDED, and publishing a
 Q2 false PASS the id-scoped half exists to stop. A shortfall is still a refusal
 by name (the arm is BLOCKED, the artifact is kept, the run exits 3) and the
 repair is still the record's own fold, never a relaxed guard:
-``tools/record_runner.py apply --journal <path>`` — the artifact emits that exact
-command as ``seed.fold_command`` whenever a write came back unprojected.
+``tools/record_runner.py plan --from-checkpoint`` then ``… apply --acknowledge-plan
+<N>`` — the artifact emits BOTH, with this run's tenant filled in, as ``seed.fold``
+whenever a write came back unprojected. One command would not be runnable: `apply`
+requires ``--org-id``/``--graph-id`` on every verb and refuses a writing run without
+the count `plan` prints.
 
 ⛔ THE JOURNAL IS A PRECONDITION, DECLARED, NOT DERIVED. The record is
 ``replay(journal)``, so a seed that appends nowhere is not a seed; ``--journal``
@@ -905,8 +908,8 @@ def require_journal(explicit: str | None = None) -> Path:
         )
     # ⛔ RESOLVED TO AN ABSOLUTE PATH BEFORE IT IS USED OR DECLARED. The same
     # string goes to `EventLog`, to `record_vector.RECORD_JOURNAL_ENV` and into the
-    # `seed.fold_command` an operator pastes — three readers, so a relative path
-    # would make each of them depend on its own working directory.
+    # `seed.fold` commands an operator pastes — three readers, so a relative
+    # path would make each of them depend on its own working directory.
     return Path(os.path.abspath(os.path.expanduser(chosen)))
 
 
@@ -1171,9 +1174,9 @@ def require_population_in_record(matched: int | None, population_n: int) -> None
     journal holds the population and the record has not folded it (a projection
     refusal, an unproven position, or a cut-over graph's enumerated-replay
     refusal). The repair is the record's own fold — ``tools/record_runner.py
-    apply --journal <path>``, which the artifact emits as ``seed.fold_command``
-    when the seed reported it — never a second writer from here and never a
-    relaxed guard.
+    plan --from-checkpoint`` then ``… apply --acknowledge-plan <N>``, which the
+    artifact emits as ``seed.fold`` when the seed reported one — never a second
+    writer from here and never a relaxed guard.
     """
     if matched is None:
         raise Refused(
@@ -1199,9 +1202,10 @@ def require_population_in_record(matched: int | None, population_n: int) -> None
             f"leave no row), or a row whose `embedding` produced no "
             f"`embedding_vec` (row present, not rankable — a width the store's "
             f"converter will not hold). Run the record's own fold over "
-            f"the journal this run wrote (`tools/record_runner.py apply --journal "
-            f"<path>`; the artifact's `seed.fold_command` names it when the seed "
-            f"reported one), then re-run. This instrument will not write the "
+            f"the journal this run wrote (`tools/record_runner.py plan "
+            f"--from-checkpoint`, then `apply --acknowledge-plan <N>`, "
+            f"both carried in the artifact's `seed.fold` with this run's tenant "
+            f"filled in), then re-run. This instrument will not write the "
             f"record a second way and will not fake a cohort",
         )
 
@@ -1361,8 +1365,10 @@ class SeedReport:
     __slots__ = (
         "first_seq",
         "folded",
+        "graph_id",
         "journal",
         "last_seq",
+        "org_id",
         "positions_unproven",
         "record_applied",
         "record_armed",
@@ -1374,6 +1380,8 @@ class SeedReport:
         self,
         *,
         journal: str,
+        org_id: str | None,
+        graph_id: str | None,
         written: int,
         record_armed: bool | None,
         record_applied: int,
@@ -1384,6 +1392,8 @@ class SeedReport:
         last_seq: int | None,
     ) -> None:
         self.journal = journal
+        self.org_id = org_id
+        self.graph_id = graph_id
         self.written = written
         self.record_armed = record_armed
         self.record_applied = record_applied
@@ -1393,9 +1403,24 @@ class SeedReport:
         self.first_seq = first_seq
         self.last_seq = last_seq
 
+    def _fold_needed(self) -> bool:
+        """Is there a record fold to run at all?
+
+        ⛔ NOT MERELY "something went wrong". An UNPROVEN POSITION on an UNARMED
+        deployment needs no fold — there is no record for a journal position to be
+        missing from — so emitting a repair there would send the operator to a fold
+        over a store this run never wrote. An unprojected write always needs one
+        (it exists only where the record was armed and refused).
+        """
+        if self.record_unprojected:
+            return True
+        return bool(self.positions_unproven) and self.record_armed is not False
+
     def as_dict(self) -> dict:
         payload = {
             "journal": self.journal,
+            "org_id": self.org_id,
+            "graph_id": self.graph_id,
             "written": self.written,
             # ⛔ THE THREE-STATE ANSWER, KEPT THREE-STATE. `record_applied == 0` on
             # an UNARMED deployment means "no record in this run", not "the record
@@ -1411,23 +1436,51 @@ class SeedReport:
             "last_seq": self.last_seq,
             "door": "tortoise.live_write.write (journal append → record projection → graph fold)",
         }
-        if self.record_unprojected or self.positions_unproven:
-            # ⛔ THE REPAIR, NAMED EXACTLY AND ONLY WHEN IT IS NEEDED. A run that
-            # emits this had lines the record did not take (or could not prove a
-            # position for), and the operator needs the command that heals it
-            # rather than the name of the guard that caught it.
-            #
-            # ⛔ AND THE TWO FACES ARE DIFFERENT GATES, so the note names both
-            # (reviewer, 2026-11-19): an UNPROJECTED write leaves no row and the
-            # id-scoped guard catches it, while an UNPROVEN POSITION still lands
-            # the row and only its `public.journal_event` row is missing — the id
-            # count then PASSES and the arm is declined to the graph and refused by
-            # the mechanism check instead. Naming one gate for both sent the reader
-            # to the wrong refusal.
-            payload["fold_command"] = (
-                f"uv run python tools/record_runner.py apply --journal "
-                f"{shlex.quote(self.journal)}"
-            )
+        # ⛔ THE REPAIR IS TWO COMMANDS, AND BOTH ARE RUNNABLE (review round 2,
+        # finding 1). The single `... apply --journal <path>` this emitted first was
+        # NOT: `record_runner` requires `--org-id`/`--graph-id` on every verb, and
+        # `apply` REFUSES a writing run without `--acknowledge-plan <N>` — a number
+        # only `plan` prints (#11469's report-before-drop guarantee, made
+        # mechanical). A "repair command" that argparse rejects is the same class of
+        # false promise this file keeps closing, so the artifact carries the pair,
+        # with the tenant this run already holds filled in.
+        #
+        # ⛔ AND THE TWO FACES ARE DIFFERENT GATES, so the note names both: an
+        # UNPROJECTED write leaves no row and the id-scoped guard catches it, while
+        # an UNPROVEN POSITION still lands the row and only its
+        # `public.journal_event` row is missing — the id count then PASSES and the
+        # arm is declined to the graph and refused by the mechanism check instead.
+        if self._fold_needed():
+            journal = shlex.quote(self.journal)
+            if self.org_id and self.graph_id:
+                ident = (
+                    f"--org-id {shlex.quote(self.org_id)} --graph-id {shlex.quote(self.graph_id)}"
+                )
+            else:
+                # Unreachable on the emitted path (an unprojected write requires an
+                # ARMING record, which requires a resolved tenant), and stated
+                # rather than guessed: a placeholder is visible, a wrong id is not.
+                ident = "--org-id <org-id> --graph-id <graph-id>"
+            payload["fold"] = {
+                "plan": (
+                    f"uv run python tools/record_runner.py plan --from-checkpoint "
+                    f"--journal {journal} {ident}"
+                ),
+                "apply": (
+                    f"uv run python tools/record_runner.py apply --journal {journal} "
+                    f"{ident} --acknowledge-plan <N: the count `plan` reports>"
+                ),
+                "why": (
+                    "`apply` writes NOTHING without --acknowledge-plan (a number only "
+                    "`plan` prints), and `--from-checkpoint` makes the plan report "
+                    "what REMAINS rather than the whole journal — the number `apply` "
+                    "then wants. Both verbs require --org-id/--graph-id, filled in "
+                    "above from this run's tenant. ⚠️ A CUT-OVER graph (one holding a "
+                    "`record_cursor` row) refuses an ENUMERATED replay whatever the "
+                    "acknowledgement; there the repair is the allocator's operator "
+                    "path, not this fold"
+                ),
+            }
             payload["note"] = (
                 f"{self.record_unprojected} write(s) came back unprojected and "
                 f"{self.positions_unproven} append(s) proved no position — the "
@@ -1436,8 +1489,8 @@ class SeedReport:
                 f"guard; an unproven position leaves the row but not its "
                 f"`public.journal_event` row, so `journal_ready` reads the tenant as "
                 f"behind and the arm is declined to the graph (refused by the "
-                f"mechanism check). Both are healed by `fold_command`, which is "
-                f"emitted here rather than retried because the fold is the "
+                f"mechanism check). Both are healed by `fold`'s two commands, "
+                f"reported here rather than run in-process because the fold is the "
                 f"record's own door, not a second writer (#13345)"
             )
         return payload
@@ -1561,6 +1614,8 @@ def _seed_population(
             folded += 1
     return SeedReport(
         journal=str(journal_path),
+        org_id=tenant[0] if tenant else None,
+        graph_id=tenant[1] if tenant else None,
         written=len(population),
         record_armed=True if armed_yes else (None if armed_unmeasured else False),
         record_applied=applied,
@@ -1719,7 +1774,8 @@ def run_measurement(args: argparse.Namespace) -> int:
         print(
             f"WARNING: {seed.record_unprojected} of {seed.written} seeded write(s) "
             f"came back UNPROJECTED and {seed.positions_unproven} proved no journal "
-            f"position — repair with: {seed.as_dict()['fold_command']}",
+            f"position — repair with `seed.fold.plan` then `seed.fold.apply` "
+            f"(the artifact carries both, with this run's tenant filled in)",
             file=sys.stderr,
         )
     written = seed.written

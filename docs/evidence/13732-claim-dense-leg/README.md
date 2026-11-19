@@ -218,10 +218,13 @@ ids in the record *before* the arm, so a write that was ATTEMPTED and a write th
 different facts. When they are not all there, the `record_dense` arm is recorded as
 `BLOCKED[record_population_absent]` by name and the run exits **3**, so the artifact cannot be
 mistaken for the paired answer. What changed is the DIAGNOSIS: a shortfall is now a fold/ordering
-fact (a refused projection, an append whose position could not be proven, an enumerated replay
-refused on a cut-over graph), and the repair is the record's own fold —
-`uv run python tools/record_runner.py apply --journal <path>` — which the artifact emits as
-`seed.fold_command` whenever a write came back unprojected.
+fact (a refused projection, a row filed under another tenant, an enumerated replay refused on a
+cut-over graph, or an `embedding` the store's converter turns into a NULL `embedding_vec`), and the
+repair is the record's own fold — `record_runner plan --from-checkpoint`, then
+`record_runner apply --acknowledge-plan <N>` — which the artifact emits as `seed.fold`, tenants
+filled in, whenever a write came back unprojected. ⛔ **One command would not do:** `apply`
+requires `--org-id`/`--graph-id` on every verb and refuses a writing run without the count `plan`
+prints, so a bare `apply --journal <path>` is argparse-rejected.
 
 ## 4. Falsifiers, and where each one stands
 
@@ -282,13 +285,26 @@ records and writes `n` record rows, and the ids are deterministic, so a re-run u
 only grows the journal.
 
 ⛔ **If a write comes back unprojected, the artifact says so and names the repair.** `seed` in the
-artifact carries `record_applied` / `record_unprojected` / `positions_unproven` and, when either of
-the last two is non-zero, `seed.fold_command` — the record's own fold over the journal this run
-wrote:
+artifact carries `record_armed` (three-state: `true`/`false`/`null`, so `record_applied: 0` on an
+unarmed deployment is not read as a refusal), `record_applied`, `record_unprojected` and
+`positions_unproven`; when a fold is needed it also carries `seed.fold` — the record's own fold over
+the journal this run wrote, as the TWO commands `record_runner` actually requires:
 
 ```bash
-uv run python tools/record_runner.py apply --journal "$TORTOISE_RECORD_JOURNAL"
+# 1. plan: read the number, writes nothing
+uv run python tools/record_runner.py plan --from-checkpoint \
+    --journal "$TORTOISE_RECORD_JOURNAL" --org-id "$TORTOISE_RECORD_ORG_ID" --graph-id "$TORTOISE_RECORD_GRAPH_ID"
+# 2. apply that number (N = what the plan reported)
+uv run python tools/record_runner.py apply \
+    --journal "$TORTOISE_RECORD_JOURNAL" --org-id "$TORTOISE_RECORD_ORG_ID" --graph-id "$TORTOISE_RECORD_GRAPH_ID" \
+    --acknowledge-plan <N>
 ```
+
+(The artifact fills the tenant in from the run itself — the block above is the same two commands with
+shell variables.) `apply` refuses a writing run without `--acknowledge-plan` (#11469's
+report-before-drop guarantee, made mechanical), which is why the pair is emitted rather than one
+line. ⚠️ A CUT-OVER graph (one holding a `record_cursor` row) refuses an ENUMERATED replay whatever
+the acknowledgement; the repair there is the allocator's operator path, not this fold.
 
 The run still measures the other two arms and still exits 3 with `record_dense` blocked by name; a
 re-run after the fold measures all three.

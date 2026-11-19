@@ -58,6 +58,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import types
@@ -809,9 +810,14 @@ class TestRefusals:
         # ⛔ THE REPAIR IS NAMED, NOT IMPLIED — and since #13830 the repair is the
         # record's own FOLD, not a backfill this instrument never had: the
         # population IS written through the journaled door, so a shortfall is a
-        # fold/ordering fact and `tools/record_runner.py apply` is what heals it.
-        assert "record_runner.py apply" in ei.value.message, ei.value.message
-        assert "--journal" in ei.value.message, ei.value.message
+        # fold/ordering fact and `record_runner plan` + `apply --acknowledge-plan`
+        # are what heal it (two commands: `apply` writes nothing without the count
+        # `plan` prints, and both verbs require --org-id/--graph-id).
+        # …and it names the RUNNABLE pair, not one command `apply` would refuse
+        # for want of `--org-id`/`--graph-id`/`--acknowledge-plan` (review round 2).
+        assert "record_runner.py plan" in ei.value.message, ei.value.message
+        assert "--acknowledge-plan" in ei.value.message, ei.value.message
+        assert "seed.fold" in ei.value.message, ei.value.message
 
     def test_the_population_guard_refuses_a_PARTIAL_cohort(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
@@ -1089,7 +1095,9 @@ class TestTheArmsConstruction:
     same arm", so the two assertions whose absence mattered most were missing.
     """
 
-    def test_seed_population_writes_the_write_paths_own_vector(self, tool_mod, monkeypatch, tmp_path):
+    def test_seed_population_writes_the_write_paths_own_vector(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
         """⛔ THE SEEDED VECTOR MUST BE THE ONE PRODUCTION WRITES.
 
         Every write-side embedder in this tree goes through
@@ -1127,9 +1135,7 @@ class TestTheArmsConstruction:
 
         long_content = " ".join(f"w{i}" for i in range(600))
         population = [{"id": "pt-12186000000", "content": long_content}]
-        seed = tool_mod._seed_population(
-            folded, population, journal_path=tmp_path / "j.jsonl"
-        )
+        seed = tool_mod._seed_population(folded, population, journal_path=tmp_path / "j.jsonl")
 
         assert seed.written == 1
         assert len(seen["texts"][0].split()) == embeddings.EMBED_WORD_BUDGET, (
@@ -1197,7 +1203,9 @@ class TestTheArmsConstruction:
         assert seed.record_applied == 2 and seed.record_unprojected == 0, seed.as_dict()
         assert seed.first_seq == 1 and seed.last_seq == 2, seed.as_dict()
 
-    def test_seed_population_refuses_a_row_it_could_not_embed(self, tool_mod, monkeypatch, tmp_path):
+    def test_seed_population_refuses_a_row_it_could_not_embed(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
         """A `None` vector is a NAMED refusal, never a written hole."""
         log = _journal_double(monkeypatch)
         folded = _FoldDouble()
@@ -1239,11 +1247,13 @@ class TestTheArmsConstruction:
         """
         tree = ast.parse(TOOL.read_text())
         seed = next(
-            n for n in ast.walk(tree)
+            n
+            for n in ast.walk(tree)
             if isinstance(n, ast.FunctionDef) and n.name == "_seed_population"
         )
         attrs = {
-            n.func.attr for n in ast.walk(seed)
+            n.func.attr
+            for n in ast.walk(seed)
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
         }
         assert "_upsert_point_props" not in attrs, (
@@ -1252,7 +1262,8 @@ class TestTheArmsConstruction:
             "journal record, so the record could never receive the population"
         )
         chokepoint = [
-            n for n in ast.walk(seed)
+            n
+            for n in ast.walk(seed)
             if isinstance(n, ast.Call)
             and isinstance(n.func, ast.Attribute)
             and n.func.attr == "write"
@@ -1268,9 +1279,7 @@ class TestTheArmsConstruction:
         passed = {k.arg for c in chokepoint for k in c.keywords}
         assert {"log", "projection"} <= passed, passed
         imported = {
-            (a.name or "" for a in n.names)
-            for n in ast.walk(seed)
-            if isinstance(n, ast.ImportFrom)
+            (a.name or "" for a in n.names) for n in ast.walk(seed) if isinstance(n, ast.ImportFrom)
         }
         flat = set().union(*imported) if imported else set()
         for banned in ("write_live_record", "write_records", "RecordWriter"):
@@ -1337,7 +1346,9 @@ class TestTheJournalDeclaration:
         # the refusal names the door and the reason, not just the variable
         assert "journaled door" in ei.value.message, ei.value.message
 
-    def test_the_env_declaration_is_used_when_the_flag_is_absent(self, tool_mod, monkeypatch, tmp_path):
+    def test_the_env_declaration_is_used_when_the_flag_is_absent(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
         from tortoise import record_vector
 
         journal = tmp_path / "events.jsonl"
@@ -1409,6 +1420,8 @@ class TestTheSeedReport:
     def _report(self, tool_mod, **over):
         base = dict(
             journal="/tmp/j.jsonl",
+            org_id="org-1",
+            graph_id="graph-1",
             written=2,
             record_armed=True,
             record_applied=2,
@@ -1424,23 +1437,100 @@ class TestTheSeedReport:
     def test_a_clean_seed_names_no_repair(self, tool_mod):
         payload = self._report(tool_mod).as_dict()
         assert payload["record_applied"] == 2 and payload["record_unprojected"] == 0
-        assert "fold_command" not in payload, (
-            "a clean seed must not hand the operator a repair command — a warning "
+        assert "fold" not in payload, (
+            "a clean seed must not hand the operator a repair — a warning "
             "that always fires is a warning nobody reads"
         )
 
-    def test_an_unprojected_write_names_the_folder_command(self, tool_mod):
+    def test_the_repair_is_the_RUNNABLE_two_step_fold(self, tool_mod):
+        """⛔ A REPAIR COMMAND ARGPARSE REJECTS IS NOT A REPAIR (review round 2).
+
+        The first cut emitted `... apply --journal <path>` alone. `record_runner`
+        requires `--org-id`/`--graph-id` on every verb, and `apply` refuses a
+        WRITING run without `--acknowledge-plan <N>` — a number only `plan` prints
+        (#11469). Measured: the bare command exits 2 with
+        `the following arguments are required: --org-id, --graph-id`. So the
+        artifact must carry BOTH commands, with this run's tenant filled in.
+        """
         payload = self._report(tool_mod, record_applied=1, record_unprojected=1).as_dict()
-        assert payload["fold_command"] == (
-            "uv run python tools/record_runner.py apply --journal /tmp/j.jsonl"
-        ), payload
+        fold = payload["fold"]
+        assert fold["plan"].startswith(
+            "uv run python tools/record_runner.py plan --from-checkpoint --journal /tmp/j.jsonl"
+        ), fold
+        assert "--org-id org-1 --graph-id graph-1" in fold["plan"], fold["plan"]
+        assert "--acknowledge-plan" in fold["apply"], fold["apply"]
+        assert "--org-id org-1 --graph-id graph-1" in fold["apply"], fold["apply"]
+        assert "plan" in fold["why"] and "acknowledge" in fold["why"], fold["why"]
         assert "unprojected" in payload["note"], payload["note"]
 
-    def test_an_unproven_position_names_it_too(self, tool_mod):
+    def test_the_emitted_commands_PARSE_against_the_real_record_runner(self, tool_mod):
+        """⛔ THE PIN THAT WOULD HAVE CAUGHT ROUND 2's FINDING.
+
+        The first cut emitted a command `record_runner` REJECTS: `apply` requires
+        `--org-id`/`--graph-id` on every verb and refuses a writing run without
+        `--acknowledge-plan <N>` (a number only `plan` prints). A prefix assertion
+        on the string could not see that, so this parses both emitted commands with
+        the runner's OWN parser — the same object that refuses them at run time.
+        """
+        # ⛔ REGISTERED BEFORE exec_module, because `record_runner` declares
+        # `@dataclass`es and `dataclasses` resolves `from __future__ import
+        # annotations` strings through `sys.modules[cls.__module__]`. The tool under
+        # test cannot use a dataclass for the same reason (see `SeedReport`'s own
+        # note); a module this TEST loads is free to be registered properly.
+        name = "record_runner_for_13830"
+        spec = importlib.util.spec_from_file_location(
+            name, REPO_ROOT / "tools" / "record_runner.py"
+        )
+        runner = importlib.util.module_from_spec(spec)
+        sys.modules[name] = runner
+        try:
+            spec.loader.exec_module(runner)
+            parser = runner._parser()
+        finally:
+            sys.modules.pop(name, None)
+        payload = self._report(tool_mod, record_applied=1, record_unprojected=1).as_dict()
+
+        def _argv(command: str) -> list[str]:
+            """`uv run python tools/record_runner.py …` -> the args the parser reads."""
+            tokens = shlex.split(command)
+            assert tokens[:3] == ["uv", "run", "python"], tokens[:3]
+            assert tokens[3].endswith("tools/record_runner.py"), tokens[3]
+            return tokens[4:]
+
+        plan = parser.parse_args(_argv(payload["fold"]["plan"]))
+        assert plan.verb == "plan", plan
+        assert (plan.org_id, plan.graph_id) == ("org-1", "graph-1"), plan
+        assert plan.from_checkpoint is True, (
+            "without --from-checkpoint the plan reports the WHOLE journal, which is a "
+            "different number from the one `apply` then wants"
+        )
+        applied = parser.parse_args(
+            _argv(payload["fold"]["apply"].replace("<N: the count `plan` reports>", "3"))
+        )
+        assert applied.verb == "apply", applied
+        assert applied.acknowledge_plan == 3, applied
+        assert (applied.org_id, applied.graph_id) == ("org-1", "graph-1"), applied
+
+    def test_an_unproven_position_on_an_ARMED_record_names_the_fold(self, tool_mod):
         """A record row with no journal_event row is UNPROJECTED to the read gate."""
-        payload = self._report(tool_mod, positions_unproven=2, first_seq=None, last_seq=None).as_dict()
-        assert "fold_command" in payload, payload
+        payload = self._report(
+            tool_mod, positions_unproven=2, first_seq=None, last_seq=None
+        ).as_dict()
+        assert "fold" in payload, payload
         assert payload["positions_unproven"] == 2, payload
+
+    def test_an_unproven_position_on_an_unarmed_record_needs_NO_fold(self, tool_mod):
+        """⛔ Nothing was written to a record, so there is no fold to run.
+
+        A journal append that cannot prove its position on an UNARMED deployment
+        is a fact about the append; the record never saw the write, so a repair
+        aimed at the record would send the operator to a store this run did not
+        touch.
+        """
+        payload = self._report(
+            tool_mod, record_armed=False, record_applied=0, positions_unproven=2
+        ).as_dict()
+        assert "fold" not in payload, payload
 
     def test_an_UNARMED_record_is_not_read_as_a_refusal(self, tool_mod):
         """⛔ `record_applied == 0` MEANS TWO THINGS, AND THE REPORT KEEPS THEM APART.
@@ -1453,7 +1543,7 @@ class TestTheSeedReport:
         """
         unarmed = self._report(tool_mod, record_armed=False, record_applied=0).as_dict()
         assert unarmed["record_armed"] is False and unarmed["record_applied"] == 0
-        assert "fold_command" not in unarmed, (
+        assert "fold" not in unarmed, (
             "an unarmed record is not an unprojected one — nothing was attempted, "
             "so there is no fold to run"
         )
@@ -1920,6 +2010,8 @@ class TestTheDocumentedRunPath:
             # shipped seed does not have.
             return tool_mod.SeedReport(
                 journal=str(journal_path),
+                org_id="org-1",
+                graph_id="graph-1",
                 written=len(pop),
                 record_armed=True,
                 record_applied=len(pop) - seed_unprojected,
@@ -1935,9 +2027,7 @@ class TestTheDocumentedRunPath:
         # refuses when neither `--journal` nor the env names one, and the run
         # DECLARES the resolved path for the record arm's readiness gate — so
         # `monkeypatch` owns the path here (and restores the environment after).
-        monkeypatch.setenv(
-            "TORTOISE_RECORD_JOURNAL", str(tmp_path / "journal" / "events.jsonl")
-        )
+        monkeypatch.setenv("TORTOISE_RECORD_JOURNAL", str(tmp_path / "journal" / "events.jsonl"))
         monkeypatch.setattr(
             tool_mod,
             "_read_arm",
@@ -2490,27 +2580,27 @@ class TestTheDocumentedRunPath:
         artifact = json.loads(target.read_text())
         seed_block = artifact["seed"]
         assert seed_block["record_unprojected"] == 2, seed_block
-        assert seed_block["fold_command"].startswith(
+        assert seed_block["fold"]["apply"].startswith(
             "uv run python tools/record_runner.py apply --journal"
         ), seed_block
+        assert "--acknowledge-plan" in seed_block["fold"]["apply"], seed_block
+        assert "--org-id" in seed_block["fold"]["plan"], seed_block
         # the repair is on stderr too — an artifact read later is not a report
         err = capsys.readouterr().err
-        assert "UNPROJECTED" in err and "record_runner.py apply" in err, err
+        assert "UNPROJECTED" in err and "seed.fold" in err, err
         # ⛔ AND THE ARM STILL REFUSES, BY NAME.
         assert artifact["arms"]["record_dense"]["blocked"] == "record_population_absent"
-        assert "record_runner.py apply" in artifact["arms"]["record_dense"]["message"]
+        assert "record_runner.py plan" in artifact["arms"]["record_dense"]["message"]
         assert rc == 3, rc
 
-    def test_a_clean_seed_publishes_its_counts_and_no_repair(
-        self, tool_mod, monkeypatch, tmp_path
-    ):
+    def test_a_clean_seed_publishes_its_counts_and_no_repair(self, tool_mod, monkeypatch, tmp_path):
         target = tmp_path / "clean.json"
         rc = self._drive(
             tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N, record_ok=True
         )
         artifact = json.loads(target.read_text())
         assert artifact["seed"]["record_applied"] == 3, artifact["seed"]
-        assert "fold_command" not in artifact["seed"], artifact["seed"]
+        assert "fold" not in artifact["seed"], artifact["seed"]
         assert artifact["arms"]["record_dense"].get("blocked") is None, artifact["arms"]
         assert rc == 0, rc
 
