@@ -2019,6 +2019,46 @@ def _load_plan(path: str, confirmed: str) -> dict:
     return plan
 
 
+def _looks_like_host(segment: str) -> bool:
+    """``True`` for ``host`` / ``host:port`` / ``[v6]`` / ``[v6]:port`` — nothing else.
+
+    Used only to decide whether text after the last ``@`` is a host (so the ``@`` is a
+    userinfo boundary) or query junk (so it is not). Deliberately strict: a false ``False``
+    is a refusal, which is the safe direction for a comparison key.
+    """
+    if not segment or any(ch in segment for ch in "@/?#"):
+        return False
+    if segment.startswith("["):
+        end = segment.find("]")
+        if end < 0:
+            return False
+        remainder = segment[end + 1:]
+        return remainder == "" or (remainder.startswith(":") and remainder[1:].isdigit()
+                                   and remainder[1:] != "")
+    host, sep, port = segment.partition(":")
+    if not host:
+        return False
+    if not sep:
+        return True
+    return port.isdigit() and port != ""
+
+
+def _host_with_port(segment: str) -> bool:
+    """``True`` only for ``host:<digits>`` or ``[v6]:<digits>`` — a PORT is required.
+
+    The stronger sibling of :func:`_looks_like_host`, used where a ``?``/``#`` inside the
+    userinfo forces a choice between "password character" and "query start": requiring a
+    real port after the last ``@`` is what tells `:s3cret?xx@prod:6379` (a password) from
+    `host:6379?x@y` (a query before a path, whose tail must never become the host).
+    """
+    if not _looks_like_host(segment):
+        return False
+    if segment.startswith("["):
+        return "]:" in segment and segment.rsplit(":", 1)[1].isdigit()
+    head, sep, port = segment.rpartition(":")
+    return bool(head) and bool(sep) and port.isdigit() and port != ""
+
+
 def uri_fingerprint(uri: str) -> str:
     """A plan-safe fingerprint of a graph target: scheme, host, port and graph NAME.
 
@@ -2104,7 +2144,22 @@ def uri_fingerprint(uri: str) -> str:
     #    `@` is still inside that window and is removed with the rest of the userinfo —
     #    never truncated, which is why the userinfo strip precedes the query cut.
     authority, _, path = rest.partition("/")
-    host = authority.rpartition("@")[2]      # drop `user:password@`
+    userinfo, _, host = authority.rpartition("@")      # drop `user:password@`
+    # ⛔ AND THE BOUNDARY IS ONLY BELIEVABLE WHEN A REAL `host:port` FOLLOWS IT. A `?`/`#`
+    #    BEFORE the last `@` is either a password character or the start of a genuine
+    #    query, and the split above cannot tell them apart: measured,
+    #    `docker://host:6379?x@y/g` yielded host `y` — junk from the query — so two
+    #    deployments folded onto `docker://y/g`. Requiring a PORT after the `@` separates
+    #    the password case (`:s3cret?xx@prod:6379`) from that one, and the ambiguous
+    #    remainder is REFUSED rather than guessed.
+    if userinfo and any(ch in userinfo for ch in "?#") and not _host_with_port(host):
+        raise Refusal(
+            REFUSE_TARGET_UNPARSEABLE,
+            f"the graph target {scheme}://… cannot be fingerprinted: a '?'/'#' precedes "
+            "the last '@' and no host:port follows it, so the authority cannot be "
+            "separated from a credential without either printing it or dropping the "
+            "host. Percent-encode the credential ('/' → '%2F', '?' → '%3F', '#' → '%23') "
+            "or pass the graph name out of band with `--graph-name`.")
     # 3. The query and the fragment are not target identity, and `?api_key=…` is a
     #    credential — drop them from the PATH, after the host is known.
     cut = min(
@@ -2627,10 +2682,15 @@ def main(argv: list[str] | None = None) -> int:
         # escaped `main` and was read as exit 1 ("usage") over a traceback — nothing about
         # the invocation was wrong, and the destructive path's own contract says a census
         # that cannot be run is a refusal. This mirrors the preview arm above.
+        # ⚠️ THE MESSAGE IS RELAYED HERE, unlike the preview arm: this block wraps no
+        # target resolution, and the graph URI it was handed is already a credential-free
+        # fingerprint — so nothing reachable from here can echo a secret, and withholding
+        # the text would turn a real bug into an undiagnosable exit 3.
         sys.stderr.write(
             f"strip_graph_entity_vectors: REFUSED — the run could not complete "
-            f"({_unexpected_failure(exc)}). A gate that cannot be read is a refusal, not a "
-            "pass. Nothing was removed.\n")
+            f"({type(exc).__name__}: {exc}). A gate that cannot be read is a refusal, not "
+            "a pass. ⛔ NOTHING IS CLAIMED ABOUT WHAT LANDED: a failure here can arrive "
+            "after a batch was applied, so re-plan before retrying.\n")
         return 3
 
     print(json.dumps(result, indent=2))

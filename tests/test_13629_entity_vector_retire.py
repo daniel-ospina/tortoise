@@ -1616,7 +1616,11 @@ def test_the_execute_path_refuses_an_unreadable_gate_instead_of_tracebacking(
     assert code == 3, err
     assert "REFUSED" in err
     assert "ImportError" in err
-    assert "tortoise.security" not in err, "the message must be withheld, not relayed"
+    # ⛔ THE MESSAGE IS RELAYED HERE — this arm wraps no target resolution, and the URI it
+    # was handed is already a credential-free fingerprint, so withholding the text would
+    # only make a real bug undiagnosable (measured: a `TypeError` on this arm would be
+    # indistinguishable from a gate failure if the message were dropped).
+    assert "tortoise.security" in err, "the cause must be diagnosable on this arm"
 
 
 def test_a_plan_that_lists_a_label_twice_is_refused(tmp_path):
@@ -1915,6 +1919,24 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     # safety by collapsing credentialed URIs to a constant.
     assert strip.uri_fingerprint("docker://:pa%2Fss@prod:6379/tortoise") == \
         "docker://prod:6379/tortoise"
+    # ⛔ A `?`/`#` INSIDE THE PASSWORD IS USERINFO, NOT A QUERY. Cutting the query first
+    # dropped the `@` before the ambiguity guard could see it, so the credential came back
+    # AND the host went missing: measured on the previous revision,
+    # `docker://:s3cret?xx@prod:6379/g` rendered `docker://:s3cret`, and prod/staging
+    # folded onto `docker://:pa`. The authority window is therefore resolved BEFORE the
+    # query is cut.
+    assert strip.uri_fingerprint("docker://:s3cret?xx@prod:6379/g") == \
+        "docker://prod:6379/g"
+    assert "s3cret" not in strip.uri_fingerprint("docker://:s3cret?xx@prod:6379/g")
+    assert "xx" not in strip.uri_fingerprint("docker://:s3cret?xx@prod:6379/g")
+    assert strip.uri_fingerprint("docker://:pa?ss@prod:6379/g") != \
+        strip.uri_fingerprint("docker://:pa?ss@staging:6379/g")
+    assert strip.uri_fingerprint("docker://:pw#x@prod:6379/g") == "docker://prod:6379/g"
+    # …and a query BEFORE a path (`host:6379?x@y/g`) is the shape where requiring a real
+    # port after the last `@` matters: without it, `y` became the host and two deployments
+    # folded. It is refused rather than guessed.
+    with pytest.raises(strip.Refusal):
+        strip.uri_fingerprint("docker://host:6379?x@y/g")
     assert strip.uri_fingerprint("docker://:pa%2Fss@prod:6379/tortoise") != \
         strip.uri_fingerprint("docker://:pa%2Fss@staging:6379/tortoise")
     # A bare db-path carries no credential and is passed through unchanged, so the
