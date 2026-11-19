@@ -1401,12 +1401,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # brief and this pin still named the pre-#13290 lines), and this branch's own
     # seam work moves them a further +23. Re-derived against the live file, so
     # the pin and §1 of the brief name the same lines as the code.
-    ("tortoise/projection/__init__.py", 20974, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20974`"),
-    ("tortoise/projection/__init__.py", 21417, "def _create_fulltext_index(",
-     "`:21417`"),
-    ("tortoise/projection/__init__.py", 21859,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21859`"),
+    ("tortoise/projection/__init__.py", 21004, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21004`"),
+    ("tortoise/projection/__init__.py", 21447, "def _create_fulltext_index(",
+     "`:21447`"),
+    ("tortoise/projection/__init__.py", 21889,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21889`"),
 )
 
 
