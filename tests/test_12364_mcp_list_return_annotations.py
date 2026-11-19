@@ -325,16 +325,34 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # that arithmetic put the floor four rows under the population the scan actually
     # produces, which is slack on the one guard whose job is to notice a collapse.)
     # The floor moves DOWN with the surface, exactly ON the measurement (0 slack, as
-    # at 16); it is not lowered to whatever a green run last produced, and the two
-    # guards ABOVE (`checked > 0`, and `checked + reshaped == len(pairs)`) are what
-    # still make a vacuous scan impossible. Measured at this head: 10 pass-through +
-    # 19 reshaping = the 29 rows the scan above found.
+    # at 16); it is not lowered to whatever a green run last produced. Measured at
+    # this head: 10 pass-through + 19 reshaping = the 29 rows the scan above found.
+    # ⛔ WHAT NO GUARD IN THIS TEST CATCHES — written down because the sentence that used
+    # to stand here ("the two guards ABOVE … are what still make a vacuous scan
+    # impossible") was FALSE, and a false non-vacuity claim is the class-A hazard this
+    # whole file exists to stop:
+    #   • `checked + reshaped == len(pairs)` is the TAUTOLOGY `:276` already documents —
+    #     `unresolved` and `unreadable` are asserted empty BEFORE it, so every row lands
+    #     in exactly one counter and the equality cannot fail.
+    #   • `checked > 0` sees only the pass-through term collapsing to ZERO.
+    #   ⇒ a LOSS OF RESHAPING ROWS is covered by NOTHING here. Measured at this head:
+    #     three reshaping rows disappear (a scan that lost them, not a real retirement)
+    #     → pairs 29 → 26 (`26 > 25` GREEN), checked 10 → 10 (`>= 10` GREEN), 10 + 16 ==
+    #     26 (tautology, GREEN), `checked > 0` GREEN. Every guard passes over a registry
+    #     three rows short. The mirror case IS caught: three pass-throughs going
+    #     unrecognised answer checked=7 and red this floor.
+    #     So the `pairs` floor's 4-row margin is bought by THIS floor's 0 slack for the
+    #     PASS-THROUGH term ONLY; the reshaping term carries no pin, and closing it needs
+    #     a third floor (`reshaped >= N`) that a comment-only pass may not invent — a
+    #     0-slack floor on the term whose job is to SWALLOW unrecognised shapes is a
+    #     standing false-red on every reshaping-door retirement, so it owes its own
+    #     change and its own mutant attribution (#13704 owns that decision).
     # ⛔ WHY 0 SLACK HERE, and 4 rows of margin 200 lines above (`> 25` for pairs) —
     # the #13676 review named this as the file's one unexplained convention clash,
     # so the rule is stated: the `pairs` floor answers a REACH question ("did the scan
     # reach the registry at all?"), where a floor left at a pre-consolidation number
-    # reds on a CORRECT retirement and a collapse it misses is still caught by
-    # `checked > 0` plus the sum identity. THIS floor answers a COVERAGE question, and
+    # reds on a CORRECT retirement — and, as immediately above, NOTHING downstream
+    # catches what its 4-row margin misses. THIS floor answers a COVERAGE question, and
     # a slack row buys exactly one thing: a wrapper the classifier stopped recognising
     # goes uncounted, which is the escape `_passthrough_of` is measured to allow. False
     # PASS is class A, an over-block is class B (AGENTS.md A/B), so the margin that is
