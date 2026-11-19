@@ -4084,7 +4084,17 @@ def run_vector_query(
                 "record dense leg for %s is the label's ONLY source and did not "
                 "answer (%s) — reporting the failed leg rather than a smaller "
                 "graph cohort", entity_type, e)
-            _record(ran=True, degraded=True, reason="query_failed", count=0)
+            # ⛔ `failure=True` AND the mechanism, for the same reason every other
+            # failure record in this function carries them (`#13610` review F2).
+            # The closure's empty-scope rule is `_scope_empty and not failure`:
+            # without the flag, a SCOPED read whose scope probe measured nothing
+            # stamps this entry NEUTRAL (`VECTOR_SCOPE_EMPTY`), `declared_degraded_read`
+            # skips neutral entries, and the leg that could not look is laundered
+            # into "no scope, nothing to say" — the exact laundering the rule's own
+            # comment forbids. `mechanism` is what the sealed-empty arm beside it
+            # passes: a post-contract failure reports the record leg, not nothing.
+            _record(ran=True, degraded=True, reason="query_failed", count=0,
+                    mechanism=MECHANISM_PGVECTOR, failure=True)
             return []
         except Exception as e:  # noqa: BLE001, RUF100 — every failure takes the fallback
             index_attempted = True

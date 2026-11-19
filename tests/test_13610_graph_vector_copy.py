@@ -42,6 +42,7 @@ build their own by path)::
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import shutil
 import tempfile
@@ -51,7 +52,12 @@ import pytest
 
 from tortoise import record_vector
 from tortoise.projection import FalkorProjection
-from tortoise.search_engine import run_vector_query
+from tortoise.search_engine import (
+    VECTOR_SCOPE_EMPTY,
+    VECTOR_SCOPE_KEY,
+    declared_degraded_read,
+    run_vector_query,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
@@ -314,6 +320,56 @@ def test_post_contract_a_record_failure_is_reported_and_not_answered_from_graph(
                               graph=_Graph([("obj-legacy", 1.0 / 1.5)]))
     assert [row[0] for row in rows] == ["obj-legacy"], (rows, trace)
     assert trace[-1]["mechanism"] == "scan_fallback", trace
+
+
+def test_a_post_contract_failure_on_an_empty_scope_still_declares_degraded(
+        monkeypatch):
+    """⛔ A FAILURE IS NEVER NEUTRAL — keyed on the SCOPE too (#13610 review F2).
+
+    The post-contract arm records `query_failed` when the record cannot answer.
+    On a SCOPED read whose probe measured an EMPTY scope, the closure's
+    empty-scope rule (`_scope_empty and not failure`) stamps the entry
+    `VECTOR_SCOPE_EMPTY`, and `declared_degraded_read` skips neutral entries. So
+    without `failure=True` the leg that could not look is laundered into "no
+    scope, nothing to say", and the read reports itself healthy after answering
+    from nothing — the exact laundering that rule's own comment forbids. Every
+    other FAILURE record in this function passes the flag; this one did not.
+
+    The probe answers `(0, 0)`: a MEASURED, empty scope. The scope is non-empty,
+    which is what makes `_scope_empty` reachable at all.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    _stub_record(monkeypatch, count=4, rows=[])
+
+    def _boom(*_a, **_k):
+        raise record_vector.RecordVectorError("the record went away")
+
+    # THROUGH THE REAL SEARCHER (see the case above): the
+    # Declined/WithoutFallback split is made there.
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+
+    trace: list[dict] = []
+    graph = _Graph([(0, 0)])
+    rows = run_vector_query(
+        graph, [0.01] * 8, limit=10, is_embedded=False, entity_type="object",
+        leg_trace=trace, pg_vector=_searcher(4), timeout_ms=500,
+        scope_kinds=("widget",))
+
+    assert rows == []
+    assert len(graph.queries) == 1 and "count(n.embedding)" in graph.queries[0], (
+        f"the fixture must build the MEASURED-empty-scope shape: {graph.queries}")
+    vector_entries = [e for e in trace if e.get("leg") == "vector"]
+    assert vector_entries, trace
+    assert all(e.get(VECTOR_SCOPE_KEY) != VECTOR_SCOPE_EMPTY
+               for e in vector_entries), (
+        f"a post-contract FAILURE was stamped NEUTRAL: {vector_entries}")
+    entry = declared_degraded_read(trace)
+    assert entry is not None, (
+        "a post-contract failure on an empty scope was filtered out as neutral, "
+        f"so the read declared itself healthy after answering nothing: {trace}")
+    assert entry["reason"] == "query_failed", entry
+    assert [e.get("mechanism") for e in vector_entries] == ["pgvector"], (
+        f"the failure must name the leg that could not answer: {vector_entries}")
 
 
 def test_an_unmeasurable_graph_denominator_keeps_the_graph_branch(monkeypatch):
@@ -722,39 +778,57 @@ def test_the_two_denominators_are_stated_as_a_comparison_and_not_a_membership_pr
         "coverage unreachable for a duplicate-name label — it belongs in the docstring")
 
 
-def test_a_cardinality_preserving_mismatch_still_verifies(monkeypatch):
-    """The residual DRIVEN, not just described: equal SIZES verify on their own.
+def test_the_gate_is_a_size_comparison_by_construction(monkeypatch):
+    """The residual's BOUND, pinned as the SHAPE that makes it one.
 
-    `Coverage` is a size comparison, so a graph node whose record row is missing,
-    offset by a record row whose graph node is gone, VERIFIES — the count cannot
-    see membership. That is the bound on what step 2 proves, and the alternative (a
-    set difference) is refused deliberately: it would ship every id across the wire
-    on a path that runs inside a dense read.
+    ⛔ THE CASE THIS REPLACES PROMISED A DRIVEN MISMATCH AND DROVE NONE (#13610
+    review F3). It handed `coverage` the literal ``7`` on BOTH sides and asserted
+    the verdict — but ``7 >= 7`` holds under every candidate implementation
+    (``>=``, ``==``, a membership check), and the function never receives a
+    population to compare. Its name claimed the residual was driven; the body
+    re-asserted the happy path already covered by the cached-verdict case, so no
+    mutation of the diff could redden it.
 
-    ⛔ The sibling case above only reads `Coverage.__doc__` for the words, so its red
-    was an unrelated prose edit while the behaviour the docstring names had no test.
-    This drives that behaviour: the record's count is taken over the record's OWN
-    population, so a row substituted for another node is invisible and the verdict
-    is positive.
+    What IS pinnable at this layer is the comparison the design actually is, and
+    the two facts below are what a membership implementation would have to break:
+
+    * the boundary is ``record >= graph``, ONE-SIDED by design — an equal or larger
+      record verifies, a SHORT one never does (``==`` reddens the ``8 vs 7`` case,
+      ``<=`` the ``6 vs 7`` one). This is the direction the issue's no-silent-loss
+      rule depends on;
+    * the surface carries COUNTS and no identities, so no implementation reachable
+      through it can compare membership. That is the honest statement of the
+      residual, whose prose lives in `Coverage.__doc__` (pinned by the case above).
 
     ⚠️ The OTHER stated residual — the graph MERGEs on `id` while the record keys on
     `name`, so two nodes sharing a name can hold the verdict below what the record
-    can reach — is not pinnable at this layer: it needs a graph with duplicate names
-    and a record that folds them to one row, which is a store-level fixture rather
-    than a property of this function. It stays in the docstring as a residual for
-    that reason, and `chk_object_node_key_is_contract_key` is its schema-side pin.
+    can reach — is not pinnable at this layer either: it needs a graph with
+    duplicate names and a record that folds them to one row, which is a store-level
+    fixture rather than a property of this function. `chk_object_node_key_is_contract_key`
+    is its schema-side pin.
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
-    record_vector.reset_coverage_cache()
     scope = record_vector._Scope(*_SCOPE)
-    # Seven record rows, seven graph nodes — and by construction NOT the same seven.
-    monkeypatch.setattr(record_vector, "_record_vector_count",
-                        lambda *a, **k: 7, raising=True)
-    verdict = record_vector.coverage("object", scope, graph_vectors=7)
-    assert verdict.verified is True, (
-        "a size-equal verdict did not verify; if the gate ever compares MEMBERSHIP "
-        "the cost model changes and `Coverage`'s docstring is wrong")
-    assert verdict.record_vectors == verdict.graph_vectors == 7
+
+    for record_vectors, expected in ((7, True), (8, True), (6, False)):
+        record_vector.reset_coverage_cache()
+        monkeypatch.setattr(record_vector, "_record_vector_count",
+                            lambda *a, _n=record_vectors, **k: _n, raising=True)
+        verdict = record_vector.coverage("object", scope, graph_vectors=7)
+        assert verdict.verified is expected, (
+            f"record={record_vectors} graph=7 answered verified="
+            f"{verdict.verified}; the gate is `record >= graph` and a SHORT record "
+            "must never verify")
+
+    params = set(inspect.signature(record_vector.coverage).parameters)
+    identities = {"ids", "keys", "members", "nodes", "rows"}
+    assert "graph_vectors" in params and not (identities & params), (
+        "`coverage` grew an identity-bearing parameter — the gate could then "
+        "compare membership, and `Coverage`'s stated residual would be wrong: "
+        f"{sorted(params)}")
+    fields = set(record_vector.Coverage.__dataclass_fields__)
+    assert not (identities & fields), (
+        f"the verdict grew an identity-bearing field: {sorted(fields)}")
 
 
 # ── 5. the folds: no encode, no write ────────────────────────────────────
@@ -805,7 +879,9 @@ def test_the_folds_do_not_encode_or_write_once_the_record_owns_the_vector(
     ⚠️ Nothing is DELETED either way: `set_embedding_clause` writes no property for
     a NULL vector and the `clear_embedding` pre-REMOVE is emitted only when a vector
     will be written, so an existing node's stored vector is untouched. That is the
-    issue's "no data deletion" constraint, and it is pinned by the third case.
+    issue's "no data deletion" constraint, and the third case pins it **with the
+    mirror RETIRED** — the only arrangement in which those two guards are
+    load-bearing rather than masked by the fold's own re-write.
     """
     from tortoise import derived_embedding
     from tortoise.record_writer import use_record_tenant
@@ -838,12 +914,28 @@ def test_the_folds_do_not_encode_or_write_once_the_record_owns_the_vector(
         "the graph stored a copy its record already owns")
     assert _embedding_of(proj.g, "Object", "obj-13610-b") is None
 
-    # ── the transitional object case, and NO DELETION on an existing node ─
-    record_vector.reset_coverage_cache()
+    # ── NO DELETION on an existing node — driven with the mirror RETIRED ──
+    # ⛔ The ARRANGEMENT is the claim, and it is why this block is no longer the
+    # shape it used to be (`#13610` review F1). Resetting the coverage cache
+    # RE-ARMS the mirror, so the fold re-encodes and REWRITES the vector: the
+    # property is present because it was just written, and neither guard
+    # (`clear_embedding`'s `vector is None` no-op, `set_embedding_clause`'s
+    # `ELSE s.embedding`) is reached. Coverage for `subject` is VERIFIED by case 2
+    # and a verified verdict is sticky, so this fold takes the mirror-RETIRED
+    # path: no encode, and the MERGE is handed a NULL vector for a node that
+    # already CARRIES one. That is the only arrangement in which dropping either
+    # guard deletes stored data — `preserve_on_null=False` writes NULL into the
+    # ON MATCH clause, and removing `clear_embedding`'s early return fires its
+    # REMOVE — so it is the only one that pins the issue's `⛔ No data deletion`.
+    assert _embedding_of(proj.g, "Subject", "sub-13610-a") is not None, (
+        "fixture: the transitional case above must leave a stored vector to lose")
     with use_record_tenant(*_SCOPE):
         proj._upsert_subject({"id": "sub-13610-a", "name": "alice"})
+    assert calls == ["alice"], (
+        f"the fold encoded with the mirror RETIRED: {calls}")
     assert _embedding_of(proj.g, "Subject", "sub-13610-a") is not None, (
-        "a re-fold DELETED a stored graph vector — this change removes no data")
+        "a re-fold with the mirror RETIRED deleted a stored graph vector — "
+        "this change removes no data")
 
 
 def test_the_object_fold_is_gated_too(proj, monkeypatch):

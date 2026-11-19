@@ -156,11 +156,14 @@ and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in execut
 > graph, it does not silently answer short. The rollback is `TORTOISE_RECORD_VECTOR_LEG=0`. Four
 > facts an operator still needs, in the order that matters:
 >
-> 1. **The in-graph vector index is retired on a store whose replacement is ARMED** — the next
->    setup drops a `Point.embedding` HNSW index if it finds one and never creates another. That is
->    the decision (owner, 2026-11-07), and the ARM GATE is symmetric (#11660 review round 7, P2-2):
->    an UNARMED store behaves exactly as `main` did — it keeps an index it has and still gains one
->    it lacks — because a store must never be left with neither an in-graph index nor a record leg.
+> 1. **The in-graph vector index is retired on a store whose replacement is EXPLICITLY armed** —
+>    `TORTOISE_RECORD_VECTOR_LEG=1` present in the environment, the only spelling
+>    `vector_index_retired()` (via `arm_is_explicit()`) accepts. The next setup drops a
+>    `Point.embedding` HNSW index if it finds one and never creates another. That is the decision
+>    (owner, 2026-11-07), and the ARM GATE is symmetric (#11660 review round 7, P2-2): a store the
+>    operator has not explicitly armed — which includes the DEFAULT posture, since the arm itself
+>    defaults ON — behaves exactly as `main` did: it keeps an index it has and still gains one it
+>    lacks, because a store must never be left with neither an in-graph index nor a record leg.
 > 2. **With the leg unarmed — the ROLLBACK spelling `TORTOISE_RECORD_VECTOR_LEG=0` — the graph keeps
 >    its ANN index**, so dense `Point`/`Source`/`Event` reads are unchanged; a label with NO index is
 >    `#4997`'s defect and the setup reports it at **WARNING** (`#4997/#11642` line). `#13610` added a
