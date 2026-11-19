@@ -686,10 +686,14 @@ class TestRefusals:
         """⛔ `--population 0` was the one input never validated.
 
         It raised `ValueError: n must be positive` out of `detectable_effect_pp`
-        — an uncaught traceback with exit 1 in the ONLY mode this box can run —
-        and in the measurement path it silently made the pre-registered bar
-        `None`, so the pre-registration bound nothing while the emitted note
-        still claimed both bars bind.
+        — an uncaught traceback with exit 1 in the ONLY mode this box can run.
+
+        ⚠️ In the MEASUREMENT path that also means the run died BEFORE an
+        artifact existed (`detectable_effect_pp(preregistered_n, …)` and
+        `preregistration(preregistered_n)` both raise, and `main()` catches only
+        `Refused`), so the `population_mismatch` note never shipped. The related
+        `None`-bar fallback in `paired`/`gated_bar_pp` is real at FUNCTION level
+        and unreachable in an emitted artifact — it is not what this row pins.
         """
         for bad in ("0", "-5"):
             proc = subprocess.run(

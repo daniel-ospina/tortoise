@@ -1463,11 +1463,22 @@ def main(argv: list[str] | None = None) -> int:
         if value < 1:
             print(f"REFUSED: {flag} must be >= 1 (got {value})", file=sys.stderr)
             return 4
-    #    ⚠️ And in the MEASUREMENT path a zero did not even crash: it made
-    #    `preregistered_n = 0`, so `paired` answered
-    #    `detectable_pp_preregistered: None` and `gated_bar_pp` fell back to the
-    #    observed bar alone — the pre-registration bound NOTHING while the
-    #    emitted note still claimed both bars bind. The floor closes that too.
+    #    ⚠️ And in the MEASUREMENT path a zero NEVER REACHED AN ARTIFACT — so
+    #    the fail-open this floor closes is the CRASH, not a mislabel. Two
+    #    call sites evaluate the pre-registered n unconditionally:
+    #    `detectable_effect_pp(preregistered_n, …)` and
+    #    `preregistration(preregistered_n)`, and both raise `ValueError: n must
+    #    be positive` — BEFORE `artifact` is assembled, since `main()` wraps only
+    #    `run_measurement` in `except Refused`. So the old behaviour was an
+    #    uncaught traceback at exit 1, and the `population_mismatch` note was
+    #    never emitted at all.
+    #    The related function-level hazard is real but UNREACHABLE in a shipped
+    #    artifact: with `preregistered_n = 0`, `paired` answers
+    #    `detectable_pp_preregistered: None` and `gated_bar_pp` falls back to the
+    #    observed bar alone, so the pre-registration would bound nothing while
+    #    the note claimed both bars bind. It cannot ship, because the two calls
+    #    above raise first. Recorded here as a reason to keep the floor, not as a
+    #    bug that was shipping.
     if args.preregister:
         print(json.dumps(preregistration(args.population), indent=2, sort_keys=True))
         return 0
