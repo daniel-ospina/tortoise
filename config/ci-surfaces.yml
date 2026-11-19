@@ -2793,6 +2793,22 @@ surfaces:
   # `tortoise/record_writer.py`/`record_projection.py` — the only modules it drives —
   # are `core` triggers, so `core` is the surface whose diff must actually run it.
   - test_13418_source_and_document_derivation.py
+  # #13634 follow-up: the "declared priors are the open decision in #9063" claim — the refusal
+  # message in `tortoise/sdk.py` and the v3.38 changelog entry (via `docs/ONTOLOGY-CHANGELOG.md`).
+  # `classify_test_file` is EXACT membership over the surfaces, so an unregistered file is selected by
+  # NO leg on any diff AND `integrity()` reports it as manifest drift, redding the required
+  # `manifest-integrity` leg — measured on this branch before this row was added:
+  #   `python3 tools/ci_selection.py --integrity` -> `manifest drift: ['test_13634_9063_pointer_resolves.py']`.
+  # `core` selection rationale: `tortoise/sdk.py` is a `SHARED_MODULES` path, so a diff to it selects
+  # the FULL matrix on its own (`tools/ci_selection.py:251-252`; measured: `--changed-files
+  # tortoise/sdk.py` → `full: true, test_files: ALL`). `core` is the selection FALLBACK and where the
+  # sibling SDK-source rows live (`test_sdk_surface_declaration.py`, `test_surface_manifest.py`,
+  # `test_sdk_rename_table.py`), so this row is what keeps the file graded when the DIFF is a test
+  # file — which is the case the drift above is about. ONE row only: this file is `merge=union` in
+  # `.gitattributes`, so a second `core` row on the merge result is a `duplicate_entries()` gate
+  # failure, not a note. Hermetic apart from the throwaway EMBEDDED engine the refusal case builds in
+  # a `tempfile` scratch dir it removes in teardown: no docker, no Postgres, no network, no model.
+  - test_13634_9063_pointer_resolves.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
   # added with its own rationale. This branch registered it here first; the

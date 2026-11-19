@@ -41519,12 +41519,25 @@ class TortoiseSDK:
                 labels = []
             if labels:
                 self._evidence.pop(claim_id, None)
+                # ⛔ This refusal used to tell the caller that non-Point priors "are the open
+                # belief-model decision in #9063". That pointer does not resolve: #9063 RAISED the
+                # question — which node kinds must carry a prior? — reserved it to the owner, and
+                # closed COMPLETED on 2026-10-20 WITHOUT deciding it (the correction is recorded in
+                # `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 entry, appended by #13641; the question itself is
+                # stated as open and owner-reserved at `_CALIBRATION_EVIDENCE_KINDS`, which records no
+                # closure — do not read it as one). So a caller who followed it found a closed issue and
+                # no answer, and the question is tracked by NO open issue.
+                # ⛔ The correction is recorded HERE and deliberately NOT in the message: a tracker
+                # state is not something a shipped string can keep true (the issue may be filed
+                # tomorrow), and the archaeology of what an earlier wording said is not a fact a
+                # caller can act on. The message states the design fact only. Pinned by
+                # `tests/test_13634_9063_pointer_resolves.py`.
                 raise ValueError(
                     f"set_point_baseline: {claim_id!r} is a :{labels[0]}, not a "
                     f":Point — nothing was written. Baselines are writable on "
-                    f":Point only (epistemic-entity priors are the open "
-                    f"belief-model decision in #9063), so the belief you "
-                    f"intended was never stored."
+                    f":Point only: there is no writer for a declared prior on a "
+                    f"non-Point, and whether one should exist is unsettled, so "
+                    f"the belief you intended was never stored."
                 )
             if not _unbindable:
                 # #9262: the probes found NOTHING by this id — a typo'd or
