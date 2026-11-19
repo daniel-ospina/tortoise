@@ -636,6 +636,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         f"and THIS head's diff carries no `tortoise/` path at all (`{_tortoise_cmd}` is empty)",
         "at THIS head it prints two (`activation_scorecard.py`",
         "at the merge heads this section was written for it printed NOTHING",
+        # ⛔ TWO MORE SPELLINGS OF THE SAME FALSE DIRECTION (#13746 review, MEASURED at
+        # `c7f8413a0f`): the list above missed both, and the suite stayed green over them
+        # while the document's own command printed two paths. `activation_scorecard.py`
+        # has been IN this diff since `5db18e9a77`, so "not in the diff at all" and "has
+        # no line to grade" were both false beside the command that shows otherwise.
+        "at THIS head the `tortoise/` set above is empty",
+        "trivially so at THIS head, where that command's file is not in the diff at all",
     ):
         assert _stale_direction not in doc, (
             f"05-verify.md states {_stale_direction!r} — a direction about the `tortoise/` "
