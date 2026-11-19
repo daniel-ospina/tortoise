@@ -2482,9 +2482,6 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     if not diff:
         pytest.skip("origin/main == HEAD in this tree — nothing to compare")
 
-    assert not [p for p in diff if p.startswith("tortoise/")], (
-        "the R3 claim is 'no retrieval behaviour changed', and the diff reaches "
-        f"the product: {[p for p in diff if p.startswith('tortoise/')]}")
     # ⛔ the cell's ENUMERATION is part of the record, both ways: a path it names
     # that the diff does not carry is a re-staled cell (the reviewer's mutant,
     # `tortoise/sdk.py` added to the cell, was GREEN), and a diff path it omits is
@@ -2499,6 +2496,34 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     assert tokens, f"no path tokens in the enumerated span: {span[:200]!r}"
     dirs = {t for t in tokens if t.endswith("/")}
     named = tokens - dirs
+
+    # ⛔ SCOPED TO THE BRANCH THE CELL RECORDS (#13572, measured). The three
+    # assertions below are about ONE PR's change — this cell publishes the path set
+    # of the `#13267`/`#13302` lane — and they were written as if every head's diff
+    # were that diff. It is not: on ANY other branch `named - diff` is non-empty by
+    # construction, so the pin red the required `test (c)` shard for every unrelated
+    # PR while the cell and the tree were both untouched (measured: PR #13712, a
+    # two-file test/copy diff, failed this file's assertion with twelve paths the
+    # cell names and its diff does not carry). A pin that fails on every branch but
+    # one is not a pin, it is a false block — and the sentence this file already
+    # asserts says the set is RE-READ BY A REVIEWER at each head.
+    #
+    # The discrimination is kept, not dropped: a branch that DOES carry the recorded
+    # change still gets every assertion below, including the over-claim arm the
+    # reviewer's `tortoise/sdk.py` mutant needed. The trigger is the record itself —
+    # the brief's own directory — and NOT `named & diff`: the named set includes test
+    # files this lane may legitimately edit, so an overlap test would re-arm the false
+    # block for any PR that touches one of them (and this fix edits
+    # `tests/test_paired_expansion_ab_2518.py` itself).
+    brief_dir = _DOCS.relative_to(repo).as_posix() + "/"
+    if not [p for p in diff if p.startswith(brief_dir)]:
+        pytest.skip("this branch's diff does not carry the research brief this cell "
+                    "records (the cell describes one PR's change) — the set is "
+                    "re-read by a reviewer at each head")
+
+    assert not [p for p in diff if p.startswith("tortoise/")], (
+        "the R3 claim is 'no retrieval behaviour changed', and the diff reaches "
+        f"the product: {[p for p in diff if p.startswith('tortoise/')]}")
     extra = named - set(diff)
     assert not extra, (
         f"the cell names paths this diff does not carry: {sorted(extra)} — a "
