@@ -256,13 +256,8 @@ def _pricing_init_code(html: str, page: str = "product.html") -> str:
     return hits[0]
 
 
-def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
-    """One page's render function with its COMMENT LINES removed.
-
-    The two product pages explain the same code with different comments — and
-    legitimately so: `product.html` cites `#4815` for the labels resolver, the
-    campaign page cites the funnel. What must not differ is the CODE, so the
-    comparison is taken over it.
+def _strip_comment_lines(code: str) -> str:
+    """`code` with every line that is WHOLLY a JS comment removed.
 
     Line-based on purpose. A regex `//`-strip would cut the `https://` inside
     the self-host anchor and hide every mutation past it; in these bodies every
@@ -270,7 +265,7 @@ def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
     """
     out: list[str] = []
     in_block = False
-    for line in _function_refs(html, fn_name, page).splitlines():
+    for line in code.splitlines():
         stripped = line.strip()
         if in_block:
             in_block = "*/" not in stripped
@@ -281,7 +276,18 @@ def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
         if stripped.startswith("//"):
             continue
         out.append(line.rstrip())
-    return "\n".join(out).strip()
+    return "\n".join(out)
+
+
+def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
+    """One page's render function with its COMMENT LINES removed.
+
+    The two product pages explain the same code with different comments — and
+    legitimately so: `product.html` cites `#4815` for the labels resolver, the
+    campaign page cites the funnel. What must not differ is the CODE, so the
+    comparison is taken over it.
+    """
+    return _strip_comment_lines(_function_refs(html, fn_name, page)).strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7162,6 +7168,28 @@ def _pricing_source_includes(html: str) -> list[str]:
     return re.findall(r'<script\b[^>]*\bsrc="([^"]+)"', html, re.I)
 
 
+#: ONE spelling of a price figure, shared by the rows that refuse a second copy
+#: of it outside the shared table.
+PRICE_FIGURE_RE = re.compile(r"\$\s?\d")
+
+
+def _inline_scripts(html: str) -> list[str]:
+    """The body of every INLINE `<script>`, comment lines dropped.
+
+    `src=`-carrying tags are skipped: their bodies are empty in these documents
+    and the code they load (`/assets/tortoise-pricing.js`, `/consent.js`) is
+    graded by its own rows. Comment lines go through the same line-based rule
+    `_render_code` uses, so a `//`-strip cannot cut the `https://` inside the
+    self-host anchor and hide every literal after it.
+    """
+    return [
+        _strip_comment_lines(body)
+        for attrs, body in re.findall(
+            r"<script\b([^>]*)>(.*?)</script>", html, re.S | re.I)
+        if not re.search(r"\bsrc\s*=", attrs, re.I)
+    ]
+
+
 class TestPricingSourceIsShared:
     """#13645: `/tortoise` and `/tortoise-for-product-teams` cannot disagree.
 
@@ -7347,6 +7375,60 @@ class TestPricingSourceIsShared:
                 "figure above the fold is a second copy that no row compares "
                 "against `/tortoise`, so the two pages can quote different "
                 "numbers with nothing red (#13645).")
+
+    def test_no_page_quotes_a_price_inside_its_own_script(self):
+        """The channel `_served` cannot see: a price literal in the page's JS.
+
+        `test_no_page_quotes_a_price_outside_the_pricing_section` reads the
+        SERVED markup, and `_served` deletes `<script>` bodies — deliberately,
+        because injected copy is not what a no-JS reader receives. The render
+        rows close the other end (`test_the_two_pages_render_from_the_same_code`
+        compares the five functions, `test_both_pages_init_to_the_same_billing_mode`
+        the init statement), but a literal ANYWHERE ELSE in the inline script is
+        read by nothing: `_served` has removed it and no render comparison
+        covers it.
+
+        Measured at `fb6b1afc68`: prepending
+        `document.title = 'Pro from $25/mo';` to the campaign page's inline
+        script left all **138 rows GREEN** while that page quoted $25/mo for
+        Builder against `/tortoise`'s $20 monthly / $15 annual (#13696 round 5).
+        Both pages carry ZERO price literals in their inline scripts today, so
+        this row is green as written — it refuses the next one rather than
+        fixing a live divergence.
+
+        A price a script needs must come from the shared table through
+        `window.tortoiseFmtPrice` (or `PRICING`); a literal is a second copy of
+        the number that no row compares against `/tortoise`.
+
+        A line that is WHOLLY a comment is dropped before the scan, so prose may
+        still mention a figure. A TRAILING comment on a code line is not — the
+        line is scanned as written — which fails closed and deliberately: the fix
+        is to move the sentence onto its own line, never to widen this row.
+        """
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            scripts = _inline_scripts(path.read_text(encoding="utf-8"))
+            assert scripts, (
+                f"{name} carries no inline `<script>` body, so this row would "
+                "pass without reading anything — the channel it exists to read "
+                "has moved and the row must move with it")
+            hits = [
+                line.strip()
+                for body in scripts
+                for line in body.splitlines()
+                if PRICE_FIGURE_RE.search(line)
+            ]
+            assert not hits, (
+                f"{name} quotes a price INSIDE its own script:\n  "
+                + "\n  ".join(hits)
+                + "\nA price a script renders must come from the ONE shared "
+                "table via `window.tortoiseFmtPrice` / `PRICING` — a literal is "
+                "a second copy that no static row can see (`_served` deletes "
+                "script bodies) and no render row compares, so this page can "
+                "quote a different number than `/tortoise` with every suite "
+                "green (#13645).\n"
+                "(A line that is wholly a comment is skipped, so prose may name "
+                "a figure; a TRAILING comment on a code line is scanned with "
+                "the code — move the sentence onto its own line.)")
 
     # The five functions that turn the shared table into the prices a JS
     # visitor actually sees. See `test_the_two_pages_render_from_the_same_code`.
