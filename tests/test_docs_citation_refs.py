@@ -1306,7 +1306,7 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
 #: for") is past tense and deliberately allowed — that is the same line the numstat arm
 #: draws between `printing `1 1` at a head of its own` and `both print `1 1``.
 _TORTOISE_SET_DIRECTION_CLAIM = re.compile(
-    r"(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
+    r"(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`?"
     # ⛔ THE SHORTHAND TOO (#13802 review, round 4, P2): the document writes
     # "`-- tortoise/` returns NOTHING" as well as the full command, and a pattern that
     # knows only the long spelling walks past a false claim in the shorthand — measured,
@@ -1314,10 +1314,44 @@ _TORTOISE_SET_DIRECTION_CLAIM = re.compile(
     # green while the same claim in the long spelling redded.
     r"|`-- tortoise/`"
     r"|`tortoise/` set[^`]{0,40}?)"
-    r"\s*(?:prints?|->|returns?|is)\s*`?"
-    r"(?:(?:NOT|not)\s+)?"
-    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two|ONE module|TWO modules)"
+    # ⛔ THE SAME ANSWER VOCABULARY AS `_typed_answers_to_tortoise_cmd` (#13802 review,
+    # round 5, P2), deliberately: that arm MEASURES and therefore skips on the depth-1
+    # rail, so it cannot be the guard the required `test` job relies on. Its witnesses
+    # pin the vocabulary this ban must ALSO carry — `carries no `tortoise/` path at all`,
+    # `names two `tortoise/` paths`, `prints just one path`, `returns a non-empty set` —
+    # and a ban with a narrower list let exactly those pass green in a depth-1 clone
+    # (measured). `_TORTOISE_ANSWER_WITNESSES` below is the pin that keeps the two lists
+    # from diverging again; every entry must match THIS pattern and be read as an answer
+    # by THAT arm.
+    r"[\s*]*(?:(?:still|now|actually|also)\s+)?"
+    r"(?:prints?|returns?|yields?|reports?|gives?|outputs?|carries?|lists?|shows?|"
+    r"names?|includes?|contains?|has|->|→|is|[=:])\s*`?"
+    r"(?:(?:NOT|not|never|isn['\u2019]t)\s+)?(?:a|an)?\s*"
+    r"(?:NOTHING|nothing|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?paths?|empty|EMPTY|non-empty|nonempty|"
+    r"exactly those two|just one|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"single)\b"
     r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`")
+
+#: The answer witnesses the two `-- tortoise/` guards must agree on (#13802 review, round
+#: 5, P2). Each is a spelling the MEASURED arm already reads as an answer; the text ban
+#: has to refuse the same population, because the measured arm is skipped on the depth-1
+#: rail and the text ban is not. `test_the_text_ban_covers_every_answer_the_measured_arm_reads`
+#: asserts BOTH directions, so adding a witness to one and not the other reds. (The
+#: document's quoted-and-retracted `returns exactly those two` is NOT a witness for that
+#: reason: the measured arm deliberately does not read a retraction as a live answer,
+#: while the text ban — which cannot tell an assertion from a quoted retraction — refuses
+#: it. The ban being STRICTER than the arm is the safe direction; the danger this pin
+#: closes is the ban being NARROWER, which is what shipped four green spellings).
+_TORTOISE_ANSWER_WITNESSES = (
+    "prints NOTHING",
+    "prints NO path at all",
+    "prints no path at all",
+    "prints NO path at this head",
+    "carries no `tortoise/` path at all",
+    "names two `tortoise/` paths",
+    "prints just one path",
+    "returns a non-empty set",
+)
 
 #: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
 #: docs/00_index.md` prints NOTHING at this head, so a document that types what it printed
@@ -1347,6 +1381,42 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # print` followed by a typed pair is this class by construction; the HISTORICAL form
     # ("printing `1 1` at a head of its own") is the participle, not this verb.
     r"|\bboth print\s*`\d+\s+\d+`")
+
+
+def test_the_text_ban_covers_every_answer_the_measured_arm_reads():
+    """⛔ THE TWO `-- tortoise/` GUARDS MUST REFUSE THE SAME POPULATION (#13802 round 5).
+
+    The MEASURED arm (`_typed_answers_to_tortoise_cmd`) shells out to `git diff
+    origin/main...HEAD -- tortoise/`, so on the depth-1 checkout the required `test` job
+    uses it reports UNPROVABLE and skips — measured in a real `--depth 1` clone of this
+    branch: a FALSE membership claim in the document came back GREEN. The TEXT BAN is
+    what grades that class on the rail, so it has to cover the measured arm's whole
+    vocabulary; a narrower list let `carries no `tortoise/` path at all`, `names two
+    `tortoise/` paths`, `prints just one path` and `returns a non-empty set` through.
+
+    This pin asserts BOTH directions for every witness: the text ban MATCHES it, and the
+    measured arm still READS it as an answer. Adding a spelling to one guard and not the
+    other therefore reds here rather than three review rounds later.
+    """
+    cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    for witness in _TORTOISE_ANSWER_WITNESSES:
+        sentence = f"`{cmd}` {witness} at this head"
+        assert _TORTOISE_SET_DIRECTION_CLAIM.search(sentence), (
+            f"the text ban does not refuse {witness!r} — the measured arm reads it as a "
+            "typed answer, so on the depth-1 rail (where that arm skips) this spelling "
+            "ships green (#13802 review, round 5, P2)")
+        assert _typed_answers_to_tortoise_cmd(sentence, cmd), (
+            f"the measured arm no longer reads {witness!r} as an answer, so this witness "
+            "list describes a population the guard does not have — the two lists have "
+            "drifted apart (#13802 review, round 5, P2)")
+    # The legitimate forms stay green: naming the command, and history in the past tense.
+    for allowed in (f"run `{cmd}` at the head you merge",
+                    f"at that head `{cmd}` printed no path",
+                    f"`{cmd}` is the command that answers it"):
+        assert not _TORTOISE_SET_DIRECTION_CLAIM.search(allowed), (
+            f"the text ban refuses a legitimate form ({allowed!r}) — naming the command, "
+            "or a past-tense statement scoped to a head, is what this document is "
+            "supposed to do (#13802 review, round 5, P2)")
 
 
 def test_the_document_types_no_numstat_figure_for_the_index_residual():
