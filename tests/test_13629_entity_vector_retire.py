@@ -6736,6 +6736,47 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+
+        # ⛔ AND A WRAPPER AROUND A PAIR ELEMENT IS THE SAME PAIR (`#13788`, measured at
+        # `a17a1550`): `_pairs_store_the_vector` type-tested `ast.Tuple | ast.List`, so ONE
+        # transparent wrapper around the pair flipped a REFUSED store to CERTIFIED — the same
+        # root as the zip columns and the `fromkeys` key sequence in the two rounds before, and
+        # 53 of the affected rows produced an argument list byte-identical to a refused twin.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(props, *[copy.copy(("embedding", _encode(ev)))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(props, *[("embedding", _encode(ev)).copy()])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(props, *[copy.copy(["embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(props, *( [("embedding", _encode(ev))] if _f() else [] ))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [copy.copy({"embedding": _encode(ev)})][0]
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad

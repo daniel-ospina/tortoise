@@ -2815,15 +2815,26 @@ def _pairs_store_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> b
     """
     import ast
 
+    # ⛔ EACH ELEMENT IS RESOLVED, NOT TYPE-TESTED (`#13788`, measured at `a17a1550`). This is
+    # the same defect the zip COLUMNS and the `fromkeys` key sequence carried in the two rounds
+    # before, one level over: `isinstance(element, ast.Tuple | ast.List)` answers the BARE pair,
+    # so ONE transparent wrapper around it flipped a REFUSED store to CERTIFIED —
+    # `props._set(props, *[copy.copy(("embedding", vec))])` CERTIFIED while
+    # `props._set(props, *[("embedding", vec)])` was refused, the same runtime call. 68 in-surface
+    # matrix rows (PAIR, FLATPAIR, CTN_MAP, CTN_PAIR), 53 of them producing an argument list
+    # byte-identical to a refused bare spelling. `_sequence_options` is the ONE resolver, so each
+    # element is resolved into its options and every two-element option is asked the pair
+    # question — which also keeps the `Starred`-target pairing the previous commit landed.
+    #
+    # ⛔ THE PAIR'S KEY IS THE SAME KEY (`#13788` F11): `[(key, vec)]` with `key = "embedding"`
+    # places the property exactly as `[("embedding", vec)]` does, so the alias rule answers here
+    # too rather than leaving one spelling of the same key certified.
     return any(
-        isinstance(element, ast.Tuple | ast.List) and len(element.elts) == 2
-        # ⛔ THE PAIR'S KEY IS THE SAME KEY (`#13788` F11): `[(key, vec)]` with
-        # `key = "embedding"` places the property exactly as `[("embedding", vec)]` does, so
-        # the alias rule answers here too rather than leaving one spelling of the same key
-        # certified.
-        and _names_property_key(element.elts[0], alias_keys)
-        and not isinstance(element.elts[1], ast.Constant)
-        for element in node.elts)
+        len(option) == 2
+        and _names_property_key(option[0], alias_keys)
+        and not isinstance(option[1], ast.Constant)
+        for element in node.elts
+        for option in (_sequence_options(element) or ()))
 
 
 def _two_argument_store(arguments, alias_keys: frozenset[str] = frozenset()) -> bool:
