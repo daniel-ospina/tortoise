@@ -1408,7 +1408,10 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
         "below would then be vacuous"
     )
 
-    assert scoped, "`_label_hits` read no files at all on the calling thread"
+    assert scoped, (
+        "`_label_hits` read no file from its own frame, so the recorder is "
+        "blind and the exclusion below proves nothing"
+    )
     assert foreign not in scoped, (
         "a read made on ANOTHER thread was attributed to `_label_hits`, which "
         "reds the population control on a foreign path and reports a defect "
@@ -1476,7 +1479,10 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "this test guards against was not reproduced — the exclusion assertion "
         "below would then be vacuous"
     )
-    assert read, "`_label_hits` read no files at all on the recording thread"
+    assert read, (
+        "`_label_hits` read no file from its own frame, so the recorder is "
+        "blind and the exclusion below proves nothing"
+    )
     assert ambient not in read, (
         "a read made by ANOTHER FRAME on the recording thread was attributed to "
         "`_label_hits`, which reds the population control on a path it never "
