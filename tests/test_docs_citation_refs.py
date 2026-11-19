@@ -627,8 +627,17 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # and the merge-head `printed NOTHING` claim by that same set at the merge head
     # (`git diff e61694255a...2584a86ec1 -- tortoise/` prints five). They are refused by
     # name in the idiom this file already uses for retracted sentences.
-    # NON-VACUITY, MEASURED: every string below was present in the document at
-    # `618b1ec0e4` before this repair, beside the command that refutes it.
+    # NON-VACUITY, MEASURED — per arm, because one head does not cover the population (#13746
+    # review, P3: an earlier cut of this comment said EVERY string below was present at
+    # `618b1ec0e4`). Measured `05-verify.md` occurrences of each arm, arm by arm:
+    #   * `618b1ec0e4` -> 1 for every arm below EXCEPT `is empty, so both modules are
+    #     identical`, which measures 0 there — `ebe191924e`, an ANCESTOR of it, had already
+    #     removed that spelling — and 1 at `17b9925a8508`;
+    #   * `c7f8413a0f` -> 1 for the LAST TWO arms (that is where they were added; the other
+    #     six measure 0 at that head).
+    # A dead arm would be one that measures 0 at the head that is supposed to carry it; none
+    # does. Each was present beside the command that refutes it, and all eight measure 0 at
+    # this head — which is what makes re-introducing any one of them red.
     for _stale_direction in (
         "at THIS head the PR's own diff carries NO `tortoise/` module",
         f"`{_tortoise_cmd}` is empty, so both modules are identical",
