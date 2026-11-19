@@ -713,7 +713,7 @@ _PREFIX_BOUNDS_BULLETS = (
 _NAMED_GAP3_UMBRELLA_BOUND = (
     "- **The gap-3 umbrella is ATTRIBUTION-ONLY — a stamp whose header NAME is an "
     "expression is neither counted nor classified outside `HTML_SITES`.** `countStamps` "
-    "still runs only over the six `HTML_SITES` files.\n")
+    "still runs only over the seven `HTML_SITES` files.\n")
 
 
 def test_the_gap3_umbrella_bound_guard_reds_on_the_prefix_bounds_list():

@@ -2157,7 +2157,7 @@ test('every file that emits or serves HTML is in the guarded site list', () => {
 test('every file that stamps a Content-Security-Policy is classified', () => {
   // `stampCount` above runs ONLY over `HTML_SITES` — a hand-written list. So the
   // window it opens (the stamp COUNT, the policy CONSTANT it must equal, and the
-  // import provenance of that constant) is opened on six files and nothing else: a
+  // import provenance of that constant) is opened on seven files and nothing else: a
   // `headers.set("Content-Security-Policy", …)` added to any other Function — a
   // new HTML producer, or a header set on a non-HTML response in a file nobody
   // classified — ships with no count, no constant check and no entitlement check
