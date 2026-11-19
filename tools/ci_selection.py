@@ -380,6 +380,23 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/welcome.html",
                    "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
+                   # #13645: the niche product page (`premiselabs.co/tortoise-
+                   # for-product-teams`) and the ONE pricing source both product
+                   # pages render from. `website/` is in NON_PYTHON_PREFIXES and
+                   # these are CONCRETE names, so without these rows a diff that
+                   # added the page or changed a price selected NOTHING —
+                   # measured: `select(["website/tortoise-for-product-teams.html"])`
+                   # -> `surfaces: []`, so the head/canonical/pricing guards and
+                   # `test_website_static.py`'s `TestPricingSourceIsShared` never
+                   # ran on the only change class that can re-stale them. Same
+                   # #1349/#3332/#3616 silent-drop class as the entries below.
+                   "website/tortoise-for-product-teams.html",
+                   "website/assets/tortoise-pricing.js",
+                   # #13645: this page's own preview card. The card guard resolves
+                   # EVERY page's `og:image` and holds it to its declared type,
+                   # size and a 40 KB content floor, so a replaced card is a
+                   # subject of that guard.
+                   "website/assets/product-teams-og.jpg",
                    # #2409: the public contact form's page. Registered here for the
                    # same reason as the rest of this tuple — a PR touching only
                    # this page must still select the guard that holds it.

@@ -54,6 +54,13 @@
 # The investor one-pager (#8568) — same document class as the design-partner
 # page above, so it carries the same trailing-slash 301.
 /investors/  /investors  301
+# The niche product page (#13645). It is served at the COMPANY ROOT, not under
+# `/tortoise` — the middleware's prefix rewrite only serves `PRODUCT_PAGES`
+# there, and this page is deliberately not a member (a `PRODUCT_PAGES` entry
+# would 301 this very URL to `/tortoise/<name>`, which does not exist). Pages'
+# pretty-URL resolution serves the asset at both spellings, so the trailing
+# slash and the raw `.html` form are pinned here to keep ONE address.
+/tortoise-for-product-teams/  /tortoise-for-product-teams  301
 
 # The Spanish LFPDPPP notice (`aviso-privacidad.html`) is RETIRED (#9486): the
 # controller's jurisdiction of residence is the United Kingdom, so the Mexican
@@ -88,6 +95,11 @@
 /self-hosted.html  /self-hosted  301
 /design-partners-intro.html  /design-partners-intro  301
 /investors.html  /investors  301
+# The niche product page's raw asset (#13645). Same reason as its siblings
+# above: Pages resolves the extensionless path to this file, so without this
+# row `/tortoise-for-product-teams` and `/tortoise-for-product-teams.html`
+# are two indexable copies of one document.
+/tortoise-for-product-teams.html  /tortoise-for-product-teams  301
 # The legal pages moved to the company ROOT in #11762, so their `.html` twins are
 # duplicates ON the canonical host for the first time. Before that they were 301'd
 # off-host by the middleware's TORTOISE_ONLY set, which is why they were never listed
