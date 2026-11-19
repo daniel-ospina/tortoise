@@ -735,7 +735,7 @@ def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
         f"prose is told nothing: {supplied.reason!r}")
     # ⛔ AND IT DATES THE COUNT (#13812 review P2). This string outlives the
     # instant it describes — a verified verdict is cached for the life of the
-    # process, and `as_dict()` carries the reason into a backup manifest — so a
+    # process, and `Coverage.as_dict()` hands the same string to a caller — so a
     # present-tense "the record HOLDS N / the graph SERVES M" is read later as a
     # claim about the population NOW, while the read rendering it may return rows
     # the count never saw. The renderer is the trace line the cases below drive;
@@ -743,8 +743,8 @@ def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
     # cannot keep a present-tense count after the trace has been corrected.
     assert not re.search(r"\b(holds|serves)\s+\d", supplied.reason), (
         "the reason narrates its count in the PRESENT tense, so every later "
-        "reader of it (a cached verdict, the unverified DECLINE line, a manifest) "
-        f"is told a stale number is the current one: {supplied.reason!r}")
+        "reader of it (a cached verdict, the unverified DECLINE line, a caller's "
+        f"as_dict()) is told a stale number is the current one: {supplied.reason!r}")
     assert supplied.as_dict()["trivial"] is True, (
         "the marker is not on the serialised verdict, so an artifact that records "
         "`as_dict()` cannot tell a trivial pass from a catch-up")
