@@ -3000,6 +3000,41 @@ _PREFIX_APPROVAL_RECORD = (
 _PREFIX_UNRESOLVED_POINTER = (
     "> reads four conditions). That is a code defect with its own issue; it is not a "
     "sentence to rewrite.")
+# ⛔ THE SAME POINTER, SOFT-WRAPPED, and it is a fixture because the arm was
+# measured FAIL-OPEN on this shape (review @ 30ef349c, finding P2): the arm split the
+# RAW block, so ``own`` and ``issue`` on separate physical lines never met and the
+# sentence that names a home it cannot give was never examined. A soft wrap is not a
+# semantic boundary — the entry it guards reflows every release.
+_POINTER_SPLIT_BY_A_SOFT_WRAP = (
+    "> reads four conditions). That is a code defect with its own\n"
+    "> issue; it is not a sentence to rewrite.")
+# ⛔ AND THE SECOND HALF, DRIVEN SEPARATELY SO THE TWO FIXES CANNOT SHADOW EACH OTHER:
+# the pointer sentence is closed by a QUOTATION (``itself."``), so a splitter keyed on
+# ``(?<=[.;!?])`` sees the borrowed ``#13450`` in the NEXT sentence as part of this one
+# and the pointer passes. Measured GREEN before the fix, with the wrap fix alone still
+# GREEN — they are two independent fail-opens and both are needed.
+_POINTER_BORROWING_AN_ID_ACROSS_A_QUOTE_BOUNDARY = (
+    '> The ruling reads "the artifact is the text itself."* That is a code defect\n'
+    '> with its own issue."  Citing #13450 does not change it.')
+# ⛔ THE TWO SHAPES A COPY-EDIT PRODUCES, each measured FAIL-OPEN (review @ 30ef349c,
+# round 2): the phrase is what the DOCUMENT RENDERS, so a doubled space and a markdown
+# emphasis run are the same pointer as far as a reader is concerned — and neither
+# matched ``\bown issue\b``, so the arm slept through both.
+_POINTER_WITH_A_DOUBLED_SPACE = (
+    "> reads four conditions). That is a code defect with its own  issue; it is not a\n"
+    "> sentence to rewrite.")
+_POINTER_WITH_AN_EMPHASIS_RUN = (
+    "> reads four conditions). That is a code defect with its own *issue*; it is not a\n"
+    "> sentence to rewrite.")
+# ⛔ AND THE PARAGRAPH BOUNDARY, which is why the run is bounded per PARAGRAPH: this
+# pointer ends without terminal punctuation, so unfolding the whole block glued the
+# next paragraph's id onto it and the pointer passed on a number a reader would never
+# read as its own (measured GREEN). The next paragraph's ``#13450`` is a DIFFERENT
+# sentence by this arm's own stated scope.
+_POINTER_ACROSS_A_PARAGRAPH_BREAK = (
+    "> reads four conditions). That is a code defect with its own issue\n"
+    ">\n"
+    "> see #13450 for the defect it names.")
 # ⛔ THE SHAPE THE ARM MUST IGNORE (review F1), kept as a CONTROL: a release that records
 # NO owner approval owes no citation. The first cut asserted `len(records) == 1`, which
 # fires on ZERO as well, so it refused 36 of the 43 landed blocks — the same
@@ -3147,8 +3182,25 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         f"is the form the owner rejected; the paragraph reads: {record!r}")
 
 
-_OWN_ISSUE_RE = re.compile(r"\bown issue\b")
+_OWN_ISSUE_RE = re.compile(r"\bown\s+issue\b")
 _ISSUE_NUMBER_RE = re.compile(r"#\d{2,}")
+
+
+def _reader_text(sentence: str) -> str:
+    """`sentence` as a READER sees it: whitespace collapsed, emphasis markers dropped.
+
+    ⛔ THE POINTER ARM MATCHES WHAT THE DOCUMENT RENDERS, not the bytes it was typed
+    with. Measured green before this (review @ 30ef349c, round 2, P3):
+    ``with its own  issue`` (a doubled space) and ``with its own *issue*`` (markdown
+    emphasis, which renders as ``own issue``) both escaped ``_OWN_ISSUE_RE``, so the
+    one phrase this arm exists to refuse passed unread in the two shapes a re-wrap and
+    a copy-edit actually produce. The same reasoning that unfolded the block applies
+    here: neither spacing nor a markup run is a semantic boundary.
+
+    ⛔ THE NUMBER IS READ FROM THE SAME NORMALISED TEXT, so markup can neither hide a
+    pointer nor manufacture one: ``#13450`` survives the transformation.
+    """
+    return re.sub(r"\s+", " ", sentence.replace("*", "").replace("_", "").replace("`", "")).strip()
 
 
 def _refuse_an_unresolvable_pointer(block: str) -> None:
@@ -3158,13 +3210,35 @@ def _refuse_an_unresolvable_pointer(block: str) -> None:
     pointer a reader is told to follow that resolves to nothing. *"its own issue"*,
     with no number, is that pointer — the reader lands on no issue at all, and the
     defect the sentence disclaims is tracked by nothing a reader can find.
+
+    ⛔ UNFOLDED WITHIN A PARAGRAPH, THEN SPLIT BY THE FILE'S OWN ``_sentences``, and
+    each half is load bearing — every one was measured FAIL-OPEN on its own (review @
+    30ef349c, findings P2 and P3):
+      - a soft wrap between ``own`` and ``issue`` put the phrase out of reach of
+        ``_OWN_ISSUE_RE``, so a reflow of any entry silently disabled this arm;
+      - a sentence closed by a quotation put the NEXT sentence's ``#NNNN`` inside this
+        one, so a pointer borrowed its neighbour's number;
+      - a doubled space or an emphasis run (``own *issue*``) escaped the phrase, in
+        the two shapes a copy-edit actually produces;
+      - and unfolding the WHOLE block absorbed the next PARAGRAPH's id into a pointer
+        that ended without terminal punctuation — a different sentence by this arm's
+        own scope, so the run is bounded per paragraph here.
+    Fixtures below drive them one at a time, so a later cut that drops any fix reds
+    instead of passing.
+
+    ⛔ THE RESIDUAL, STATED: an id anywhere in the SAME sentence satisfies it, so
+    ``… its own issue, unlike #13450;`` is accepted. Separating that needs the
+    sentence's grammar, not its characters, and the reader-visible defect here is the
+    pointer with no number at all.
     """
-    for sentence in re.split(r"(?<=[.;!?])\s+", block):
-        if _OWN_ISSUE_RE.search(sentence) and not _ISSUE_NUMBER_RE.search(sentence):
-            raise AssertionError(
-                "a changelog sentence names an issue as the home of a defect but gives "
-                "no issue number, so a reader cannot follow it — cite the issue "
-                f"(``#NNNNN``): {sentence!r}")
+    for paragraph in _quoted_paragraphs(block):
+        for sentence in _sentences(paragraph):
+            text = _reader_text(sentence)
+            if _OWN_ISSUE_RE.search(text) and not _ISSUE_NUMBER_RE.search(text):
+                raise AssertionError(
+                    "a changelog sentence names an issue as the home of a defect but gives "
+                    "no issue number, so a reader cannot follow it — cite the issue "
+                    f"(``#NNNNN``): {sentence!r}")
 
 
 def _assert_refused_by(raised: pytest.ExceptionInfo[AssertionError], arm: str) -> None:
@@ -3248,6 +3322,32 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     with pytest.raises(AssertionError) as pointer:
         _refuse_an_unresolvable_pointer(_PREFIX_UNRESOLVED_POINTER)
     _assert_refused_by(pointer, "_refuse_an_unresolvable_pointer")
+    # …and again where a SOFT WRAP splits the phrase (measured fail-open before the arm
+    # unfolded first): the pointer is the same, only the reflow differs.
+    with pytest.raises(AssertionError) as wrapped_pointer:
+        _refuse_an_unresolvable_pointer(_POINTER_SPLIT_BY_A_SOFT_WRAP)
+    _assert_refused_by(wrapped_pointer, "_refuse_an_unresolvable_pointer")
+    # …and again where the sentence is closed by a QUOTATION and the number in the
+    # sentence after it is borrowed (measured fail-open with a naive sentence split):
+    with pytest.raises(AssertionError) as borrowed_pointer:
+        _refuse_an_unresolvable_pointer(
+            _POINTER_BORROWING_AN_ID_ACROSS_A_QUOTE_BOUNDARY)
+    _assert_refused_by(borrowed_pointer, "_refuse_an_unresolvable_pointer")
+    # …and the two shapes a COPY-EDIT produces — a doubled space and an emphasis run —
+    # which are the same pointer to a reader (measured fail-open before the arm read
+    # the rendered text):
+    with pytest.raises(AssertionError) as spaced_pointer:
+        _refuse_an_unresolvable_pointer(_POINTER_WITH_A_DOUBLED_SPACE)
+    _assert_refused_by(spaced_pointer, "_refuse_an_unresolvable_pointer")
+    with pytest.raises(AssertionError) as emphasised_pointer:
+        _refuse_an_unresolvable_pointer(_POINTER_WITH_AN_EMPHASIS_RUN)
+    _assert_refused_by(emphasised_pointer, "_refuse_an_unresolvable_pointer")
+    # …and again where the pointer ends without terminal punctuation and the NEXT
+    # PARAGRAPH carries the id (measured fail-open while the whole block was unfolded
+    # as one run): the id belongs to a different sentence, so it is not a resolution.
+    with pytest.raises(AssertionError) as paragraph_pointer:
+        _refuse_an_unresolvable_pointer(_POINTER_ACROSS_A_PARAGRAPH_BREAK)
+    _assert_refused_by(paragraph_pointer, "_refuse_an_unresolvable_pointer")
     # …and a RESOLVED pointer is not refused, so the arm cannot be satisfied by
     # refusing every sentence that mentions an issue's existence.
     _refuse_an_unresolvable_pointer(
