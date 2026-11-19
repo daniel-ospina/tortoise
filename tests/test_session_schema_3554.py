@@ -3442,6 +3442,24 @@ _APPROVAL_RECORD_AS_A_LATER_PARENTHESISED_ITEM = (
 _APPROVAL_RECORD_BEHIND_AN_H1_HEADING_AFTER_AN_ITEM = (
     "> - Retired the legacy predicate in §4.5.\n"
     "> # **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ AND THE SHAPE NO FIXTURE REACHED (review: measured FAIL-OPEN, a regression from
+# `main`): the heading on its OWN line and the label on the NEXT one — what a lane writes
+# when it titles an entry. A heading is a whole block (CommonMark §4.3), so the label
+# opens a new paragraph and is a record; before `_HEADING_START_RE` closed the heading's
+# paragraph the two lines fused, the paragraph began with `###`, and the record PASSED.
+_APPROVAL_RECORD_AFTER_A_HEADING_LINE = (
+    "> ### v3.41 — a wording fix\n"
+    "> **Owner approval of the exact changes** — given in-session, no comment cited.")
+# …and the MIRROR, so closing the heading's paragraph is not satisfied by refusing every
+# line after a heading: prose below a heading records nothing and must stay green.
+_NO_APPROVAL_RECORD_AFTER_A_HEADING_LINE = (
+    "> ### v3.41 — a wording fix\n"
+    "> The §4.5 sentence was corrected; no approval is recorded here.")
+# ⛔ AND A TABLE ROW, which is the one block kind `_PARAGRAPH_START_RE` does not know
+# (review: measured PASS where `main` refused). Declared in the residual list; pinned green
+# so the gap is measured. `docs/ONTOLOGY-CHANGELOG.md` writes no tables.
+_APPROVAL_RECORD_IN_A_TABLE_ROW = (
+    "> | **Owner approval of the exact changes** | given in-session, no comment cited |")
 
 
 # ⛔ THE BLOCK-LEVEL MARKERS THAT START A PARAGRAPH (review round 5):
@@ -3451,6 +3469,16 @@ _APPROVAL_RECORD_BEHIND_AN_H1_HEADING_AFTER_AN_ITEM = (
 # a heading are the same case, per CommonMark §5.2 (a list item's text is its own block).
 _PARAGRAPH_START_RE = re.compile(
     r"^(?:(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+)")
+# ⛔ AND A HEADING IS ALSO A PARAGRAPH's END (review: measured FAIL-OPEN, and a
+# regression from `main`). `_PARAGRAPH_START_RE` decides where a paragraph BEGINS, so a
+# heading line started one — but nothing ended it, and the NEXT line was appended to the
+# heading's paragraph. Per CommonMark §4.3 an ATX heading is a whole block (its content
+# is the line it is written on), so the line after it opens a NEW paragraph — which by
+# this arm's own contract means its opening emphasis run is a label. Measured before this
+# cut: "### v3.41 — a wording fix" followed by the label on the next line PASSED, while
+# `main` refused it. The corpus writes no heading lines, which is exactly why it was
+# silent; `_APPROVAL_RECORD_AFTER_A_HEADING_LINE` pins the direction now.
+_HEADING_START_RE = re.compile(r"^#{1,6}\s+")
 
 
 def _quoted_paragraphs(block: str) -> list[str]:
@@ -3467,7 +3495,9 @@ def _quoted_paragraphs(block: str) -> list[str]:
     opening run could ever be read. CommonMark §5.2/§4.8 settle what a paragraph is: each
     list item is a container block whose text is its OWN paragraph, so each item's first
     inline run does open one — the exact contract this arm is built on. A heading splits
-    the same way, for the same reason.
+    the same way, for the same reason: it STARTS a paragraph, and — because a heading is a
+    whole block, CommonMark §4.3 — it also ENDS one, so the line after it begins a new
+    paragraph rather than continuing the heading.
     """
     paragraphs: list[str] = []
     current: list[str] = []
@@ -3482,6 +3512,9 @@ def _quoted_paragraphs(block: str) -> list[str]:
             paragraphs.append(" ".join(current))
             current = []
         current.append(text)
+        if _HEADING_START_RE.match(text):
+            paragraphs.append(" ".join(current))
+            current = []
     if current:
         paragraphs.append(" ".join(current))
     return paragraphs
@@ -3647,10 +3680,23 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         out of scope: the corpus writes ``**`` exclusively — no ``<b>`` or ``<strong>``
         appears in the file);
       - a label NOT CONTAINED IN A SINGLE EMPHASIS RUN is therefore **PASSES** (fail-open,
-        out of scope): ``**Owner** **approval of the exact changes**``, ``**Owner
-        <b>approval</b> …**`` and ``**[Owner approval …](url)**`` render as the label but
-        are not ONE run to this reader, so ``_opening_approval_label`` returns ``None``;
-        driven by ``_APPROVAL_LABEL_SPLIT_ACROSS_RUNS`` so the shape is measured;
+        out of scope): ``**Owner** **approval of the exact changes**`` splits the phrase
+        across two runs, so no single run renders the label and
+        ``_opening_approval_label`` returns ``None``; driven by
+        ``_APPROVAL_LABEL_SPLIT_ACROSS_RUNS`` so the shape is measured. ⛔ THE OTHER TWO
+        SHAPES A READER RENDERS THE SAME WAY DO NOT FAIL FOR THAT REASON, and the
+        difference is stated because it decides which fix would close them:
+        ``**Owner <b>approval</b> …**`` and ``**[Owner approval …](url)**`` ARE one run —
+        it is ``_reader_text`` that strips no HTML tags and no link syntax, so the run's
+        rendered text carries ``<b>``/``</b>`` or ``[...](url)`` and does not begin with
+        the phrase. Closing either needs the MARKUP stripped first, not the run unsplit;
+      - a label in a TABLE ROW (``| **Owner approval …** | given in-session |``) is
+        **PASSES** (fail-OPEN, out of scope): ``_PARAGRAPH_START_RE`` knows bullets,
+        ordered items, task boxes and headings, and a table row is none of them, so the
+        row's opening run is never read. Measured PASS where `main` refused; the corpus
+        writes no tables (``grep -c '^> *|' docs/ONTOLOGY-CHANGELOG.md`` = 0), and the
+        shape is driven green by ``_APPROVAL_RECORD_IN_A_TABLE_ROW`` so removing it or
+        handling it is a visible decision rather than a silent one;
       - an ENTITY-ENCODED space (``**Owner&#32;approval …**``, ``**Owner&nbsp;approval
         …**``) renders as the label but ``_reader_text`` decodes no entities, so it
         **PASSES** (fail-OPEN); driven by ``_ENTITY_ENCODED_LABEL_IS_NOT_A_RECORD``;
@@ -3776,12 +3822,26 @@ def _reader_text(sentence: str) -> str:
 # PARAGRAPH-WIDE bold scan (`_bolded_approval_label`) beside this file's OPENING-ONLY one;
 # they are two answers to the same question, and keeping both would let a later lane read a
 # report from whichever one it happened to call. This file keeps the opening-only detector,
-# because it is the one that makes a COMPACT LIST ITEM's label readable at all (the marker
-# strip + `_quoted_paragraphs`' item split) and the one this arm's corpus pins measure. The
-# direction that trades AWAY is NAMED in the arm's residual list — a label that does not
-# OPEN its paragraph PASSES — and driven by `_APPROVAL_LABEL_AFTER_AN_UNBOLDED_MENTION` and
-# `_PREFIX_APPROVAL_RECORD_WITH_AN_UNBOLDED_MENTION_CITING_AN_ID`, so the boundary is a pin
-# rather than a sentence nobody measures.
+# which is the detector this arm's fixtures, corpus pins and residuals were written against.
+# ⛔ THE REASON IS THE MEASURED TRADE, NOT A CLAIM THAT THE OTHER DETECTOR CANNOT WORK —
+# list-item readability comes from `_quoted_paragraphs`' item split, which BOTH detectors
+# share (measured: `main`'s scan over this file's paragraph model reads a compact list's
+# later item without any marker strip; the marker strip exists because the opening anchor
+# needs it). Over the landed corpus and that same paragraph model the two detectors agree
+# on 42 of 43 blocks, and the single disagreement is v3.33, which this arm REFUSES as a
+# record with no comment id while `main` exempts it as out of scope. So the two real
+# questions this merge decided are:
+#   1. a label that does not OPEN its paragraph is not read here (fail-OPEN) where `main`
+#      read it — declared in the residual list and driven by
+#      `_APPROVAL_LABEL_AFTER_AN_UNBOLDED_MENTION` and
+#      `_PREFIX_APPROVAL_RECORD_WITH_AN_UNBOLDED_MENTION_CITING_AN_ID`, so the boundary is
+#      a pin rather than a sentence nobody measures;
+#   2. a bare ``**Approval**`` label IS in scope here, which is what makes v3.33 a false
+#      block and ``**Approval of spend**`` a false block too — both are named in the
+#      residual list as the fail-closed cost of covering the shape #13669 says must be
+#      refused or declared out of scope.
+# Neither is a ruling this file can make on its own; both are recorded in the PR body so a
+# later lane re-deciding them meets the trade instead of discovering it.
 
 
 def _refuse_an_unresolvable_pointer(block: str) -> None:
@@ -3914,6 +3974,19 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # which the shipped detector REFUSED while its comment claimed the colon kept it out):
     # a denial does not OPEN a paragraph, so the structural read excludes it.
     _refuse_an_approval_record_with_no_resolvable_home(_NO_APPROVAL_RECORD_IN_PROSE)
+    # ⛔ A LABEL AFTER A HEADING LINE IS A RECORD (review: measured FAIL-OPEN, regression
+    # from `main`): the heading is its own block, so the label opens the next paragraph.
+    with pytest.raises(AssertionError) as after_heading:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _APPROVAL_RECORD_AFTER_A_HEADING_LINE)
+    _assert_refused_by(after_heading, "_refuse_an_approval_record_with_no_resolvable_home")
+    # …and prose below a heading still passes, so the fix is a boundary and not a refusal
+    # of everything that follows a heading.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _NO_APPROVAL_RECORD_AFTER_A_HEADING_LINE)
+    # ⛔ AND THE TABLE ROW IS THE DECLARED FAIL-OPEN (review): green, so a later lane that
+    # teaches the paragraph model table blocks has to re-decide this row, not discover it.
+    _refuse_an_approval_record_with_no_resolvable_home(_APPROVAL_RECORD_IN_A_TABLE_ROW)
     _refuse_an_approval_record_with_no_resolvable_home(_NO_APPROVAL_RECORD_IN_BOLD_PROSE)
     # …and the negative sentence that DOES carry a colon, kept from the sibling lane's round
     # (@ 9d34e510, finding 5): the colon-requiring cut claimed the colon was what excluded
