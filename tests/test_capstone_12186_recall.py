@@ -182,6 +182,71 @@ def test_the_artifact_carries_the_near_duplicate_rule_it_was_measured_under(arti
         f"but the tool computed §3a at {cap.NEARDUP_JACCARD!r}")
 
 
+def test_the_record_states_the_near_duplicate_rule_the_tool_ran(artifact):
+    """§3a's RULE SENTENCE and the artifact's `key`, which nothing read (round 27, F3).
+
+    ⛔ MEASURED at this head, with the suite GREEN at 55 passed: the two statements a
+    re-deriver actually reads could be falsified at once —
+    `README.md` §3a `neardup-v1` -> `neardup-v2` **and** `.` dropped from the declared
+    separator class (`-` `_` `.` `/` -> `-` `_` `/`) — and, separately,
+    `measurement.json -> neardup_rule.key` -> `"exact string only"`. The sibling test
+    above pins the artifact's VERSION and THRESHOLD and both stayed green, because
+    neither it nor any other pin reads the description of the fold or §3a's prose.
+
+    Why it is not cosmetic: §3a is the one section whose numbers **cannot be
+    re-derived** from the artifact at all — `measurement.json` stores the aggregate
+    counts, never the returned name windows — so the stated rule is the only thing a
+    reader has to reproduce `0.0229 / 0.0227 / 0.0142 / 0.0127`. And §3a says out loud
+    that the rule is "pinned by `tests/test_capstone_12186_recall.py`", which was
+    true of the rule's NAME only as a constant in the tool, never of the record.
+
+    Derived from the TOOL, never from the record: the separator class is what the
+    fold ACTUALLY folds, probed over a candidate set, not a copy of the README's list
+    (a copy would pass whatever the README holds).
+    """
+    from tools.candidate_recall_11901 import _fold_punct
+
+    rule = artifact["neardup_rule"]
+    assert rule["key"] == cap.NEARDUP_KEY_NOTE, (
+        f"the artifact describes the near-duplicate key as {rule['key']!r}, but the "
+        f"tool's rule is {cap.NEARDUP_KEY_NOTE!r}")
+
+    #: The class, derived from BEHAVIOUR. The probe set is every character a rule of
+    #: this shape could plausibly name; `_fold_punct` folds exactly four of them.
+    #: ⛔ Space is deliberately absent: it is collapsed by the whitespace pass, so
+    #: `_fold_punct("a b")` is `"a b"` and a space probe would always "fold".
+    folds = {ch for ch in "-_./\\+~,:;|!@#" if _fold_punct(f"a{ch}b") == "a b"}
+    assert folds == {"-", "_", ".", "/"}, (
+        f"the fold class moved to {sorted(folds)} — this pin's expectations and §3a's "
+        f"prose both name `-` `_` `.` `/`")
+
+    paragraph = _paragraph(README.read_text(), "frozen in the tool")
+    #: `_paragraph` returns the block FLATTENED (whitespace and inline-code backticks
+    #: dropped), so the declared class reads as one parenthesised group — `(-_./)` —
+    #: which is still the list itself, not a substring of an unrelated token.
+    declared = re.search(r"\(([-_. /]{1,8})\)", paragraph)
+    assert declared, f"§3a no longer lists a separator class: {paragraph!r}"
+    named = set(declared.group(1)) - {" "}
+    assert named == folds, (
+        f"§3a declares the separator class {sorted(named)}, but the fold this rule "
+        f"computes folds {sorted(folds)} — a record that names a class the tool does "
+        f"not fold states a rule the published rates cannot come from: {paragraph!r}")
+
+    #: THE NAME, in BOTH places §3a spells it. `neardup-v1` is the heading AND the
+    #: sentence, so pinning one copy leaves the other mutable — the class this file
+    #: has repaired twice (§5's DOOR paragraph, §4's second quotation of the mint
+    #: rate). A heading that renamed the rule while the sentence kept it would also
+    #: leave the table's own title contradicting its body.
+    text = README.read_text()
+    headings = [ln for ln in text.splitlines() if ln.startswith("### 3a.")]
+    assert len(headings) == 1, headings
+    assert cap.NEARDUP_RULE in headings[0], (
+        f"§3a's heading no longer names {cap.NEARDUP_RULE!r}: {headings[0]!r}")
+    assert cap.NEARDUP_RULE in paragraph, (
+        f"§3a's rule sentence no longer names {cap.NEARDUP_RULE!r}: {paragraph!r}")
+
+
+
 def test_an_empty_name_is_never_a_duplicate_of_anything():
     assert not cap.is_near_duplicate("", "")
     assert not cap.is_near_duplicate("the ", "")
