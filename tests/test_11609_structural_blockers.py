@@ -245,8 +245,10 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     a site here and WAS one there, because `A` is `object`. That is a false BLOCK the
     PRE-`#13585` reader (`888eda1368^`) emits and this head does not — measured, and pinned so
     the element-wise reading cannot decay back into "ignore the target". It is NOT `origin/main`
-    that emits it: measured on this branch's base (`66ddcf305a`), `main` answers `[]` for the
-    same source too, because `#13585` had already replaced the target-skipping reader.
+    today that emits it: measured on the base `#13628` was written against (`66ddcf305a`, two
+    commits after `#13585` merged), `main` answers `[]` for the same source too, because `#13585`
+    had already replaced the target-skipping reader; on `origin/main` today the same source still
+    answers `[]`, so the mirror row is not where the series' difference shows.
 
     ⛔ EVERY BINDING IS REPLAYED INTO THE BLOCK THAT OWNS IT, AND A CALL IS RESOLVED THROUGH THE
     WHOLE CHAIN (`#13585 review` P3). A FLAT replay cannot say which block a binding belongs to,
@@ -515,8 +517,10 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         and every name in the target was recorded `SHADOWED`. That lost the alias, so
         `A, b = A, object` … `A(app)` reported `[]` at the head while the PRE-`#13585` reader —
         which skipped every non-`Name` target and therefore never dropped the import binding —
-        reported the site. (Measured: `origin/main` at this branch's base answers `[]` too, so
-        naming `main` here would be FALSE — `#13585` had already removed that reader.) Same
+        reported the site. (Measured: on the base `#13628` was written against (`66ddcf305a`,
+        two commits after `#13585` merged) `main` answers `[]` too, so naming `main` there would
+        be FALSE — `#13585` had already removed that reader; on `origin/main` today the same
+        source answers `[3]`, because this series' value-side fix landed at `9d1b1eba`.) Same
         false PASS as the store arm, one level down: the pin's headline claim goes green over a
         module that really wires the adapter.
 
@@ -524,10 +528,13 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         (recursing through nested tuples/lists, and through ONE `Starred`, whose middle slice is
         skipped because a slice has no static value: the elements AFTER it are paired from the
         right, `a, *b, c = (1, 2, 3, 4)` → `c` is `4`). That parenthesised arm is the only
-        starred arm that PAIRS. A bare starred target also parses (`*a = [1]` is a `Starred`
-        target on 3.12, not the `SyntaxError` an earlier cut of this docstring claimed —
-        measured FALSE) and it reaches the `return []` arm below, so it makes NO CLAIM: `*A, =
-        [object]` … `A(app)` therefore reports a site it should not. That is the DECLARED
+        starred arm that PAIRS. A bare starred target also reaches this function: `ast.parse`
+        accepts `*a = [1]` as a `Starred` target even though the COMPILER rejects it (`SyntaxError:
+        starred assignment target must be in a list or tuple`) — and this reader parses with
+        `ast.parse`, which is exactly why the arm is reachable from source that could never run.
+        Either form makes NO CLAIM (the bare form reaches the `return []` arm; the comma form
+        `*A, = [object]`, which IS valid Python, passes the arity guard and returns zero pairs),
+        so `*A, = [object]` … `A(app)` reports a site it should not. That is the DECLARED
         over-read direction (a false BLOCK, never a false PASS) and it is recorded here so the
         shape is a decision a reader can see rather than an untested accident.
 
@@ -541,10 +548,12 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
 
         ⛔ THAT "LEAVES THE EARLIER BINDING IN FORCE" IS BLOCK-LOCAL. The earlier cut stated it
         unconditionally (and attributed it to `main`, which was the PRE-`#13585` reader); the
-        review measured the difference (`#13628 review 2`, P2). It holds when the earlier binding
+        review at `4a91cbc19293` measured the difference (recorded in #13628's post-merge note,
+        P2). It holds when the earlier binding
         shares the assignment's block. Across a block boundary `_resolve` answers `SHADOWED` for
         a name that is bound-but-unvalued, so the SAME source answers differently by scope —
-        measured with this head, the branch's base (`66ddcf305a`) and the pre-`#13585` reader:
+        measured with this head, the base `#13628` was written against (`66ddcf305a`) and the
+        pre-`#13585` reader:
 
             module    `A, b = build_pair()` … `A(app)`         head [3]  base []  pre [3]
             function  `def wire(app): A, b = build_pair(); …`   head []   base []  pre [4]
@@ -1722,8 +1731,12 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # and the mirror row below is the polar control: there too it reported a site, and that
     # report was wrong — `A` is `object`. Element-wise pairing answers both directions; ignoring
     # the target, which is what the pre-`#13585` reader did, answers neither. MEASURED, so the
-    # name is not a guess: on this branch's base (`origin/main` `66ddcf305a`) BOTH rows answer
-    # `[]`, i.e. `main` today carries the false PASS, not the false BLOCK.
+    # name is not a guess: on the base `#13628` was written against (`66ddcf305a`, two commits
+    # after `#13585` merged) BOTH rows answer `[]` — that tree carries the false PASS, not the
+    # false BLOCK. On `origin/main` TODAY the value row answers `[3]` and the mirror `[]`: the
+    # value row now agrees with the pre-`#13585` reader (`[3]`), and the mirror does not (it was
+    # `[3]` there and is `[]` today) — that removal is the false BLOCK the element-wise reading
+    # closes.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "A, b = A, object\n"
