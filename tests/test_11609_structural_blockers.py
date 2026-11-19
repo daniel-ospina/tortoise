@@ -298,13 +298,18 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     # site for `object(x)`: a FALSE BLOCK the pin did not previously emit.
     chains: dict[int, tuple[ast.AST, ...]] = {}
     #: Whether a node runs on only SOME executions of its block — inside an `if`/`try`/`match`/
-    #: loop/`with` arm. A binding there is a JOIN, not an overwrite (`_bind`).
+    #: loop/`with` arm, or inside a SHORT-CIRCUIT expression (`a and b`, `x if c else y`), which
+    #: runs its right/selected arm on only some executions too. A binding there is a JOIN, not an
+    #: overwrite (`_bind`).
     conditional: dict[int, bool] = {}
     #: The statements that make their subtree conditional. `Try` marks its body, handlers and
     #: `orelse` alike: over-approximating an arm that cannot be attributed costs a re-read of
     #: the pin, while under-approximating one is the false PASS this reader exists to prevent.
     branches = (ast.If, ast.Try, ast.TryStar, ast.While, ast.For, ast.AsyncFor,
-                ast.With, ast.AsyncWith, ast.ExceptHandler, ast.Match, ast.match_case)
+                ast.With, ast.AsyncWith, ast.ExceptHandler, ast.Match, ast.match_case,
+                # `and`/`or` and `a if c else b` are SHORT-CIRCUIT: a binding inside one runs on
+                # only SOME executions, exactly as an `if` STATEMENT does (#13639 review P1).
+                ast.IfExp, ast.BoolOp)
 
     def _chain(node: ast.AST) -> tuple[ast.AST, ...]:
         return chains.get(id(node), ())
@@ -723,8 +728,9 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         # direction (A/B: a false PASS is the one that must never ship).
         # ⛔ BUT ONLY WHEN IT ACTUALLY CROSSED A BLOCK (`#13639 review F2`). A walrus in
         # STRAIGHT-LINE code always runs, so there is nothing to join and the write must REPLACE —
-        # that is the rule this file already pins for `=` at `test_the_reading_is_positional`
-        # ("the join must replace on a path that always runs, not accumulate forever"). Making it
+        # that is the rule this file already pins for `=` ("the join must replace on a path that
+        # always runs, not accumulate forever", the row in
+        # `test_the_adapter_reading_is_not_spelling_blind`). Making it
         # unconditional reported a site for `A = FastAPIRouterAdapter; (A := object); A(app)`,
         # where `=` alone reports nothing: a false BLOCK in the one direction that is a re-read,
         # and a disagreement between two spellings of the same rebinding.
@@ -1929,7 +1935,7 @@ def test_the_adapter_reading_is_not_spelling_blind():
     ), ("a WALRUS write was not treated as a JOIN — a comprehension may execute zero times, so "
         "the arm where it never ran is still live and the call it wires must stay REPORTED")
     # …and the OTHER direction: a walrus in STRAIGHT-LINE code always runs, so it must REPLACE,
-    # exactly as `=` does (the rule this file pins at `test_the_reading_is_positional`). An
+    # exactly as `=` does (the rule the `=` row above pins). An
     # unconditional JOIN reported a site here while the `=` spelling of the same rebinding
     # reported none (`#13639 review F2`) — a false BLOCK, and two spellings of one rebinding
     # disagreeing. ⛔ MEASURED SHAPES: this row (a bare walrus over an IMPORT binding) is `[3]`
@@ -1949,6 +1955,36 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A(app)\n"
     ) == [], ("the `=` CONTROL for the row above — if this ever reports, the pair is no longer a "
               "discrimination and the walrus row proves nothing")
+    # ⛔ …AND "STRAIGHT-LINE" IS NOT "ALWAYS RUNS" (`#13639` review P1). A walrus inside a
+    # SHORT-CIRCUIT expression crosses no block, so the `target_chain != chain` test called it
+    # straight-line and let it REPLACE the import binding. With a falsy `cond` the walrus never
+    # runs, so `A(app)` still instantiates the adapter and the site is REAL — `main` and the
+    # pre-rebase head both reported it, and this rule lost it: a false PASS, the one direction
+    # that must never ship. Short-circuit forms therefore JOIN, like an `if` STATEMENT. The three
+    # rows below are the two spellings plus the `if`-statement control, so the pair is a
+    # discrimination rather than two absences (the control is what shows the site is expected).
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "cond = False\n"
+        "cond and (A := object)\n"
+        "A(app)\n"
+    ), ("a walrus in a short-circuit `and` was treated as straight-line and REPLACED the import "
+        "binding — with a falsy `cond` it never runs, so `A(app)` still instantiates the adapter")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "cond = False\n"
+        "x = (A := object) if cond else None\n"
+        "A(app)\n"
+    ), ("a walrus in a conditional EXPRESSION was treated as straight-line — it runs on only one "
+        "arm, so the other arm keeps the adapter binding and the call is a real site")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "cond = False\n"
+        "if cond:\n"
+        "    A = object\n"
+        "A(app)\n"
+    ), ("the `if`-STATEMENT control for the rows above — the `=` spelling of the same conditional "
+        "rebinding must report the site too, or the pair is two absences, not a discrimination")
     # ⛔ THE UNREADABLE-DESTRUCTURING BRANCH IS PINNED BY A TARGET IT CAN ACTUALLY SEE
     # (`#13585 review 94361b8f` P3#2). The existing row for it uses `b, c = build_pair()`, whose
     # NAMES are `b` and `c` — so reverting the branch to a blanket `SHADOWED` claim reded nothing
