@@ -2268,9 +2268,10 @@ def _reader_citations(
     # unbound, because the block names no reader for `:40-50` anywhere.
     unbound = {(fname, lo, hi) for fname, lo, hi, sym in cites if sym is None}
     assert unbound <= {("embeddings.py", 40, 50)}, (
-        f"{artifact}: these cites name no reader INLINE and were not bound by the "
-        f"ordinal sentence either, so they are needle-only and a re-pin onto another "
-        f"reader's identical gate line passes: {sorted(unbound)}"
+        f"{artifact}: only the resolver's own `:40-50` definition may stay unbound, so "
+        f"these cites are either an entry's cite that lost its reader (reflowed above "
+        f"its `::name`, or edited out) or the resolver span re-pinned off `(40, 50)` — "
+        f"in both cases the pin no longer says what the prose says it says: {sorted(unbound)}"
     )
     return cites
 
