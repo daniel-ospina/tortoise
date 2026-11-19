@@ -1184,12 +1184,16 @@ opposite decisions. `load_in_progress_s` is the in-flight attempt's elapsed seco
 is running, `null` after a FINISHED load too — the start timestamp outlives its attempt, so the
 running thread is the authority).
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
-`failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — `not_installed`,
-`load_failed`, `load_timeout`, `model_unavailable` — or `null` before any attempt. Point at that
+`failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
+`load_failed` (the common one: an import/construct failure in an installed dependency chain),
+`load_timeout` or `not_installed` — or `null` before any attempt records a cause. Point at that
 declaration rather than re-typing a copy here: it is the ONE set the producer literals are pinned
-against, and `no_embedder` / `load_in_flight` are LEG-TRACE words (translated to the recorded kind at
-`embeddings.py::_as_failure_kind`), not failure kinds — publishing one of those here is the
-#5275/#13528 conflation. `unavailable` with `failure_kind: null` means no attempt has run in THIS process yet (a
+against. `model_unavailable` is a member of the vocabulary but NOT a value THIS field holds — it is
+the translation fallback (`embeddings.py::_as_failure_kind`), i.e. the kind a REFUSAL carries when
+nothing was recorded; likewise `no_embedder` / `load_in_flight` are LEG-TRACE words translated at that
+same seam, not failure kinds — publishing one of those here is the #5275/#13528 conflation. `oom` is
+not a member at all: a process killed for memory records nothing, so read the machine for that, not
+this field. `unavailable` with `failure_kind: null` means no attempt has run in THIS process yet (a
 fresh boot before the pre-warm landed) — not a failure.
 - **`load_timeout_s` is the bound the PROCESS applies**, and it must read `300.0` on this image. A
 `90.0` here is a pre-#13674 binary still deployed, which is the whole outage.

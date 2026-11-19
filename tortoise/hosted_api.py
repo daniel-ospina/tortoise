@@ -8422,8 +8422,9 @@ def _embedder_health() -> dict:
     Never raises, collects no I/O (#2850): `status()` reads process memory only
     — it takes no embedder lock, so a 156.5 s cold import cannot delay this
     handler. The DEGRADED arm publishes the SAME key set as the healthy one
-    (the rule `capture` / `refusals` state: an ad-hoc short dict is how a
-    dashboard gets a `KeyError` in exactly the path it is reading).
+    (PLUS `error` — an extra key cannot `KeyError` a consumer, a missing one
+    can) and the rule `capture` / `refusals` state holds: an ad-hoc short dict
+    is how a dashboard gets a `KeyError` in exactly the path it is reading.
     """
     try:
         from tortoise.embeddings import EmbeddingModel
