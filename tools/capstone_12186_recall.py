@@ -171,9 +171,22 @@ DOOR_NOTES = {
     "capture_prior": "extractor_v2._fts_rows(entity_type='object') — the "
                      "capture-time link-before-create prior (INTERNAL path); "
                      "production window is 3",
-    "user_search": "sdk.tortoise_fts_query(entity_type='object') at the MCP tool "
-                   "`tortoise_search`'s own defaults — the USER door "
-                   "(REST GET /v1/search)",
+    # ⛔ The VERB is the user door's; the ARGUMENTS are this fixture's, and the two are
+    # not the same claim. `tortoise_search` (MCP) and `GET /v1/search` (REST) both
+    # resolve to `sdk.tortoise_fts_query` — that is what makes this the user's door.
+    # But the doors' own defaults are `entity_type='point'` and `limit=10`
+    # (`tortoise/mcp_server.py::tortoise_search`), while the arms call
+    # `entity_type='object'` (the population IS `:Object` names) at `limit=KMAX`=15.
+    # A note that called those "the tool's own defaults" would be false about two
+    # default values while presenting itself as a checked fact — so it states the
+    # divergence instead. `recall@k` is a shipped-window figure only for k <= 10.
+    "user_search": "sdk.tortoise_fts_query(entity_type='object', limit=15) — the "
+                   "USER door's VERB (MCP `tortoise_search` and REST "
+                   "`GET /v1/search` both resolve to it). The ARGUMENTS are this "
+                   "fixture's, NOT the doors' defaults: `entity_type='object'` "
+                   "because the population is `:Object` names (both doors default "
+                   "to 'point'), and `limit=15` (both doors default to 10 — so "
+                   "recall@k is a shipped-window figure only for k <= 10)",
 }
 
 ARM_NOTES = {

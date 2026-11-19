@@ -3314,7 +3314,7 @@
     }
    },
    "door": "user_search",
-   "door_note": "sdk.tortoise_fts_query(entity_type='object') at the MCP tool `tortoise_search`'s own defaults \u2014 the USER door (REST GET /v1/search)",
+   "door_note": "sdk.tortoise_fts_query(entity_type='object', limit=15) \u2014 the USER door's VERB (MCP `tortoise_search` and REST `GET /v1/search` both resolve to it). The ARGUMENTS are this fixture's, NOT the doors' defaults: `entity_type='object'` because the population is `:Object` names (both doors default to 'point'), and `limit=15` (both doors default to 10 \u2014 so recall@k is a shipped-window figure only for k <= 10)",
    "duplicate_rate_in_window": {
     "10": {
      "duplicate_rows": 41,
@@ -4917,7 +4917,7 @@
     }
    },
    "door": "user_search",
-   "door_note": "sdk.tortoise_fts_query(entity_type='object') at the MCP tool `tortoise_search`'s own defaults \u2014 the USER door (REST GET /v1/search)",
+   "door_note": "sdk.tortoise_fts_query(entity_type='object', limit=15) \u2014 the USER door's VERB (MCP `tortoise_search` and REST `GET /v1/search` both resolve to it). The ARGUMENTS are this fixture's, NOT the doors' defaults: `entity_type='object'` because the population is `:Object` names (both doors default to 'point'), and `limit=15` (both doors default to 10 \u2014 so recall@k is a shipped-window figure only for k <= 10)",
    "duplicate_rate_in_window": {
     "10": {
      "duplicate_rows": 41,
@@ -6522,7 +6522,7 @@
     }
    },
    "door": "user_search",
-   "door_note": "sdk.tortoise_fts_query(entity_type='object') at the MCP tool `tortoise_search`'s own defaults \u2014 the USER door (REST GET /v1/search)",
+   "door_note": "sdk.tortoise_fts_query(entity_type='object', limit=15) \u2014 the USER door's VERB (MCP `tortoise_search` and REST `GET /v1/search` both resolve to it). The ARGUMENTS are this fixture's, NOT the doors' defaults: `entity_type='object'` because the population is `:Object` names (both doors default to 'point'), and `limit=15` (both doors default to 10 \u2014 so recall@k is a shipped-window figure only for k <= 10)",
    "duplicate_rate_in_window": {
     "10": {
      "duplicate_rows": 43,
@@ -8367,7 +8367,13 @@
    "declared": "2026-11-19",
    "field": "cleanup",
    "run_head": "31bce52ddbb3b3f0bc93093e2988b42c0e5536ba",
-   "why": "the `cleanup` block was inserted by hand after this run: the tool AT `code_head` has no `cleanup` builder at all (`git show 31bce52ddb:tools/capstone_12186_recall.py | grep -c cleanup` = 0), so reproducing at the head this record names yields every number below and no `cleanup` block. The block is a DECLARATION of the graph residue, not a figure; every figure in this record is run output. Any later run writes the block itself and records `post_run_edits: []`."
+   "why": "the `cleanup` block was inserted by hand after this run: the tool AT `code_head` has no `cleanup` builder at all (`git show 318950c6e0:tools/capstone_12186_recall.py | grep -c cleanup` = 0 \u2014 318950c6e0 rather than the run head's sha, which the rebase made unreachable; see `code_head_note`), so reproducing at the head this record names yields every number below and no `cleanup` block. The block is a DECLARATION of the graph residue, not a figure; every figure in this record is run output. Any later run writes the block itself and records `post_run_edits: []`."
+  },
+  {
+   "declared": "2026-11-19",
+   "field": "arms",
+   "run_head": "31bce52ddbb3b3f0bc93093e2988b42c0e5536ba",
+   "why": "the `user_search*` arms' `door_note` PROSE was restated after the run. It read \"at the MCP tool `tortoise_search`'s own defaults\", which is false about two default values: the tool's own defaults are `entity_type='point'` and `limit=10` (`tortoise/mcp_server.py::tortoise_search`), while the arms call `entity_type='object'` (the population IS `:Object` names) at `limit=15`. The note now states the VERB/ARGUMENTS split instead. NO FIGURE IS AFFECTED \u2014 this is the note, not the readings; the recall/duplicate/mint figures are unchanged run output."
   }
  ],
  "timings": {
@@ -8384,5 +8390,6 @@
   "rest": "GET /v1/search",
   "sdk_method": "tortoise_fts_query",
   "tool": "tortoise_search"
- }
+ },
+ "code_head_note": "`code_head` is the RUN head and stays truthful: this measurement really did run at 31bce52ddbb3. But it predates the rebase onto `origin/main`, so the rebase REWROTE it \u2014 it is reachable from no ref on this published branch, and every `git show 31bce52ddbb3:...` command in this record and in README \u00a76 fails for a reader without this box's local lane-rescue ref. The content is verifiable, only the sha is not: this record's two INPUTS are byte-identical at 318950c6e0, which IS an ancestor of this branch \u2014 `git show 318950c6e0:tools/capstone_12186_recall.py` and `git show 318950c6e0:docs/evidence/12186-capstone/queries.json` reproduce the same blobs the run used (and `| grep -c cleanup` still yields the documented 0). Follow `code_head` for WHICH RUN this is; follow 318950c6e0 to RUN the commands. The measurement figures do not depend on the difference: the tool's only changes after 318950c6e0 are comments and new builder functions, not the query/recall computation."
 }
