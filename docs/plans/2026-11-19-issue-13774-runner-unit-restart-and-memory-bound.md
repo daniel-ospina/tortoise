@@ -15,7 +15,7 @@ sentinel is 0 — see R9).
 **Team:** organisation-design-team
 
 **Architecture:** the installer keeps delegating unit creation to GitHub's `svc.sh` and adds **one** step,
-executed **immediately after the `fi` at `:1686` — outside the `[ ! -f "$UNIT_DIR/$(unit_for "$name")" ]` guard**
+executed **immediately after the `fi` at `:1691` — outside the `[ ! -f "$UNIT_DIR/$(unit_for "$name")" ]` guard**
 **[R2-fix: P1 — "between install and start" is positionally ambiguous; as an indented line it lands INSIDE the
 guard, which is the branch this fleet's already-installed boxes never take]**, writing
 `<UNIT_DIR>/<unit>.d/10-restart-and-memory.conf` idempotently (`cmp` before `install`, `daemon-reload` only on
@@ -38,11 +38,11 @@ aggregate. Stated here, in R4 and in the runbook step.
 
 | Surface | What it is | Test layer | Why this layer |
 |---|---|---|---|
-| install loop, after the `fi` at `:1686` | where the drop-in write is called (outside the guard) | installer unit test (hermetic `CI_RUNNER_UNIT_DIR` seam, `:158`) | the only observable place without touching `/etc` |
+| install loop, after the `fi` at `:1691` | where the drop-in write is called (outside the guard) | installer unit test (hermetic `CI_RUNNER_UNIT_DIR` seam, `:158`) | the only observable place without touching `/etc` |
 | the **guard-false** branch (`svc.sh install` skipped, unit already present) | the branch every already-installed box takes | own arm: unit pre-created, assert drop-in written + `svc.sh install` ABSENT from the argv log | step 4 of v2 was negative-only and the mutation "indent into the guard" survived all arms **[R2-fix]** |
 | `<UNIT_DIR>/<unit>.d/10-restart-and-memory.conf` | the artifact systemd reads | content + **section-position** assertion | a key in the wrong section is silently ignored |
 | `systemctl daemon-reload` | applies the drop-in (including to a live unit) | `sudo`-stub argv log **and** a `systemctl` stub on PATH (the sudo stub execs its argv, `tests/…:2376`) | must fire on change, not on every pass |
-| uninstall loop (`:1515-1637`) **and** the orphan-unit branch (`:1558-1561`) | remove the unit today, the drop-in never | new arms: our file removed, **foreign files survive**, the printed orphan remedy names it **[R2-fix: P1/P2]** | a surviving drop-in governs a future unit of the same name |
+| uninstall loop (`:1515-1642`) **and** the orphan-unit branch (`:1558-1561`) | remove the unit today, the drop-in never | new arms: our file removed, **foreign files survive**, the printed orphan remedy names it **[R2-fix: P1/P2]** | a surviving drop-in governs a future unit of the same name |
 | `docs/ops/ci-runner-x64.md` (map bullet at `:534`) | operator-facing refs | existing pin, new section placed **below** the map | the pin picks the FIRST bullet carrying a ref (`tests/…:2773`) |
 | converger (`runner_autoscale.py`) | NOT touched | — | it counts listeners, not units |
 
@@ -88,7 +88,7 @@ aggregate. Stated here, in R4 and in the runbook step.
 10. **Implement** — knobs next to the sizing knobs, each with its rationale comment; add the three INTEGER knobs to
     the existing validator list (`:268-273`, which fails on non-digits) and validate the interval separately with a
     timespan pattern (`^[0-9]+(s|min|h|d)+$`) because `1h` is not an integer **[R2-fix: P2]**.
-11. **Implement** — `write_unit_dropin()` near `unit_for()`, called **immediately after the `fi` at `:1686`**;
+11. **Implement** — `write_unit_dropin()` near `unit_for()`, called **immediately after the `fi` at `:1691`**;
     **not** in `--repair-labels`, which never installs and may run against a REMOTE install
     (`:524`, `:1244`) **[R2-fix: P2 — v2 named a non-existent `--repair` path]**.
 12. **Implement** — dry run prints the drop-in path and the keys it would write.

@@ -3434,6 +3434,69 @@ def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_nam
     land("MEMORY.md", int(repair.group(1)), r'^if \[ "\$MODE" = repair \]')
 
 
+# ── 8b-bis. the PLAN's positional refs ───────────────────────────────────────────────────────
+def test_the_plans_positional_refs_land_on_the_constructs_they_name():
+    """⛔ NOTHING PINNED `docs/plans/`, AND THIS FILE DROVE TWO ROUNDS OF DRIFT.
+
+    The plan header instructs a lane to EXECUTE it, and its step 11 is the load-bearing one: the
+    drop-in write must sit *"immediately after the `fi` at `:NNN`"*, outside the
+    `[ ! -f "$UNIT_DIR/$(unit_for "$name")" ]` guard. The plan's own `[R2-fix: P1]` records why:
+    inside the guard, the whole of an already-installed fleet is uncovered. Yet the number drifted
+    twice — once because it predated a re-measurement, and again when a LATER COMMIT IN THIS PR
+    inserted five lines above the guard and moved the `fi` from 1686 to 1691. Every installer pin
+    stayed green, because none of them reads the plan.
+
+    So this arm pins the two refs that carry a guarantee rather than a description of the code:
+    the `fi` the write follows, and the `--uninstall` span whose end must include the exit. It is
+    deliberately NOT a blanket pin of every `:NNN` in the plan — many of those cite OTHER files
+    (`config.sh`, `runner_autoscale.py`, this suite) and a two-way table over them would be mostly
+    noise. The symbol-keyed discipline of 8b still governs the files it enumerates.
+
+    Non-vacuity: pointing the `fi` claim back at 1686 (the pre-`c9e8b11e98` number) reds it — that
+    line is a comment, and the first code line below it is the `if`, not `write_unit_dropin`.
+    """
+    plan = (
+        REPO_ROOT / "docs" / "plans" / "2026-11-19-issue-13774-runner-unit-restart-and-memory-bound.md"
+    ).read_text()
+    installer = INSTALLER.read_text().splitlines()
+
+    fi_refs = set(re.findall(r"immediately after the `fi` at `:(\d+)`", plan))
+    assert fi_refs, "the plan no longer states where the drop-in write sits — re-anchor this pin"
+    problems = []
+    for n in sorted(int(x) for x in fi_refs):
+        assert 1 <= n <= len(installer), f"the plan cites :{n}, past EOF ({len(installer)} lines)"
+        if installer[n - 1].strip() != "fi":
+            problems.append(f":{n} is {installer[n - 1].strip()!r}, not the install guard's `fi`")
+            continue
+        # the write must be the FIRST code line after that `fi` — comments and blanks skipped
+        nxt = next(
+            (line for line in installer[n:] if line.strip() and not line.strip().startswith("#")),
+            "",
+        )
+        if 'write_unit_dropin "$name"' not in nxt:
+            problems.append(
+                f"the first code line after the `fi` at :{n} is {nxt.strip()!r}, not the drop-in write"
+            )
+    assert not problems, (
+        "the plan tells the next lane to place the drop-in write after a line that is not the guard's "
+        "`fi` — re-derive it (and the installer's line map) rather than shifting the number: "
+        + "; ".join(problems)
+    )
+
+    # the `--uninstall` span: its header through the `fi` that closes the block, so its END covers
+    # the exit rather than stopping at a comment inside the deleting branch.
+    span = re.search(r"uninstall loop \(`:(\d+)-(\d+)`\)", plan)
+    assert span, "the plan no longer cites the uninstall block's span — re-anchor this pin"
+    lo, hi = int(span.group(1)), int(span.group(2))
+    assert "── uninstall" in installer[lo - 1], (
+        f"the plan cites the uninstall block at :{lo}, which is {installer[lo - 1].strip()!r}"
+    )
+    assert installer[hi - 1].strip() == "fi" and installer[hi - 2].strip().startswith("exit "), (
+        f"the plan cites the uninstall block as ending at :{hi}, which is "
+        f"{installer[hi - 1].strip()!r} — it must be the `fi` after the `exit`"
+    )
+
+
 # ── 8c. the installer's OWN self-citations ──────────────────────────────────────────────────
 def test_the_installers_own_self_citations_land_on_the_line_they_name():
     """⛔ THE INSTALLER CITES ITSELF, AND THOSE REFS WERE THE SAME WRONG-TARGET CLASS.
@@ -6306,17 +6369,31 @@ def test_an_unreadable_memory_reading_is_refused_rather_than_sized_against(tmp_p
     class this whole PR is about.
 
     The refusal is a GUARD refusal (exit 2, `die`'s default), and it must name the reading rather than
-    the headroom, so a caller can tell "this box cannot be measured" from "this box is too small".
+    the headroom, so a caller can tell "this box cannot be MEASURED" from "this box is too small".
+
+    ⛔ WHAT REMOVING IT ACTUALLY DOES — measured, after an earlier version of this docstring got it
+    wrong. Deleting the three `case … esac` lines does NOT fail open: `mem_free_gb` is never an
+    arithmetic operand, its only consumer is `[ "$mem_free_gb" -ge "$mem_need_gb" ]`, and bash
+    reports `line N: [: banana: integer expression expected` and returns FALSE for a non-integer — so
+    the `|| die` on the very next line still refuses, with exit 2:
+
+        REFUSED: memory headroom: bananaG available against 2G needed for 1 runners (+0G reserve)
+
+    So the guard's real value is the MESSAGE: without it the box still fails closed, but it reports a
+    headroom comparison that was never computable as though the measurement had succeeded, and the
+    string a fixer sees names the wrong fault. That is smaller than "a fail-open", and it is what this
+    arm pins: the arm REDS on the message assertion, not on a return code. Stated explicitly because
+    "`$(( ))` would coerce it to 0 and approve an unbounded install" was FALSE here, and a false
+    mechanism in a failure message is the same class as a false citation.
     """
     env = _dropin_env(tmp_path, unit_present=False, CI_RUNNER_MEM_AVAILABLE_GB="banana")
     r = _run("--count", "1", "--fallback", "off", env=env)
     assert r.returncode == 2, (
-        "an unreadable memory reading must be a GUARD refusal (exit 2), never sized against — "
-        f"$(( )) would coerce it to 0 and approve an unbounded install — got {r.returncode}: {r.stderr}"
+        f"an unreadable memory reading must be refused (exit 2), got {r.returncode}: {r.stderr}"
     )
     assert "cannot read available memory" in r.stderr, (
-        "the refusal must name the UNREAD BOUND, not the headroom it never computed: "
-        f"{r.stderr}"
+        "the refusal must name the UNREAD BOUND, not a headroom comparison that was never "
+        f"computable — that is the whole difference this arm pins: {r.stderr}"
     )
 
 
