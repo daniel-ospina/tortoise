@@ -16496,11 +16496,12 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # that is the head-bound figure the D5 row forbids.
     for stale in ("carries TWO numeric re-points", "a document that carries two"):
         assert stale not in text, (
-            f"D5 states `{stale}` about `04-plan.md`. The `hosted_api.py` "
-            "`:15202-15279` -> `:15225-15302` move it is paired with is `origin/main`'s "
-            "own and is INHERITED, not contributed (`git show origin/main:docs/epics/"
-            "2026-11-04-7949-extractor-v4-capstone/04-plan.md` already carries "
-            "`:15225-15302`). Do not re-inflate the count")
+            f"D5 states `{stale}` about `04-plan.md`. Refused because a typed count is "
+            "the head-bound figure D5's own row forbids — NOT because those moves are "
+            "inherited: this diff DOES contribute them (`origin/main`'s copy reads "
+            "`hosted_api.py:15225-15302`; this head's reads `:15261-15338`, and the "
+            "`sdk.py:28607`->`:28682` re-point is this diff's too). Do not re-inflate "
+            "the count")
     assert "carries ONE numeric re-point" not in text, (
         "D5 states that `04-plan.md` carries ONE numeric re-point in this PR's diff. "
         "Measured at this head: `git diff --name-only origin/main...HEAD` DOES list that "

@@ -127,8 +127,8 @@ above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
 `cache_projection.py` `:2485`, `:2542`, `:2714`, `:2714-2715`, `:2724-2726`, `:2776`, `:3841` and
 `projection/entities.py` `:5722` — **eight addresses that open at `main` and not at the pin** ⚠️ **and
-they are listed at the head the PINS read — this branch's integration head `e36c77161e`, which is also
-the working tree — NOT at `ae54df166d`.** `#13494` re-derived them ON the tree so that each one's
+they are listed at the head the PINS read — this branch's integration head `e36c77161e` — NOT at
+`ae54df166d`.** `#13494` re-derived them ON the tree so that each one's
 `content` could be pinned there; the `#13124` review had measured them at `ae54df166d`, which is why
 the `ae54df166d` values this paragraph goes on to quote (`:2720` / `:2715`, `:3837` / `:3834`) are not
 the addresses in this list. (measured,
