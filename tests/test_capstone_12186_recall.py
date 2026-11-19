@@ -10,20 +10,21 @@ closes both:
    "simplification" could change while every published number stayed put. The
    rule, the window arithmetic and the pin's refusals are asserted here.
 2. **The README drifts away from the artifact.** Every figure in the README's
-   §1 provenance table, its §2 recall, per-class, paired and leg-degradation
-   tables, its §3a duplicate-rate and §3b mint tables, and its §4 lever table is
-   recomputed from the committed artifact CELL BY CELL (or ROW BY ROW, for the
-   label-keyed ones) and compared, so the doc cannot publish a number the
-   evidence does not hold.
-   ⛔ The two cuts before this one each claimed MORE than they enforced, and both
-   gaps were found by mutating the document: the first said "every figure the
-   README's tables state" while §3a's `rows`/`near-duplicate rows`/`pairs`/
-   `queries affected` columns had NO assertion at all (`875` -> `999` stayed
-   green); the second left §1 and §4 unpinned while calling them "not
-   re-derivable" — they are re-derivable, and §4's `0.5328` is a SECOND
-   quotation of the mint rate, so editing it alone still published two different
-   rates for the same matcher with every pin green (measured). Both are pinned
-   now. **A claim wider than its measurement is the defect this file exists to
+   plain-language summary and in its §1 provenance, §2 recall / per-class /
+   paired / leg-degradation, §3a duplicate-rate, §3b mint and §4 lever tables is
+   recomputed from the committed artifact and compared — CELL-scoped for the
+   tabular ones, ROW-scoped and digit-bounded for the prose ones — so no figure in
+   those places can disagree with the evidence.
+   ⛔ **This is the boundary of the claim, and it is deliberately narrower than
+   "the whole document".** Figures in §5's declared limits and §6's run metadata
+   are NOT pinned. Every earlier cut of this paragraph claimed more than it
+   enforced, and each gap was found by mutating the document: the first said
+   "every figure the README's tables state" while §3a's count columns had no
+   assertion at all; the second left §1 and §4 unpinned while calling them "not
+   re-derivable" (they are, and §4 holds the SECOND quotation of the mint rate);
+   the third pinned only §4's figures and left its `shipped state` and verdict
+   WORD unpinned, so `OFF by default` could become `ON by default` with every pin
+   green. **A claim wider than its measurement is the defect this file exists to
    avoid**, so when adding a row here, mutate the cell first.
 
 ⛔ Nothing here runs the measurement — it needs a live FalkorDB and ~10 minutes of
@@ -37,6 +38,7 @@ import hashlib
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -594,9 +596,38 @@ def _flat(text: str) -> str:
     row and requiring the artifact-derived token INSIDE THAT ROW keeps the pin
     row-scoped — which is what makes a dropped row, or a figure moved to another
     lever, red — without pinning the sentence's shape.
+
+    ⛔ A flattened row CONCATENATES its neighbours, so a plain `token in row` is an
+    unbounded substring: `41 gains` -> `141 gains`, `104 files` -> `1 104 files` and
+    `0.5328` -> `0.53281` all stayed green through one (measured). Use
+    `_mentions`, which refuses a match whose own leading or trailing digit is
+    glued to another digit.
     """
     return (text.replace("*", "").replace("`", "").replace(",", "")
             .replace("\u00a0", "").replace("\u202f", "").replace(" ", ""))
+
+
+def _mentions(text: str, token: str) -> bool:
+    """`token` occurs in `text` with no extra digit glued to a number in it.
+
+    The boundary is on the TOKEN's own edges, which is what makes an inflated
+    figure red while leaving the digit-that-belongs-to-the-next-token alone:
+    `"122912records0parseerrors"` still mentions `"122912records"` (its last char
+    is a letter), while `"1122912records"` does NOT (its first char is a digit and
+    the match is preceded by one).
+    """
+    for m in re.finditer(re.escape(token), text):
+        if token[0].isdigit() and m.start() and text[m.start() - 1].isdigit():
+            continue
+        if token[-1].isdigit() and m.end() < len(text) and text[m.end()].isdigit():
+            continue
+        return True
+    return False
+
+
+def _assert_mentions(text: str, tokens, where: str) -> None:
+    for token in tokens:
+        assert _mentions(text, token), f"{where} omits {token!r}: {text!r}"
 
 
 def test_the_readme_quotes_the_duplicate_rates_the_artifact_holds(artifact):
@@ -721,26 +752,37 @@ def test_the_readme_quotes_the_provenance_the_artifact_records(artifact):
     _assert_rows_cover(rows, PROVENANCE_ROW_MARKERS)
 
     read = _flat(_one_row(rows, PROVENANCE_ROW_MARKERS["corpus read"], "corpus read")[1])
-    for token in (f"{corpus['files']}files",
-                  f"{corpus['lines']}records",
-                  f"{corpus['parse_errors']}parseerrors",
-                  f"{corpus['records_without_text']}recordswithouttext",
-                  f"{int(corpus['elapsed_s'])}s"):
-        assert token in read, f"§1 corpus row omits {token!r}: {read!r}"
+    _assert_mentions(read, (f"{corpus['files']}files",
+                            f"{corpus['lines']}records",
+                            f"{corpus['parse_errors']}parseerrors",
+                            f"{corpus['records_without_text']}recordswithouttext",
+                            f"{int(corpus['elapsed_s'])}s"), "§1 corpus row")
 
     pop = _flat(_one_row(rows, PROVENANCE_ROW_MARKERS["population"], "population")[1])
-    assert f"{pin['population']}names" in pop, (
-        f"§1 population row does not state {pin['population']} names: {pop!r}")
+    #: The per-class split, from the PIN FILE's own rows — not from a total, which
+    #: is all this pin checked before. `600 definite` -> `999 definite` stayed green
+    #: through that (measured). Deriving it here also pins that the split and the
+    #: total agree, which the README states in one sentence.
+    counts = Counter(r["cls"] for r in json.loads(PIN.read_text())["population_rows"])
+    assert sum(counts.values()) == pin["population"], (
+        f"the pin file's class counts sum to {sum(counts.values())}, artifact "
+        f"records population {pin['population']}")
+    _assert_mentions(pop, [f"{pin['population']}names"]
+                     + [f"{counts[c]}{c}" for c in ("definite", "ident", "path")],
+                     "§1 population row")
 
     queries = _flat(_one_row(rows, PROVENANCE_ROW_MARKERS["queries"], "queries")[1])
     shares = "/".join(str(pin["shares"][c]) for c in ("definite", "ident", "path"))
-    assert f"{pin['queries']}-name" in queries and shares in queries, (
-        f"§1 queries row does not state the {pin['queries']}-name sample as "
-        f"{shares}: {queries!r}")
+    _assert_mentions(queries, (f"{pin['queries']}-name", shares), "§1 queries row")
 
     digest = _flat(_one_row(rows, PROVENANCE_ROW_MARKERS["digest"], "digest")[1])
-    for token in (pin["digest"], pin["query_digest"], pin["sha256"][:8]):
-        assert token in digest, f"§1 digest row omits {token!r}: {digest!r}"
+    #: `sha256<prefix>…` rather than the bare prefix: `2486a359e` is a LONGER hex
+    #: prefix of the same digest, so the bare token does not red on it (measured).
+    #: The label is part of the token because `sha256` itself ENDS in a digit, which
+    #: would otherwise read as a glued digit run and make `_mentions` refuse a
+    #: correct row (observed).
+    _assert_mentions(digest, (pin["digest"], pin["query_digest"],
+                              f"sha256{pin['sha256'][:8]}…"), "§1 digest row")
 
 
 #: §1's provenance rows, by the `field` label each carries.
@@ -763,6 +805,21 @@ LEVER_ROW_MARKERS: dict[str, tuple[str, ...]] = {
 }
 
 
+#: §4's two left columns, as PREFIXES each row must carry. `#12368`'s and
+#: `#12343`'s `shipped state` is DERIVED from `merged_lever_visibility` (see the
+#: test); the rest are DECLARATIONS the artifact cannot carry — no boolean exists
+#: for the write-path fold, and the two unmeasured levers are unmeasured by
+#: construction — so they are declared here and pinned the same way, which is what
+#: stops a prose edit promoting `#12349` from `n/a` to `YES`.
+LEVER_COLUMN_PREFIXES: dict[str, tuple[str, str]] = {
+    "underscore": ("", "YES"),
+    "fold": ("ON", "YES"),
+    "rerank": ("", "NO"),
+    "verdict": ("ON", "not"),
+    "m3": ("measured", "n/a"),
+}
+
+
 def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
     """§4, ROW BY ROW — the table a reader leaves with, lever by lever.
 
@@ -781,33 +838,91 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
     _assert_rows_cover(rows, LEVER_ROW_MARKERS)
 
     visibility = artifact["merged_lever_visibility"]
+    #: The artifact's shipped-state booleans, as the words the row must start with.
+    #: Before this the pin read ONLY the third column's figures, so `**OFF by
+    #: default**` -> `**ON by default**` and `**NO**` -> `**YES**` on the rerank row
+    #: both stayed green (measured) — the capstone's own conclusion, invertible in
+    #: prose with every pin passing. The `#12349` row is the third case: mutating
+    #: `n/a — no code shipped` to `**YES** — no code shipped` also survived, which is
+    #: exactly the "promoted to visible by a prose edit" this test said it prevented.
+    derived_shipped = {
+        "underscore": visibility["underscore_terms_shipped_default"],
+        "rerank": visibility["fused_rerank_shipped_default"],
+    }
+    assert visibility["fused_rerank_ran_in_user_search"] is False, (
+        "the artifact no longer records the rerank as un-run in user search, so "
+        "§4's `NO` verdict has no premise")
+    for key, marks in LEVER_ROW_MARKERS.items():
+        row = _one_row(rows, marks, key)
+        shipped = _flat(row[1])
+        verdict = _flat(row[2])
+        want_shipped = derived_shipped.get(key, LEVER_COLUMN_PREFIXES[key][0])
+        assert shipped.startswith(want_shipped), (
+            f"§4 `{key}` shipped state {row[1]!r} does not start with "
+            f"{want_shipped!r}")
+        want_verdict = LEVER_COLUMN_PREFIXES[key][1]
+        assert verdict.startswith(want_verdict), (
+            f"§4 `{key}` verdict {row[2]!r} does not start with {want_verdict!r} "
+            "— a lever cannot be promoted to visible by a prose edit")
 
     underscore = visibility["underscore_terms_visible_on_user_door"]
     row = _flat(_one_row(rows, LEVER_ROW_MARKERS["underscore"], "#12368")[2])
-    for token in (f"+{underscore['delta_pts_clean']:.2f}pts",
-                  f"{underscore['gains']}gains",
-                  f"{underscore['losses']}losses",
-                  f"p{underscore['p_display']}"):
-        assert token in row, f"§4 `#12368` row omits {token!r}: {row!r}"
+    _assert_mentions(row, (f"+{underscore['delta_pts_clean']:.2f}pts",
+                           f"{underscore['gains']}gains",
+                           f"{underscore['losses']}losses",
+                           f"p{underscore['p_display']}"), "§4 `#12368` row")
 
     mint = artifact["arms"]["mint_rate"]
     row = _flat(_one_row(rows, LEVER_ROW_MARKERS["fold"], "#12304")[2])
-    for token in (f"{mint['norm_only']['rate']:.4f}",
-                  f"{mint['shipped']['rate']:.4f}"):
-        assert token in row, f"§4 `#12304` row omits mint rate {token!r}: {row!r}"
+    _assert_mentions(row, (f"{mint['norm_only']['rate']:.4f}",
+                           f"{mint['shipped']['rate']:.4f}"),
+                     "§4 `#12304` row")
 
     rerank = visibility["fused_rerank_effect_on_user_door_if_armed"]
     row = _flat(_one_row(rows, LEVER_ROW_MARKERS["rerank"], "#12343")[2])
-    for token in (f"+{rerank['delta_pts_clean']:.2f}pts", f"p={rerank['p_display']}"):
-        assert token in row, f"§4 `#12343` row omits {token!r}: {row!r}"
+    _assert_mentions(row, (f"+{rerank['delta_pts_clean']:.2f}pts",
+                           f"p={rerank['p_display']}"), "§4 `#12343` row")
 
-    #: The two rows whose verdict is a DECLARATION, not a figure — pinned so that a
-    #: lever cannot be quietly promoted to "visible" by a prose edit.
-    for key, claim in (("verdict", "notmeasurablehere"),
-                       ("m3", "nocodeshipped")):
-        row = _flat(_one_row(rows, LEVER_ROW_MARKERS[key], key)[2])
-        assert claim in row, (
-            f"§4 `{key}` row no longer declares {claim!r}: {row!r}")
+
+def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifact):
+    """The document's ABSTRACT — the paragraph nine readers in ten stop at.
+
+    It is not a table, so nothing read it, and it restates the capstone's three
+    verdicts in prose: `83.4 % -> 98.9 %`, `+15.5 points`, `41 queries gained`,
+    `+1.13 points`, `100 % -> 53.3 %`. Measured surviving without this pin:
+    `83.4 %` -> `63.4 %` and `100 % -> 53.3 %` -> `100 % -> 93.3 %`.
+
+    Extracted by its own leading marker, then pinned digit-boundedly, so the
+    wording can be rewritten freely but no figure in it can drift from the
+    artifact.
+    """
+    lines = README.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("**Plain language:**"))
+    paragraph = []
+    for ln in lines[start:]:
+        if not ln.strip():
+            break
+        paragraph.append(ln)
+    text = _flat(" ".join(paragraph))
+    assert text, "the plain-language summary is empty"
+
+    visibility = artifact["merged_lever_visibility"]
+    underscore = visibility["underscore_terms_visible_on_user_door"]
+    rerank = visibility["fused_rerank_effect_on_user_door_if_armed"]
+    mint = artifact["arms"]["mint_rate"]
+    _assert_mentions(
+        text,
+        (f"{underscore['before_recall_clean'] * 100:.1f}%",
+         f"{underscore['after_recall_clean'] * 100:.1f}%",
+         f"+{underscore['delta_pts_clean']:.1f}points",
+         f"{underscore['gains']}queriesgained",
+         f"{underscore['losses']}lost",
+         f"+{rerank['delta_pts_clean']:.2f}points",
+         f"{rerank['gains']}gained",
+         f"p={rerank['p_display']}",
+         f"{mint['norm_only']['rate'] * 100:.0f}%",
+         f"{mint['shipped']['rate'] * 100:.1f}%"),
+        "the plain-language summary")
 
 
 def test_the_readme_refuses_the_cross_corpus_comparison_too(artifact):
