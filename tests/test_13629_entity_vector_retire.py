@@ -1859,6 +1859,27 @@ class _Projection:
 ASKED_SCOPE: dict = {}
 
 
+def _counts_sentence(record_vectors: int, graph_vectors: int, *,
+                     label: str = "object") -> str:
+    """The count sentence `Coverage.reason` carries, built in ONE place (#13872).
+
+    ⛔ WHY THIS IS A HELPER AND NOT EIGHT LITERALS. `8d8355bde4` (#13812) reworded the
+    reason from a present-tense `"the record holds N … the graph serves M"` to the
+    measurement-dated `"the count measured N … against M"` — and left EIGHT assertions in
+    this file pinning the old sentence, so `test (c)` has been RED on `main` since (#13872).
+    The pins are still literal and still assert the WHOLE sentence rather than a bare digit
+    (a `"12" in reason` passes on a fold's line numbers, which is what this pin exists to
+    stop), but they now name the sentence once: the next reword edits this function, not
+    eight call sites that a shard then has to find.
+
+    The wording is NOT derived from `tortoise/record_vector.py` — an expectation computed by
+    the code under test cannot notice that the code changed, which is the whole point of a
+    pin. This is the SAME literal, recorded once.
+    """
+    return (f"the count measured {record_vectors} vector(s) in the record for "
+            f"{label} against {graph_vectors} in the graph")
+
+
 def _fresh_record_leg(monkeypatch, *, record_vectors: int,
                       graph_vectors: int | None = None):
     """An EMPTY coverage cache, an armed leg, and the record's aggregate stubbed.
@@ -1924,7 +1945,7 @@ def test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_suppli
         record_dsn="postgresql://localhost/record")
     assert "answers False" in reason, reason
     assert "has not proved" not in reason, reason
-    assert "the record holds 9200 vector(s) for object, the graph serves 9200" in reason, (
+    assert _counts_sentence(9200, 9200) in reason, (
         f"the measured arm did not report the two counts it compared: {reason}")
     # ⛔ AND THE TENANT WAS ASKED FOR IN THE DECLARED ORDER (review round 7). A swapped
     # `scope=(graph_id, org_id)` measures a DIFFERENT tenant — both halves are non-empty
@@ -1955,7 +1976,7 @@ def test_a_short_record_refuses_the_label_with_BOTH_counts_in_the_reason(monkeyp
     # ⛔ THE SENTENCE, NOT THE DIGITS. `"12" in reason` is satisfied by any two digits
     # anywhere in a reason that also embeds the fold's line numbers, so a deficit reported
     # with the wrong counts would still pass it (found in review of this change).
-    assert "the record holds 12 vector(s) for object, the graph serves 9200" in reason, (
+    assert _counts_sentence(12, 9200) in reason, (
         f"a short record did not report the deficit it measured: {reason}")
 
 
@@ -1994,12 +2015,10 @@ def test_the_plan_is_STRIP_READY_from_a_fresh_process_when_the_record_covers(
     assert plan["ready"] is True
     # ⛔ THE REASON NAMES BOTH COUNTS, on the READY arm — that is what makes
     # `strip_ready: True` checkable instead of asserted.
-    assert "the record holds 1 vector(s)" in row["readiness_reason"]
-    assert "the graph serves 1" in row["readiness_reason"], row["readiness_reason"]
+    assert _counts_sentence(1, 1) in row["readiness_reason"], row["readiness_reason"]
     # …and the operator reading the PLAN sees them, not the bare word "ready".
     rendered = strip.render_plan(plan)
-    assert "the record holds 1 vector(s)" in rendered
-    assert "the graph serves 1" in rendered
+    assert _counts_sentence(1, 1) in rendered
 
 
 def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeypatch):
@@ -2043,7 +2062,7 @@ def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeyp
         "a short record certified a strip — the graph holds vectors the record cannot "
         f"answer with ({row})")
     blocked = row["blocked_reason"]
-    assert "the record holds 1 vector(s) for object, the graph serves 3" in blocked, blocked
+    assert _counts_sentence(1, 3) in blocked, blocked
     assert "has not proved" not in blocked, blocked
 
 
@@ -2109,7 +2128,7 @@ def test_the_stripper_cli_hands_the_gate_its_own_projection_and_tenant(
                        "--org-id", "o", "--graph-id", "g",
                        "--label", "Object"]) == 0
     out = capsys.readouterr().out
-    assert "the record holds 2 vector(s) for object, the graph serves 2" in out, (
+    assert _counts_sentence(2, 2) in out, (
         "the preview plan did not carry the measurement — `main` stopped handing the gate "
         f"its own projection/tenant, and #13796 is back ({out})")
     assert "has not proved" not in out, out
@@ -2159,7 +2178,7 @@ def test_the_census_cli_hands_the_gate_its_own_projection_and_tenant(
                         "--label", "Object"]) == 0
     probe = captured["strip_readiness"]
     _ready, reason = probe("Object")
-    assert "the record holds 2 vector(s) for object, the graph serves 2" in reason, (
+    assert _counts_sentence(2, 2) in reason, (
         "the census's gate was not given the run's projection/tenant, so it answers "
         f"\"not proved\" for a covered label (#13796's symptom): {reason}")
     assert "has not proved" not in reason, reason
@@ -2207,7 +2226,7 @@ def test_the_census_gate_takes_its_record_leg_from_the_flag_not_the_ambient_env(
                         "--org-id", "o", "--graph-id", "g",
                         "--label", "Object"]) == 0
     _ready, reason = captured["strip_readiness"]("Object")
-    assert "the record holds 1 vector(s) for object, the graph serves 1" in reason, (
+    assert _counts_sentence(1, 1) in reason, (
         "the census's gate did not receive this run's --record-dsn, so the record leg "
         f"came from an absent ambient and nothing was measured ({reason})")
     assert "not proved" not in reason, reason
@@ -2256,7 +2275,7 @@ def test_the_plan_probe_takes_its_record_leg_from_the_flag_not_the_ambient_env(
                        "--org-id", "o", "--graph-id", "g",
                        "--label", "Object"]) == 0
     out = capsys.readouterr().out
-    assert "the record holds 1 vector(s) for object, the graph serves 1" in out, (
+    assert _counts_sentence(1, 1) in out, (
         "the plan did not carry the measurement — `build_plan` stopped handing the probe "
         f"this run's --record-dsn, so the record leg came from an absent ambient ({out})")
     assert "has not proved" not in out, out
