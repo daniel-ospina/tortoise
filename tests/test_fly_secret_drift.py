@@ -2044,11 +2044,16 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         "deploy-set value"
     )
     # ── #13674: the embedder warm-up's EMERGENCY SWITCH ──────────────────────
-    # `TORTOISE_EMBEDDER_WARMUP` gates THREE warm-up surfaces — the SDK
-    # engine-init warm-up (`tortoise/embeddings.py::start_warm_up`, gated at
-    # `:1296`), the HOSTED lifespan pre-warm (`tortoise/hosted_api.py::_lifespan`,
-    # `:3225-3235` — the consumer that runs on the deployed box this declaration
-    # unblocks), and the boot pre-warm (`entrypoint.sh:432`) — and production RAN
+    # `TORTOISE_EMBEDDER_WARMUP` gates FIVE read sites — the SDK engine-init
+    # warm-up (`tortoise/embeddings.py::start_warm_up`, gated at `:1296`), the
+    # WRITE-path bound (`::await_write_ready_reason`, `:1401`, #13224), the
+    # READ-path bound (`::await_read_ready_reason`, `:1527`, #13528), the HOSTED
+    # lifespan pre-warm (`tortoise/hosted_api.py::_lifespan`, `:3225-3235` — the
+    # consumer that runs on the deployed box this declaration unblocks), and the
+    # boot pre-warm (`entrypoint.sh:432`). The two bound readers are NOT
+    # cosmetic: with the flag off each returns `None` immediately (`:1401-1405`,
+    # `:1527-1530`), so the WRITE and READ paths fall back to the synchronous
+    # in-request load — part of what flipping the switch chooses. Production RAN
     # it at `0` while the embedder could not load, which is what makes it a live
     # operator switch and not a deploy-set value (#13674 Scope item 3: "`TORTOISE_EMBEDDER_WARMUP=0`
     # is the *emergency* switch it is, not the steady state"; the merged fix

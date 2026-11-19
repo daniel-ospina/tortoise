@@ -4307,12 +4307,14 @@ route (`fly-toml-env`) once the secret is gone. That is fail-closed and intended
 for a REAL out-of-band secret, so its removal is a visible revert rather than a silent staleness.
 
 ⚠️ **The `fly-only:` ruling is still owed.** `#13674` records the lever's emergency nature but does not
-carry the `OVERRIDES:` marker the token's contract requires (`.github/scripts/fly-managed-secrets.txt:51-60`,
-`:78-90`), so the ref is checkable by **shape only** until that ruling lands on the issue. Measured
-**2026-11-19** at the head that added the declaration: `grep -ci 'overrides:'` on the issue **body** → **0**,
-and over body **plus comments** → **6** — of which exactly **one** is in marker form (`**OVERRIDES:**`),
-living in a self-described **proposal** that says writing it here would be forging the ruling. Quote the
-**marker form**, not the string: "the string appears nowhere" is false and a re-measurement will show it.
+carry the `OVERRIDES:` marker the token's contract requires (`.github/scripts/fly-managed-secrets.txt:51-54`,
+`:81-90`), so the ref is checkable by **shape only** until that ruling lands on the issue. Measured
+**2026-11-19** at the head that added the declaration: the issue **body** carries `grep -ci 'overrides:'`
+→ **0**, and the **marker form** (`**OVERRIDES:**`) occurs **exactly once** anywhere on the issue — in a
+self-described **proposal** that says writing it here would be forging the ruling. Quote the **marker
+form**, not the string: "the string appears nowhere" is false, and a RUNNING TOTAL of the bare string is
+unstable — it increments with every comment about it (measured **6**, then **7** a minute later when this
+PR's own status comment counted itself).
 ⛔ Re-measure before quoting this — it is a volatile GitHub fact, not a property of the tree, and it goes
 stale the moment the owner rules.
 
