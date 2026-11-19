@@ -281,18 +281,21 @@ _REAL_READ_TEXT = Path.read_text
 #: reds there. The qualname item needed no new fixture, which is why it is pinned
 #: rather than merely declared: `__code__.replace` sets both attributes in one call.
 #:
-#: ⛔ ONE SUPERSET IS STILL GREEN, MEASURED, AND IS THE DECLARED RESIDUAL: `caller is
-#: _LABEL_HITS_CODE or self.suffix == ".py"` — a widening that re-admits every `.py`
-#: ambient read (measured at this head: 48 passed, so no arm here can tell it from the
-#: shipped rule). ⛔ NOT because this file stages no `.py` outside the population: the
-#: drift arm's `inside_checkout` stale IS one (`tests/test_substrate_map.py`). That arm
-#: cannot pin the widening because BOTH its stales are read through `_label_hits`'s OWN
-#: frame, where `caller is _LABEL_HITS_CODE` already matches and a suffix disjunct adds
-#: nothing. The imposter arm's staged reads are both `.txt`, and reusing it would not
-#: help anyway: the rule tests `self`, the file READ, never the caller, so a
-#: frame-identity fixture cannot see a suffix disjunct. Pinning it needs a `.py` file
-#: OUTSIDE the population read by an AMBIENT frame — a fixture this file does not have
-#: yet. Named here so the next reader does not read this pin as total.
+#: ⛔ THE LAST SUPERSET — `caller is _LABEL_HITS_CODE or self.suffix == ".py"`, a
+#: widening that re-admits EVERY ambient `.py` read — IS PINNED TOO, and by a path this
+#: file already stages: that same arm reads the in-checkout stale (`inside_checkout`, a
+#: real `.py` OUTSIDE the population) from an AMBIENT frame, which the shipped rule
+#: refuses and the widening takes — measured: that mutant reds there (1 failed, 47
+#: passed), and it passed 48/48 before the ambient read was added. ⛔ THE TWO HALVES ARE
+#: A FIXTURE PAIR, not interchangeable: `_label_hits` reads that same path in the drift
+#: arm, and THAT read is taken by every rule (it is `_label_hits`'s own frame), so a
+#: suffix disjunct is invisible there — which is why the drift arm could not pin it and
+#: the AMBIENT read had to be added.
+#:
+#: ⛔ THE ONE BOUND THIS FILE CANNOT PIN, stated so the pins above are not read as total:
+#: the recorder sees a read only when it goes THROUGH `Path.read_text`. A helper that
+#: read via `open()`/`io` would be invisible to it and every arm here would stay green
+#: over that helper — pinning it would mean patching the other entry points too.
 #:
 #: ⛔ EVERY UNION THAT RE-ADMITS A TRACKED READ BY ANOTHER FRAME IS PINNED TOO, in
 #: `test_a_same_thread_ambient_read_is_not_attributed_to_label_hits`. Two such rules
@@ -1610,6 +1613,16 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "the imposter's file is inside the checkout, so a containment filter could "
         "explain its absence and this arm would pin nothing"
     )
+    #: A REAL `.py` file OUTSIDE the tracked population, read below from an AMBIENT
+    #: frame — the fixture the `self.suffix == ".py"` widening needs and the staged stales
+    #: cannot supply (they are read by `_label_hits`'s OWN frame, so every rule takes them
+    #: and no suffix clause is observable through them). Asserted outside the population,
+    #: so a later re-registration of this module could not turn the pin into a no-op.
+    in_checkout_stale = REPO / "tests" / "test_substrate_map.py"
+    assert in_checkout_stale not in set(_tracked_files_under(_TRACKED_DIR)), (
+        "the `.py` ambient-read fixture is inside the tracked population, so the "
+        "suffix widening could not drift it and this arm would pin nothing"
+    )
 
     def _imposter(path: Path) -> None:
         path.read_text(encoding="utf-8")
@@ -1637,6 +1650,12 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     def _an_ambient_read() -> None:
         ambient.read_text(encoding="utf-8")
         tracked_ambient.read_text(encoding="utf-8")
+        #: ⛔ A `.py` read from an AMBIENT frame — a pin, not decoration: it holds the
+        #: `caller is _LABEL_HITS_CODE or self.suffix == ".py"` widening, which takes
+        #: this read (the file is a `.py` OUTSIDE the population, so the recorded set then
+        #: drifts). Same PATH as the drift arm's stale; the FRAME is the difference that
+        #: makes it a pin.
+        in_checkout_stale.read_text(encoding="utf-8")
         imposter(imposter_file)
 
     everything: list = []
@@ -1653,6 +1672,13 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     assert imposter_file in [p for p, _ in everything], (
         "the recorder did not see the IMPOSTER's read, so the code-object arm below "
         "would be vacuous — a name-based rule passed it by not running"
+    )
+    #: Non-vacuity for the `.py`-suffix pin, asserted for the same reason as its siblings:
+    #: an exclusion cannot be pinned by a read that never reached the recorder.
+    assert in_checkout_stale in [p for p, _ in everything], (
+        "the recorder did not see the ambient read of the in-checkout `.py` stale, so "
+        "the `.py`-suffix widening would re-admit every ambient `.py` read while this "
+        "arm stayed green"
     )
     #: The frame NAME half of `everything` is asserted, not just collected: the
     #: name recorded for this read must be the frame that made it, not
@@ -1687,6 +1713,11 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "CODE NAME was attributed to `_label_hits` — the rule compared "
         "`f_code.co_name`, a string, instead of the code object, so any same-named "
         "function anywhere in the process re-opens the false-RED class #13699 is"
+    )
+    assert in_checkout_stale not in read, (
+        "an ambient read of a `.py` file OUTSIDE the population was attributed to "
+        "`_label_hits` — the rule has grown a `self.suffix == \".py\"` widening, which "
+        "re-admits every ambient `.py` read and is the false-RED class #13699 closes"
     )
     assert read.count(tracked_ambient) == 1, (
         f"a read of a TRACKED file made by ANOTHER FRAME was attributed to "
@@ -1766,7 +1797,7 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch, tmp_pa
         return [*real_population(rel), inside_checkout, outside_checkout]
 
     #: Patch the NAME `_label_hits` resolves, for the recording only: the read of
-    #: `stray` must come from `_label_hits`'s own frame, or the attribution rule
+    #: `inside_checkout` must come from `_label_hits`'s own frame, or the attribution rule
     #: (correctly) refuses it and this control pins nothing.
     with monkeypatch.context() as inside:
         inside.setattr(sys.modules[__name__], "_tracked_files_under", _widened)
