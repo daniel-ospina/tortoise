@@ -3010,6 +3010,21 @@ _PREFIX_APPROVAL_RECORD_WITH_EMPHASIS_IN_THE_LABEL = (
 _PREFIX_APPROVAL_RECORD_IN_UNDERSCORE_EMPHASIS = (
     "> __Owner approval of the exact change:__ 2026-11-18, given in-session, after the\n"
     "> audit measured the behaviour. The artifact is the text itself.")
+# ⛔ AND THE SAME LABEL IN ANOTHER CASING, measured ACCEPTED (review @ 95a8df2f):
+# `**Owner Approval**` and `**OWNER APPROVAL**` render as the label, and a case-sensitive
+# search read neither, so a record with no home passed in both.
+_PREFIX_APPROVAL_RECORD_IN_TITLE_CASE = (
+    "> **Owner Approval of the exact changes:** 2026-11-18, given in-session, after the\n"
+    "> audit measured the behaviour. The artifact is the text itself.")
+_PREFIX_APPROVAL_RECORD_IN_ALL_CAPS = (
+    "> **OWNER APPROVAL of the exact changes:** 2026-11-18, given in-session, after the\n"
+    "> audit measured the behaviour. The artifact is the text itself.")
+# ⛔ AND THE MIRROR DIRECTION (review @ 95a8df2f): an id that follows an ABBREVIATION in
+# the label sentence is still in that sentence to a reader, so it must resolve. Before
+# the splitter stopped treating `e.g.`'s final dot as a terminator the arm refused it.
+_APPROVAL_CITING_AFTER_AN_ABBREVIATION = (
+    "> **Owner approval of the exact changes:** given in-session on 2026-11-18, e.g. as\n"
+    "> comment `6993778525`, which the reader can resolve.")
 _PREFIX_UNRESOLVED_POINTER = (
     "> reads four conditions). That is a code defect with its own issue; it is not a "
     "sentence to rewrite.")
@@ -3048,15 +3063,45 @@ _POINTER_ACROSS_A_PARAGRAPH_BREAK = (
     "> reads four conditions). That is a code defect with its own issue\n"
     ">\n"
     "> see #13450 for the defect it names.")
+# ⛔ ORDINARY COPY-EDITS OF THE PHRASE ITSELF, each measured ACCEPTED (review @ 95a8df2f):
+# `its own GitHub issue`, `its own follow-up issue`, `its own issues`, `own Issue`. A
+# reader sees the same pointer in every one, and the arm slept through all of them
+# because the phrase was the adjacency-exact `\bown\s+issue\b` in one case.
+_POINTER_WITH_A_QUALIFIED_ISSUE = (
+    "> reads four conditions). That is a code defect with its own GitHub issue; it is "
+    "not a sentence to rewrite.")
+_POINTER_IN_THE_PLURAL = (
+    "> reads four conditions). That is a code defect with its own issues; it is not a "
+    "sentence to rewrite.")
+_POINTER_CAPITALISED = (
+    "> reads four conditions). That is a code defect with its own Issue; it is not a "
+    "sentence to rewrite.")
+# ⛔ AND THE MIRROR DIRECTION THE SPLITTER WAS GETTING WRONG (review @ 95a8df2f): `;` is
+# NOT a sentence boundary a reader sees, so a resolved pointer after one is ONE sentence
+# and must stay GREEN. The arm refused it — a false block on true prose, the same
+# pressure that produced the §4.3 pin's measured 36/43 false-block.
+_POINTER_RESOLVED_AFTER_A_SEMICOLON = (
+    "> reads four conditions). That is a code defect with its own issue; see #13450 for "
+    "the defect it names.")
 # ⛔ THE SHAPE THE ARM MUST IGNORE (review F1), kept as a CONTROL: a release that records
 # NO owner approval owes no citation. The first cut asserted `len(records) == 1`, which
 # fires on ZERO as well, so it refused 36 of the 43 landed blocks — the same
 # measured false-block the §4.3 pin above rejects, reintroduced under a new predicate.
+# ⛔ AND THIS CONTROL IS HONEST ABOUT WHY IT IS GREEN (review @ 95a8df2f): its negative
+# sentence happens to write `owner` lowercase, so a case-sensitive detector read nothing
+# for an accidental reason. The detector now requires the LABEL — the phrase AND the
+# colon that closes it — which is what makes "no approval was recorded" structurally
+# not a record, in any casing. `_NO_APPROVAL_RECORD_IN_PROSE` drives the sentence-initial
+# capital that the case accident used to skip.
 _NO_APPROVAL_RECORD = (
     "> **Changelog v3.39 (2026-11-19 — a wording fix in §4.5 that records no approval):**\n"
     ">\n"
     "> **What changed.** §4.5's table gained a row and its prose said the same thing "
     "more plainly. No owner approval was required for a wording fix.")
+_NO_APPROVAL_RECORD_IN_PROSE = (
+    "> **Changelog v3.39 (2026-11-19 — a wording fix that records no approval):**\n"
+    ">\n"
+    "> Owner approval was not required for a wording fix.")
 # ⛔ THE F2 FAIL-OPEN, driven as a fixture (review: "needs its own fixture (an id that is
 # NOT the approval's)"). This is the landed v3.38 record with its OWN relay deleted: the
 # only id left is the incidental one the next sentence cites, for a comment about the
@@ -3113,7 +3158,21 @@ def _quoted_paragraphs(block: str) -> list[str]:
     return paragraphs
 
 
-_SENTENCE_END_RE = re.compile(r"[.;!?][\"'*_`)\]]*(?=\s)")
+_SENTENCE_END_RE = re.compile(r"[.!?][\"'*_`)\]]*(?=\s)")
+# ⛔ `;` IS NOT A TERMINATOR, MEASURED (review @ 95a8df2f): a reader does not see a
+# sentence break at a semicolon, and treating one as a break refused TRUE prose —
+# ``… its own issue; see #13450 for it.`` was three pseudo-sentences to this file and
+# one sentence to its reader, so the id landed in the wrong half and the pointer was
+# refused. Dropping `;` WIDENS the sentence, which is the fail-OPEN direction for a
+# borrowed id — so the widening is stated as a residual in both arms' docstrings above,
+# and `_POINTER_RESOLVED_AFTER_A_SEMICOLON` pins the direction that matters (resolved
+# prose must stay green).
+# ⛔ …AND THE ABBREVIATIONS ARE MASKED, not split on: `e.g.`/`i.e.` end in a dot that is
+# no terminator, and splitting there refused a label sentence whose citation followed an
+# `e.g.` (measured). Only these two are masked — ``etc.`` is left alone because it DOES
+# end sentences, and masking it would merge two of them.
+_ABBREVIATION_RE = re.compile(r"\b(?:e\.g|i\.e)\.", re.IGNORECASE)
+_DOT_SENTINEL = "\u2024"
 
 
 def _sentences(text: str) -> list[str]:
@@ -3128,12 +3187,15 @@ def _sentences(text: str) -> list[str]:
     the second half passes as if it were the approval's.
     """
     out: list[str] = []
+    guarded = _ABBREVIATION_RE.sub(
+        lambda match: match.group(0).replace(".", _DOT_SENTINEL), text)
     last = 0
-    for match in _SENTENCE_END_RE.finditer(text):
-        out.append(text[last:match.end()])
+    for match in _SENTENCE_END_RE.finditer(guarded):
+        out.append(guarded[last:match.end()])
         last = match.end()
-    out.append(text[last:])
-    return [sentence for sentence in out if sentence.strip()]
+    out.append(guarded[last:])
+    return [sentence.replace(_DOT_SENTINEL, ".")
+            for sentence in out if sentence.strip()]
 
 
 def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
@@ -3173,19 +3235,25 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     ⛔ THE RESIDUAL IS STATED, NOT PAPERED OVER: within ONE sentence a contrastive
     parenthetical that also names an id (v3.37's shape, ``… as comment `6970713492`,
     … — the form the owner rejected for v3.36 (comment `6965147045`)``) is still
-    accepted. Telling WHICH of two ids records the approval needs the comment's own
-    text — the reviewer step this arm's docstring records in #12068.
+    accepted — and dropping `;` as a terminator WIDENS that window, deliberately: a
+    semicolon is not a sentence break to a reader, and keeping it as one refused true
+    prose (measured). Telling WHICH of two ids records the approval needs the comment's
+    own text — the reviewer step this arm's docstring records in #12068.
     """
     # ⛔ THE RECORD IS DETECTED ON WHAT THE DOCUMENT RENDERS, not on its bytes (review @
-    # e4927f5f): `**Owner approval` as a literal missed `**Owner  approval` (a doubled
-    # space) and `**Owner *approval*` / `__Owner approval …__` (markup that renders as
-    # the same label), and each of those left a record with NO resolvable home passing —
-    # the one artifact this arm exists to refuse. `_reader_text` drops the markup and
-    # collapses the spacing, so `\bOwner approval\b` reads the rendered label; the
-    # CITATION below is still read from the RAW sentence, so markup can neither hide nor
-    # manufacture an id.
+    # e4927f5f, then @ 95a8df2f): `**Owner approval` as a literal missed
+    # `**Owner  approval` (a doubled space), `**Owner *approval*` / `__Owner approval …__`
+    # (markup that renders as the same label), and `**Owner Approval**` / `**OWNER
+    # APPROVAL**` (another casing a reader reads identically). Each of those left a
+    # record with NO resolvable home passing — the one artifact this arm exists to
+    # refuse. `_reader_text` drops the markup and collapses the spacing and
+    # `_OWNER_APPROVAL_LABEL_RE` reads case-insensitively, so the RENDERED label is what
+    # is found; requiring the label's COLON is what keeps "no owner approval was
+    # recorded" out of the detector on its own merit rather than by casing accident.
+    # ⛔ THE CITATION below is still read from the RAW sentence, so markup can neither
+    # hide nor manufacture an id.
     records = [paragraph for paragraph in _quoted_paragraphs(block)
-               if re.search(r"\bOwner approval\b", _reader_text(paragraph))]
+               if _OWNER_APPROVAL_LABEL_RE.search(_reader_text(paragraph))]
     if not records:
         # ⛔ RETURN, DO NOT ASSERT (review F1). This release records no owner approval,
         # so it owes no citation: the unconditional demand was measured to false-block
@@ -3197,7 +3265,7 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         "reads exactly ONE, so a second copy would shadow the one checked")
     record = records[0]
     label = next(sentence for sentence in _sentences(record)
-                 if re.search(r"\bOwner approval\b", _reader_text(sentence)))
+                 if _OWNER_APPROVAL_LABEL_RE.search(_reader_text(sentence)))
     assert _CITATION_RE.search(label), (
         "the newest changelog block records an owner approval but names no comment id "
         "in the SENTENCE that records it, so the approval has no home a reader can "
@@ -3207,7 +3275,8 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         f"is the form the owner rejected; the paragraph reads: {record!r}")
 
 
-_OWN_ISSUE_RE = re.compile(r"\bown\s+issue\b")
+_OWNER_APPROVAL_LABEL_RE = re.compile(r"\bowner\s+approval\b[^:]{0,120}:", re.IGNORECASE)
+_OWN_ISSUE_RE = re.compile(r"\bown\b(?:\s+[^\s]+){0,3}\s+issues?\b", re.IGNORECASE)
 _ISSUE_NUMBER_RE = re.compile(r"#\d{2,}")
 
 
@@ -3215,12 +3284,13 @@ def _reader_text(sentence: str) -> str:
     """`sentence` as a READER sees it: whitespace collapsed, emphasis markers dropped.
 
     ⛔ THE POINTER ARM MATCHES WHAT THE DOCUMENT RENDERS, not the bytes it was typed
-    with. Measured green before this (review @ 30ef349c, round 2, P3):
-    ``with its own  issue`` (a doubled space) and ``with its own *issue*`` (markdown
-    emphasis, which renders as ``own issue``) both escaped ``_OWN_ISSUE_RE``, so the
-    one phrase this arm exists to refuse passed unread in the two shapes a re-wrap and
-    a copy-edit actually produce. The same reasoning that unfolded the block applies
-    here: neither spacing nor a markup run is a semantic boundary.
+    with. Measured green before this (review @ 30ef349c round 2, then @ 95a8df2f):
+    ``with its own  issue`` (a doubled space), ``with its own *issue*`` (markdown
+    emphasis, which renders as ``own issue``), ``its own GitHub issue``, ``its own
+    issues`` and ``own Issue`` all escaped ``_OWN_ISSUE_RE``, so the one phrase this arm
+    exists to refuse passed unread in the shapes a re-wrap, a copy-edit and a
+    qualification actually produce. Neither spacing, nor a markup run, nor a
+    qualifier between the words is a semantic boundary.
 
     ⛔ THE NUMBER IS READ FROM THE SAME NORMALISED TEXT, so markup can neither hide a
     pointer nor manufacture one: ``#13450`` survives the transformation.
@@ -3254,7 +3324,15 @@ def _refuse_an_unresolvable_pointer(block: str) -> None:
     ⛔ THE RESIDUAL, STATED: an id anywhere in the SAME sentence satisfies it, so
     ``… its own issue, unlike #13450;`` is accepted. Separating that needs the
     sentence's grammar, not its characters, and the reader-visible defect here is the
-    pointer with no number at all.
+    pointer with no number at all. ⛔ AND the same widening is why `;` is no longer a
+    terminator (a semicolon is not a sentence break to a reader) — stated HERE, next to
+    the window it widens, rather than left to be discovered.
+    ⛔ AND ONE QUOTED SHAPE IS STILL REFUSED, named because the approval arm names its
+    own: text inside a nested ``> > `` run is a QUOTATION OF DEFUNCT PROSE, not a claim
+    this release makes, and this arm reads it as a claim — so an entry quoting the old
+    ``its own issue`` sentence to record its correction is refused. Nothing in the
+    landed corpus does this today; the fix is to skip nested-quote paragraphs, and it is
+    a change to the shared reader, not to this arm.
     """
     for paragraph in _quoted_paragraphs(block):
         for sentence in _sentences(paragraph):
@@ -3328,17 +3406,24 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # this raised — `len(records) == 1` fires on zero — so the arm refused the 36
     # landed blocks it promises to leave alone.
     _refuse_an_approval_record_with_no_resolvable_home(_NO_APPROVAL_RECORD)
+    # …and again with the negative sentence carrying a SENTENCE-INITIAL capital, which
+    # the case accident above used to skip: the label's colon, not the casing, is what
+    # keeps a "no approval was recorded" sentence out of the detector (review @ 95a8df2f).
+    _refuse_an_approval_record_with_no_resolvable_home(_NO_APPROVAL_RECORD_IN_PROSE)
     # NON-VACUITY: both shapes this release shipped are refused, verbatim.
     with pytest.raises(AssertionError) as refused:
         _refuse_an_approval_record_with_no_resolvable_home(_PREFIX_APPROVAL_RECORD)
     _assert_refused_by(refused, "_refuse_an_approval_record_with_no_resolvable_home")
-    # …and the same SHIPPED record in the three shapes a copy-edit produces — a doubled
-    # space, emphasis on the label's last word, and the label in `__…__`. Each RENDERS as
-    # the label and each was measured GREEN while the arm matched the literal bytes, so a
-    # record with no home passed in all three (review @ e4927f5f).
+    # …and the same SHIPPED record in the five shapes a copy-edit produces — a doubled
+    # space, emphasis on the label's last word, the label in `__…__`, and TITLE/ALL-CAPS
+    # casing. Each RENDERS as the label and each was measured GREEN while the arm matched
+    # the literal bytes, so a record with no home passed in all five (review @ e4927f5f
+    # and @ 95a8df2f).
     for copy_edit in (_PREFIX_APPROVAL_RECORD_WITH_A_DOUBLED_SPACE,
                       _PREFIX_APPROVAL_RECORD_WITH_EMPHASIS_IN_THE_LABEL,
-                      _PREFIX_APPROVAL_RECORD_IN_UNDERSCORE_EMPHASIS):
+                      _PREFIX_APPROVAL_RECORD_IN_UNDERSCORE_EMPHASIS,
+                      _PREFIX_APPROVAL_RECORD_IN_TITLE_CASE,
+                      _PREFIX_APPROVAL_RECORD_IN_ALL_CAPS):
         with pytest.raises(AssertionError) as rendered:
             _refuse_an_approval_record_with_no_resolvable_home(copy_edit)
         _assert_refused_by(
@@ -3360,9 +3445,13 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     _assert_refused_by(
         borrowed_after_a_quote, "_refuse_an_approval_record_with_no_resolvable_home")
     # …and the RESOLVED shape is green, so the arm above is not satisfied by refusing
-    # every record that names an id anywhere.
+    # every record that names an id anywhere — including where the id follows an
+    # abbreviation, which the splitter used to cut off at `e.g.`'s dot (measured refusal
+    # of true prose, review @ 95a8df2f).
     _refuse_an_approval_record_with_no_resolvable_home(
         _APPROVAL_RELAY_IN_LABEL_SENTENCE)
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_CITING_AFTER_AN_ABBREVIATION)
     with pytest.raises(AssertionError) as pointer:
         _refuse_an_unresolvable_pointer(_PREFIX_UNRESOLVED_POINTER)
     _assert_refused_by(pointer, "_refuse_an_unresolvable_pointer")
@@ -3392,6 +3481,18 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     with pytest.raises(AssertionError) as paragraph_pointer:
         _refuse_an_unresolvable_pointer(_POINTER_ACROSS_A_PARAGRAPH_BREAK)
     _assert_refused_by(paragraph_pointer, "_refuse_an_unresolvable_pointer")
+    # …and the ordinary copy-edits of the PHRASE ITSELF, each measured ACCEPTED before the
+    # arm stopped requiring adjacency and one casing (review @ 95a8df2f):
+    for reworded in (_POINTER_WITH_A_QUALIFIED_ISSUE,
+                     _POINTER_IN_THE_PLURAL,
+                     _POINTER_CAPITALISED):
+        with pytest.raises(AssertionError) as reworded_pointer:
+            _refuse_an_unresolvable_pointer(reworded)
+        _assert_refused_by(reworded_pointer, "_refuse_an_unresolvable_pointer")
+    # …and the MIRROR direction: a semicolon is not a sentence break to a reader, so a
+    # resolved pointer after one is ONE sentence and stays green (measured refusal of
+    # true prose while `;` was a terminator).
+    _refuse_an_unresolvable_pointer(_POINTER_RESOLVED_AFTER_A_SEMICOLON)
     # …and a RESOLVED pointer is not refused, so the arm cannot be satisfied by
     # refusing every sentence that mentions an issue's existence.
     _refuse_an_unresolvable_pointer(
