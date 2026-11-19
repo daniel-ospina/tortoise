@@ -430,8 +430,17 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # negated test it stores exactly when the gate said stop, i.e. the polarity
         # inversion again wearing a `return`. Only a bare `return`/`return None`/`raise` is
         # an exit; a `return` carrying a call is judged as a write, below.
-        if any(_is_write_stop_exit(statement)
-               for statement in sub.body for statement in _own_walk(statement)):
+        #
+        # ⛔ AND AN EXIT IS ONLY A WRITE-STOP ON THE *NEGATED* ARM. `mirror_required`
+        # answers True = "the graph must still store this", so `if gate("object"): return
+        # None` exits on the runs the vector MUST be written and falls through to the store
+        # on every run a strip can happen — the inverted write-stop, and still certified
+        # gated at `df345c22` because this arm ran the exit test BEFORE looking at
+        # `polarity` (round 8's F1.a, measured: GATED). The correct spelling is
+        # `if not gate("object"): return`.
+        if polarity < 0 and any(_is_write_stop_exit(statement)
+                                for statement in sub.body
+                                for statement in _own_walk(statement)):
             return True
         # ⛔ THE POLARITY DECIDES WHICH BODY IS A WRITE-STOP, and getting this wrong in
         # either direction is a defect that was measured:
@@ -456,6 +465,11 @@ def _is_write_stop_exit(statement) -> bool:
     A `return` of a CALL is a write that also exits, so it is judged by the same polarity
     rule as an assignment. Treating every `Return` as an exit accepted
     `if not gate(l): return self._write(ev)`, which stores on the arm the gate said stop.
+
+    ⛔ THE CALLER APPLIES THE POLARITY, and must: an exit that writes nothing is a
+    write-stop only when the branch runs on the STOP verdict (`polarity < 0`). On the
+    mirror arm (`if gate(l): return`) the same exit skips the write the gate asked for, so
+    it is the inverted shape rather than a write-stop.
     """
     import ast
 
