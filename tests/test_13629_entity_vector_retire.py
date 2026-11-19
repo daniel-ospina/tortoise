@@ -588,6 +588,19 @@ def _upsert_object(ev):
     return _write(ev)
 """
 
+#: ⛔ THE DEAD-*STORE* TWIN of `WRITER_DEAD_BRANCH`, and the fail-OPEN opposite direction:
+#: the guard walk already dropped a dead GUARD, but the STORE walk did not, so a store that
+#: never runs certified the guarded arm while the vector was written unconditionally below
+#: it. A dead store is not evidence of a store.
+WRITER_DEAD_STORE = """
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        if False:
+            embedding = _encode(props)
+    props["embedding"] = vec
+    return _write(props)
+"""
+
 WRITER_UNCALLED = """
 def _upsert_object(ev):
     mirror_required("object")
@@ -747,7 +760,8 @@ def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
     Mutation: revert `_asks_the_gate` to `any(name in body)` and the first three cases
     below go green-to-red (i.e. this test fails), while the fourth must stay gated.
     """
-    for source in (WRITER_PROSE_ONLY, WRITER_DEAD_BRANCH, WRITER_UNCALLED):
+    for source in (WRITER_PROSE_ONLY, WRITER_DEAD_BRANCH, WRITER_UNCALLED,
+                   WRITER_DEAD_STORE):
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"{source!r} was accepted as a gate"
