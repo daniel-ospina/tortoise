@@ -59,6 +59,34 @@ def _sdk() -> TortoiseSDK:
     return TortoiseSDK.__new__(TortoiseSDK)
 
 
+#: ⚠️ #12901 FINAL privatised these doors: the `def` moved to the private spelling while the
+#: SEMANTIC name — the one the merges route to, and the one every assertion in this file
+#: names — is unchanged. So the fixture substitutes the PRIVATE attribute and records the
+#: PUBLIC name: substituting by public spelling is an `AttributeError` at fixture time
+#: (`monkeypatch.setattr` refuses a name the class does not have), and recording the private
+#: one would make a routing assertion about the rename rather than about the route.
+#: `delete_entity` collided with an existing `_delete_entity`, so its carrier is `__svc`.
+_PRIVATE_DOORS = {
+    "create_direct_edge": "_create_direct_edge",
+    "create_derivation": "_create_derivation",
+    "create_operator": "_create_operator",
+    "create_edge": "_create_edge",
+    "link_source_to_entity": "_link_source_to_entity",
+    "update": "_update",
+    "retract_point": "_retract_point",
+    "invalidate_point": "_invalidate_point",
+    "annotate_operator": "_annotate_operator",
+    "delete": "_delete",
+    "delete_point": "_delete_point",
+    "delete_entity": "_delete_entity__svc",
+}
+
+
+def _carrier(door: str) -> str:
+    """The attribute name the class actually holds for a semantic door name."""
+    return _PRIVATE_DOORS.get(door, door)
+
+
 @pytest.fixture
 def sdk(monkeypatch):
     """An SDK whose write doors are recorded instead of executed."""
@@ -76,21 +104,10 @@ def sdk(monkeypatch):
 
     for door in (
         "create_entity",
-        "create_derivation",
-        "create_direct_edge",
-        "create_operator",
-        "create_edge",
-        "link_source_to_entity",
-        "update",
         "_update_entity_any",
-        "retract_point",
-        "invalidate_point",
-        "annotate_operator",
-        "delete",
-        "delete_point",
-        "delete_entity",
+        *_PRIVATE_DOORS,
     ):
-        monkeypatch.setattr(inst, door, record(door))
+        monkeypatch.setattr(inst, _carrier(door), record(door))
     return inst
 
 
@@ -113,9 +130,9 @@ def test_the_four_merges_are_rows_of_the_approved_40_and_the_declaration_is_unch
 @pytest.mark.parametrize(
     ("alias", "type_", "extra"),
     [
-        ("create_subject", "subject", {"name": "Acme"}),
-        ("create_object", "object", {"name": "Widget"}),
-        ("create_event", "event", {"name": "Kickoff", "eventKind": "core:meeting"}),
+        ("_create_subject", "subject", {"name": "Acme"}),
+        ("_create_object", "object", {"name": "Widget"}),
+        ("_create_event", "event", {"name": "Kickoff", "eventKind": "core:meeting"}),
 
     ],
 )
@@ -721,7 +738,8 @@ def test_the_writers_have_somewhere_to_put_the_callers_instant(door):
     """The merge may only forward `valid_to` if the writers accept it."""
     import inspect
 
-    assert "valid_to" in inspect.signature(getattr(TortoiseSDK, door)).parameters
+    assert "valid_to" in inspect.signature(
+        getattr(TortoiseSDK, _carrier(door))).parameters
 
 
 def test_the_merge_exposes_the_temporal_field_and_forwards_its_value():
