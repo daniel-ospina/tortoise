@@ -652,13 +652,13 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             _filler = re.sub(
                 r"^(?:the|a|an|its|this|that|those|these"
                 r"|just|only|still|now|actually|also|at\s+least|at\s+most"
-                r"|more\s+than|no\s+fewer\s+than|exactly)\s+", "", low, count=1)
+                r"|more\s+than|no\s+more\s+than|no\s+fewer\s+than|exactly)\s+", "", low, count=1)
             if _filler != low:
                 if re.match(r"more\s+than\b", low):
                     _lower_bound = True
                 elif re.match(r"(?:at\s+least|no\s+fewer\s+than)\b", low):
                     _tautology = True
-                elif re.match(r"at\s+most\b", low):
+                elif re.match(r"(?:at\s+most|no\s+more\s+than)\b", low):
                     _at_most = True
                 low = _filler
             # ⛔ AND A DOUBLED FORM (`prints contains …`) — a listed verb can sit where
@@ -717,16 +717,19 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # `low`, so that branch could never match — dropped rather than left as an inert
             # alternative. Named rather than numbered: a line reference here rotted twice in
             # this PR, pointing at a `rest = …` line instead of the strip.)
-            # ⛔ A NUMERAL THAT IS NOT A COUNT IS NOT A MEMBER EITHER (#13831 review, P1):
-            # `\d+\b` matches the `0` of `0-based` and stops at the hyphen boundary, so a
-            # token that computes an OFFSET was read as a MEMBERSHIP claim — the same
-            # accident that made `zero-length output` SKIP while `0-length output` did not.
-            # The bound keeps a count (`1 path`, `10 paths`) and drops a token continuing
-            # into a hyphen. (`\w` needs no listing: `\b` already refuses a following word
-            # character, and a `.` cannot reach here — the window is cut at the first one.)
+            # ⛔ A NUMERAL THAT COMPUTES AN OFFSET IS NOT A MEMBER EITHER (#13831 review,
+            # P1): `\d+\b` matches the `0` of `0-based` and stops at the hyphen boundary, so
+            # a token that names a NUMBERING SCHEME was read as a MEMBERSHIP claim. The bound
+            # keeps a COUNT (`1 path`, `10 paths`, and also `2-line output`, which counts
+            # lines) and drops only the `-based` token — MEASURED at the merge base and at
+            # `origin/main` (`487c7e0e82`): there `prints zero-length output` read EMPTINESS and
+            # `prints 2-line output` read MEMBERSHIP, so a blanket `(?!-)` would have turned
+            # both into a SKIP and handed back the fail-open this bound exists to close.
+            # (`\w` needs no listing: `\b` already refuses a following word character, and a
+            # `.` cannot reach here — the window is cut at the first one.)
             _member = re.match(
                 r"(?:tortoise/|comment-only\b|non[- ]?empty\b"
-                r"|\d+\b(?!-)|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b"
+                r"|\d+\b(?!-based)|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b"
                 r"|nine\b|ten\b|both\b|single\b)", low)
             # ⛔ A ZERO NUMERAL IS EMPTINESS, FULL STOP (#13795 review, rounds 4 and 5):
             # `prints 0 paths`, `prints exactly zero paths`, `prints 0 files` and
@@ -735,20 +738,25 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # refusing a true sentence. Zero is emptiness whatever it COUNTS.
             # ⛔ …BUT ONLY WHEN IT IS A COUNT AT ALL (#13831 review, P1/P2). Dropping that
             # noun gate made any `0` an emptiness claim, including one that computes an
-            # offset — `prints 0-based offsets` asserts neither direction. Both bounds here
-            # and in `_member` therefore require the numeral to END the token, so such a
-            # sentence SKIPS (no direction is typed) rather than being read as emptiness or
-            # as membership. `zero-length output` already skipped; this makes the digit form
-            # agree with it.
+            # offset — `prints 0-based offsets` asserts neither direction, so it SKIPS (no
+            # direction is typed). The `-based` bound is deliberately the ONLY hyphenated
+            # suffix excluded: `zero-length` / `0-length` / `zero-count` name a COUNT (they
+            # are emptiness), and a blanket `(?!-)` — which this cut carried for one round —
+            # silently skipped them instead, the fail-open measured above.
             # ⛔ ONE LIMIT THIS LEAVES, STATED RATHER THAN IMPLIED: `prints 0.5 coverage`
             # still reads as `prints 0`, because the window is cut at the first `.` — the
             # `0` really is the whole of what the classifier sees, so it is indistinguishable
             # from a bare zero and is read as emptiness. That truncation is pre-existing and
             # not introduced here; naming it keeps the comments above honest about it.
+            # ⛔ AND THE `no …` ARM NAMES ONE ALTERNATIVE, NOT TWO (#13831 review, P2):
+            # `paths` was listed beside `path` and is UNREACHABLE — `path` matches `no
+            # paths` as a bare prefix — so deleting it red nothing. Removed rather than left
+            # as a second spelling of coverage that does not exist; the `prints no paths`
+            # row below pins that the PLURAL is still read as emptiness.
             _empty = re.match(
                 r"(?:empty\b|nothing\b|none\b|blank\b"
-                r"|(?:zero|0)\b(?!-)"
-                r"|no\b\s*(?:path|paths|tortoise/))", low)
+                r"|(?:zero|0)\b(?!-based)"
+                r"|no\b\s*(?:path|tortoise/))", low)
             if _empty:
                 if re.match(r"(?:zero|0)\s+or\s+more\b", low):
                     # ⛔ THE SAME TAUTOLOGY AS `at least zero`, ONE SPELLING OVER (#13831
@@ -1134,9 +1142,12 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             ("prints more than zero paths", False),
             ("prints more than 0 files", False),
             ("prints 0-based offsets", None),
-            ("prints zero-length output", None),
+            ("prints zero-length output", True),
+            ("prints 2-line output", False),
             ("prints zero or more paths", None),
             ("prints 0 or more files", None),
+            ("prints no more than zero paths", True),
+            ("prints no more than two paths", None),
             ("prints no fewer than zero paths", None)):
         _edge_expect = [] if _edge_want is None else [(_edge_spelling, _edge_want)]
         assert _typed_answers_to_tortoise_cmd(
