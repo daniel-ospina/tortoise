@@ -675,12 +675,16 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     ):
         assert _negation not in doc, (
             f"05-verify.md asserts {_negation!r}. That is a DIRECTION about the `tortoise/` "
-            f"set typed as a current fact, and it is refuted by the very command it quotes: "
-            f"`{_tortoise_cmd}` prints two comment-only paths at this head "
-            "(`tortoise/activation_scorecard.py` and `tortoise/hosted_api.py`), so the "
-            "sentence contradicts the claims beside it — and it satisfied the presence-only "
-            "leg above while doing so. Read the set at the head being merged; never type a "
-            "direction (#13489 review, P1)")
+            f"set typed as a current fact, and the command it quotes is the one that refutes "
+            f"it: `{_tortoise_cmd}` prints a DIFFERENT set at every head, so the sentence "
+            "is false at whichever head it is not describing — and it satisfied the "
+            "presence-only leg above while doing so. Read the set at the head being merged; "
+            "never type a direction (#13489 review, P1) — ⛔ this MESSAGE used to name a "
+            "count and two paths, which is the same head-bound figure the ban exists to "
+            "refuse (#13746 review at `9ec7377640`, carried P2): at the head that re-checked it the set was ONE "
+            "module, so the message refuted the sentence with a stale measurement of its "
+            "own. A failure message is only read when the assertion fires, so no leg caught "
+            "it.")
     # ⛔ …AND THE DIRECTION IS READ, NEVER TYPED (#13550 review, P1 — MEASURED at
     # `618b1ec0e4`). The leg this replaces demanded that the document say the `tortoise/`
     # set was EMPTY. That is a claim about ONE head, and it is FALSE at this one:
