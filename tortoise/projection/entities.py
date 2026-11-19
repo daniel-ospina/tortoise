@@ -894,6 +894,29 @@ def _build_search_text(title, summary=None, topics=None) -> str:
     return " ".join(filter(None, parts))
 
 
+def _encode_document_mirror(required_dim: int | None, st: str):
+    """The `:Document` fold's ONE encode, shared by both halves of the `:Source` node.
+
+    ⛔ THE SEAM (#13447) — see `_upsert_subject`. The TEXT here is `st`
+    (`_build_search_text(title, summary, topics)`), and it is ALSO the record's text:
+    `#13412` LANDED in main and the seam's `DocumentCreated` rule CALLS `_upsert_document`
+    itself (`derived_embedding._document_embedding_parts`), so the record column and this
+    fold compose ONE string and the text-keyed memo serves the second leg at zero model
+    calls — a document write pays ONE encode, like every other label. ⚠️ The comment this
+    moved out of said the opposite until review cycle 8 (P3); it then contradicted the
+    seam module's own `DocumentCreated` paragraph ("the document pair dedupes for free").
+
+    `#5008` (an identifier-only text earns no vector) and `#13224`'s `bounded=True` are
+    INSIDE `derived_embedding.encode` / its `encode_for_row` primitive, so both halves of
+    the gate ask get the same refusals by construction rather than by a second copy here.
+    """
+    try:
+        from tortoise import derived_embedding
+        return derived_embedding.encode(st, required_dim, bounded=True)
+    except Exception:
+        return None
+
+
 def _seq_events(events):
     """Yield ``(journal_seq, record)`` for a deferred-fold batch (#3722 P2).
 
@@ -5520,27 +5543,29 @@ class _EntityHandlers:
         # preserve-on-null leaves a stored vector alone. The conjunct sits in the TEST
         # rather than around the block so the write-stop is the encode itself, the same
         # shape `_upsert_subject` / `_upsert_object` use.
-        if (not ev.get("suppress_embedding") and st and st.strip()
-                and _derived_mirror_required("document")):
-            # #5008: through the EMBED gate — an identifier-only text earns no vector.
-            try:
-                # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The TEXT here is `st`
-                # (`_build_search_text(title, summary, topics)`), and it is ALSO the
-                # record's text: `#13412` LANDED in main and the seam's
-                # `DocumentCreated` rule CALLS this same function
-                # (`derived_embedding._document_embedding_parts`), so the record column
-                # and this fold compose ONE string and the text-keyed memo serves this
-                # second leg at zero model calls — a document write pays ONE encode,
-                # like every other label. ⚠️ This comment said the opposite until
-                # review cycle 8 (P3): it was written while `#13412` was still unlanded,
-                # the re-cut made it false, and it then contradicted the seam module's
-                # own `DocumentCreated` paragraph ("the document pair dedupes for free").
-                from tortoise import derived_embedding
-                # #13224: DERIVED vector — see `_upsert_subject` for the scope.
-                embedding = derived_embedding.encode(
-                    st, self.required_embedding_dim, bounded=True)
-            except Exception:
-                pass
+        # ⛔ AND IT ASKS THE `:Source` HALF TOO (#13854 review). ONE `:Source` vector serves
+        # both halves of the node, and `LABEL_SERVED` splits those halves on `document_kind`
+        # — so a node this fold writes need not belong to the `document` population at all.
+        # `_update_entity`'s `:Source` arm and `hosted_backup.restore_graph` therefore retire
+        # the vector only when BOTH `document` and `source` answer stop; asking `document`
+        # alone here wrote NO vector when the `document` half was covered but the `source`
+        # half was not, i.e. the "vector in neither store" state (#11395) the conservative
+        # arm exists to forbid. Both arms call the ONE encode, so the seam rule is unchanged:
+        # a document write still pays one encode, and `#5008`'s identifier-only refusal still
+        # lives inside it.
+        _text_ready = bool(not ev.get("suppress_embedding") and st and st.strip())
+        embedding = None
+        # ⛔ TWO ARMS, NOT ONE `or` — and the suppression below is load-bearing, not tidiness. The
+        # writer census (`tools/strip_graph_entity_vectors.py::_asks_the_gate`) refuses a
+        # BooleanOp it cannot split: it reads the gate calls as `and` CONJUNCTS, so an `or`
+        # test is "masked" and the fold would count as still emitting, re-opening the
+        # `:Source` acceptance gap this arm closes. Each conjunctive ask below is visible to
+        # it, and the two arms are the SAME encode, so `simplify` would merge them — see
+        # `test_the_document_fold_asks_the_gate`'s per-label arms.
+        if _text_ready and _derived_mirror_required("document"):  # noqa: SIM114
+            embedding = _encode_document_mirror(self.required_embedding_dim, st)
+        elif _text_ready and _derived_mirror_required("source"):
+            embedding = _encode_document_mirror(self.required_embedding_dim, st)
         # #125 capture fields — use ev.get(field) with NO default so None →
         # Cypher null, letting coalesce fall through to existing on partial
         # updates. CRITICAL: "" is non-null in Cypher — coalesce("", d.f, ...)

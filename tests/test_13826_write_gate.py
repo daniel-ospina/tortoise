@@ -177,7 +177,19 @@ def test_the_event_fold_asks_the_gate(proj, monkeypatch):
 
 
 def test_the_document_fold_asks_the_gate(proj, monkeypatch):
-    """`_upsert_document` asks about `document` — the half of `:Source` it writes."""
+    """`_upsert_document` asks BOTH halves of the `:Source` node it writes.
+
+    ⛔ ONE `:Source` VECTOR SERVES BOTH LABELS (#13854 review, the `:Source` acceptance
+    gap). `LABEL_SERVED` splits the two populations on `document_kind`, so a node this
+    fold writes need not belong to the `document` half at all — and the two writers that
+    can SEE the shared node (`_update_entity`'s `:Source` arm and
+    `hosted_backup.restore_graph`) both retire the vector only when BOTH `document` and
+    `source` answer stop. Asking `document` alone left the mirror of that rule open in the
+    one fold that ENCODES: with the `document` half covered and the `source` half not, the
+    fold wrote NO vector — the "vector in neither store" state (#11395) the conservative
+    arm forbids. That is the arm below at `keep={"source"}`, and it is RED on the pre-fix
+    code (measured: `embedding is None` there).
+    """
     calls = _never_encode(monkeypatch)
 
     _gate(monkeypatch, True)
@@ -186,6 +198,20 @@ def test_the_document_fold_asks_the_gate(proj, monkeypatch):
     assert _prop(proj.g, "(n:Source {url:'https://example.com/doc-keep'})",
                  "embedding") is not None
     assert calls, "the mirror arm did not encode"
+
+    # ⛔ PER LABEL, through the SAME entry point (#13828 review's rule, applied here):
+    # `document` covered + `source` uncovered must STILL write the vector, and the
+    # reverse must too — only BOTH answering stop retires it.
+    for _keep, _url in (("document", "doc-half"), ("source", "source-half")):
+        calls.clear()
+        _gate_map(monkeypatch, {_keep})
+        _url = f"https://example.com/{_url}"
+        proj._upsert_document({"id": _url, "title": "Half kept",
+                               "summary": "one half still wants it"})
+        assert _prop(proj.g, f"(n:Source {{url:'{_url}'}})", "embedding") is not None, (
+            f"the document fold dropped the `:Source` vector while `{_keep}` answered "
+            "KEEP — one vector serves both halves, so only BOTH stopping retires it")
+        assert calls, f"the {_keep}-keep arm did not encode"
 
     _gate(monkeypatch, False)
     calls.clear()
