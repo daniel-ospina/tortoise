@@ -20,6 +20,18 @@ later run must not be free to choose after it sees the numbers:
    population PASSES it and serves an empty cohort as `pgvector/ok`. That is
    exactly the shape M2's population had (written with no embedding), so the
    guard is asserted rather than assumed;
+3b. **and the ID-SCOPED half of that guard** — `coverage` is a LABEL-WIDE count
+   by design (`#11395` step 2), so it verifies any tenant that holds *some*
+   embedded `Point` rows, including one that holds NONE of THIS population's ids.
+   `record_population_vectors` must ask the record for the population's OWN id
+   set before an arm runs: without it `record_dense` ranks nothing and publishes
+   `recall@3 = 0.0` as a finding about the leg instead of a finding about the
+   seed step;
+4b. **the DSN comes from the module that owns it** — `record_vector` declares the
+   ARM, not the DSN (`record_writer.record_dsn` does). The shipped call read
+   `record_vector.record_dsn`, i.e. an `AttributeError` one expression BEFORE the
+   `no_record_dsn` refusal the artifact promises, on exactly the documented
+   recipe (`--dsn` defaults to `""`, the environment carries the value);
 4. **the contradiction test, as a structural pin** — the dense leg comes FROM
    THE RECORD (`#11481` V1: Postgres is the record, FalkorDB is the projection).
    The instrument must therefore never create a graph vector index nor seed
@@ -40,8 +52,10 @@ import ast
 import importlib.util
 import json
 import math
+import re
 import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import ClassVar
 
@@ -106,6 +120,43 @@ class TestPreregistration:
         assert block["statistic"].startswith("exact two-sided McNemar")
         assert block["arms"] == ["lexical", "graph_dense", "record_dense"]
         assert block["declared_mechanisms"]["record_dense"] == ["pgvector"]
+
+    def test_the_docstring_table_quotes_the_same_numbers(self, tool_mod):
+        """ONE spelling of each pre-registered threshold, in prose and in code.
+
+        ⛔ `test_detectable_effect_at_the_m2_population` allows ±0.06 — which
+        cannot separate 2.23 from 2.24 — so the module docstring's own copy of
+        the table could drift from the computation and stay green. It did: the
+        docstring quoted `2.24` where the committed block, the PR body and the
+        test constant all say `2.23`. A pre-registration whose quoted threshold
+        exists in two spellings is the one artifact where that is not a nit, so
+        the table is read OUT of the docstring and compared here.
+        """
+        rows = re.findall(r"^(0\.\d{2})\s+(\d+\.\d{2})$", tool_mod.__doc__ or "", flags=re.M)
+        assert len(rows) == 4, f"expected the 4-row table, read {rows}"
+        for discordance, quoted in rows:
+            assert float(quoted) == round(
+                tool_mod.detectable_effect_pp(M2_N, float(discordance)), 2
+            ), (discordance, quoted)
+
+    def test_the_preregistration_needs_no_statistics_stack(self):
+        """The reason `_erfinv` is hand-rolled — the fact prose cannot carry.
+
+        ⛔ `scipy>=1.10` IS a direct dependency (`pyproject.toml`), so an earlier
+        docstring's "scipy is not in the base install" was false and is the kind
+        of wrong reason the next lane copies. What must stay true is that the
+        instrument imports no such stack: two fixed normal quantiles are computed
+        from `math`, so the pre-registration runs wherever `python` does.
+        """
+        tree = ast.parse(TOOL.read_text())
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        assert "scipy" not in imported, imported
+        assert "numpy" not in imported, imported
 
     def test_committed_preregistration_matches_the_instrument(self, tool_mod):
         """The committed block and the tool's own output are the SAME numbers.
@@ -318,6 +369,53 @@ class TestRefusals:
             tool_mod.require_record(None)
         assert ei.value.code == "no_record_dsn"
 
+    def test_the_dsn_is_read_through_the_module_that_owns_it(self, tool_mod, monkeypatch):
+        """`record_vector` declares the ARM; `record_writer` declares the DSN.
+
+        ⛔ The shipped call was `record_vector.record_dsn()` — an attribute that
+        does not exist, so the documented recipe (no `--dsn`, the value in
+        `TORTOISE_RECORD_DSN`) raised `AttributeError` one expression BEFORE the
+        `no_record_dsn` refusal, and AFTER the graph had already been seeded.
+        """
+        source = TOOL.read_text()
+        assert "record_vector.record_dsn" not in source
+        tree = ast.parse(source)
+        # ⛔ ANY `<module>.record_dsn` attribute read is the defect shape: the
+        # function is `record_writer`'s, and asking `record_vector` (or an alias
+        # of it) for it is the AttributeError. A text pin alone missed an alias.
+        off_module = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and n.attr == "record_dsn"
+        ]
+        assert not off_module, [ast.dump(n)[:80] for n in off_module]
+        assert "from tortoise.record_writer import" in source
+        run = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        assert any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "_resolve_dsn"
+            for n in ast.walk(run)
+        ), "run_measurement must resolve the DSN through `_resolve_dsn`"
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "")
+        assert tool_mod._resolve_dsn("") is None  # unset/blank is UNARMED, not an error
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://u:p@record.example/db")
+        assert tool_mod._resolve_dsn("") == "postgresql://u:p@record.example/db"
+
+    def test_a_malformed_dsn_is_a_named_refusal_not_a_traceback(self, tool_mod, monkeypatch):
+        """A configured-but-unusable DSN is a misconfiguration, refused BY NAME.
+
+        The seam raises `RecordWriteError` (wrong scheme, no host, whitespace);
+        `main()` catches only `Refused`, so without this conversion the operator
+        would get a traceback where the artifact promises a named precondition.
+        """
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "mysql://user@host/db")
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod._resolve_dsn("")
+        assert ei.value.code == "record_dsn_unusable"
+        assert ei.value.exit_code == 2
+
     def test_seeded_guard_refuses_the_zero_zero_coverage_trap(self, tool_mod):
         """`0 >= 0` is VERIFIED — so seeding is guarded, not inferred."""
         with pytest.raises(tool_mod.Refused) as ei:
@@ -337,6 +435,32 @@ class TestRefusals:
 
     def test_seeded_guard_passes_a_seeded_pair(self, tool_mod):
         tool_mod.require_seeded(786, 800)  # no raise
+
+    def test_the_population_guard_refuses_a_cohort_the_record_does_not_hold(self, tool_mod):
+        """The label-wide count can be VERIFIED over a population in neither store.
+
+        786 graph vectors and 800 record vectors is `verified=True` for the
+        `point` label — and if the record holds NONE of this population's ids,
+        `record_dense` ranks nothing and publishes `recall@3 = 0.0` as a finding
+        about the leg. That is the `0 >= 0` trap one level deeper.
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_population_in_record(0, 786)
+        assert ei.value.code == "record_population_absent"
+        assert "13210" in ei.value.message  # the backfill is named, not implied
+
+    def test_the_population_guard_refuses_a_PARTIAL_cohort(self, tool_mod):
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_population_in_record(785, 786)
+        assert ei.value.code == "record_population_absent"
+
+    def test_the_population_guard_refuses_an_unmeasurable_membership(self, tool_mod):
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_population_in_record(None, 786)
+        assert ei.value.code == "record_population_unmeasurable"
+
+    def test_the_population_guard_passes_a_seeded_population(self, tool_mod):
+        tool_mod.require_population_in_record(786, 786)  # no raise
 
     def test_unverified_coverage_is_refused(self, tool_mod):
         class V:
@@ -368,7 +492,119 @@ class TestRefusals:
         assert "found@deep" in proc.stderr
 
 
-# ── 5. the contradiction test, structurally ───────────────────────────────
+# ── 5. the record's membership of the population (id-scoped, not label-wide) ─
+
+
+class _FakeCursor:
+    def __init__(self, row):
+        self.row = row
+        self.executed: list[tuple[str, object]] = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((sql, params))
+
+    def fetchone(self):
+        return self.row
+
+    def close(self):
+        pass
+
+
+class _FakeConn:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def cursor(self):
+        return self._cur
+
+    def close(self):
+        pass
+
+
+class TestRecordMembership:
+    """The population's OWN ids must be in the record — the whole finding.
+
+    ⛔ `record_vector.coverage` answers a LABEL-WIDE question by design, so it
+    cannot see this. These cases red the mutants that make the guard label-wide
+    or that turn an unreadable record into an empty one.
+    """
+
+    SCOPE = types.SimpleNamespace(org_id="org-1", graph_id="graph-1")
+
+    def _ids(self, n: int) -> list[str]:
+        return [f"pt-12186{i:06d}" for i in range(n)]
+
+    def test_the_query_is_id_scoped_and_not_a_label_count(self, tool_mod, monkeypatch):
+        cur = _FakeCursor((786,))
+        monkeypatch.setattr("tortoise.record_serve.open_record", lambda *a, **k: _FakeConn(cur))
+        monkeypatch.setattr(
+            "tortoise.record_projection.scope_connection", lambda conn, org_id: cur
+        )
+        ids = self._ids(786)
+        got = tool_mod.record_population_vectors(ids, self.SCOPE, "postgresql://u@h/db")
+        assert got == 786
+        sql, params = cur.executed[-1]
+        assert "= ANY(%s)" in sql, sql  # the ID SET is the predicate
+        assert "count(*)" in sql
+        assert "embedding_vec IS NOT NULL" in sql  # the column the SERVE slices
+        assert params == ("org-1", "graph-1", ids)
+
+    def test_an_unreadable_record_is_unmeasurable_not_empty(self, tool_mod, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("no route to the record")
+
+        monkeypatch.setattr("tortoise.record_serve.open_record", boom)
+        assert tool_mod.record_population_vectors(self._ids(3), self.SCOPE, "dsn") is None
+
+    def test_no_ids_is_not_a_verdict(self, tool_mod):
+        assert tool_mod.record_population_vectors([], self.SCOPE, "dsn") is None
+
+    def test_the_run_asks_the_id_scoped_question_before_any_arm(self):
+        """The guard is WIRED, over the population's own ids, before the arms.
+
+        ⛔ A guard nothing calls is the shape this finding started as: the
+        label-wide gate verified, and no assertion anywhere asked the second
+        question.
+        """
+        tree = ast.parse(TOOL.read_text())
+        run = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        calls = [n for n in ast.walk(run) if isinstance(n, ast.Call)]
+        named = [c for c in calls if isinstance(c.func, ast.Name)]
+        membership = [c for c in named if c.func.id == "record_population_vectors"]
+        assert membership, "run_measurement never asks the record for the population's ids"
+        first = membership[0].args[0]
+        if isinstance(first, ast.Name):
+            # Bound to a local first (the run also needs its length) — follow it.
+            bound = [
+                n
+                for n in ast.walk(run)
+                if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == first.id for t in n.targets)
+            ]
+            assert bound, f"{first.id} is never assigned inside run_measurement"
+            first = bound[0].value
+        assert isinstance(first, ast.ListComp), ast.dump(first)[:120]
+        assert isinstance(first.generators[0].iter, ast.Name)
+        assert first.generators[0].iter.id == "population"
+        guard = [c for c in named if c.func.id == "require_population_in_record"]
+        assert guard, "the id-scoped measurement is never REFUSED on"
+        # …and it must precede the arm loop, or a bad cohort is scored anyway.
+        arms_loop = [
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.For)
+            and isinstance(n.iter, ast.Name)
+            and n.iter.id == "ARMS"
+        ]
+        assert arms_loop
+        assert min(c.lineno for c in guard) < min(a.lineno for a in arms_loop)
+
+
+# ── 6. the contradiction test, structurally ───────────────────────────────
 
 
 class TestContradictionTest:

@@ -96,9 +96,30 @@ have read as "the dense leg has no recall" instead of "the population has no vec
 `require_seeded` refuses two zeros for exactly this reason, and
 `test_seeded_guard_refuses_the_zero_zero_coverage_trap` pins it.
 
-That is the whole of this lane's code: the claim population must be **embedded and written to both
-stores** before an armed dense leg can be measured at all, and the record's cohort is a
-precondition (`#13210` is the backfill's tool), never something the instrument seeds.
+That is **half** of this lane's code, and the other half is the correction `#13734`'s review forced.
+
+⛔ **AND THE COUNT IS NOT ENOUGH — THE IDS ARE (#13734 review, finding 1).**
+`coverage` answers a **label-wide** question on purpose ("does the record hold as many vectors as
+the graph serves?", `#11395` step 2), so on any tenant holding enough embedded `Point` rows it
+answers VERIFIED for a population whose **own** ids are in neither store. The `record_dense` arm
+would then rank none of them, report `recall@3 = 0.0`, and publish *"the record's dense leg
+collapses claim recall"* with a valid McNemar p — a figure about the seeding step wearing the leg's
+name. The instrument therefore asks a second, **id-scoped** question before any arm runs:
+`record_population_vectors` counts how many of the population's own ids the record holds a vector
+for (the same predicates as the label-wide count — `org_id`/`graph_id` from the one tenant prologue,
+`embedding_vec IS NOT NULL`, since that is the column the serve slices), and
+`require_population_in_record` REFUSES the run when that is not all of them:
+`record_population_absent` (or `record_population_unmeasurable` when the count could not be taken —
+unmeasured is never zero). `coverage` itself is unchanged: widening it would reverse a documented
+decision and change every other label's reader, and the id-set half belongs in the instrument, which
+is the only place the population is known.
+
+So the truth about this instrument, stated plainly: **it embeds and writes the population to the
+GRAPH, and it REQUIRES — never writes — the record's matching cohort.** `#13210` is the backfill's
+tool, and the record is a journal fold with no side door; a second writer for its population is the
+one thing this file promised not to be. The consequence is a real residual: on a tenant whose record
+does not hold this population's ids the run now REFUSES by name instead of publishing a 0.0 — the
+honest outcome, and the reason no claim-recall figure appears in this bundle on any reading.
 
 ## 4. Falsifiers, and where each one stands
 
@@ -131,3 +152,7 @@ uv run python tools/claim_dense_leg_13732.py --points 900 --deep 50 \
 
 ⛔ Do **not** write over `preregistration.json`; it is the record of what was declared before the
 numbers, and a re-run that edits it has no pre-registration at all.
+
+⛔ And a refusal is a result: `REFUSED[record_population_absent]` means the record does not hold
+this population's ids, so the `record_dense` arm would have measured the seed step. Do not relax the
+guard to get a number — that is the false PASS `#13734`'s review closed.

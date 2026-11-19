@@ -52,6 +52,21 @@ empty record cohort as ``mechanism=pgvector, reason=ok``. That is why step
 :func:`require_seeded` asserts a non-zero vector count on BOTH sides before any
 arm runs; a gate that can be satisfied by two zeros is not a gate.
 
+⛔ **AND THE COUNT IS NOT THE WHOLE GUARD — the IDS are.** ``coverage`` asks a
+LABEL-WIDE question by design (*"does the record hold as many vectors as the
+graph serves?"*, ``#11395`` step 2), so on any tenant holding enough embedded
+``Point`` rows it answers VERIFIED for a population whose OWN ids are in neither
+store: the ``record_dense`` arm would then rank none of them, report
+``recall@3 = 0.0``, and publish *"the record's dense leg collapses claim recall"*
+with a valid McNemar p — a figure about the seeding step wearing the leg's name.
+That is the ``0 >= 0`` trap one level deeper, and it is why this instrument asks a
+SECOND, id-scoped question before any arm runs:
+:func:`record_population_vectors` counts how many of the POPULATION's own ids the
+record holds a vector for, and :func:`require_population_in_record` REFUSES the
+run when that is not all of them. ``coverage`` is left as it is — changing it
+would reverse a documented decision and break every other label's reader; the
+id-set half belongs here, where the population is known.
+
 THE ARMS (paired; every query is asked in all three)
 ----------------------------------------------------
 ``lexical``       the dense leg is NOT submitted — the M2 posture. Reproduced in
@@ -91,7 +106,7 @@ power and α = 0.05 two-sided, ``delta_min = (1.96 + 0.842)·sqrt(p_d / n)``:
 ============================  ==========
 discordance ``p_d``           detectable Δ (pp)
 ============================  ==========
-0.05                          2.24
+0.05                          2.23
 0.10                          3.16
 0.20                          4.47
 0.30                          5.47
@@ -128,6 +143,7 @@ contradicted its own declaration · ``4`` argument error.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -199,11 +215,17 @@ def _z(p: float) -> float:
 def _erfinv(x: float) -> float:
     """Inverse error function (Newton on ``math.erf``), |x| < 1.
 
-    Written out rather than imported because the ONE dependency this instrument
-    should not have is the statistics stack: `scipy` is not in the base install
-    (`uv sync` without the `embeddings`/`parity` extras drops it), and an
-    instrument that cannot compute its own pre-registration on the box where the
-    measurement is refused is an instrument nobody can pre-register on.
+    ⛔ AVAILABILITY IS NOT THE REASON IT IS HAND-ROLLED — an earlier cut of this
+    docstring said `scipy` was absent from the base install, and that is false:
+    `scipy>=1.10` is a DIRECT dependency (``pyproject.toml``, ``[project]
+    dependencies``), so ``scipy.stats.norm.ppf`` is importable wherever this
+    instrument's tests run. The reason is proportion: the pre-registration needs
+    TWO fixed standard-normal quantiles, and paying a statistics-stack import for
+    them in an instrument whose only other statistic is already inside the tree
+    (``_binom_two_sided``, stdlib ``math.comb``) is not a trade this file makes.
+    The arithmetic is pinned against ``math.erf`` by
+    ``test_erfinv_inverts_erf``, and that the file imports no such stack by
+    ``test_the_preregistration_needs_no_statistics_stack``.
     """
     if x <= -1.0:
         return -math.inf
@@ -514,6 +536,36 @@ def require_embedder():
     return model
 
 
+def _resolve_dsn(explicit: str) -> str | None:
+    """The record's DSN from the module that OWNS the arming surface, or a NAMED refusal.
+
+    ⛔ ``record_vector`` does not declare the DSN — it declares the ARM
+    (``ARMING_ENV``/``cutover_armed``). The reader lives in
+    :func:`tortoise.record_writer.record_dsn`, which is where ``tortoise.__main__``
+    and ``record_serve.open_record`` get it; asking ``record_vector`` for it was an
+    ``AttributeError`` one expression before the ``no_record_dsn`` refusal this
+    file promises, i.e. a traceback where a named precondition belongs — and the
+    flag's default is ``""``, so the documented recipes (``export
+    TORTOISE_RECORD_DSN=...``) took exactly that path.
+
+    The seam also REFUSES a configured-but-unusable value (wrong scheme, no host,
+    whitespace) by raising ``RecordWriteError``. That is a misconfiguration, not
+    an unarmed record, so it is converted here rather than escaping as a
+    traceback ``main()`` does not catch.
+    """
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    try:
+        return record_dsn(explicit or None)
+    except RecordWriteError as exc:
+        raise Refused(
+            "record_dsn_unusable",
+            f"the record DSN is set but unusable ({exc}) — fix the value or unset "
+            f"it; an unusable record is not an unarmed one, and this instrument "
+            f"will not measure the graph's leg under the record's name",
+        ) from exc
+
+
 def require_record(dsn: str | None):
     """An armed, reachable record — the dense leg's source, or nothing to measure."""
     from tortoise import record_vector
@@ -571,6 +623,92 @@ def require_seeded(graph_vectors: int, record_vectors: int | None) -> None:
             f"the record holds {record_vectors} claim vector(s) for this tenant "
             f"— run the backfill (#13210) for the tenant being measured; this "
             f"instrument does not seed node rows and will not fake a cohort",
+        )
+
+
+def record_population_vectors(ids: list[str], scope, record_dsn: str | None) -> int | None:
+    """How many of THIS population's ids does the record hold a VECTOR for?
+
+    The id-SCOPED half of the precondition :func:`require_seeded` can only state
+    as a label-wide count, and the one number that tells *"the record serves this
+    cohort"* from *"the record serves some other cohort of the same label"*.
+
+    ⛔ The predicates are :func:`tortoise.record_vector._record_vector_count`'s,
+    verbatim — ``org_id``/``graph_id`` from the ONE tenant prologue
+    (``record_projection.scope_connection``), the table and id column from that
+    module's :data:`LABEL_SERVED`, and ``embedding_vec IS NOT NULL``, which is the
+    column the serve slices. A guard that admitted a row the serve cannot rank
+    would be the same false PASS one level down.
+
+    ``None`` for every failure, never ``0``: a count that could not be taken is
+    not an empty record — the rule ``record_vector`` itself states, kept here.
+    """
+    if not ids:
+        return None
+    from tortoise.record_projection import scope_connection
+    from tortoise.record_serve import open_record
+    from tortoise.record_vector import LABEL_SERVED
+
+    table, id_column = LABEL_SERVED["point"][:2]
+    try:
+        conn = open_record(record_dsn)
+    except Exception:  # noqa: BLE001 — unmeasurable, not zero
+        return None
+    try:
+        cur = scope_connection(conn, scope.org_id)
+        try:
+            sql = (
+                f"SELECT count(*) FROM public.{table} AS t "
+                "WHERE t.org_id = %s AND t.graph_id = %s "
+                f"  AND t.{id_column} = ANY(%s) "
+                "  AND t.embedding_vec IS NOT NULL"
+            )
+            cur.execute(sql, (scope.org_id, scope.graph_id, list(ids)))
+            row = cur.fetchone()
+            return int(row[0]) if row else None
+        finally:
+            with contextlib.suppress(Exception):
+                cur.close()
+    except Exception:  # noqa: BLE001, RUF100 — unmeasurable, not zero
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def require_population_in_record(matched: int | None, population_n: int) -> None:
+    """The record must hold a VECTOR for every id this run would score.
+
+    ⛔ ``coverage``/``require_seeded`` count the whole ``point`` label, so on any
+    tenant holding enough embedded claims they answer VERIFIED for a population
+    whose own ids are in NEITHER store. The ``record_dense`` arm would then rank
+    none of them and publish ``recall@3 = 0.0`` — with a valid McNemar p-value —
+    as *"the record's dense leg collapses claim recall"*, when the truth is
+    *"this population is not in the record"*. A population id the record cannot
+    rank makes every delta on that arm a statement about the seeding step.
+
+    This REFUSES rather than seeding: the record is a journal fold with no
+    backfill from this process (``#13210`` is the backfill's tool), and a second
+    writer for the record's population is the one thing this instrument promised
+    not to be.
+    """
+    if matched is None:
+        raise Refused(
+            "record_population_unmeasurable",
+            "how many of this population's ids the record holds a vector for "
+            "could not be measured — unmeasured is not zero, and it is not a "
+            "verdict",
+        )
+    if matched < population_n:
+        raise Refused(
+            "record_population_absent",
+            f"the record holds a vector for {matched} of the {population_n} "
+            f"population id(s) this run would score — the `record_dense` arm "
+            f"could rank {matched} of them and would report 0.0 recall for the "
+            f"rest, which is a figure about the seed step and not about the leg. "
+            f"The record's cohort is a PRECONDITION (#13210 is the backfill's "
+            f"tool); this instrument does not seed node rows and will not fake "
+            f"a cohort",
         )
 
 
@@ -693,7 +831,7 @@ def run_measurement(args: argparse.Namespace) -> int:
     sessions = Path(os.path.expanduser(args.sessions_dir))
     files = require_corpus(sessions)
     model = require_embedder()
-    dsn = require_record(args.dsn or record_vector.record_dsn())
+    dsn = require_record(_resolve_dsn(args.dsn))
 
     sys.path.insert(0, str(REPO_ROOT))
     from tools.window_quality_m2 import (
@@ -747,6 +885,17 @@ def run_measurement(args: argparse.Namespace) -> int:
         record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn)
     )
     require_seeded(graph_vectors, coverage["record_vectors"])
+
+    # ⛔ THE ID-SCOPED HALF (see the docstring): `coverage` is a LABEL-WIDE count
+    # by design, so it verifies a tenant whose record holds SOME embedded points
+    # while this population's own ids are in neither store. Asking only the
+    # label-wide question publishes a 0.0 `record_dense` recall as a finding
+    # about the leg, when it is a finding about the seed step.
+    population_ids = [row["id"] for row in population]
+    population_vectors = record_population_vectors(population_ids, scope, dsn)
+    require_population_in_record(population_vectors, len(population_ids))
+    coverage["population_n"] = len(population_ids)
+    coverage["population_vectors"] = population_vectors
 
     queries = [(row["id"], row["query"]) for row in population]
     arms: dict[str, dict] = {}
