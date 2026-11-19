@@ -648,9 +648,13 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
         git show e679d22286:tortoise/sdk.py | cmp - tortoise/sdk.py
         -> identical, so `#13724`'s move is already on the branch's base
 
-    So the one changed line is the `#12296` row's DESCRIPTION of its own `:27861`
-    clause, and the sentence was the document's own defect class — a typed head-bound
-    figure — applied to the document it lives in. It survived several review rounds for
+    ⛔ At the head this arm now runs on, the file is not in the residual AT ALL —
+    `git diff --name-only origin/main...HEAD -- docs/00_index.md` prints nothing and
+    `git rev-parse origin/main:docs/00_index.md HEAD:docs/00_index.md` prints the same
+    blob twice — so there is no "one changed line", and the `#12296` row's DESCRIPTION
+    of its own `:27861` clause is INHERITED from `origin/main`, not this diff's. The
+    sentence was the document's own defect class — a typed head-bound figure — applied
+    to the document it lives in. It survived several review rounds for
     the same reason the census green did: the D5 arms in
     `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
     file-table section, so nothing read it.
@@ -695,11 +699,21 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
                 "this diff's. State the command (`git diff -U0 --word-diff=plain "
                 "origin/main...HEAD -- docs/00_index.md`) and let the reader re-derive "
                 "it (#13746 review, round 3, finding 4)")
-        assert ("git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md"
-                in doc), (
-            "05-verify.md no longer states the command that decides whether this diff "
-            "re-points a cite in `docs/00_index.md` — without it the sentence is "
-            "uncheckable at the head a reader merges (#13746 review, round 3, P2)")
+
+    # ⛔ HOISTED OUT OF THE SET-EQUALITY GUARD (#13802 review, finding 2 — FAIL-OPEN).
+    # Standing the prohibition down when the measurement supports the attribution is
+    # defensible; standing THIS requirement down is not. Executed only while the cite
+    # sets are EQUAL, it asserted nothing on the normal state of a branch that has not
+    # been re-based after `main` re-derived a row (measured at least four times:
+    # #13617/#13675, #13724, #13750/#13786, #13790) — i.e. exactly the heads where the
+    # reader most needs the command to be there. It is unconditional now.
+    assert ("git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md"
+            in doc), (
+        "05-verify.md no longer states the command that decides whether this diff "
+        "re-points a cite in `docs/00_index.md` — without it the sentence is "
+        "uncheckable at the head a reader merges, whatever the diff did "
+        "(#13746 review, round 3, P2; hoisted out of the set-equality guard by "
+        "#13802 review, finding 2)")
 
     # A re-point's NEW side has to resolve in the file it lands in, whatever the diff
     # did: the cites the document presents as the row's CURRENT values must name the
@@ -719,6 +733,42 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
             "(#13746 review, round 3, P2)")
 
 
+#: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
+#: docs/00_index.md` prints NOTHING at this head, so a document that types what it printed
+#: is refuted by the command it quotes beside the figure. The pre-fix document did exactly
+#: that at four clauses (#13802 review, finding 1 — the D5 row and the file-table section),
+#: so the pattern below is the armed detector for that defect class.
+_TYPED_INDEX_NUMSTAT = re.compile(
+    r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
+    r"\s*(?:->|prints)\s*`\d+\s+\d+`")
+
+
+def test_the_document_types_no_numstat_figure_for_the_index_residual():
+    """⛔ The D5 row and the file-table rows typed `1 1` — refuted by their own command.
+
+    `git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING at this
+    head, so a document that states what it `prints` is contradicted by the command it
+    quotes in the same clause. That is precisely the defect class this file exists to
+    catch — a typed head-bound figure — applied to the figure's own command, and it
+    survived the earlier rounds because each guard spelled its own phrase list instead
+    of recognizing the shape (#13802 review, finding 1).
+
+    NON-VACUITY, MEASURED: on the pre-fix document this pattern matches FIVE times
+    across FOUR clauses — the two `-> `1 1`` clauses (:108, :134) and the three
+    `prints `1 1`` clauses (:114, :134 again, :143) — so the arm reds on the exact
+    defect finding 1 names, and matches nothing on the fixed document.
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    typed = [m.group(0) for m in _TYPED_INDEX_NUMSTAT.finditer(doc)]
+    assert not typed, (
+        "05-verify.md TYPES the figure that `git diff --numstat origin/main...HEAD -- "
+        f"docs/00_index.md` printed ({typed[0]!r}). A numstat is a head-bound figure — "
+        "it is EMPTY at this head, so the clause is refuted by the very command quoted "
+        "beside it. State the command and let the reader re-derive the set "
+        "(#13802 review, finding 1)")
+
+
 def _added_cite_tokens(diff_text: str) -> set[str]:
     """The `sdk.py:<n>` tokens a `--word-diff=plain` patch ADDS to `docs/00_index.md`.
 
@@ -729,10 +779,13 @@ def _added_cite_tokens(diff_text: str) -> set[str]:
     return set(re.findall(r"sdk\.py:(\d+)", added))
 
 
-#: The spellings that assert THIS diff re-points a cite in `docs/00_index.md`. Each was
-#: measured FALSE at the head the arm below was written for (#13746 review, round 3,
-#: finding 4): the file's one changed line is the `#12296` row's DESCRIPTION of its own
-#: `:27861` clause, and no `sdk.py:<n>` token moves.
+#: The spellings that assert THIS diff re-points a cite in `docs/00_index.md`. Each is
+#: measured FALSE at the head this arm runs on (#13746 review, round 3, finding 4):
+#: `git diff --name-only origin/main...HEAD -- docs/00_index.md` prints NOTHING (and the
+#: two blobs at `origin/main` and `HEAD` are the same), so the file is not in the
+#: residual at all and no `sdk.py:<n>` token moves. An earlier cut attributed the
+#: residual to "the `#12296` row's DESCRIPTION of its own `:27861` clause" — that edit
+#: is `origin/main`'s now (#13802 review, finding 1).
 _INDEX_REPOINT_CLAIMS = (
     "this diff carries ONE `docs/00_index.md` change — the capstone row's",
     "it IS in the set, for ONE cite",
@@ -746,18 +799,28 @@ _INDEX_REPOINT_CLAIMS = (
     # branch's base, and the live three-dot diff adds no `sdk.py:<n>` token.
     "and THAT shift is this repair",
     "this repair re-pointed it once more",
+    # ⛔ The two BARE spellings `_attributions` above carried with no counterpart here
+    # (#13802 review, finding 2, residual): on any head whose cite sets DIFFER the wider
+    # `_attributions` arm stands down, and without these entries the live-diff arm below
+    # did not know the phrasings either — so the attribution was covered by NEITHER arm,
+    # which is the fail-open Finding 2 names in its second form. Both are absent here.
+    "re-points it once more, to",
+    "re-pointed that cite once more",
 )
 
 
 def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff():
     """⛔ The doc said this diff's ONE `docs/00_index.md` line WAS a cite re-point.
 
-    It is not, and the command printed beside the claim refutes it: at this head
-    `git diff --numstat origin/main...HEAD -- docs/00_index.md` is `1 1`, while
+    It is not, and the commands printed beside the claim refute it: at this head
+    `git diff --name-only origin/main...HEAD -- docs/00_index.md` prints NOTHING (2-dot
+    and 3-dot both empty, and `git rev-parse origin/main:docs/00_index.md
+    HEAD:docs/00_index.md` prints the same blob twice), while
     `git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` moves no
     `sdk.py:<n>` token in either direction (`grep -c 'sdk.py:21679' docs/00_index.md` ->
-    `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both). The line it rewrites
-    is the `#12296` entity-verdict row's DESCRIPTION of its own `:27861` clause.
+    `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both). An earlier cut
+    attributed that residual to the `#12296` entity-verdict row's DESCRIPTION of its
+    own `:27861` clause; that edit is `origin/main`'s now.
 
     So "the `1 1` numstat IS this cite re-point" was the same defect class the last four
     review rounds kept finding, and it reached the rail because nothing read this
