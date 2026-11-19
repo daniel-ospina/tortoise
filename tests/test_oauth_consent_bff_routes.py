@@ -1936,11 +1936,12 @@ _FOREIGN_OWNED_ROW = [{
     ("start_signed_in", {"noStore": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"sessionReadThrows": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"asOrigin": "api.premiselabs.co"}, "as_origin_misconfigured", 503),
-    # `resource` (RFC 8707) is the SIXTH validated param `start.ts` carries, and it is deliberately
-    # NOT in `_PARAMS`: that dict is compared byte-exactly by the recorded-row assertions, so the
-    # arm that presents it spreads a copy. It matters because it is a DESTINATION with no scheme
-    # the origin assertion can see — `cursor://…` is not `http(s)://` — so a refusal page that
-    # interpolated it would carry a target the `http://`/`https://` check cannot stop.
+    # `resource` (RFC 8707) is a validated param `start.ts` carries, and it is deliberately NOT a key
+    # on `_PARAMS`: that dict is the set EVERY arm presents, and `resource` is presented only by the
+    # arm below, so it spreads a copy instead of widening the common case. It matters because it is a
+    # DESTINATION in a non-http scheme — `cursor://…` is not `http(s)://`, and this repo already
+    # handles such schemes in `NATIVE_REDIRECT_SCHEMES` — so a refusal page that interpolated it would
+    # carry a target the `http://`/`https://` check cannot see.
     ("start_signed_in", {"storeThrows": True, "params": dict(_PARAMS, resource=_RESOURCE)},
      "consent_store_unavailable", 503),
     # #10865 arm B — the `403`.
