@@ -1510,7 +1510,7 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     a `render_collision` term, while this tool joins on the RAW key (see the ⚠️ in
     `_measure_label`). On a string identity the two coincide, which is the population
     this pin certifies. A NON-STRING key (`id=123` against a record row `"123"`) makes
-    the tool over-report `graph_only` by one — measured, tracked as its own finding — so
+    the tool over-report `graph_only` by one — measured, tracked as `#13775` — so
     feeding one here would make this pin assert a reconciliation the code does not make.
 
     ⛔ AND THE RECORD-ONLY ROW IS SEEDED, because the two counts are now POPULATION-SCOPED

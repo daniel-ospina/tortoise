@@ -908,7 +908,7 @@ def _measure_label(g: Any, door: RecordDoor, table: str, label: str) -> dict:
     STATED rather than silently half-fixed: adopting the census's rendered join alone
     would not reconcile them either (it would double-count the collision excess against
     the raw-key mismatch), and choosing which identity the WRITE path matches on is a
-    design decision, not a merge repair. Tracked as its own finding; the pin that
+    design decision, not a merge repair. Tracked as `#13775`; the pin that
     compares the two instruments is bounded to populations where the rendered and raw
     forms coincide, and says so.
 
