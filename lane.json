@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "exit_code": null,
+  "heartbeat_at": 1795051357,
+  "host": "cmux",
+  "issue": 10884,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-10884-1795051357-p3109991-36568607",
+  "lease_until": 1795059157,
+  "pid": 3109991,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795051357,
+  "state": "RUNNING",
+  "tag": "10884",
+  "worktree": "/tmp/lane-10884"
+}
