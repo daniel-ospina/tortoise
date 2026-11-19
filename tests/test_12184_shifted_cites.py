@@ -125,7 +125,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # integration inserted 186 lines above it, and later merges 147 more — 333 in all). ⛔ AND EACH
     # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
     # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57423` is
-    # NOT that head's), and `57276 + 147 = 57423` is `origin/main`'s and this head's. Measured per
+    # NOT that head's), and `57276 + 147 = 57423` was `origin/main`'s at the head that cut was
+    # written at. ⛔ AND A LATER `origin/main` MOVED IT AGAIN: merged into this branch at
+    # `28ca66878d`, those merges insert a further +194, so THIS head's value is `57617`, and
+    # `57423` is now a HEAD-BOUND HISTORY value — NOT this head's. The chain closes as
+    # `57090 + 186 = 57276`, `57276 + 147 = 57423`, `57423 + 194 = 57617`; a comment that stops at
+    # `57423` and calls it "this head's" is the same defect one hop later. Measured per
     # head with `git show <rev>:tortoise/sdk.py | grep -n 'entity_type="event"'` — an earlier cut of
     # this comment named `:57387` for BOTH heads and so contradicted its own 186 (#13750 review).
     # A cite re-derived before a merge is stale after it, which is D5's own rule; the pin is what
@@ -136,18 +141,18 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:57423`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # those three (`sdk.py:57617`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
     # the head this pin was written at, so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
-    (_AUDIT, '`sdk.py:57423` passes `"event"`', _SDK, 57423, 'entity_type="event"'),
+    (_AUDIT, '`sdk.py:57617` passes `"event"`', _SDK, 57617, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`mcp_server.py:5137`", _MCP, 5137, "entity_type=entity_type"),
-    (_AUDIT, "`:5577`", _MCP, 5577, "entity_type=entity_type"),
-    (_AUDIT, "`:8129`", _MCP, 8129, "entity_type=entity_type"),
+    (_AUDIT, "`:5607`", _MCP, 5607, "entity_type=entity_type"),
+    (_AUDIT, "`:8159`", _MCP, 8159, "entity_type=entity_type"),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -293,13 +298,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37503` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37503`)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37480` and'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57423` passes `"event"`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57617` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5137`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5577`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8129`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5607`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8159`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,

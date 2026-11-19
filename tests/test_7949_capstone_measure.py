@@ -6588,14 +6588,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `main`'s `c3309ec656` (`#13674`/`#13819`, the embedder's `/health` block) inserts 67 lines
         # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
-        # further down), so the span moves by a uniform +66 and is
+        # further down), so the span moved by a uniform +66, from `:15262-15339` to `:15328-15405`.
+        # ⛔ AND THEN A SECOND, LATER HOP — this row's numbers do NOT come from that one. `main`'s
+        # `819a473cd4` (`#13841`) moves `hosted_api.py` by a uniform **+18** (the same +18 that
+        # re-derived D5's `:20311` -> `:20329` and the audit doc's three `hosted_api` cites), so
+        # `:15328-15405` -> `:15346-15423`. The TOTAL from `:15262-15339` is therefore **+84, not
+        # +66**, and ⛔ QUOTING ONLY THE `#13674` HOP IS A TRAP: a reader re-deriving from this
+        # paragraph would compute `:15328-15405` and "correct" the pin DOWNWARD by 18, which is
+        # exactly the rot this row exists to catch (measured: `git show c3309ec656^` -> START
+        # `:15262`, `git show c3309ec656` -> `:15328`, `HEAD` -> `:15346`).
         # `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
         # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
         # hold EXACTLY from that START, which is how the figures below were re-derived rather
-        # than nudged — a uniform +66 on both ends, and the offsets re-measured rather than
-        # assumed. The span at the PREVIOUS head, `:15262-15339`, no longer contains the
+        # than nudged — the offsets are re-measured rather than assumed, and they are offset
+        # FROM the START, so they survive a hop that moves both ends together. The span at the
+        # head BEFORE BOTH hops, `:15262-15339`, no longer contains the
         # `nodes_used` read at all (`grep -c 'nodes_used = await asyncio.to_thread'` over those
         # lines -> 0), which is why carrying it would have been a false pin.
         # ⛔ AN EARLIER cut of this comment recorded the forward merge of `origin/main`

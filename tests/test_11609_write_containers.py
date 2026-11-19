@@ -743,6 +743,60 @@ def _receiver_binding_violations(source: str, receiver: str) -> list[str]:
     return out
 
 
+def _import_target_violation(target: ast.ImportFrom, receiver: str) -> str | None:
+    """Why an exemption row's ``from … import`` cannot be CHECKED, or ``None``.
+
+    ⛔ IT MUST BE ABSOLUTE AND NAME A MODULE PATH (#13863 review, P2).
+    ``test_every_declared_non_sdk_receiver_is_a_real_one`` resolves the row's
+    class with ``importlib.import_module(target.module)`` and then compares it
+    against ``TortoiseSDK``. A RELATIVE import's ``module`` is resolved against
+    the CALLING module's package, which ``importlib.import_module`` does not
+    know about: ``from .embeddings import EmbeddingModel`` (``level=1``,
+    ``module='embeddings'``) would silently import a TOP-LEVEL ``embeddings``
+    module — a different class, or whatever a stray ``embeddings.py`` on
+    ``sys.path`` provides — and certify a class it never looked at. ``from .
+    import X`` has no module at all. Both are refused BY NAME rather than
+    resolved into a guess.
+    """
+    if not target.module:
+        return (f"`from . import {receiver}` names no module path, so the class "
+                "cannot be checked — import it by its full module path")
+    if target.level != 0:
+        return (f"`{receiver}` is imported RELATIVELY (level={target.level}), so "
+                "`importlib` would resolve it as a TOP-LEVEL module and this pin "
+                "would check the WRONG class (or the wrong one on `sys.path`) — "
+                "import it by its full module path")
+    return None
+
+
+def test_the_receiver_import_audit_refuses_relative_and_module_less_imports():
+    """A row's import must be ABSOLUTE, or the pin checks a class it never named.
+
+    ⛔ NON-VACUITY for the relative-import refusal (#13863 review, P2): the only
+    declared row imports absolutely, so deleting the ``target.level != 0``
+    clause reds NOTHING today. This pin makes that clause vary — the mutant is
+    caught here (measured: with ``level != 0`` removed from
+    ``_import_target_violation``, the two `level` rows FAIL).
+    """
+    receiver = "EmbeddingModel"
+    absolute = ast.parse(f"from tortoise.embeddings import {receiver}\n").body[0]
+    assert _import_target_violation(absolute, receiver) is None, (
+        "an absolute `from … import` by full module path is the LEGITIMATE shape "
+        "and must not be refused")
+    for source, why in (
+            (f"from .embeddings import {receiver}\n", "level"),
+            (f"from ..embeddings import {receiver}\n", "level"),
+            (f"from . import {receiver}\n", "no module path")):
+        node = ast.parse(source).body[0]
+        refusal = _import_target_violation(node, receiver)
+        assert refusal is not None, (
+            f"`{source.strip()}` was ACCEPTED — a relative import resolves against "
+            "the calling module's package, which `importlib.import_module` does "
+            "not know, so this pin would check a top-level module instead of the "
+            "class the row names")
+        assert why in refusal, (why, refusal)
+
+
 def test_the_binding_audit_catches_every_way_the_name_can_be_rebound():
     """The audit must see EVERY binding form, not just an assignment.
 
@@ -837,11 +891,8 @@ def test_every_declared_non_sdk_receiver_is_a_real_one():
             f"{rel}: `{receiver}` is bound to {sorted(targets)} — the exemption "
             "names ONE class, so every import of that name must be the same one")
         target = bound[0]
-        assert target.module and target.level == 0, (
-            f"{rel}: `{receiver}` is imported RELATIVELY (`from .{'':<1}import …`, "
-            f"level={target.level}) — `importlib` would resolve it as a "
-            "TOP-LEVEL module and this pin would then check the WRONG class "
-            "(or the wrong one on `sys.path`). Import it by its full module path")
+        refusal = _import_target_violation(target, receiver)
+        assert refusal is None, f"{rel}: {refusal}"
         # The alias that MATCHES the receiver, not names[0]: an import line may
         # carry several names and this row is about exactly one of them.
         alias = next(a for a in target.names
