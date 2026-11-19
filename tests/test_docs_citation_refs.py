@@ -698,7 +698,7 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     file-table section, so nothing read it.
 
     NON-VACUITY, MEASURED: on the pre-fix document this arm reds on the FIRST entry
-    of `_attributions`, `re-pointing that row's `sdk.py` cite from` — present once in
+    of `_ATTRIBUTION_PHRASES`, `re-pointing that row's `sdk.py` cite from` — present once in
     `git show f6f202cf5c:…/05-verify.md`, and earlier in that text than the phrase an
     earlier cut of this paragraph named. That named phrase (`and THAT shift is this
     repair's, not main's`) does NOT reproduce: `origin/main` credits the move to
@@ -716,16 +716,11 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
            / "05-verify.md").read_text(encoding="utf-8")
     index = (DOCS / "00_index.md").read_text(encoding="utf-8")
 
-    # Every spelling below asserts that THIS DIFF moved a cite in `docs/00_index.md`,
-    # so each is refused while the measured cite sets are equal.
-    _attributions = (
-        "re-pointing that row's `sdk.py` cite from",
-        "and THAT shift is this repair",
-        "re-points it once more, to",
-        "re-pointed it once more",
-        "re-pointed that cite once more",
-        "for exactly ONE cite",
-    )
+    # Every spelling in `_ATTRIBUTION_PHRASES` (module level, beside the live-diff
+    # claims it must pair with) asserts that THIS DIFF moved a cite in
+    # `docs/00_index.md`, so each is refused while this tree has no measurement that
+    # supports it — cite sets equal, or the base ref unreadable (#13802 review P1: the
+    # unconditional direction, not a skip).
 
     # ─────────────────────────────────────────────────────────────────────────────
     # ARMS THAT NEED NO BASE REF, ORDERED FIRST ON PURPOSE (#13802 review, finding 3).
@@ -821,7 +816,7 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
             "shows this diff moves a cite at all — the depth-1 `test` job is the "
             "normal case, and an unmeasured premise may not carry an attribution")
     if not _may_attribute:
-        for phrase in _attributions:
+        for phrase in _ATTRIBUTION_PHRASES:
             assert phrase not in doc, (
                 f"05-verify.md says this diff re-points a `docs/00_index.md` cite "
                 f"({phrase!r}), but {_basis}. State the command (`git diff -U0 "
@@ -882,6 +877,29 @@ def _added_cite_tokens(diff_text: str) -> set[str]:
     return set(re.findall(r"sdk\.py:(\d+)", added))
 
 
+#: The spellings the arm above refuses wherever this tree has NO measurement showing
+#: that this diff moves a cite (cite sets EQUAL, or the base ref unreadable —
+#: `#13802` review P1). ⛔ Kept beside `_INDEX_REPOINT_CLAIMS` on purpose: on a head
+#: whose cite sets DIFFER **and** whose base is readable, the arm above stands DOWN —
+#: legitimately, because the attribution may be true there — and the claims list is the
+#: only arm that still reads the document. So every phrase here must also be covered
+#: there, which `test_every_attribution_spelling_is_also_a_live_diff_claim` MEASURES
+#: rather than leaves to a reader. That arm exists because the pairing was
+#: hand-maintained four review rounds running (`#13802` review, finding 2, residual):
+#: the sixth phrase below had no counterpart at all, and the fourth had only the
+#: PREFIXED claim `this repair re-pointed it once more` — which a document saying only
+#: `re-pointed it once more` does not contain (the claims arm tests `claim in doc`, so
+#: coverage needs the claim to be a substring of the PHRASE, not the other way round).
+_ATTRIBUTION_PHRASES = (
+    "re-pointing that row's `sdk.py` cite from",
+    "and THAT shift is this repair",
+    "re-points it once more, to",
+    "re-pointed it once more",
+    "re-pointed that cite once more",
+    "for exactly ONE cite",
+)
+
+
 #: The spellings that assert THIS diff re-points a cite in `docs/00_index.md`. Each is
 #: measured FALSE at the head this arm runs on (#13746 review, round 3, finding 4):
 #: `git diff --name-only origin/main...HEAD -- docs/00_index.md` prints NOTHING (and the
@@ -902,20 +920,70 @@ _INDEX_REPOINT_CLAIMS = (
     # branch's base, and the live three-dot diff adds no `sdk.py:<n>` token.
     "and THAT shift is this repair",
     "this repair re-pointed it once more",
-    # ⛔ The two BARE spellings `_attributions` above carried with no counterpart here
-    # (#13802 review, finding 2, residual): on any head whose cite sets DIFFER the wider
-    # `_attributions` arm stands down, and without these entries the live-diff arm below
+    # ⛔ The two BARE spellings `_ATTRIBUTION_PHRASES` above carried with no counterpart
+    # here (#13802 review, finding 2, residual): on a head whose cite sets DIFFER and
+    # whose base is readable the attribution arm stands down, and without these entries
+    # the live-diff arm below
     # did not know the phrasings either — so the attribution was covered by NEITHER arm,
     # which is the fail-open Finding 2 names in its second form. Both are absent here.
     "re-points it once more, to",
     "re-pointed that cite once more",
     # ⛔ The THIRD spelling with no counterpart (#13802 review, finding 2, residual — one
-    # instance over from the two above): on a head whose cite sets DIFFER the
-    # `_attributions` arm stands down, and without this entry the live-diff arm below
-    # does not know this phrasing either, so the attribution is covered by NEITHER arm.
-    # Absent here, measured.
+    # instance over from the two above): on a head whose cite sets DIFFER and whose base
+    # is readable the `_attributions` arm stands down, and without this entry the
+    # live-diff arm below does not know this phrasing either, so the attribution is
+    # covered by NEITHER arm. Absent here, measured.
     "re-pointing that row's `sdk.py` cite from",
+    # ⛔ The FOURTH, and the one the previous passes still missed (#13802 review, finding
+    # 2, residual — the same class, one instance over again). The bare phrase in
+    # `_ATTRIBUTION_PHRASES` had only the PREFIXED counterpart `this repair re-pointed it
+    # once more`, and that is not a counterpart for the purpose this list serves: the arm
+    # asks whether the CLAIM occurs in the document, so a document saying only
+    # `re-pointed it once more` contains no claim and escapes both arms on a diff-set
+    # head. Absent here, measured (`grep -cF` -> 0 at this head).
+    "re-pointed it once more",
 )
+
+
+def test_every_attribution_spelling_is_also_a_live_diff_claim():
+    """Every phrase the attribution arm refuses must ALSO be claimed-refutable.
+
+    ⛔ The two arms are not interchangeable. `_ATTRIBUTION_PHRASES` is executed only
+    where this tree has no measurement that supports an attribution (cite sets EQUAL, or
+    the base ref unreadable); on a head whose cite sets DIFFER **and** whose base is
+    readable it stands down — correctly, because the attribution may be true there — and
+    `_INDEX_REPOINT_CLAIMS` is the only arm that still reads the document. That state is
+    the normal one for a branch that has not been re-based after `main` re-derived a row
+    (`#13617`/`#13675`, `#13724`, `#13750`/`#13786`, `#13790`). A phrase present in the
+    first tuple and absent from the second is therefore covered by NEITHER arm there,
+    with no red row — the fail-open `#13802` review finding 2 names, repaired by hand
+    once per round (each pass adding only the instance in front of it).
+
+    The coverage relation is a CONTAINMENT one and its direction is the whole point: the
+    claims arm tests `claim in doc`, so a document containing only `PHRASE` is refused
+    only if some claim is a SUBSTRING OF THE PHRASE (`claim in phrase`). The prefixed
+    claim `this repair re-pointed it once more` does NOT cover the bare `re-pointed it
+    once more`, which is how the fourth instance survived the pass that added the
+    prefixed one — measured in-process against this head's document with the bare phrase
+    injected: the claims list selects `[]` and the arm asserts nothing.
+
+    NON-VACUITY, MEASURED: with the bare claim removed (the pre-fix state) this row reds
+    on exactly `['re-pointed it once more']`; with it, no phrase is uncovered. The row
+    needs no base ref, so it is live in the depth-1 checkout too — it is not one of the
+    arms that the unreadable-base fallback can stand down.
+    """
+    uncovered = [
+        phrase for phrase in _ATTRIBUTION_PHRASES
+        if not any(claim in phrase for claim in _INDEX_REPOINT_CLAIMS)
+    ]
+    assert not uncovered, (
+        "these phrasings assert that this diff re-points a `docs/00_index.md` cite and "
+        "are refused by the attribution arm wherever this tree has no measurement "
+        "supporting an attribution, but no `_INDEX_REPOINT_CLAIMS` entry is a SUBSTRING "
+        "of them — so on a head whose cite sets DIFFER and whose base is readable (where "
+        "that arm stands down) the attribution is covered by NEITHER arm and the row "
+        f"stays green: {uncovered}. Add the bare spelling to `_INDEX_REPOINT_CLAIMS` "
+        "(#13802 review, finding 2, residual)")
 
 
 def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff():
