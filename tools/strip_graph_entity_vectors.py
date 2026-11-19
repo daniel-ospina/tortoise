@@ -2502,14 +2502,14 @@ def _comprehension_source_pairs_the_property_with_a_value(
 
     for item in _comprehension_source_yields(source) or ():
         # ⛔ THE PAIR'S KEY IS THE SAME KEY, ALIAS INCLUDED (`#13788` F11 seam, measured at
-        # `86d6c74a5`). ⚠️ THIS COMMENT HAS BEEN WRONG IN BOTH DIRECTIONS, so read it as the
-        # MEASUREMENT it is: at `10796bf7f` `_unpacked_element_stores_the_vector` also carried the
-        # alias set, and reverting this leg alone then left every 3-element clause refused. This
-        # commit REMOVED that leg's alias (measured redundant at `10796bf7f`, needed again once
-        # removed), so AT THIS HEAD this leg is the one that answers the bare 3-element ALIAS
-        # clause (`{k: v for k, v, _z in [(key, vec, 1)]}`, `.copy()` included) — measured by the
-        # review of `9ddcaa4f`, where reverting this leg alone GATED all three. The unpacked leg
-        # keeps answering the CONSTANT-key shape.
+        # `86d6c74a5`). ⚠️ READ THIS AS A MEASUREMENT WITH A HEAD, because it has now been wrong
+        # three times: at `9ddcaa4f` reverting this leg's alias ALONE GATED the bare and wrapped
+        # 3-element alias clauses; at THIS head reverting it alone leaves them REFUSED, because
+        # `_comprehension_key_mentions_the_bound_property` (reached through the pairs rule) also
+        # answers them — so this leg is redundant for the BARE shape here and is what answers the
+        # WRAPPED sources (`.copy()`, `+ []`, `set(...)`, `.items()`). The alias on it stays
+        # because the wrapped sources are exactly where a removal is silent; a comment claiming a
+        # fixpoint over which leg answers what is how the previous three versions went wrong.
         if (len(item) >= 2 and _names_property_key(item[0], alias_keys)
                 and not isinstance(item[1], ast.Constant)):
             return True
@@ -3120,6 +3120,19 @@ def _mutator_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -
        through another name) IS answered — that is the alias arm, and `alias_keys` is empty on
        the mirror arm, which is what makes it safe.
 
+    6. **A KEY BINDING THE ALIAS WALK DOES NOT FOLLOW** — measured at `e21a2fcb`, each a
+       stop-arm store that stays CERTIFIED: `*_r, x = 1, 2, key` (a `Starred` shifts the
+       positions), `(x, _z), _w = (key, 2), 3` (a nested target), `for x, _z in [(key, 1)]:`
+       (a LOOP target), `if (x := key):` (a walrus in a condition), and `x = key if True else
+       "y"` (a conditional VALUE). `_property_alias_names` follows a plain, same-length,
+       all-`ast.Name` tuple/list unpack and nothing else — deliberately: a positional pairing
+       that ignores `Starred` MIS-PAIRS (`*_r, x = 1, key, 2` binds `x = 2`, and index pairing
+       read `x = key`), so the walk under-approximates instead. That direction can only lose
+       refusals, never add an acceptance, which is why it is the safe one to stop at; closing
+       the family needs a real binding model (`_unpacked_target_stores_the_vector` already
+       unwraps `Tuple`/`List`/`Starred` for TARGETS, and a second implementation beside it is
+       the drift this file keeps paying for).
+
     ⛔ WHAT IS *NOT* A RESIDUAL ANY MORE: a store reached through a HELPER ARGUMENT
     (`_set(props, "embedding", vec)`) used to be listed here as "indistinguishable from
     `_read(props, "embedding")`". That was false — the two differ in ARITY and in the
@@ -3328,28 +3341,37 @@ def _property_alias_names(scope) -> frozenset[str]:
             if not isinstance(sub, ast.Assign | ast.AnnAssign):
                 continue
             # ⛔ PAIR EACH TARGET WITH THE VALUE IT ACTUALLY RECEIVES (`#13788` F23, measured by
-            # the review of `9ddcaa4f`). Two wrong readings lived here, in opposite directions:
+            # the reviews of `9ddcaa4f` and `e21a2fcb`). Three wrong readings have lived here:
             #  - `x, _z = key, 1` bound NOTHING, because a tuple TARGET is not an `ast.Name` and
             #    was dropped — so `x` was not an alias and 8/8 channels CERTIFIED a stop arm
             #    that stores `props["embedding"]`;
             #  - `x = (key, 1)` bound `x`, because the value was scanned for ANY alias Name — so
-            #    a writer that places the TUPLE key `("embedding", 1)` was REFUSED on the stop
-            #    arm (an over-refusal the parent does not make).
-            # Positional pairing answers both: an element of a tuple/list target takes the
-            # element of a tuple/list value at the SAME index, and nothing else.
+            #    a writer that places the TUPLE key `("embedding", 1)` was REFUSED (an
+            #    over-refusal the parent does not make);
+            #  - and a POSITIONAL `zip` over the elements MIS-PAIRS as soon as a `Starred` is in
+            #    the target: `*_r, x = 1, key, 2` binds `x = 2`, but index pairing read
+            #    `x = key` and refused an honest writer (measured by the review of `e21a2fcb`).
+            # So the pairing is taken ONLY when EVERY target element is a plain `ast.Name` and
+            # the value is a sequence of the SAME length. Anything else — a `Starred`, a nested
+            # target, a subscript, a length mismatch — binds nothing here: the shape is NOT
+            # followed, which is residual #6 of `_mutator_stores_the_vector` and is the answer
+            # the parent gives. Under-approximating the ALIAS SET can only lose refusals, so it
+            # cannot widen what the gate accepts; a mis-pair both loses one and invents another.
             if isinstance(sub, ast.Assign) and len(sub.targets) == 1 and isinstance(
                     sub.targets[0], ast.Tuple | ast.List):
                 target_elts = list(sub.targets[0].elts)
                 value_elts = (list(sub.value.elts)
                               if isinstance(sub.value, ast.Tuple | ast.List) else [])
-                pairs = list(zip(target_elts, value_elts, strict=False))
+                if (all(isinstance(element, ast.Name) for element in target_elts)
+                        and len(target_elts) == len(value_elts)):
+                    pairs = list(zip(target_elts, value_elts, strict=False))
+                else:
+                    pairs = []
             else:
                 targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
                 pairs = [(target, sub.value) for target in targets]
             for target, value in pairs:
                 if not isinstance(target, ast.Name):
-                    # A `Starred`/nested/subscript target inside the tuple binds something this
-                    # walk does not name; it contributes no alias either way.
                     continue
                 if (isinstance(value, ast.Name) and value.id in alias_names
                         and target.id not in alias_names):
