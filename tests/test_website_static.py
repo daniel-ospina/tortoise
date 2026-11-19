@@ -815,7 +815,7 @@ def _strip_comment_lines(code: str) -> str:
     of this helper. Measured (`#13696` review, round 6): with the line-based
     rule, a `$25/mo` literal behind a leading `/* x */` left BOTH
     `test_no_page_quotes_a_price_inside_its_own_script` and
-    `test_the_two_pages_render_the_same_code` green while the page quoted a
+    `test_the_two_pages_render_from_the_same_code` green while the page quoted a
     price `/tortoise` does not. The tail after `*/` is now KEPT as code.
 
     Line-based for the trailing `//` case only, on purpose. A regex `//`-strip
@@ -3807,11 +3807,17 @@ class TestPageHeadingOutline:
     def test_the_niche_product_page_does_not_skip_a_heading_level(self):
         """#13645: same outline contract, one page over.
 
-        The owner's PDF has ONE h1 (the hero) and an h2 per step, plus the
-        heading-less intro and compute beats — so the expected shape is
-        h1, h2, h2, h2, h2, h2, h2 and no level skips. A step rendered as an h3
-        (an easy slip when a beat is pasted in) is an accessibility regression
-        here exactly as it is on the product page.
+        The owner's PDF has ONE h1 (the hero) and an h2 per beat, with the intro
+        and compute beats heading-less — the measured outline is exactly
+        `[1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4]`: one hero h1, five h2 (the three
+        steps, onboarding and pricing), the four tier-card h3s under
+        `#pricing-section`, and one h4 on the self-hosted card. No level skips.
+
+        ⛔ A STEP rendered as an h3 — an easy slip when a beat is pasted in — is
+        an accessibility regression here exactly as it is on the product page,
+        because h3 is only legitimate inside the pricing block (the tier cards).
+        Scope any such reading to ABOVE `#pricing-section`; the h3s below it are
+        correct and must not be "fixed" down to h2.
         """
         levels = _heading_levels(PRODUCT_TEAMS_HTML.read_text(encoding="utf-8"))
         assert levels and levels[0] == 1, (

@@ -2252,9 +2252,18 @@ def test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left() -> None
 # cannot evade the guard by wrapping the phrase over a line, emphasising it, or hyphenating it.
 #
 # ⛔ AND THAT IS THE WHOLE CLAIM — it is a PHRASE match, not a semantic one. Two limits are known and
-# deliberate: markup that puts a WORD CHARACTER between them (`every <b>hard</b> failure`, where
-# `</b>` contains letters) does not match, and a different determiner (`all` / `each` / `any hard
-# failure`) is a different phrase. This guard pins the string this change retires; it does not claim
+# deliberate: markup that puts a WORD CHARACTER between them does not match, and a different
+# determiner (`all` / `each` / `any hard failure`) is a different phrase. The word-character limit
+# covers BOTH the lettered form (`every <b>hard</b> failure`, where `</b>` contains letters) AND the
+# underscore-emphasis form (`every _hard_ failure` / `every __hard__ failure`), because `_` is a
+# `\w` character. Underscore emphasis is live in this repo's own docs — `_or_` at
+# `docs/epics/2026-09-10-2835-capability-registry/00-align.md:269`, `_labelled_` at
+# `docs/research/2026-09-25-4503-edge-accounting/measurement.md:141` — so that spelling is a live
+# way to re-introduce the denial GREEN. Measured through `_false_absolute_in`: all three return
+# None. ⛔ An earlier draft of THIS comment cited `__bold__` in `docs/00_index.md`; that was FALSE
+# (`git grep __bold__ -- docs/` returns nothing, and that file's convention is `**bold**`, which the
+# guard REDs). Corrected here rather than silently swapped, because a citation is a claim — which is
+# this PR's whole argument. This guard pins the string this change retires; it does not claim
 # to catch a rephrased denial, and a comment that claimed it would be the class of over-claim this
 # PR exists to remove (review of #13712, F8).
 #
@@ -2383,8 +2392,9 @@ def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSI
 
     ⛔ THE SHAPES ARE PINNED BY THEIR OWN TABLE, not only by this corpus: the phrase is UNREACHABLE
     here at head — `git grep -i 'every hard failure'` over the three files below returns 0 hits — so
-    without `test_the_summary_guard_REDS_the_phrase_in_EVERY_shape` a later narrowing of the pattern
-    would ship with nothing red claiming to cover it. That table drives `_false_absolute_in` →
+    without `test_the_summary_guard_REDS_the_phrase_in_every_NON_WORD_SEPARATED_shape` a later
+    narrowing of the pattern would ship with nothing red claiming to cover it. That table drives
+    `_false_absolute_in` →
     `_absolute_violations`, the same decision this loop calls.
 
     Non-vacuous, and where the red actually lands: `origin/main`'s
@@ -2532,8 +2542,17 @@ _SUMMARY_ABSOLUTE_ROWS: list[str] = [
 
 
 @pytest.mark.parametrize("sentence", _SUMMARY_ABSOLUTE_ROWS)
-def test_the_summary_guard_REDS_the_phrase_in_EVERY_shape(sentence: str) -> None:
+def test_the_summary_guard_REDS_the_phrase_in_every_NON_WORD_SEPARATED_shape(
+        sentence: str) -> None:
     r"""A guard that fails OPEN on one word is worse than no guard: it reads as coverage.
+
+    ⛔ THE NAME IS SCOPED TO WHAT THE PATTERN DELIVERS — "NON_WORD_SEPARATED", not "EVERY". `_` is a
+    `\w` character, so `every _hard_ failure` / `every __hard__ failure` are GREEN, and underscore
+    emphasis is live in this repo's docs (`_or_` at
+    `docs/epics/2026-09-10-2835-capability-registry/00-align.md:269`) — a name claiming EVERY shape
+    would assert coverage this table does not have. That is the same over-claim this PR exists to
+    remove, and it is exactly what a test NAME is worst at carrying. The word-character limit is
+    deliberate and recorded on `_FALSE_ABSOLUTE_RE`; the name now matches it.
 
     ⛔ WHY A COMMITTED TABLE, when the exemption had already been measured by hand twice: a
     measurement that lives only in a commit message is the "reads as coverage it does not have"

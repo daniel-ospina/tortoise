@@ -252,9 +252,11 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:2288`, at this head — `1584` at
-`4f68a2aa7`) and the graph migration `relabel_legacy_documents`
-(`migrate_kinds.py:167`).
+`_DOC_RETIRED_KEYS` (`projection/entities.py:2288`, at this head — re-derived by
+`grep -nF '_DOC_RETIRED_KEYS: frozenset' tortoise/projection/entities.py`, which
+returns that one line; the sentence used to name `2257`, a comment at this head, and
+`1584` at `4f68a2aa7`) and the graph migration
+`relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 **How to read a line pointer in this section:** the LINE NUMBERS from §5's
 heading down to `### The one interface that must not be broken` — the
