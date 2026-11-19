@@ -3215,14 +3215,19 @@ _APPROVAL_RECORD_AS_A_PARENTHESISED_ITEM = (
     "> 1) **Owner approval of the exact changes** — given in-session, no comment cited.")
 _APPROVAL_RECORD_BEHIND_A_CHECKED_TASK_LIST_BOX = (
     "> - [x] **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ AND THE CAPITAL BOX (review round 9): `[X]` renders identically to `[x]` and had no
+# fixture, so narrowing `[ xX]` to `[ x]` left the suite GREEN while that label went unread.
+_APPROVAL_RECORD_BEHIND_A_CAPITAL_X_TASK_LIST_BOX = (
+    "> - [X] **Owner approval of the exact changes** — given in-session, no comment cited.")
 # ⛔ THE ITEM THAT IS NOT FIRST (review round 5, measured FAIL-OPEN and a REGRESSION from
 # `main`): a compact list carries no `>` separator between its items, so joining the block
 # by line fused every item into ONE paragraph and the marker strip could only reach the
 # FIRST one. A record written as a later bullet was therefore never read, while `main`'s
 # phrase detector refused it — the arm did not reduce the vacuity here, it widened it.
 # The corpus cannot see this (nothing landed records an approval inside a list), so the
-# direction is pinned by fixture; `docs/ONTOLOGY-CHANGELOG.md` has 104 list-item lines
-# (86 bullets, 18 ordered) and
+# direction is pinned by fixture; `docs/ONTOLOGY-CHANGELOG.md` has 111 lines that begin
+# with a list marker after the quote prefix (93 bullets, 18 ordered, one a nested
+# continuation) and
 # its lists are compact, so this is the shape the NEXT release reaches.
 _APPROVAL_RECORD_AS_A_LATER_BULLET = (
     "> - Retired the legacy predicate in §4.5.\n"
@@ -3323,6 +3328,13 @@ _HTML_LABEL_IS_NOT_A_RECORD = (
 # ACCEPTED. Driven so the disclosure is measured rather than claimed.
 _APPROVAL_LABEL_SPLIT_ACROSS_RUNS = (
     "> **Owner** **approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ AN ENTITY-ENCODED SPACE IN THE LABEL IS THE FIFTH DECLARED FAIL-OPEN (review round 9):
+# `&#32;` / `&nbsp;` render as a space, `_reader_text` does not decode entities, so the
+# label is not read. Naming it, plus a statement that the list is what was MEASURED rather
+# than an enumeration of every rendering, is what closes the "a shape you did not think of"
+# class this file's review rounds kept re-opening.
+_ENTITY_ENCODED_LABEL_IS_NOT_A_RECORD = (
+    "> **Owner&#32;approval of the exact changes** — given in-session, no comment cited.")
 # ⛔ THE POINTER'S FORWARD FORM NAMING A CONTAINER (#13669 cycle 5): ``its own issue
 # tracker`` is a container, not a home, and is REFUSED — the stop-list binds only the
 # reversed form, so this cost is driven as a fixture rather than left to be discovered.
@@ -3354,6 +3366,15 @@ _APPROVAL_RECORD_BEHIND_A_HEADING_AFTER_AN_ITEM = (
 _APPROVAL_RECORD_BEHIND_A_H4_HEADING_AFTER_AN_ITEM = (
     "> - Retired the legacy predicate in §4.5.\n"
     "> #### **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ AND THE OTHER ENDS OF THE DECLARED CONTAINERS (review round 9): `1)` as a LATER item
+# (the first-item fixture never exercised the split), `# ` as a later item, and `[X]`
+# above. Each was GREEN under a narrowing of its own class while the suite stayed green.
+_APPROVAL_RECORD_AS_A_LATER_PARENTHESISED_ITEM = (
+    "> - Retired the legacy predicate in §4.5.\n"
+    "> 1) **Owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_BEHIND_AN_H1_HEADING_AFTER_AN_ITEM = (
+    "> - Retired the legacy predicate in §4.5.\n"
+    "> # **Owner approval of the exact changes** — given in-session, no comment cited.")
 
 
 # ⛔ THE BLOCK-LEVEL MARKERS THAT START A PARAGRAPH (review round 5):
@@ -3523,11 +3544,12 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     and a decision label but at no words a reader can check). Both are FALSE BLOCKS on
     true prose, stated rather than glossed: the test reads the NEWEST block alone, which
     passes, and a lane sweeping the corpus should expect these two.
-    ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT, all named here so the next lane meets
-    them as known rather than as a bug — and **four are fail-OPEN**, which is the
-    direction that matters: an unread record, an unread HTML label, a label split across
-    two runs and an id borrowed from a contrastive parenthetical all PASS, so this arm
-    reduces the vacuity #13669 measured rather than ending it:
+    ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT — the shapes MEASURED at this head, NOT an
+    enumeration of every way a label can render. Five are fail-OPEN, which is the direction
+    that matters: an unread record, an unread HTML label, a label split across runs, an
+    entity-encoded space and an id borrowed from a contrastive parenthetical all PASS, so
+    this arm reduces the vacuity #13669 measured rather than ending it, and a reading this
+    list does not name should be treated as fail-OPEN until a fixture says otherwise:
       - an UNBOLDED, or MID-PARAGRAPH, record is OUT OF SCOPE and therefore **PASSES**:
         ``Owner approval: comment `NNN`.`` in plain prose, and ``The change landed.
         **Owner approval …**``, are not read as records — emphasis is the corpus's only
@@ -3553,6 +3575,9 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         <b>approval</b> …**`` and ``**[Owner approval …](url)**`` render as the label but
         are not ONE run to this reader, so ``_opening_approval_label`` returns ``None``;
         driven by ``_APPROVAL_LABEL_SPLIT_ACROSS_RUNS`` so the shape is measured;
+      - an ENTITY-ENCODED space (``**Owner&#32;approval …**``, ``**Owner&nbsp;approval
+        …**``) renders as the label but ``_reader_text`` decodes no entities, so it
+        **PASSES** (fail-OPEN); driven by ``_ENTITY_ENCODED_LABEL_IS_NOT_A_RECORD``;
       - an id anywhere in the label's SENTENCE still satisfies it and therefore **PASSES**,
         so a contrastive parenthetical naming another id (v3.37's shape) is accepted, and
         telling WHICH of two ids records the approval needs the comment's own text — the
@@ -3903,6 +3928,9 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                             _APPROVAL_RECORD_AS_A_LATER_PLUS_BULLET,
                             _APPROVAL_RECORD_BEHIND_A_HEADING_AFTER_AN_ITEM,
                             _APPROVAL_RECORD_BEHIND_A_H4_HEADING_AFTER_AN_ITEM,
+                            _APPROVAL_RECORD_AS_A_LATER_PARENTHESISED_ITEM,
+                            _APPROVAL_RECORD_BEHIND_AN_H1_HEADING_AFTER_AN_ITEM,
+                            _APPROVAL_RECORD_BEHIND_A_CAPITAL_X_TASK_LIST_BOX,
                             _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS,
                             _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS,
                             _APPROVAL_RECORD_BEHIND_A_HEADING,
@@ -3937,6 +3965,7 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # …and the declared HTML fail-OPEN is ACCEPTED, which is what the residual list says
     # (#13669 cycle 5): an HTML-bold label is not an emphasis run to this reader.
     _refuse_an_approval_record_with_no_resolvable_home(_HTML_LABEL_IS_NOT_A_RECORD)
+    _refuse_an_approval_record_with_no_resolvable_home(_ENTITY_ENCODED_LABEL_IS_NOT_A_RECORD)
     # …and the label split across two emphasis runs is the other declared fail-OPEN, so it
     # is ACCEPTED (review round 8).
     _refuse_an_approval_record_with_no_resolvable_home(_APPROVAL_LABEL_SPLIT_ACROSS_RUNS)
