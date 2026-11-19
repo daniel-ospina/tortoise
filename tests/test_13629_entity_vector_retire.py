@@ -4040,6 +4040,39 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE SAME CONSTRUCTOR ONE SPELLING OVER IS THE SAME STORE: REBUILT rather
+        # than merged. `_rebuild_stores_the_vector` named `dict` and only `dict`, so
+        # `props = OrderedDict({"embedding": vec})` was CERTIFIED while
+        # `props = dict({"embedding": vec})` was refused — one name list, two spellings of
+        # it (measured). All four are the same rebuild the writer is then handed.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.OrderedDict({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.Counter({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.defaultdict(dict, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.OrderedDict([("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4939,6 +4972,13 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= _collections.defaultdict(dict, {"embedding": None})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.OrderedDict({"embedding_model": _m()})
         return None
     _write(props)
 """,

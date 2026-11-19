@@ -1463,7 +1463,6 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     return _pairs_operand_stores_the_vector(node)
 
 
-
 #: Callee names that BUILD a mapping from `dict()`'s own operands, so an instance of one is
 #: a mapping `dict.__ior__` / `dict.update` MERGES rather than iterates (measured on this box:
 #: `|=` and `update()` both merge all six, PEP 584's "mapping-like objects … or iterables of
@@ -1479,6 +1478,32 @@ def _is_mapping_constructor(name: str) -> bool:
     """Does this callee name build a MAPPING — a merge source, not a pairs iterable alone?"""
     return name.endswith("Dict") or name in _MAPPING_CONSTRUCTORS
 
+
+def _constructor_stores_the_vector(call) -> bool:
+    """Does this MAPPING CONSTRUCTOR place the vector — through EITHER operand form?
+
+    ⛔ ONE HELPER, THREE CALLERS, because the same constructor is a store whether it is
+    MERGED (`props |= OrderedDict({…})`), FED to a mutator (`props.update(OrderedDict({…}))`)
+    or the mapping the writer is HANDED (`props = OrderedDict({…})`). Two rules asked it —
+    the pairs rule for the `|=` arm and `_mapping_argument_stores_the_vector` for the
+    rebuild — and each caller asked only one of them, so half the operand forms certified a
+    stop arm (measured: `OrderedDict({"embedding": vec})` CERTIFIED beside `[(…)]` refused,
+    and `props = OrderedDict({"embedding": vec})` CERTIFIED beside `props = dict({"embedding":
+    vec})` refused — the same constructor, one name list apart).
+
+    ⛔ STOP ARM ONLY, as every caller of both helpers is: a fix may add refusals, never
+    acceptances.
+    """
+    if not _is_mapping_constructor(_callee_name(call)):
+        return False
+    return (_mapping_argument_stores_the_vector(call)
+            # …and EACH OPERAND by both rules: the builtin `dict(…)` call above answers its
+            # own keywords and args, while every other constructor's operands are reached
+            # here — the MAPPING literal (which the pairs rule has no arm for) and the PAIRS
+            # literal (which the mapping rule only follows one wrapper in).
+            or any(_mapping_argument_stores_the_vector(argument)
+                   or _pairs_operand_stores_the_vector(argument)
+                   for argument in call.args))
 
 
 def _pairs_operand_stores_the_vector(node) -> bool:
@@ -1543,23 +1568,15 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         if (name == "copy" and isinstance(node.func, ast.Attribute)
                 and not node.args and not node.keywords):
             return _pairs_operand_stores_the_vector(node.func.value)
-        # ⛔ A MAPPING CONSTRUCTOR IS A MAPPING: `props |= OrderedDict([("embedding", vec)])`
-        # merges through `dict.__ior__` because `OrderedDict` IS a dict subclass, and the
-        # constructor spelling was CERTIFIED while the bare literal was refused (measured).
-        # ⛔ AND THE CONSTRUCTOR FAMILY IS AN INCLUDE LIST, NOT A NAME SHAPE:
-        # `endswith("Dict")` excludes `defaultdict`/`ChainMap`/`Counter`, each of which `|=`
-        # and `update()` merge like any dict (measured CERTIFIED, and each really merges).
-        # ⛔ AND THE OPERAND IS ANSWERED BY **BOTH** RULES — pairs sequence and mapping — or by
-        # neither: PEP 584 takes "mapping-like objects … or iterables of key-value pairs", so
-        # `OrderedDict({"embedding": vec})` is the mapping form of the very constructor this arm
-        # exists for. ⛔ AND IT NEED NOT BE THE FIRST OPERAND OR THE ONLY ONE
-        # (`defaultdict(list, pairs)`, `OrderedDict(pairs, extra=1)`), so every positional
-        # operand is followed and the keyword restriction is gone — a keyword on the
-        # CONSTRUCTOR does not make its positional mapping operand disappear.
-        if _is_mapping_constructor(name):
-            return any(_mapping_argument_stores_the_vector(argument)
-                       or _pairs_operand_stores_the_vector(argument)
-                       for argument in node.args)
+        # ⛔ A MAPPING CONSTRUCTOR IS **NOT** ANSWERED HERE, and that is measured rather
+        # than assumed: `_constructor_stores_the_vector` answers it at the three sites that
+        # can be handed one (the `|=` arm through the rebuild walk, `update(…)`, and the
+        # rebuild arm), so a second answer in this helper was REDUNDANT — disabling this arm
+        # changed no verdict on eight constructor spellings (mapping and pairs operands,
+        # `defaultdict`/`ChainMap`/`Counter`/`UserDict`, a keyword operand, a nested
+        # constructor in a constructor, through `|=`, `update(…)` and a rebuild). Removed
+        # rather than kept looking load-bearing; `test_the_stop_arm_must_not_store_the_vector`
+        # keeps the rows that pin the surviving route.
         return False                  # `zip(…)`, `map(…)`, a builder: residual, stated above
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
         return _pairs_operand_stores_the_vector(node.value)
@@ -1850,12 +1867,15 @@ def _rebuild_stores_the_vector(node) -> bool:
             if any(isinstance(side, ast.Dict) and _dict_stores_the_vector(side)
                    for side in (leaf.left, leaf.right)):
                 return True
-        elif isinstance(leaf, ast.Call) and _callee_name(leaf) == "dict":
+        elif isinstance(leaf, ast.Call) and _is_mapping_constructor(_callee_name(leaf)):
             # ONE recognition, not two: the CONSTRUCTOR spelling is answered by
-            # `_mapping_argument_stores_the_vector` (the neighbouring fix at `fbc8c04ac0`),
-            # and a second implementation of the same rule is how two answers to one
-            # question drift apart.
-            if _mapping_argument_stores_the_vector(leaf):
+            # `_constructor_stores_the_vector` (both operand forms, both call sites), and a
+            # second implementation of the same rule is how two answers to one question drift
+            # apart. ⛔ THE NAME LIST IS SHARED TOO — `_callee_name(leaf) == "dict"` here while
+            # the `|=` arm used a `*Dict` suffix meant `props = OrderedDict({"embedding":
+            # vec})` was CERTIFIED beside `props = dict({"embedding": vec})` refused
+            # (measured), the same constructor under two spellings of one name list.
+            if _constructor_stores_the_vector(leaf):
                 return True
     return False
 
