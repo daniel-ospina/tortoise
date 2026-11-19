@@ -575,29 +575,38 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # is empty", `-> empty`, `is EMPTY`) and it became a FALSE BLOCK on the branch that made
     # the sentence true by shipping code. MEASURED at this head:
     #
-    #     $ git diff --name-only origin/main...HEAD -- tortoise/
+    #     $ git diff --name-only origin/main -- tortoise/
     #     tortoise/activation_scorecard.py
     #     tortoise/hosted_api.py
+    #     tortoise/indexer/github_indexer.py
     #     tortoise/projection/__init__.py
     #
-    # — three paths, one of them (`projection/__init__.py`) THIS PR's own runtime change. The
-    # leg therefore demanded that the document assert a falsehood, and the lane that corrected
-    # the document to the measured set (and to the command, which is this document's own rule
-    # for a head-bound figure) red this arm instead of passing it. A verdict is stale the moment
-    # the diff moves, so the arm no longer pins WHICH WAY the measurement went: it forbids the
-    # claims that are false for the tree as it stands and leaves the reading to the command the
-    # document names. The `is NOT empty` spelling is no longer forbidden for the same reason —
-    # it is what the command prints here, so refusing it refused the truth.
+    # — THIS PR's own `tortoise/` paths, one of them (`projection/__init__.py`) its runtime
+    # change and two of them comment-text figure restatements. ⛔ the block that stood here said
+    # "three paths, one of them `projection/__init__.py`" and omitted
+    # `indexer/github_indexer.py` — the same head-bound figure this file condemns, one paragraph
+    # after it condemns it (#13728 delta review, P1). No count is typed now: the membership is
+    # the record, and `git diff --name-only origin/main -- tortoise/` re-takes it.
+    #
+    # The leg therefore demanded that the document assert a falsehood, and the lane that
+    # corrected the document to the measured set (and to the command, which is this document's
+    # own rule for a head-bound figure) red this arm instead of passing it. A verdict is stale
+    # the moment the diff moves, so the arm no longer pins WHICH WAY the measurement went: it
+    # forbids the claims that are false for the tree as it stands and leaves the reading to the
+    # command the document names. The `is NOT empty` spelling is no longer forbidden for the
+    # same reason — it is what the command prints here, so refusing it refused the truth.
     #
     # NON-VACUITY, MEASURED — per member, because the collective claim was FALSE
     # (#13728 delta review, P2). On the pre-fix document (`16ace39823`) THREE of the five
     # spellings below fire (`neither is` -> 1, `is empty` -> 2, `-> empty` -> 1, counted with
     # `grep -c -F --`). The other two are REFUSALS WITHOUT A MEASURED PRE-FIX CASE and are
-    # labelled so rather than counted as exercised: `is EMPTY` matched only a DIFFERENT
-    # subject in that document ("the same command with `-- tortoise/` is EMPTY"), and
-    # `returns exactly those two` occurs there only inside the quoted retraction the
-    # pattern deliberately excludes. An earlier wording said "every one of these
-    # spellings was present" and cited one member as evidence for five.
+    # labelled so rather than counted as exercised: `is EMPTY` fired on the ABBREVIATED
+    # subject ("the same command with `-- tortoise/` is EMPTY"), which the full-command
+    # patterns could not see — ⛔ that was a BLIND SPOT, not a different subject, and it let
+    # the document assert the false spelling while this arm passed (#13728 delta review, P1);
+    # the abbreviation has its own pattern below now. `returns exactly those two` occurs only
+    # inside the quoted retraction the pattern deliberately excludes. An earlier wording said
+    # "every one of these spellings was present" and cited one member as evidence for five.
     #
     # ⛔ AND THE DIRECTION IS MEASURED — BUT ONLY AN EMPTY MEASUREMENT MAY RELAX THE LEG, which
     # is the asymmetry that keeps this arm ENFORCING in the lane that runs it (#13728 delta
@@ -642,12 +651,21 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         f"{_tortoise_cmd}` -> empty",
         f"{_tortoise_cmd}` is EMPTY",
         f"{_tortoise_cmd}` returns exactly those two",
+        # ⛔ THE ABBREVIATED SUBJECT (#13728 delta review, P1): the document also names this
+        # command as "the same command with `-- tortoise/`", which none of the spellings above
+        # can see. It is the SAME measurement — the pin asserts one set, so an empty claim
+        # about the abbreviation is the same falsehood and was passing this arm while the
+        # document asserted it.
+        "`-- tortoise/` is empty",
+        "`-- tortoise/` -> empty",
+        "`-- tortoise/` is EMPTY",
     ):
         assert _negation not in doc, (
             f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints the PR's OWN "
             f"`tortoise/` paths — {_measured_note} — so the empty claim is refuted by the "
             "very command it quotes, and it satisfied the presence-only leg above while "
-            "contradicting the empty claims beside it (#13489 review, P1)")
+            "contradicting the empty claims beside it (#13489 review, P1; the abbreviated "
+            "subject added at #13728 delta review, P1)")
     # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
     # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
     # head they were measured at". The first cut of the repair said "at the head that still
