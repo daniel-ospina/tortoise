@@ -864,13 +864,15 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # (a) AGREEMENT, measured in-process by the checker the document quotes.
     # ⛔ THE PIVOT IS RE-DERIVED, BECAUSE `--check` RE-DERIVES IT (#13807 review round 7,
     # P1 — MEASURED). `census()`'s default is the FROZEN `DEFAULT_PIVOT`; the verb's
-    # `--check` path calls `census(sites[0])` with `sites = lifetime_query_sites()` and
-    # iterates to a fixpoint. Measuring `census()` here therefore asserted agreement on a
-    # path `--check` does not take: MEASURED at `c2e8b42336`, `_sweep(census())` -> `0` while
-    # `_sweep(census(lifetime_query_sites()[0]))` -> `1`, so this arm reported "agreement"
-    # over a tree the verb it names reported as STALE — precisely the false PASS the arm
-    # exists to refuse, reproduced inside the arm. The shape `--check` refuses (more than one
-    # site) is refused here too rather than silently graded on the wrong pivot.
+    # `--check` path calls `census(sites[0])` with `sites = lifetime_query_sites()` and is a
+    # SINGLE PASS (`main()` returns on the first `rc`, so only `--refresh` iterates — corrected
+    # in round 8, which is why this arm needs no loop). Measuring `census()` here therefore
+    # asserted agreement on a path `--check` does not take: MEASURED at `c2e8b42336`,
+    # `_sweep(census())` -> `0` while `_sweep(census(lifetime_query_sites()[0]))` -> `1`, so
+    # this arm reported "agreement" over a tree the verb it names reported as STALE —
+    # precisely the false PASS the arm exists to refuse, reproduced inside the arm. The shape
+    # `--check` refuses (more than one site) is refused here too rather than silently graded
+    # on the wrong pivot.
     _lifetime_sites = lifetime_query_sites()
     assert len(_lifetime_sites) == 1, (
         f"{len(_lifetime_sites)} `query(LIFETIME_MEMORY_QUERY)` sites in `tortoise/hosted_api.py` "
@@ -1366,12 +1368,14 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     # arm's bytecode may reach ONE global name, the ledger it ban-matches, and nothing else.
     # ⛔ TWO SCOPES ARE STATED RATHER THAN IMPLIED (#13807 review round 7, F2 — MEASURED):
     # `co_names` is a lookup table, so it does NOT see a seam captured in a DEFAULT ARGUMENT
-    # or a closure cell — `def arm(doc, _run=subprocess.run)` satisfies `co_names` byte-for-byte
-    # while holding the PRE-patch `run` in `__defaults__` and never tripping the attribute
-    # patches above. Those two channels are closed by the assertion on `__defaults__` /
-    # `co_freevars` / nested code objects BELOW, so the pair — not `co_names` alone — is the
-    # closure; an earlier cut of this comment claimed `co_names` alone was it, which is the
-    # "describe itself as complete" this file forbids by name.
+    # (positional OR keyword-only) or a closure cell — `def arm(doc, _run=subprocess.run)`
+    # satisfies `co_names` byte-for-byte while holding the PRE-patch `run` in
+    # `__defaults__`, and `def arm(doc, *, _run=subprocess.run)` does the same and hides in
+    # `__kwdefaults__` (#13807 review round 8, F3 — MEASURED: the earlier cut of this
+    # assertion read `__defaults__` only, and the keyword-only form passed it). Those channels
+    # are closed by the assertion BELOW, so the pair — not `co_names` alone — is the closure;
+    # an earlier cut of this comment claimed `co_names` alone was it, which is the "describe
+    # itself as complete" this file forbids by name.
     assert _census_membership_verdicts.__code__.co_names == (
         "_TORTOISE_RETIRED_SPELLINGS",
     ), (
@@ -1381,17 +1385,18 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         "(#13807 review round 6, F4)")
     assert (
         _census_membership_verdicts.__defaults__ is None,
+        _census_membership_verdicts.__kwdefaults__ is None,
         not _census_membership_verdicts.__code__.co_freevars,
         not [
             _const for _const in _census_membership_verdicts.__code__.co_consts
             if hasattr(_const, "co_names")
         ],
-    ) == (True, True, True), (
-        "arm (c-i) captures a seam in a DEFAULT ARGUMENT, a closure cell or a nested code "
-        "object. `co_names` is a LOOKUP table and cannot see any of those, so the global-name "
-        "whitelist alone would report clean over an arm that holds the pre-patch "
-        "`subprocess.run` in `__defaults__` (#13807 review round 7, F2 — MEASURED) — the same "
-        "alias hole F4 closed, one channel over")
+    ) == (True, True, True, True), (
+        "arm (c-i) captures a seam in a DEFAULT ARGUMENT (positional or keyword-only), a "
+        "closure cell or a nested code object. `co_names` is a LOOKUP table and cannot see "
+        "any of those, so the global-name whitelist alone would report clean over an arm that "
+        "holds the pre-patch `subprocess.run` in `__defaults__` / `__kwdefaults__` "
+        "(#13807 review round 6, F4; round 8, F3)")
     _probe = f"… {_TORTOISE_EMPTY_SPELLINGS[-1]} …"
     assert _census_membership_verdicts(_probe) == [_TORTOISE_EMPTY_SPELLINGS[-1]], (
         "arm (c-i) stopped answering from the document's text when a child-process seam "
