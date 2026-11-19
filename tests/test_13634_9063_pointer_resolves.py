@@ -328,6 +328,11 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
         "remains open (**#9063**)",
         "`#9063` remains the open question",
         "#9063 is the *open tracker* for declared priors",
+        # The `_` half of the emphasis normalisation, and the LEADING `\b` of the marker class: without
+        # the first, an `_…_` emphasis escapes (false pass); without the second, a marker SUFFIX inside
+        # another word (`spread`) launders an assertion — the mirror of the trailing-`\b` row below.
+        "#9063 remains the _open_ question",
+        'The rumour spread "remains open (#9063)".',
         # Form 6's inner alternatives and both `{0,3}` bounds, each of which no other form reaches.
         "#9063 is the open belief-model question",
         "#9063 as unsettled belief-model decision",
