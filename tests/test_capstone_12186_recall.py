@@ -619,6 +619,29 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
     assert rest_limit == door_limit, (
         f"the two doors disagree on `limit` (MCP {door_limit!r}, REST "
         f"{rest_limit!r}) while DOOR_NOTES says they share one default")
+
+    # ⛔ AND THE §5 DOOR PARAGRAPH'S OWN WINDOW TOKENS (round 27, measured). The
+    # registration row claimed "§5's DOOR paragraph IS pinned", but only its argument
+    # clauses were: replacing `@15` with `@16`, or `@3`/`@5`/`@10` with `@4`/`@6`/`@11`,
+    # inside that paragraph left the suite GREEN at 54 passed. The paragraph could then
+    # assert a column the record does not carry, while the manifest lane read the claim
+    # as paragraph-level coverage — the "claim wider than its measurement" shape.
+    #
+    # Both token sets are derived from `cap.KS`. ⛔ The BACKTICKS are NOT part of the
+    # token: `_paragraph` flattens through `_flat`, which deletes markup as well as
+    # spacing (`` `@15` column `` -> `@15column`), so a token written with its
+    # backticks matches NOTHING here — measured while adopting this pin: the
+    # backticked form failed on the UNMUTATED document (a pin that cannot see its own
+    # subject is the defect this file hunts, not a fix for it), which is why the two
+    # tokens below are asserted in their flattened spelling.
+    door_para = _paragraph(README.read_text(), "column is this instrument")
+    assert f"@{cap.KMAX}column" in door_para, (
+        f"§5's door paragraph no longer names the instrument's window "
+        f"`@{cap.KMAX}` as its own column (not a user default): {door_para!r}")
+    door_window = "/".join(f"@{k}" for k in cap.KS if k != cap.KMAX)
+    assert f"{door_window}figures" in door_para, (
+        f"§5's door paragraph no longer names the shipped-window columns "
+        f"{door_window} that carry every claim: {door_para!r}")
     # …and, for completeness, that the REST route really resolves to the same verb.
     rest_body = inspect.getsource(selfhost_api.search)
     assert "tortoise_fts_query" in rest_body, (
@@ -943,8 +966,21 @@ def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifa
     # likewise), while the lowercase spellings of each red. This is the same "keyed to
     # one spelling" defect the length paragraph above records, one level down, so the
     # token is FOLDED before it is compared.
+    #
+    # ⛔ AND A THIRD SURFACE HANDS OUT A COMMAND (round 27, measured). The record's
+    # `post_run_edits[*].why` fields explain a hand-edit by citing the command that
+    # proves it — `git show 318950c6e0:tools/capstone_12186_recall.py | grep -c cleanup`
+    # is in `post_run_edits[0].why` today. Appending
+    # ``Reproduce with `git show 31bce52ddbb3:tools/capstone_12186_recall.py` `` to that
+    # `why` left the suite GREEN at 54 passed, so the `code_head`-prefixed command the
+    # note was corrected for could be re-introduced through the ledger instead. The
+    # scan reads all three now — README, note, ledger — under the same derivation and
+    # the same case-folding, so no surface is a spelling the guard does not see.
+    edits = " ".join(str(edit.get("why", ""))
+                     for edit in artifact.get("post_run_edits") or [])
     shown = {tok.lower() for tok in
-             re.findall(r"git show ([0-9a-fA-F]{4,40}):", flat + " " + note)}
+             re.findall(r"git show ([0-9a-fA-F]{4,40}):",
+                        flat + " " + note + " " + edits)}
     code_head = artifact["code_head"]
     for token in sorted(shown):
         # A sha abbreviation is a prefix; comparing with a common prefix of any length
@@ -1065,6 +1101,67 @@ def test_run_refuses_a_binding_that_is_not_the_users_door(monkeypatch, capsys):
     assert "no live FalkorDB" not in err, (
         f"the URI guard answered instead of the door guard, so deleting the door "
         f"guard would leave this test green: {err!r}")
+
+
+def test_a_failed_head_lookup_is_announced_and_never_silently_swallowed(monkeypatch, capsys):
+    """`_git_head()` may return `None`, but it may not do so QUIETLY.
+
+    ⛔ MEASURED GAP (round 27). Every other provenance guard in `run()` refuses rather
+    than degrading quietly (the door binding, the URI check, the stale-name scan, the
+    non-fixture rows); this one swallowed BOTH failure paths:
+
+    * the pre-fix body was `subprocess.run([...]).stdout.strip() or None` under a bare
+      `except Exception: return None`, and
+    * `git -C <bad root> rev-parse HEAD` does not RAISE — it exits 128 with empty
+      `stdout`, which the expression reduced to `None` with no diagnostic at all.
+
+    So a run with no git on PATH, a wrong `REPO_ROOT`, a 10 s timeout or a permissions
+    error wrote `"code_head": null` plus the `<unknown>` note and exited 0,
+    indistinguishable in the operator's terminal from a normal run. `None` is a shape
+    `_code_head_note` already handles (the artifact stays writable — the convergent
+    choice: MLflow's own version-tracking example falls back to a label such as
+    `local-dev` for missing git metadata, but RAISES when the git command itself
+    fails), so the contract is kept and only the SILENCE is removed.
+
+    Both paths are asserted, and so is the SUCCESS path — a guard that announces
+    unconditionally would satisfy the two failure assertions while making every healthy
+    run print a false alarm.
+    """
+    import subprocess
+
+    class _Done:
+        def __init__(self, returncode, stdout, stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    # (1) A non-zero exit — the COMMON failure (`git -C <bad root>` exits 128).
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: _Done(128, "", "fatal: not a git repository"))
+    assert cap._git_head() is None
+    err = capsys.readouterr().err
+    assert "could not resolve HEAD" in err, (
+        "a `git rev-parse` that exits non-zero returned None without announcing it — "
+        f"that is the silent swallow this guard exists to remove: {err!r}")
+    assert "128" in err, f"the announcement must name git's own exit code: {err!r}"
+    assert "code_head: null" in err, (
+        f"the announcement must name the consequence for the artifact: {err!r}")
+
+    # (2) An exception (no git binary, a timeout) — announced with its repr.
+    def _boom(*_a, **_k):
+        raise OSError("git: command not found")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    assert cap._git_head() is None
+    err = capsys.readouterr().err
+    assert "could not resolve HEAD" in err and "command not found" in err, (
+        f"a raising `git rev-parse` was swallowed without a diagnostic: {err!r}")
+
+    # (3) The success path is silent and returns the sha, unstripped of meaning.
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: _Done(0, "deadbeefcafe\n"))
+    assert cap._git_head() == "deadbeefcafe"
+    assert capsys.readouterr().err == "", (
+        "a healthy `git rev-parse` must not announce anything — an unconditional "
+        "warning is noise the operator learns to ignore")
 
 
 def test_the_uri_guard_accepts_every_scheme_the_product_itself_supports():
@@ -1322,6 +1419,59 @@ def test_the_paired_block_in_the_artifact_accounts_for_every_query(artifact):
         assert set(cell["loss_ids"]) <= known, (where, name, "unknown loss id")
         assert len(set(cell["gain_ids"])) == len(cell["gain_ids"]), (where, name, "dup gain id")
         assert len(set(cell["loss_ids"])) == len(cell["loss_ids"]), (where, name, "dup loss id")
+
+
+def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
+    """Every SUMMARY figure must be re-derivable from the raw evidence beside it.
+
+    ⛔ MEASURED GAP (round 27). `per_query` is the only place the underlying data
+    lives (1 800 rank entries), and the suite read it solely for its KEY SET — so
+    `recall` and every `paired` block could be contradicted by the committed raw
+    data with the suite GREEN. Measured: setting all five arms' `per_query[*].rank`
+    to `null` produced 0 reds across the 43 artifact-reading pins, and negating one
+    listed gain id's rank to 999 — a "gain" that is not a hit at k=3 — was likewise
+    0 reds.
+
+    The `neardup_rule` pair below is the same family and is ALSO owned by its own
+    dedicated pin (`test_the_artifact_carries_the_near_duplicate_rule_it_was_measured_
+    under`, restored with round 24); it is kept here because a record whose rule
+    disagrees with the tool contradicts its own evidence exactly as a stale `recall`
+    does, and this test is where the evidence-reconciliation boundary is stated.
+
+    The recomputation is exact and cheap (no graph, no measurement): `paired()`
+    reproduces all four committed blocks field-for-field, and `in_window / n`
+    reproduces every `arms[*].recall` — verified at this head before adding this
+    guard, so this is a GUARD, not a data change.
+    """
+    for before, after, _lever in cap.PAIRS:
+        where = f"{before} -> {after}"
+        recomputed = cap.paired(artifact["arms"][before], artifact["arms"][after],
+                                cap.PAIRED_K)
+        committed = artifact["paired"][where]["paired"]
+        assert committed["k"] == cap.PAIRED_K, (where, committed["k"], cap.PAIRED_K)
+        for field, value in recomputed.items():
+            assert committed[field] == value, (
+                f"`paired[{where}][{field}]` is {committed[field]!r} but the raw "
+                f"`per_query` data gives {value!r} — the published paired block is "
+                "contradicted by its own evidence")
+
+    for name, arm in artifact["arms"].items():
+        per_query = arm.get("per_query")
+        if per_query is None:  # `mint_rate` is a write-path block, not an arm
+            continue
+        assert arm["n"] == len(per_query), (name, arm["n"], len(per_query))
+        for k in cap.KS:
+            in_window = sum(1 for row in per_query.values()
+                            if row.get("rank") is not None and row["rank"] <= k)
+            expected = round(in_window / arm["n"], 4)
+            assert arm["recall"][str(k)] == expected, (
+                f"`arms[{name}].recall[{k}]` is {arm['recall'][str(k)]!r} but the "
+                f"committed `per_query` ranks give {expected!r} "
+                f"({in_window}/{arm['n']})")
+
+    rule = artifact["neardup_rule"]
+    assert rule["jaccard_threshold"] == cap.NEARDUP_JACCARD, (rule, cap.NEARDUP_JACCARD)
+    assert rule["version"] == cap.NEARDUP_RULE, (rule, cap.NEARDUP_RULE)
 
 
 # ── the README, against the artifact ─────────────────────────────────────────

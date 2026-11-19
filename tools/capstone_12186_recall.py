@@ -794,12 +794,40 @@ def _cleanup(graph: str) -> dict:
 
 
 def _git_head() -> str | None:
+    """The HEAD the artifact records as ``code_head``, or ``None``.
+
+    ⛔ A FAILURE HERE IS ANNOUNCED, NEVER SWALLOWED (round 27, measured). Every
+    other provenance guard in :func:`run` REFUSES rather than degrading quietly (the
+    door binding, the URI check, the stale-name scan, the non-fixture rows); this one
+    returned ``None`` on any exception, so a run whose ``git rev-parse`` failed — no
+    git on PATH, a wrong ``REPO_ROOT``, the 10 s timeout, a permissions error — wrote
+    an artifact with ``"code_head": null`` and the ``code_head`` <unknown> note, then
+    exited 0. The absence was indistinguishable, in the operator's terminal, from a
+    normal run. The return contract is kept (``None`` is a shape `_code_head_note`
+    handles), but the condition is now printed to stderr so a null `code_head` is an
+    announced state rather than a silent one.
+    """
     import subprocess
+    import sys
     try:
-        return subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
-                              capture_output=True, text=True,
-                              timeout=10).stdout.strip() or None
-    except Exception:
+        done = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=10)
+        head = done.stdout.strip()
+        if done.returncode == 0 and head:
+            return head
+        # ⛔ A NON-ZERO EXIT IS THE COMMON CASE, NOT THE RARE ONE (round 27). `git -C
+        # <bad root> rev-parse HEAD` does not RAISE — it exits 128 — so guarding only
+        # `except` left the real path silent: `stdout.strip() or None` returned `None`
+        # with no diagnostic, which is exactly the swallow this guard is for.
+        print(f"capstone: could not resolve HEAD in {REPO_ROOT} (git exit "
+              f"{done.returncode}): {(done.stderr or done.stdout).strip()[:300]} — the "
+              f"artifact will record `code_head: null`, which is a LABEL and not a "
+              f"reproduction anchor", file=sys.stderr)
+        return None
+    except Exception as exc:
+        print(f"capstone: could not resolve HEAD in {REPO_ROOT}: {exc!r} — the "
+              f"artifact will record `code_head: null`, which is a LABEL and not a "
+              f"reproduction anchor", file=sys.stderr)
         return None
 
 
