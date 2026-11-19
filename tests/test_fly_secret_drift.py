@@ -2368,6 +2368,65 @@ def test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers():
     )
 
 
+#: The sibling record the block cites as UNDERSTATING the read set. It is the
+#: only cite in the #13674 block that is not a flag reader, so the reader-citation
+#: guards above cannot cover it — and it rotted under a merge before (see the
+#: test's docstring). Cited as `tests/<file>.py:<lo>` or `:<lo>-<hi>`.
+_SIBLING_RECORD_CITE_RE = re.compile(
+    r"`tests/test_13674_embedder_load_bound_and_reclaim\.py:(\d+)(?:-(\d+))?`"
+)
+REAL_SIBLING_RECORD = REPO_ROOT / "tests" / "test_13674_embedder_load_bound_and_reclaim.py"
+
+
+def test_the_understated_record_citation_resolves_to_its_own_claim():
+    """#13814: the block's sibling-record cite MUST land on the sentence it quotes.
+
+    `.github/scripts/fly-managed-secrets.txt` says a sibling test *"asserts
+    'exactly' four — omitting reader 3, and naming `warm_up`"*. That is a claim
+    ABOUT a line in another file, and it is the one cite in the block the reader
+    guards cannot see: the cited lines do not read the flag, so
+    `test_the_embedder_warmup_citations_resolve_to_the_flag_readers` excludes it.
+
+    It rotted exactly as the reader cites did. `origin/main`'s `#13819` follow-up
+    grew that test file 1248 → 1432 lines and carried the sentence to `:1148`,
+    leaving the block pointing at `:964-965` — a comment header for a DIFFERENT
+    class — while the words around it still read as true. Nothing in CI reads a
+    line number, so the pre-merge cite was green everywhere and wrong in the
+    tree the PR lands in.
+
+    The assertion is the quoted CLAIM, not the number: the cited lines must say
+    the flag `gates exactly` its readers and must still name `warm_up` (the
+    non-reader the block contrasts against). A re-pin onto any other span of
+    that file drops the claim and reds.
+    """
+    text = REAL_MANIFEST.read_text()
+    cites = _SIBLING_RECORD_CITE_RE.findall(text)
+    assert len(cites) == 1, (
+        "the #13674 block must cite the sibling record exactly once — found "
+        f"{len(cites)} cite(s) in the manifest, so either the citation was "
+        "dropped (the understatement it records then goes unstated) or it was "
+        "duplicated"
+    )
+    lo = int(cites[0][0])
+    hi = int(cites[0][1] or lo)
+    body = REAL_SIBLING_RECORD.read_text().splitlines()
+    assert hi <= len(body), (
+        f"the block cites {REAL_SIBLING_RECORD.name}:{lo}-{hi}, but the file has "
+        f"only {len(body)} lines — the cite past the end cannot resolve"
+    )
+    cited = "\n".join(body[lo - 1:hi])
+    assert "gates exactly" in cited, (
+        f"{REAL_SIBLING_RECORD.name}:{lo}-{hi} is cited as the record that "
+        "understates the read set, but those lines do not carry that claim. "
+        f"Cited lines: {cited!r}"
+    )
+    assert "warm_up" in cited, (
+        f"{REAL_SIBLING_RECORD.name}:{lo}-{hi} is cited as naming `warm_up` (the "
+        "reader that never reads the flag), and the cited lines do not name it: "
+        f"{cited!r}"
+    )
+
+
 def _enclosing_definition(body: list[str], line_no: int, symbol: str) -> str | None:
     """Whether `symbol` encloses `line_no` (1-based); returns the enclosing name.
 
