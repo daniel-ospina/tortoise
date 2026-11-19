@@ -2421,9 +2421,11 @@ def test_an_uncountable_projection_yields_NO_supplier_rather_than_a_zero(stores,
                                                                        monkeypatch):
     """⛔ `None` IS UNVERIFIED, NEVER `0` — and this is the FAIL-OPEN direction.
 
-    `graph_vector_population` returns ``None`` when the projection cannot count, because
-    `_safe_population` reads an absent supplier, a raise and a non-integer the same way and
-    an absence read as ``0`` would VERIFY coverage on a failed measurement. Measured on the
+    `graph_vector_population` returns ``None`` when the projection cannot count. The guard
+    that makes that ``None`` mean UNVERIFIED is a pair in `record_vector`:
+    `coverage` never calls an absent supplier, and `_safe_population` answers ``None`` for a
+    raise, a ``None`` value and a non-integer alike. An absence read as ``0`` would VERIFY
+    coverage on a failed measurement. Measured on the
     head before this test: swapping the ``else None`` for the ordinary "supply a default"
     idiom ``else (lambda _label: 0)`` left both suites at **143 passed**, and the gate then
     answered `still_emits = False` — *"the record holds 5 vector(s) for object, the graph

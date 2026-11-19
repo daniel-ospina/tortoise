@@ -2040,9 +2040,13 @@ def graph_vector_population(proj: Any) -> Callable[[str], int | None] | None:
     `#13647` corrected.
 
     ⛔ ``None`` WHEN THE PROJECTION CANNOT ANSWER, and ``None`` is UNVERIFIED rather than
-    zero: `record_vector._safe_population` treats a missing supplier, a raise, and a
-    non-integer the same way, and an absence read as ``0`` would verify coverage on a
-    failed measurement and retire the graph for a store that needs it.
+    zero. The guard is a PAIR, and it lives in `record_vector`, not here:
+    `coverage` never calls the supplier when it is absent (the count stays ``None`` and the
+    verdict is unverified), and `record_vector._safe_population` answers ``None`` for a
+    raise, a ``None`` value and a non-integer alike. An absence read as ``0`` would verify
+    coverage on a failed measurement and retire the graph for a store that needs it, which
+    is why `test_an_uncountable_projection_yields_NO_supplier_rather_than_a_zero` pins the
+    half this module owns.
 
     The method is looked up rather than assumed because it is the projection's own
     private count (`tortoise.projection._label_vector_count`, added by `#13610`) and
