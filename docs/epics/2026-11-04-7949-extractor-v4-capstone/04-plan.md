@@ -510,7 +510,7 @@ vocabulary. **The A-rows are additive.**
 |---|---|---|
 | **G0** — the record is readable, on the **A-lane** | `prereg` appears **zero times** in `hosted_api.py`; the chain lives only in `capstone_run.py` | **OWED — new** · owner **C2** · refusal under I6 |
 | **G1** — posted-payload hash equals the row's pin, on the **A-lane** | the check does not exist: `payload_sha256` occurs only as an export/import envelope key, and `docs/evidence/7949-capstone/a-corpus/` does not exist | **OWED — new** · owner **C2**; the record-side map is C1's (seam split: C1 = map + CI pin, C2 = run-side hash + refusal) |
-| capture door (`POST /v1/sessions`) | **402 at 25,000 points** (`hosted_api.py:18205` the condition / `:18216` the raise, via `quota_refusal_payload`) | `BLOCKED — capture refused 402`; never a zero, never a pass |
+| capture door (`POST /v1/sessions`) | **402 at 25,000 points** (`hosted_api.py:18205` the condition / `:18216` the raise, via `quota_refusal_payload` — ⛔ **both read at `a577d0e25c`, the head this row's cite set was taken at** (#13802 review, round 7, P2: the pair was typed with no head, which this bundle's own D5 rule forbids; at THIS head 18205 is a blank line)) | `BLOCKED — capture refused 402`; never a zero, never a pass |
 | registration → verdict gate | a new id the enum refuses | derive the enum (4.4) + a CI pin |
 | corpus pin | a row scored against another row's corpus | per-row `corpus_id`; refuse on mismatch |
 | `create_edge` (the A1 writer's boundary) | it **cannot** carry an anchor (`#5213` option 3) | documented, not fixed; E3's metric is `#9736`'s |
