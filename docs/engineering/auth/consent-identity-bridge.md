@@ -347,9 +347,9 @@ Pages binding is `required`.
 > This is the part of §2.3 that is easy to get backwards, and the cost of getting it backwards is a
 > total, silent 401 on every redemption. `kid` is load-bearing (the AS *selects* the key by it), so:
 >
-> * a half with **no** `CONSENT_TOKEN_KEYS` accepts exactly one kid, `consent-1`, with the bytes in its
+> - a half with **no** `CONSENT_TOKEN_KEYS` accepts exactly one kid, `consent-1`, with the bytes in its
 >   `CONSENT_TOKEN_SECRET`, and stamps `consent-1` no matter what its key is;
-> * a half **with** `CONSENT_TOKEN_KEYS` accepts **only** the kids in it, and refuses anything else as
+> - a half **with** `CONSENT_TOKEN_KEYS` accepts **only** the kids in it, and refuses anything else as
 >   an unknown kid.
 >
 > So the migration order is fixed, and step 1 is not the first step:
@@ -375,8 +375,8 @@ Pages binding is `required`.
 > reads **AGREE** in front of a bridge on which nothing can complete. Read the verdict as what it is —
 > one comparison of *bytes*:
 >
-> * `MISMATCH` ⇒ the halves sign with different bytes (a genuine split; investigate).
-> * `AGREE` ⇒ **the current key bytes agree.** It is not a statement that the halves can complete a
+> - `MISMATCH` ⇒ the halves sign with different bytes (a genuine split; investigate).
+> - `AGREE` ⇒ **the current key bytes agree.** It is not a statement that the halves can complete a
 >   flow: it does not check the kid, and it cannot see a kid the set does not hold.
 >
 > The kid half of the question is answered by construction (the ordering above) and by an end-to-end
