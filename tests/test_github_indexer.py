@@ -3261,35 +3261,24 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurs **once**.
     # A row recorded as "found by its pinned text" must name text that actually finds
     # it, or the record does not reproduce the address it explains.
-    #
-    # ⛔ RE-DERIVED AGAIN (#13728) at `main` `a6fed32ab4` — the head it was measured at,
-    # NOT this branch's merge base (that has since moved to `945817d22a`, so a reader who
-    # runs `git merge-base origin/main HEAD` gets a different sha and must not read the
-    # derivation as stale for it) — because every row above had gone stale there: the required `test
-    # (d)` shard was RED on `main` itself, with all four inputs
-    # (`tortoise/projection/entities.py`, `tortoise/sdk.py`, this file, and the pin
-    # walker's own `tortoise/indexer/github_indexer.py` apart from comment prose) byte-
-    # identical to `main`, so nothing in this diff could have moved them. Same method:
-    # each address was FOUND by searching its own pinned FIRST-line text (and, where
-    # the row has one, its own LAST-line text) at the tree about to be committed.
-    #   · `entities.py` — uniform **+56**: 5193-5195 (status latch), 6014, 6096-6097,
-    #     6254-6255, 6278-6284 / 6278-6283 / 6279-6282 (the three reopen spans),
-    #     6286-6288, 6307, 6339-6344, 6348, 6359-6361.
-    #   · `sdk.py` — **+111** for 55317-55319 (non-scalar refusal), 55469-55478
-    #     (un-supersede arm) and 55918; **+75** for `update_knowledge` (22593-22768),
-    #     its end again located as the function's own last line `return
-    #     self._update_entity_any(id, **props)` rather than computed.
-    #   · `cache_projection.py` — unchanged at 811 (that module did not move).
-    # The citations in `tortoise/indexer/github_indexer.py` and in this file were
-    # re-pointed by the SAME map, because every address they write is a pin key (the
-    # first assertion above), so one derivation keeps the two halves consistent.
-    # `SET n += $props` is still the non-unique case and `55918` was again located by
-    # its per-label write, which occurs once.
+    # ⛔ #13767's own review pass then narrowed the last two `sdk.py` rows, each of
+    # which carried a locator that could not FAIL on the defect it exists to catch:
+    # `55807`→`55918` stored the bare `SET n += $props` (occurs **40×** in `sdk.py`,
+    # 25 of them in comments), so a uniform drift landed it on a comment; the
+    # per-label write it was actually found by occurs **once** and is what it now
+    # stores. And `22593-22768` recorded `None` for its end — its START text
+    # `def update_knowledge(` is unique and did red, but an end that is never read
+    # let an insert INSIDE the function leave the cited end naming nothing while
+    # both guards stayed green.
+    # Both ADDRESSES were re-derived at `ef0abcb`; both LOCATORS were narrowed at
+    # `c50a03a` (the commit carrying this note), by the texts pinned below.
     ("sdk.py", 55317, 55319): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55469, 55478): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22593, 22768): ("def update_knowledge(", None),
-    ("sdk.py", 55918, 55918): ("MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
+    ("sdk.py", 22593, 22768): (
+        "def update_knowledge(", "return self._update_entity_any(id, **props)"),
+    ("sdk.py", 55918, 55918): (
+        "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 
 

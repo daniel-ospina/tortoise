@@ -103,7 +103,7 @@ Lifecycle decision table (THE rule):
   a row a PACK fold keyed. ``_fold_object_stage`` carries a SECOND silent refusal
   this reader does not model — the kind-OWNERSHIP guard (``declared_kinds``, passed
   at ``projection/entities.py:6307``, applied at ``:6359-6361``) — and the query
-  below does not even fetch ``o.objectKind`` (``:1288-1293``). So the moment a pack
+  below does not even fetch ``o.objectKind`` (``:1360-1365``). So the moment a pack
   DECLARES state on ``pm:issue`` (a ``statuses:``/``pipeline:`` block on
   ``kindDefs.issue``, which ``packs/*/manifest.yaml`` does not have today), the
   built-in fold returns ``False`` for EVERY indexed issue row while this read
