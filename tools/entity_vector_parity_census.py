@@ -629,10 +629,21 @@ def _report_uri(uri: str) -> str:
         return f"<unfingerprinted: strip_graph_entity_vectors not importable ({exc})>"
 
 
-def _write_gate() -> Any:
+def _write_gate(proj: Any = None, *, org_id: str | None = None,
+                graph_id: str | None = None,
+                record_dsn: str | None = None) -> Any:
     """The stripper's own gate, imported lazily so the two tools share ONE answer.
 
     The stripper imports this module, so the import runs the other way only at call time.
+
+    ⛔ AND IT CARRIES THIS RUN'S MEASUREMENT CONTEXT (`#13796`). `ready` is the gate's
+    answer, and the gate's answer is a COVERAGE verdict — ``record_vectors >=
+    graph_vectors``, whose denominator only a holder of the graph handle can count. A
+    census that passed no supplier asked the predicate a question no fresh process can
+    answer, so every label reported *unproved* and the column carried the reader's
+    attention to a backfill that had in fact already run. The projection is this call's
+    own handle, the tenant and DSN are this run's declared ones, and
+    `strip_mod.readiness_probe` closes them over the one-argument contract `census()` uses.
 
     ⛔ AN IMPORT FAILURE IS NOT `None`, which means "the caller opted out of the question",
     and a census reading one as the other sends an operator to fix their own call instead
@@ -643,6 +654,14 @@ def _write_gate() -> Any:
     try:
         import strip_graph_entity_vectors as strip_mod
 
+        probe = getattr(strip_mod, "readiness_probe", None)
+        if callable(probe):
+            supplier = getattr(strip_mod, "graph_vector_population", None)
+            population = supplier(proj) if callable(supplier) else None
+            return probe(graph_population=population, org_id=org_id,
+                         graph_id=graph_id, record_dsn=record_dsn)
+        # A tree whose stripper predates the measured form: the unmeasured reader is still
+        # the honest answer there, and it is fail-closed (`strip_readiness`).
         return strip_mod.strip_readiness
     except Exception as exc:
         reason = (
@@ -665,8 +684,11 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
     about to write to, rather than a second connection it hopes addresses the same
     one); ``strip_readiness`` is a ``label -> (ready, reason)`` callable, and it has NO
     default — omitting it is recorded as "not evaluated", which sets ``ready`` **False**.
-    An explicit ``None`` says the same thing in words. Both CLIs pass the stripper's own
-    ``strip_readiness``, so the two tools cannot disagree about why a label is blocked.
+    An explicit ``None`` says the same thing in words. Both CLIs pass a
+    ``strip_mod.readiness_probe(...)`` built from the projection, tenant and record leg of
+    the run (`#13796`), which is what makes the two tools' answers identical rather than
+    merely similar. ⛔ NOT ``strip_readiness``: that is the stripper's UNMEASURED arity-1
+    version-skew fallback, and a third caller that wired it would restore #13796 here.
 
     ⛔ AN UNEVALUATED WRITE GATE IS NOT A PASS. ``ready`` means "parity holds AND no
     writer will re-add what we remove"; a caller that skipped the second half has not
@@ -916,7 +938,9 @@ def main(argv: list[str] | None = None) -> int:
         report = census(
             g=proj.g, record_dsn=record_dsn,
             org_id=args.org_id, graph_id=args.graph_id, labels=args.label,
-            strip_readiness=_write_gate())
+            strip_readiness=_write_gate(proj, org_id=args.org_id,
+                                        graph_id=args.graph_id,
+                                        record_dsn=record_dsn))
         report["graph"] = graph_name
         report["graph_uri"] = _report_uri(args.uri or args.db_path or "")
     except CensusError as exc:
