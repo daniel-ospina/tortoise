@@ -198,9 +198,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, 'sdk.py:21867', _SDK, 21867, 'search_text = _source_search_text(topics=topics)'),
     (_AUDIT, 'sdk.py:21909', 'tortoise/sdk.py', 21909, 's.summary=CASE WHEN $sum'),
     (_AUDIT, '`:22032`', 'tortoise/sdk.py', 22032, 's.summary, s.topics, s.'),
-    (_AUDIT, 'hosted_api.py:23028', 'tortoise/hosted_api.py', 23028, 'MERGE (s:Source {url:$did})'),
-    (_AUDIT, '`:22840`', 'tortoise/hosted_api.py', 22840, 'def _execute_commit_writes'),
-    (_AUDIT, '`:33791`', 'tortoise/hosted_api.py', 33791, 'MERGE (p:PackInstall {namespace: $ns})'),
+    (_AUDIT, 'hosted_api.py:23046', 'tortoise/hosted_api.py', 23046, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:22858`', 'tortoise/hosted_api.py', 22858, 'def _execute_commit_writes'),
+    (_AUDIT, '`:33809`', 'tortoise/hosted_api.py', 33809, 'MERGE (p:PackInstall {namespace: $ns})'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -248,8 +248,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     ("search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:21909", _SDK, 21909, "s.summary=CASE WHEN $sum"),
     (":22032", _SDK, 22032, "s.summary, s.topics, s."),
-    ("hosted_api.py:23028", "tortoise/hosted_api.py", 23028, "MERGE (s:Source {url:$did})"),
-    (":22840", "tortoise/hosted_api.py", 22840, "def _execute_commit_writes"),
+    ("hosted_api.py:23046", "tortoise/hosted_api.py", 23046, "MERGE (s:Source {url:$did})"),
+    (":22858", "tortoise/hosted_api.py", 22858, "def _execute_commit_writes"),
 )
 
 
@@ -338,9 +338,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21867'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21909'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22032`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23028'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22840`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33791`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23046'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22858`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33809`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5366` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7117` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,

@@ -1339,7 +1339,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "answer to the ABBREVIATED command `-- tortoise/` "
         f"({['an EMPTINESS' if _e else 'a MEMBERSHIP' for _a, _e in _typed_short]} at this "
         "head). The abbreviation is how this document spells the same head-bound command in "
-        "its own prose, and it is not a substring of the full form, so the full-command "
+        "its own prose, and it does not CONTAIN the full command, so the full-command "
         "pass above cannot see it — the same half-closure one layer down (#13845 review, "
         "cycle 2; #13807 review round 16, F1)")
 
