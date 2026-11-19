@@ -26,7 +26,6 @@ import json
 import math
 import os
 import re
-import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -701,6 +700,45 @@ def test_the_object_arm_stops_being_blind_once_its_two_reads_differ(
 
 _DOCS = (Path(__file__).resolve().parent.parent
          / "docs" / "research" / "2026-11-17-2518-paired-ab")
+
+#: ⛔ The path tokens the cell ENUMERATES, frozen — the reference set the pin
+#: compares that enumeration against. ⛔ It is the CELL's tokens, NOT the raw
+#: output of the cell's reproducing command: that command prints FILES, so it
+#: prints the five artifacts under `docs/research/2026-11-17-2518-paired-ab/`
+#: individually, while the cell folds them into the DIRECTORY token below. Do not
+#: "correct" this constant to the command's output — adding those five paths would
+#: RED `missing`, because the cell names the directory and not its members.
+#: ⛔ WHY FROZEN (#13572 review round 1, P1; round 2 corrected the REASON). The
+#: previous revision keyed the pin on the branch's own `git diff origin/main...HEAD`
+#: carrying the brief's directory or `tools/paired_expansion_ab_2518.py`, and it
+#: failed in BOTH directions (measured at round 2, replaying the removed guard):
+#:   · pre-fix head 5f88e29 (touches neither)      -> SKIP, so all three assertions
+#:     below were dead code on every branch that does not touch the record;
+#:   · a branch editing ONLY the probe             -> ARMED, 11 of the 12 paths
+#:     `extra` => RED — a FALSE BLOCK on the lane that repairs the probe;
+#:   · a branch editing ONLY the brief             -> ARMED, all 12 => RED, same;
+#:   · THIS commit's own head, once committed      -> ARMED, 11 extra / 20 missing,
+#:     because it edits the brief for the pin.
+#: So it was not "a pin that could only skip": it skipped where the cell could not
+#: have gone stale, and FALSE-REDDED exactly the branches that own the record — the
+#: worst of both. The reference is frozen here so the comparison is unconditional
+#: and needs no git (armed on the suite job's shallow checkout too).
+_RECORDED_TOUCHED_PATHS = frozenset({
+    "tools/paired_expansion_ab_2518.py",
+    "tests/test_paired_expansion_ab_2518.py",
+    "tools/capstone_state_value.py",
+    "tools/dense_leg_probe_13108.py",
+    "tools/measure_13436_write_costs.py",
+    "tests/test_m3_fts_leg_recall_12298.py",
+    "tests/test_rerank_pool.py",
+    "tests/test_window_quality_m2.py",
+    "docs/architecture/CYPHER-INVENTORY.md",
+    "docs/architecture/SEARCH-ARCHITECTURE-CHANGELOG.md",
+    "docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md",
+    "docs/research/2026-11-18-13420-vector-placement/dossier.md",
+})
+#: the one DIRECTORY the cell enumerates, kept separate from the path set above
+_RECORDED_BRIEF_DIR = "docs/research/2026-11-17-2518-paired-ab/"
 _ARTIFACTS = ("paired-point-300.json", "paired-point-300-short-query.json",
               "paired-object-60-control.json")
 
@@ -2441,7 +2479,8 @@ def test_every_published_sample_size_and_load_delta_recomputes():
 
 
 def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
-    """F6 — the cell claimed a set pin that did not exist.
+    """F6 — the cell claimed a set pin that did not exist, and the first set pin
+    built to replace it was INERT on every branch.
 
     The R3 falsifier publishes the touched-path set and ended "the pin in
     `tests/test_paired_expansion_ab_2518.py` keeps this cell to the path set".
@@ -2450,12 +2489,28 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     vocabulary; it never compared the set to the tree, and the reviewer measured
     `tortoise/sdk.py` added to the cell as GREEN.
 
-    The fix is both halves: the sentence no longer claims a pin that does not
-    exist, and a real set-level check runs wherever `origin/main` resolves. It is
-    skipped on the suite job's shallow checkout (where `origin/main` is
-    unresolvable and such a pin would SKIP anyway — the residual the previous
-    lane recorded rather than shipping a vacuous guard), so the brief says the set
-    is re-read by a reviewer at each head.
+    The first replacement compared the enumeration against the branch's own
+    `git diff --name-only origin/main...HEAD` and SKIPPED wherever the diff carried
+    neither the brief nor the probe. ⛔ That guard failed in BOTH directions,
+    measured by replaying it (#13572 review, P1 finding then P2 on the REASON; its
+    round-2 descendant — armed by the brief alone — has the same defect): it
+    SKIPPED on every head that touches neither, so the three assertions were dead
+    code there, and it ARMED and RED on any head that edits
+    `tools/paired_expansion_ab_2518.py` (11 of the 12 paths in `extra`) or the
+    brief's directory (all 12) — a FALSE BLOCK on exactly the lanes that own or
+    repair the record, this commit's own head included. A pin that skips where
+    nothing can go stale and reds where the record is being maintained is worth
+    less than nothing.
+
+    So the reference is the RECORDED enumeration itself (`_RECORDED_TOUCHED_PATHS`
+    — the cell's own tokens, see the constant's comment for why it is not the
+    command's raw output), not any live diff: the comparison is armed
+    unconditionally, it can be falsified in both directions (`tortoise/sdk.py`
+    added to the cell REDs; a recorded path deleted from it REDs), and it needs
+    no git — which also removes the shallow-checkout skip the previous trigger
+    owed. The brief still says the set is re-read by a reviewer at each head, and
+    that sentence is now the HONEST one rather than a cover for a skip: the suite
+    pins the record, the reviewer re-derives the live numbers.
     """
     brief = (_DOCS / "research-brief.md").read_text()
     assert "keeps this cell to the path set" not in brief, (
@@ -2467,32 +2522,11 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
         "dropping the false pin claim must keep the honest one: the path set is "
         "re-read by a reviewer at each head")
 
-    repo = Path(__file__).resolve().parent.parent
-    try:
-        base = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", "origin/main"],
-            capture_output=True, text=True, check=True).stdout.strip()
-        diff = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--name-only",
-             f"{base}...HEAD"],
-            capture_output=True, text=True, check=True).stdout.split()
-        # ⛔ `--diff-filter=A`: the paths this branch CREATES, not merely touches
-        # (#13572 review round 3, P2). See the trigger comment below.
-        added = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--name-only", "--diff-filter=A",
-             f"{base}...HEAD"],
-            capture_output=True, text=True, check=True).stdout.split()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pytest.skip("origin/main does not resolve here (shallow checkout) — the "
-                    "path set is re-read by a reviewer at each head")
-    if not diff:
-        pytest.skip("origin/main == HEAD in this tree — nothing to compare")
-
     # ⛔ the cell's ENUMERATION is part of the record, both ways: a path it names
-    # that the diff does not carry is a re-staled cell (the reviewer's mutant,
-    # `tortoise/sdk.py` added to the cell, was GREEN), and a diff path it omits is
-    # an incomplete set. Only the `touches exactly these paths:` span is an
-    # enumeration — the `No change to \`tortoise/\`` clause after it is a
+    # that the recorded change does not carry is a re-staled cell (the reviewer's
+    # mutant, `tortoise/sdk.py` added to the cell, was GREEN), and a recorded path
+    # it omits is an incomplete set. Only the `touches exactly these paths:` span
+    # is an enumeration — the `No change to \`tortoise/\`` clause after it is a
     # NEGATIVE and is deliberately not read as a member.
     marker = "touches exactly these paths:"
     at = brief.find(marker)
@@ -2503,70 +2537,40 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     dirs = {t for t in tokens if t.endswith("/")}
     named = tokens - dirs
 
-    # ⛔ SCOPED TO THE BRANCH THE CELL RECORDS (#13572, measured). The three
-    # assertions below are about ONE PR's change — this cell publishes the path set
-    # of the `#13267`/`#13302` lane — and they were written as if every head's diff
-    # were that diff. It is not: on ANY other branch `named - diff` is non-empty by
-    # construction, so the pin red the required `test (c)` shard for every unrelated
-    # PR while the cell and the tree were both untouched (measured: PR #13712, a
-    # two-file test/copy diff, failed this file's assertion with twelve paths the
-    # cell names and its diff does not carry). A pin that fails on every branch but
-    # one is not a pin, it is a false block — and the sentence this file already
-    # asserts says the set is RE-READ BY A REVIEWER at each head.
-    #
-    # The discrimination is kept, not dropped: a branch that DOES carry the recorded
-    # change still gets every assertion below, including the over-claim arm the
-    # reviewer's `tortoise/sdk.py` mutant needed. The trigger is the record itself —
-    # the brief's own directory — and NOT `named & diff`: the named set includes test
-    # files this lane may legitimately edit, so an overlap test would re-arm the false
-    # block for any PR that touches one of them (and this fix edits
-    # `tests/test_paired_expansion_ab_2518.py` itself).
-    # ⛔ ARMED ONLY BY A BRANCH THAT **CREATES** THE RECORD (#13572 review round 3, P2).
-    # The scope has to be "adds", not "touches". The three assertions below say the
-    # RECORD's enumerated path set is exactly ITS authoring branch's diff — a claim
-    # that can hold for one diff and no other. Every weaker trigger re-creates a false
-    # block, measured three times over:
-    #   * arm on `tools/paired_expansion_ab_2518.py` (round 2's attempt): the probe is
-    #     itself one of the twelve enumerated paths, so a probe-only fix is red on the
-    #     eleven a one-file diff cannot carry (`extra` = 11);
-    #   * arm on the brief's DIRECTORY: that directory exists on `origin/main` already
-    #     (`f462ad3acb`), so an ordinary maintenance edit to the brief or one of its
-    #     JSON artifacts is red on the same eleven — measured, `extra` = 11 — and the
-    #     only way to green it would be to rewrite the record's cell to describe the
-    #     EDITING branch, falsifying the record;
-    #   * `named & diff` overlap: the named set includes test files this lane may
-    #     legitimately edit (this file among them), which re-arms the original block.
-    # `--diff-filter=A` on the brief's directory is the trigger that means what the
-    # assertions MEAN: this diff is the one that brings the record into existence.
-    #
-    # RESIDUAL, stated rather than hidden: a PR that merely EDITS the record is not
-    # checked by this pin (it skips). That is deliberate — the set re-read below is the
-    # authoring diff's, and no later diff can be measured against it without falsifying
-    # the record. The honest pin for an edit is the reviewer's read, which the record's
-    # own sentence already requires ("re-read by a reviewer at each head").
-    brief_dir = _DOCS.relative_to(repo).as_posix() + "/"
-    if not [p for p in added if p.startswith(brief_dir)]:
-        pytest.skip("this branch does not CREATE the research record this cell "
-                    "enumerates (it already exists at the base) — the cell publishes "
-                    "ONE authoring diff's path set, and the set is re-read by a "
-                    "reviewer at each head")
-
-    assert not [p for p in diff if p.startswith("tortoise/")], (
-        "the R3 claim is 'no retrieval behaviour changed', and the diff reaches "
-        f"the product: {[p for p in diff if p.startswith('tortoise/')]}")
-    extra = named - set(diff)
+    # ⛔ SCOPED BY FREEZING, not by a live diff (#13572 review rounds 1–3; each round's
+    # diff-keyed guard had the same defect one layer deeper). The three assertions below
+    # are about ONE PR's change — this cell publishes the path set of the
+    # `#13267`/`#13302` lane — and NO branch's diff can answer for it. Measured by
+    # replaying the guards that were tried here:
+    #   · arm on the brief's directory + the probe (round 1): a head touching neither
+    #     SKIPs — all three assertions unreachable, dead code exactly where the cell
+    #     cannot have gone stale — while a head that edits either is ARMED and REDs
+    #     (`extra` = 11 or 12);
+    #   · arm on the brief's directory alone (round 2): same skip, and a maintenance
+    #     edit to the record REDs on the twelve paths a one-file diff cannot carry;
+    #   · arm on `--diff-filter=A` (round 3, "the diff that CREATES the record"): the
+    #     record has been in `main` since `f462ad3acb`, so no live branch creates it —
+    #     the pin skips on EVERY head, including an edit-only PR, which is the one
+    #     change that can still make the cell stale. That residual is the same failure
+    #     mode this lane exists to remove, so it is not accepted here.
+    # So no diff-keyed trigger is right: the reference is the RECORD itself, and the
+    # comparison is unconditional. It needs no git (armed on the suite job's shallow
+    # checkout too) and is falsifiable in both directions — editing the cell without
+    # updating the constant REDs immediately, which is the point.
+    extra = named - _RECORDED_TOUCHED_PATHS
     assert not extra, (
-        f"the cell names paths this diff does not carry: {sorted(extra)} — a "
-        "path set that over-claims is as stale as one that under-claims")
-    covered = set(named)
-    for directory in dirs:
-        covered |= {p for p in diff if p.startswith(directory)}
-    missing = set(diff) - covered
+        f"the cell names paths the recorded change does not carry: {sorted(extra)} "
+        "— a path set that over-claims is as stale as one that under-claims")
+    missing = _RECORDED_TOUCHED_PATHS - named
     assert not missing, (
-        "the cell does not name these touched paths, so its set is incomplete: "
-        f"{sorted(missing)}")
-    assert dirs and "docs/research/2026-11-17-2518-paired-ab/" in dirs, (
-        "the cell must name the directory it summarises")
+        "the cell no longer names these paths the recorded change carries, so its "
+        f"set is incomplete: {sorted(missing)}")
+    assert not [p for p in named if p.startswith("tortoise/")], (
+        "the R3 claim is 'no retrieval behaviour changed', and the cell now names "
+        f"the product: {sorted(p for p in named if p.startswith('tortoise/'))}")
+    assert dirs == {_RECORDED_BRIEF_DIR}, (
+        "the cell must name exactly the directory it summarises — "
+        f"{_RECORDED_BRIEF_DIR} — and no other: {sorted(dirs)}")
 
 
 # ── 2h. the pins review round 5 measured GREEN (`#13267` F1–F6) ──────────────
