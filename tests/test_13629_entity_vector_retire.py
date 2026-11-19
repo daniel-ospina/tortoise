@@ -34,6 +34,15 @@ that fails OPEN the day someone deletes a branch.
 | `test_the_stop_arm_must_not_store_the_vector` | the stop arm stops — it does not place the vector first | a stop arm that STORES (then exits, or pops-then-stores) certifies the writer as write-stopped |
 | `test_the_stop_arm_of_a_POSITIVE_ask_must_not_store_either` | the `else` of `if gate(l):` is the STOP arm, and it is read | a store on that arm (`orelse` never examined) certifies the writer as write-stopped |
 | `test_upsert_source_IS_a_Source_writer_through_the_PASSTHROUGH` | `_upsert_source` persists a caller `embedding` via `SET n += $extra` | the name is dropped from `:Source`'s population on a static-clause count, letting a strip run into a live writer |
+| `test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_supplied` | **#13796** — the gate is MEASURABLE from a fresh process | the stripper asks without its own denominator/tenant, so every label answers *unproved* while parity holds |
+| `test_a_short_record_refuses_the_label_with_BOTH_counts_in_the_reason` | "proved short" is a DIFFERENT answer from "not proved" | a measured deficit is reported as an unmeasured one, sending the operator back to a census already run |
+| `test_the_plan_is_STRIP_READY_from_a_fresh_process_when_the_record_covers` | coverage clears a plan in a fresh process, and the READY reason is the measurement | `strip_ready: True` without the two counts beside it — an assertion nobody can check |
+| `test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason` | **#13796** acceptance (b)+(c) — the refusal is the MEASUREMENT | a short record certifies a strip, or refuses with "not proved" when the counts were taken |
+| `test_the_destructive_arm_hands_the_gate_the_runs_own_denominator` | **#13796**'s reachability on the `--execute` arm — the second of `main`'s two hops | the destructive path drops the population while the preview keeps it, so `execute` re-checks an unsatisfiable gate (measured: 107 passed under that mutant) |
+| `test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_stripper` | `_write_gate`'s version-skew arm answers with the FAIL-CLOSED twin, never with a measurement it could not take | an old stripper is answered by a probe that reports `ready` with no counts behind it (measured: the mutant survived at 112 passed until the writers and the tenant door were both held open) |
+| `test_execute_rechecks_the_gate_with_the_runs_own_measurement_context` | **#13796**'s THIRD hop — `execute`'s OWN re-check probe, built seconds before the first delete | the destructive re-check loses the denominator and refuses `REFUSE_WRITE_STILL_EMITS` on a covered graph (measured: 112 passed under that mutant before this test) |
+| `test_an_uncountable_projection_yields_NO_supplier_rather_than_a_zero` | `graph_vector_population` answers `None`, never `0`, when the projection cannot count | a "supply a default" `0` VERIFIES coverage on a measurement never taken — the fail-OPEN direction (measured: 143 passed under that mutant) |
+| `test_a_HALF_tenant_declaration_is_refused_not_downgraded_to_the_ambient_one` | a half declared tenant is REFUSED by `_declared_scope`, not collapsed to the ambient tenant | a `("org-A", "")` declaration is answered from the ambient tenant's record, certifying one tenant's strip from another's measurement |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -59,6 +68,22 @@ from tools import strip_graph_entity_vectors as strip
 #: that monkeypatched the package-qualified one would patch a module the code under
 #: test never calls — the patch would appear to work and assert nothing.
 parity = strip.parity
+
+
+def _census_strip():
+    """The stripper module object the CENSUS imports — NOT the same object as `strip`.
+
+    `tools.strip_graph_entity_vectors` and the top-level `strip_graph_entity_vectors` that
+    `entity_vector_parity_census._write_gate` resolves are two module objects around one
+    file (the tool puts its own directory on `sys.path`). A monkeypatch applied to `strip`
+    is therefore INVISIBLE to the census's own call — measured: patching `strip`'s
+    `_fold_consults_gate` left the census running the real writer check and refusing
+    `:Object` on two ungated writers. A test that patched only the package-qualified
+    module would read as green while asserting nothing about the census CLI.
+    """
+    import strip_graph_entity_vectors
+
+    return strip_graph_entity_vectors
 
 
 # ── a hermetic stand-in for the two stores ──────────────────────────────────
@@ -213,7 +238,8 @@ def _row(report, label):
 
 def _ready(monkeypatch):
     """Close the write gate — the state #13617 + the event/source write-stop reach."""
-    monkeypatch.setattr(strip, "write_gate", lambda entity_type: (False, "write-stopped"))
+    monkeypatch.setattr(strip, "write_gate",
+                        lambda entity_type, **_: (False, "write-stopped"))
 
 
 def _plan(graph, *, labels=None, batch=strip.DEFAULT_BATCH):
@@ -501,15 +527,70 @@ def test_write_gate_is_fail_closed_when_the_symbol_is_absent(monkeypatch):
 
 
 def test_write_gate_is_fail_closed_when_the_gate_raises(monkeypatch):
+    """⛔ THE MEASURED FORM IS THE ONE THE STRIPPER READS, so it is the one that must fail
+    closed here (`#13796`). `mirror_verdict` is preferred when the tree carries it; the
+    boolean-only fallback is pinned separately by
+    `test_write_gate_falls_back_to_the_boolean_on_a_tree_without_the_measured_form`.
+    """
     from tortoise import record_vector
 
-    def boom(_entity_type):
+    def boom(_entity_type, **_kwargs):
         raise RuntimeError("coverage cache unreadable")
 
-    monkeypatch.setattr(record_vector, "mirror_required", boom, raising=False)
+    monkeypatch.setattr(record_vector, "mirror_verdict", boom, raising=False)
     emits, reason = strip.write_gate("object")
     assert emits is True
     assert "not a permission" in reason
+
+
+def test_write_gate_falls_back_to_the_boolean_on_a_tree_without_the_measured_form(
+        monkeypatch):
+    """A tree holding `mirror_required` but not `mirror_verdict` is one this change has not
+    reached, and the read must degrade to it rather than raise (`#13796`).
+
+    ⛔ THE FALLBACK IS STILL FAIL-CLOSED: the answer is the same boolean, and the reason
+    says coverage was the predicate's own claim — no counts, because none were taken.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.delattr(record_vector, "mirror_verdict", raising=False)
+    monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: True,
+                        raising=False)
+    emits, reason = strip.write_gate("object")
+    assert emits is True
+    assert "no counts were taken" in reason, reason
+
+
+def test_write_gate_falls_back_fail_closed_when_the_old_gate_raises(monkeypatch):
+    """⛔ THE FALLBACK'S `except` ARM, which `ea10eb2d` left without a falsifier.
+
+    Re-pointing `test_write_gate_is_fail_closed_when_the_gate_raises` at
+    `mirror_verdict` (the measured form) took the only test that used to raise through
+    the OLD symbol with it, and the sibling above returns `True` without raising — so
+    deleting the fallback's `except Exception → return True, "… raised …"` left the suite
+    green (measured: **110 passed**).
+
+    Why it matters: a tree that carries `mirror_required` but not `mirror_verdict` is one
+    this change has not reached, and a bare `getattr` miss there must answer fail-closed.
+    A raise escaping instead is not a permission — but it is also not the refusal the tool
+    documents, and the file's own standard is one falsifier per load-bearing claim.
+
+    Mutation (measured): delete the `except` block in `write_gate`'s fallback arm (leaving
+    `needed = bool(gate(entity_type))`) and this test reds on the escaping exception while
+    the rest of the file stays green.
+    """
+    from tortoise import record_vector
+
+    def _boom(entity_type):
+        raise RuntimeError("the record leg is unreachable")
+
+    monkeypatch.delattr(record_vector, "mirror_verdict", raising=False)
+    monkeypatch.setattr(record_vector, "mirror_required", _boom, raising=False)
+
+    emits, reason = strip.write_gate("object")
+    assert emits is True, reason
+    assert "raised" in reason and "RuntimeError" in reason, reason
+    assert "an unreadable answer is not a permission" in reason, reason
 
 
 def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monkeypatch):
@@ -628,8 +709,9 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     """
     from tortoise import record_vector
 
-    monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
-                        raising=False)
+    monkeypatch.setattr(
+        record_vector, "mirror_verdict",
+        lambda entity_type, **_: (False, "the record reports coverage"), raising=False)
 
     # ⛔ POLARITY FIRST, so the DELETION of the arm reds on the VERDICT and not merely on the
     # message text: every step below the arm is forced to certify, leaving it the only refusal.
@@ -646,8 +728,9 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     # fires with nothing below it forced; it is NOT evidence about the fold, which this path
     # never reaches (`if label is None:` returns above it — measured: 0 invocations).
     monkeypatch.undo()
-    monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
-                        raising=False)
+    monkeypatch.setattr(
+        record_vector, "mirror_verdict",
+        lambda entity_type, **_: (False, "the record reports coverage"), raising=False)
     emits, reason = strip.write_gate("no_such_entity_type_13647")
     assert emits is True, f"an unmapped entity_type licensed a delete ({reason})"
     assert "no declared graph label" in reason
@@ -679,8 +762,10 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(
     """
     from tortoise import record_vector
 
-    monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+    monkeypatch.setattr(record_vector, "mirror_verdict",
+                        lambda entity_type, **_: (
+                            False, "the record holds 3 vector(s) for object, the graph "
+                                   "serves 3"), raising=False)
     # The recorded predicate says "not required" for every label; that is a READ fact and
     # the gate must still answer "emits" while a writer exists that nobody stopped.
     ungated = _fake_writer_module(tmp_path, monkeypatch, """
@@ -1516,8 +1601,10 @@ def test_the_record_still_requiring_the_copy_keeps_the_gate_SHUT(monkeypatch, tm
     """
     from tortoise import record_vector
 
-    monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: True, raising=False)
+    monkeypatch.setattr(record_vector, "mirror_verdict",
+                        lambda entity_type, **_: (
+                            True, "the record has not proved it holds this label's "
+                                  "vectors in this process"), raising=False)
     gated = _fake_writer_module(tmp_path, monkeypatch, """
 def _only_writer(ev):
     if not _derived_mirror_required("object"):
@@ -1576,8 +1663,10 @@ def test_the_gate_OPENS_when_every_declared_writer_asks(monkeypatch, tmp_path):
     """
     from tortoise import record_vector
 
-    monkeypatch.setattr(record_vector, "mirror_required",
-                        lambda entity_type: False, raising=False)
+    monkeypatch.setattr(record_vector, "mirror_verdict",
+                        lambda entity_type, **_: (
+                            False, "the record holds 2 vector(s) for object, the graph "
+                                   "serves 2"), raising=False)
     gated = _fake_writer_module(tmp_path, monkeypatch, """
 def _only_writer(ev):
     if not _derived_mirror_required("object"):
@@ -1590,6 +1679,10 @@ def _only_writer(ev):
     emits, reason = strip.write_gate("object")
     assert emits is False, reason
     assert "calls the gate" in reason
+    # ⛔ AND THE CERTIFIED REASON NAMES THE MEASUREMENT (`#13796`): a `strip_ready: True`
+    # rests on it, so the counts the verdict compared must survive into the sentence the
+    # operator reads.
+    assert "2 vector(s)" in reason and "serves 2" in reason
     # …and a single un-gated writer closes it again, so the positive arm is not a bypass.
     monkeypatch.setattr(strip, "_writers_for", lambda label: (
         (f"{gated}::_only_writer", f"{gated}::_missing"), None))
@@ -1777,13 +1870,822 @@ def test_label_write_gate_requires_every_entity_type_addressing_the_label(monkey
     """`:Source` serves `source` AND `document`; one stopped writer is not enough."""
     monkeypatch.setattr(
         strip, "write_gate",
-        lambda entity_type: (entity_type == "document", f"{entity_type} emits"))
+        lambda entity_type, **_: (entity_type == "document", f"{entity_type} emits"))
     emits, reason = strip.label_write_gate("Source")
     assert emits is True
     assert "document" in reason
-    # …and when BOTH stop, the label stops.
-    monkeypatch.setattr(strip, "write_gate", lambda entity_type: (False, "stopped"))
-    assert strip.label_write_gate("Source")[0] is False
+    # …and when BOTH stop, the label stops — and its reason carries the coverage account of
+    # every type it cleared (`#13796`: a `strip_ready: True` must rest on a checkable
+    # sentence, not on the bare word "stopped").
+    monkeypatch.setattr(strip, "write_gate",
+                        lambda entity_type, **_: (False, f"record covers {entity_type}"))
+    stopped, why = strip.label_write_gate("Source")
+    assert stopped is False
+    assert "record covers source" in why and "record covers document" in why
+
+
+# ── #13796: the gate is MEASURABLE from a fresh operator process ────────────
+
+
+class _Projection:
+    """The projection's own graph-side vector count, as the real one answers it.
+
+    `tortoise.projection._label_vector_count` is the ONE aggregate `#13610` added for
+    this denominator, and it is a full-label count of nodes carrying an `embedding`.
+    Reproducing it against `FakeGraph` (rather than returning a constant) keeps the
+    test on the statement shape the supplier really issues, so a supplier that asked
+    the wrong question would red here instead of passing on a stub.
+    """
+
+    def __init__(self, graph) -> None:
+        self._graph = graph
+
+    def _label_vector_count(self, entity_type, *, timeout_ms=None):
+        from tortoise.security import entity_label
+
+        rows = self._graph.ro_query(
+            f"MATCH (n:{entity_label(entity_type)}) WHERE n.embedding IS NOT NULL "
+            "RETURN count(n)").result_set
+        return int(rows[0][0])
+
+
+#: The tenant the LAST `_record_vector_count` call was asked about, so the ORDER of the
+#: declared pair is observable (`#13796` review rounds 5-7: the half-tenant guard, then its
+#: mirrored form, then the pair's ordering — each a one-token edit on one line).
+ASKED_SCOPE: dict = {}
+
+
+def _fresh_record_leg(monkeypatch, *, record_vectors: int,
+                      graph_vectors: int | None = None):
+    """An EMPTY coverage cache, an armed leg, and the record's aggregate stubbed.
+
+    ⛔ THE EMPTY CACHE IS THE POINT. `#13796`'s defect needs no fault: a process that has
+    served no gated dense read holds no verdict, and before this change that was the
+    permanent state of every operator run. `reset_coverage_cache()` is what makes this
+    test the fresh process the issue describes.
+
+    The returned supplier is only for the `write_gate` tests; a test that measures through
+    `_Projection` passes `graph_vectors` nothing and lets the GRAPH answer the denominator,
+    because a constant there would hide a supplier that asked the wrong question.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    record_vector.reset_coverage_cache()
+    # ⛔ THE COUNT STUB CAPTURES THE SCOPE IT WAS ASKED ABOUT (review round 7). Every
+    # `_record_vector_count` stub in this file used `lambda *a, **k:` and threw the scope
+    # away, so `scope=(graph_id, org_id)` — the two halves interchanged on the line this
+    # series edits — measured a DIFFERENT tenant and left **148 passed** across both suites.
+    # A swapped pair is accepted silently by `_declared_scope` (both halves are non-empty
+    # strings), so the order has to be asserted, not assumed.
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda _label, scope=None, **k: (
+                            ASKED_SCOPE.update(scope=scope), record_vectors)[1],
+                        raising=True)
+    return lambda _entity_type: graph_vectors
+
+
+def test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_supplied(
+        monkeypatch):
+    """⛔ #13796, THE DEFECT ITSELF: the gate was unsatisfiable from this process.
+
+    Two halves, and the FIRST is the falsifier: asked with no supplier and no declared
+    tenant — the state every operator run starts in — the gate reports NO MEASUREMENT.
+    ⛔ The observed run could not even say WHICH precondition was missing: `write_gate`
+    used to print one fixed sentence ("the record has not proved it holds this label's
+    vectors") whatever the predicate's real arm was, so a missing tenant and a missing
+    denominator were indistinguishable in the artifact an operator pastes into the issue.
+    Now each arm names itself, and this half pins that neither claims a count.
+
+    The second half supplies what a caller holding the graph handle always could — the
+    denominator — plus the tenant this run declared on its command line, and the answer
+    becomes the MEASUREMENT: the coverage half clears and the gate reaches `answers False`.
+    ⚠️ What refuses after that is a DIFFERENT question, `#13647`'s writer check, and on
+    this tree it refuses every label because the writers are not gated (`#13806`). This
+    test pins the coverage half being measured and its counts reported; it does not claim
+    the label is strippable.
+    """
+    supply = _fresh_record_leg(monkeypatch, record_vectors=9200, graph_vectors=9200)
+
+    emits, unmeasured = strip.write_gate("object")
+    assert emits is True
+    assert "9200" not in unmeasured, (
+        "a fresh process with no denominator reported a MEASUREMENT it never took: "
+        f"{unmeasured}")
+    assert ("has not proved" in unmeasured) or ("no tenant" in unmeasured), unmeasured
+
+    emits, reason = strip.write_gate(
+        "object", graph_population=supply, org_id="org", graph_id="graph",
+        record_dsn="postgresql://localhost/record")
+    assert "answers False" in reason, reason
+    assert "has not proved" not in reason, reason
+    assert "the record holds 9200 vector(s) for object, the graph serves 9200" in reason, (
+        f"the measured arm did not report the two counts it compared: {reason}")
+    # ⛔ AND THE TENANT WAS ASKED FOR IN THE DECLARED ORDER (review round 7). A swapped
+    # `scope=(graph_id, org_id)` measures a DIFFERENT tenant — both halves are non-empty
+    # strings, so `_declared_scope` accepts it silently and the gate answers from the wrong
+    # record. Measured: the swap left both suites at 148 passed before this assertion.
+    asked = ASKED_SCOPE.get("scope")
+    assert asked is not None, (
+        "the record count was taken with no scope at all — the declared tenant never "
+        f"reached the query: {ASKED_SCOPE!r}")
+    assert (asked.org_id, asked.graph_id) == ("org", "graph"), (
+        "the tenant's two halves reached the record query INTERCHANGED, so the count came "
+        f"from a different tenant: {asked!r}")
+
+
+def test_a_short_record_refuses_the_label_with_BOTH_counts_in_the_reason(monkeypatch):
+    """The other direction: short coverage is a refusal that NAMES THE DEFICIT.
+
+    ⛔ "NOT PROVED" AND "PROVED SHORT" ARE DIFFERENT ANSWERS, and only the second tells
+    an operator what to do (backfill 9188 rows). A stripper that reported the first for a
+    measured deficit would send them to re-run the census they had already run.
+    """
+    supply = _fresh_record_leg(monkeypatch, record_vectors=12, graph_vectors=9200)
+    emits, reason = strip.write_gate(
+        "object", graph_population=supply, org_id="org", graph_id="graph",
+        record_dsn="postgresql://localhost/record")
+    assert emits is True
+    assert "answers True" in reason, reason
+    # ⛔ THE SENTENCE, NOT THE DIGITS. `"12" in reason` is satisfied by any two digits
+    # anywhere in a reason that also embeds the fold's line numbers, so a deficit reported
+    # with the wrong counts would still pass it (found in review of this change).
+    assert "the record holds 12 vector(s) for object, the graph serves 9200" in reason, (
+        f"a short record did not report the deficit it measured: {reason}")
+
+
+def test_the_plan_is_STRIP_READY_from_a_fresh_process_when_the_record_covers(
+        stores, monkeypatch):
+    """`strip_ready: True` and a reason an operator can check — acceptance #13796 (a).
+
+    ⛔ IT IS MET WITH THE WRITER HALF HELD CLOSED, AND END-TO-END ON ZERO LABELS ON THIS
+    TREE. The two halves ask different questions: coverage asks *"does the record hold this
+    label's vectors?"* (`#13796`, fixed here) and the writer check asks *"will a writer
+    re-add them?"* (`#13647`). On this tree the second still refuses every label, because
+    `hosted_backup::restore_graph` and `sdk::_update_entity` (and, for `:Event`/`:Source`,
+    several more) store an `embedding` without asking the gate — measured, and owned by
+    `#13806`, which needs a write-semantics decision rather than a test change.
+
+    So the writer check is DRIVEN CLOSED here on purpose, and what this test pins is the
+    half this issue is about: with writers certified, a covering record makes the plan ready
+    IN A FRESH PROCESS and the reason beside `strip_ready` is the measurement, not the bare
+    word "ready".
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1, graph_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id="org",
+        graph_id="graph", graph_name="g", graph_uri="docker://x/g",
+        labels=["Object"], batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+
+    row = plan["labels"][0]
+    assert row["strip_ready"] is True, row["blocked_reason"]
+    assert plan["ready"] is True
+    # ⛔ THE REASON NAMES BOTH COUNTS, on the READY arm — that is what makes
+    # `strip_ready: True` checkable instead of asserted.
+    assert "the record holds 1 vector(s)" in row["readiness_reason"]
+    assert "the graph serves 1" in row["readiness_reason"], row["readiness_reason"]
+    # …and the operator reading the PLAN sees them, not the bare word "ready".
+    rendered = strip.render_plan(plan)
+    assert "the record holds 1 vector(s)" in rendered
+    assert "the graph serves 1" in rendered
+
+
+def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeypatch):
+    """⛔ ACCEPTANCE #13796 (b) AND (c) IN ONE FALSIFIER: the block is the MEASUREMENT.
+
+    "The plan for a short-record label must refuse, and must refuse for the *measured*
+    reason (not "not proved" when the counts were never taken)." Both halves are
+    asserted, because they fail in opposite directions: a stripper that refused with
+    "not proved" would be unable to distinguish an unbackfilled deployment from a
+    tested one, and a stripper that did not refuse would strip a label whose only copy is
+    the graph's.
+
+    ⛔ AND THE REFUSAL MUST BE THE COVERAGE ARM'S, so the OTHER two arms are held open:
+    every graph key is READABLE IN THE RECORD (parity passes, otherwise the parity block
+    would be the reason and a coverage gate that wrongly certified would still look
+    refused) and every writer is driven closed. The record's own aggregate stays short, so
+    the coverage comparison is the ONLY thing left that can refuse — which is what makes
+    this a falsifier rather than a test that passes for an unrelated reason (both halves
+    caught in review of this change; the earlier cut proved nothing).
+    """
+    graph, record = stores
+    for key in ("obj-1", "obj-2", "obj-3"):
+        graph.add("Object", key)
+        # parity holds: the record can answer with EVERY graph vector it measured.
+        record.holds("object", key)
+    # …but the record's own aggregate holds ONE vector, against a graph that serves three.
+    # The two legs are separate reads (row-level for parity, one aggregate for coverage),
+    # and only the second is short: that difference is the whole point.
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id="org",
+        graph_id="graph", graph_name="g", graph_uri="docker://x/g",
+        labels=["Object"], batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+
+    row = plan["labels"][0]
+    assert row["strip_ready"] is False, (
+        "a short record certified a strip — the graph holds vectors the record cannot "
+        f"answer with ({row})")
+    blocked = row["blocked_reason"]
+    assert "the record holds 1 vector(s) for object, the graph serves 3" in blocked, blocked
+    assert "has not proved" not in blocked, blocked
+
+
+# ── #13796: the CLIs must hand the gate THEIR OWN measurement context ───────
+
+
+def _cli_harness(monkeypatch, graph):
+    """Point both CLIs at ``graph`` through a projection DOUBLE that can also count.
+
+    ⛔ THE DOUBLE EXPOSES `_label_vector_count`, WHICH IS THE POINT. Every other
+    `main`-level test's `_Proj` carries only `g`, so `graph_vector_population(proj)`
+    answers `None` there and a reverted CLI wiring would look identical — which is how
+    the central hop of this fix came to have no falsifier at all (found in review of
+    this change, by two independent reviewers, measured: deleting
+    `graph_population=population` from `main` left the suite at 105 passed).
+    """
+    class _Proj(_Projection):
+        def __init__(self, target):
+            super().__init__(target)
+            self.g = target
+
+    import tortoise.projection as projection
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        type("P", (), {"from_uri": staticmethod(lambda *a, **k: _Proj(graph)),
+                                       "__init__": lambda self, *a, **k: None}))
+    monkeypatch.setattr(parity.census_mod, "resolve_graph_name", lambda *a, **k: "g")
+    monkeypatch.setattr(parity.census_mod, "_refuse_unless_graph_present",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(parity.census_mod, "empty_graph_target_flag", lambda *a, **k: None)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+
+
+def test_the_stripper_cli_hands_the_gate_its_own_projection_and_tenant(
+        stores, monkeypatch, capsys):
+    """⛔ #13796's CENTRAL HOP, pinned from the CLI: a reverted `main` must RED.
+
+    The plan tests pass `graph_population=` themselves, so they pin `build_plan` and not
+    the hop that supplies it. Here `main` is driven end-to-end with a covering record and
+    a projection double that CAN count: if `main` stops handing its own population and
+    tenant to the gate, the row falls back to "this process has taken no verdict" and the
+    measured sentence disappears from the printed plan.
+
+    Mutation (measured): delete `graph_population=population` from `main`'s `build_plan`
+    call and this test reds on the absent sentence while the rest of the file stays green.
+
+    ⛔ TWO vector-bearing nodes on purpose: with one, a constant `lambda _label: 1` produced
+    the same sentence and this assertion passed on an ASSERTED denominator (#13796's
+    forbidden shape — measured, 2 passed). The graph's own count must be the only thing
+    that can print it.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    graph.add("Object", "obj-2")
+    record.holds("object", "obj-1")
+    record.holds("object", "obj-2")
+    _fresh_record_leg(monkeypatch, record_vectors=2)
+    _cli_harness(monkeypatch, graph)
+
+    assert strip.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                       "--record-dsn", "postgresql://localhost/record",
+                       "--org-id", "o", "--graph-id", "g",
+                       "--label", "Object"]) == 0
+    out = capsys.readouterr().out
+    assert "the record holds 2 vector(s) for object, the graph serves 2" in out, (
+        "the preview plan did not carry the measurement — `main` stopped handing the gate "
+        f"its own projection/tenant, and #13796 is back ({out})")
+    assert "has not proved" not in out, out
+
+
+def test_the_census_cli_hands_the_gate_its_own_projection_and_tenant(
+        stores, monkeypatch):
+    """The same hop on the CENSUS tool, and it is a separate call site.
+
+    ⛔ `_write_gate` IS A FUNCTION OF THE RUN'S PROJECTION, TENANT AND DSN SINCE #13796, and
+    a census main that calls it with no arguments restores the defect the pair exists to
+    fix — for the report an operator reads FIRST. Measured: reverting
+    `_write_gate(proj, org_id=…, graph_id=…, record_dsn=…)` to `_write_gate()` left
+    `test_13629 + test_13685` at 144 passed, 2 skipped. The probe `census()` receives is
+    captured here and asked directly, so the argument expression is what is pinned.
+
+    ⛔ `ready` IS STILL FALSE HERE, AND THAT IS NOT A REGRESSION: the census's gate is the
+    stripper's, so it runs BOTH halves — the coverage half clears (below) and `#13647`'s
+    writer check refuses `:Object` because its writers are ungated on this tree (`#13806`).
+    The discriminator is therefore the MEASUREMENT, not the verdict: an unwired gate answers
+    "not proved" and carries no counts; a wired one carries them. (The two module objects
+    are also why this test cannot simply force the writer half closed the way the sibling
+    does — the census resolves the stripper by its top-level name.)
+    """
+    graph, record = stores
+    # ⛔ TWO nodes, for the same reason as the preview sibling: one node lets a CONSTANT
+    # denominator print the same sentence, which is the asserted gate #13796 forbids.
+    graph.add("Object", "obj-1")
+    graph.add("Object", "obj-2")
+    record.holds("object", "obj-1")
+    record.holds("object", "obj-2")
+    _fresh_record_leg(monkeypatch, record_vectors=2)
+    _cli_harness(monkeypatch, graph)
+
+    captured: dict = {}
+    real_census = parity.census
+
+    def _spy(**kwargs):
+        captured["strip_readiness"] = kwargs["strip_readiness"]
+        return real_census(**kwargs)
+
+    monkeypatch.setattr(parity, "census", _spy)
+
+    assert parity.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                        "--record-dsn", "postgresql://localhost/record",
+                        "--org-id", "o", "--graph-id", "g",
+                        "--label", "Object"]) == 0
+    probe = captured["strip_readiness"]
+    _ready, reason = probe("Object")
+    assert "the record holds 2 vector(s) for object, the graph serves 2" in reason, (
+        "the census's gate was not given the run's projection/tenant, so it answers "
+        f"\"not proved\" for a covered label (#13796's symptom): {reason}")
+    assert "has not proved" not in reason, reason
+
+
+def test_the_census_gate_takes_its_record_leg_from_the_flag_not_the_ambient_env(
+        stores, monkeypatch):
+    """⛔ THE CENSUS SIDE OF THE `record_dsn` HOP — its own call site, its own falsifier.
+
+    `entity_vector_parity_census._write_gate` builds the probe at `:661` and hands it
+    `record_dsn=record_dsn`. Deleting that one keyword leaves the projection, tenant and
+    population wired, compiles and runs, and — because `_fresh_record_leg` SETS
+    `TORTOISE_RECORD_DSN` (`:1837`) — leaves every census test green on the ambient value
+    (measured: **110 passed**). The report an operator reads FIRST then carries
+    "not proved" for a label the record covers, with no counts anywhere.
+
+    Deleting the ambient is what makes the argument load-bearing; the `--record-dsn` flag
+    alone is an invocation `main` supports (`:904`).
+
+    Mutation (measured): drop `record_dsn=record_dsn` from `_write_gate`'s `readiness_probe`
+    call and this test reds on the absent counts while the rest of the file stays green.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+
+    from tortoise import record_vector
+
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    record_vector.reset_coverage_cache()
+    _cli_harness(monkeypatch, graph)
+
+    captured: dict = {}
+    real_census = parity.census
+
+    def _spy(**kwargs):
+        captured["strip_readiness"] = kwargs["strip_readiness"]
+        return real_census(**kwargs)
+
+    monkeypatch.setattr(parity, "census", _spy)
+
+    assert parity.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                        "--record-dsn", "postgresql://localhost/record",
+                        "--org-id", "o", "--graph-id", "g",
+                        "--label", "Object"]) == 0
+    _ready, reason = captured["strip_readiness"]("Object")
+    assert "the record holds 1 vector(s) for object, the graph serves 1" in reason, (
+        "the census's gate did not receive this run's --record-dsn, so the record leg "
+        f"came from an absent ambient and nothing was measured ({reason})")
+    assert "not proved" not in reason, reason
+
+
+# ── #13796: the two hops the CLI tests above do NOT pin ─────────────────────
+
+
+def test_the_plan_probe_takes_its_record_leg_from_the_flag_not_the_ambient_env(
+        stores, monkeypatch, capsys):
+    """⛔ `build_plan`'s `readiness_probe(record_dsn=…)` HOP, the one harness masks.
+
+    `main` declares `--record-dsn` on its command line, so an operator run need not export
+    `TORTOISE_RECORD_DSN`. `build_plan` must therefore hand the probe THIS run's DSN — but
+    `readiness_probe`'s `record_dsn` defaults to ``None``, so deleting
+    `record_dsn=record_dsn` there (leaving `graph_population`/`org_id`/`graph_id` intact)
+    compiles, runs, and leaves the whole file at **109 passed, measured**. The plan then
+    resolves the record leg from an ABSENT ambient instead, and the row reaches the
+    operator with `#13796`'s undiagnosable sentence — a ready-looking plan with no counts
+    behind it.
+
+    ⛔ WHY EVERY OTHER TEST MISSES IT: `_fresh_record_leg` SETS
+    `TORTOISE_RECORD_DSN` (`:1837`), so the ambient value stands in for the argument and a
+    dropped parameter is indistinguishable. Deleting the ambient is what makes the
+    argument load-bearing, and it is the only difference between this test and its
+    sibling above.
+
+    Mutation (measured): drop `record_dsn=record_dsn` from `build_plan`'s
+    `readiness_probe(...)` call and this test reds on the absent sentence while the rest
+    of the file stays green.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+
+    from tortoise import record_vector
+
+    # ⛔ NO AMBIENT RECORD DSN — the `--record-dsn`-only invocation `main` supports.
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    record_vector.reset_coverage_cache()
+    _cli_harness(monkeypatch, graph)
+
+    assert strip.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                       "--record-dsn", "postgresql://localhost/record",
+                       "--org-id", "o", "--graph-id", "g",
+                       "--label", "Object"]) == 0
+    out = capsys.readouterr().out
+    assert "the record holds 1 vector(s) for object, the graph serves 1" in out, (
+        "the plan did not carry the measurement — `build_plan` stopped handing the probe "
+        f"this run's --record-dsn, so the record leg came from an absent ambient ({out})")
+    assert "has not proved" not in out, out
+
+
+def test_the_destructive_arm_hands_the_gate_the_runs_own_denominator(
+        stores, tmp_path, monkeypatch):
+    """⛔ `main`'s SECOND hop, and the one still unpinned after the preview fix.
+
+    `main` builds the population once and threads it into BOTH arms — `build_plan` on the
+    preview and `execute` on the destructive path. The sibling CLI test above drives the
+    preview, so it pins the first hop; dropping the argument from the `execute` call alone
+    leaves this file at **107 passed, measured** — the same class of gap the round-2
+    finding filed, one arm over. `execute` re-checks the gate before it removes anything,
+    so without the denominator the destructive run re-asks a question no fresh process can
+    answer and refuses with #13796's own sentence.
+
+    ⚠️ THE ASSERTION IS A REAL MEASUREMENT, NOT AN IDENTITY. The supplier is the
+    projection's own count, so it is asked here for `object` and must answer the number of
+    nodes THIS graph carries an `embedding` on. ⛔ THAT NUMBER IS **TWO**, deliberately: with
+    a single vector-bearing node a constant `lambda _label: 1` satisfied every assertion in
+    this file — measured, 2 passed — and a constant on a larger graph is precisely the
+    asserted gate #13796 forbids. Two nodes make the count distinguishable from a constant,
+    and the supplier is exactly what `record_vector.coverage` binds, so this is the value
+    the gate compares rather than a proxy for it.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    # …a SECOND vector-bearing node. `execute` is stubbed below, so the plan still covers
+    # `obj-1` alone; the point of `obj-2` is only that the denominator is not 1.
+    graph.add("Object", "obj-2")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    # ⛔ THE AMBIENT LEG IS DELETED, so the `--record-dsn` flag is the ONLY source the
+    # destructive hop can draw from (`_fresh_record_leg` otherwise sets it to the same
+    # string the plan declares, and a dropped argument then looks identical).
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    _cli_harness(monkeypatch, graph)
+
+    plan = {
+        "tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION,
+        "graph": "g", "graph_uri": "docker://h:6379/g", "org_id": "o", "graph_id": "g",
+        "labels": [{"label": "Object", "keys": ["obj-1"], "nodes": 1,
+                    "unkeyed_nodes_blocking": 0, "strip_ready": True,
+                    "blocked_reason": None}],
+        "total_nodes": 1,
+    }
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+
+    executed: dict = {}
+    monkeypatch.setattr(strip, "execute",
+                        lambda **kwargs: executed.update(kwargs) or {"removed": 0})
+    monkeypatch.setattr(strip, "result_exit_code", lambda result: 0)
+
+    assert strip.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                       "--record-dsn", "postgresql://localhost/record",
+                       "--org-id", "o", "--graph-id", "g",
+                       "--execute", "--plan", str(plan_path),
+                       "--confirm-plan-digest", plan["digest"]]) == 0
+
+    # ⛔ THE DECLARED RECORD LEG AND TENANT, on the DESTRUCTIVE hop (review round 8).
+    # Dropping `record_dsn` here substitutes the AMBIENT store: `record_serve.open_record`
+    # resolves `TORTOISE_RECORD_DSN` when the value is `None`, and `execute` takes its
+    # parity AND coverage verdict from the live census it runs with it — so a covering
+    # ambient store would certify a strip whose copy lives elsewhere. That is the
+    # false-PASS direction, and the `record_dsn` drift check does not compare this field.
+    # The ambient variable is REMOVED first, because `_fresh_record_leg` sets it to the
+    # same string the plan declares and would otherwise stand in for the argument.
+    assert executed.get("record_dsn") == "postgresql://localhost/record", (
+        "the destructive arm lost the run's declared record leg — its live pre-write "
+        f"census then reads the AMBIENT store: {executed.get('record_dsn')!r}")
+    assert (executed.get("org_id"), executed.get("graph_id")) == ("o", "g"), (
+        "the destructive arm carried the tenant's halves interchanged: "
+        f"{executed.get('org_id')!r}/{executed.get('graph_id')!r}")
+
+    supply = executed.get("graph_population")
+    assert callable(supply), (
+        "the destructive arm ran without the denominator this run holds, so `execute` "
+        f"re-checks the gate #13796 made unsatisfiable: {supply!r}")
+    assert supply("object") == 2, (
+        "the destructive arm carried a supplier that is not this graph's own count — the "
+        f"gate would compare against the wrong population: {supply('object')!r}")
+
+
+def test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_stripper(
+        stores, monkeypatch):
+    """⛔ THE VERSION-SKEW ARM: a stripper predating `readiness_probe` must still ANSWER.
+
+    `_write_gate` prefers `readiness_probe(… measurement context …)` and falls back to the
+    bare `strip_readiness` name. The fallback is a same-signature FAIL-CLOSED twin that
+    looks exactly like the real answer, which is why the arm needs a falsifier: a caller
+    that reached for it on a modern tree, or a `_write_gate` that answered with a probe it
+    could not build, would report `ready` with no counts behind it — the unmeasured gate
+    #13796 is about, restored in the second tool.
+
+    ⛔ THE ORDER IS FORCED BY THE DELEGATION, NOT BY POLARITY (corrected after review).
+    `strip_readiness` is `return readiness_probe()(label)`, so once `readiness_probe` is
+    removed the fallback RAISES `NameError` rather than refusing — measured. The polarity
+    is therefore measured FIRST, while the name still resolves; asserting only the
+    identity would pin which function came back without pinning what it says.
+
+    ⛔ AND THE REFUSAL MUST BE THE COVERAGE ARM'S, or this asserts nothing about
+    measurement: on this tree `#13647`'s writer check refuses `:Object` first (#13806), so
+    an unpatched run answers `ready is False` for the WRITER's reason and a
+    `strip_readiness` that invented a denominator still passes (measured: **112 passed**
+    under `readiness_probe(graph_population=lambda _: 0)` before this correction). Two
+    gates are held open for that: the writers are certified, and an AMBIENT TENANT is
+    installed — without a tenant the verdict refuses at the tenant door and the invented
+    denominator is never consulted either.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    census_strip = _census_strip()
+    monkeypatch.setattr(census_strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    from tortoise.record_writer import use_record_tenant
+
+    # ── the fallback REFUSES FOR THE MEASUREMENT: no context, so nothing is cleared.
+    with use_record_tenant("org", "graph"):
+        ready, reason = census_strip.strip_readiness("Object")
+    assert ready is False, (
+        f"the unmeasured fallback certified a strip it never measured: {reason}")
+    assert "has not proved" in reason, (
+        "the refusal was not the coverage arm's — so this test cannot say the fallback is "
+        f"unmeasured: {reason}")
+
+    # ── and on a tree without `readiness_probe`, that name is what `_write_gate` returns.
+    monkeypatch.delattr(census_strip, "readiness_probe", raising=False)
+    fallback = parity._write_gate(
+        _Projection(graph), org_id="o", graph_id="g",
+        record_dsn="postgresql://localhost/record")
+    assert fallback is census_strip.strip_readiness, (
+        "a stripper without `readiness_probe` was answered by something other than the "
+        f"fail-closed twin: {fallback!r}")
+
+
+def test_execute_rechecks_the_gate_with_the_runs_own_measurement_context(
+        stores, monkeypatch):
+    """⛔ `execute`'s OWN probe — the third hop, and the one round 2 named but nobody pinned.
+
+    `execute` loads a plan from disk, so it never calls `build_plan` and its coverage cache
+    starts empty. Immediately before the first delete it builds its OWN readiness probe for
+    the live parity re-check, with the same measurement context. Measured on this head:
+    dropping `graph_population=graph_population` from THAT call left the file at **112
+    passed** — round 2's finding named both mutants and round 3 pinned only `main`'s call,
+    one hop up. With the context gone, `mirror_verdict` takes the cache-only arm, every
+    label reports *"has not proved"*, and the destructive run refuses
+    `REFUSE_WRITE_STILL_EMITS` on a fully backfilled graph — #13796's exact symptom, on the
+    path that deletes.
+
+    ⛔ THE ASSERTION IS BEHAVIOURAL, NOT STRUCTURAL: the real `execute` runs to completion
+    (no `Refusal`, exit 0) with the writers certified and a covering record, which is the
+    outcome the denominator buys — and it is what settles the reviewer's UNVERIFIED row
+    (`does the mutant actually raise REFUSE_WRITE_STILL_EMITS?`). The captured probe kwargs
+    are checked too, so a mutant that keeps the argument but empties it still reds.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    plan = _plan(graph, labels=["Object"])
+
+    captured: dict = {}
+    real_probe = strip.readiness_probe
+
+    def _spy(**kwargs):
+        captured.update(kwargs)
+        # ⛔ ASKED AT BUILD TIME, not after the strip: the supplier is a live count of the
+        # graph's vector-bearing nodes, so a reading taken afterwards answers 0 because the
+        # removal already happened — that would measure this test's own ordering, not the
+        # wiring.
+        supplier = kwargs.get("graph_population")
+        captured["population_at_build"] = supplier("object") if callable(supplier) else None
+        return real_probe(**kwargs)
+
+    monkeypatch.setattr(strip, "readiness_probe", _spy)
+
+    result = _execute(graph, plan, expect_narrowed=True,
+                      graph_population=strip.graph_vector_population(
+                          _Projection(graph)))
+
+    assert captured, "`execute` never built a readiness probe — the re-check was skipped"
+    assert callable(captured.get("graph_population")), (
+        "the destructive re-check was built without this run's denominator, so every "
+        f"label answers 'has not proved' (#13796) seconds before a delete: {captured!r}")
+    assert captured["population_at_build"] == 1, (
+        "the destructive re-check carried a supplier that is not this graph's own count: "
+        f"{captured['population_at_build']!r}")
+    # ⛔ AND THE DECLARED RECORD LEG on this hop too (round 2's F2; its siblings cover the
+    # other two sites by deleting the ambient variable, which is also the right test here
+    # — `_execute` passes `record_dsn="postgresql://x"` while the helper sets the ambient
+    # to a different store, so the explicit value is the only one that can arrive).
+    assert captured.get("record_dsn") == "postgresql://x", (
+        f"the destructive re-check lost the run's declared record leg: {captured!r}")
+    assert strip.result_exit_code(result) == 0, result
+    assert graph.vector_keys("Object") == set(), "the strip did not run"
+
+
+def test_an_uncountable_projection_yields_NO_supplier_rather_than_a_zero(stores,
+                                                                       monkeypatch):
+    """⛔ `None` IS UNVERIFIED, NEVER `0` — and this is the FAIL-OPEN direction.
+
+    `graph_vector_population` returns ``None`` when the projection cannot count. The guard
+    that makes that ``None`` mean UNVERIFIED is a pair in `record_vector`:
+    `coverage` never calls an absent supplier, and `_safe_population` answers ``None`` for a
+    raise, a ``None`` value and a non-integer alike. An absence read as ``0`` would VERIFY
+    coverage on a failed measurement. Measured on the
+    head before this test: swapping the ``else None`` for the ordinary "supply a default"
+    idiom ``else (lambda _label: 0)`` left both suites at **143 passed**, and the gate then
+    answered `still_emits = False` — *"the record holds 5 vector(s) for object, the graph
+    serves 0"* — on a projection that holds the handle but cannot count. That is a strip
+    licence manufactured from a measurement that never happened, which is exactly what
+    #13796 forbids (*"measured, not asserted"*).
+
+    Not reachable from either CLI today (`FalkorProjection` always carries
+    `_label_vector_count`), so this is defence in depth — but it is the direction every
+    other gap in this file was NOT, and it had no falsifier at all.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=5)
+
+    class _Uncountable:
+        """A projection that holds the HANDLE but exposes no count method."""
+
+        g = graph
+
+    assert strip.graph_vector_population(_Uncountable()) is None, (
+        "an uncountable projection produced a supplier — and a default of 0 there VERIFIES "
+        "coverage on a measurement that was never taken")
+    # …and the refusal that produces is the fail-closed one, not a licence.
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    emits, reason = strip.write_gate(
+        "object", graph_population=strip.graph_vector_population(_Uncountable()),
+        org_id="org", graph_id="graph", record_dsn="postgresql://localhost/record")
+    assert emits is True, f"an unmeasurable denominator licensed a delete: {reason}"
+    assert "has not proved" in reason or "cannot be asked" in reason, reason
+
+
+@pytest.mark.parametrize("org_id,graph_id", [
+    ("org-A", ""),      # a declared org with an empty graph
+    ("", "graph-A"),    # the MIRROR — pinned because `if org_id` survives the first row
+    (None, ""),         # neither half usable, and one of them explicitly absent
+    ("", None),         # …and its mirror: `if (org_id or graph_id)` lets both through
+])
+def test_a_HALF_tenant_declaration_is_refused_not_downgraded_to_the_ambient_one(
+        stores, monkeypatch, org_id, graph_id):
+    """⛔ A HALF DECLARED TENANT MUST NOT FALL BACK TO THE AMBIENT ONE (fail-open).
+
+    `write_gate` used to build `scope=(org_id, graph_id) if (org_id and graph_id) else None`.
+    That looks like the same guard and is not: `("org-A", "")` collapses to `None`, which
+    `_declared_scope` reads as *nobody declared one* and answers with the AMBIENT tenant —
+    so a mis-declared run measured a DIFFERENT tenant's record and certified a strip from
+    it (measured: with an ambient `("org-B", "graph-B")` installed, the gate answered
+    `still_emits = False` for declared `org-A`/`""`). `_declared_scope` is the ONE resolver
+    both doors use precisely because it REFUSES a half pair, and pre-coercing the tuple
+    here took that refusal away. Neither CLI can reach it (both refuse a partial tenant at
+    exit 3), so this is the same defence-in-depth class as the `None`/`0` arm above.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    from tortoise.record_writer import use_record_tenant
+
+    # An AMBIENT tenant that is NOT the one this run declared, so a downgrade is visible.
+    with use_record_tenant("org-B", "graph-B"):
+        emits, reason = strip.write_gate(
+            "object",
+            graph_population=strip.graph_vector_population(_Projection(graph)),
+            org_id=org_id, graph_id=graph_id,
+            record_dsn="postgresql://localhost/record")
+
+    assert emits is True, (
+        "a half tenant declaration was answered from the AMBIENT tenant's record — one "
+        f"tenant's strip certified from another tenant's measurement: {reason}")
+    # ⛔ AND THE ACCOUNT IS THE DECLARATION'S, not the no-declaration sentence: a caller
+    # that DID declare a tenant must not be told that "none was declared" (review round 6
+    # — the refusal was right and its reason was false in both clauses).
+    assert "DECLARED is not a whole" in reason, (
+        f"a refused DECLARATION was reported as no declaration at all: {reason}")
+
+
+def test_the_tenant_pair_reaches_the_record_query_in_the_DECLARED_ORDER_on_every_hop(
+        stores, monkeypatch):
+    """⛔ THE PAIR'S ORDER, AT THE POINT WHERE IT BECOMES A QUERY (review round 8).
+
+    `_declared_scope` accepts a TRANSPOSED pair silently — both halves are non-empty
+    strings — so `(graph_id, org_id)` measures a different tenant and the gate answers from
+    the wrong record. Round 7 pinned that at the ONE hop it edited (`write_gate` →
+    `mirror_verdict`); the same pair is transposed by every intermediate hop, and a matrix
+    of the whole measurement context measured **118 passed** at each of the other seven.
+    Their consequence is fail-closed under RLS (a swapped org matches no rows → unverified
+    → the mirror is kept), which is why they ranked P3 — but a swap is invisible, and
+    "invisible but currently harmless" is one schema change away from a wrong-tenant
+    verdict.
+
+    ⛔ ASSERTING AT THE QUERY COVERS THE WHOLE CHAIN TRANSITIVELY. The two internal
+    pass-throughs (`label_write_gate` → `write_gate`, `readiness_probe` →
+    `label_write_gate`) are exercised by every path below, so a transposition there moves
+    the scope the count stub OBSERVES. The three entry hops are driven with `org` and
+    `graph` DISTINCT strings, because equal halves cannot reveal a transposition.
+
+    The recorder is CLEARED per hop on purpose: `ASKED_SCOPE` is module-level state, and a
+    stale value from an earlier hop would make the assertion vacuous.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    census_strip = _census_strip()
+    monkeypatch.setattr(census_strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+    # ⛔ DISTINCT halves: `("same", "same")` is invariant under transposition.
+    ORG, GRAPH = "org-A", "graph-A"
+
+    from tortoise import record_vector
+
+    def _fresh_hop() -> None:
+        """Clear the observed scope AND the coverage cache.
+
+        ⛔ BOTH, or the second hop onward is a CACHE HIT: the verdict for
+        `(object, ("org-A","graph-A"), dsn)` is memoised by the first hop, and a cached
+        verdict never calls `_record_vector_count` — so the recorder keeps the previous
+        hop's scope and the assertion goes vacuous.
+        """
+        ASKED_SCOPE.clear()
+        record_vector.reset_coverage_cache()
+
+    def _assert_query_order(hop: str) -> None:
+        asked = ASKED_SCOPE.get("scope")
+        assert asked is not None, (
+            f"{hop}: the record count was taken with NO scope, so the declared tenant "
+            f"never reached the query ({ASKED_SCOPE!r})")
+        assert (asked.org_id, asked.graph_id) == (ORG, GRAPH), (
+            f"{hop}: the tenant reached the record query INTERCHANGED, so the count came "
+            f"from a different tenant: {asked!r}")
+
+    # ── hop 1: `build_plan` → `readiness_probe` → … → the query.
+    _fresh_hop()
+    strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id=ORG, graph_id=GRAPH,
+        graph_name="g", graph_uri="docker://x/g", labels=["Object"],
+        batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+    _assert_query_order("preview (`build_plan`)")
+
+    # ── hop 2: `execute`'s own live re-check probe.
+    _fresh_hop()
+    plan = _plan(graph, labels=["Object"])
+    plan["org_id"], plan["graph_id"] = ORG, GRAPH
+    _execute(graph, plan, org_id=ORG, graph_id=GRAPH, expect_narrowed=True,
+             graph_population=strip.graph_vector_population(_Projection(graph)))
+    _assert_query_order("destructive (`execute`)")
+
+    # ── hop 3: the census CLI's `_write_gate` (the TOP-LEVEL module it resolves).
+    _fresh_hop()
+    probe = parity._write_gate(_Projection(graph), org_id=ORG, graph_id=GRAPH,
+                              record_dsn="postgresql://localhost/record")
+    probe("Object")
+    _assert_query_order("census (`_write_gate`)")
 
 
 # ── preview is the default and writes nothing ───────────────────────────────
@@ -2617,7 +3519,8 @@ def test_parity_and_ready_are_two_different_answers(stores, monkeypatch):
     assert report["parity"] is True
     assert report["ready"] is False          # no write-stop on this tree
     assert "WRITE GATE" in parity.render(report, "g")
-    monkeypatch.setattr(strip, "write_gate", lambda entity_type: (False, "stopped"))
+    monkeypatch.setattr(strip, "write_gate",
+                        lambda entity_type, **_: (False, "stopped"))
     report = strip.parity.census(
         g=graph, record_dsn="postgresql://x", org_id="org", graph_id="graph",
         labels=["Object"], strip_readiness=strip.strip_readiness)
@@ -3208,7 +4111,7 @@ def _stub_census_main(monkeypatch, report):
     """Point `parity.main` at a canned report and a graph that never opens."""
     monkeypatch.setattr(parity, "census", lambda **kwargs: dict(report))
     monkeypatch.setattr(parity, "render", lambda *a, **k: "")
-    monkeypatch.setattr(parity, "_write_gate", lambda: None)
+    monkeypatch.setattr(parity, "_write_gate", lambda *a, **k: None)
 
     class _Proj:
         g = None
